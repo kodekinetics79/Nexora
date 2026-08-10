@@ -1,4 +1,5 @@
 using ERP_RFQ_Automation.Authorization;
+using ERP_RFQ_Automation.Delivery;
 using ERP_RFQ_Automation.DTOs;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
@@ -97,10 +98,11 @@ namespace ERP_RFQ_Automation.Controllers
             // written. OrderItem ids are global (the table carries no BusinessUnitId — isolation
             // is parent-derived), so a caller could otherwise name another order's — or another
             // tenant's — line and have it recorded on this shipment.
-            var orderLineIds = await _context.Set<OrderItem>().AsNoTracking()
+            var orderLines = await _context.Set<OrderItem>().AsNoTracking()
                 .Where(i => i.OrderId == dto.OrderId)
-                .Select(i => i.Id)
+                .Select(i => new { i.Id, i.Quantity })
                 .ToListAsync();
+            var orderLineIds = orderLines.Select(i => i.Id).ToList();
             var unknownLines = dto.Items.Select(i => i.OrderItemId).Distinct()
                 .Except(orderLineIds).OrderBy(id => id).ToList();
             if (unknownLines.Count > 0)
@@ -110,6 +112,51 @@ namespace ERP_RFQ_Automation.Controllers
                 });
             if (dto.Items.Any(i => i.Quantity <= 0))
                 return BadRequest(new { message = "Every shipment line must declare a positive quantity." });
+
+            // OVER-SHIPMENT. The ordered quantity was a ceiling in the browser only —
+            // CreateShipmentPage set `max` on a number input, and the server rejected nothing but
+            // a non-positive quantity. A caller could therefore ship 150 against an order for 100:
+            // the shipment was accepted and written, the stock left, and the shipment could then
+            // never be invoiced, because the INVOICE ceiling is enforced server-side
+            // (CommercialFinanceApplicationService: alreadyInvoiced + requested > source.Quantity).
+            // Physical loss behind an order that looks clean on every screen.
+            //
+            // Cumulative across shipments, exactly as the invoice check is cumulative across
+            // invoices — a per-request check would let three shipments of 50 past an order for 100.
+            //
+            // FR-DLM-05: the ceiling counts DESPATCHED shipments only. A cancelled despatch put
+            // nothing on a lorry, and leaving it in the total would permanently consume the order
+            // line's remaining quantity with goods that never left — wiring-contract failure #9,
+            // a new state that every hand-written guard has to be told about. The set lives in
+            // DeliveryStatuses.Despatched so the next status added is a visible decision in one
+            // file rather than a clause somebody forgets in one method out of three.
+            var alreadyShipped = await _context.ShipmentItems.AsNoTracking()
+                .Where(si => si.IsActive && si.Shipment.OrderId == dto.OrderId
+                             && si.Shipment.BusinessUnitId == targetBUId && si.Shipment.IsActive
+                             && DeliveryStatuses.DespatchedForQuery.Contains(si.Shipment.DeliveryStatus))
+                .GroupBy(si => si.OrderItemId)
+                .Select(g => new { OrderItemId = g.Key, Quantity = g.Sum(x => x.Quantity) })
+                .ToDictionaryAsync(x => x.OrderItemId, x => x.Quantity);
+            var declaredByLine = dto.Items.GroupBy(i => i.OrderItemId)
+                .ToDictionary(g => g.Key, g => g.Sum(i => i.Quantity));
+            var overShipped = orderLines
+                .Where(line => declaredByLine.ContainsKey(line.Id)
+                               && alreadyShipped.GetValueOrDefault(line.Id) + declaredByLine[line.Id] > line.Quantity)
+                .OrderBy(line => line.Id)
+                // Quantities are normalised before they are written into the sentence. A SUM read
+                // back through the portable lane carries the column's scale, so the same figure
+                // rendered as "100" on one side of the message and "100.0000" on the other — the
+                // operator is being asked to compare three numbers and they have to look alike.
+                .Select(line => $"line {line.Id}: {Units(line.Quantity)} ordered, "
+                                + $"{Units(alreadyShipped.GetValueOrDefault(line.Id))} already shipped, "
+                                + $"{Units(declaredByLine[line.Id])} declared now")
+                .ToList();
+            if (overShipped.Count > 0)
+                return Conflict(new
+                {
+                    message = "Shipment quantity exceeds the remaining quantity for "
+                              + string.Join("; ", overShipped) + "."
+                });
 
             try
             {
@@ -121,7 +168,14 @@ namespace ERP_RFQ_Automation.Controllers
                 var strategy = _context.Database.CreateExecutionStrategy();
                 var created = await strategy.ExecuteAsync(async () =>
                 {
+                    _context.ChangeTracker.Clear();
                     await using var transaction = await _context.Database.BeginTransactionAsync();
+
+                    // Read inside the transaction, and inside the tenant predicate, so the master
+                    // reference stamped on the despatch note is the one the order held when the
+                    // goods were issued — and can only ever be this tenant's.
+                    var order = await _context.Orders.AsNoTracking()
+                        .SingleAsync(o => o.Id == dto.OrderId && o.BusinessUnitId == targetBUId);
 
                     var shipment = new Shipment
                     {
@@ -138,11 +192,26 @@ namespace ERP_RFQ_Automation.Controllers
                         ShippingCost = dto.ShippingCost,
                         LabelUrl = dto.LabelUrl,
                         ShippingAddress = dto.ShippingAddress,
+                        DeliveryCityId = dto.DeliveryCityId,
                         Notes = dto.Notes,
                         CreatedBy = User.Identity?.Name ?? "system",
                         CreatedOn = DateTime.Now,
-                        IsActive = true
+                        IsActive = true,
+                        // FR-DLM-05. The governed lifecycle, alongside the tenant's own picklist
+                        // label in StatusId. DISPATCHED and not SCHEDULED, because this call
+                        // ISSUES THE STOCK a few lines below: the goods leave in the same
+                        // transaction, so recording them as still in the warehouse would make the
+                        // governed status disagree with the inventory ledger from the first row.
+                        // A shipment that is planned but not yet gone is a scheduling feature and
+                        // is out of scope under R22.
+                        DeliveryStatus = DeliveryStatuses.Dispatched,
+                        DeliveryStatusChangedBy = User.Identity?.Name ?? "system",
+                        DeliveryStatusChangedOn = DateTime.UtcNow
                     };
+
+                    // FR-DLM-01: the delivery note carries the case rather than re-deriving it.
+                    // Set before the row is written, so a shipment cannot exist without it.
+                    shipment.InheritCommercialIdentity(order);
 
                     foreach (var itemDto in dto.Items)
                     {
@@ -168,8 +237,11 @@ namespace ERP_RFQ_Automation.Controllers
 
                     var row = await _repository.CreateShipmentAsync(shipment);
 
-                    // The goods issue consumes exactly what THIS shipment declares.
-                    await IssueOrderStockAsync(targetBUId, dto.OrderId, dto.Items);
+                    // The goods issue consumes exactly what THIS shipment declares, against the
+                    // despatch note that was just written — so the lot declarations it makes name
+                    // the delivery note the material left on.
+                    await IssueOrderStockAsync(targetBUId, dto.OrderId, dto.Items, row.Id,
+                        dto.ComplianceOverrideReason);
 
                     // Order status follows the goods, not the existence of a shipment: SHIPPED is
                     // only reached once every open line has been shipped in full. It used to be
@@ -189,6 +261,25 @@ namespace ERP_RFQ_Automation.Controllers
                 return Conflict(new { message = ex.Message });
             }
             catch (ERP_RFQ_Automation.Inventory.StockLedgerException ex)
+            {
+                return Conflict(new { message = ex.Message });
+            }
+            catch (Inventory.IncompleteGoodsIssueException ex)
+            {
+                // Nothing was written: the despatch note, the goods issue and the status
+                // transition share one transaction. 409 rather than 200-with-a-warning, because
+                // a warning on a delivery note is a warning nobody reads at the loading bay.
+                return Conflict(new { message = ex.Message });
+            }
+            catch (ERP_RFQ_Automation.Inventory.QuarantinedLotIssueException ex)
+            {
+                return Conflict(new { message = ex.Message });
+            }
+            catch (ERP_RFQ_Automation.Traceability.MaterialTraceabilityValidationException ex)
+            {
+                return BadRequest(new { message = ex.Message });
+            }
+            catch (ERP_RFQ_Automation.Traceability.MaterialTraceabilityConflictException ex)
             {
                 return Conflict(new { message = ex.Message });
             }
@@ -222,7 +313,8 @@ namespace ERP_RFQ_Automation.Controllers
         /// balance agreed with each other.
         /// </summary>
         private async Task IssueOrderStockAsync(
-            long businessUnitId, long orderId, IEnumerable<CreateShipmentItemDto> items)
+            long businessUnitId, long orderId, IEnumerable<CreateShipmentItemDto> items,
+            long shipmentId, string? complianceOverrideReason)
         {
             var actor = User.FindFirst("email")?.Value ?? User.Identity?.Name ?? "system";
 
@@ -234,7 +326,21 @@ namespace ERP_RFQ_Automation.Controllers
             if (declared.Count == 0) return; // a shipment that declares no goods issues none
 
             await _stock.ReserveOrderAsync(businessUnitId, orderId, actor);
-            await _stock.ConsumeOrderLinesAsync(businessUnitId, orderId, declared, actor);
+            var issue = await _stock.ConsumeOrderLinesAsync(businessUnitId, orderId, declared, actor,
+                shipmentId, complianceOverrideReason);
+
+            // THE RESULT IS NOT OPTIONAL. Both calls above used to be awaited and discarded.
+            // Partial allocation deliberately does not throw — a short order must still be able to
+            // raise a supplier purchase order for the balance — so an order whose stock had been
+            // quarantined between confirmation and despatch reserved nothing, consumed nothing,
+            // and produced a delivery note for goods that never moved. The order was then marked
+            // SHIPPED because MarkOrderShippedIfCompleteAsync counts shipment LINES rather than
+            // issued QUANTITY, so nothing downstream ever noticed.
+            //
+            // A shipment is one physical event: if any line could not issue what it declared, the
+            // whole shipment fails and the transaction rolls the despatch note back with it.
+            if (issue.IsShort)
+                throw new ERP_RFQ_Automation.Inventory.IncompleteGoodsIssueException(orderId, issue.ShortLines);
         }
 
         /// <summary>
@@ -257,7 +363,8 @@ namespace ERP_RFQ_Automation.Controllers
 
             var shipped = await _context.ShipmentItems.AsNoTracking()
                 .Where(si => si.IsActive && si.Shipment.OrderId == orderId
-                             && si.Shipment.BusinessUnitId == businessUnitId && si.Shipment.IsActive)
+                             && si.Shipment.BusinessUnitId == businessUnitId && si.Shipment.IsActive
+                             && DeliveryStatuses.DespatchedForQuery.Contains(si.Shipment.DeliveryStatus))
                 .GroupBy(si => si.OrderItemId)
                 .Select(g => new { OrderItemId = g.Key, Quantity = g.Sum(x => x.Quantity) })
                 .ToDictionaryAsync(x => x.OrderItemId, x => x.Quantity);
@@ -313,17 +420,54 @@ namespace ERP_RFQ_Automation.Controllers
             }
         }
 
+        /// <summary>
+        /// Withdraws a shipment that never despatched. A reason is required and the actor is taken
+        /// from the token, never from the request — see
+        /// <c>ShipmentRepository.DeleteShipmentAsync</c> for what this refuses and why.
+        ///
+        /// <para>Every refusal reaches the caller as its own status code with the server's own
+        /// sentence: 400 for a missing reason, 404 for a shipment that is not this tenant's, 409 for
+        /// a despatched or proved shipment. This used to be one <c>catch (Exception)</c> returning
+        /// a 500 with the message stringified into it, so a governed refusal was indistinguishable
+        /// from a database outage on the screen and in the logs.</para>
+        /// </summary>
         [HttpDelete("{id}")]
         [RequireModulePermission("Shipments", PermissionAction.Delete)]
-        public async Task<IActionResult> DeleteShipment(long id, [FromQuery] long? businessUnitId = null)
+        public async Task<IActionResult> DeleteShipment(
+            long id, [FromQuery] string? reason = null, [FromQuery] long? businessUnitId = null)
         {
+            // TryParse, not Parse: this block sits outside the try that used to swallow everything
+            // into a 500, and a malformed claim must not become an unhandled exception.
+            _ = long.TryParse(User.FindFirst("businessUnitId")?.Value, out var claimBUId);
+            var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
+            if (targetBUId <= 0)
+                return BadRequest(new { message = "Business Unit ID is required." });
+
+            // The actor comes from the token. A destructive verb attributed to a name the caller
+            // supplied is not attribution.
+            var actor = User.FindFirst("email")?.Value ?? User.Identity?.Name;
+            if (string.IsNullOrWhiteSpace(actor))
+                return Unauthorized(new
+                {
+                    message = "A shipment can only be withdrawn by a named authenticated user."
+                });
+
             try
             {
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
-
-                await _repository.DeleteShipmentAsync(id, targetBUId);
+                await _repository.DeleteShipmentAsync(id, targetBUId, reason ?? string.Empty, actor);
                 return NoContent();
+            }
+            catch (ArgumentException ex)
+            {
+                return BadRequest(new { message = ex.Message });
+            }
+            catch (KeyNotFoundException ex)
+            {
+                return NotFound(new { message = ex.Message });
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Conflict(new { message = ex.Message });
             }
             catch (Exception ex)
             {
@@ -349,6 +493,13 @@ namespace ERP_RFQ_Automation.Controllers
             }
         }
 
+        /// <summary>
+        /// A quantity as an operator reads it: no trailing scale zeros, invariant separators.
+        /// Used only in messages, never in arithmetic.
+        /// </summary>
+        private static string Units(decimal quantity)
+            => quantity.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture);
+
         private ShipmentDto MapToDto(Shipment shipment)
         {
             return new ShipmentDto
@@ -369,6 +520,14 @@ namespace ERP_RFQ_Automation.Controllers
                 ShippingCost = shipment.ShippingCost,
                 LabelUrl = shipment.LabelUrl,
                 ShippingAddress = shipment.ShippingAddress,
+                // FR-DLM-05 / FR-DLM-01. The governed state and the governed region reach the API
+                // contract and the client type, not just the table.
+                DeliveryStatus = shipment.DeliveryStatus,
+                DeliveryStatusChangedOn = shipment.DeliveryStatusChangedOn,
+                DeliveryStatusChangedBy = shipment.DeliveryStatusChangedBy,
+                DeliveryCityId = shipment.DeliveryCityId,
+                DeliveryCityName = shipment.DeliveryCity?.CityName,
+                DeliveryRegionName = shipment.DeliveryCity?.State?.StateName,
                 Notes = shipment.Notes,
                 Items = shipment.ShipmentItems.Select(si => new ShipmentItemDto
                 {

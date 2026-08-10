@@ -53,9 +53,14 @@ public sealed class BelowFloorCheck
 /// approvals inbox + manager-gated approve endpoint govern it. NO new approval
 /// entity — the approvals engine is reused verbatim.
 ///
-/// Floors are recomputed via <see cref="IPricingEngine"/> at check time; a line
-/// whose floor could not be established (0 / no signals) has NO floor and never
-/// blocks. If the RFQ deadline is already inside the tenant's
+/// Floors are recomputed via <see cref="IPricingEngine"/> at check time and are the awarded
+/// supplier's landed unit cost for that RFQ line (<c>CustomerQuoteSourcingDecision</c>). A line
+/// with no awarded sourcing decision has NO floor and cannot block here — that gap is covered by
+/// the R5 price-provenance gate in <c>QuoteService.SendQuoteEmailAsync</c>, which refuses any send
+/// whose prices nobody has confirmed, so an un-awarded line is not simply waved through.
+/// A floor whose currency cannot be joined to the price's by an approved rate holds the send
+/// (<see cref="BelowFloorCheck.CurrencyBlockers"/>) rather than passing it.
+/// If the RFQ deadline is already inside the tenant's
 /// <see cref="SlaPolicy.DeadlineBufferHours"/> when a hold is created, the
 /// requester and their manager are alerted immediately (the sweep would be too late).
 /// </summary>
@@ -115,8 +120,7 @@ public sealed class BelowFloorGuard : IBelowFloorGuard
         if (request?.Lines is not { Count: > 0 }) return BelowFloorCheck.Clear;
 
         var preview = await _engine.PriceRfqAsync(rfqId, businessUnitId, ct);
-        var floorByItem = preview.Lines.Where(l => l.FloorUnitPrice.HasValue)
-            .ToDictionary(l => l.RfqItemId, l => l.FloorUnitPrice!.Value);
+        var previewByItem = preview.Lines.ToDictionary(l => l.RfqItemId, l => l);
 
         // Malformed requests (unknown line, non-positive price, duplicate) are left
         // to the engine's own validation so the caller gets its usual 400 — a hold
@@ -126,14 +130,8 @@ public sealed class BelowFloorGuard : IBelowFloorGuard
         {
             if (!seen.Add(line.RfqItemId)) return BelowFloorCheck.Clear;
             if (line.UnitPrice <= 0) return BelowFloorCheck.Clear;
-            if (!floorByItem.ContainsKey(line.RfqItemId)) return BelowFloorCheck.Clear;
+            if (!previewByItem.ContainsKey(line.RfqItemId)) return BelowFloorCheck.Clear;
         }
-
-        var offending = request.Lines
-            .Where(l => floorByItem[l.RfqItemId] > 0 && l.UnitPrice < floorByItem[l.RfqItemId])
-            .Select(l => new BelowFloorLine(
-                l.RfqItemId, l.UnitPrice, floorByItem[l.RfqItemId], floorByItem[l.RfqItemId] - l.UnitPrice))
-            .ToList();
 
         // FX fix: ApplyPricingLine carries a bare decimal with no currency (PricingModels.cs), so
         // the submitted prices are only meaningful if every RFQ line being priced shares one
@@ -155,7 +153,82 @@ public sealed class BelowFloorGuard : IBelowFloorGuard
                               $"({string.Join(", ", touchedCurrencies)}); submitted prices carry no currency of their " +
                               "own, so they cannot be applied without an approved FX comparison.");
 
+        // A submitted price is denominated in its RFQ line's currency (that is what the blockers
+        // above establish); the floor is denominated in the AWARD's currency. Same conversion and
+        // the same fail-closed rule as the send gate — see ComparableInFloorCurrencyAsync.
+        var fx = new FxConversionService(_db);
+        var currencyIdByCode = await _db.Currencies.AsNoTracking()
+            .Where(c => c.BusinessUnitId == businessUnitId)
+            .ToDictionaryAsync(c => c.Code.ToUpperInvariant(), c => c.Id, ct);
+        var rateCache = new Dictionary<(long From, long To), decimal?>();
+
+        var offending = new List<BelowFloorLine>();
+        foreach (var line in request.Lines)
+        {
+            var previewLine = previewByItem[line.RfqItemId];
+            // No award, no floor. The line is left UNCHECKED rather than clearing the whole
+            // request: this used to `return Clear` for every line the moment one line had no
+            // floor, so a single un-awarded item on a mixed RFQ switched the control off.
+            if (previewLine.FloorUnitPrice is not { } floor || floor <= 0m) continue;
+
+            var lineCurrencyId = string.IsNullOrWhiteSpace(previewLine.Currency) ? (long?)null
+                : currencyIdByCode.TryGetValue(previewLine.Currency.Trim().ToUpperInvariant(), out var id)
+                    ? id : null;
+
+            var (comparablePrice, blocker) = await ComparableInFloorCurrencyAsync(
+                fx, businessUnitId, line.RfqItemId, line.UnitPrice, lineCurrencyId, previewLine.Currency,
+                previewLine.FloorCurrency, currencyIdByCode, rateCache, ct);
+            if (blocker is not null)
+            {
+                applyBlockers.Add(blocker);
+                continue;
+            }
+
+            if (comparablePrice!.Value < floor)
+                offending.Add(new BelowFloorLine(
+                    line.RfqItemId, comparablePrice.Value, floor, floor - comparablePrice.Value));
+        }
+
         return new BelowFloorCheck { Lines = offending, Preview = preview, CurrencyBlockers = applyBlockers };
+    }
+
+    /// <summary>
+    /// Brings <paramref name="price"/> into the FLOOR's currency so the two can be compared, or
+    /// returns the reason they cannot be.
+    ///
+    /// <para>Exactly one of the two results is non-null. A blocker is NOT a pass: every caller adds
+    /// it to <see cref="BelowFloorCheck.CurrencyBlockers"/>, which holds the action just as a real
+    /// below-floor line does. The price moves rather than the floor because the floor is money
+    /// already committed to a supplier and re-expressing it would restate an audited cost.</para>
+    /// </summary>
+    private static async Task<(decimal? Price, string? Blocker)> ComparableInFloorCurrencyAsync(
+        FxConversionService fx, long businessUnitId, long rfqItemId, decimal price,
+        long? priceCurrencyId, string? priceCurrencyCode, string? floorCurrencyCode,
+        IReadOnlyDictionary<string, long> currencyIdByCode,
+        Dictionary<(long From, long To), decimal?> rateCache, CancellationToken ct)
+    {
+        if (!string.IsNullOrWhiteSpace(priceCurrencyCode) && !string.IsNullOrWhiteSpace(floorCurrencyCode) &&
+            string.Equals(priceCurrencyCode.Trim(), floorCurrencyCode.Trim(), StringComparison.OrdinalIgnoreCase))
+            return (price, null);
+
+        if (priceCurrencyId is null || string.IsNullOrWhiteSpace(floorCurrencyCode) ||
+            !currencyIdByCode.TryGetValue(floorCurrencyCode.Trim().ToUpperInvariant(), out var floorCurrencyId))
+            return (null, $"Line {rfqItemId}: the price and its cost floor are in different or unidentified " +
+                          "currencies; an approved FX rate is required before the floor can be checked.");
+
+        var key = (priceCurrencyId.Value, floorCurrencyId);
+        if (!rateCache.TryGetValue(key, out var rate))
+        {
+            var resolution = await fx.ResolveRateAsync(
+                businessUnitId, priceCurrencyId.Value, floorCurrencyId, DateTime.UtcNow, ct);
+            rate = resolution.Found ? resolution.Rate : (decimal?)null;
+            rateCache[key] = rate;
+        }
+        if (rate is null)
+            return (null, $"Line {rfqItemId}: no approved {priceCurrencyCode} to {floorCurrencyCode} exchange " +
+                          "rate is effective today; the floor cannot be checked.");
+
+        return (FxConversionService.RoundMoney(price * rate.Value), null);
     }
 
     public async Task<BelowFloorCheck> CheckQuoteSendAsync(long quoteId, long businessUnitId, CancellationToken ct)
@@ -184,12 +257,22 @@ public sealed class BelowFloorGuard : IBelowFloorGuard
             .Where(l => l.FloorUnitPrice > 0)
             .ToDictionary(l => l.RfqItemId, l => l);
 
-        // FX fix: the quote line price (denominated by Quote.CurrencyId) used to be compared
-        // directly against PriceLine.FloorUnitPrice (denominated by PriceLine.Currency, from the
-        // RFQ line). Neither side's currency was read, so a EUR price numerically above a USD
-        // floor sailed through the send gate — a fail-OPEN control. Prices are now converted into
-        // the floor's currency before the comparison, and any line that cannot be converted
-        // becomes a blocker rather than a pass.
+        // FX. The quote line price is denominated by Quote.CurrencyId; the floor is denominated by
+        // PriceLine.FloorCurrency — the AWARD's currency, which is a different column from the RFQ
+        // line's own PriceLine.Currency and can legitimately differ from it. Neither side's
+        // currency used to be read at all, so a EUR price numerically above a USD floor sailed
+        // through the send gate — a fail-OPEN control.
+        //
+        // DIRECTION: the PRICE is converted INTO the floor's currency, never the other way round.
+        // Two reasons, both deliberate. (1) The floor is a recorded historical fact — money already
+        // committed to a supplier — and restating it through today's rate would move an audited
+        // cost figure; the customer price is the number under review, so it is the one that moves.
+        // (2) BelowFloorLine.FloorUnitPrice is what the approvals inbox shows the manager, and it
+        // must be the landed cost as booked, not a re-expressed derivative of it.
+        //
+        // FAIL CLOSED: a line whose price cannot be brought into the floor's currency by an
+        // approved rate becomes a CurrencyBlocker, which holds the send exactly as a real breach
+        // does. "We could not check" and "the check passed" must never be the same answer.
         var fx = new FxConversionService(_db);
         // Tenant predicate is explicit and matches the currencyIdByCode lookup two lines below,
         // which always had one. Currencies now carry a global query filter too, but this guard
@@ -208,7 +291,7 @@ public sealed class BelowFloorGuard : IBelowFloorGuard
 
         var offending = new List<BelowFloorLine>();
         var blockers = new List<string>();
-        var rateCache = new Dictionary<long, decimal?>();
+        var rateCache = new Dictionary<(long From, long To), decimal?>();
 
         foreach (var item in quote.Items)
         {
@@ -216,39 +299,18 @@ public sealed class BelowFloorGuard : IBelowFloorGuard
             if (!floorLines.TryGetValue(item.RfqItemId, out var floorLine)) continue;
             var floor = floorLine.FloorUnitPrice!.Value;
 
-            var comparablePrice = item.UnitPrice;
-            var sameCurrency =
-                !string.IsNullOrWhiteSpace(quoteCurrencyCode) &&
-                !string.IsNullOrWhiteSpace(floorLine.Currency) &&
-                string.Equals(quoteCurrencyCode.Trim(), floorLine.Currency.Trim(), StringComparison.OrdinalIgnoreCase);
-
-            if (!sameCurrency)
+            var (comparablePrice, blocker) = await ComparableInFloorCurrencyAsync(
+                fx, businessUnitId, item.RfqItemId, item.UnitPrice, quote.CurrencyId, quoteCurrencyCode,
+                floorLine.FloorCurrency, currencyIdByCode, rateCache, ct);
+            if (blocker is not null)
             {
-                if (quote.CurrencyId is null || string.IsNullOrWhiteSpace(floorLine.Currency) ||
-                    !currencyIdByCode.TryGetValue(floorLine.Currency.Trim().ToUpperInvariant(), out var floorCurrencyId))
-                {
-                    blockers.Add($"Line {item.RfqItemId}: the quote price and the floor are in different or " +
-                                 "unidentified currencies; an approved FX rate is required before the floor can be checked.");
-                    continue;
-                }
-
-                if (!rateCache.TryGetValue(floorCurrencyId, out var rate))
-                {
-                    var resolution = await fx.ResolveRateAsync(businessUnitId, quote.CurrencyId.Value, floorCurrencyId, DateTime.UtcNow, ct);
-                    rate = resolution.Found ? resolution.Rate : (decimal?)null;
-                    rateCache[floorCurrencyId] = rate;
-                }
-                if (rate is null)
-                {
-                    blockers.Add($"Line {item.RfqItemId}: no approved {quoteCurrencyCode} to {floorLine.Currency} " +
-                                 "exchange rate is effective today; the floor cannot be checked.");
-                    continue;
-                }
-                comparablePrice = FxConversionService.RoundMoney(item.UnitPrice * rate.Value);
+                blockers.Add(blocker);
+                continue;
             }
 
-            if (comparablePrice < floor)
-                offending.Add(new BelowFloorLine(item.RfqItemId, comparablePrice, floor, floor - comparablePrice));
+            if (comparablePrice!.Value < floor)
+                offending.Add(new BelowFloorLine(
+                    item.RfqItemId, comparablePrice.Value, floor, floor - comparablePrice.Value));
         }
 
         return new BelowFloorCheck { Lines = offending, Preview = preview, CurrencyBlockers = blockers };
@@ -409,12 +471,12 @@ public sealed class BelowFloorGuard : IBelowFloorGuard
                 $"{bidClosing.Value:dd MMM yyyy HH:mm} UTC — already inside the {policy.DeadlineBufferHours}-hour " +
                 "internal safety buffer. Please approve or reject it right away so the quote can still go out in time.";
 
-            var notified = false;
+            var outcomes = new List<SlaSendResult>();
             if (requester is not null && !string.IsNullOrWhiteSpace(requester.Email))
             {
-                notified |= await _notifications.SendDeadlineAlertAsync(
+                outcomes.Add(await _notifications.SendDeadlineAlertAsync(
                     requester.Email, requester.FirstName, "escalated", label,
-                    $"Below-floor approval is blocking {label} — deadline imminent", detail, businessUnitId, ct);
+                    $"Below-floor approval is blocking {label} — deadline imminent", detail, businessUnitId, ct));
 
                 if (requester.ManagerId.HasValue)
                 {
@@ -425,30 +487,42 @@ public sealed class BelowFloorGuard : IBelowFloorGuard
                         .FirstOrDefaultAsync(ct);
                     if (manager is not null && !string.IsNullOrWhiteSpace(manager.Email))
                     {
-                        notified |= await _notifications.SendDeadlineAlertAsync(
+                        outcomes.Add(await _notifications.SendDeadlineAlertAsync(
                             manager.Email, manager.FirstName, "escalated", label,
-                            $"Below-floor approval is blocking {label} — deadline imminent", detail, businessUnitId, ct);
+                            $"Below-floor approval is blocking {label} — deadline imminent", detail, businessUnitId, ct));
                     }
                 }
             }
 
+            // Stamp whenever the provider MAY already hold a copy, not only on a proven send.
+            // Withholding the stamp because the outcome was uncertain hands the 5-minute sweep
+            // permission to escalate the same approval again — the duplicate this ledger exists
+            // to prevent. An outcome of NotSent is the one case where nothing left the building,
+            // and there the sweep SHOULD pick it up.
+            var accepted = outcomes.FirstOrDefault(x => x.Outcome == SlaSendOutcome.Sent);
+            var notified = outcomes.Any(x => x.Outcome != SlaSendOutcome.NotSent);
             if (notified)
             {
                 // Same (BU, "approval", guid-derived key, "escalated") dedup row the
                 // sweep checks before escalating — one escalation per approval, ever.
                 //
-                // THE DEDUP KEY IS NOT OPTIONAL. SlaEvent.DedupKey carries an UNFILTERED
-                // UNIQUE index (UX_SlaEvents_BU_DedupKey) and SlaSweepWorker.TryClaimEventAsync
-                // matches on that column ALONE — not on EntityType/EntityId/Level. A row
-                // written with the default empty string is therefore invisible to the sweep,
-                // which re-sent this exact escalation to the requester's manager on its next
-                // 5-minute tick; and because every such row shared the key '', the SECOND
-                // below-floor deadline-buffer hold in a tenant collided on 23505 and left a
-                // poisoned Added entity on this request-scoped DbContext.
+                // THE DEDUP KEY IS NOT OPTIONAL. SlaEvent.DedupKey carries the UNIQUE index
+                // (UX_SlaEvents_BU_DedupKey) and SlaSweepWorker.TryClaimEventAsync matches on
+                // that column ALONE — not on EntityType/EntityId/Level. A row written with the
+                // default empty string is therefore invisible to the sweep, which re-sent this
+                // exact escalation to the requester's manager on its next 5-minute tick; and
+                // because every such row shared the key '', the SECOND below-floor
+                // deadline-buffer hold in a tenant collided on 23505 and left a poisoned Added
+                // entity on this request-scoped DbContext.
                 //
                 // Routed through the sweep's own claim insert so the key is built in exactly
                 // one place and a genuine collision reads as "already escalated" (detached,
                 // null) instead of poisoning the context.
+                //
+                // The RECIPIENT-LESS key is deliberate here: this path mails the requester and
+                // their manager together, and the sweep suppresses on this legacy form as well
+                // as on its own recipient-scoped keys, so the two paths still never
+                // double-notify (see SlaSweepWorker.TryClaimEventAsync).
                 var entityKey = BitConverter.ToInt64(approval.Id.ToByteArray(), 0);
                 var claim = await SlaSweepWorker.InsertClaimAsync(
                     _db, businessUnitId, "approval", entityKey, "escalated",
@@ -458,6 +532,15 @@ public sealed class BelowFloorGuard : IBelowFloorGuard
                     _log.LogDebug(
                         "Below-floor hold {ApprovalId}: escalation was already stamped for BU {Bu}; not re-claimed.",
                         approval.Id, businessUnitId);
+                else
+                    // The stamp is written AFTER the send here, so it records an outcome rather
+                    // than claiming one. Accepted evidence when there is any; UNCERTAIN when the
+                    // provider may hold a copy it never acknowledged — either way the key is
+                    // occupied and the sweep will not send it again.
+                    await SlaSweepWorker.SettleClaimAsync(_db, claim,
+                        accepted is not null ? SlaEventStatuses.Sent : SlaEventStatuses.Uncertain,
+                        accepted is not null ? null : "ACCEPTANCE_EVIDENCE_MISSING",
+                        accepted?.Provider, accepted?.AcceptanceReference, ct);
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

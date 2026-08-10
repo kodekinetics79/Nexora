@@ -15,6 +15,7 @@ import platformHttp from '../api/platformHttp';
 import {
   clearPlatformSession,
   getPlatformAuthedSnapshot,
+  getPlatformMfaAuthenticatedSnapshot,
   getPlatformUser,
   setPlatformSession,
   subscribePlatformSession,
@@ -32,12 +33,25 @@ export interface PlatformMfaChallenge {
 }
 
 export type PlatformLoginResult =
-  | { mfaRequired: false }
+  /**
+   * Signed in. `mfaEnrollmentRequired` is true when the operator has never enrolled a second
+   * factor: the token is real but the server (PlatformPolicies.Enrollment) will refuse it on
+   * every platform screen except the MFA panel, so the console must send them there rather than
+   * to a dashboard that would answer 403 on every tile with nothing saying why.
+   */
+  | { mfaRequired: false; mfaEnrollmentRequired: boolean }
   | { mfaRequired: true; challenge: PlatformMfaChallenge };
 
 export interface PlatformAuth {
   /** True when a live platform-scoped token is present. */
   isPlatformAuthed: boolean;
+  /**
+   * True when that token also carries `amr=mfa`. False means the operator signed in with a
+   * password and has never enrolled a second factor: the server (Sec-D2) will refuse every
+   * platform endpoint except MFA enrollment and logout, so the console must show the enrollment
+   * step rather than the console.
+   */
+  isPlatformMfaAuthenticated: boolean;
   /** The signed-in platform operator (or null). */
   platformUser: PlatformSessionUser | null;
   /** Authenticate against the platform IdP and store the platform token. */
@@ -54,6 +68,11 @@ export const usePlatformAuth = (): PlatformAuth => {
   const isPlatformAuthed = useSyncExternalStore(
     subscribePlatformSession,
     getPlatformAuthedSnapshot,
+    () => false,
+  );
+  const isPlatformMfaAuthenticated = useSyncExternalStore(
+    subscribePlatformSession,
+    getPlatformMfaAuthenticatedSnapshot,
     () => false,
   );
   // Re-derived on every session change (subscribe drives the re-render).
@@ -79,7 +98,7 @@ export const usePlatformAuth = (): PlatformAuth => {
       throw new Error('Platform login did not return a token.');
     }
     setPlatformSession(token, userFromLogin(data, token, email));
-    return { mfaRequired: false };
+    return { mfaRequired: false, mfaEnrollmentRequired: data?.mfaEnrollmentRequired === true };
   }, []);
 
   const platformCompleteMfa = useCallback(async (
@@ -104,5 +123,12 @@ export const usePlatformAuth = (): PlatformAuth => {
     }
   }, []);
 
-  return { isPlatformAuthed, platformUser, platformLogin, platformCompleteMfa, platformLogout };
+  return {
+    isPlatformAuthed,
+    isPlatformMfaAuthenticated,
+    platformUser,
+    platformLogin,
+    platformCompleteMfa,
+    platformLogout,
+  };
 };

@@ -79,6 +79,14 @@ public sealed record MailboxCreateRequestDTO
     /// and the failure only surfaces as missing leads days later.
     /// </summary>
     public bool VerifyBeforeSave { get; init; } = true;
+
+    /// <inheritdoc cref="MailboxSecretRedaction.Marker"/>
+    public override string ToString() =>
+        $"MailboxCreateRequestDTO {{ ConfigurationName = {ConfigurationName}, "
+        + $"EmailAddress = {EmailAddress}, Protocol = {Protocol}, Host = {Host}, Port = {Port}, "
+        + $"Username = {Username}, Password = {MailboxSecretRedaction.Marker(Password)}, "
+        + $"UseSsl = {UseSsl}, PollingInterval = {PollingInterval}, IsActive = {IsActive}, "
+        + $"VerifyBeforeSave = {VerifyBeforeSave} }}";
 }
 
 public sealed record MailboxUpdateRequestDTO
@@ -112,6 +120,14 @@ public sealed record MailboxUpdateRequestDTO
     public bool IsActive { get; init; } = true;
 
     public bool VerifyBeforeSave { get; init; } = true;
+
+    /// <inheritdoc cref="MailboxSecretRedaction.Marker"/>
+    public override string ToString() =>
+        $"MailboxUpdateRequestDTO {{ ConfigurationName = {ConfigurationName}, "
+        + $"EmailAddress = {EmailAddress}, Host = {Host}, Port = {Port}, Username = {Username}, "
+        + $"Password = {MailboxSecretRedaction.Marker(Password)}, UseSsl = {UseSsl}, "
+        + $"PollingInterval = {PollingInterval}, IsActive = {IsActive}, "
+        + $"VerifyBeforeSave = {VerifyBeforeSave} }}";
 }
 
 /// <summary>
@@ -139,6 +155,36 @@ public sealed record MailboxTestRequestDTO
     public string? Password { get; init; }
 
     public bool UseSsl { get; init; } = true;
+
+    /// <inheritdoc cref="MailboxSecretRedaction.Marker"/>
+    public override string ToString() =>
+        $"MailboxTestRequestDTO {{ MailboxId = {MailboxId}, Protocol = {Protocol}, Host = {Host}, "
+        + $"Port = {Port}, Username = {Username}, "
+        + $"Password = {MailboxSecretRedaction.Marker(Password)}, UseSsl = {UseSsl} }}";
+}
+
+/// <summary>
+/// SEC-G9. Shared marker for the three mailbox request records that carry a live customer
+/// mailbox password inbound.
+/// </summary>
+internal static class MailboxSecretRedaction
+{
+    /// <summary>
+    /// A record's compiler-generated ToString prints EVERY property, so a single
+    /// <c>_logger.LogWarning("mailbox test failed for {Request}", request)</c> — the most natural
+    /// line anyone would write while diagnosing exactly the failure these DTOs exist to surface —
+    /// would put a live customer mailbox credential in the log. The response DTO deliberately
+    /// carries no password at all for the same reason (see <see cref="MailboxResponseDTO"/>);
+    /// nothing protected the inbound half. Redacted at the source rather than by trusting every
+    /// future call site, matching the overrides on <c>IssuedTenantAdminInvitation</c> and
+    /// <c>ProvisioningSubmitResult</c>.
+    ///
+    /// <para>Present-or-absent is kept, because on the update and test records a blank password
+    /// MEANS "keep the stored one" — so "was a password supplied" is the first question anyone
+    /// diagnosing them asks, and it discloses nothing.</para>
+    /// </summary>
+    public static string Marker(string? secret) =>
+        string.IsNullOrEmpty(secret) ? "none" : "[redacted]";
 }
 
 /// <summary>

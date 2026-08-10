@@ -23,14 +23,20 @@ namespace ERP_RFQ_Automation.Platform.Entitlements;
 /// selects all 42 of its columns, so PostgreSQL answers 42501 (insufficient privilege)
 /// for columns the role was never granted.
 ///
-/// That failure is invisible in two directions at once, which is why it is called out
-/// here rather than left to the reader: the catch below is a CONTRACTED FAIL-OPEN, so a
-/// 42501 does not surface as an error — it silently disables tenant-suspension
-/// enforcement and every plan limit for that business unit; and SQLite has neither roles
-/// nor column privileges, so the whole test suite stays green while production runs
-/// unenforced. Keep these queries projections. Adding a property to
-/// <see cref="TenantAccessSnapshot"/> means adding its column to the grant, not widening
-/// the SELECT and hoping.</para>
+/// That failure used to be invisible in two directions at once: the catch below was a
+/// CONTRACTED FAIL-OPEN, so a 42501 did not surface as an error — it silently disabled
+/// tenant-suspension enforcement and every plan limit for that business unit; and SQLite
+/// has neither roles nor column privileges, so the whole test suite stayed green while
+/// production ran unenforced. Sec-D1 closed both halves: the catch now DENIES (503), and
+/// <see cref="TenantAccessGrantContract"/> proves at boot, against the live database, that
+/// every column this query projects is readable by both tenant-plane roles — so the 42501
+/// is refused at startup instead of being discovered by a customer.</para>
+///
+/// <para>Keep these queries projections, and keep
+/// <see cref="TenantAccessGrantContract.RequiredColumns"/> in step with them: adding a
+/// property to <see cref="PlanSnapshot"/> means adding its column to the grant AND to that
+/// list, not widening the SELECT and hoping. <c>TenantAccessGrantContractTests</c> fails if
+/// you add the property and forget the list.</para>
 /// </summary>
 public sealed class TenantAccessService : ITenantAccessService
 {
@@ -164,18 +170,30 @@ public sealed class TenantAccessService : ITenantAccessService
         }
         catch (Exception ex)
         {
-            // Contracted fail-open: an unavailable platform plane (missing grant,
-            // reduced test model, transient outage) must never take the tenant
-            // product down. Briefly cached so a broken plane is not hammered.
-            // Sec2: logged AND counted — a sustained fail-open rate means status
-            // enforcement and plan limits are silently disabled; alert on the metric.
-            _log.LogWarning(ex,
-                "Tenant access resolution FAILED OPEN for BusinessUnit {BusinessUnitId}: the platform "
-                + "plane could not be read, so tenant-status enforcement and plan limits are "
-                + "disabled for this BU for {FailureCacheTtlSeconds}s.",
+            // Sec-D1: this WAS a contracted fail-open — `catch (Exception) → allow`, returning the
+            // same null-status snapshot the legacy-BU path returns, which made IsAccessDenied false
+            // and admitted the request. It now fails CLOSED, for one reason: the failure it is most
+            // likely to catch is a 42501 on the platform read, and that is a whole-deployment
+            // condition, not a one-tenant blip. Any deployment sitting between
+            // 20260805105320 (tenant plane narrowed to column-level SELECT) and 20260808163605
+            // (which finally granted Plans."Features", projected by CoreQuery) answers 42501 on
+            // EVERY tenant request — so the old catch turned one missing grant into "no suspension,
+            // no past-due gating, no archival, no plan limit" for every tenant on the platform, and
+            // said so only in a log line. EntitlementService.CheckFeatureAsync already refused the
+            // same class of unresolved lookup; this is now consistent with it.
+            //
+            // Still logged AND counted: the metric is what distinguishes "one tenant, one blip"
+            // from "the plane is down", and the cache TTL below is deliberately short so a grant
+            // applied by a migration recovers the platform without a restart.
+            _log.LogError(ex,
+                "Tenant access resolution FAILED CLOSED for BusinessUnit {BusinessUnitId}: the platform "
+                + "plane could not be read, so this business unit is refused (503) for up to "
+                + "{FailureCacheTtlSeconds}s. Tenant status and plan limits are UNKNOWN, not absent.",
                 businessUnitId, FailureCacheTtl.TotalSeconds);
-            _metrics?.TenantAccessFailOpen(businessUnitId);
-            snapshot = new TenantAccessSnapshot(businessUnitId, null, null, null);
+            _metrics?.TenantAccessUnresolvable(businessUnitId);
+            snapshot = TenantAccessSnapshot.Unresolved(businessUnitId,
+                "The platform control plane could not be read, so this organization's subscription "
+                + "status could not be confirmed.");
             ttl = FailureCacheTtl;
         }
 
@@ -201,7 +219,13 @@ public sealed class TenantAccessService : ITenantAccessService
     {
         var core = await CoreQuery(businessUnitId).FirstOrDefaultAsync(ct);
         if (core is null)
-            return new TenantAccessSnapshot(businessUnitId, null, null, null); // legacy BU → fail open
+            // RESOLVED, with no tenant. The platform plane answered; this BusinessUnit simply has
+            // no Tenant row, so there is no status to enforce and no plan to limit. Kept as an
+            // allowance — and it is the one that remains — because it is a fact about the data
+            // rather than an unknown: the query ran, under a role that can read every column it
+            // projects (asserted at boot by TenantAccessGrantContract), and returned no row.
+            // Distinguishing this from "the read failed" is the whole of Sec-D1.
+            return new TenantAccessSnapshot(businessUnitId, null, null, null);
 
         var snapshot = new TenantAccessSnapshot(businessUnitId, core.TenantId, core.Status, core.Plan);
         snapshot = await AddBillingTermsAsync(snapshot, core.TenantId, ct);

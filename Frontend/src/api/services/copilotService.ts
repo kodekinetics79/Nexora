@@ -73,6 +73,14 @@ export interface AgentAuditEntry {
 
 export interface AgentPolicy {
   autonomyLevel: AgentAutonomyLevel;
+  /**
+   * The currency the two caps below are denominated in. Null means the tenant has never set
+   * one, which suspends auto-approval entirely: the guardrail cannot compare an undenominated
+   * cap with anything, so every amount-bearing action routes to a human.
+   */
+  currencyId: number | null;
+  /** Server-computed mirror of `currencyId != null`. */
+  capsAreDenominated: boolean;
   maxAutoAwardValue: number;
   maxAutoOrderValue: number;
   requireApprovalForAwards: boolean;

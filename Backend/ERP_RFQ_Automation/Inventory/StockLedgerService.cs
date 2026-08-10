@@ -9,6 +9,11 @@ namespace ERP_RFQ_Automation.Inventory;
 public sealed class StockLedgerException(string message) : InvalidOperationException(message);
 
 /// <summary>The state of one inventory row after a ledger write.</summary>
+/// <param name="BookQuantity">
+/// FR-INV-05. What the system believed was on hand immediately BEFORE this write. Null for writes
+/// that are not a count.
+/// </param>
+/// <param name="CountedQuantity">What the counter physically found. Null unless this was a count.</param>
 public sealed record StockLedgerResult(
     long InventoryId,
     long ProductId,
@@ -18,7 +23,117 @@ public sealed record StockLedgerResult(
     decimal Damaged,
     decimal Expired,
     decimal SafetyStock,
-    long? MovementId);
+    long? MovementId,
+    decimal? BookQuantity = null,
+    decimal? CountedQuantity = null,
+    /// <summary>FR-INV-04. The configured minimum for this item and warehouse. Null is
+    /// "not configured" and is rendered as such — never as a blank that reads like zero.</summary>
+    decimal? MinimumLevel = null,
+    /// <summary>FR-INV-04. The configured maximum. Null is "not configured".</summary>
+    decimal? MaximumLevel = null)
+{
+    /// <summary>
+    /// FR-INV-05. Counted minus book: positive means more stock was found than the system knew
+    /// about, negative means stock is missing.
+    ///
+    /// <para><b>Why this is returned and not merely implied.</b> <c>RecordCountAsync</c> computed
+    /// exactly this number in order to size the adjustment and then threw it away — the only
+    /// surviving trace was the quantity on an <c>AdjustmentIncrease</c>/<c>AdjustmentDecrease</c>
+    /// movement carrying the free-text reason "Physical count", indistinguishable from any other
+    /// adjustment. A stock take whose variance cannot be reported is a stock take that has not been
+    /// done, which is the whole of FR-INV-05's second clause.</para>
+    /// </summary>
+    public decimal? Variance => CountedQuantity.HasValue && BookQuantity.HasValue
+        ? CountedQuantity.Value - BookQuantity.Value
+        : null;
+
+    /// <summary>True when the count agreed with the book value. A null variance is not agreement.</summary>
+    public bool CountAgreed => Variance == 0m;
+}
+
+/// <summary>
+/// FR-INV-05. One counted line in the variance report: what the book said, what the counter found,
+/// and the gap between them.
+/// </summary>
+public sealed record StockCountVariance(
+    long InventoryId,
+    long ProductId,
+    string PartNumber,
+    string ProductName,
+    long WarehouseId,
+    string WarehouseName,
+    decimal BookQuantity,
+    decimal CountedQuantity,
+    DateTime CountedOn,
+    string CountedBy,
+    string? Reason)
+{
+    public decimal Variance => CountedQuantity - BookQuantity;
+
+    /// <summary>
+    /// Variance as a share of the book value. Null when the book value was zero — a count that
+    /// finds 5 units where the system knew of none is an infinite percentage, and reporting it as
+    /// 0% or as 500% would both be inventions. The absolute variance is the honest number there.
+    /// </summary>
+    public decimal? VariancePercent => BookQuantity == 0m
+        ? null
+        : Math.Round(Variance / BookQuantity * 100m, 2);
+}
+
+/// <summary>
+/// FR-INV-06. One inventory row's ageing position: how long since anything physically moved, and
+/// which slow-moving/obsolete band that puts it in.
+/// </summary>
+public sealed record StockAgeingRow(
+    long InventoryId,
+    long ProductId,
+    string PartNumber,
+    string ProductName,
+    long WarehouseId,
+    string WarehouseName,
+    decimal OnHand,
+    decimal UnitCost,
+    DateTime? LastReceiptOn,
+    DateTime? LastIssueOn,
+    int? DaysSinceLastIssue,
+    int? DaysSinceLastReceipt,
+    string Band)
+{
+    /// <summary>Capital tied up in this row at its recorded unit cost.</summary>
+    public decimal CarryingValue => Math.Round(OnHand * UnitCost, 2);
+}
+
+/// <summary>
+/// FR-INV-06. The ageing bands.
+///
+/// <para><b>Measured from the last ISSUE, not the last receipt.</b> A line that is received every
+/// month and never sold is the definition of obsolete, and receipt-based ageing would report it as
+/// the freshest stock in the warehouse. Where a row has never issued at all, its first receipt is
+/// the clock — otherwise stock that has sat untouched since the day it arrived would have no age
+/// at all and disappear from the report that exists to find it.</para>
+/// </summary>
+public static class StockAgeingBands
+{
+    public const string Current = "CURRENT";       // moved within 90 days
+    public const string Slow = "SLOW_MOVING";      // 90–180 days
+    public const string VerySlow = "VERY_SLOW";    // 180–365 days
+    public const string Obsolete = "OBSOLETE";     // over a year
+    /// <summary>Stock is present but the ledger holds no movement to date it from.</summary>
+    public const string Undated = "UNDATED";
+
+    public const int SlowAfterDays = 90;
+    public const int VerySlowAfterDays = 180;
+    public const int ObsoleteAfterDays = 365;
+
+    public static string For(int? daysSinceMovement) => daysSinceMovement switch
+    {
+        null => Undated,
+        < SlowAfterDays => Current,
+        < VerySlowAfterDays => Slow,
+        < ObsoleteAfterDays => VerySlow,
+        _ => Obsolete,
+    };
+}
 
 public interface IStockLedgerService
 {
@@ -51,6 +166,18 @@ public interface IStockLedgerService
         decimal safetyStock, string actor, CancellationToken ct = default);
 
     /// <summary>
+    /// FR-INV-04. Sets the minimum and maximum stock levels for one item in one warehouse. A policy
+    /// value, so it posts no movement.
+    ///
+    /// <para><b>Null means "not configured" and is a settable value, not an omission.</b> A caller
+    /// clearing a level passes null and the level is removed; there is no way to express "leave this
+    /// one alone" through this method, because a partial update that silently kept a stale maximum
+    /// would be indistinguishable on screen from one that cleared it.</para>
+    /// </summary>
+    Task<StockLedgerResult> SetStockLevelsAsync(long businessUnitId, long productId, long warehouseId,
+        decimal? minimumLevel, decimal? maximumLevel, string actor, CancellationToken ct = default);
+
+    /// <summary>
     /// Moves physical stock between two warehouses of the same tenant as one atomic pair of
     /// TransferOut/TransferIn movements. Without this, warehouses are decorative: stock could
     /// only ever enter the warehouse its purchase order named.
@@ -58,6 +185,27 @@ public interface IStockLedgerService
     Task<(StockLedgerResult From, StockLedgerResult To)> TransferAsync(long businessUnitId, long productId,
         long fromWarehouseId, long toWarehouseId, decimal quantity, string idempotencyKey, string actor,
         string? reason = null, CancellationToken ct = default);
+
+    /// <summary>
+    /// FR-INV-05. The variance report for counts posted in a date window: book value, counted
+    /// value and the gap, per counted inventory row.
+    ///
+    /// <para>Driven off the count movements themselves rather than a separate stock-take table.
+    /// The movement is written in the same transaction as the balance change and is append-only,
+    /// so it cannot disagree with the stock it explains — whereas a parallel count-session table
+    /// would be a second record of the same event with its own way of going stale. What that costs
+    /// is named in the module report: there is no count SHEET, so a count is a single line, and
+    /// blind/second-count workflow is not modelled.</para>
+    /// </summary>
+    Task<IReadOnlyList<StockCountVariance>> GetCountVarianceAsync(long businessUnitId,
+        DateTime? from = null, DateTime? to = null, bool varianceOnly = true, CancellationToken ct = default);
+
+    /// <summary>
+    /// FR-INV-06. Stock ageing for slow-moving and obsolete identification, aged from the last
+    /// physical issue. See <see cref="StockAgeingBands"/> for why it is issue-dated.
+    /// </summary>
+    Task<IReadOnlyList<StockAgeingRow>> GetStockAgeingAsync(long businessUnitId,
+        long? warehouseId = null, string? band = null, CancellationToken ct = default);
 }
 
 /// <summary>The non-sellable buckets that reclassification can move stock into.</summary>
@@ -86,16 +234,46 @@ public sealed class StockLedgerService(ErpRfqAutomationContext db) : IStockLedge
 {
     private readonly ErpRfqAutomationContext _db = db;
 
-    public Task<StockLedgerResult> RecordCountAsync(long businessUnitId, long productId, long warehouseId,
+    /// <summary>The source stamped on a count's balancing movement. See <see cref="CountSourceType"/>.</summary>
+    internal const string CountSourceType = "StockCount";
+
+    public async Task<StockLedgerResult> RecordCountAsync(long businessUnitId, long productId, long warehouseId,
         decimal countedQuantity, string idempotencyKey, string actor, string? reason = null,
         CancellationToken ct = default)
     {
         if (countedQuantity < 0m)
             throw new ArgumentOutOfRangeException(nameof(countedQuantity), "A counted quantity cannot be negative.");
-        return WriteAsync(businessUnitId, productId, warehouseId, idempotencyKey, actor, ct,
-            inventory => ApplyOnHandDelta(inventory, countedQuantity - inventory.QtyOnHand,
-                reason ?? "Physical count", actor));
+
+        // FR-INV-05. The book value is captured BEFORE the mutation, because after it the balance
+        // is the counted quantity and the variance is unrecoverable — which is exactly why this
+        // number used to be computed, used to size the adjustment, and then lost. It is carried
+        // out on the result and stamped on the movement, so the variance report can be rebuilt
+        // from the ledger rather than depending on someone having kept the response.
+        var book = 0m;
+        var result = await WriteAsync(businessUnitId, productId, warehouseId, idempotencyKey, actor,
+            CountSourceType, ct,
+            inventory =>
+            {
+                book = inventory.QtyOnHand;
+                return ApplyOnHandDelta(inventory, countedQuantity - inventory.QtyOnHand,
+                    CountReason(book, countedQuantity, reason), actor);
+            });
+
+        // A count that matches the book value posts no movement (the delta is zero), so there is
+        // no ledger row to read the book value back from. Reporting a zero variance is still the
+        // truth about the count, and it is the one the counter needs to see.
+        return result with { BookQuantity = book, CountedQuantity = countedQuantity };
     }
+
+    /// <summary>
+    /// The movement reason for a count. The book and counted figures are written into it verbatim
+    /// so the variance is reconstructable from the append-only ledger alone — the movement quantity
+    /// carries the absolute delta but not its sign relative to what was expected, and the
+    /// <c>Inventory</c> balance has already moved on by the time anyone reads it.
+    /// </summary>
+    private static string CountReason(decimal book, decimal counted, string? reason)
+        => $"Physical count: book {book}, counted {counted}"
+           + (string.IsNullOrWhiteSpace(reason) ? "" : $" — {reason.Trim()}");
 
     public Task<StockLedgerResult> AdjustAsync(long businessUnitId, long productId, long warehouseId,
         decimal delta, string idempotencyKey, string actor, string? reason = null,
@@ -159,10 +337,50 @@ public sealed class StockLedgerService(ErpRfqAutomationContext db) : IStockLedge
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             await using var tx = await _db.Database.BeginTransactionAsync(Isolation(), ct);
             var inventory = await ResolveInventoryAsync(businessUnitId, productId, warehouseId, actor, ct);
             await LockAsync(InventoryAvailabilityService.InventoryLock(businessUnitId, inventory.Id), ct);
             inventory.SafetyStockQuantity = safetyStock;
+            Touch(inventory, actor);
+            await _db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
+            return Snapshot(inventory, null);
+        });
+    }
+
+    public async Task<StockLedgerResult> SetStockLevelsAsync(long businessUnitId, long productId,
+        long warehouseId, decimal? minimumLevel, decimal? maximumLevel, string actor,
+        CancellationToken ct = default)
+    {
+        // These three refusals are the SERVICE-LEVEL copy of CK_Inventory_StockLevels. The
+        // constraint is the authority on PostgreSQL, but the portable lane runs SQLite with
+        // PRAGMA ignore_check_constraints = ON, so a constraint alone would be unenforced there and
+        // the invariant would only be tested in one of the two lanes.
+        if (minimumLevel is < 0m)
+            throw new ArgumentOutOfRangeException(nameof(minimumLevel),
+                "A minimum stock level cannot be negative. Clear it to leave the item unmonitored.");
+        if (maximumLevel is < 0m)
+            throw new ArgumentOutOfRangeException(nameof(maximumLevel),
+                "A maximum stock level cannot be negative. Clear it to leave the item unmonitored.");
+        // A maximum below the minimum is a policy nothing can satisfy: every quantity in the world
+        // is simultaneously too little and too much, so the row would carry both a shortage alert
+        // and an overstock alert permanently.
+        if (minimumLevel is { } min && maximumLevel is { } max && max < min)
+            throw new StockLedgerException(
+                $"The maximum level ({max}) cannot be below the minimum level ({min}): no quantity would "
+                + "satisfy both, so the item would be reported short and overstocked at the same time.");
+
+        RequireActor(actor);
+        var strategy = _db.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(async () =>
+        {
+            _db.ChangeTracker.Clear();
+            await using var tx = await _db.Database.BeginTransactionAsync(Isolation(), ct);
+            var inventory = await ResolveInventoryAsync(businessUnitId, productId, warehouseId, actor, ct);
+            await LockAsync(InventoryAvailabilityService.InventoryLock(businessUnitId, inventory.Id), ct);
+            inventory.MinimumLevel = minimumLevel;
+            inventory.MaximumLevel = maximumLevel;
             Touch(inventory, actor);
             await _db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
@@ -184,6 +402,7 @@ public sealed class StockLedgerService(ErpRfqAutomationContext db) : IStockLedge
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             await using var tx = await _db.Database.BeginTransactionAsync(Isolation(), ct);
 
             var source = await ResolveInventoryAsync(businessUnitId, productId, fromWarehouseId, actor, ct);
@@ -223,49 +442,220 @@ public sealed class StockLedgerService(ErpRfqAutomationContext db) : IStockLedge
         });
     }
 
+    public async Task<IReadOnlyList<StockCountVariance>> GetCountVarianceAsync(long businessUnitId,
+        DateTime? from = null, DateTime? to = null, bool varianceOnly = true, CancellationToken ct = default)
+    {
+        if (businessUnitId <= 0) throw new ArgumentOutOfRangeException(nameof(businessUnitId));
+
+        // `from` is a query-expression keyword, so the window bounds are bound to locals before
+        // the comprehension rather than referenced by parameter name inside it.
+        var since = from;
+        var until = to;
+
+        var rows = await (
+            from movement in _db.InventoryMovements.AsNoTracking()
+            join inventory in _db.Set<Models.Inventory>().AsNoTracking()
+                on movement.InventoryId equals inventory.Id
+            join product in _db.Products.AsNoTracking() on movement.ProductId equals product.Id into products
+            from product in products.DefaultIfEmpty()
+            join warehouse in _db.Warehouses.AsNoTracking() on movement.WarehouseId equals warehouse.Id into warehouses
+            from warehouse in warehouses.DefaultIfEmpty()
+            where movement.BusinessUnitId == businessUnitId && inventory.Buid == businessUnitId
+                  && movement.SourceType == CountSourceType
+                  && (since == null || movement.OccurredOn >= since)
+                  && (until == null || movement.OccurredOn <= until)
+            orderby movement.OccurredOn descending, movement.Id descending
+            select new
+            {
+                movement.InventoryId, movement.ProductId, movement.WarehouseId, movement.Type,
+                movement.Quantity, movement.OccurredOn, movement.CreatedBy, movement.Reason,
+                PartNumber = product != null ? product.PartNo : inventory.PartNo,
+                ProductName = product != null ? product.ProductName : inventory.ProductName,
+                WarehouseName = warehouse != null ? warehouse.WarehouseName : null,
+            }).ToListAsync(ct);
+
+        return rows.Select(x =>
+        {
+            // The signed variance is the movement's on-hand effect: an AdjustmentIncrease means
+            // the counter found more than the book said. Derived through InventoryQuantityMath so
+            // the sign convention cannot drift from the one the reconciliation uses.
+            var variance = InventoryQuantityMath.OnHandDelta(x.Type) * x.Quantity;
+            var (book, counted) = ParseCountReason(x.Reason, variance);
+            return new StockCountVariance(x.InventoryId, x.ProductId, x.PartNumber ?? "",
+                x.ProductName ?? x.PartNumber ?? "", x.WarehouseId, x.WarehouseName ?? "Unassigned",
+                book, counted, x.OccurredOn, x.CreatedBy, x.Reason);
+        })
+        .Where(x => !varianceOnly || x.Variance != 0m)
+        .ToList();
+    }
+
+    /// <summary>
+    /// Recovers the book and counted figures from the reason text the count wrote, falling back to
+    /// the signed variance alone when the text is not in the expected shape.
+    ///
+    /// <para>The fallback matters: counts posted before this gate carry the bare reason "Physical
+    /// count", so their book value is genuinely unrecoverable. It reports book 0 and counted =
+    /// variance, which keeps the VARIANCE — the number the report exists for — exactly right, and
+    /// leaves the two absolute figures visibly implausible rather than quietly wrong.</para>
+    /// </summary>
+    private static (decimal Book, decimal Counted) ParseCountReason(string? reason, decimal variance)
+    {
+        const string bookMarker = "book ";
+        const string countedMarker = ", counted ";
+        if (reason is not null)
+        {
+            var bookAt = reason.IndexOf(bookMarker, StringComparison.Ordinal);
+            var countedAt = reason.IndexOf(countedMarker, StringComparison.Ordinal);
+            if (bookAt >= 0 && countedAt > bookAt)
+            {
+                var bookText = reason[(bookAt + bookMarker.Length)..countedAt];
+                var rest = reason[(countedAt + countedMarker.Length)..];
+                var end = rest.IndexOf(' ');
+                var countedText = end < 0 ? rest : rest[..end];
+                if (decimal.TryParse(bookText, System.Globalization.NumberStyles.Any,
+                        System.Globalization.CultureInfo.InvariantCulture, out var book)
+                    && decimal.TryParse(countedText, System.Globalization.NumberStyles.Any,
+                        System.Globalization.CultureInfo.InvariantCulture, out var counted))
+                    return (book, counted);
+            }
+        }
+        return (0m, variance);
+    }
+
+    public async Task<IReadOnlyList<StockAgeingRow>> GetStockAgeingAsync(long businessUnitId,
+        long? warehouseId = null, string? band = null, CancellationToken ct = default)
+    {
+        if (businessUnitId <= 0) throw new ArgumentOutOfRangeException(nameof(businessUnitId));
+
+        var stock = await (
+            from inventory in _db.Set<Models.Inventory>().AsNoTracking()
+            join product in _db.Products.AsNoTracking() on inventory.ProductId equals product.Id into products
+            from product in products.DefaultIfEmpty()
+            join warehouse in _db.Warehouses.AsNoTracking() on inventory.WarehouseId equals warehouse.Id into warehouses
+            from warehouse in warehouses.DefaultIfEmpty()
+            where inventory.Buid == businessUnitId
+                  && (warehouseId == null || inventory.WarehouseId == warehouseId)
+                  // Ageing describes stock that is SITTING there. A row at zero on-hand is not
+                  // slow-moving, it is empty, and including it would bury the rows that matter
+                  // under every SKU the tenant has ever stocked.
+                  && inventory.QtyOnHand > 0m
+            select new
+            {
+                inventory.Id, inventory.ProductId, inventory.WarehouseId, inventory.QtyOnHand,
+                inventory.UnitCost,
+                PartNumber = product != null ? product.PartNo : inventory.PartNo,
+                ProductName = product != null ? product.ProductName : inventory.ProductName,
+                WarehouseName = warehouse != null ? warehouse.WarehouseName : null,
+            }).ToListAsync(ct);
+        if (stock.Count == 0) return [];
+
+        var inventoryIds = stock.Select(x => x.Id).ToArray();
+        var movements = await _db.InventoryMovements.AsNoTracking()
+            .Where(m => m.BusinessUnitId == businessUnitId && inventoryIds.Contains(m.InventoryId)
+                        && (m.Type == InventoryMovementType.Issue
+                            || m.Type == InventoryMovementType.TransferOut
+                            || m.Type == InventoryMovementType.Receipt
+                            || m.Type == InventoryMovementType.TransferIn))
+            .GroupBy(m => new { m.InventoryId, m.Type })
+            .Select(g => new { g.Key.InventoryId, g.Key.Type, LastOn = g.Max(m => m.OccurredOn) })
+            .ToListAsync(ct);
+
+        var lastIssue = movements
+            .Where(x => x.Type is InventoryMovementType.Issue or InventoryMovementType.TransferOut)
+            .GroupBy(x => x.InventoryId).ToDictionary(g => g.Key, g => g.Max(x => x.LastOn));
+        var lastReceipt = movements
+            .Where(x => x.Type is InventoryMovementType.Receipt or InventoryMovementType.TransferIn)
+            .GroupBy(x => x.InventoryId).ToDictionary(g => g.Key, g => g.Max(x => x.LastOn));
+
+        var now = DateTime.UtcNow;
+        var rows = stock.Select(x =>
+        {
+            var issuedOn = lastIssue.TryGetValue(x.Id, out var issue) ? issue : (DateTime?)null;
+            var receivedOn = lastReceipt.TryGetValue(x.Id, out var receipt) ? receipt : (DateTime?)null;
+            // Aged from the last issue; where nothing has ever issued, from the first arrival.
+            // A row with neither is UNDATED rather than being given a fabricated age.
+            var clock = issuedOn ?? receivedOn;
+            var days = clock.HasValue ? (int)Math.Floor((now - clock.Value).TotalDays) : (int?)null;
+            return new StockAgeingRow(x.Id, x.ProductId ?? 0, x.PartNumber ?? "",
+                x.ProductName ?? x.PartNumber ?? "", x.WarehouseId ?? 0, x.WarehouseName ?? "Unassigned",
+                x.QtyOnHand, x.UnitCost ?? 0m, receivedOn, issuedOn,
+                issuedOn.HasValue ? (int)Math.Floor((now - issuedOn.Value).TotalDays) : null,
+                receivedOn.HasValue ? (int)Math.Floor((now - receivedOn.Value).TotalDays) : null,
+                StockAgeingBands.For(days));
+        });
+
+        if (!string.IsNullOrWhiteSpace(band))
+        {
+            var wanted = band.Trim().ToUpperInvariant();
+            rows = rows.Where(x => x.Band == wanted);
+        }
+
+        return rows
+            .OrderByDescending(x => x.DaysSinceLastIssue ?? x.DaysSinceLastReceipt ?? int.MaxValue)
+            .ThenByDescending(x => x.CarryingValue)
+            .ToList();
+    }
+
     /// <summary>
     /// Shared write pipeline: transaction, advisory lock, idempotency replay check, mutation,
     /// invariant enforcement and movement posting — in that order, all in one transaction.
+    ///
+    /// <para>When the caller already holds a transaction the pipeline joins it rather than opening a
+    /// second one. That is what lets a lot quarantine (FR-MTR-05) reclassify stock through this
+    /// service — the sanctioned bucket writer — inside the same unit of work that flips the lot's
+    /// own status. Writing <c>QuarantineQuantity</c> directly from the traceability module would
+    /// have been the alternative, and it would have produced a second, unbalanced writer of the
+    /// exact column this class exists to keep reconcilable against the movement ledger. Same guard,
+    /// same reasoning, as <c>InventoryAvailabilityService.ReserveAsync</c>.</para>
     /// </summary>
-    private async Task<StockLedgerResult> WriteAsync(long businessUnitId, long productId, long warehouseId,
+    private Task<StockLedgerResult> WriteAsync(long businessUnitId, long productId, long warehouseId,
         string idempotencyKey, string actor, CancellationToken ct,
+        Func<Models.Inventory, (InventoryMovementType Type, decimal Quantity, string Reason)?> mutate)
+        => WriteAsync(businessUnitId, productId, warehouseId, idempotencyKey, actor, "StockLedger", ct, mutate);
+
+    private async Task<StockLedgerResult> WriteAsync(long businessUnitId, long productId, long warehouseId,
+        string idempotencyKey, string actor, string sourceType, CancellationToken ct,
         Func<Models.Inventory, (InventoryMovementType Type, decimal Quantity, string Reason)?> mutate)
     {
         RequireActor(actor);
         RequireKey(idempotencyKey);
         var key = idempotencyKey.Trim();
 
-        var strategy = _db.Database.CreateExecutionStrategy();
-        return await strategy.ExecuteAsync(async () =>
+        async Task<StockLedgerResult> ApplyAsync()
         {
-            await using var tx = await _db.Database.BeginTransactionAsync(Isolation(), ct);
             var inventory = await ResolveInventoryAsync(businessUnitId, productId, warehouseId, actor, ct);
             await LockAsync(InventoryAvailabilityService.InventoryLock(businessUnitId, inventory.Id), ct);
 
             var replay = await FindMovementAsync(businessUnitId, key, ct);
             if (replay is not null)
-            {
-                await tx.CommitAsync(ct);
                 return Snapshot(inventory, replay.Id);
-            }
 
             var posting = mutate(inventory);
             if (posting is null)
-            {
-                await tx.CommitAsync(ct);
                 return Snapshot(inventory, null);
-            }
 
             var reserved = await ActiveReservedAsync(businessUnitId, inventory.Id, ct);
             EnsureInvariants(inventory, reserved);
             Touch(inventory, actor);
 
             var movement = NewMovement(inventory, posting.Value.Type, posting.Value.Quantity, key,
-                "StockLedger", key, posting.Value.Reason, actor, DateTime.UtcNow);
+                sourceType, key, posting.Value.Reason, actor, DateTime.UtcNow);
             _db.InventoryMovements.Add(movement);
             await _db.SaveChangesAsync(ct);
-            await tx.CommitAsync(ct);
             return Snapshot(inventory, movement.Id);
+        }
+
+        if (_db.Database.CurrentTransaction is not null)
+            return await ApplyAsync();
+
+        var strategy = _db.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(async () =>
+        {
+            _db.ChangeTracker.Clear();
+            await using var tx = await _db.Database.BeginTransactionAsync(Isolation(), ct);
+            var result = await ApplyAsync();
+            await tx.CommitAsync(ct);
+            return result;
         });
     }
 
@@ -372,7 +762,8 @@ public sealed class StockLedgerService(ErpRfqAutomationContext db) : IStockLedge
     private static StockLedgerResult Snapshot(Models.Inventory inventory, long? movementId)
         => new(inventory.Id, inventory.ProductId ?? 0, inventory.WarehouseId ?? 0, inventory.QtyOnHand,
             inventory.QuarantineQuantity, inventory.DamagedQuantity, inventory.ExpiredQuantity,
-            inventory.SafetyStockQuantity, movementId);
+            inventory.SafetyStockQuantity, movementId,
+            MinimumLevel: inventory.MinimumLevel, MaximumLevel: inventory.MaximumLevel);
 
     private static void Touch(Models.Inventory inventory, string actor)
     {

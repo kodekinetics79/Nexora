@@ -72,12 +72,16 @@ public sealed class CommercialExceptionApplicationService(
         var generatedAtUtc = DateTime.UtcNow;
         var sourceCoverage = await SourceCoverageAsync(businessUnitId, cancellationToken);
         var availableSourceCount = sourceCoverage.Count(x => x.IsAvailable);
-        var coverageStatus = availableSourceCount switch
-        {
-            0 => "Unavailable",
-            2 => "Complete",
-            _ => "Partial"
-        };
+        // Counted against the sources that ACTUALLY EXIST, not against a literal. This read
+        // "availableSourceCount switch { 0 => Unavailable, 2 => Complete, _ => Partial }", so adding
+        // the FR-DLM-07 delivery source silently downgraded a fully healthy tenant to "Partial" —
+        // wiring-contract failure #9, an allowed-value set that one guard was never told about. The
+        // count now derives from the same list the panel renders.
+        var coverageStatus = availableSourceCount == 0
+            ? "Unavailable"
+            : availableSourceCount == sourceCoverage.Count
+                ? "Complete"
+                : "Partial";
         var scoped = db.CommercialExceptionCases.AsNoTracking()
             .Where(x => x.BusinessUnitId == businessUnitId);
         if (!scope.TenantWide)
@@ -494,6 +498,12 @@ public sealed class CommercialExceptionApplicationService(
             .Where(x => x.BusinessUnitId == businessUnitId && orderIds.Contains(x.Id))
             .Select(x => new AggregateIdentity(x.Id, x.CommercialCaseId ?? 0, x.NexoraSerial ?? string.Empty))
             .ToDictionaryAsync(x => x.AggregateId, cancellationToken);
+        var shipmentIds = supported.Where(x => x.Type == CommercialAggregateType.Shipment)
+            .Select(x => x.Task.AggregateId).Distinct().ToArray();
+        var shipmentIdentities = await db.Shipments.AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId && shipmentIds.Contains(x.Id))
+            .Select(x => new AggregateIdentity(x.Id, x.CommercialCaseId ?? 0, x.NexoraSerial ?? string.Empty))
+            .ToDictionaryAsync(x => x.AggregateId, cancellationToken);
 
         foreach (var row in supported)
         {
@@ -503,6 +513,7 @@ public sealed class CommercialExceptionApplicationService(
                 CommercialAggregateType.Rfq => rfqIdentities,
                 CommercialAggregateType.Quote => quoteIdentities,
                 CommercialAggregateType.Order => orderIdentities,
+                CommercialAggregateType.Shipment => shipmentIdentities,
                 _ => throw new InvalidOperationException("Unsupported aggregate type reached reconciliation.")
             };
             if (!identities.TryGetValue(row.Task.AggregateId, out var identity) ||
@@ -511,6 +522,9 @@ public sealed class CommercialExceptionApplicationService(
                     $"Follow-up task {row.Task.Id} cannot be resolved to a canonical {row.Type} commercial case.");
             detections.Add(FollowUpDetection(row.Task, row.Type, identity, reconciledAtUtc));
         }
+
+        detections.AddRange(await DetectDeliveryShortfallsAsync(
+            businessUnitId, reconciledAtUtc, cancellationToken));
 
         var caseIds = detections.Select(x => x.CommercialCaseId).Distinct().ToArray();
         var commercialCases = await db.CommercialCases.AsNoTracking()
@@ -526,6 +540,111 @@ public sealed class CommercialExceptionApplicationService(
         }
 
         return detections.OrderBy(x => x.ExceptionKey, StringComparer.Ordinal).ToArray();
+    }
+
+    /// <summary>
+    /// Gate 7 / FR-DLM-07. A customer took fewer units than the delivery note declared, and nobody
+    /// has decided whether to re-supply or credit.
+    ///
+    /// <para><b>The undecided-ness is the condition, not the shortfall.</b> A shortfall is a
+    /// permanent historical fact — the customer refused two of ten cartons on the 14th and always
+    /// will have. If that were the detection condition the case could never close: the refresh
+    /// sweep would reopen it the moment anybody resolved it, and the exception centre would fill
+    /// with rows nobody could clear. So the condition is "a shortfall with no commercial decision
+    /// recorded against it", which stops being true exactly when somebody records one. The framework
+    /// then closes the case itself with SOURCE_RESOLVED, and "resolved" means what the product owner
+    /// said it means: the commercial decision was taken. There is no investigation to conclude and
+    /// no remediation to chase.</para>
+    ///
+    /// <para><b>Deliberately not detected: liability, cause or carrier fault.</b> Damage in transit
+    /// is the carrier's process, run outside this system. What is recorded here is the commercial
+    /// consequence — the units are not invoiceable, the order line is not fulfilled, and somebody
+    /// has to choose.</para>
+    ///
+    /// <para><b>Named gap.</b> A shipment whose order never came from a lead carries no commercial
+    /// case (<c>Shipment.CommercialCaseId</c> is nullable by design), and this framework's case
+    /// requires one. Those shortfalls are skipped here rather than given an invented case id; they
+    /// are still recorded in full on the proof line and still cap the invoice, so nothing is lost
+    /// from the commercial record — only from this queue. Recorded in the gate report.</para>
+    /// </summary>
+    private async Task<IReadOnlyList<Detection>> DetectDeliveryShortfallsAsync(
+        long businessUnitId, DateTime reconciledAtUtc, CancellationToken cancellationToken)
+    {
+        var shortfalls = await (
+                from line in db.Set<Delivery.DeliveryProofLine>().AsNoTracking()
+                join shipment in db.Shipments.AsNoTracking()
+                    on new { line.BusinessUnitId, Id = line.ShipmentId }
+                    equals new { shipment.BusinessUnitId, shipment.Id }
+                where line.BusinessUnitId == businessUnitId
+                      && line.AcceptedQuantity < line.DespatchedQuantity
+                      && !db.Set<Delivery.DeliveryShortfallDecision>().Any(d =>
+                          d.BusinessUnitId == businessUnitId && d.DeliveryProofLineId == line.Id)
+                select new
+                {
+                    Line = line,
+                    shipment.ShipmentNo,
+                    shipment.CommercialCaseId,
+                    shipment.NexoraSerial,
+                    RecordedOn = db.Set<Delivery.DeliveryProof>()
+                        .Where(p => p.BusinessUnitId == businessUnitId && p.Id == line.DeliveryProofId)
+                        .Select(p => p.ReceivedOn).FirstOrDefault()
+                })
+            .ToListAsync(cancellationToken);
+
+        var detections = new List<Detection>();
+        foreach (var row in shortfalls)
+        {
+            if (row.CommercialCaseId is not > 0 || string.IsNullOrWhiteSpace(row.NexoraSerial))
+                continue; // named gap — see the remarks
+
+            var refused = row.Line.DespatchedQuantity - row.Line.AcceptedQuantity;
+            // A whole consignment line refused is a different conversation from two units short.
+            var severity = row.Line.AcceptedQuantity == 0
+                ? CommercialExceptionSeverity.Critical
+                : row.Line.ExceptionReasonCode == Delivery.DeliveryExceptionReasons.Rejected
+                    ? CommercialExceptionSeverity.High
+                    : CommercialExceptionSeverity.Medium;
+
+            detections.Add(new Detection(
+                $"DeliveryShortfall:{row.Line.Id}",
+                CommercialExceptionType.DeliveryShortfall,
+                "DeliveryProofLine",
+                row.Line.Id,
+                1,
+                row.CommercialCaseId.Value,
+                row.NexoraSerial,
+                null,
+                null,
+                null,
+                row.Line.Id,
+                severity,
+                row.Line.ExceptionReasonCode ?? Delivery.DeliveryExceptionReasons.ShortShipment,
+                "Delivery shortfall awaiting a commercial decision",
+                $"{refused} of {row.Line.DespatchedQuantity} units on delivery note {row.ShipmentNo} "
+                + $"were not accepted ({row.Line.ExceptionReasonCode}). The order line is not "
+                + "fulfilled and the shortfall is not invoiceable.",
+                "DECIDE_RESUPPLY_OR_CREDIT",
+                // Three working days. A customer waiting to hear whether they get goods or money
+                // back is the clock that matters, not an internal process one.
+                (row.RecordedOn == default ? reconciledAtUtc : row.RecordedOn).AddDays(3),
+                JsonSerializer.Serialize(new
+                {
+                    authoritative = true,
+                    sourceType = "DeliveryProofLine",
+                    sourceId = row.Line.Id,
+                    shipmentId = row.Line.ShipmentId,
+                    shipmentNo = row.ShipmentNo,
+                    orderId = row.Line.OrderId,
+                    orderItemId = row.Line.OrderItemId,
+                    despatchedQuantity = row.Line.DespatchedQuantity,
+                    acceptedQuantity = row.Line.AcceptedQuantity,
+                    refusedQuantity = refused,
+                    reasonCode = row.Line.ExceptionReasonCode,
+                    reasonNote = row.Line.ExceptionNote
+                }, JsonOptions)));
+        }
+
+        return detections;
     }
 
     private static Detection UnassignedDetection(
@@ -544,6 +663,7 @@ public sealed class CommercialExceptionApplicationService(
             null,
             null,
             source.Id,
+            null,
             source.SlaDueOn < reconciledAtUtc
                 ? CommercialExceptionSeverity.High
                 : CommercialExceptionSeverity.Medium,
@@ -590,6 +710,7 @@ public sealed class CommercialExceptionApplicationService(
             identity.NexoraSerial,
             source.AssignedToUserId,
             source.Id,
+            null,
             null,
             severity,
             "FOLLOW_UP_OVERDUE",
@@ -643,6 +764,7 @@ public sealed class CommercialExceptionApplicationService(
         exception.SourceVersion = candidate.SourceVersion;
         exception.FollowUpTaskId = candidate.FollowUpTaskId;
         exception.UnassignedWorkItemId = candidate.UnassignedWorkItemId;
+        exception.DeliveryProofLineId = candidate.DeliveryProofLineId;
         exception.OwnerUserId = candidate.OwnerUserId;
         exception.Severity = candidate.Severity;
         exception.ReasonCode = candidate.ReasonCode;
@@ -662,6 +784,7 @@ public sealed class CommercialExceptionApplicationService(
             exception.SourceId != candidate.SourceId ||
             exception.FollowUpTaskId != candidate.FollowUpTaskId ||
             exception.UnassignedWorkItemId != candidate.UnassignedWorkItemId ||
+            exception.DeliveryProofLineId != candidate.DeliveryProofLineId ||
             exception.CommercialCaseId != candidate.CommercialCaseId ||
             !string.Equals(exception.NexoraSerial, candidate.NexoraSerial, StringComparison.Ordinal))
             throw new CommercialExceptionConflictException(
@@ -834,6 +957,12 @@ public sealed class CommercialExceptionApplicationService(
         var followUpAvailable = await CanReadSourceAsync(
             db.FollowUpTasks.AsNoTracking().Where(x => x.BusinessUnitId == businessUnitId),
             cancellationToken);
+        // Gate 7 / FR-DLM-07. Reported alongside the other two rather than assumed reachable: the
+        // delivery tables are new, and a coverage panel that stays silent about a source it cannot
+        // read is the "blank that reads like a loading state" the wiring contract names.
+        var deliveryAvailable = await CanReadSourceAsync(
+            db.Set<Delivery.DeliveryProofLine>().AsNoTracking().Where(x => x.BusinessUnitId == businessUnitId),
+            cancellationToken);
         return
         [
             Coverage("UnassignedWorkItem", unassignedAvailable,
@@ -841,7 +970,10 @@ public sealed class CommercialExceptionApplicationService(
                 "The governed unassigned-routing source could not be queried."),
             Coverage("FollowUpTask", followUpAvailable,
                 "Governed commercial follow-up tasks are reachable.",
-                "The governed follow-up source could not be queried.")
+                "The governed follow-up source could not be queried."),
+            Coverage("DeliveryProofLine", deliveryAvailable,
+                "Confirmed delivery lines are reachable.",
+                "The delivery confirmation source could not be queried.")
         ];
     }
 
@@ -967,6 +1099,10 @@ public sealed class CommercialExceptionApplicationService(
             "RFQ" => CommercialAggregateType.Rfq,
             "QUOTE" => CommercialAggregateType.Quote,
             "ORDER" => CommercialAggregateType.Order,
+            // Gate 7. A follow-up on a despatch is now resolvable, because the shipment carries its
+            // own commercial case; before this it fell through to null and the task was silently
+            // dropped from the sweep — a follow-up nobody was ever chased for.
+            "SHIPMENT" => CommercialAggregateType.Shipment,
             _ => null
         };
     }
@@ -1033,6 +1169,7 @@ public sealed class CommercialExceptionApplicationService(
         long? OwnerUserId,
         long? FollowUpTaskId,
         long? UnassignedWorkItemId,
+        long? DeliveryProofLineId,
         CommercialExceptionSeverity Severity,
         string ReasonCode,
         string Title,

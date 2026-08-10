@@ -47,10 +47,43 @@ public sealed class PriceLine
     /// <summary>Advisory sell price from admitted accepted-Quote evidence.</summary>
     public decimal RecommendedUnitPrice { get; set; }
 
-    /// <summary>Reserved for an authoritative governed cost floor; currently null.</summary>
+    /// <summary>
+    /// The authoritative cost floor for this line: the awarded supplier's LANDED unit cost, taken
+    /// from <c>CustomerQuoteSourcingDecision.SupplierLandedUnitCost</c> — the very number the
+    /// customer price was derived from (<c>landed / (1 - margin)</c>), so it is the honest floor
+    /// rather than an inferred one. Denominated in <see cref="FloorCurrency"/>, NOT necessarily in
+    /// <see cref="Currency"/>.
+    ///
+    /// <para>NULL means NO FLOOR IS ESTABLISHED: no governed sourcing decision has been recorded
+    /// against this RFQ line, so nobody has decided what it costs. It must be rendered as a visible
+    /// gap and must NEVER be defaulted to 0 — a floor of 0 asserts "any price is acceptable", which
+    /// is a decision no one took (wiring contract failure #10) and which would make the below-floor
+    /// send gate pass every price ever typed.</para>
+    /// </summary>
     public decimal? FloorUnitPrice { get; set; }
 
-    /// <summary>Reserved for a governed margin calculation; null without authoritative cost.</summary>
+    /// <summary>
+    /// The currency code <see cref="FloorUnitPrice"/> is denominated in — the awarded supplier
+    /// offer's currency, which can legitimately differ from <see cref="Currency"/> (the RFQ line's
+    /// own currency). Every comparison against the floor MUST read this and convert, or refuse.
+    ///
+    /// <para>Null WITH a non-null floor means the floor's currency could not be named. That is not
+    /// permission to assume the line currency: <see cref="BelowFloorGuard"/> treats it as an
+    /// unresolvable comparison and holds the action (fail closed).</para>
+    /// </summary>
+    public string? FloorCurrency { get; set; }
+
+    /// <summary>
+    /// Plain-language provenance of the floor, for the rep who is being told not to go below it.
+    /// Null exactly when <see cref="FloorUnitPrice"/> is null.
+    /// </summary>
+    public string? FloorBasis { get; set; }
+
+    /// <summary>
+    /// Gross margin of <see cref="RecommendedUnitPrice"/> over <see cref="FloorUnitPrice"/> as a
+    /// PERCENT — 20m means 20%, not 0.2. Null when there is no floor, no recommendation, or when
+    /// the two are in different currencies (this advisory does not convert; the send gate does).
+    /// </summary>
     public decimal? MarginPct { get; set; }
 
     /// <summary>0-1: strength and recency of admitted evidence.</summary>

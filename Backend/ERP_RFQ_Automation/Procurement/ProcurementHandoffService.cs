@@ -128,6 +128,7 @@ public sealed class ProcurementHandoffService(ErpRfqAutomationContext db) : IPro
         var strategy = db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            db.ChangeTracker.Clear();
             await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable,
                 cancellationToken);
             var replay = await db.ProcurementHandoffs.AsNoTracking().SingleOrDefaultAsync(x =>
@@ -236,6 +237,7 @@ public sealed class ProcurementHandoffService(ErpRfqAutomationContext db) : IPro
         var strategy = db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            db.ChangeTracker.Clear();
             await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable,
                 cancellationToken);
             var replayEvent = await db.ProcurementEvents.AsNoTracking().SingleOrDefaultAsync(x =>

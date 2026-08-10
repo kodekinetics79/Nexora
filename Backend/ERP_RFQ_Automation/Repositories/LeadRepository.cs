@@ -244,6 +244,13 @@ namespace ERP_RFQ_Automation.Repositories
                     BuyersName = l.BuyersName,
                     RecDate = l.RecDate,
                     BidClosingDate = l.BidClosingDate,
+                    // FR-RFQ-03 / FR-RFQ-04 intake fields. Projected on the LIST as well as
+                    // the detail because the required delivery date belongs beside the
+                    // deadline in the grid: those are two different dates and a trader who
+                    // sees only one of them quotes against the wrong one.
+                    RequiredDeliveryDate = l.RequiredDeliveryDate,
+                    BidClosingDateHijri = l.BidClosingDateHijri,
+                    AgreementReference = l.AgreementReference,
                     BiddingDecision = l.BiddingDecision,
                     AcknowledgmentDate = l.AcknowledgmentDate,
                     SubDate = l.SubDate,
@@ -382,6 +389,21 @@ namespace ERP_RFQ_Automation.Repositories
 
         private async Task<Rfq> CreateRfqFromLeadAsync(Lead lead, long businessUnitId, string createdBy)
         {
+            // RFQItems.Quantity is NOT NULL and carries CK_RFQItems_Quantity_Positive, so a lead
+            // line whose quantity the document never stated cannot become an RFQ line. Refuse it
+            // here, by name, rather than coalescing to 0 — which would either be rejected by the
+            // database as an opaque 23514 or, worse, accepted as a real demand for nothing.
+            var unquantified = lead.LeadItems
+                .Where(li => li.Quantity is null or <= 0)
+                .Select(li => string.IsNullOrWhiteSpace(li.LineItemNo) ? $"line {li.Id}" : $"line {li.LineItemNo}")
+                .ToList();
+            if (unquantified.Count > 0)
+            {
+                throw new InvalidOperationException(
+                    "This lead cannot be converted until every line states a quantity greater than zero. "
+                    + $"Missing on {string.Join(", ", unquantified)}.");
+            }
+
             var rfqno = !string.IsNullOrWhiteSpace(lead.Rfqno)
                 ? lead.Rfqno
                 : $"RFQ-{lead.Id}-{DateTime.UtcNow:yyyyMMddHHmmss}";
@@ -422,7 +444,8 @@ namespace ERP_RFQ_Automation.Repositories
                     Currency = li.Currency,
                     UnitOfMeasure = li.UnitOfMeasure,
                     UnitPrice = li.UnitPrice,
-                    Quantity = li.Quantity,
+                    // Non-null by the guard at the top of this method.
+                    Quantity = li.Quantity!.Value,
                     StorageLocation = li.StorageLocation,
                     ManufacturerName = li.ManufacturerName,
                     ManufacturerPartNumber = li.ManufacturerPartNumber,
@@ -564,6 +587,8 @@ namespace ERP_RFQ_Automation.Repositories
                 BuyersName = l.BuyersName,
                 RecDate = l.RecDate,
                 BidClosingDate = l.BidClosingDate,
+                // FR-RFQ-04 — the buyer's own date, beside the submission deadline.
+                RequiredDeliveryDate = l.RequiredDeliveryDate,
                 BiddingDecision = l.BiddingDecision,
                 AcknowledgmentDate = l.AcknowledgmentDate,
                 SubDate = l.SubDate,
@@ -687,6 +712,8 @@ namespace ERP_RFQ_Automation.Repositories
                 BuyersName = lead.BuyersName,
                 RecDate = lead.RecDate,
                 BidClosingDate = lead.BidClosingDate,
+                // FR-RFQ-04 — the buyer's own date, beside the submission deadline.
+                RequiredDeliveryDate = lead.RequiredDeliveryDate,
                 BiddingDecision = lead.BiddingDecision,
                 AcknowledgmentDate = lead.AcknowledgmentDate,
                 SubDate = lead.SubDate,
@@ -818,6 +845,11 @@ namespace ERP_RFQ_Automation.Repositories
                 BuyersName = lead.BuyersName,
                 RecDate = lead.RecDate,
                 BidClosingDate = lead.BidClosingDate,
+                // FR-RFQ-03 / FR-RFQ-04 intake fields — see LeadResponseDTO for why each
+                // is distinct from the date or reference sitting next to it.
+                RequiredDeliveryDate = lead.RequiredDeliveryDate,
+                BidClosingDateHijri = lead.BidClosingDateHijri,
+                AgreementReference = lead.AgreementReference,
                 BiddingDecision = lead.BiddingDecision,
                 AcknowledgmentDate = lead.AcknowledgmentDate,
                 SubDate = lead.SubDate,
@@ -895,7 +927,10 @@ namespace ERP_RFQ_Automation.Repositories
                     Aiconfidence = li.Aiconfidence,
                     // Verbatim unrecognized customer-document columns (jsonb -> dict);
                     // tolerant parse returns null for absent/malformed payloads.
-                    ExtraFields = ExtraFieldsJson.Deserialize(li.ExtraFields)
+                    ExtraFields = ExtraFieldsJson.Deserialize(li.ExtraFields),
+                    // AA-01 · the tenant-defined bag, carried raw so the line grid can
+                    // materialise a custom-field column per the user's saved layout.
+                    CustomFields = li.CustomFieldsJson
                 }).ToList(),
                 Attachments = attachments
             };
@@ -968,6 +1003,27 @@ namespace ERP_RFQ_Automation.Repositories
                 })
                 .ToListAsync();
 
+            // Per-line verdicts from the evidence ledger, for this page of leads only. The
+            // client has rendered this count since it replaced the confidence percentage and
+            // nothing served it. It is read, never re-derived: the same CanonicalLineItem
+            // status the review screen shows, so the queue and the workbench cannot disagree.
+            var leadIds = leads.Select(l => l.Id).ToList();
+            var ledgerLines = await _context
+                .Set<ERP_RFQ_Automation.DocumentIntelligence.Persistence.CanonicalLineItem>()
+                .AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId
+                            && x.Inquiry.LeadId != null
+                            && leadIds.Contains(x.Inquiry.LeadId!.Value))
+                .GroupBy(x => x.Inquiry.LeadId!.Value)
+                .Select(g => new
+                {
+                    LeadId = g.Key,
+                    NeedingCheck = g.Count(x => x.ValidationStatus
+                        != ERP_RFQ_Automation.DocumentIntelligence.Persistence.CanonicalValidationStatus.Valid)
+                })
+                .ToListAsync();
+            var needingCheckByLead = ledgerLines.ToDictionary(x => x.LeadId, x => x.NeedingCheck);
+
             var dtos = leads.Select(l => new LeadNeedsReviewItemDTO
             {
                 Id = l.Id,
@@ -980,7 +1036,13 @@ namespace ERP_RFQ_Automation.Repositories
                 ItemCount = l.ItemCount,
                 ReviewReason = ExtractReviewReason(l.HeaderRemarks),
                 ReceivedOn = l.ReceivedOn,
-                ReviewVersion = l.ReviewVersion
+                ReviewVersion = l.ReviewVersion,
+                // Null, not zero: a document whose extraction path wrote no ledger has no
+                // per-line verdict at all, and "0 of 8 need a check" would be a claim we
+                // cannot support. The client falls back to the bare line count.
+                LinesNeedingCheck = needingCheckByLead.TryGetValue(l.Id, out var needing)
+                    ? needing
+                    : null
             }).ToList();
 
             return (dtos, totalCount);
@@ -1088,6 +1150,7 @@ namespace ERP_RFQ_Automation.Repositories
             if (header.Rfqno != null && header.Rfqno != lead.Rfqno) headerChanged.Add("rfqno");
             if (header.BuyersName != null && header.BuyersName != lead.BuyersName) headerChanged.Add("buyersName");
             if (header.BidClosingDate != null && header.BidClosingDate != lead.BidClosingDate) headerChanged.Add("bidClosingDate");
+            if (header.RequiredDeliveryDate != null && header.RequiredDeliveryDate != lead.RequiredDeliveryDate) headerChanged.Add("requiredDeliveryDate");
             if (header.OpportunityNo != null && header.OpportunityNo != lead.OpportunityNo) headerChanged.Add("opportunityNo");
             if (header.HeaderRemarks != null && header.HeaderRemarks != lead.HeaderRemarks) headerChanged.Add("headerRemarks");
             if (header.CustomerId.HasValue && header.CustomerId != lead.CustomerId) headerChanged.Add("customerId");
@@ -1100,6 +1163,7 @@ namespace ERP_RFQ_Automation.Repositories
             if (header.Rfqno != null) lead.Rfqno = header.Rfqno;
             if (header.BuyersName != null) lead.BuyersName = header.BuyersName;
             if (header.BidClosingDate != null) lead.BidClosingDate = header.BidClosingDate;
+            if (header.RequiredDeliveryDate != null) lead.RequiredDeliveryDate = header.RequiredDeliveryDate;
             if (header.OpportunityNo != null) lead.OpportunityNo = header.OpportunityNo;
 
             // HeaderRemarks: a client-supplied value wins; otherwise strip the review marker
@@ -1539,8 +1603,11 @@ namespace ERP_RFQ_Automation.Repositories
             return changed;
         }
 
-        // Only quantity is non-nullable on the model; a null quantity keeps the existing
-        // value (update) or defaults to 0 (insert, via the model default).
+        // A null quantity in the payload means "the reviewer did not touch it": the existing
+        // value is kept on update, and on insert the row is left with a NULL quantity, which is
+        // the honest record of a line whose quantity nobody has yet stated. It used to default
+        // to 0 there, because the model could not express "unknown"; it now can, and approval
+        // already refuses a line whose quantity is null or non-positive.
         private static void ApplyItemFields(LeadItem item, LeadItemReviewDTO dto)
         {
             item.LineItemNo = dto.LineItemNo;

@@ -49,7 +49,13 @@ public sealed class PriceRfqTool : IAgentTool
                     description = Truncate(l.Description, 80),
                     quantity = l.Quantity,
                     recommendedUnitPrice = l.RecommendedUnitPrice,
+                    // The floor carries its own currency: it is the awarded supplier's landed cost,
+                    // which is not necessarily denominated in this line's currency. A model shown
+                    // the number without the unit is failure #12 with a language model holding the
+                    // pen. Null floor = no award recorded, stated in words so it cannot read as 0.
                     floorUnitPrice = l.FloorUnitPrice,
+                    floorCurrency = l.FloorCurrency,
+                    floorBasis = l.FloorBasis ?? "No cost floor established for this line.",
                     marginPct = l.MarginPct,
                     confidence = l.Confidence,
                     needsAttention = l.NeedsAttention,

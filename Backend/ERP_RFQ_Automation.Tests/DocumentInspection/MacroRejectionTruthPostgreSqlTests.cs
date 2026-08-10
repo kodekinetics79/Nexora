@@ -135,7 +135,7 @@ public sealed class MacroRejectionTruthPostgreSqlTests
         ErpRfqAutomationContext context,
         string root,
         IFileInspectionService inspection) => new(
-            new ExtractionQueue(context, new NoopLogger<ExtractionQueue>()),
+            new ExtractionQueue(context, new NoopLogger<ExtractionQueue>(), new StubTenant(null)),
             new LocalEvidenceObjectStorage(new LocalFileStorage(root, root)),
             inspection,
             context,

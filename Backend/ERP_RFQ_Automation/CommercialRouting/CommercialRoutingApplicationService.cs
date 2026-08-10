@@ -107,7 +107,14 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
                             CustomerIdentifierType.ErpAccount, 1m, IsVerified: true)]
                         : Array.Empty<CustomerMatchCandidate>())
                     .ToArray();
-                var scopeKeys = command.ScopeKeys ?? await BuildScopeKeysAsync(businessUnitId, lead, ct);
+                var derivations = command.ScopeKeys is { } supplied
+                    ? RoutingScopeKeys.FromSuppliedKeys(supplied)
+                    : await BuildScopeKeyDerivationsAsync(businessUnitId, lead, ct);
+                // Only scopes with a real key are offered to the engine. An underived scope is
+                // absent rather than present-and-empty, so its rules match nothing at all.
+                var scopeKeys = derivations
+                    .Where(derivation => derivation.IsDerived)
+                    .ToDictionary(derivation => derivation.Scope, derivation => derivation.Key);
                 var request = new RoutingRequest(
                     businessUnitId,
                     lead.Id,
@@ -118,7 +125,8 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
                     ownerships,
                     availability,
                     scopeKeys,
-                    RequestHash: requestHash);
+                    RequestHash: requestHash,
+                    ScopeKeyDerivations: derivations);
                 var result = _engine.Route(request, _policy);
 
                 // The engine has always proven customer matches and persisted them onto
@@ -821,17 +829,88 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
     private sealed record RoutingStatusRow(
         long SetupId, string SetupType, string? SetupCode, string SetupValue);
 
-    private async Task<IReadOnlyDictionary<OwnershipScope, string?>> BuildScopeKeysAsync(
+    /// <summary>
+    /// Derives a scope key for EVERY scope the routing policy ranks, each with the provenance of
+    /// what it was read from.
+    ///
+    /// <para>This used to return Branch and ProductCategory only. Territory and KeyAccountTeam
+    /// rules were therefore unmatchable by construction — the engine looks the scope up in this
+    /// dictionary, found nothing, and skipped the rule — so half of FR-RFQ-07's "customer,
+    /// product-category or region" was dead. Territory derives from the delivery location and the
+    /// region masters; KeyAccountTeam now derives from <c>Customer.AccountTeamId</c> (FR-CST-02),
+    /// which is the customers-to-teams edge that did not exist when this method was written, and
+    /// reports <see cref="RoutingScopeKeys.KeyAccountTeamUnavailable"/> per RFQ when the lead names
+    /// no customer or that customer is in no account team.</para>
+    ///
+    /// <para>Tenant isolation: every read below is filtered on <paramref name="businessUnitId"/>
+    /// explicitly, on top of the context's query filters, so a territory can never be derived
+    /// from another tenant's customer row or region master.</para>
+    /// </summary>
+    private async Task<IReadOnlyList<ScopeKeyDerivation>> BuildScopeKeyDerivationsAsync(
         long businessUnitId, Lead lead, CancellationToken ct)
     {
         var branch = await _db.BusinessUnits.Where(b => b.Id == businessUnitId)
             .Select(b => b.BusinessUnitCode).SingleAsync(ct);
         var category = lead.LeadItems.Select(i => i.CommodityProduct).FirstOrDefault(x => !string.IsNullOrWhiteSpace(x));
-        return new Dictionary<OwnershipScope, string?>
-        {
-            [OwnershipScope.Branch] = branch,
-            [OwnershipScope.ProductCategory] = category
-        };
+
+        // The customer RECORDED on the lead — never one of the routing candidates, which are
+        // still unproven at this point. Reading a candidate's address would let a guess the
+        // engine has not yet accepted (and may reject as ambiguous) choose the territory.
+        var customerRow = lead.CustomerId is long customerId
+            ? await _db.Customers.AsNoTracking()
+                .Where(c => c.Id == customerId && c.Buid == businessUnitId)
+                .Select(c => new
+                {
+                    Region = new CustomerRegionEvidence(
+                        c.ShippingState, c.ShippingCity, c.BillingState, c.BillingCity),
+                    // FR-CST-02's account team, read under the same tenant predicate as the region.
+                    // The join is restated on BusinessUnitId rather than trusted to the foreign key:
+                    // Customer.AccountTeamId is a single-column key and cannot itself express that
+                    // the team belongs to this tenant.
+                    AccountTeamName = _db.Teams
+                        .Where(t => t.Id == c.AccountTeamId && t.BusinessUnitId == businessUnitId)
+                        .Select(t => t.TeamName)
+                        .FirstOrDefault()
+                })
+                .SingleOrDefaultAsync(ct)
+            : null;
+        var customer = customerRow?.Region;
+
+        var states = await _db.SetStates.AsNoTracking()
+            .Where(s => s.Buid == businessUnitId && s.IsActive)
+            .Select(s => new { s.StateId, s.StateCode, s.StateName })
+            .ToListAsync(ct);
+        var cities = await _db.SetCities.AsNoTracking()
+            .Where(c => c.Buid == businessUnitId && c.IsActive)
+            .Select(c => new { c.CityName, c.StateId })
+            .ToListAsync(ct);
+
+        // A tenant's region vocabulary, flattened to "this wording means this region": a state
+        // answers to its code and to its name, and a city answers for the state it sits in.
+        var regionByStateId = states
+            .GroupBy(s => s.StateId)
+            .ToDictionary(group => group.Key, group => group.First().StateName);
+        var stateAliases = states
+            .SelectMany(s => new[]
+            {
+                new TerritoryRegionAlias(s.StateCode, s.StateName),
+                new TerritoryRegionAlias(s.StateName, s.StateName)
+            })
+            .Where(alias => !string.IsNullOrWhiteSpace(alias.Alias) && !string.IsNullOrWhiteSpace(alias.RegionName))
+            .ToList();
+        var cityAliases = cities
+            .Where(c => regionByStateId.ContainsKey(c.StateId))
+            .Select(c => new TerritoryRegionAlias(c.CityName, regionByStateId[c.StateId]))
+            .Where(alias => !string.IsNullOrWhiteSpace(alias.Alias) && !string.IsNullOrWhiteSpace(alias.RegionName))
+            .ToList();
+
+        return
+        [
+            RoutingScopeKeys.Branch(branch),
+            RoutingScopeKeys.ProductCategory(category),
+            RoutingScopeKeys.Territory(lead.DeliveryLocation, customer, stateAliases, cityAliases),
+            RoutingScopeKeys.KeyAccountTeam(customerRow?.AccountTeamName)
+        ];
     }
 
     private static Dictionary<CustomerIdentifierType, HashSet<string>> BuildEvidence(Lead lead)
@@ -953,6 +1032,7 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             await using var transaction = await _db.Database.BeginTransactionAsync(isolationLevel, ct);
             var result = await operation();
             await transaction.CommitAsync(ct);

@@ -85,8 +85,10 @@ public sealed class Module03SalesRoutingMigrationPostgreSqlTests(PostgreSqlTestD
             var migrator = context.GetService<IMigrator>();
             await migrator.MigrateAsync(PreviousMigration);
 
-            Seed.EnsureBusinessUnit(context, 99_501);
-            Seed.EnsureBusinessUnit(context, 99_502);
+            // Raw-SQL seed: this database is pinned to an earlier migration, so the current
+            // model would name columns that do not exist there yet.
+            Seed.HistoricalBusinessUnit(context, 99_501);
+            Seed.HistoricalBusinessUnit(context, 99_502);
             // Pinned to the rehearsal era: seeding through the CURRENT model would name
             // every column later migrations added and fail with 42703.
             var lead = Seed.HistoricalLead(context, 99_511, 99_501, "Routing tenant A");

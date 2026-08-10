@@ -10,7 +10,8 @@ public sealed class Release01AcceptanceRegressionTests
 {
     [Theory]
     [InlineData(typeof(LeadController), 2)]
-    [InlineData(typeof(QuoteController), 6)]
+    // 7 = + IPriceAttestationService (R5 price-provenance attestation).
+    [InlineData(typeof(QuoteController), 7)]
     public void UnexpectedControllerErrors_DoNotExposeInternalExceptionText(Type controllerType, int dependencyCount)
     {
         var arguments = Enumerable.Repeat<object?>(null, dependencyCount).ToArray();

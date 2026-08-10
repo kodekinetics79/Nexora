@@ -390,8 +390,11 @@ public sealed class ExtractionIntakeGuardClaimPostgreSqlTests : IAsyncLifetime
     private ErpRfqAutomationContext Context()
         => _server.ContextForConnectionString(_connectionString, null);
 
+    // SEC-ING-02: the tenant context is mandatory. Context() is built with a null tenant (the
+    // cross-tenant worker view), so the queue gets the matching null-tenant StubTenant and takes
+    // the deliberate nexora_pipeline_app role.
     private static ExtractionQueue NewQueue(ErpRfqAutomationContext context)
-        => new(context, new NoopLogger<ExtractionQueue>());
+        => new(context, new NoopLogger<ExtractionQueue>(), new StubTenant(null));
 
     private static Task<ExtractionJob> JobAsync(ErpRfqAutomationContext context, long jobId)
         => context.Set<ExtractionJob>().AsNoTracking().SingleAsync(job => job.Id == jobId);

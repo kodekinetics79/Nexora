@@ -18,6 +18,7 @@ import {
   Typography,
 } from "@mui/material";
 import {
+  AssignmentTurnedIn,
   Inventory2,
   OpenInNew,
   Refresh,
@@ -40,6 +41,7 @@ export default function PurchaseOrdersPage() {
   const navigate = useNavigate();
   const { hasPermission } = useAuth();
   const canViewRfqs = hasPermission("RFQ Management", "view");
+  const canRecordAnswer = hasPermission("Orders", "edit");
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const ordersQuery = useQuery({
@@ -180,14 +182,31 @@ export default function PurchaseOrdersPage() {
                     <TableCell>{readableDate(order.expectedOn)}</TableCell>
                     <TableCell align="right">
                       {canViewRfqs ? (
+                        /*
+                          FR-SPO-03. An order sitting at SENT or ISSUED is waiting on the supplier's
+                          answer, and that answer is recorded on the order's card in the sourcing
+                          workbench. This summary carries no version, so it cannot make the
+                          version-checked call itself — it points the buyer at the screen that can,
+                          rather than leaving them to guess where an acknowledgement is captured.
+                        */
                         <Button
                           size="small"
-                          endIcon={<OpenInNew />}
+                          endIcon={
+                            canRecordAnswer &&
+                            ["SENT", "ISSUED"].includes(order.status) ? (
+                              <AssignmentTurnedIn />
+                            ) : (
+                              <OpenInNew />
+                            )
+                          }
                           onClick={() =>
                             navigate(`/procurement/rfqs/${order.rfqId}/sourcing`)
                           }
                         >
-                          Open workbench
+                          {canRecordAnswer &&
+                          ["SENT", "ISSUED"].includes(order.status)
+                            ? "Record supplier answer"
+                            : "Open workbench"}
                         </Button>
                       ) : (
                         <Typography variant="caption" color="text.secondary">

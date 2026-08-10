@@ -101,6 +101,30 @@ export const getPlatformUser = (): PlatformSessionUser | null => {
 /** Snapshot used by `useSyncExternalStore` — true when a live token is present. */
 export const getPlatformAuthedSnapshot = (): boolean => getPlatformToken() !== null;
 
+/**
+ * Whether the live platform token carries `amr=mfa`.
+ *
+ * Sec-D2: this is the CLIENT MIRROR of `PlatformPolicies.PlatformScope`, which requires that
+ * exact claim. It is read from the same token the server will read, so the two cannot drift into
+ * disagreement the way a separate "hasEnrolledMfa" boolean on the login body would.
+ *
+ * It is not a security control — the server is — it is what stops a password-only operator being
+ * dropped into a console where every screen answers 403 with nothing saying which one to open.
+ * Anything unreadable answers FALSE, so a malformed or absent token routes to enrollment rather
+ * than into the console.
+ */
+export const getPlatformMfaAuthenticatedSnapshot = (): boolean => {
+  const token = getPlatformToken();
+  if (!token) return false;
+  try {
+    const { amr } = jwtDecode<{ amr?: string | string[] }>(token);
+    if (typeof amr === 'string') return amr === 'mfa';
+    return Array.isArray(amr) && amr.includes('mfa');
+  } catch {
+    return false;
+  }
+};
+
 // --- writes -----------------------------------------------------------------
 
 export const setPlatformSession = (token: string, user: PlatformSessionUser): void => {

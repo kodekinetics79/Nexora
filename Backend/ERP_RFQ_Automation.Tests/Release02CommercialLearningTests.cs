@@ -275,8 +275,22 @@ public sealed class Release02CommercialLearningTests
         Assert.NotEmpty(partial.ApprovalRequirements);
     }
 
+    /// <summary>
+    /// Two things at once, because they are the same rule seen from both sides.
+    ///
+    /// <para>The floor is READ from the awarded supplier's landed unit cost
+    /// (<c>CustomerQuoteSourcingDecision</c>), never inferred from the sell-side blend — so the
+    /// line that carries an award gets a real floor in the AWARD's currency, and the line that
+    /// carries none gets NULL.</para>
+    ///
+    /// <para>This assertion used to read <c>Assert.All(preview.Lines, l =&gt; Assert.Null(l.FloorUnitPrice))</c>,
+    /// which certified the defect: <c>PricingEngine</c> declared <c>decimal? floor = null</c> and
+    /// never assigned it, so every floor in the system was null, every
+    /// <c>BelowFloorGuard</c> filter was empty and no price was ever compared to any cost before a
+    /// quote left the building. A test that passes whether or not the wiring exists is not a test.</para>
+    /// </summary>
     [Fact]
-    public async Task Shadow_pricing_partitions_currency_and_never_creates_a_synthetic_floor()
+    public async Task Shadow_pricing_partitions_currency_and_takes_each_floor_from_the_awarded_landed_cost()
     {
         using var fixture = new ProcurementScenario();
         await using (var seed = fixture.Context())
@@ -319,6 +333,27 @@ public sealed class Release02CommercialLearningTests
                     Quantity = 5m, UnitPrice = 9m, Currency = "Q2", CreatedBy = "qa", CreatedOn = DateTime.UtcNow
                 });
             await seed.SaveChangesAsync();
+
+            // The governed award-to-quote pricing bridge has priced the FIRST line and not the
+            // second. CustomerQuoteSourcingDecision carries seven composite foreign keys into the
+            // sourcing aggregate; standing that whole chain up would make this test about the
+            // sourcing fixture rather than about where the floor comes from, so referential
+            // enforcement is stood down for the seed exactly as Gate8GrossMarginTests does. The
+            // columns under test — RfqItemId, SupplierLandedUnitCost, CurrencyId — are unaffected.
+            seed.Database.ExecuteSqlRaw("PRAGMA foreign_keys = OFF");
+            seed.CustomerQuoteSourcingDecisions.Add(new ERP_RFQ_Automation.SupplierQuotes.CustomerQuoteSourcingDecision
+            {
+                Id = 970_100, BusinessUnitId = fixture.BusinessUnitId, QuoteId = 970_010,
+                QuoteItemId = 970_011, RfqId = fixture.RfqId, RfqItemId = fixture.RfqItemId,
+                CommercialDemandLineId = 0, SourcingCaseId = 0, SourcingAwardId = 0,
+                SupplierQuotedItemId = 0, SupplierQuoteId = 0, SupplierQuoteRevisionId = 0,
+                SupplierQuoteLineId = 0, NexoraSerial = "NXR-QA-FLOOR", Quantity = 10m,
+                SupplierLandedUnitCost = 13.5m, TargetMarginPercent = 25m, CustomerUnitPrice = 18m,
+                CurrencyId = ProcurementTestData.Currency, IdempotencyKey = "qa:floor:1",
+                RequestHash = new string('0', 64), Rationale = "qa", CreatedOn = DateTime.UtcNow.AddDays(-1),
+                CreatedBy = "qa", CorrelationId = "corr-qa-floor"
+            });
+            await seed.SaveChangesAsync();
         }
 
         await using var context = fixture.Context();
@@ -334,7 +369,24 @@ public sealed class Release02CommercialLearningTests
         Assert.Equal(0, preview.Totals.UnpricedLineCount);
         Assert.All(preview.Lines.SelectMany(line => line.Signals),
             signal => Assert.Equal(PriceSignalSources.RecentQuote, signal.Source));
-        Assert.All(preview.Lines, line => Assert.Null(line.FloorUnitPrice));
+        // The awarded line: the floor is the landed unit cost as booked, in the AWARD's currency,
+        // and the margin is stated against it as a PERCENT (18 recommended over 13.5 cost = 25%).
+        var awarded = Assert.Single(preview.Lines, line => line.RfqItemId == fixture.RfqItemId);
+        Assert.Equal(13.5m, awarded.FloorUnitPrice);
+        Assert.Equal("Q0", awarded.FloorCurrency);
+        Assert.Equal(25.00m, awarded.MarginPct);
+        Assert.Contains("Cost floor 13.5 Q0", awarded.FloorBasis);
+        Assert.Contains("Cost floor 13.5 Q0", awarded.Rationale);
+
+        // The un-awarded line: a VISIBLE GAP, not a zero. Nobody has decided what this line costs,
+        // and a floor of 0 would assert that any price is acceptable — wiring contract failure #10,
+        // and the one that would make the send gate pass every price ever typed.
+        var unawarded = Assert.Single(preview.Lines, line => line.RfqItemId == ProcurementTestData.RfqItem + 1);
+        Assert.Null(unawarded.FloorUnitPrice);
+        Assert.Null(unawarded.FloorCurrency);
+        Assert.Null(unawarded.FloorBasis);
+        Assert.Null(unawarded.MarginPct);
+        Assert.Contains("No cost floor is established", unawarded.Rationale);
         await Assert.ThrowsAsync<InvalidOperationException>(() => engine.ApplyPricingAsync(
             fixture.RfqId, fixture.BusinessUnitId, new ApplyPricingRequest
             {

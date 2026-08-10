@@ -15,13 +15,18 @@ import {
   ShoppingCart as OrderIcon,
   EmojiEvents as OutcomeIcon,
   MarkEmailRead as RespondedIcon,
-  ContentCopy as ReviseIcon
+  ContentCopy as ReviseIcon,
+  EventRepeat as ExtendValidityIcon
 } from '@mui/icons-material';
-import quoteService from '../../../api/services/quoteService';
+import quoteService, { type PriceAttestationSource } from '../../../api/services/quoteService';
 import QuoteOutcomeDialog from './QuoteOutcomeDialog';
+import ExtendValidityDialog from './ExtendValidityDialog';
+import PriceConfirmationDialog from './PriceConfirmationDialog';
 import EmailPromptDialog from '../../../components/common/EmailPromptDialog';
 import { CustomerAwardDialog, type CustomerAwardQuote } from './customer-awards';
 import { useAuth } from '../../../context/AuthContext';
+import { presentableErrorMessage } from '../../../utils/apiErrors';
+import { formatMoney } from '../../../utils/currency';
 import dayjs from 'dayjs';
 import { toast } from 'react-hot-toast';
 import CommercialLineIntelligence from '../../../components/common/CommercialLineIntelligence';
@@ -64,7 +69,11 @@ const QuoteViewPage: React.FC = () => {
       anchor.click();
       URL.revokeObjectURL(url);
     },
-    onError: () => toast.error('Failed to export the quote PDF')
+    // R5: the PDF can now be refused because nobody has confirmed where the prices came
+    // from. That reason is actionable, so it must reach the rep verbatim instead of being
+    // flattened into "export failed".
+    onError: (error: unknown) =>
+      toast.error(presentableErrorMessage(error, 'The quote PDF could not be exported.'), { duration: 6000 })
   });
 
   // WP-B4 revisions-lite: chain facts drive the "Rev n" chip + Revise button.
@@ -89,11 +98,36 @@ const QuoteViewPage: React.FC = () => {
   });
 
   // WP-B3: quote-send with below-floor hold awareness.
+  // R5: the send is gated on a price-provenance confirmation. The recipient is chosen
+  // first, then the rep confirms the prices and where they came from; only then is the
+  // send attempted. The server refuses an unconfirmed send regardless of this flow.
   const [emailOpen, setEmailOpen] = React.useState(false);
+  // R7: extending the validity of a quote that is already with the customer.
+  const [extendValidityOpen, setExtendValidityOpen] = React.useState(false);
+  const [priceConfirmOpen, setPriceConfirmOpen] = React.useState(false);
+  const [pendingRecipient, setPendingRecipient] = React.useState('');
   const [holdInfo, setHoldInfo] = React.useState<string | null>(null);
   const sendMutation = useMutation({
     mutationFn: (recipientEmail: string) => quoteService.sendEmail(Number(id), recipientEmail),
     onSuccess: (result) => {
+      if (result.priceAttestationRequired) {
+        // The prices changed between the confirmation and the send — confirm again.
+        toast.error(result.message || 'The prices changed. Confirm the price source again before sending.', { duration: 8000 });
+        queryClient.invalidateQueries({ queryKey: ['quote-price-attestation', Number(id)] });
+        setPriceConfirmOpen(true);
+        return;
+      }
+      // R17: nothing was sent because a line's output tax was never calculated. Confirming the
+      // price source again would not help, so the confirm dialog is closed and the server's
+      // sentence — which names the line and the fix — is shown as-is.
+      if (result.taxDerivationRequired) {
+        toast.error(result.message
+          || 'A line has no calculated tax. Set the output tax rate in Commercial Policy settings.',
+          { duration: 10000 });
+        setPriceConfirmOpen(false);
+        return;
+      }
+      setPriceConfirmOpen(false);
       setEmailOpen(false);
       if (result.held) {
         setHoldInfo(result.message || null);
@@ -104,6 +138,20 @@ const QuoteViewPage: React.FC = () => {
       }
     },
     onError: () => toast.error('Failed to send the quote email')
+  });
+
+  // R5: record the confirmation, then send. Both steps must succeed for the quote to go out.
+  const confirmPriceMutation = useMutation({
+    mutationFn: ({ source, reference }: { source: PriceAttestationSource; reference: string }) =>
+      quoteService.confirmPriceAttestation(Number(id), source, reference),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['quote-price-attestation', Number(id)] });
+      sendMutation.mutate(pendingRecipient);
+    },
+    onError: (error: any) => {
+      const message = error?.response?.data?.message || 'The price confirmation could not be recorded.';
+      toast.error(message, { duration: 6000 });
+    }
   });
 
   // WP-A4: outcome capture + "customer responded" stamp.
@@ -185,8 +233,15 @@ const QuoteViewPage: React.FC = () => {
           <Stack direction="row" useFlexGap spacing={1} sx={{ alignItems: 'center', mb: 1, flexWrap: 'wrap', minWidth: 0, maxWidth: '100%' }}>
             <IconButton onClick={() => navigate('/sales/quotes')} size="small"><BackIcon /></IconButton>
             <Typography variant="h4" sx={{ fontWeight: 900, overflowWrap: 'anywhere', minWidth: 0, flex: '1 1 220px', lineHeight: 1.15 }}>Quote: {quote.quoteNo}</Typography>
-            {(quote.nexoraSerial || quote.commercialCaseReference) && (
-              <Chip label={`Nexora Serial: ${quote.nexoraSerial || quote.commercialCaseReference}`} variant="outlined" sx={{ fontWeight: 900, fontFamily: 'monospace', maxWidth: '100%' }} />
+            {quote.nexoraSerial ? (
+              <Chip label={`Nexora Serial: ${quote.nexoraSerial}`} variant="outlined" sx={{ fontWeight: 900, fontFamily: 'monospace', maxWidth: '100%' }} />
+            ) : (
+              // Shown, never hidden. A quotation with no commercial case cannot be traced from
+              // inquiry to delivery, and an absent chip would read as a rendering gap rather than
+              // the defect it is.
+              <Tooltip title="This quotation states no commercial case, so it cannot be traced to its inquiry or to delivery. It was created outside the RFQ path.">
+                <Chip label="Not linked to a case" color="warning" variant="outlined" sx={{ fontWeight: 900, maxWidth: '100%' }} />
+              </Tooltip>
             )}
             <Chip label={quote.statusValue} color={quote.statusValue === 'Sent' ? 'success' : quote.statusValue === 'Accepted' ? 'primary' : 'default'} sx={{ fontWeight: 900, height: 28, borderRadius: 1.5 }} />
             {revisionInfo && revisionInfo.revisionNo > 1 && revisionInfo.revisionOfQuoteNo && (
@@ -267,6 +322,27 @@ const QuoteViewPage: React.FC = () => {
           >
             Email
           </Button>}
+
+          {/*
+            R7: the buyer's most common request — "can you hold your price for another two
+            weeks". Offered only while the quote is live with the customer and has not been
+            superseded; extending records a reason and does NOT create a revision, so the
+            customer keeps looking at the same commercial offer.
+          */}
+          {hasPermission('Quotations', 'edit') && quote.canExtendValidity && !revisionInfo?.supersededByQuoteId && (
+            <Tooltip title="Hold this quote's price open until a later date. Records a reason; does not create a revision.">
+              <span>
+                <Button
+                  variant="outlined"
+                  startIcon={<ExtendValidityIcon />}
+                  onClick={() => setExtendValidityOpen(true)}
+                  sx={{ borderRadius: 2 }}
+                >
+                  Extend validity
+                </Button>
+              </span>
+            </Tooltip>
+          )}
 
           {hasPermission('Quotations', 'edit') && revisionInfo?.canRevise && (
             <Tooltip title="Create a new draft revision of this quote (the original stays untouched)">
@@ -384,9 +460,17 @@ const QuoteViewPage: React.FC = () => {
               <Grid size={{ xs: 12, sm: 6 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Contact</Typography><Typography sx={{ fontWeight: 700 }}>{quote.contactName || quote.customerEmail || 'Contact unresolved'}</Typography></Grid>
               <Grid size={{ xs: 12, sm: 6 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Email</Typography><Typography sx={{ fontWeight: 700 }}>{quote.customerEmail || 'N/A'}</Typography></Grid>
               <Grid size={{ xs: 12, sm: 6 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Source RFQ</Typography><Button size="small" sx={{ px: 0 }} onClick={() => quote.rfqId && navigate(`/procurement/rfqs/view/${quote.rfqId}`)}>{quote.rfqNo || 'None'}</Button></Grid>
-              <Grid size={{ xs: 12, sm: 6 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Validity</Typography><Typography sx={{ fontWeight: 700 }}>{quote.validUntil ? `Until ${dayjs(quote.validUntil).format('DD MMM YYYY')}` : 'Commercial validity pending'}</Typography></Grid>
+              <Grid size={{ xs: 12, sm: 6 }}>
+                <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Validity</Typography>
+                <Typography sx={{ fontWeight: 700 }}>{quote.validUntil ? `Until ${dayjs(quote.validUntil).format('DD MMM YYYY')}` : 'Commercial validity pending'}</Typography>
+                {quote.validityExtendedOn && (
+                  <Typography variant="caption" color="text.secondary">
+                    Extended on {dayjs(quote.validityExtendedOn).format('DD MMM YYYY')} — open “Extend validity” to read why.
+                  </Typography>
+                )}
+              </Grid>
               <Grid size={{ xs: 12, sm: 6 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Opportunity Owner</Typography><Typography sx={{ fontWeight: 700 }}>{quote.createdBy}</Typography></Grid>
-              <Grid size={{ xs: 12, sm: 6 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Lineage</Typography><Typography sx={{ fontWeight: 700 }}>{quote.nexoraSerial || quote.commercialCaseReference}</Typography></Grid>
+              <Grid size={{ xs: 12, sm: 6 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Lineage</Typography><Typography sx={{ fontWeight: 700, color: quote.nexoraSerial ? 'text.primary' : 'warning.main' }}>{quote.nexoraSerial || 'Not linked to a commercial case'}</Typography></Grid>
               <Grid size={{ xs: 12, sm: 6 }}><Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>Source Revisions</Typography><Typography sx={{ fontWeight: 700 }}>{quote.sourceLeadRevision > 0 && quote.sourceRfqRevision > 0 ? `Lead Rev ${quote.sourceLeadRevision} · RFQ Rev ${quote.sourceRfqRevision}` : 'Legacy source revision unverified'}</Typography></Grid>
               {quote.leadId && <Grid size={{ xs: 12, sm: 6 }}><Button size="small" variant="outlined" onClick={() => navigate(`/procurement/leads/view/${quote.leadId}`)}>Open Canonical Lead</Button></Grid>}
               {(quote.discountValue || 0) > 0 && (
@@ -425,17 +509,17 @@ const QuoteViewPage: React.FC = () => {
                         </Stack>;
                       })()}
                     </TableCell>
-                    <TableCell align="right">{Number(item.unitPrice || 0) === 0 ? <Chip size="small" label="Pricing Pending" color="warning" variant="outlined" /> : `$ ${item.unitPrice?.toLocaleString()}`}</TableCell>
+                    <TableCell align="right">{Number(item.unitPrice || 0) === 0 ? <Chip size="small" label="Pricing Pending" color="warning" variant="outlined" /> : formatMoney(item.unitPrice, quote.currencyCode)}</TableCell>
                     <TableCell align="right">
                       {item.discount > 0 ? (
                         <Typography variant="caption" color="error.main" sx={{ fontWeight: 700 }}>
-                          - $ {item.discount.toLocaleString()}
+                          - {formatMoney(item.discount, quote.currencyCode)}
                           <br />
                           ({item.discountTypeName})
                         </Typography>
                       ) : '-'}
                     </TableCell>
-                    <TableCell align="right" sx={{ fontWeight: 700 }}>{isUnpricedDraft ? 'Pricing Pending' : `$ ${item.totalAmount?.toLocaleString()}`}</TableCell>
+                    <TableCell align="right" sx={{ fontWeight: 700 }}>{isUnpricedDraft ? 'Pricing Pending' : formatMoney(item.totalAmount, quote.currencyCode)}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -448,11 +532,11 @@ const QuoteViewPage: React.FC = () => {
             <CardContent sx={{ p: 3 }}>
               <Typography variant="h6" sx={{ fontWeight: 800, mb: 3 }}>Financial Summary</Typography>
               <Stack spacing={2}>
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}><Typography color="text.secondary">Gross Subtotal</Typography><Typography sx={{ fontWeight: 700 }}>{isUnpricedDraft ? 'Pricing Pending' : `$ ${itemsSubtotal.toLocaleString()}`}</Typography></Box>
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}><Typography color="text.secondary">Item Discounts</Typography><Typography sx={{ fontWeight: 700, color: 'error.main' }}>{isUnpricedDraft ? 'Pending' : `- $ ${itemsDiscounts.toLocaleString()}`}</Typography></Box>
-                {headerDiscount > 0 && <Box sx={{ display: 'flex', justifyContent: 'space-between' }}><Typography color="text.secondary">Header Discount</Typography><Typography sx={{ fontWeight: 700, color: 'error.main' }}>- $ {headerDiscount.toLocaleString()}</Typography></Box>}
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}><Typography color="text.secondary">Gross Subtotal</Typography><Typography sx={{ fontWeight: 700 }}>{isUnpricedDraft ? 'Pricing Pending' : formatMoney(itemsSubtotal, quote.currencyCode)}</Typography></Box>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}><Typography color="text.secondary">Item Discounts</Typography><Typography sx={{ fontWeight: 700, color: 'error.main' }}>{isUnpricedDraft ? 'Pending' : `- ${formatMoney(itemsDiscounts, quote.currencyCode)}`}</Typography></Box>
+                {headerDiscount > 0 && <Box sx={{ display: 'flex', justifyContent: 'space-between' }}><Typography color="text.secondary">Header Discount</Typography><Typography sx={{ fontWeight: 700, color: 'error.main' }}>- {formatMoney(headerDiscount, quote.currencyCode)}</Typography></Box>}
                 <Divider />
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}><Typography variant="h5" sx={{ fontWeight: 900 }}>Grand Total</Typography><Typography variant="h5" sx={{ fontWeight: 900, color: isUnpricedDraft ? 'warning.main' : 'primary.main' }}>{isUnpricedDraft ? 'Pricing Pending' : `$ ${quote.totalAmount?.toLocaleString()}`}</Typography></Box>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}><Typography variant="h5" sx={{ fontWeight: 900 }}>Grand Total</Typography><Typography variant="h5" sx={{ fontWeight: 900, color: isUnpricedDraft ? 'warning.main' : 'primary.main' }}>{isUnpricedDraft ? 'Pricing Pending' : formatMoney(quote.totalAmount, quote.currencyCode)}</Typography></Box>
               </Stack>
             </CardContent>
           </Card>
@@ -464,6 +548,15 @@ const QuoteViewPage: React.FC = () => {
         onClose={() => setOutcomeOpen(false)}
         quoteId={Number(id)}
         quoteNo={quote.quoteNo}
+        invalidateKeys={[['quote-detail', id], ['quotes']]}
+      />
+
+      <ExtendValidityDialog
+        open={extendValidityOpen}
+        onClose={() => setExtendValidityOpen(false)}
+        quoteId={Number(id)}
+        quoteNo={quote.quoteNo}
+        currentValidUntil={quote.validUntil}
         invalidateKeys={[['quote-detail', id], ['quotes']]}
       />
 
@@ -485,7 +578,22 @@ const QuoteViewPage: React.FC = () => {
         businessUnitId={businessUnitId}
         customerId={quote.customerId ?? null}
         onCancel={() => setEmailOpen(false)}
-        onConfirm={(email) => sendMutation.mutate(email)}
+        onConfirm={(email) => {
+          // R5: choosing the recipient no longer sends. The prices are confirmed first.
+          setPendingRecipient(email);
+          setEmailOpen(false);
+          setPriceConfirmOpen(true);
+        }}
+      />
+
+      <PriceConfirmationDialog
+        open={priceConfirmOpen}
+        quoteId={Number(id)}
+        quoteNo={quote.quoteNo}
+        recipientEmail={pendingRecipient}
+        submitting={confirmPriceMutation.isPending || sendMutation.isPending}
+        onCancel={() => setPriceConfirmOpen(false)}
+        onConfirm={(source, reference) => confirmPriceMutation.mutate({ source, reference })}
       />
     </Box>
   );

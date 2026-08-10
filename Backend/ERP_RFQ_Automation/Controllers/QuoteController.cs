@@ -27,6 +27,7 @@ namespace ERP_RFQ_Automation.Controllers
         private readonly IQuoteOutcomeService _outcomeService;
         private readonly ILifecycleApplicationService _lifecycle;
         private readonly ErpRfqAutomationContext _context;
+        private readonly ERP_RFQ_Automation.Intelligence.Pricing.IPriceAttestationService _attestations;
         private readonly ILogger<QuoteController>? _logger;
 
         public QuoteController(
@@ -35,6 +36,7 @@ namespace ERP_RFQ_Automation.Controllers
             IQuoteOutcomeService outcomeService,
             ILifecycleApplicationService lifecycle,
             ErpRfqAutomationContext context,
+            ERP_RFQ_Automation.Intelligence.Pricing.IPriceAttestationService attestations,
             ILogger<QuoteController>? logger = null)
         {
             _repository = repository;
@@ -42,6 +44,7 @@ namespace ERP_RFQ_Automation.Controllers
             _outcomeService = outcomeService;
             _lifecycle = lifecycle;
             _context = context;
+            _attestations = attestations;
             _logger = logger;
         }
 
@@ -203,9 +206,22 @@ namespace ERP_RFQ_Automation.Controllers
             }
         }
 
+        /// <summary>
+        /// Removes a quotation, with a stated reason.
+        ///
+        /// <para>This route used to hard-delete the row, and with it the quote's R5 price
+        /// attestations and R7 validity extensions, on nothing more than the Quotations Delete
+        /// permission. It is now a reasoned, audited removal: past DRAFT the quote is withdrawn
+        /// rather than destroyed, a tombstone is written in every case, and the evidence tables
+        /// survive by database constraint. See <c>QuoteRepository.RemoveAsync</c>.</para>
+        ///
+        /// <para><paramref name="reason"/> is mandatory. It is the difference between a removal
+        /// that can be explained a year later and one that cannot.</para>
+        /// </summary>
         [HttpDelete("{id}")]
         [RequireModulePermission("Quotations", PermissionAction.Delete)]
-        public async Task<IActionResult> Delete(long id, [FromQuery] long? businessUnitId = null)
+        public async Task<IActionResult> Delete(long id, [FromQuery] string? reason = null,
+            [FromQuery] long? businessUnitId = null)
         {
             try
             {
@@ -214,9 +230,29 @@ namespace ERP_RFQ_Automation.Controllers
 
                 if (targetBUId <= 0)
                     return BadRequest("Business Unit ID is required.");
+                if (string.IsNullOrWhiteSpace(reason))
+                    return BadRequest("A reason is required to remove a quotation.");
 
-                await _repository.DeleteAsync(id, targetBUId);
-                return NoContent();
+                var outcome = await _repository.RemoveAsync(id, targetBUId, reason, ActorEmail());
+                if (outcome == null) return NotFound();
+
+                // 200 with the outcome, not 204: "withdrawn, still on file" and "discarded" are
+                // different things and the caller should be able to tell the user which happened.
+                return Ok(new
+                {
+                    quoteNo = outcome.QuoteNo,
+                    mode = outcome.Mode,
+                    removedOn = outcome.RemovedOn,
+                    deleted = outcome.WasDeleted,
+                    message = outcome.WasDeleted
+                        ? $"Draft {outcome.QuoteNo} was discarded. The removal is on record."
+                        : $"Quote {outcome.QuoteNo} was withdrawn. It stays on file with its price " +
+                          "confirmations and validity history intact."
+                });
+            }
+            catch (QuoteRemovalRefusedException ex)
+            {
+                return Conflict(ex.Message);
             }
             catch (Exception ex)
             {
@@ -224,6 +260,16 @@ namespace ERP_RFQ_Automation.Controllers
             }
         }
 
+        /// <summary>
+        /// The customer-facing quotation document.
+        ///
+        /// <para>R5: this route had no price-attestation check at all, which made it the widest
+        /// hole in the gate — the PDF is the commercial offer, and anyone with View could pull it
+        /// and forward it with nobody having attested to a single price on it. The check lives in
+        /// <see cref="IQuoteService.GenerateQuotePdfAsync"/> so the quote-delivery worker is
+        /// covered by the same code, and it fails closed: 409 with the rep-facing reason, no
+        /// bytes.</para>
+        /// </summary>
         [HttpGet("{id}/pdf")]
         [RequireModulePermission("Quotations", PermissionAction.View)]
         public async Task<IActionResult> DownloadPdf(long id)
@@ -232,17 +278,79 @@ namespace ERP_RFQ_Automation.Controllers
             {
                 var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
                 if (businessUnitId <= 0) return Forbid();
-                var bytes = await _quoteService.GenerateQuotePdfAsync(id, businessUnitId);
+                var bytes = await _quoteService.GenerateQuotePdfAsync(
+                    id, businessUnitId, ct: HttpContext.RequestAborted);
                 return File(bytes, "application/pdf", $"Quote_{id}.pdf");
             }
             catch (KeyNotFoundException)
             {
                 return NotFound();
             }
+            catch (ERP_RFQ_Automation.Intelligence.Pricing.PriceAttestationRequiredException ex)
+            {
+                // priceAttestationRequired mirrors the SendEmail contract, so the client can
+                // re-open the same confirm-price dialog instead of showing a dead end.
+                return Conflict(new { priceAttestationRequired = true, message = ex.Message });
+            }
             catch (InvalidOperationException ex)
             {
                 return Conflict(new { message = ex.Message });
             }
+        }
+
+        // -------- POST /api/Quote/{id}/extend-validity (R7) --------
+
+        /// <summary>
+        /// Holds an already-issued quote's price open until a later date, with a mandatory reason
+        /// that is recorded as an auditable row (Decision Register R7).
+        ///
+        /// <para>Deliberately NOT a revision: the commercial offer is unchanged, so the revision
+        /// number does not move. Authorization is the same Quotations:Edit permission that governs
+        /// every other commercial action on a quote (send, outcome, price attestation) — extending
+        /// validity is a commercial act on the quote, not a new kind of privilege.</para>
+        /// </summary>
+        [HttpPost("{id}/extend-validity")]
+        [RequireModulePermission("Quotations", PermissionAction.Edit)]
+        public async Task<ActionResult<QuoteValidityExtensionResultDTO>> ExtendValidity(
+            long id,
+            [FromBody] QuoteExtendValidityRequestDTO request,
+            [FromHeader(Name = "Idempotency-Key")] string? idempotencyKey)
+        {
+            if (!ModelState.IsValid) return BadRequest(ModelState);
+            if (request?.ValidUntil is null)
+                return BadRequest(new { message = "Choose the new date the quote stays valid until." });
+
+            var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+            if (businessUnitId <= 0) return BadRequest(new { message = "Business Unit ID is required." });
+
+            try
+            {
+                var result = await _quoteService.ExtendQuoteValidityAsync(
+                    id, businessUnitId, request.ValidUntil.Value, request.Reason,
+                    ActorEmail(), ActorUserId(),
+                    string.IsNullOrWhiteSpace(idempotencyKey) ? Guid.NewGuid().ToString("N") : idempotencyKey,
+                    HttpContext.RequestAborted);
+                return Ok(result);
+            }
+            catch (KeyNotFoundException) { return NotFound(); }
+            catch (ArgumentException ex) { return BadRequest(new { message = ex.Message }); }
+            catch (InvalidOperationException ex) { return Conflict(new { message = ex.Message }); }
+            catch (Exception ex) { return Unexpected(ex, "extend-validity"); }
+        }
+
+        // -------- GET /api/Quote/{id}/validity-extensions (R7: the reason must be readable) --------
+        [HttpGet("{id}/validity-extensions")]
+        [RequireModulePermission("Quotations", PermissionAction.View)]
+        public async Task<ActionResult<IReadOnlyList<QuoteValidityExtensionDTO>>> GetValidityExtensions(long id)
+        {
+            var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+            if (businessUnitId <= 0) return BadRequest(new { message = "Business Unit ID is required." });
+            try
+            {
+                return Ok(await _quoteService.GetValidityExtensionsAsync(id, businessUnitId, HttpContext.RequestAborted));
+            }
+            catch (KeyNotFoundException) { return NotFound(); }
+            catch (Exception ex) { return Unexpected(ex, "validity-extensions"); }
         }
 
         [HttpPost("{id}/revision-impact/resolve")]
@@ -279,6 +387,30 @@ namespace ERP_RFQ_Automation.Controllers
                     RequestedByUserId = ActorUserId(),
                     RequestedBy = ActorEmail()
                 });
+
+                // R5: nothing was sent — the price source is unconfirmed, or a price changed
+                // after it was confirmed. The client re-opens the confirmation dialog.
+                if (result.BlockedPendingPriceAttestation)
+                {
+                    return Conflict(new
+                    {
+                        priceAttestationRequired = true,
+                        message = result.PriceAttestationReason
+                    });
+                }
+
+                // R17: nothing was sent — a line's output tax was never derived. Reported as its
+                // own condition rather than folded into the attestation branch, because the fix is
+                // different: set the output tax rate in Commercial Policy settings, or price the
+                // line, or give the non-standard line its reason.
+                if (result.BlockedPendingTaxDerivation)
+                {
+                    return Conflict(new
+                    {
+                        taxDerivationRequired = true,
+                        message = result.TaxDerivationReason
+                    });
+                }
 
                 if (result.Held)
                 {
@@ -487,6 +619,111 @@ namespace ERP_RFQ_Automation.Controllers
 
             var reasons = await _outcomeService.GetOutcomeReasonsAsync(businessUnitId);
             return Ok(reasons);
+        }
+
+        // ================================================================
+        // R5 price-provenance attestation (Decision Register R5).
+        // The rep confirms where the prices came from BEFORE the quote is emailed;
+        // SendEmail above refuses any quote whose current prices are not covered.
+        // ================================================================
+
+        /// <summary>
+        /// Whether this quote may be sent, what was last confirmed, and the prices a fresh
+        /// confirmation would cover. Drives the confirm-before-send dialog.
+        /// </summary>
+        [HttpGet("{id}/price-attestation")]
+        [RequireModulePermission("Quotations", PermissionAction.View)]
+        public async Task<ActionResult<QuotePriceAttestationStatusDTO>> GetPriceAttestation(
+            long id, CancellationToken ct)
+        {
+            var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+            if (businessUnitId <= 0) return BadRequest(new { message = "Business Unit ID is required." });
+            try
+            {
+                var state = await _attestations.EvaluateAsync(id, businessUnitId, ct);
+                return Ok(await BuildAttestationStatusAsync(id, businessUnitId, state, ct));
+            }
+            catch (KeyNotFoundException) { return NotFound(); }
+            catch (Exception ex) { return Unexpected(ex, "price-attestation-read"); }
+        }
+
+        /// <summary>
+        /// Records the rep's confirmation over the quote's CURRENT prices. Any later price
+        /// change voids it and this must be called again.
+        /// </summary>
+        [HttpPost("{id}/price-attestation")]
+        [RequireModulePermission("Quotations", PermissionAction.Edit)]
+        public async Task<ActionResult<QuotePriceAttestationStatusDTO>> ConfirmPriceAttestation(
+            long id, [FromBody] QuotePriceAttestationRequest request, CancellationToken ct)
+        {
+            var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+            if (businessUnitId <= 0) return BadRequest(new { message = "Business Unit ID is required." });
+            if (request is null) return BadRequest(new { message = "A price source and reference are required." });
+            try
+            {
+                await _attestations.AttestAsync(
+                    id, businessUnitId, request.Source, request.SourceReference,
+                    ActorUserId(), ActorEmail(), ct);
+
+                var state = await _attestations.EvaluateAsync(id, businessUnitId, ct);
+                return Ok(await BuildAttestationStatusAsync(id, businessUnitId, state, ct));
+            }
+            catch (KeyNotFoundException) { return NotFound(); }
+            catch (ArgumentException ex) { return BadRequest(new { message = ex.Message }); }
+            catch (Exception ex) { return Unexpected(ex, "price-attestation-confirm"); }
+        }
+
+        private async Task<QuotePriceAttestationStatusDTO> BuildAttestationStatusAsync(
+            long quoteId, long businessUnitId,
+            ERP_RFQ_Automation.Intelligence.Pricing.PriceAttestationState state,
+            CancellationToken ct)
+        {
+            var currencyId = await _context.Quotes.AsNoTracking()
+                .Where(q => q.Id == quoteId && q.BusinessUnitId == businessUnitId)
+                .Select(q => q.CurrencyId)
+                .FirstOrDefaultAsync(ct);
+            var currencyCode = currencyId is null ? null : await _context.Currencies.AsNoTracking()
+                .Where(c => c.Id == currencyId.Value && c.BusinessUnitId == businessUnitId)
+                .Select(c => c.Code)
+                .FirstOrDefaultAsync(ct);
+
+            var attestedLines = state.Latest is null
+                ? new List<QuotePriceAttestationLineDTO>()
+                : await _context.QuotePriceAttestationLines.AsNoTracking()
+                    .Where(l => l.BusinessUnitId == businessUnitId && l.AttestationId == state.Latest.Id)
+                    .OrderBy(l => l.QuoteItemId)
+                    .Select(l => new QuotePriceAttestationLineDTO
+                    {
+                        QuoteItemId = l.QuoteItemId,
+                        RfqItemId = l.RfqItemId,
+                        ItemDescription = l.ItemDescription,
+                        Quantity = l.Quantity,
+                        UnitPrice = l.UnitPrice
+                    })
+                    .ToListAsync(ct);
+
+            return new QuotePriceAttestationStatusDTO
+            {
+                QuoteId = quoteId,
+                Satisfied = state.Satisfied,
+                Reason = state.Reason,
+                Source = state.Latest?.Source,
+                SourceReference = state.Latest?.SourceReference,
+                ConfirmedBy = state.Latest?.ConfirmedBy,
+                ConfirmedOn = state.Latest?.ConfirmedOn,
+                SupersededByPriceChange = state.Latest is not null && !state.Satisfied,
+                CurrencyId = currencyId,
+                CurrencyCode = currencyCode,
+                CurrentLines = state.CurrentLines.Select(l => new QuotePriceAttestationLineDTO
+                {
+                    QuoteItemId = l.QuoteItemId,
+                    RfqItemId = l.RfqItemId,
+                    ItemDescription = l.ItemDescription,
+                    Quantity = l.Quantity,
+                    UnitPrice = l.UnitPrice
+                }).ToList(),
+                AttestedLines = attestedLines
+            };
         }
 
         private string ActorEmail() =>

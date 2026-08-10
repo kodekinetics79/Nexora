@@ -10,7 +10,8 @@ public sealed record CreateCustomFieldDefinitionCommand(
     IReadOnlyList<CustomFieldOptionDraft>? Options = null,
     IReadOnlyList<CustomFieldRuleDraft>? Rules = null,
     IReadOnlyList<long>? DependencyDefinitionIds = null,
-    bool Activate = false);
+    bool Activate = false,
+    int DisplayOrder = 0);
 
 public sealed record AddCustomFieldVersionCommand(
     CustomFieldVersionDraft Version,
@@ -20,6 +21,12 @@ public sealed record AddCustomFieldVersionCommand(
     bool Activate = false);
 
 public sealed record RetireCustomFieldDefinitionCommand(string Reason);
+
+/// <summary>One field's new position. Sent as a batch so a whole reorder is a single call.</summary>
+public sealed record CustomFieldOrderEntry(long DefinitionId, int DisplayOrder);
+
+public sealed record ReorderCustomFieldsCommand(
+    string EntityType, IReadOnlyList<CustomFieldOrderEntry> Order);
 
 public sealed record UpsertCustomFieldValueCommand(
     CustomFieldValueInput Value,
@@ -64,7 +71,8 @@ public sealed record CustomFieldDefinitionResponse(
     DateTime? RetiredOn,
     string? RetiredBy,
     string? RetirementReason,
-    long Version);
+    long Version,
+    int DisplayOrder = 0);
 
 public sealed record CustomFieldValueResponse(
     long Id,
@@ -91,3 +99,10 @@ public sealed record CustomFieldEntitySchemaResponse(
 
 public sealed class CustomFieldNotFoundException(string message) : Exception(message);
 public sealed class CustomFieldConflictException(string message) : Exception(message);
+
+/// <summary>
+/// Thrown by the retired EAV value-write path. Surfaced as 410 Gone so a caller can tell
+/// "this endpoint is deliberately gone, here is the replacement" apart from "this endpoint
+/// is missing because the deployment is broken".
+/// </summary>
+public sealed class CustomFieldWritePathRetiredException(string message) : Exception(message);

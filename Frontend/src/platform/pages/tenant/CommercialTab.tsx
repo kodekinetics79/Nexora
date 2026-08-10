@@ -44,6 +44,11 @@ import { platformKeys } from '../../api/queryKeys';
 import { usePlatformPermissions } from '../../auth/usePlatformPermissions';
 import { REQUIRED_ROLE_COPY } from '../../auth/permissions';
 import {
+  EMPTY_ACCOUNT_CONTACT,
+  accountContactProblem,
+  type AccountContactForm,
+} from '../../components/accountContactValidation';
+import {
   leakReasonLabel,
   validateCommercialTerms,
   type CommercialTermsForm,
@@ -59,6 +64,17 @@ const fmtMoney = (amount: number, currency: string) =>
 const currentPeriod = () => new Date().toISOString().slice(0, 7);
 
 const toDateInput = (value: string | null): string => (value ? value.slice(0, 10) : '');
+
+const contactFromProfile = (profile: TenantBillingProfile): AccountContactForm => ({
+  billingContactName: profile.billingContactName ?? '',
+  billingContactEmail: profile.billingContactEmail ?? '',
+  billingAddress: profile.billingAddress ?? '',
+  purchaseOrderReference: profile.purchaseOrderReference ?? '',
+  paymentTermsDays: profile.paymentTermsDays == null ? '' : String(profile.paymentTermsDays),
+  accountOwnerEmail: profile.accountOwnerEmail ?? '',
+  contractStartOn: toDateInput(profile.contractStartOn),
+  contractEndOn: toDateInput(profile.contractEndOn),
+});
 
 const formFromProfile = (profile: TenantBillingProfile): CommercialTermsForm => ({
   billingMode:
@@ -90,6 +106,8 @@ export default function CommercialTab({ tenant }: { tenant: Tenant }) {
   const [finalizeId, setFinalizeId] = useState<string | null>(null);
   const [reviewId, setReviewId] = useState<string | null>(null);
   const [pastDueAction, setPastDueAction] = useState<'mark' | 'resolve' | null>(null);
+  const [contactOpen, setContactOpen] = useState(false);
+  const [contact, setContact] = useState<AccountContactForm>(EMPTY_ACCOUNT_CONTACT);
 
   // The whole billing controller is Owner|BillingAdmin. A SupportAdmin or ReadOnlyOps
   // operator gets no request at all rather than a 403 on page load.
@@ -148,6 +166,29 @@ export default function CommercialTab({ tenant }: { tenant: Tenant }) {
       invalidate();
     },
     onError: fail('The commercial terms were refused'),
+  });
+
+  const contactMutation = useMutation({
+    mutationFn: (reason: string) =>
+      platformApi.setTenantAccountContact(tenant.id, {
+        billingContactName: contact.billingContactName.trim() || null,
+        billingContactEmail: contact.billingContactEmail.trim() || null,
+        billingAddress: contact.billingAddress.trim() || null,
+        purchaseOrderReference: contact.purchaseOrderReference.trim() || null,
+        paymentTermsDays: contact.paymentTermsDays.trim() ? Number(contact.paymentTermsDays) : null,
+        accountOwnerEmail: contact.accountOwnerEmail.trim() || null,
+        contractStartOn: contact.contractStartOn || null,
+        contractEndOn: contact.contractEndOn || null,
+        reason,
+      }),
+    onSuccess: () => {
+      enqueueSnackbar('Invoicing details updated — the change applies to the next invoice', {
+        variant: 'success',
+      });
+      setContactOpen(false);
+      invalidate();
+    },
+    onError: fail('The invoicing details were refused'),
   });
 
   const pinMutation = useMutation({
@@ -353,7 +394,36 @@ export default function CommercialTab({ tenant }: { tenant: Tenant }) {
               <Row label="Billing contact">
                 {[profile.billingContactName, profile.billingContactEmail].filter(Boolean).join(' · ') || <Dash />}
               </Row>
+              <Row label="Invoice address">{profile.billingAddress ?? <Dash />}</Row>
               <Row label="Account owner">{profile.accountOwnerEmail ?? <Dash />}</Row>
+
+              {!profile.billingContactEmail && (
+                <Alert severity="error" sx={{ borderRadius: 2 }}>
+                  <AlertTitle sx={{ fontWeight: 800 }}>This tenant cannot be invoiced</AlertTitle>
+                  Invoicing refuses to issue without an invoice recipient, so no subscription
+                  invoice can be finalized — which also means this tenant cannot be offboarded, as
+                  the readiness gate requires one. Set an invoice recipient below.
+                </Alert>
+              )}
+
+              <Divider />
+              <RoleGate allowed={permissions.canAdministerBilling} requirement={REQUIRED_ROLE_COPY.billing}>
+                {(disabled) => (
+                  <Box>
+                    <Button
+                      startIcon={<EditIcon />}
+                      disabled={disabled}
+                      onClick={() => {
+                        setContact(contactFromProfile(profile));
+                        setContactOpen(true);
+                      }}
+                      sx={{ fontWeight: 700 }}
+                    >
+                      Edit invoicing details
+                    </Button>
+                  </Box>
+                )}
+              </RoleGate>
             </Stack>
           </PageSection>
         </Grid>
@@ -771,6 +841,93 @@ export default function CommercialTab({ tenant }: { tenant: Tenant }) {
           </Button>
         </DialogActions>
       </Dialog>
+
+      <ReasonDialog
+        open={contactOpen}
+        title="Invoicing details"
+        confirmLabel="Save and audit"
+        minReasonLength={15}
+        reasonHelper="Redirecting a customer's invoice has to be attributable months later. Say on whose instruction."
+        description={
+          <>
+            Who at {tenant.name} is invoiced, where, on what terms, and under which contract. It
+            takes effect on the <strong>next</strong> invoice — invoices already issued keep the
+            bill-to they were sent with, because an issued invoice is evidence of what went to whom
+            on the day it went, and correcting the customer record must not rewrite that.
+          </>
+        }
+        extra={
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <TextField
+              fullWidth
+              required
+              label="Invoice recipient email"
+              value={contact.billingContactEmail}
+              onChange={(event) => setContact({ ...contact, billingContactEmail: event.target.value })}
+              helperText="Invoicing refuses to issue without this. It is frozen into each invoice's buyer snapshot."
+            />
+            <TextField
+              fullWidth
+              label="Invoice recipient name"
+              value={contact.billingContactName}
+              onChange={(event) => setContact({ ...contact, billingContactName: event.target.value })}
+            />
+            <TextField
+              fullWidth
+              multiline
+              minRows={2}
+              label="Invoice address"
+              value={contact.billingAddress}
+              onChange={(event) => setContact({ ...contact, billingAddress: event.target.value })}
+              helperText="Used only when it differs from the registered address on the Profile tab."
+            />
+            <TextField
+              fullWidth
+              label="Payment terms (days)"
+              type="number"
+              value={contact.paymentTermsDays}
+              onChange={(event) => setContact({ ...contact, paymentTermsDays: event.target.value })}
+              helperText="Added to the issue date to compute the due date. 0 means due on receipt; blank falls back to 30."
+            />
+            <TextField
+              fullWidth
+              label="Their PO reference"
+              value={contact.purchaseOrderReference}
+              onChange={(event) => setContact({ ...contact, purchaseOrderReference: event.target.value })}
+              helperText="The reference their accounts-payable department requires on every invoice."
+            />
+            <TextField
+              fullWidth
+              label="Account owner (ours)"
+              value={contact.accountOwnerEmail}
+              onChange={(event) => setContact({ ...contact, accountOwnerEmail: event.target.value })}
+              helperText="Who here owns this account, for escalation."
+            />
+            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
+              <TextField
+                fullWidth
+                type="date"
+                label="Contract starts"
+                value={contact.contractStartOn}
+                onChange={(event) => setContact({ ...contact, contractStartOn: event.target.value })}
+                slotProps={{ inputLabel: { shrink: true } }}
+              />
+              <TextField
+                fullWidth
+                type="date"
+                label="Contract ends"
+                value={contact.contractEndOn}
+                onChange={(event) => setContact({ ...contact, contractEndOn: event.target.value })}
+                slotProps={{ inputLabel: { shrink: true } }}
+              />
+            </Stack>
+          </Stack>
+        }
+        extraProblem={profile ? accountContactProblem(contact, profile.billingMode) : null}
+        busy={contactMutation.isPending}
+        onClose={() => setContactOpen(false)}
+        onConfirm={(reason) => contactMutation.mutate(reason)}
+      />
 
       <ReasonDialog
         open={pastDueAction !== null}

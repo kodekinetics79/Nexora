@@ -10,9 +10,8 @@ namespace ERP_RFQ_Automation.Security;
 /// <summary>
 /// Three guards for support-impersonation tokens (<c>impersonated=true</c>):
 /// 1. Read-only enforcement — any non-safe HTTP method is rejected with 403.
-/// 2. Sensitive-read deny-list (Sec8) — even safe GETs are rejected with 403 when
-///    they hit file-download / bulk-export style routes (customer document bytes and
-///    bulk data have no place in a support session).
+/// 2. Read ALLOW-LIST (Sec-D3) — a safe GET is rejected with 403 unless its route is
+///    explicitly permitted during impersonation. See <see cref="AllowedReadPaths"/>.
 /// 3. Revocation enforcement — the token's <c>jti</c> must match a live
 ///    <see cref="ImpersonationSession"/> row (present, not revoked, not expired)
 ///    or the request is rejected with 401. Lookups are cached in the shared
@@ -20,6 +19,17 @@ namespace ERP_RFQ_Automation.Security;
 ///    cross-instance revocation staleness; a same-process revoke evicts the entry
 ///    (see <see cref="EvictSession"/>) and therefore takes effect immediately
 ///    (P2-A12). Missing/unknown jti fails CLOSED.
+///
+/// <para><b>Sec-D3: why guard 2 was inverted.</b> It used to be a deny-list of file-download and
+/// export routes. A deny-list has to anticipate the reachable surface, and this one was written
+/// against the wrong set. An impersonation token carries no <c>roleId</c>, so
+/// <c>PermissionHandler</c> denies every <c>[RequireModulePermission]</c> endpoint — which is
+/// genuinely fail-closed, but it means the surface an impersonated session can actually reach is
+/// precisely the endpoints with NO module permission, and the deny-list named none of them. The
+/// tenant's entire customer and supplier contact directory and the AI copilot's transcripts and
+/// decision audit were reachable, because nobody had thought to deny them. An allow-list cannot
+/// fail that way: a route added tomorrow with no permission attribute is refused by default, and
+/// making it reachable during impersonation is a decision someone has to write down here.</para>
 /// </summary>
 public sealed class ReadOnlyImpersonationMiddleware(RequestDelegate next, IMemoryCache cache)
 {
@@ -27,19 +37,55 @@ public sealed class ReadOnlyImpersonationMiddleware(RequestDelegate next, IMemor
     public static readonly TimeSpan CacheTtl = TimeSpan.FromSeconds(30);
 
     /// <summary>
-    /// Sec8: path prefixes an impersonated (support) session may never read. These are
-    /// the real routes that stream customer file bytes or bulk data exports:
-    /// - /api/File            → attachment/evidence file downloads (FileController)
-    /// - /api/processing-evidence → extraction evidence payloads
-    /// The suffix rules below additionally cover the uploader-template/export CSV
-    /// endpoints (e.g. /api/CustomerUploader/export, /api/Boq/{id}/export.csv).
+    /// Sec-D3: the complete set of route prefixes a support-impersonation session may read.
+    /// Anything not listed here is refused, including routes that do not exist yet.
+    ///
+    /// <para><b>The admission test each entry had to pass:</b> it explains how the tenant's
+    /// system is CONFIGURED (which is what a support operator is diagnosing), and it contains no
+    /// customer or supplier identity, no commercial figures, and no document content. That is why
+    /// the list is short — and it is honest that it is short. An impersonated session already
+    /// cannot open any module-gated screen, so a longer list would mostly be listing routes that
+    /// 403 one layer further in anyway.</para>
+    ///
+    /// <para><b>Deliberately absent</b>, each having been reachable before this change:
+    /// <c>/api/Contact</c> (the tenant's whole customer and supplier contact directory — names,
+    /// emails, direct numbers: PII, and not configuration); <c>/api/agent</c> (copilot transcripts
+    /// and the decision audit — the tenant's own commercial reasoning); <c>/api/GeneralDropdown</c>
+    /// (mixes harmless status lists with supplier and warehouse names); <c>/api/SetupMaster</c>
+    /// (tenant role rows); <c>/api/BusinessUnit/Dropdown</c>; <c>/api/list-views</c> (a specific
+    /// operator's saved column layouts, which are theirs and not diagnostic). Each can be added
+    /// here on a written decision — which is the point of the inversion.</para>
     /// </summary>
-    internal static readonly string[] DeniedReadPathPrefixes =
+    internal static readonly string[] AllowedReadPaths =
     {
-        "/api/File",
-        "/api/processing-evidence"
+        // Tenant SLA policy: response-time thresholds and escalation windows. The commonest
+        // support question ("why did this escalate?") is answered by this and nothing else.
+        "/api/sla/policy",
+
+        // Commercial policy: the tenant's own rules for margins, approvals and rounding. Config,
+        // not figures — no customer, quote or order appears in it.
+        "/api/commercial-policy",
+
+        // Quote document configuration: numbering, templates and layout. Answers "why does their
+        // quote number look like that", which is otherwise a screen-share.
+        "/api/QuoteConfiguration",
+
+        // Global reference data, identical for every tenant on the deployment and containing
+        // nothing about this one. Listed explicitly rather than waved through as "harmless"
+        // because that judgement should be visible.
+        "/api/Country",
+        "/api/State",
+        "/api/City",
+        "/api/Uom"
     };
 
+    /// <summary>
+    /// Retained as a SECOND check applied after the allow-list, not as the primary control.
+    ///
+    /// <para>It is redundant today — no allow-listed prefix has an export or download route
+    /// beneath it — and it is kept precisely because that is a property of today's list. Someone
+    /// widening a prefix above should not be able to hand out a bulk export by accident.</para>
+    /// </summary>
     internal static readonly string[] DeniedReadPathSuffixes =
     {
         "/export",
@@ -81,13 +127,14 @@ public sealed class ReadOnlyImpersonationMiddleware(RequestDelegate next, IMemor
             return;
         }
 
-        // Sec8: block file-download / export style reads for impersonated sessions.
-        if (impersonated && IsDeniedRead(context.Request.Path))
+        // Sec-D3: a safe read still has to be on the allow-list. Default is refusal.
+        if (impersonated && !IsAllowedRead(context.Request.Path))
         {
             await WriteProblemAsync(context, StatusCodes.Status403Forbidden,
-                NexoraProblems.ImpersonationExportDenied,
-                "File downloads and exports are not available while impersonating",
-                "Support impersonation sessions cannot download customer files or export data.");
+                NexoraProblems.ImpersonationReadDenied,
+                "This data is not available while impersonating",
+                "A support impersonation session may only read the tenant's own configuration. "
+                + "Customer data, documents and exports are not available through it.");
             return;
         }
 
@@ -103,24 +150,40 @@ public sealed class ReadOnlyImpersonationMiddleware(RequestDelegate next, IMemor
         await _next(context);
     }
 
-    internal static bool IsDeniedRead(PathString path)
+    /// <summary>
+    /// True only when the path sits under an <see cref="AllowedReadPaths"/> prefix AND does not
+    /// end in one of the export/download suffixes. Everything else — including an empty path and
+    /// anything the list has never heard of — is false.
+    /// </summary>
+    internal static bool IsAllowedRead(PathString path)
     {
-        foreach (var prefix in DeniedReadPathPrefixes)
-        {
-            if (path.StartsWithSegments(prefix, StringComparison.OrdinalIgnoreCase))
-                return true;
-        }
-
         var value = path.Value;
         if (string.IsNullOrEmpty(value))
             return false;
+
+        var allowed = false;
+        foreach (var prefix in AllowedReadPaths)
+        {
+            // Segment matching, not string prefixing: "/api/sla/policy" must not admit
+            // "/api/sla/policy-history" or "/api/slaX".
+            if (path.StartsWithSegments(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                allowed = true;
+                break;
+            }
+        }
+
+        if (!allowed)
+            return false;
+
         var trimmed = value.TrimEnd('/');
         foreach (var suffix in DeniedReadPathSuffixes)
         {
             if (trimmed.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
-                return true;
+                return false;
         }
-        return false;
+
+        return true;
     }
 
     private static async Task WriteProblemAsync(

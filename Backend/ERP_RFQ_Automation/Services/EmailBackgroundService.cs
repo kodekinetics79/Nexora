@@ -35,7 +35,37 @@ namespace ERP_RFQ_Automation.Services
     public class EmailBackgroundService : BackgroundService
     {
         internal const string PollLockName = "nexora:email-poller";
-        private static readonly TimeSpan DefaultPollInterval = TimeSpan.FromSeconds(300);
+
+        /// <summary>
+        /// THE UNIT OF <c>EmailConfiguration.PollingInterval</c> IS MINUTES.
+        ///
+        /// <para>It is stated here because it used to be stated nowhere, and every surface a
+        /// human touches disagreed with the one line of code that consumed it. The API DTOs
+        /// documented "Minutes between polls" and constrained it to <c>[1, 1440]</c>; the
+        /// mailbox screen labelled the input "Check for new mail every … minutes"; the
+        /// mailbox health text said "Polling every N minute(s)" — and this loop read the same
+        /// number as SECONDS. An operator who typed 5, meaning five minutes, got a five-second
+        /// IMAP poll: sixty times the intended rate, which is the standard route to provider
+        /// throttling or an account lock, and it would have taken out the primary intake
+        /// channel silently. Nothing caught it because no test polls a real mailbox.</para>
+        ///
+        /// <para>Minutes wins because minutes is what every human-facing surface already
+        /// promised. Every stored value keeps its number and changes meaning from seconds to
+        /// minutes, which is a sixty-fold SLOWDOWN — no existing row can start polling faster
+        /// than it does today, so the transition cannot create the hazard it removes, and no
+        /// backfill is required to make it safe.</para>
+        /// </summary>
+        internal const int MinimumPollIntervalMinutes = 1;
+
+        /// <inheritdoc cref="MinimumPollIntervalMinutes"/>
+        internal const int MaximumPollIntervalMinutes = 1440;
+
+        /// <summary>
+        /// Used when no active mailbox states an interval, or when the interval cannot be read.
+        /// Five minutes — deliberately the same number the create/update DTOs default to, so
+        /// the fallback and the operator default mean the same thing.
+        /// </summary>
+        private static readonly TimeSpan DefaultPollInterval = TimeSpan.FromMinutes(5);
 
         private readonly IServiceProvider _services;
         private readonly IBackgroundWorkerHeartbeats? _heartbeats;
@@ -338,17 +368,31 @@ namespace ERP_RFQ_Automation.Services
         // transient DB error here would otherwise (with the default StopHost
         // behavior) take down the whole API host. Guard it and fall back to a
         // safe default polling interval so the loop always survives.
-        private async Task<TimeSpan> ResolvePollIntervalAsync(
+        // internal rather than private so the UNIT can be pinned by a test. Nothing else polls
+        // a real mailbox, which is exactly why the seconds/minutes contradiction survived.
+        internal async Task<TimeSpan> ResolvePollIntervalAsync(
             ErpRfqAutomationContext dbContext, CancellationToken stoppingToken)
         {
             try
             {
+                // IMAP only. The DTOs say "Minutes between polls. Ignored for SMTP" and the
+                // mailbox screen hides the input for SMTP — but this read took the minimum
+                // across EVERY active mailbox, so an outbound-only SMTP row carrying the
+                // column default was setting the inbound poll rate for the whole tenant.
+                // A field documented as ignored must actually be ignored.
                 var intervals = await dbContext.EmailConfigurations
-                    .Where(e => e.IsActive)
+                    .Where(e => e.IsActive && e.Protocol.ToUpper() == "IMAP")
                     .Select(e => e.PollingInterval)
                     .ToListAsync(stoppingToken);
+                // MINUTES — see MinimumPollIntervalMinutes. Clamped to the same [1, 1440]
+                // range the create/update DTOs enforce, so a value that could only have
+                // arrived by direct SQL cannot poll faster than any operator is allowed to
+                // ask for. The clamp is a floor on the RATE, never a way to make a
+                // misconfigured mailbox look healthy: the interval actually in force is
+                // reported verbatim on the mailbox health line.
                 if (intervals.Any())
-                    return TimeSpan.FromSeconds(Math.Max(intervals.Min(), 1));
+                    return TimeSpan.FromMinutes(Math.Clamp(
+                        intervals.Min(), MinimumPollIntervalMinutes, MaximumPollIntervalMinutes));
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -356,8 +400,9 @@ namespace ERP_RFQ_Automation.Services
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to read polling interval; using default {DefaultInterval}s",
-                    DefaultPollInterval.TotalSeconds);
+                _logger.LogError(ex,
+                    "Failed to read polling interval; using default {DefaultInterval} minute(s)",
+                    DefaultPollInterval.TotalMinutes);
             }
 
             return DefaultPollInterval;

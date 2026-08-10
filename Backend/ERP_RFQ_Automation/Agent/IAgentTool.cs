@@ -1,3 +1,4 @@
+using System.Security.Claims;
 using System.Text.Json;
 
 namespace ERP_RFQ_Automation.Agent;
@@ -7,12 +8,35 @@ namespace ERP_RFQ_Automation.Agent;
 /// resolved from the JWT so tools never trust caller-supplied identifiers. The EF
 /// global query filter already scopes reads to <see cref="BusinessUnitId"/>; tools
 /// stamp it onto any rows they create.
+///
+/// <para><b>Authority travels with the context.</b> It used to carry the tenant and the
+/// user's name and nothing else, which is why the copilot could read what module RBAC
+/// forbade: there was simply no role in scope to check. <see cref="RoleId"/> and
+/// <see cref="Principal"/> are what <see cref="AgentOrchestrator"/> puts in front of the
+/// real authorization policy before dispatching any tool. Both are required; either being
+/// absent is a refusal, never a pass.</para>
 /// </summary>
 public sealed class AgentToolContext
 {
     public long BusinessUnitId { get; init; }
     public long? UserId { get; init; }
     public string? UserName { get; init; }
+
+    /// <summary>
+    /// The acting user's <c>roleId</c> claim. The module-permission handler resolves rank
+    /// and RolePermissions rows from this; a context with no role cannot be authorized for
+    /// any tool, so the orchestrator refuses rather than letting the handler's silent
+    /// "no claim → not succeeded" produce an unexplained empty result.
+    /// </summary>
+    public long? RoleId { get; init; }
+
+    /// <summary>
+    /// The caller's <see cref="ClaimsPrincipal"/>, evaluated against the same
+    /// "ModulePermission:{module}:{action}" policies the controllers use. Held rather than
+    /// re-derived so the agent asks the real policy exactly what an HTTP request would.
+    /// Null means "no authenticated principal in scope" and denies every tool.
+    /// </summary>
+    public ClaimsPrincipal? Principal { get; init; }
 }
 
 /// <summary>Uniform result envelope for tool execution.</summary>

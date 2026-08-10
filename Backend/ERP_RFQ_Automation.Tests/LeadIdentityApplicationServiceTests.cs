@@ -641,6 +641,175 @@ public sealed class LeadIdentityApplicationServiceTests
         Assert.Empty(await context.Set<LeadMatchCandidate>().ToListAsync());
     }
 
+    // FR-RFQ-05: "When a closing-date amendment is received, version the existing RFQ (v1, v2,
+    // etc.) rather than create a duplicate." The four tests below pin the arm that does it, and
+    // the three neighbours it must NOT reach.
+    //
+    // The amendment here carries no address of its own and arrives with no sender — the manually
+    // uploaded amendment PDF. That is the shape that used to reach the human queue: when the
+    // sender resolves on both sides the scope-plus-reference arm already versions it.
+    [Fact]
+    public async Task Closing_date_amendment_versions_the_existing_rfq_instead_of_queueing_a_review()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(93);
+        Seed.BusinessUnit(context, 93); Seed.EmailConfig(context, 9301, 93); Seed.EmailIngest(context, 9401, 9301, "NeedsReview");
+        await context.SaveChangesAsync();
+        var service = new LeadIdentityApplicationService(context);
+
+        var original = Candidate(93, 9401, "TENDER-5500", "tenders@closing.test", 10);
+        original.BidClosingDate = new DateTime(2026, 9, 1, 12, 0, 0, DateTimeKind.Utc);
+        var created = await service.ReconcileAsync(original,
+            Intake("closing-original", "closing-a", Guid.NewGuid(), "tenders@closing.test"));
+        Assert.Equal(LeadOccurrenceClassification.New, created.Classification);
+
+        context.ChangeTracker.Clear();
+        var amendment = Candidate(93, 9401, "TENDER-5500", null, 10);
+        amendment.BidClosingDate = new DateTime(2026, 9, 20, 12, 0, 0, DateTimeKind.Utc);
+        var revision = await service.ReconcileAsync(amendment,
+            Intake("closing-amendment", "closing-b", Guid.NewGuid(), sender: null));
+
+        Assert.Equal(LeadOccurrenceClassification.Revision, revision.Classification);
+        Assert.Equal(created.LeadId, revision.LeadId);
+        Assert.Equal(created.NexoraSerial, revision.NexoraSerial);
+        Assert.Equal(2, revision.RevisionNumber);
+        // No duplicate lead row, and no review item standing in for one.
+        Assert.Equal(1, await context.Leads.CountAsync());
+        Assert.Empty(await context.Set<LeadMatchCandidate>().ToListAsync());
+        Assert.Equal(2, await context.Set<LeadRevision>().CountAsync(x => x.LeadId == created.LeadId));
+        Assert.True(await context.Set<LeadIdentityAuditEvent>()
+            .AnyAsync(x => x.LeadId == created.LeadId && x.EventType == "LEAD_REVISION_CREATED"));
+        // The reviewer has to be able to read WHY it auto-linked, with both deadlines named.
+        var reason = Assert.Single(revision.Reasons);
+        Assert.Contains("Closing-date amendment", reason, StringComparison.Ordinal);
+        Assert.Contains("2026-09-01 12:00", reason, StringComparison.Ordinal);
+        Assert.Contains("2026-09-20 12:00", reason, StringComparison.Ordinal);
+        var canonical = await context.Leads.Include(x => x.LeadItems).SingleAsync(x => x.Id == created.LeadId);
+        Assert.Equal(new DateTime(2026, 9, 20, 12, 0, 0, DateTimeKind.Utc), canonical.BidClosingDate);
+    }
+
+    // An earlier deadline is an amendment too. The arm must not read "later" as the only direction.
+    [Fact]
+    public async Task Closing_date_brought_forward_versions_the_existing_rfq()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(94);
+        Seed.BusinessUnit(context, 94); Seed.EmailConfig(context, 9401, 94); Seed.EmailIngest(context, 9501, 9401, "NeedsReview");
+        await context.SaveChangesAsync();
+        var service = new LeadIdentityApplicationService(context);
+
+        var original = Candidate(94, 9501, "TENDER-5501", "tenders@earlier.test", 10);
+        original.BidClosingDate = new DateTime(2026, 10, 15, 12, 0, 0, DateTimeKind.Utc);
+        var created = await service.ReconcileAsync(original,
+            Intake("earlier-original", "earlier-a", Guid.NewGuid(), "tenders@earlier.test"));
+
+        context.ChangeTracker.Clear();
+        var amendment = Candidate(94, 9501, "TENDER-5501", null, 10);
+        amendment.BidClosingDate = new DateTime(2026, 10, 2, 12, 0, 0, DateTimeKind.Utc);
+        var revision = await service.ReconcileAsync(amendment,
+            Intake("earlier-amendment", "earlier-b", Guid.NewGuid(), sender: null));
+
+        Assert.Equal(LeadOccurrenceClassification.Revision, revision.Classification);
+        Assert.Equal(created.LeadId, revision.LeadId);
+        Assert.Equal(2, revision.RevisionNumber);
+        Assert.Equal(1, await context.Leads.CountAsync());
+    }
+
+    // Nothing about the deadline changed, so the closing-date arm has no business firing: an
+    // unresolved sender with a matching reference stays the human decision it already was.
+    [Fact]
+    public async Task Same_reference_and_items_with_an_unchanged_closing_date_still_requires_review()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(95);
+        Seed.BusinessUnit(context, 95); Seed.EmailConfig(context, 9501, 95); Seed.EmailIngest(context, 9601, 9501, "NeedsReview");
+        await context.SaveChangesAsync();
+        var service = new LeadIdentityApplicationService(context);
+
+        var closing = new DateTime(2026, 9, 1, 12, 0, 0, DateTimeKind.Utc);
+        var original = Candidate(95, 9601, "TENDER-5502", "tenders@same.test", 10);
+        original.BidClosingDate = closing;
+        var created = await service.ReconcileAsync(original,
+            Intake("same-original", "same-a", Guid.NewGuid(), "tenders@same.test"));
+
+        context.ChangeTracker.Clear();
+        var resend = Candidate(95, 9601, "TENDER-5502", null, 12);
+        resend.BidClosingDate = closing;
+        var review = await service.ReconcileAsync(resend,
+            Intake("same-resend", "same-b", Guid.NewGuid(), sender: null));
+
+        Assert.Equal(LeadOccurrenceClassification.PossibleMatchReviewRequired, review.Classification);
+        Assert.Equal(0, review.LeadId);
+        Assert.Equal(1, await context.Leads.CountAsync());
+        var match = Assert.Single(await context.Set<LeadMatchCandidate>()
+            .Where(x => x.OccurrenceId == review.OccurrenceId).ToListAsync());
+        Assert.Equal(created.LeadId, match.CandidateLeadId);
+    }
+
+    // A moved deadline does not make two different item sets one inquiry. Sameness is decided by
+    // the same similarity machinery every other revision arm uses.
+    [Fact]
+    public async Task Materially_different_items_with_a_changed_closing_date_are_not_auto_versioned()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(96);
+        Seed.BusinessUnit(context, 96); Seed.EmailConfig(context, 9601, 96); Seed.EmailIngest(context, 9701, 9601, "NeedsReview");
+        await context.SaveChangesAsync();
+        var service = new LeadIdentityApplicationService(context);
+
+        var original = Candidate(96, 9701, "TENDER-5503", "tenders@scope.test", 10);
+        original.BidClosingDate = new DateTime(2026, 9, 1, 12, 0, 0, DateTimeKind.Utc);
+        var created = await service.ReconcileAsync(original,
+            Intake("scope-original", "scope-a", Guid.NewGuid(), "tenders@scope.test"));
+
+        context.ChangeTracker.Clear();
+        // Same reference and a moved deadline, but the buyer has re-scoped the package: one of the
+        // two lines is a part we were never asked about.
+        var rescoped = Candidate(96, 9701, "TENDER-5503", null, 10);
+        rescoped.BidClosingDate = new DateTime(2026, 9, 20, 12, 0, 0, DateTimeKind.Utc);
+        rescoped.LeadItems.Add(new LeadItem { LineItemNo = "2", ManufacturerPartNumber = "PN-999",
+            ProductShortDescription = "Gearbox", Quantity = 4, UnitOfMeasure = "EA" });
+
+        var review = await service.ReconcileAsync(rescoped,
+            Intake("scope-rescoped", "scope-b", Guid.NewGuid(), sender: null));
+
+        Assert.Equal(LeadOccurrenceClassification.PossibleMatchReviewRequired, review.Classification);
+        Assert.Equal(0, review.LeadId);
+        Assert.Equal(1, await context.Leads.CountAsync());
+        Assert.Equal(1, await context.Set<LeadRevision>().CountAsync(x => x.LeadId == created.LeadId));
+    }
+
+    // FR-RFQ-06 is not weakened: a contradicting buyer never auto-links, however well the
+    // reference, the line items and the moved deadline line up.
+    [Fact]
+    public async Task Different_buyer_with_a_changed_closing_date_is_not_auto_versioned()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(97);
+        Seed.BusinessUnit(context, 97); Seed.EmailConfig(context, 9701, 97); Seed.EmailIngest(context, 9801, 9701, "NeedsReview");
+        await context.SaveChangesAsync();
+        var service = new LeadIdentityApplicationService(context);
+
+        var original = Candidate(97, 9801, "TENDER-5504", "tenders@first.test", 10);
+        original.BidClosingDate = new DateTime(2026, 9, 1, 12, 0, 0, DateTimeKind.Utc);
+        var created = await service.ReconcileAsync(original,
+            Intake("buyer-original", "buyer-a", Guid.NewGuid(), "tenders@first.test"));
+
+        context.ChangeTracker.Clear();
+        // A second reseller chasing the same public tender number, with the amended deadline.
+        var other = Candidate(97, 9801, "TENDER-5504", "tenders@second.test", 10);
+        other.BidClosingDate = new DateTime(2026, 9, 20, 12, 0, 0, DateTimeKind.Utc);
+        var review = await service.ReconcileAsync(other,
+            Intake("buyer-second", "buyer-b", Guid.NewGuid(), "tenders@second.test"));
+
+        Assert.NotEqual(LeadOccurrenceClassification.Revision, review.Classification);
+        Assert.Equal(LeadOccurrenceClassification.PossibleMatchReviewRequired, review.Classification);
+        Assert.Equal(1, await context.Set<LeadRevision>().CountAsync(x => x.LeadId == created.LeadId));
+        var match = Assert.Single(await context.Set<LeadMatchCandidate>()
+            .Where(x => x.OccurrenceId == review.OccurrenceId).ToListAsync());
+        Assert.Equal(created.LeadId, match.CandidateLeadId);
+    }
+
     /// <summary>A candidate carrying the commercial columns the human decision path used to drop.</summary>
     private static Lead VerbatimCandidate(long bu, long ingestId, string? rfq, string? clientEmail, string? buyer, int quantity)
     {
@@ -654,6 +823,80 @@ public sealed class LeadIdentityApplicationServiceTests
             UnitPrice = 1234.56m, Currency = "SAR", CustomerRfqno = "CUST-REF/77", ItemMaterialCode = "MAT-9/1",
             ManufacturerName = "Acme Valves", LeadTime = 14, Aiconfidence = .91m
         });
+        return lead;
+    }
+
+    // FR-RFQ-06: "Flag possible duplicates based on the same buyer, same item and overlapping
+    // dates for human review BEFORE a new record is created." The pair below is deliberately
+    // built so commercial-content similarity stays under the match threshold — the second
+    // extraction describes the same part with different wording and a different unit — which is
+    // exactly the case the similarity-only path used to let through as a brand new inquiry.
+    [Fact]
+    public async Task Same_buyer_overlapping_deadline_and_matching_part_is_held_for_review_before_any_lead_is_created()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(91);
+        Seed.BusinessUnit(context, 91); Seed.EmailConfig(context, 9101, 91); Seed.EmailIngest(context, 9201, 9101, "NeedsReview");
+        await context.SaveChangesAsync();
+        var service = new LeadIdentityApplicationService(context);
+
+        var first = Candidate(91, 9201, "TENDER-8801", "procurement@buyer.test", 10);
+        first.BidClosingDate = new DateTime(2026, 9, 1, 12, 0, 0, DateTimeKind.Utc);
+        var created = await service.ReconcileAsync(first, Intake("dup-first", "dup-hash-a", Guid.NewGuid(), "procurement@buyer.test"));
+        Assert.Equal(LeadOccurrenceClassification.New, created.Classification);
+
+        context.ChangeTracker.Clear();
+        var second = DifferentlyWordedSameParts(91, 9201, "procurement@buyer.test",
+            new DateTime(2026, 9, 2, 12, 0, 0, DateTimeKind.Utc));
+
+        var review = await service.ReconcileAsync(second, Intake("dup-second", "dup-hash-b", Guid.NewGuid(), "procurement@buyer.test"));
+
+        Assert.Equal(LeadOccurrenceClassification.PossibleMatchReviewRequired, review.Classification);
+        Assert.Equal(0, review.LeadId);
+        Assert.Equal(1, await context.Leads.CountAsync());
+        var match = Assert.Single(await context.Set<LeadMatchCandidate>()
+            .Where(x => x.OccurrenceId == review.OccurrenceId).ToListAsync());
+        Assert.Equal(created.LeadId, match.CandidateLeadId);
+        Assert.Contains(review.Reasons, r => r.Contains("Same buyer", StringComparison.OrdinalIgnoreCase));
+    }
+
+    // The date dimension has to carry weight, or the rule degrades into "same buyer ever bought
+    // this part", which would hold a legitimate repeat order for review every time.
+    [Fact]
+    public async Task Same_buyer_and_part_with_deadlines_far_apart_is_a_new_inquiry()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(92);
+        Seed.BusinessUnit(context, 92); Seed.EmailConfig(context, 9201, 92); Seed.EmailIngest(context, 9301, 9201, "NeedsReview");
+        await context.SaveChangesAsync();
+        var service = new LeadIdentityApplicationService(context);
+
+        var first = Candidate(92, 9301, "TENDER-9901", "procurement@repeat.test", 10);
+        first.BidClosingDate = new DateTime(2026, 9, 1, 12, 0, 0, DateTimeKind.Utc);
+        await service.ReconcileAsync(first, Intake("repeat-first", "repeat-hash-a", Guid.NewGuid(), "procurement@repeat.test"));
+
+        context.ChangeTracker.Clear();
+        var second = DifferentlyWordedSameParts(92, 9301, "procurement@repeat.test",
+            new DateTime(2026, 11, 20, 12, 0, 0, DateTimeKind.Utc));
+
+        var repeat = await service.ReconcileAsync(second, Intake("repeat-second", "repeat-hash-b", Guid.NewGuid(), "procurement@repeat.test"));
+
+        Assert.Equal(LeadOccurrenceClassification.New, repeat.Classification);
+        Assert.Equal(2, await context.Leads.CountAsync());
+    }
+
+    /// <summary>
+    /// Same manufacturer part as <see cref="Candidate"/>, described differently and in another
+    /// unit. Line identity hashes part + description + UoM, so this scores 0 on similarity while
+    /// the FR-RFQ-06 rule — which keys on the part number alone — still sees a match.
+    /// </summary>
+    private static Lead DifferentlyWordedSameParts(long bu, long ingestId, string email, DateTime closing)
+    {
+        var lead = new Lead { Rfqno = null, BuyersName = "Buyer", RecDate = DateTime.UtcNow,
+            LeadSource = "ManualUpload", CreatedBy = "test", CreatedDate = DateTime.UtcNow, BusinessUnitId = bu,
+            EmailIngestsId = ingestId, Clientemail = email, RequiresCommercialReview = true, BidClosingDate = closing };
+        lead.LeadItems.Add(new LeadItem { LineItemNo = "1", ManufacturerPartNumber = "PN-100",
+            ProductShortDescription = "Ball valve, two inch, flanged", Quantity = 10, UnitOfMeasure = "PCS" });
         return lead;
     }
 

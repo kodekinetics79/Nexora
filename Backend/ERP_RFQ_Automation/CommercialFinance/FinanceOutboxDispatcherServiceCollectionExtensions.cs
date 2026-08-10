@@ -46,7 +46,13 @@ public static class FinanceOutboxDispatcherServiceCollectionExtensions
             .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
             {
                 AllowAutoRedirect = false
-            });
+            })
+            // SEC-G9: FinanceEventPublisher signs each envelope and sends the MAC as
+            // X-Nexora-Signature. The factory's logging handlers write every header at Trace and
+            // redact nothing by default, so a diagnostic session would have logged the signature
+            // beside the exact payload it covers — the starting position for an offline attack on
+            // the shared secret — and any Authorization header a future endpoint requires.
+            .RedactLoggedHeaders(ERP_RFQ_Automation.Infrastructure.OutboundHttpRedaction.SensitiveHeaders);
         services.AddHostedService<FinanceOutboxDispatcherService>();
         return services;
     }

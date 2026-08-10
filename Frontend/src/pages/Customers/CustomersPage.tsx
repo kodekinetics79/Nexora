@@ -23,9 +23,13 @@ import contactService, { type ContactDTO, type ContactMutationRequest } from '..
 import countryService from '../../api/services/countryService';
 import stateService from '../../api/services/stateService';
 import cityService from '../../api/services/cityService';
+import teamService from '../../api/services/teamService';
 import { useAuth } from '../../context/AuthContext';
 import SearchField from '../../components/common/SearchField';
 import UploadExportToolbar from '../../components/common/UploadExportToolbar';
+import ColumnPreferences from '../../components/common/ColumnPreferences';
+import CustomFieldValuesEditor from '../../components/common/CustomFieldValuesEditor';
+import useColumnPreferences from '../../hooks/useColumnPreferences';
 import { useSnackbar } from 'notistack';
 
 // ─── Empty forms ───────────────────────────────────────────────────────────
@@ -36,6 +40,42 @@ const emptyCustomer = {
   shippingAddressLine1: '', shippingAddressLine2: '',
   shippingCity: '', shippingState: '', shippingCountry: '', shippingPostalCode: '',
   isActive: true,
+  // FR-CST-01/02. Empty string means NOT CAPTURED and is sent as such; the server
+  // canonicalises it to NULL rather than storing "".
+  commercialRegistrationNumber: '', taxRegistrationNumber: '', sector: '',
+  regionStateId: '', accountTeamId: '',
+};
+
+/**
+ * The stored sector CODES and their labels. The code is what travels and what is stored — a
+ * renamed label must not orphan the rows classified under the old wording.
+ */
+const SECTOR_OPTIONS: { code: string; label: string }[] = [
+  { code: 'GOVERNMENT', label: 'Government' },
+  { code: 'SEMI_GOVERNMENT', label: 'Semi-Government' },
+  { code: 'PRIVATE', label: 'Private' },
+];
+
+const sectorLabel = (code?: string | null) =>
+  SECTOR_OPTIONS.find(option => option.code === code)?.label ?? null;
+
+/**
+ * The server's own validation message, verbatim. The CR and VAT rules live server-side (they are
+ * also enforced by a database CHECK constraint), so restating them in client copy would risk two
+ * descriptions of one rule that can drift apart. ASP.NET returns either a plain string or a
+ * ProblemDetails `errors` bag; both are unwrapped here, and only a genuinely unreadable response
+ * falls back to the caller's generic wording.
+ */
+const serverMessage = (error: unknown, fallback: string): string => {
+  const data = (error as { response?: { data?: unknown } })?.response?.data;
+  if (typeof data === 'string' && data.trim()) return data;
+  const errors = (data as { errors?: Record<string, string[]> } | undefined)?.errors;
+  if (errors) {
+    const first = Object.values(errors).flat().find(message => typeof message === 'string' && message.trim());
+    if (first) return first;
+  }
+  const title = (data as { title?: string } | undefined)?.title;
+  return typeof title === 'string' && title.trim() ? title : fallback;
 };
 
 type CustomerFormState = typeof emptyCustomer & { imageFile?: File | null };
@@ -125,12 +165,19 @@ const CustomersPage: React.FC = () => {
   const canDelete = hasPermission('Customers', 'delete');
 
   const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ pageSize: 10, page: 0 });
+  // AA-01 · per-user column layout for this grid, plus tenant-defined Customer fields.
+  const columnPreferences = useColumnPreferences('customers.list');
   const [search, setSearch] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [selectedRecord, setSelectedRecord] = useState<CustomerDTO | null>(null);
   const [formData, setFormData] = useState<CustomerFormState>(emptyCustomer);
   const [sameAsB, setSameAsB] = useState(false);
-  const [customerErrors, setCustomerErrors] = useState<{ name?: string; contactEmail?: string }>({});
+  const [customerErrors, setCustomerErrors] = useState<{
+    name?: string;
+    contactEmail?: string;
+    commercialRegistrationNumber?: string;
+    taxRegistrationNumber?: string;
+  }>({});
 
   // Contact state
   const [showContactForm, setShowContactForm] = useState(false);
@@ -190,6 +237,13 @@ const CustomersPage: React.FC = () => {
     enabled: !!buid,
   });
 
+  // FR-CST-02 — the account teams a customer can be assigned to.
+  const { data: teams = [] } = useQuery({
+    queryKey: ['teams', buid],
+    queryFn: () => teamService.getAll(),
+    enabled: !!buid,
+  });
+
   // Helpers to find IDs by Name for filtering
   const getCountryId = (name: string) => countries.find(c => c.countryName === name)?.countryId;
   const getStateId = (name: string) => states.find(s => s.stateName === name)?.stateId;
@@ -222,13 +276,13 @@ const CustomersPage: React.FC = () => {
   const createMutation = useMutation({
     mutationFn: (fd: FormData) => customerService.create(fd),
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['customers'] }); enqueueSnackbar('Customer created!', { variant: 'success' }); setIsModalOpen(false); },
-    onError: () => enqueueSnackbar('Failed to create customer', { variant: 'error' }),
+    onError: (error) => enqueueSnackbar(serverMessage(error, 'Failed to create customer'), { variant: 'error' }),
   });
 
   const updateMutation = useMutation({
     mutationFn: ({ id, fd }: { id: number; fd: FormData }) => customerService.update(id, fd),
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['customers'] }); enqueueSnackbar('Customer updated!', { variant: 'success' }); setIsModalOpen(false); },
-    onError: () => enqueueSnackbar('Failed to update customer', { variant: 'error' }),
+    onError: (error) => enqueueSnackbar(serverMessage(error, 'Failed to update customer'), { variant: 'error' }),
   });
 
   const deactivateCustomerMutation = useMutation({
@@ -273,6 +327,11 @@ const CustomersPage: React.FC = () => {
       shippingCity: record.shippingCity ?? '', shippingState: record.shippingState ?? '',
       shippingCountry: record.shippingCountry ?? '', shippingPostalCode: record.shippingPostalCode ?? '',
       isActive: record.isActive ?? true,
+      commercialRegistrationNumber: record.commercialRegistrationNumber ?? '',
+      taxRegistrationNumber: record.taxRegistrationNumber ?? '',
+      sector: record.sector ?? '',
+      regionStateId: record.regionStateId != null ? String(record.regionStateId) : '',
+      accountTeamId: record.accountTeamId != null ? String(record.accountTeamId) : '',
     });
     setSameAsB(false);
     setShowContactForm(false);
@@ -315,6 +374,11 @@ const CustomersPage: React.FC = () => {
       if (selectedRecord && k === 'isActive') return;
       if (k === 'imageFile') {
         if (v) fd.append('ImageFile', v as File);
+      } else if (k === 'regionStateId' || k === 'accountTeamId') {
+        // Omitted entirely when unset. Sending "" for a nullable numeric would bind as a value
+        // rather than as an absence on some model binders, and 0 is not a key — it would satisfy
+        // "not null" and then match no team and no region for the rest of the record's life.
+        if (v !== '' && v != null) fd.append(k, String(v));
       } else {
         fd.append(k, String(v));
       }
@@ -373,7 +437,46 @@ const CustomersPage: React.FC = () => {
     { field: 'contactEmail', headerName: t('email'), flex: 1.2, minWidth: 180 },
     { field: 'billingCity', headerName: t('city'), width: 120, renderCell: (p) => p.value ?? '—' },
     { field: 'billingCountry', headerName: t('country'), width: 120, renderCell: (p) => p.value ?? '—' },
+    // ── FR-CST-01/02 ──
+    // Each renders a STATED gap rather than an em dash that could be read as "none required".
+    {
+      field: 'accountTeamName', headerName: 'Account team', width: 160,
+      renderCell: (p) => p.value ?? (
+        <Typography variant="caption" sx={{ color: 'warning.main', fontWeight: 700 }}>
+          No account team
+        </Typography>
+      ),
+    },
+    {
+      field: 'sector', headerName: 'Sector', width: 140,
+      renderCell: (p) => sectorLabel(p.value as string | null) ?? (
+        <Typography variant="caption" sx={{ color: 'text.disabled' }}>Not classified</Typography>
+      ),
+    },
+    {
+      field: 'regionName', headerName: 'Region', width: 140,
+      renderCell: (p) => p.value ?? (
+        <Typography variant="caption" sx={{ color: 'text.disabled' }}>Not stated</Typography>
+      ),
+    },
+    {
+      field: 'commercialRegistrationNumber', headerName: 'CR number', width: 150,
+      renderCell: (p) => p.value
+        ? <Typography sx={{ fontFamily: 'monospace', fontSize: '0.8rem' }}>{p.value}</Typography>
+        : <Typography variant="caption" sx={{ color: 'text.disabled' }}>Not captured</Typography>,
+    },
+    {
+      field: 'taxRegistrationNumber', headerName: 'VAT number', width: 160,
+      renderCell: (p) => p.value
+        ? <Typography sx={{ fontFamily: 'monospace', fontSize: '0.8rem' }}>{p.value}</Typography>
+        : <Typography variant="caption" sx={{ color: 'text.disabled' }}>Not captured</Typography>,
+    },
+    // AA-01: already in the payload, previously discarded by this grid. Off by default,
+    // one tick away for anyone who ships to a different address than they bill.
+    { field: 'shippingCity', headerName: 'Shipping city', width: 130, renderCell: (p) => p.value ?? '—' },
+    { field: 'shippingCountry', headerName: 'Shipping country', width: 140, renderCell: (p) => p.value ?? '—' },
     { field: 'isActive', headerName: t('status'), width: 100, renderCell: (p) => <Chip label={p.value ? 'Active' : 'Inactive'} color={p.value ? 'success' : 'error'} size="small" variant="outlined" /> },
+    { field: 'createdOn', headerName: 'Created', width: 120, renderCell: (p) => (p.value ? new Date(String(p.value)).toLocaleDateString() : '—') },
     { 
       field: 'actions', 
       headerName: t('actions'), 
@@ -394,6 +497,10 @@ const CustomersPage: React.FC = () => {
       )
     },
   ];
+
+  // AA-01: this user's saved layout, plus a column for every custom field the tenant has
+  // defined on Customer. `customFields` is the raw jsonb bag carried on each list row.
+  const orderedColumns = columnPreferences.arrangeColumns(columns);
 
   return (
     <Box sx={{ width: '100%', px: 1, py: 1 }}>
@@ -419,6 +526,8 @@ const CustomersPage: React.FC = () => {
       {/* Search */}
       <Paper sx={{ p: 1, mb: 1.5, display: 'flex', gap: 2, alignItems: 'center', backgroundColor: 'background.paper', borderRadius: 2 }}>
         <SearchField value={search} onChange={setSearch} placeholder="Search customers..." />
+        <Box sx={{ flexGrow: 1 }} />
+        <ColumnPreferences preferences={columnPreferences} />
       </Paper>
 
       {requestedCustomerQuery.isError && (
@@ -435,7 +544,7 @@ const CustomersPage: React.FC = () => {
 
       {/* Grid */}
       <Paper sx={{ height: 'calc(100vh - 220px)', width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
-        <DataGrid aria-label="Customers" rows={customerListQuery.isError ? [] : data?.items ?? []} columns={columns} rowCount={customerListQuery.isError ? 0 : data?.totalCount ?? 0} loading={isLoading} pageSizeOptions={[10, 25, 50]} paginationModel={paginationModel} paginationMode="server" onPaginationModelChange={setPaginationModel} getRowId={(r) => r.id} disableRowSelectionOnClick />
+        <DataGrid aria-label="Customers" rows={customerListQuery.isError ? [] : data?.items ?? []} columns={orderedColumns} rowCount={customerListQuery.isError ? 0 : data?.totalCount ?? 0} loading={isLoading} pageSizeOptions={[10, 25, 50]} paginationModel={paginationModel} paginationMode="server" onPaginationModelChange={setPaginationModel} getRowId={(r) => r.id} disableRowSelectionOnClick columnVisibilityModel={columnPreferences.columnVisibilityModel} onColumnVisibilityModelChange={columnPreferences.onColumnVisibilityModelChange} />
       </Paper>
 
       {/* ── Dialog ─────────────────────────────────────────────────────────── */}
@@ -512,6 +621,96 @@ const CustomersPage: React.FC = () => {
                       control={<Switch checked={formData.isActive} onChange={(e) => setFormData(p => ({ ...p, isActive: e.target.checked }))} color="success" />}
                       label={<Typography variant="subtitle2" sx={{ fontWeight: 700 }}>Active Status</Typography>}
                     />}
+              </Grid>
+            </Grid>
+          </Box>
+
+          {/* ── FR-CST-01 · Registration and account ─────────────────────────
+              The identifiers a KSA counterparty is verified against, plus the account team
+              that owns the relationship. Each field states what "empty" means rather than
+              leaving a blank that reads like a loading state. */}
+          <Box sx={{ mb: 4, p: 2, borderRadius: 2, bgcolor: 'grey.50', border: '1px solid', borderColor: 'divider' }}>
+            <Stack direction="row" spacing={1} sx={{ mb: 2, alignItems: 'center' }}>
+              <BillingIcon color="primary" fontSize="small" />
+              <Typography variant="subtitle2" sx={{ fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                Registration &amp; Account
+              </Typography>
+            </Stack>
+            <Grid container spacing={2}>
+              <Grid size={{ xs: 12, sm: 6 }}>
+                <TextField
+                  fullWidth size="small"
+                  label="CR number"
+                  value={formData.commercialRegistrationNumber}
+                  onChange={f('commercialRegistrationNumber')}
+                  error={!!customerErrors.commercialRegistrationNumber}
+                  helperText={customerErrors.commercialRegistrationNumber
+                    ?? 'KSA commercial registration: 10 digits. For a non-Saudi registration, include the country prefix. Leave empty if not captured.'}
+                />
+              </Grid>
+              <Grid size={{ xs: 12, sm: 6 }}>
+                <TextField
+                  fullWidth size="small"
+                  label="VAT registration number"
+                  value={formData.taxRegistrationNumber}
+                  onChange={f('taxRegistrationNumber')}
+                  error={!!customerErrors.taxRegistrationNumber}
+                  helperText={customerErrors.taxRegistrationNumber
+                    ?? 'KSA VAT number: 15 digits, beginning and ending with 3. Leave empty if the customer is not registered.'}
+                />
+              </Grid>
+              <Grid size={{ xs: 12, sm: 4 }}>
+                <FormControl fullWidth size="small">
+                  <InputLabel>Sector</InputLabel>
+                  <Select
+                    value={formData.sector}
+                    label="Sector"
+                    onChange={(e) => setFormData(p => ({ ...p, sector: e.target.value as string }))}
+                  >
+                    {/* "Not classified" is a real answer and is stored as NULL. It is deliberately
+                        NOT defaulted to Private — the difference decides whether government
+                        procurement rules apply. */}
+                    <MenuItem value=""><em>Not classified</em></MenuItem>
+                    {SECTOR_OPTIONS.map(option => (
+                      <MenuItem key={option.code} value={option.code}>{option.label}</MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+              </Grid>
+              <Grid size={{ xs: 12, sm: 4 }}>
+                <FormControl fullWidth size="small">
+                  <InputLabel>Region</InputLabel>
+                  <Select
+                    value={formData.regionStateId}
+                    label="Region"
+                    onChange={(e) => setFormData(p => ({ ...p, regionStateId: e.target.value as string }))}
+                  >
+                    {/* The tenant's governed region master — the same list routing resolves sales
+                        territory against, not a free-typed string. */}
+                    <MenuItem value=""><em>Not stated</em></MenuItem>
+                    {states.map(state => (
+                      <MenuItem key={state.stateId} value={String(state.stateId)}>{state.stateName}</MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+              </Grid>
+              <Grid size={{ xs: 12, sm: 4 }}>
+                <FormControl fullWidth size="small">
+                  <InputLabel>Account team</InputLabel>
+                  <Select
+                    value={formData.accountTeamId}
+                    label="Account team"
+                    onChange={(e) => setFormData(p => ({ ...p, accountTeamId: e.target.value as string }))}
+                  >
+                    {/* Assigning a team NARROWS who can read this customer. Leaving it empty
+                        leaves the record readable by everyone who holds the Customers permission,
+                        which is what it was before this field existed. */}
+                    <MenuItem value=""><em>No account team (readable tenant-wide)</em></MenuItem>
+                    {teams.map(team => (
+                      <MenuItem key={team.id} value={String(team.id)}>{team.teamName}</MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
               </Grid>
             </Grid>
           </Box>
@@ -736,6 +935,14 @@ const CustomersPage: React.FC = () => {
               <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 600 }}>No contacts yet. Click "Add Contact" to add one.</Typography>
             </Box>
           )}
+
+          {/* AA-01 · fields this tenant defined on Customer. Renders nothing when none exist,
+              and only once the record is persisted — a value bag needs a row to hang on. */}
+          <CustomFieldValuesEditor
+            entityType="Customer"
+            entityId={selectedRecord?.id ?? null}
+            canEdit={canEdit}
+          />
 
         </DialogContent>
 

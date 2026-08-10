@@ -198,10 +198,19 @@ public sealed class AiGovernanceService : IAiGovernanceService
         // Consult the allow-list gate ONCE, before the serializable reservation
         // transaction: the gate reads through its own scoped context, and its verdict is
         // point-in-time either way (the extraction gate re-evaluates it independently).
-        // Null — no live authorization for this exact resolved destination, or a gate
-        // refusal of any kind — always reads as "not authorized", never as "exempt".
-        var liveCeilingAuthorizationId = context.ProviderClass == AiProviderClass.External
-            ? await CeilingExemptionAsync(context, provider, model, ct)
+        // Any non-allowed outcome — no matching live authorization, endpoint/provider/model
+        // mismatch, expiry, revocation, gate refusal of any kind — is a REFUSAL of the
+        // reservation, never merely the loss of an exemption.
+        AiProviderDescriptor? externalDestination = null;
+        AiExternalProviderDecision? externalAuthorization = null;
+        if (context.ProviderClass == AiProviderClass.External)
+            (externalDestination, externalAuthorization) =
+                await AuthorizeExternalAsync(context, provider, model, ct);
+        // The authorization that PERMITTED this call, whatever the ratio then says about it. It is
+        // the ledger's answer to "which calls went external, under whose authorization" and it is
+        // recorded on every authorized external reservation — see the linkage below.
+        var liveAuthorizationId = externalAuthorization is { Allowed: true } allowed
+            ? allowed.AuthorizationId
             : null;
 
         using var strategyScope = _scopeFactory.CreateScope();
@@ -227,7 +236,27 @@ public sealed class AiGovernanceService : IAiGovernanceService
             var policy = await db.AiProcessingPolicies
                 .SingleOrDefaultAsync(x => x.BusinessUnitId == context.BusinessUnitId, ct);
             var denial = PolicyDenial(policy, context.Purpose, provider, model, context.ProviderClass);
-            long? ceilingExemptAuthorizationId = null;
+
+            // ---- the allow-list is a GATE, not an exemption --------------------
+            // This check used to live only inside the ceiling branch below, where the
+            // authorization could do one thing and one thing only: waive a ratio. Absence of
+            // an authorization was therefore not a refusal — it merely left the call subject
+            // to a ratio test. The consequence was that a tenant with
+            // ExternalProcessingAllowed = TRUE egressed structured line-item data (part
+            // numbers, quantities, unit prices, customer names) to a third party with no
+            // attributed authorization, no justification, no expiry and no revocation path,
+            // for the nine calls in ten the ratio happened to permit — and the ratio is
+            // drainable besides, because local calls buy external headroom.
+            //
+            // A ratio is a cost control. It was never an authorization, and it is not one
+            // here any more. EVERY external reservation, from every path — structured-row
+            // extraction, BOQ drafting, the agent — now requires a live allow-list
+            // authorization naming this exact destination, or it is denied outright with the
+            // gate's own reason code so the ledger records WHY.
+            if (denial is null && context.ProviderClass == AiProviderClass.External
+                && externalAuthorization is not { Allowed: true })
+                denial = externalAuthorization?.Reason ?? AiExternalProviderTrustReasons.GateUnavailable;
+
             if (denial is null && context.ProviderClass == AiProviderClass.External)
             {
                 var recentProviderClasses = await db.AiRequests.AsNoTracking()
@@ -243,19 +272,23 @@ public sealed class AiGovernanceService : IAiGovernanceService
                 var externalCeiling = policy!.ExternalDependencyCeilingPercent / 100m;
                 if ((recentProviderClasses.Count(x => x == AiProviderClass.External) + 1m) / (recentProviderClasses.Count + 1m) > externalCeiling)
                 {
-                    // The ceiling governs UNAUTHORIZED external usage only. An endpoint the
-                    // tenant explicitly authorized through the allow-list is exempt from
-                    // this ratio — the allow-list is the precise, attributed control for
-                    // authorized egress, and on a deployment with no local model the ratio
-                    // is always 100%, which would otherwise deny work the tenant has
-                    // deliberately approved. The exemption is CEILING-ONLY: every other
-                    // control (monthly + per-document budgets, reserve/attempt/settle
-                    // ledger, redaction, injection nonce, count conservation) still runs
-                    // below, unchanged. Any non-allowed outcome — no matching live
-                    // authorization, endpoint/provider/model mismatch, gate refusal of any
-                    // kind — keeps the existing denial: not authorized never means exempt.
-                    ceilingExemptAuthorizationId = liveCeilingAuthorizationId;
-                    if (ceilingExemptAuthorizationId is null)
+                    // The ceiling is a COST control and nothing more. It governs unauthorized
+                    // external usage only, and an endpoint the tenant explicitly authorized
+                    // through the allow-list is exempt from the ratio — on a deployment with
+                    // no local model the ratio is always 100%, which would otherwise deny
+                    // work the tenant has deliberately approved. The exemption is
+                    // CEILING-ONLY: every other control (monthly + per-document budgets,
+                    // reserve/attempt/settle ledger, injection nonce, count conservation)
+                    // still runs below, unchanged.
+                    //
+                    // Since the gate above now refuses every unauthorized external
+                    // reservation outright, the denial on this line is defence in depth
+                    // rather than a live path: it fires only if the gate is ever regressed or
+                    // bypassed by a future call site. That is deliberate — it is the same
+                    // reasoning that keeps an RLS policy under an app-layer check — but it
+                    // does mean the ratio is no longer the thing standing between a tenant's
+                    // line-item data and a third party. The allow-list is.
+                    if (liveAuthorizationId is null)
                         denial = "external_dependency_cap";
                 }
             }
@@ -337,15 +370,28 @@ public sealed class AiGovernanceService : IAiGovernanceService
             budget.UpdatedOn = now;
             var request = NewRequest(context, provider, model, input, inputHash, estimatedInput, reserve, now,
                 AiCallStatuses.Reserved, null);
-            if (ceilingExemptAuthorizationId is not null)
+            if (liveAuthorizationId is not null)
             {
-                // Audit linkage: the ledger row records WHICH authorization exempted this
-                // reservation from the ceiling, and the deployment posture at that moment,
-                // so "which calls went external under whose authorization" is answerable
-                // from the ledger alone.
-                request.ExternalAuthorizationId = ceilingExemptAuthorizationId;
+                // Audit linkage: the ledger row records WHICH authorization permitted this
+                // reservation, and the deployment posture at that moment, so "which calls
+                // went external under whose authorization" is answerable from the ledger
+                // alone.
+                //
+                // This used to be written only inside the ceiling-breach branch above, i.e.
+                // only when the authorization ALSO waived the ratio. Under the default 10%
+                // ceiling an external call that happened to land at or under the ratio was
+                // recorded with a null ExternalAuthorizationId — an authorized egress with
+                // no attributable authorization on the row, which is the one question the
+                // column exists to answer. The ceiling is a cost control and its outcome is
+                // not what makes a call attributable; the authorization is. The waiver
+                // itself is still tracked separately by ceilingExemptAuthorizationId.
+                request.ExternalAuthorizationId = liveAuthorizationId;
+                // The posture of the destination THIS call went to, not of whichever endpoint
+                // happens to be the extraction one — the agent's origin is a separate
+                // descriptor and would otherwise be logged under the wrong stance.
                 request.InferencePosture = InferencePostures
-                    .For(_externalProviderTrust.ResolvedProvider.ProviderClass).ToString();
+                    .For((externalDestination ?? _externalProviderTrust.ResolvedProvider).ProviderClass)
+                    .ToString();
             }
             request.BudgetWarning = budget.SoftTokenLimit is { } soft
                 && budget.ReservedTokens + budget.SettledTokens > soft;
@@ -519,16 +565,16 @@ public sealed class AiGovernanceService : IAiGovernanceService
     }
 
     /// <summary>
-    /// Returns the id of the live allow-list authorization covering this reservation's
-    /// destination, or null when the reservation must remain subject to the ceiling.
+    /// The allow-list verdict for this reservation's destination. Never null-as-maybe: a
+    /// decision is always returned, and anything other than <c>Allowed</c> denies the
+    /// reservation in <see cref="ReserveAsync"/>.
     ///
     /// <para>
-    /// The only endpoint identity this service can trust is the one resolved at startup
-    /// (<see cref="IAiExternalProviderTrust.ResolvedProvider"/>), so the exemption is
-    /// consulted ONLY when the reservation's provider and model are exactly that resolved
-    /// destination. Any other external reservation (for example the Anthropic agent
-    /// client, whose endpoint is not the resolved one) cannot be matched to an
-    /// authorization here and therefore stays under the ceiling — mismatch fails closed.
+    /// A reservation can only be authorized against a destination this process actually
+    /// has a descriptor for (<see cref="IAiExternalProviderTrust.KnownProviders"/>) —
+    /// extraction and agent alike, since the agent's origin is now registered too. A
+    /// provider/model pair that matches no descriptor names an endpoint the governance model
+    /// cannot identify, so it cannot be authorized and is refused: mismatch fails closed.
     /// </para>
     ///
     /// <para>
@@ -539,18 +585,18 @@ public sealed class AiGovernanceService : IAiGovernanceService
     /// enforced by <see cref="IAiExternalProviderTrust.EvaluateAsync"/> here.
     /// </para>
     /// </summary>
-    private async Task<long?> CeilingExemptionAsync(
-        AiCallContext context, string provider, string model, CancellationToken ct)
+    private async Task<(AiProviderDescriptor? Destination, AiExternalProviderDecision Decision)>
+        AuthorizeExternalAsync(AiCallContext context, string provider, string model, CancellationToken ct)
     {
-        var resolved = _externalProviderTrust.ResolvedProvider;
-        if (!resolved.IsResolved
-            || !AiProviderEndpoint.ProviderMatches(resolved.Provider, provider)
-            || !string.Equals(resolved.Model, model, StringComparison.Ordinal))
-            return null;
+        var destination = _externalProviderTrust.KnownProviders.FirstOrDefault(
+            x => x.IsResolved
+                 && AiProviderEndpoint.ProviderMatches(x.Provider, provider)
+                 && string.Equals(x.Model, model, StringComparison.Ordinal));
+        if (destination is null)
+            return (null, AiExternalProviderDecision.Deny(AiExternalProviderTrustReasons.EndpointUnresolved));
 
-        var decision = await _externalProviderTrust.EvaluateAsync(
-            context.BusinessUnitId, resolved, context.Purpose, unstructuredPayload: false, ct);
-        return decision.Allowed ? decision.AuthorizationId : null;
+        return (destination, await _externalProviderTrust.EvaluateAsync(
+            context.BusinessUnitId, destination, context.Purpose, unstructuredPayload: false, ct));
     }
 
     private static string? PolicyDenial(

@@ -27,6 +27,7 @@ using ERP_RFQ_Automation.Infrastructure.Storage;
 using ERP_RFQ_Automation.AI;
 using ERP_RFQ_Automation.HealthChecks;
 using ERP_RFQ_Automation.Ingestion.Triage;
+using ERP_RFQ_Automation.MultiTenancy;
 
 namespace ERP_RFQ_Automation.Services
 {
@@ -131,6 +132,13 @@ namespace ERP_RFQ_Automation.Services
         // the intake unit tests can construct the service without it; absent means "poll every
         // mailbox", which is the behaviour that existed before it.
         private readonly ERP_RFQ_Automation.Platform.Lifecycle.ITenantWorkGate? _workGate;
+        // SEC-ING-01: the ambient tenant scope every mailbox is polled inside. Optional only so the
+        // existing construction sites stay source-compatible; when it is not supplied it is
+        // resolved from the container instead (the accessor is a singleton, so any scope yields the
+        // same instance). It is NEVER substituted with a fresh TenantScopeAccessor: the scope is an
+        // AsyncLocal read by the DbContext, so a second accessor would be pushed into and read from
+        // two different objects and every ingest query would silently run unscoped again.
+        private readonly ITenantScopeAccessor? _tenantScope;
         private readonly TimeSpan _initialLookback;
         private readonly TimeSpan _minLookback;
         private readonly TimeSpan _maxLookback;
@@ -138,8 +146,10 @@ namespace ERP_RFQ_Automation.Services
             ILogger<EmailService> logger, ILLMService llmService, IServiceScopeFactory scopeFactory,
             IConfiguration configuration, IFileStorage storage,
             IEmailPollerHealth? pollerHealth = null,
-            ERP_RFQ_Automation.Platform.Lifecycle.ITenantWorkGate? workGate = null)
+            ERP_RFQ_Automation.Platform.Lifecycle.ITenantWorkGate? workGate = null,
+            ITenantScopeAccessor? tenantScope = null)
         {
+            _tenantScope = tenantScope;
             _context = context;
             _env = env;
             _logger = logger;
@@ -167,9 +177,28 @@ namespace ERP_RFQ_Automation.Services
 
         private static TimeSpan PositiveDays(double configured, double fallback)
             => TimeSpan.FromDays(configured > 0 ? configured : fallback);
+
+        /// <summary>
+        /// SEC-ING-01: the ONE query in this service that runs with no tenant pushed, and therefore
+        /// under the BYPASSRLS pipeline role. It reads nothing but the ids and the two facts the
+        /// suspension gate and its warning need. The mailbox's host, username and PASSWORD are
+        /// re-read per mailbox inside the pushed scope below, where RLS binds.
+        /// </summary>
+        private sealed record MailboxHandle(
+            long Id, long BusinessUnitId, string EmailAddress, DateTime? LastSuccessfulPollOn);
+
+        /// <summary>The container's accessor, which is a singleton, so any scope yields the same one.</summary>
+        private ITenantScopeAccessor TenantScope()
+        {
+            if (_tenantScope is not null) return _tenantScope;
+            using var scope = _scopeFactory.CreateScope();
+            return scope.ServiceProvider.GetRequiredService<ITenantScopeAccessor>();
+        }
+
         public async Task<MailboxPollReport> FetchAndSaveLeadsAsync(long? businessUnitId = null)
         {
             var query = _context.EmailConfigurations
+                .AsNoTracking()
                 .Where(e => e.IsActive && e.Protocol.ToUpper() == "IMAP");
 
             if (businessUnitId.HasValue && businessUnitId.Value > 0)
@@ -177,7 +206,11 @@ namespace ERP_RFQ_Automation.Services
                 query = query.Where(e => e.BusinessUnitId == businessUnitId.Value);
             }
 
-            var configs = await query.ToListAsync();
+            var configs = await query
+                .OrderBy(e => e.BusinessUnitId).ThenBy(e => e.Id)
+                .Select(e => new MailboxHandle(
+                    e.Id, e.BusinessUnitId, e.EmailAddress, e.LastSuccessfulPollOn))
+                .ToListAsync();
 
             // The most expensive gate in the product. ProcessConfigAsync resolves ILLMService from
             // its own scope and enqueues every attachment for extraction, so an unpolled mailbox is
@@ -213,40 +246,100 @@ namespace ERP_RFQ_Automation.Services
             _logger.LogInformation("Found {Count} active IMAP email configurations to process.", configs.Count);
 
             var outcomes = new List<MailboxPollOutcome>(configs.Count);
-            foreach (var config in configs)
+            var tenantScope = TenantScope();
+            foreach (var handle in configs)
             {
                 MailboxPollOutcome outcome;
+
+                // SEC-ING-01. THE PUSH COMES FIRST, AND IT MUST.
+                //
+                // ITenantContext captures ITenantScopeAccessor.BusinessUnitId in its CONSTRUCTOR
+                // (HttpTenantContext, MultiTenancy/ITenantContext.cs), and ErpRfqAutomationContext
+                // captures that ITenantContext in ITS constructor — so the tenant a DI scope's
+                // DbContext believes in is fixed at the moment the scope first resolves it. A push
+                // issued after CreateScope() changes nothing for that scope.
+                //
+                // Without it the whole ingest ran with BusinessUnitId == null, which turns the EF
+                // global query filters into no-ops AND routes the connection to nexora_pipeline_app
+                // — created BYPASSRLS — so both isolation layers were off at once.
+                using var tenant = tenantScope.Push(handle.BusinessUnitId);
+                using var mailboxScope = _scopeFactory.CreateScope();
+                var mailboxContext = mailboxScope.ServiceProvider
+                    .GetRequiredService<ErpRfqAutomationContext>();
+
+                EmailConfiguration? config = null;
                 try
                 {
+                    // Fail closed, the SlaSweepWorker contract. If the DbContext in this scope did
+                    // not pick the pushed scope up, every query the ingest runs below would be
+                    // cross-tenant under the bypass role again — so this refuses to poll rather
+                    // than poll unscoped. The refusal is per MAILBOX and lands in the durable poll
+                    // ledger, so the operator sees a red channel instead of a dead poll loop.
+                    if (mailboxContext.ScopedTenantId != handle.BusinessUnitId)
+                    {
+                        throw new InvalidOperationException(
+                            $"Mailbox poll refused for {handle.EmailAddress} (BU {handle.BusinessUnitId}): "
+                            + $"the DbContext resolved tenant "
+                            + $"{mailboxContext.ScopedTenantId?.ToString() ?? "<none>"}. "
+                            + "Tenant scope is mandatory for this worker.");
+                    }
+
+                    // Re-read INSIDE the scope, with the tenant predicate stated as well as
+                    // inherited: this is the read that carries the mailbox credential, and it must
+                    // be the tenant's own row or nothing.
+                    config = await mailboxContext.EmailConfigurations
+                        .FirstOrDefaultAsync(e => e.Id == handle.Id
+                            && e.BusinessUnitId == handle.BusinessUnitId);
+                    if (config is null)
+                    {
+                        throw new InvalidOperationException(
+                            $"Mailbox {handle.EmailAddress} (configuration {handle.Id}, BU "
+                            + $"{handle.BusinessUnitId}) was discovered but is not readable inside "
+                            + "its own tenant scope.");
+                    }
+
                     _logger.LogInformation("Starting process for configuration: {Email}", config.EmailAddress);
-                    outcome = await ProcessConfigAsync(config);
+                    outcome = await ProcessConfigAsync(mailboxScope.ServiceProvider, config);
                 }
                 catch (Exception ex)
                 {
                     // A catastrophic failure inside ProcessConfigAsync must not stop the loop
                     // from reaching the next mailbox — but it must never be mistaken for
                     // success either, which is precisely what this method used to do.
-                    _logger.LogError(ex, "Unexpected failure processing email configuration {Email}. Moving to next.", config.EmailAddress);
-                    outcome = FailedOutcome(config, ex, ResolveLookbackWindow(config, DateTime.UtcNow));
+                    _logger.LogError(ex, "Unexpected failure processing email configuration {Email}. Moving to next.", handle.EmailAddress);
+                    outcome = FailedOutcome(handle, ex, ResolveLookbackWindow(handle.LastSuccessfulPollOn, DateTime.UtcNow));
                 }
 
-                // ING-08: the durable ledger is written for BOTH outcomes, on every cycle.
-                await RecordPollOutcomeAsync(config, outcome);
+                // ING-08: the durable ledger is written for BOTH outcomes, on every cycle. Written
+                // through the tenant-scoped context so the UPDATE is bound by the same RLS policy
+                // as every other write in this cycle. When the guard above refused, `config` is
+                // null and there is nothing tracked to write — the failure is still reported.
+                if (config is not null)
+                    await RecordPollOutcomeAsync(mailboxContext, config, outcome);
                 outcomes.Add(outcome);
 
+                // The mailbox is named from the HANDLE, never from `config`. When the tenant-scope
+                // guard above refuses, `config` is still null — and the failure branch below is
+                // precisely the branch that runs then, so dereferencing `config` there threw a
+                // NullReferenceException out of FetchAndSaveLeadsAsync while REPORTING a refusal.
+                // It replaced the operator's one clear sentence ("tenant scope is mandatory") with
+                // a stack trace and killed the loop before the remaining mailboxes were polled:
+                // an exception raised while logging a refusal hides the refusal. The handle carries
+                // the same address, is non-null on every path, and is the value the guard's own
+                // message already uses.
                 if (outcome.Succeeded)
                 {
                     _logger.LogInformation(
                         "Finished process for configuration: {Email} ({Downloaded} new message(s), "
                         + "{AlreadyIngested} already in the ingestion ledger).",
-                        config.EmailAddress, outcome.MessagesDownloaded, outcome.MessagesAlreadyIngested);
+                        handle.EmailAddress, outcome.MessagesDownloaded, outcome.MessagesAlreadyIngested);
                 }
                 else
                 {
                     _logger.LogError(
                         "Mailbox {Email} could NOT be polled: {Reason} Last successful poll: {LastSuccess}. "
                         + "No message from this mailbox has been ingested since then.",
-                        config.EmailAddress, outcome.FailureReason,
+                        handle.EmailAddress, outcome.FailureReason,
                         outcome.LastSuccessfulPollOn?.ToString("O") ?? "never");
                 }
             }
@@ -279,7 +372,8 @@ namespace ERP_RFQ_Automation.Services
         /// half of the fix: <c>LastSuccessfulPollOn</c> is what the next lookback window is
         /// derived from, and <c>LastPollError</c> is the reason an operator reads.
         /// </summary>
-        private async Task RecordPollOutcomeAsync(EmailConfiguration config, MailboxPollOutcome outcome)
+        private async Task RecordPollOutcomeAsync(
+            ErpRfqAutomationContext context, EmailConfiguration config, MailboxPollOutcome outcome)
         {
             var now = DateTime.UtcNow;
             config.LastPollAttemptOn = now;
@@ -299,7 +393,7 @@ namespace ERP_RFQ_Automation.Services
 
             try
             {
-                await _context.SaveChangesAsync();
+                await context.SaveChangesAsync();
             }
             catch (Exception ex)
             {
@@ -309,14 +403,22 @@ namespace ERP_RFQ_Automation.Services
             }
         }
 
-        private async Task<MailboxPollOutcome> ProcessConfigAsync(EmailConfiguration config)
+        /// <summary>
+        /// SEC-ING-01: takes the caller's ALREADY tenant-scoped provider instead of creating its
+        /// own. The scope has to be created after <c>ITenantScopeAccessor.Push</c> — every
+        /// <c>ITenantContext</c> implementation captures the ambient tenant in its constructor — so
+        /// a scope created here, out of the caller's sight, is exactly where the tenant used to get
+        /// lost. The caller has already asserted <c>ScopedTenantId == config.BusinessUnitId</c> on
+        /// this provider's DbContext.
+        /// </summary>
+        private async Task<MailboxPollOutcome> ProcessConfigAsync(
+            IServiceProvider scopedServices, EmailConfiguration config)
         {
-            using var scope = _scopeFactory.CreateScope();
-            var localContext = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
-            var localLlm = scope.ServiceProvider.GetRequiredService<ILLMService>();
+            var localContext = scopedServices.GetRequiredService<ErpRfqAutomationContext>();
+            var localLlm = scopedServices.GetRequiredService<ILLMService>();
             // ING-05: unified-queue gateway from the SAME scope as localContext (null when
             // not registered -> the legacy direct path below still works).
-            var ingestion = scope.ServiceProvider.GetService<ERP_RFQ_Automation.Extraction.IDocumentIngestion>();
+            var ingestion = scopedServices.GetService<ERP_RFQ_Automation.Extraction.IDocumentIngestion>();
 
             var window = ResolveLookbackWindow(config, DateTime.UtcNow);
             LogLookbackWindow(config, window);
@@ -326,8 +428,31 @@ namespace ERP_RFQ_Automation.Services
             using var client = new ImapClient();
             try
             {
-                await client.ConnectAsync(config.Host, config.Port,
-                    config.UseSsl ? SecureSocketOptions.SslOnConnect : SecureSocketOptions.None);
+                // SSRF: the host and port on this row are supplied by a TENANT ADMINISTRATOR
+                // and this poller dialled them directly, on a 300-second loop, from inside the
+                // trust boundary — the last mail path in the product that had not been
+                // converted (the SMTP send below closed the identical defect). A mailbox row
+                // whose host resolves to 169.254.169.254, 127.0.0.1 or any RFC 1918 address
+                // turned this background service into an instance-metadata reader and an
+                // internal port scanner, with the connect outcome surfaced back through
+                // mailbox status. MailEndpointPolicy resolves the name, refuses unless EVERY
+                // returned address is publicly routable, and hands back a socket already
+                // connected to one of those exact addresses, so there is no window in which a
+                // rebinding answer can be dialled. The TLS mode and the credential are
+                // deliberately unchanged: nothing about a legitimate host behaves differently.
+                var pollSocket = await ERP_RFQ_Automation.Security.MailEndpointPolicy
+                    .ConnectAsync(config.Host, config.Port, CancellationToken.None);
+                try
+                {
+                    await client.ConnectAsync(pollSocket, config.Host, config.Port,
+                        config.UseSsl ? SecureSocketOptions.SslOnConnect : SecureSocketOptions.None);
+                }
+                catch
+                {
+                    // MailKit owns the socket only once it has accepted it.
+                    pollSocket.Dispose();
+                    throw;
+                }
                 await client.AuthenticateAsync(config.EmailAddress, config.Password);
                 var inbox = client.Inbox;
                 await inbox.OpenAsync(FolderAccess.ReadWrite);
@@ -370,7 +495,23 @@ namespace ERP_RFQ_Automation.Services
                         if (!client.IsConnected)
                         {
                             _logger.LogWarning("Connection lost during processing email {UID}. Reconnecting...", uid);
-                            await client.ConnectAsync(config.Host, config.Port, config.UseSsl ? SecureSocketOptions.SslOnConnect : SecureSocketOptions.None);
+                            // A reconnect is a SECOND outbound dial to the same tenant-supplied
+                            // host, so it is re-resolved and re-validated rather than trusted
+                            // because the first connect succeeded. Skipping the policy here
+                            // would leave the whole SSRF primitive reachable by dropping one
+                            // connection mid-poll.
+                            var reconnectSocket = await ERP_RFQ_Automation.Security.MailEndpointPolicy
+                                .ConnectAsync(config.Host, config.Port, CancellationToken.None);
+                            try
+                            {
+                                await client.ConnectAsync(reconnectSocket, config.Host, config.Port,
+                                    config.UseSsl ? SecureSocketOptions.SslOnConnect : SecureSocketOptions.None);
+                            }
+                            catch
+                            {
+                                reconnectSocket.Dispose();
+                                throw;
+                            }
                             await client.AuthenticateAsync(config.EmailAddress, config.Password);
                             await client.Inbox.OpenAsync(FolderAccess.ReadWrite);
                         }
@@ -437,6 +578,15 @@ namespace ERP_RFQ_Automation.Services
                 DescribeFailure(ex), IsPermanentFailure(ex), config.LastSuccessfulPollOn,
                 window.SinceUtc, window.CappedDays, downloaded, alreadyIngested);
 
+        /// <summary>Same outcome from the discovery handle, for the failures that happen BEFORE the
+        /// mailbox row could be read inside its own tenant scope (including the scope guard).</summary>
+        private MailboxPollOutcome FailedOutcome(
+            MailboxHandle handle, Exception ex, LookbackWindow window,
+            int downloaded = 0, int alreadyIngested = 0)
+            => new(handle.Id, handle.EmailAddress, Succeeded: false,
+                DescribeFailure(ex), IsPermanentFailure(ex), handle.LastSuccessfulPollOn,
+                window.SinceUtc, window.CappedDays, downloaded, alreadyIngested);
+
         /// <summary>
         /// A one-line, operator-readable reason. Deliberately names the exception type: the
         /// production symptom was <c>AuthenticationException: Authentication failed</c>, and
@@ -495,8 +645,10 @@ namespace ERP_RFQ_Automation.Services
         /// </list>
         /// </summary>
         internal LookbackWindow ResolveLookbackWindow(EmailConfiguration config, DateTime nowUtc)
+            => ResolveLookbackWindow(config.LastSuccessfulPollOn, nowUtc);
+
+        internal LookbackWindow ResolveLookbackWindow(DateTime? lastSuccess, DateTime nowUtc)
         {
-            var lastSuccess = config.LastSuccessfulPollOn;
             var firstEver = lastSuccess is null;
             var since = firstEver ? nowUtc - _initialLookback : lastSuccess!.Value;
 
@@ -530,7 +682,7 @@ namespace ERP_RFQ_Automation.Services
         /// it in front of the operator during the window in which it is still actionable: widen
         /// the cap before reinstating, or recover the gap from the mailbox by hand.</para>
         /// </summary>
-        private void WarnIfSuspensionHasOutrunTheLookback(EmailConfiguration config)
+        private void WarnIfSuspensionHasOutrunTheLookback(MailboxHandle config)
         {
             if (config.LastSuccessfulPollOn is not DateTime lastSuccess) return;
 
@@ -897,7 +1049,12 @@ namespace ERP_RFQ_Automation.Services
             }
             return false;
         }
-        private async Task<(long leadId, string extractedText)> SaveLeadFromEmailAndAttachments(
+        /// <summary>
+        /// Internal rather than private so the cross-tenant duplicate regression can drive the REAL
+        /// ingest write path — the duplicate check, the transaction, the Lead + LeadItems graph and
+        /// the identity baseline — instead of a re-implementation of the query under test.
+        /// </summary>
+        internal async Task<(long leadId, string extractedText)> SaveLeadFromEmailAndAttachments(
             MimeMessage message, EmailIngest ingest, EmailConfiguration config,
             ErpRfqAutomationContext context, ILLMService llmService)
         {
@@ -1050,12 +1207,28 @@ namespace ERP_RFQ_Automation.Services
                         return (0, extracted);
                     }
                 }
-                // Check for existing lead with same RFQno to avoid duplicate leads
+                // Check for existing lead with same RFQno to avoid duplicate leads.
+                //
+                // SEC-ING-01. THE TENANT PREDICATE IS THE POINT OF THIS BLOCK, not decoration.
+                // Both inputs — the RFQ number and the buyer name — are extracted from an inbound
+                // email, so an outside party who can send mail to this mailbox chooses them. With
+                // no BusinessUnitId predicate the query asked "does ANY tenant on the platform
+                // hold this lead", which is two defects at once:
+                //   * an existence oracle — a silent drop told the sender whether a named buyer is
+                //     running a named tender through a competitor; and
+                //   * cross-tenant denial of ingest on day one — one buyer issues one RFQ number
+                //     to many vendors, so two Nexora tenants bidding the same tender suppressed
+                //     each other's leads, first-come-first-served, with only a LogWarning.
+                // Stated explicitly rather than left to the global query filter: the filter is a
+                // no-op when the ambient tenant is null, which is exactly the state this path used
+                // to run in. Duplicate detection is a per-tenant question and now says so.
+                var businessUnitId = config.BusinessUnitId;
                 bool isDuplicate = false;
 
                 if (!string.IsNullOrWhiteSpace(ai.Rfqno))
                 {
                     isDuplicate = await context.Leads.AnyAsync(l =>
+                        l.BusinessUnitId == businessUnitId &&
                         l.Rfqno == ai.Rfqno &&
                         l.BuyersName == ai.BuyersName);
                 }
@@ -1066,6 +1239,7 @@ namespace ERP_RFQ_Automation.Services
                     if (firstItem != null && firstItem.Quantity > 0)
                     {
                         isDuplicate = await context.Leads.AnyAsync(l =>
+                            l.BusinessUnitId == businessUnitId &&
                             l.BuyersName == ai.BuyersName &&
                             l.NoOfLineItems == ai.Items.Count &&
                             l.LeadItems.Any(li =>
@@ -1076,7 +1250,10 @@ namespace ERP_RFQ_Automation.Services
 
                 if (isDuplicate)
                 {
-                    _logger.LogWarning("Skipping duplicate lead for RFQ: {Rfqno}", ai.Rfqno);
+                    _logger.LogWarning(
+                        "Skipping duplicate lead for RFQ {Rfqno} from {Buyer} in business unit {BusinessUnitId}; "
+                        + "this business unit already holds it.",
+                        ai.Rfqno, ai.BuyersName, businessUnitId);
                     return (0, extracted);
                 }
                 
@@ -1089,7 +1266,12 @@ namespace ERP_RFQ_Automation.Services
                     DateTime? bidClosingDate = ParseDate(ai.BidClosingDate);
                     DateTime? acknowledgmentDate = ParseDate(ai.AcknowledgmentDate);
                     DateTime? subDate = ParseDate(ai.SubDate);
-                    var items = ai.Items.Where(x => x.Quantity > 0).ToList();
+                    // Every extracted line is kept. Filtering on Quantity > 0 silently discarded any line
+                    // whose quantity the document did not state — the extractor is instructed to return
+                    // null in exactly that case — and the line count was taken from the filtered list, so
+                    // the loss was self-consistent and invisible. A line a reviewer can see and correct is
+                    // always better than a line that never existed.
+                    var items = ai.Items.ToList();
                     // Create lead record
                     var lead = new Lead
                     {
@@ -1652,18 +1834,10 @@ namespace ERP_RFQ_Automation.Services
             if (string.IsNullOrEmpty(value)) return null;
             return value.Length <= maxLength ? value : value.Substring(0, maxLength - 3) + "...";
         }
-        private DateTime? ParseDate(string? s)
-        {
-            if (string.IsNullOrWhiteSpace(s)) return null;
-            var formats = new[]
-            {
-                "yyyy-MM-dd", "dd/MM/yyyy", "MM/dd/yyyy",
-                "dd-MM-yyyy", "d/M/yyyy", "yyyy/MM/dd"
-            };
-            return DateTime.TryParseExact(s.Trim(), formats,
-                System.Globalization.CultureInfo.InvariantCulture,
-                System.Globalization.DateTimeStyles.None, out var d) ? d : null;
-        }
+        // Shared with every other ingestion door — see RfqDateParser for why this is no longer
+        // a per-service copy. This path previously had no sentinel-year guard, so an extracted
+        // "0001-01-01" reached the database as a real closing date.
+        private DateTime? ParseDate(string? s) => Extraction.RfqDateParser.Parse(s);
         private string GetEmailBody(MimeMessage message)
         {
             var body = message.GetTextBody(TextFormat.Plain);

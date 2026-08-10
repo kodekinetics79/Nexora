@@ -68,7 +68,12 @@ public sealed record SupplierNegotiationRound(
     string? PaymentTerms,
     decimal FreightAmount,
     decimal TaxAmount,
-    DateTime CapturedOn);
+    DateTime CapturedOn,
+    // The rest of the charge block. Freight and tax alone described a round that could not contain
+    // an import: the workspace showed a buyer an EXW round with no duty line to notice was missing.
+    decimal DutyAmount = 0m,
+    decimal OtherAmount = 0m,
+    decimal DiscountAmount = 0m);
 
 public sealed record SupplierBidQualityFlag(
     string Code,

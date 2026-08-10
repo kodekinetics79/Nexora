@@ -35,6 +35,72 @@ public sealed class InsufficientStockException(long inventoryId, decimal request
     public decimal Available { get; } = available;
 }
 
+/// <summary>
+/// FR-INV-01. One lot's reservable position on an inventory row: what the lot still physically
+/// holds, less the part of it that other orders have already named.
+/// </summary>
+/// <param name="MaterialLotId">The lot.</param>
+/// <param name="LotNumber">The supplier batch, the serial, or the receipt-derived identifier.</param>
+/// <param name="Remaining">Received minus declared-consumed — what the lot still contains.</param>
+/// <param name="Held">The sum of ACTIVE holds naming this lot.</param>
+/// <param name="ExpiryDate">Shelf life of the material, null when it does not expire.</param>
+/// <param name="ReceivedOn">When it entered the building. The FIFO tie-break.</param>
+public readonly record struct ReservableLot(
+    long MaterialLotId,
+    string LotNumber,
+    decimal Remaining,
+    decimal Held,
+    DateOnly? ExpiryDate,
+    DateTime ReceivedOn)
+{
+    /// <summary>How much of this lot a new hold may still name. Never negative.</summary>
+    public decimal Reservable => Math.Max(0m, Remaining - Held);
+}
+
+/// <summary>
+/// FR-INV-01. What a recall actually needs: the orders that are holding or have consumed a named
+/// lot, as opposed to the orders that merely hold the product the lot happens to be an instance of.
+/// </summary>
+/// <param name="Held">Active holds naming the lot — stock committed but not yet issued.</param>
+/// <param name="Consumed">Holds already issued against the lot.</param>
+public sealed record LotCommitmentView(
+    long MaterialLotId,
+    IReadOnlyList<LotCommitment> Held,
+    IReadOnlyList<LotCommitment> Consumed)
+{
+    public decimal HeldQuantity => Held.Sum(x => x.Quantity);
+    public decimal ConsumedQuantity => Consumed.Sum(x => x.Quantity);
+
+    /// <summary>The distinct orders a recall of this lot has to reach.</summary>
+    public IReadOnlyList<long> AffectedOrderIds =>
+        Held.Concat(Consumed).Where(x => x.OrderId.HasValue).Select(x => x.OrderId!.Value)
+            .Distinct().OrderBy(x => x).ToList();
+}
+
+/// <summary>One order's commitment against a lot.</summary>
+public sealed record LotCommitment(
+    long ReservationId, long? OrderId, long? OrderItemId, decimal Quantity,
+    StockReservationStatus Status, DateTime CreatedOn);
+
+/// <summary>
+/// Raised when a goods issue would move stock out of a lot that is under quality hold.
+///
+/// <para>This is the <b>physical</b> half of FR-MTR-05. Available-to-promise already refuses to
+/// promise quarantined stock and the fulfilment declaration already refuses to name a quarantined
+/// lot — but a hold taken before the recall names units a picker can still walk to the rack and
+/// take. Since the hold now names its lot, the issue can refuse it.</para>
+/// </summary>
+public sealed class QuarantinedLotIssueException(long reservationId, long materialLotId, string lotNumber)
+    : InvalidOperationException(
+        $"Reservation {reservationId} holds lot {lotNumber}, which is quarantined. The stock cannot be "
+        + "issued until the lot is released by an authorized user, or the order is re-allocated to "
+        + "another lot.")
+{
+    public long ReservationId { get; } = reservationId;
+    public long MaterialLotId { get; } = materialLotId;
+    public string LotNumber { get; } = lotNumber;
+}
+
 public interface IInventoryAvailabilityService
 {
     /// <summary>Computes on-hand, reserved and available-to-promise for one inventory item.</summary>
@@ -44,13 +110,77 @@ public interface IInventoryAvailabilityService
     /// Atomically holds <paramref name="quantity"/> of an inventory item for an order. Idempotent on
     /// <paramref name="idempotencyKey"/> — a replay returns the existing hold. Throws
     /// <see cref="InsufficientStockException"/> if available-to-promise is below the request.
+    ///
+    /// <para><paramref name="materialLotId"/> names the physical lot the hold reserves (FR-INV-01).
+    /// A named lot is proved to belong to this tenant, to sit on this inventory row, to be
+    /// AVAILABLE rather than quarantined, and to have that much of itself unheld — otherwise the
+    /// lot column would be decoration rather than a commitment. Null holds the un-lotted balance:
+    /// opening stock, adjustments and transfers have no receipt behind them and therefore no lot.</para>
     /// </summary>
     Task<StockReservation> ReserveAsync(
         long businessUnitId, long inventoryId, decimal quantity, string idempotencyKey,
-        long? orderId = null, long? orderItemId = null, string? actor = null, CancellationToken ct = default);
+        long? orderId = null, long? orderItemId = null, string? actor = null,
+        long? materialLotId = null, CancellationToken ct = default);
+
+    /// <summary>
+    /// FR-INV-01. The lots on one inventory row that a new hold may still name, ordered the way a
+    /// warehouse actually picks: <b>first-expired-first-out</b>, then oldest receipt, then id.
+    ///
+    /// <para>FEFO rather than plain FIFO because a trading business holds sealant, adhesives and
+    /// batteries alongside steel — picking the oldest receipt when a newer one expires sooner
+    /// manufactures write-offs. Where nothing carries a shelf life the ordering degenerates
+    /// exactly to FIFO, which is what the rack does anyway.</para>
+    ///
+    /// <para>Quarantined lots are excluded, so this and the availability bucket agree by
+    /// construction rather than by two code paths remembering the same rule.</para>
+    /// </summary>
+    Task<IReadOnlyList<ReservableLot>> GetReservableLotsAsync(
+        long businessUnitId, long inventoryId, CancellationToken ct = default);
+
+    /// <summary>
+    /// FR-INV-01 / FR-MTR-05. Releases every ACTIVE hold that names <paramref name="materialLotId"/>.
+    ///
+    /// <para>This is what lot-level reservation buys over
+    /// <see cref="ReleaseForQuarantineAsync"/>. The quantity-based sweep frees the newest holds on
+    /// the inventory row until enough stock is uncommitted — which is the best a hold that names no
+    /// lot allows, but it displaces whichever orders happen to be newest rather than the orders that
+    /// were actually holding the recalled material. This releases precisely the affected ones and
+    /// leaves every order holding a sound lot untouched.</para>
+    /// </summary>
+    Task<IReadOnlyList<StockReservation>> ReleaseHoldsOnLotAsync(
+        long businessUnitId, long materialLotId, string? actor = null, CancellationToken ct = default);
+
+    /// <summary>
+    /// FR-INV-01. Who is committed to a lot: the orders holding it now and the orders it has
+    /// already been issued to. The population a recall notice has to reach.
+    /// </summary>
+    Task<LotCommitmentView> GetLotCommitmentsAsync(
+        long businessUnitId, long materialLotId, CancellationToken ct = default);
 
     /// <summary>Releases every ACTIVE hold for an order (e.g. on cancellation); availability is restored.</summary>
     Task<int> ReleaseForOrderAsync(long businessUnitId, long orderId, string? actor = null, CancellationToken ct = default);
+
+    /// <summary>
+    /// FR-MTR-05. Releases ACTIVE holds on one inventory row until at least
+    /// <paramref name="quantityToFree"/> of committed stock has been given back, newest hold first.
+    /// Joins the caller's ambient transaction.
+    ///
+    /// <para><b>Why quarantine has to do this at all.</b> Reducing available-to-promise stops the
+    /// NEXT order reserving quarantined stock, but it does nothing about stock that is already held:
+    /// <see cref="ConsumeAsync"/> checks only that physical on-hand covers the hold — it never
+    /// re-reads availability — so a lot reserved before it was recalled would still ship. Leaving
+    /// the hold in place would make the quarantine look enforced on every screen while the goods
+    /// went out of the door.</para>
+    ///
+    /// <para>Newest-first is deliberate: the oldest commitment is the one the customer was promised
+    /// first, and first-come-first-served is a rule a salesperson can explain. Every release is
+    /// audited as <c>STOCK_RESERVATION_RELEASED_ON_QUARANTINE</c> — a distinct event type, because
+    /// "we took your stock back because the material was recalled" and "the order was cancelled" are
+    /// different facts and must not be indistinguishable in the ledger.</para>
+    /// </summary>
+    Task<IReadOnlyList<StockReservation>> ReleaseForQuarantineAsync(
+        long businessUnitId, long inventoryId, decimal quantityToFree, string? actor = null,
+        CancellationToken ct = default);
 
     /// <summary>Releases one active hold with optimistic concurrency and an auditable transition.</summary>
     Task ReleaseAsync(long businessUnitId, long reservationId, uint expectedVersion,
@@ -128,7 +258,8 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
 
     public async Task<StockReservation> ReserveAsync(
         long businessUnitId, long inventoryId, decimal quantity, string idempotencyKey,
-        long? orderId = null, long? orderItemId = null, string? actor = null, CancellationToken ct = default)
+        long? orderId = null, long? orderItemId = null, string? actor = null,
+        long? materialLotId = null, CancellationToken ct = default)
     {
         if (quantity <= 0m)
             throw new ArgumentOutOfRangeException(nameof(quantity), "Reservation quantity must be positive.");
@@ -137,17 +268,18 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
 
         if (_db.Database.CurrentTransaction is not null)
             return await ReserveWithinTransactionAsync(businessUnitId, inventoryId, quantity,
-                idempotencyKey, orderId, orderItemId, actor, ct);
+                idempotencyKey, orderId, orderItemId, actor, materialLotId, ct);
 
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             // PostgreSQL's transaction-scoped advisory lock is the serialization boundary.
             // READ COMMITTED refreshes the snapshot after a waiter acquires that lock.
             var isolation = _db.Database.IsNpgsql() ? IsolationLevel.ReadCommitted : IsolationLevel.Serializable;
             await using var transaction = await _db.Database.BeginTransactionAsync(isolation, ct);
             var reserved = await ReserveWithinTransactionAsync(businessUnitId, inventoryId, quantity,
-                idempotencyKey, orderId, orderItemId, actor, ct);
+                idempotencyKey, orderId, orderItemId, actor, materialLotId, ct);
             await transaction.CommitAsync(ct);
             return reserved;
         });
@@ -155,7 +287,7 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
 
     private async Task<StockReservation> ReserveWithinTransactionAsync(
         long businessUnitId, long inventoryId, decimal quantity, string idempotencyKey,
-        long? orderId, long? orderItemId, string? actor, CancellationToken ct)
+        long? orderId, long? orderItemId, string? actor, long? materialLotId, CancellationToken ct)
     {
         if (orderId.HasValue)
             await LockAsync(OrderLock(businessUnitId, orderId.Value), ct);
@@ -173,7 +305,8 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
         if (existing != null)
         {
             if (existing.InventoryId != inventoryId || existing.Quantity != quantity ||
-                existing.OrderId != orderId || existing.OrderItemId != orderItemId)
+                existing.OrderId != orderId || existing.OrderItemId != orderItemId ||
+                existing.MaterialLotId != materialLotId)
                 throw new InvalidOperationException(
                     "The reservation idempotency key was already used for a different request.");
             return existing;
@@ -183,12 +316,42 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
         if (availability.Available < quantity)
             throw new InsufficientStockException(inventoryId, quantity, availability.Available);
 
+        // FR-INV-01. A lot column nothing validates is decoration. The named lot has to be this
+        // tenant's, sit on this inventory row, be AVAILABLE, and still have this much of itself
+        // unheld — otherwise two orders could both "name" the same physical units while the
+        // inventory-level total looked healthy, which is precisely the over-promise the
+        // inventory-level check exists to prevent, one level down.
+        if (materialLotId is { } lotId)
+        {
+            var lot = await _db.Set<Traceability.MaterialLot>().AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId && x.Id == lotId)
+                .Select(x => new { x.Id, x.LotNumber, x.InventoryId, x.Status, x.QuantityReceived, x.QuantityConsumed })
+                .SingleOrDefaultAsync(ct)
+                ?? throw new InvalidOperationException(
+                    $"Material lot {lotId} was not found in this tenant.");
+            if (lot.InventoryId != inventoryId)
+                throw new InvalidOperationException(
+                    $"Material lot {lot.LotNumber} does not sit on inventory {inventoryId}.");
+            if (lot.Status == Traceability.MaterialLotStatuses.Quarantined)
+                throw new InvalidOperationException(
+                    $"Material lot {lot.LotNumber} is quarantined and cannot be reserved.");
+
+            var heldOnLot = await _db.Set<StockReservation>()
+                .Where(r => r.BusinessUnitId == businessUnitId && r.MaterialLotId == lotId
+                            && r.Status == StockReservationStatus.Active)
+                .SumAsync(r => (decimal?)r.Quantity, ct) ?? 0m;
+            var reservableOnLot = lot.QuantityReceived - lot.QuantityConsumed - heldOnLot;
+            if (reservableOnLot < quantity)
+                throw new InsufficientStockException(inventoryId, quantity, Math.Max(0m, reservableOnLot));
+        }
+
         var reservation = new StockReservation
         {
             BusinessUnitId = businessUnitId,
             InventoryId = inventoryId,
             OrderId = orderId,
             OrderItemId = orderItemId,
+            MaterialLotId = materialLotId,
             Quantity = quantity,
             Status = StockReservationStatus.Active,
             IdempotencyKey = idempotencyKey,
@@ -208,6 +371,7 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             var isolation = _db.Database.IsNpgsql() ? IsolationLevel.ReadCommitted : IsolationLevel.Serializable;
             await using var transaction = await _db.Database.BeginTransactionAsync(isolation, ct);
             var count = await ReleaseWithinTransactionAsync(businessUnitId, orderId, actor, ct);
@@ -225,6 +389,7 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
         var strategy = _db.Database.CreateExecutionStrategy();
         await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             var isolation = _db.Database.IsNpgsql() ? IsolationLevel.ReadCommitted : IsolationLevel.Serializable;
             await using var transaction = await _db.Database.BeginTransactionAsync(isolation, ct);
             await LockAsync(ReservationLock(businessUnitId, reservationId), ct);
@@ -287,6 +452,152 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
         return active.Count;
     }
 
+    public async Task<IReadOnlyList<StockReservation>> ReleaseForQuarantineAsync(
+        long businessUnitId, long inventoryId, decimal quantityToFree, string? actor = null,
+        CancellationToken ct = default)
+    {
+        if (quantityToFree <= 0m) return [];
+
+        async Task<IReadOnlyList<StockReservation>> ReleaseAsync()
+        {
+            await LockAsync(InventoryLock(businessUnitId, inventoryId), ct);
+            var active = await _db.Set<StockReservation>()
+                .Where(r => r.BusinessUnitId == businessUnitId && r.InventoryId == inventoryId
+                            && r.Status == StockReservationStatus.Active)
+                // Newest first: the earliest promise survives, which is the rule a customer
+                // conversation can be built on.
+                .OrderByDescending(r => r.CreatedOn).ThenByDescending(r => r.Id)
+                .ToListAsync(ct);
+
+            var released = new List<StockReservation>();
+            var freed = 0m;
+            var now = DateTime.UtcNow;
+            foreach (var reservation in active)
+            {
+                if (freed >= quantityToFree) break;
+                reservation.Status = StockReservationStatus.Released;
+                reservation.ReleasedOn = now;
+                reservation.Version++;
+                AddReservationEvent(reservation, "STOCK_RESERVATION_RELEASED_ON_QUARANTINE", actor, now,
+                    $"stock-reservation-quarantine:{reservation.Id}:{reservation.Version}");
+                freed += reservation.Quantity;
+                released.Add(reservation);
+            }
+
+            if (released.Count > 0) await _db.SaveChangesAsync(ct);
+            return released;
+        }
+
+        if (_db.Database.CurrentTransaction is not null) return await ReleaseAsync();
+
+        var strategy = _db.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(async () =>
+        {
+            _db.ChangeTracker.Clear();
+            var isolation = _db.Database.IsNpgsql() ? IsolationLevel.ReadCommitted : IsolationLevel.Serializable;
+            await using var transaction = await _db.Database.BeginTransactionAsync(isolation, ct);
+            var released = await ReleaseAsync();
+            await transaction.CommitAsync(ct);
+            return released;
+        });
+    }
+
+    public async Task<IReadOnlyList<ReservableLot>> GetReservableLotsAsync(
+        long businessUnitId, long inventoryId, CancellationToken ct = default)
+    {
+        var lots = await _db.Set<Traceability.MaterialLot>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId && x.InventoryId == inventoryId
+                        && x.Status == Traceability.MaterialLotStatuses.Available)
+            .Select(x => new
+            {
+                x.Id, x.LotNumber, x.QuantityReceived, x.QuantityConsumed, x.ExpiryDate, x.ReceivedOn
+            })
+            .ToListAsync(ct);
+        if (lots.Count == 0) return [];
+
+        var lotIds = lots.Select(x => x.Id).ToArray();
+        var held = (await _db.Set<StockReservation>().AsNoTracking()
+                .Where(r => r.BusinessUnitId == businessUnitId && r.MaterialLotId != null
+                            && lotIds.Contains(r.MaterialLotId!.Value)
+                            && r.Status == StockReservationStatus.Active)
+                .GroupBy(r => r.MaterialLotId!.Value)
+                .Select(g => new { MaterialLotId = g.Key, Quantity = g.Sum(x => x.Quantity) })
+                .ToListAsync(ct))
+            .ToDictionary(x => x.MaterialLotId, x => x.Quantity);
+
+        // FEFO, then FIFO, then id. Nulls last on expiry: material that never expires must not
+        // outrank material that does, and DateOnly? sorts nulls FIRST by default — the sort key
+        // is therefore explicit rather than relying on the framework's default, which is exactly
+        // the kind of silent ordering assumption that produces write-offs nobody can explain.
+        return lots
+            .Select(x => new ReservableLot(x.Id, x.LotNumber,
+                x.QuantityReceived - x.QuantityConsumed, held.GetValueOrDefault(x.Id, 0m),
+                x.ExpiryDate, x.ReceivedOn))
+            .Where(x => x.Reservable > 0m)
+            .OrderBy(x => x.ExpiryDate.HasValue ? 0 : 1)
+            .ThenBy(x => x.ExpiryDate ?? DateOnly.MaxValue)
+            .ThenBy(x => x.ReceivedOn)
+            .ThenBy(x => x.MaterialLotId)
+            .ToList();
+    }
+
+    public async Task<IReadOnlyList<StockReservation>> ReleaseHoldsOnLotAsync(
+        long businessUnitId, long materialLotId, string? actor = null, CancellationToken ct = default)
+    {
+        async Task<IReadOnlyList<StockReservation>> ReleaseAsync()
+        {
+            var active = await _db.Set<StockReservation>()
+                .Where(r => r.BusinessUnitId == businessUnitId && r.MaterialLotId == materialLotId
+                            && r.Status == StockReservationStatus.Active)
+                .OrderBy(r => r.Id)
+                .ToListAsync(ct);
+            if (active.Count == 0) return [];
+
+            foreach (var inventoryId in active.Select(r => r.InventoryId).Distinct().OrderBy(x => x))
+                await LockAsync(InventoryLock(businessUnitId, inventoryId), ct);
+
+            var now = DateTime.UtcNow;
+            foreach (var reservation in active)
+            {
+                reservation.Status = StockReservationStatus.Released;
+                reservation.ReleasedOn = now;
+                reservation.Version++;
+                AddReservationEvent(reservation, "STOCK_RESERVATION_RELEASED_ON_QUARANTINE", actor, now,
+                    $"stock-reservation-lot-quarantine:{reservation.Id}:{reservation.Version}");
+            }
+            await _db.SaveChangesAsync(ct);
+            return active;
+        }
+
+        if (_db.Database.CurrentTransaction is not null) return await ReleaseAsync();
+
+        var strategy = _db.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(async () =>
+        {
+            _db.ChangeTracker.Clear();
+            var isolation = _db.Database.IsNpgsql() ? IsolationLevel.ReadCommitted : IsolationLevel.Serializable;
+            await using var transaction = await _db.Database.BeginTransactionAsync(isolation, ct);
+            var released = await ReleaseAsync();
+            await transaction.CommitAsync(ct);
+            return released;
+        });
+    }
+
+    public async Task<LotCommitmentView> GetLotCommitmentsAsync(
+        long businessUnitId, long materialLotId, CancellationToken ct = default)
+    {
+        var rows = await _db.Set<StockReservation>().AsNoTracking()
+            .Where(r => r.BusinessUnitId == businessUnitId && r.MaterialLotId == materialLotId
+                        && r.Status != StockReservationStatus.Released)
+            .OrderBy(r => r.OrderId).ThenBy(r => r.Id)
+            .Select(r => new LotCommitment(r.Id, r.OrderId, r.OrderItemId, r.Quantity, r.Status, r.CreatedOn))
+            .ToListAsync(ct);
+
+        return new LotCommitmentView(materialLotId,
+            rows.Where(x => x.Status == StockReservationStatus.Active).ToList(),
+            rows.Where(x => x.Status == StockReservationStatus.Consumed).ToList());
+    }
+
     public async Task ConsumeAsync(long businessUnitId, long reservationId, string? actor = null, CancellationToken ct = default)
     {
         if (_db.Database.CurrentTransaction is not null)
@@ -297,6 +608,7 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
         var strategy = _db.Database.CreateExecutionStrategy();
         await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             var isolation = _db.Database.IsNpgsql() ? IsolationLevel.ReadCommitted : IsolationLevel.Serializable;
             await using var transaction = await _db.Database.BeginTransactionAsync(isolation, ct);
             await ConsumeWithinTransactionAsync(businessUnitId, reservationId, actor, ct);
@@ -316,6 +628,7 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             var isolation = _db.Database.IsNpgsql() ? IsolationLevel.ReadCommitted : IsolationLevel.Serializable;
             await using var transaction = await _db.Database.BeginTransactionAsync(isolation, ct);
             var child = await SplitWithinTransactionAsync(businessUnitId, reservationId, quantity, actor, ct);
@@ -353,6 +666,10 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
             InventoryId = reservation.InventoryId,
             OrderId = reservation.OrderId,
             OrderItemId = reservation.OrderItemId,
+            // The child holds part of the parent's PHYSICAL stock, so it holds the parent's lot.
+            // Dropping it here would silently un-name the units on every partial shipment — the
+            // exact gap this gate exists to close, reintroduced by the split path.
+            MaterialLotId = reservation.MaterialLotId,
             Quantity = quantity,
             Status = StockReservationStatus.Active,
             // Deterministic and unique per split: the parent's version advances on every split,
@@ -380,6 +697,7 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             var isolation = _db.Database.IsNpgsql() ? IsolationLevel.ReadCommitted : IsolationLevel.Serializable;
             await using var transaction = await _db.Database.BeginTransactionAsync(isolation, ct);
 
@@ -460,6 +778,26 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
         if (reservation.Status == StockReservationStatus.Released)
             throw new InvalidOperationException($"Reservation {reservationId} was released and cannot be consumed.");
 
+        // FR-MTR-05 / FR-INV-01 — THE PHYSICAL DOOR. Quarantine removes the lot's quantity from
+        // available-to-promise, which stops the next order being promised it, and the fulfilment
+        // declaration refuses to name a quarantined lot. Neither stops a hold taken BEFORE the
+        // recall from being issued, because the hold used to name only an inventory row and any
+        // unit on that row satisfied it. Now that the hold names its lot, the issue can refuse.
+        //
+        // This is checked here rather than in the caller because ConsumeAsync is the single point
+        // every issue path funnels through: the shipment controller, the order consume endpoint and
+        // the partial-shipment splitter all end up here. A check in any one of them would be a
+        // guard three callers have to remember (wiring-contract failure #9).
+        if (reservation.MaterialLotId is { } consumedLotId)
+        {
+            var lot = await _db.Set<Traceability.MaterialLot>().AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId && x.Id == consumedLotId)
+                .Select(x => new { x.Id, x.LotNumber, x.Status })
+                .SingleOrDefaultAsync(ct);
+            if (lot is not null && lot.Status == Traceability.MaterialLotStatuses.Quarantined)
+                throw new QuarantinedLotIssueException(reservation.Id, lot.Id, lot.LotNumber);
+        }
+
         await LockAsync(InventoryLock(businessUnitId, reservation.InventoryId), ct);
 
         var inventory = await _db.Set<Models.Inventory>()
@@ -537,6 +875,7 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
                 reservation.InventoryId,
                 reservation.OrderId,
                 reservation.OrderItemId,
+                reservation.MaterialLotId,
                 reservation.Quantity
             }),
             OccurredOn = occurredOn

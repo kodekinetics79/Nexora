@@ -90,6 +90,15 @@ public partial class ErpRfqAutomationContext
             e.Property(x => x.AutonomyLevel).HasConversion<string>().HasMaxLength(20).IsRequired();
             e.Property(x => x.MaxAutoAwardValue).HasColumnType("numeric(18,2)");
             e.Property(x => x.MaxAutoOrderValue).HasColumnType("numeric(18,2)");
+            // The caps' denomination. Composite tenant-scoped FK, matching the
+            // SupplierQuotedItem / SourcingAward precedent in
+            // ErpRfqAutomationContext.Procurement.cs:83 and :90 — a policy can only ever cite a
+            // currency belonging to its own business unit. Restrict, because deleting a currency
+            // out from under a live spend cap would silently un-denominate the control.
+            e.HasOne<Currency>().WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.CurrencyId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id })
+                .OnDelete(DeleteBehavior.Restrict);
             e.Property(x => x.PerToolOverrides).HasColumnType("jsonb");
             e.Property(x => x.CreatedOn).HasDefaultValueSql("now()");
             e.Property(x => x.UpdatedOn).HasDefaultValueSql("now()");

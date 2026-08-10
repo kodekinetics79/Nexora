@@ -150,6 +150,7 @@ public sealed class EfSupplierQuoteStore(ErpRfqAutomationContext context) : ISup
         var strategy = context.Database.CreateExecutionStrategy();
         await strategy.ExecuteAsync(async () =>
         {
+            context.ChangeTracker.Clear();
             await using var transaction = await context.Database.BeginTransactionAsync(cancellationToken);
             var quote = await context.Set<SupplierQuote>().SingleOrDefaultAsync(x =>
                 x.BusinessUnitId == command.BusinessUnitId && x.Id == command.SupplierQuoteId, cancellationToken)
@@ -183,9 +184,27 @@ public sealed class EfSupplierQuoteStore(ErpRfqAutomationContext context) : ISup
                 .Where(x => x.BusinessUnitId == command.BusinessUnitId &&
                     x.SupplierQuoteRevisionId == revision.Id && x.ReviewRequired)
                 .Select(x => x.Id).ToArrayAsync(cancellationToken);
+            // EVERY field on the revision, not only the ones flagged for review. Two separate
+            // questions are being answered below and they need different populations:
+            //
+            //   * "is anything still unreviewed?" — the review-required subset, unchanged;
+            //   * "has anything been corrected since the offer was projected?" — every field,
+            //     because a correction moves the money whether or not the field was ever flagged.
+            //
+            // Both used to be answered from the review-required subset alone. A manually captured
+            // Supplier Quote flags nothing (confidence is 1 by construction), so its correction set
+            // was always empty, and the guard that catches a correction to an ALREADY-AWARDED offer
+            // never ran for any of them. ProjectAsync has always computed this over all decisions
+            // on the revision, so the two halves of one control disagreed: the projection refused
+            // while the inbox went on reporting READY_FOR_COMPARISON.
+            var revisionEvidence = await context.Set<SupplierQuoteFieldEvidence>().AsNoTracking()
+                .Where(x => x.BusinessUnitId == command.BusinessUnitId &&
+                    x.SupplierQuoteRevisionId == revision.Id)
+                .Select(x => new { x.Id, x.FieldName }).ToArrayAsync(cancellationToken);
+            var revisionEvidenceIds = revisionEvidence.Select(x => x.Id).ToArray();
             var latestDecisions = await context.Set<SupplierQuoteReviewDecision>().AsNoTracking()
                 .Where(x => x.BusinessUnitId == command.BusinessUnitId &&
-                    requiredEvidenceIds.Contains(x.SupplierQuoteFieldEvidenceId))
+                    revisionEvidenceIds.Contains(x.SupplierQuoteFieldEvidenceId))
                 .OrderByDescending(x => x.ReviewedOn).ThenByDescending(x => x.Id)
                 .ToArrayAsync(cancellationToken);
             var latestByEvidence = latestDecisions.GroupBy(x => x.SupplierQuoteFieldEvidenceId)
@@ -193,7 +212,9 @@ public sealed class EfSupplierQuoteStore(ErpRfqAutomationContext context) : ISup
             var unresolved = requiredEvidenceIds.Any(id =>
                 !latestByEvidence.TryGetValue(id, out var latest) ||
                 latest.Status is not (SupplierQuoteReviewStatuses.Accepted or SupplierQuoteReviewStatuses.Corrected));
-            var projectionEvidenceIds = revision.Evidence.Where(x =>
+            // Alternate-authorisation evidence is excluded because approving an alternate is a
+            // commercial permission, not a change to the numbers the projection is built from.
+            var projectionEvidenceIds = revisionEvidence.Where(x =>
                     NormalizeEvidenceField(x.FieldName) is not ("ALTERNATEAUTHORIZATION" or
                         "ALTERNATEAPPROVAL" or "APPROVEDALTERNATE"))
                 .Select(x => x.Id).ToHashSet();
@@ -243,20 +264,36 @@ public sealed class EfSupplierQuoteStore(ErpRfqAutomationContext context) : ISup
                     return new SupplierQuoteEvidenceDetail(x.Id, x.SupplierQuoteLineId, x.FieldName,
                         x.OriginalValue, x.NormalizedValue, x.Confidence, x.Method, x.Critical,
                         x.ReviewRequired, decision?.Status, decision?.CorrectedValue);
-                }).ToArray());
+                }).ToArray(),
+                revision.Incoterms, revision.FreightAmount, revision.TaxAmount,
+                revision.DutyAmount, revision.OtherAmount, revision.DiscountAmount);
         }).ToArray();
         return new SupplierQuoteDetail(quote.Id, quote.SupplierId, supplierName,
             quote.SupplierSolicitationId, quote.SourcingCaseId, quote.RfqId, quote.NexoraSerial,
             quote.SupplierQuoteReference, quote.CurrentRevisionNumber, quote.InboxStatus, quote.Version, revisions);
     }
 
+    /// <summary>
+    /// Validates a reviewer's correction against the SHAPE of the field being corrected.
+    ///
+    /// <para>The round-charge fields are named here rather than left to the catch-all. They used to
+    /// fall through to "any string up to 4,000 printable characters", so a reviewer could type
+    /// "approx 1,500 SAR" into FreightAmount, be told the correction was accepted, and leave a
+    /// value the projection could never parse into money. Field names are normalized the same way
+    /// the evidence comparison normalizes them, so "Freight Amount" and "freight_amount" reach the
+    /// decimal rule rather than the catch-all.</para>
+    ///
+    /// <para>Non-negative rather than positive: correcting a wrongly captured freight charge down
+    /// to zero is a legitimate correction, whereas a negative charge would reduce landed cost and
+    /// therefore the customer price.</para>
+    /// </summary>
     private static void ValidateCorrection(string fieldName, string? value)
     {
         var normalized = value?.Trim();
         if (string.IsNullOrWhiteSpace(normalized))
             throw new SupplierQuoteValidationException("A corrected value is required.");
         var culture = System.Globalization.CultureInfo.InvariantCulture;
-        var valid = fieldName.ToUpperInvariant() switch
+        var valid = NormalizeEvidenceField(fieldName) switch
         {
             "CURRENCYID" => long.TryParse(normalized, System.Globalization.NumberStyles.Integer, culture, out var id) && id > 0,
             "VALIDUNTIL" => DateTime.TryParse(normalized, culture,
@@ -265,12 +302,23 @@ public sealed class EfSupplierQuoteStore(ErpRfqAutomationContext context) : ISup
                 System.Globalization.NumberStyles.Number, culture, out var positive) && positive > 0m,
             "AVAILABLEQUANTITY" => decimal.TryParse(normalized,
                 System.Globalization.NumberStyles.Number, culture, out var available) && available >= 0m,
+            "FREIGHTAMOUNT" or "TAXAMOUNT" or "DUTYAMOUNT" or "OTHERAMOUNT" or "DISCOUNTAMOUNT" =>
+                decimal.TryParse(normalized, System.Globalization.NumberStyles.Number, culture,
+                    out var charge) && charge >= 0m && charge <= MaxRoundCharge,
+            "INCOTERMS" => Procurement.Incoterms.Codes.Contains(normalized.ToUpperInvariant()),
             "LEADTIMEDAYS" => int.TryParse(normalized,
                 System.Globalization.NumberStyles.Integer, culture, out var days) && days >= 0,
             _ => normalized.Length <= 4000 && !normalized.Any(char.IsControl)
         };
         if (!valid) throw new SupplierQuoteValidationException($"The corrected {fieldName} value is invalid.");
     }
+
+    /// <summary>
+    /// Ceiling for a corrected round charge, matching the numeric(18,4) columns the value lands in.
+    /// Without it a typed correction can exceed the column's range and fail as a database error
+    /// deep inside the projection transaction rather than as a message the reviewer can act on.
+    /// </summary>
+    private const decimal MaxRoundCharge = 99_999_999_999_999m;
 
     private static string NormalizeEvidenceField(string value) => new(value.Where(char.IsLetterOrDigit)
         .Select(char.ToUpperInvariant).ToArray());
@@ -423,6 +471,9 @@ public sealed class SupplierQuoteInboxService
             Incoterms = Trim(command.Incoterms, 40),
             FreightAmount = command.FreightAmount,
             TaxAmount = command.TaxAmount,
+            DutyAmount = command.DutyAmount,
+            OtherAmount = command.OtherAmount,
+            DiscountAmount = command.DiscountAmount,
             PaymentTerms = Trim(command.PaymentTerms, 500),
             Notes = Trim(command.Notes, 4000),
             IdempotencyKey = idempotencyKey,
@@ -467,6 +518,7 @@ public sealed class SupplierQuoteInboxService
         }
         if (manual) AddManualEvidence(revision, command, now);
         else AddMissingCriticalEvidence(revision, command, now);
+        AddRoundChargeEvidence(revision, command, manual, now);
         revision.RequiresReview = revision.Evidence.Any(x => x.ReviewRequired);
         return revision;
     }
@@ -550,6 +602,57 @@ public sealed class SupplierQuoteInboxService
         }
     }
 
+    /// <summary>
+    /// Puts one evidence row on the revision for each round-level charge, so the charge block is
+    /// something a reviewer can see and correct.
+    ///
+    /// <para>Without this there was no evidence row for FreightAmount on any capture the platform
+    /// produces itself, so <c>ReviewAsync</c> could only ever answer "the field evidence was not
+    /// found in this revision". The correction path for the charge that most often goes missing
+    /// existed only for quotes whose extractor happened to emit a FreightAmount fact.</para>
+    ///
+    /// <para>Deliberately NOT critical and NOT review-required. A zero charge is usually the truth
+    /// — a domestic delivered-price quote really does carry no freight and no duty — and forcing
+    /// every capture into REVIEW_REQUIRED over a legitimate zero trains reviewers to clear the
+    /// queue without reading it. The Incoterm warning on the offer is what points at a zero that
+    /// should not be zero; this row is what lets someone fix it.</para>
+    /// </summary>
+    private static void AddRoundChargeEvidence(SupplierQuoteRevision revision,
+        CaptureSupplierQuoteCommand command, bool manual, DateTime now)
+    {
+        Add("FreightAmount", command.FreightAmount);
+        Add("TaxAmount", command.TaxAmount);
+        Add("DutyAmount", command.DutyAmount);
+        Add("OtherAmount", command.OtherAmount);
+        Add("DiscountAmount", command.DiscountAmount);
+        if (!string.IsNullOrWhiteSpace(revision.Incoterms)) AddText("Incoterms", revision.Incoterms);
+        return;
+
+        void Add(string field, decimal amount) => AddText(field,
+            amount.ToString(System.Globalization.CultureInfo.InvariantCulture));
+
+        void AddText(string field, string value)
+        {
+            if (revision.Evidence.Any(x => x.SupplierQuoteLineId is null &&
+                    NormalizeField(x.FieldName) == NormalizeField(field))) return;
+            revision.Evidence.Add(new SupplierQuoteFieldEvidence
+            {
+                BusinessUnitId = command.BusinessUnitId,
+                FieldName = field,
+                OriginalValue = value,
+                NormalizedValue = value,
+                Confidence = 1m,
+                Method = manual ? "MANUAL_ENTRY" : "HEADER_CAPTURE",
+                Critical = false,
+                ReviewRequired = false,
+                CreatedOn = now
+            });
+        }
+    }
+
+    private static string NormalizeField(string value) => new(value.Where(char.IsLetterOrDigit)
+        .Select(char.ToUpperInvariant).ToArray());
+
     private static void AddLineEvidence(SupplierQuoteRevision revision, SupplierQuoteLine line,
         SupplierQuoteFieldEvidence evidence)
     {
@@ -581,8 +684,10 @@ public sealed class SupplierQuoteInboxService
         if (command.RevisionNumber <= 0) throw new SupplierQuoteValidationException("Revision number must be positive.");
         if (!Channels.Contains(command.CaptureChannel)) throw new SupplierQuoteValidationException("Capture channel is invalid.");
         if (string.IsNullOrWhiteSpace(command.NexoraSerial)) throw new SupplierQuoteValidationException("Nexora Serial is required.");
-        if (command.FreightAmount < 0 || command.TaxAmount < 0)
-            throw new SupplierQuoteValidationException("Freight and tax cannot be negative.");
+        if (command.FreightAmount < 0 || command.TaxAmount < 0 || command.DutyAmount < 0 ||
+            command.OtherAmount < 0 || command.DiscountAmount < 0)
+            throw new SupplierQuoteValidationException(
+                "Freight, tax, duty, other charges, and discount cannot be negative.");
         if (command.Lines.Count is 0 or > MaxLinesPerQuote)
             throw new SupplierQuoteValidationException(
                 $"A Supplier Quote requires between 1 and {MaxLinesPerQuote} lines.");
@@ -596,6 +701,13 @@ public sealed class SupplierQuoteInboxService
                 line.Quantity <= 0 || line.UnitPrice < 0 || line.AvailableQuantity is < 0 ||
                 line.MinimumOrderQuantity is <= 0 || line.LeadTimeDays is < 0)
                 throw new SupplierQuoteValidationException($"Supplier Quote line {line.LineNumber} contains invalid values.");
+        // A discount larger than the round it discounts produces a negative landed cost, and the
+        // customer price is landed / (1 - margin) — so it would arrive as a negative price rather
+        // than as an error anybody could see.
+        if (command.DiscountAmount > command.Lines.Sum(x => x.UnitPrice * x.Quantity) +
+                command.FreightAmount + command.DutyAmount + command.OtherAmount)
+            throw new SupplierQuoteValidationException(
+                "The Supplier Quote discount exceeds the value of the round it discounts.");
     }
 
     private void EnsureTenant(long businessUnitId)

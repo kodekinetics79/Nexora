@@ -41,6 +41,16 @@ export interface ReceivableDocument {
   lines: ReceivableLine[];
 }
 
+/**
+ * One line of an invoice request. Mirrors `CreateInvoiceLineRequest(long OrderItemId, decimal
+ * Quantity)`. The quantity is what the customer ACCEPTED, not what was ordered and not what was
+ * despatched — see the ceiling in `CommercialFinanceApplicationService.CreateInvoiceAsync`.
+ */
+export interface InvoiceLineCommand {
+  orderItemId: number;
+  quantity: number;
+}
+
 export type ReceivableAdjustmentType = 'CreditNote' | 'DebitNote';
 
 export interface CreateReceivableAdjustmentRequest {
@@ -255,12 +265,31 @@ const commercialFinanceService = {
     `/api/commercial-finance/refunds/${refundId}/${succeeded ? 'confirm-disbursement' : 'fail-disbursement'}`, data,
   )).data,
 
-  createInvoiceFromOrder: async (orderId: number) =>
-    (await axiosInstance.post<ReceivableDocument>(
-      `/api/commercial-finance/orders/${orderId}/invoices`,
-      { documentDate: null, dueDate: null, lines: null },
-      withKey(`order-invoice-${orderId}-full`),
-    )).data,
+  /**
+   * Gate 7 / FR-DLM-02. `lines` and `idempotencyKey` are REQUIRED, and both are required for the
+   * same reason.
+   *
+   * This call used to post `lines: null` with the constant key `order-invoice-{orderId}-full`. A
+   * null line set is expanded by the server to the full ORDERED quantity
+   * (`CommercialFinanceApplicationService.CreateInvoiceAsync`), so after any short delivery — the
+   * ordinary case, a customer signing for 7 of 10 — the request was a guaranteed 409 against the
+   * accepted-quantity ceiling, and the product had no screen that could ask for 7. Making the
+   * parameter required is what stops that shape coming back: there is no longer a way to call this
+   * without saying what is being billed.
+   *
+   * The key must vary with the quantities; `invoiceIdempotencyKey` in
+   * `pages/Sales/Orders/invoiceFromOrder.ts` is the only supported way to build one, and the
+   * reasoning behind its shape is written out there.
+   */
+  createInvoiceFromOrder: async (
+    orderId: number,
+    lines: InvoiceLineCommand[],
+    idempotencyKey: string,
+  ) => (await axiosInstance.post<ReceivableDocument>(
+    `/api/commercial-finance/orders/${orderId}/invoices`,
+    { documentDate: null, dueDate: null, lines },
+    withKey(idempotencyKey),
+  )).data,
 
   createAdjustment: async (
     invoiceId: number,

@@ -19,12 +19,57 @@ public sealed class StaleQuoteDigestLine
 }
 
 /// <summary>
+/// What the transport actually reported. The distinction that matters is not
+/// success/failure but <b>definitely not sent</b> versus <b>may already have been
+/// sent</b>: only the first is safe to retry.
+/// </summary>
+public enum SlaSendOutcome
+{
+    /// <summary>The provider cannot have taken the message: the failure happened before the
+    /// transport was entered, or there was nothing to send. Safe to claim and retry.</summary>
+    NotSent,
+
+    /// <summary>The provider returned a receipt naming itself AND an acceptance reference.
+    /// The only outcome that counts as delivered.</summary>
+    Sent,
+
+    /// <summary>The provider MAY have accepted it. The send threw after the transport was
+    /// entered (an SMTP connection dropped between the message body and its 250 is routine),
+    /// or it returned with no acceptance evidence. Never retried.</summary>
+    Uncertain
+}
+
+/// <summary>One send attempt's outcome, with the acceptance evidence when there is any.</summary>
+public sealed record SlaSendResult(
+    SlaSendOutcome Outcome,
+    string? Provider = null,
+    string? AcceptanceReference = null,
+    string? Reason = null)
+{
+    public bool Delivered => Outcome == SlaSendOutcome.Sent;
+
+    public static SlaSendResult NotSent(string reason) => new(SlaSendOutcome.NotSent, Reason: reason);
+    public static SlaSendResult Uncertain(string reason) => new(SlaSendOutcome.Uncertain, Reason: reason);
+    public static SlaSendResult Accepted(EmailDeliveryReceipt receipt) =>
+        new(SlaSendOutcome.Sent, receipt.Provider, receipt.AcceptanceReference);
+}
+
+/// <summary>
 /// SLA-owned outbound email surface. Deliberately independent of
 /// <c>INotificationService</c>/<c>NotificationService</c> (owned by another agent
 /// this wave): it talks to the Notifications module's <see cref="IEmailSender"/>
 /// transport directly and applies the same resilient never-throw pattern — an
 /// email failure is logged and swallowed, never breaking the sweep or a business
 /// transaction.
+///
+/// <para>It never throws, but it no longer answers with a bare bool. A bool could only say
+/// "nothing threw", which is why a dropped SMTP connection after the body was accepted read
+/// as a failure and the sweep re-sent the escalation, and why a provider returning a null
+/// receipt read as a success and the alert was never sent at all. Every method returns an
+/// <see cref="SlaSendResult"/> carrying the provider's acceptance evidence, and the caller
+/// decides what to do with an <see cref="SlaSendOutcome.Uncertain"/> result. This mirrors
+/// <c>ProcurementDispatchWorker</c>, which records a supplier RFQ as sent only against a
+/// receipt with a provider AND an acceptance reference.</para>
 ///
 /// NOTE on templating: the module's IEmailTemplateRenderer is name-locked to the
 /// static EmailTemplates dictionary; registering SLA templates there would mean
@@ -35,12 +80,12 @@ public sealed class StaleQuoteDigestLine
 public interface ISlaNotifications
 {
     /// <summary>Deadline alert for a lead (warn / critical / overdue). Never throws.</summary>
-    Task<bool> SendDeadlineAlertAsync(
+    Task<SlaSendResult> SendDeadlineAlertAsync(
         string toEmail, string? toName, string level, string entityLabel,
         string headline, string detail, long businessUnitId, CancellationToken ct = default);
 
     /// <summary>Daily per-owner digest of stale quotes. Never throws.</summary>
-    Task<bool> SendStaleQuotesDigestAsync(
+    Task<SlaSendResult> SendStaleQuotesDigestAsync(
         string toEmail, string? toName, IReadOnlyList<StaleQuoteDigestLine> lines,
         long businessUnitId, CancellationToken ct = default);
 }
@@ -112,7 +157,7 @@ Reference: {{entityLabel}}
 
     // ---------------- API ----------------
 
-    public async Task<bool> SendDeadlineAlertAsync(
+    public async Task<SlaSendResult> SendDeadlineAlertAsync(
         string toEmail, string? toName, string level, string entityLabel,
         string headline, string detail, long businessUnitId, CancellationToken ct = default)
     {
@@ -143,11 +188,12 @@ Reference: {{entityLabel}}
         return await SendAsync("deadline-alert", toEmail, toName, subject, html, text, businessUnitId, ct);
     }
 
-    public async Task<bool> SendStaleQuotesDigestAsync(
+    public async Task<SlaSendResult> SendStaleQuotesDigestAsync(
         string toEmail, string? toName, IReadOnlyList<StaleQuoteDigestLine> lines,
         long businessUnitId, CancellationToken ct = default)
     {
-        if (lines is not { Count: > 0 }) return false;
+        // Nothing to send is DEFINITELY not sent: the transport is never entered.
+        if (lines is not { Count: > 0 }) return SlaSendResult.NotSent("NO_DIGEST_LINES");
 
         var model = new Dictionary<string, string?>
         {
@@ -200,16 +246,35 @@ A quick follow-up usually gets things moving — or record the outcome if you al
 
     // ---------------- internals ----------------
 
-    private async Task<bool> SendAsync(
+    /// <summary>
+    /// The one place that decides "definitely not sent" from "may have been sent".
+    ///
+    /// <para><b>Definitely not sent</b> is only ever claimed for a failure that happened
+    /// BEFORE the transport was entered: no recipient address, or an exception building the
+    /// message. <c>transportEntered</c> is set on the statement immediately before the await,
+    /// so the boundary is exact and cannot drift as this method grows — the same
+    /// <c>providerInvoked</c> discipline <c>ProcurementDispatchWorker</c> uses.</para>
+    ///
+    /// <para><b>Everything else is uncertain.</b> Once <see cref="IEmailSender.SendAsync"/>
+    /// has been entered, an exception tells us nothing about how far the provider got: SMTP
+    /// routinely accepts a message body and then loses the connection before its 250, and a
+    /// cancellation mid-flight is the same picture. A RETURN without acceptance evidence — a
+    /// null receipt, or one missing its provider or acceptance reference — is equally
+    /// unprovable in either direction, so it is uncertain too rather than being read as
+    /// success (which is how an alert could be silently never sent while its claim was
+    /// kept forever).</para>
+    /// </summary>
+    private async Task<SlaSendResult> SendAsync(
         string template, string toEmail, string? toName, string subject,
         string html, string text, long businessUnitId, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(toEmail))
         {
             _logger.LogWarning("[SlaNotifications] Skipping '{Template}' — no recipient email. BU={Bu}", template, businessUnitId);
-            return false;
+            return SlaSendResult.NotSent("NO_RECIPIENT");
         }
 
+        var transportEntered = false;
         try
         {
             var message = new EmailMessage
@@ -221,15 +286,41 @@ A quick follow-up usually gets things moving — or record the outcome if you al
             };
             message.AddTo(toEmail, toName);
 
-            await _emailSender.SendAsync(message, ct).ConfigureAwait(false);
-            _logger.LogInformation("[SlaNotifications] Dispatched '{Template}' to {To}. BU={Bu}", template, toEmail, businessUnitId);
-            return true;
+            transportEntered = true;
+            var receipt = await _emailSender.SendAsync(message, ct).ConfigureAwait(false);
+
+            if (receipt is null
+                || string.IsNullOrWhiteSpace(receipt.Provider)
+                || string.IsNullOrWhiteSpace(receipt.AcceptanceReference))
+            {
+                _logger.LogError(
+                    "[SlaNotifications] '{Template}' to {To} returned no acceptance evidence (provider={Provider}, reference={Reference}). "
+                    + "BU={Bu}. Treated as UNCERTAIN and not retried.",
+                    template, toEmail, receipt?.Provider, receipt?.AcceptanceReference, businessUnitId);
+                return SlaSendResult.Uncertain("ACCEPTANCE_EVIDENCE_MISSING");
+            }
+
+            _logger.LogInformation(
+                "[SlaNotifications] Dispatched '{Template}' to {To}; {Provider} accepted it as {Reference}. BU={Bu}",
+                template, toEmail, receipt.Provider, receipt.AcceptanceReference, businessUnitId);
+            return SlaSendResult.Accepted(receipt);
+        }
+        catch (Exception ex) when (!transportEntered)
+        {
+            // The provider was never called, so it cannot hold this message. Safe to retry.
+            _logger.LogError(ex,
+                "[SlaNotifications] '{Template}' to {To} failed before the transport was entered. BU={Bu}. Retryable.",
+                template, toEmail, businessUnitId);
+            return SlaSendResult.NotSent($"SEND_SETUP_FAILED:{ex.GetType().Name}");
         }
         catch (Exception ex)
         {
             // Never rethrow: an SLA email failure must not break the sweep or a business flow.
-            _logger.LogError(ex, "[SlaNotifications] Failed to send '{Template}' to {To}. BU={Bu}. Suppressed.", template, toEmail, businessUnitId);
-            return false;
+            // Never re-send either: the provider may already have it.
+            _logger.LogError(ex,
+                "[SlaNotifications] '{Template}' to {To} failed after the transport was entered. BU={Bu}. Delivery is UNCERTAIN.",
+                template, toEmail, businessUnitId);
+            return SlaSendResult.Uncertain($"SEND_THREW:{ex.GetType().Name}");
         }
     }
 

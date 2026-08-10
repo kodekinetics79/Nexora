@@ -7,6 +7,7 @@ import {
   Checkbox,
   Chip,
   CircularProgress,
+  Divider,
   FormControl,
   FormControlLabel,
   IconButton,
@@ -14,12 +15,6 @@ import {
   MenuItem,
   Select,
   Stack,
-  Table,
-  TableBody,
-  TableCell,
-  TableContainer,
-  TableHead,
-  TableRow,
   TextField,
   Tooltip,
   Typography,
@@ -31,17 +26,55 @@ import {
   Refresh as RetryIcon,
   ShoppingCartCheckout as ConvertIcon,
   CancelOutlined as CancelIcon,
+  Link as MatchIcon,
 } from '@mui/icons-material';
 import customerAwardService, {
   createCustomerAwardCommandIdentity,
   type CustomerAward,
   type CustomerAwardOrder,
   type CustomerPurchaseOrder,
-  type QuoteAwardBalanceLine,
+  type CustomerPurchaseOrderDocumentExtraction,
+  type PurchaseOrderLineMatchProposal,
   type QuoteAwardProjection,
 } from '../../../../api/services/customerAwardService';
+import commercialPolicyService from '../../../../api/services/commercialPolicyService';
+import uomService, { type UomDTO } from '../../../../api/services/uomService';
+import {
+  DEFAULT_COMMERCIAL_TOLERANCES,
+  priceMatches,
+  quantityMatches,
+} from '../../../../utils/commercialMatchingTolerance';
+import CustomerPoDocumentIntake from './CustomerPoDocumentIntake';
 
+/**
+ * A floating-point guard, NOT a commercial tolerance.
+ *
+ * It exists only so that arithmetic like `remaining - awarded` does not report a residue of 1e-13
+ * as an open balance. Whether a difference between what the buyer wrote and what we quoted MATTERS
+ * is a question for the tenant's policy — see `utils/commercialMatchingTolerance` — and this
+ * constant must never be used to answer it again.
+ */
 const EPSILON = 0.000001;
+
+/**
+ * Matches the buyer's own unit word against the tenant's configured units. Code first, then name,
+ * then a naive plural ("boxes" -> "box"), all case-insensitive.
+ *
+ * Deliberately conservative: no match returns undefined, the operator is shown what the document
+ * said and picks the unit themselves. Guessing here would put a unit the buyer never wrote onto the
+ * record the discrepancy check compares against.
+ */
+const resolveExtractedUom = (stated: string | null | undefined, units: UomDTO[]): number | undefined => {
+  const word = stated?.trim().toLowerCase();
+  if (!word) return undefined;
+  const candidates = [word, word.replace(/e?s$/, '')].filter(Boolean);
+  for (const candidate of candidates) {
+    const unit = units.find((option) => option.uomCode.trim().toLowerCase() === candidate)
+      ?? units.find((option) => option.uomName.trim().toLowerCase() === candidate);
+    if (unit) return unit.uomId;
+  }
+  return undefined;
+};
 
 export interface CustomerAwardQuoteLine {
   id: number;
@@ -79,24 +112,51 @@ export interface CustomerAwardWorkspaceProps {
   onBusyChange?: (busy: boolean) => void;
 }
 
+/**
+ * One line of the BUYER's purchase order.
+ *
+ * FR-COM-04: every field here is transcribed from the customer's document. None of them may be
+ * defaulted from our own quote line — the discrepancy engine compares this capture against the
+ * quotation, so a value seeded from the quotation makes the engine compare the system against
+ * itself and "no discrepancy" becomes the only possible answer. The quoted figures are displayed
+ * beside these inputs for comparison, never inside them.
+ */
 interface CaptureLine {
   clientId: string;
   externalLineReference: string;
+  description: string;
+  customerItemCode: string;
+  manufacturerName: string;
+  manufacturerPartNumber: string;
   quoteItemId: number | '';
   orderedQuantity: string;
+  /**
+   * The unit the BUYER ordered in. `''` means the operator has not stated one, which the payload
+   * sends as null — "the PO names no unit" — and never as our own quoted unit.
+   *
+   * The field existed on the entity and in the create command, and the capture screen never sent
+   * it, so every customer PO in the system stated no unit and every quantity comparison ran on
+   * bare numbers. A PO for "10 boxes" against a quote of "10 each" was an EXACT_MATCH.
+   */
+  uomId: number | '';
+  /** The unit word the document actually used, kept verbatim so an unmatched one is visible. */
+  statedUnitOfMeasure: string;
   awardedQuantity: string;
   unitPrice: string;
 }
 
+type RowErrorField = 'reference' | 'description' | 'quoteItem' | 'ordered' | 'awarded' | 'unitPrice';
+
 interface ValidationResult {
   form?: string;
-  rows: Record<string, Partial<Record<'reference' | 'quoteItem' | 'ordered' | 'awarded' | 'unitPrice', string>>>;
+  rows: Record<string, Partial<Record<RowErrorField, string>>>;
 }
 
 const today = () => new Date().toISOString().slice(0, 10);
 const normalizeReference = (value: string) => value.trim().replace(/\s+/g, ' ').toUpperCase();
 const numberValue = (value: string) => Number(value);
 const validPositive = (value: string) => Number.isFinite(numberValue(value)) && numberValue(value) > 0;
+const trimmedOrNull = (value: string) => (value.trim() ? value.trim() : null);
 
 const newClientId = () => {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
@@ -136,17 +196,49 @@ const sourceBalance = (quote: CustomerAwardQuote): QuoteAwardProjection => ({
   awards: [],
 });
 
-const createDefaultRows = (lines: QuoteAwardBalanceLine[]): CaptureLine[] =>
-  lines
-    .filter((line) => line.remainingQuantity > EPSILON)
-    .map((line, index) => ({
-      clientId: newClientId(),
-      externalLineReference: String(index + 1),
-      quoteItemId: line.quoteItemId,
-      orderedQuantity: String(line.remainingQuantity),
-      awardedQuantity: String(line.remainingQuantity),
-      unitPrice: String(line.unitPrice),
-    }));
+/**
+ * A blank buyer line. Deliberately blank: the operator transcribes or extracts the customer's
+ * figures, and until they do there is nothing to compare the quotation against.
+ */
+const emptyRow = (reference: string): CaptureLine => ({
+  clientId: newClientId(),
+  externalLineReference: reference,
+  description: '',
+  customerItemCode: '',
+  manufacturerName: '',
+  manufacturerPartNumber: '',
+  quoteItemId: '',
+  orderedQuantity: '',
+  uomId: '',
+  statedUnitOfMeasure: '',
+  awardedQuantity: '',
+  unitPrice: '',
+});
+
+const matchStatusChip = (proposal: PurchaseOrderLineMatchProposal) => {
+  if (proposal.status === 'PROPOSED') {
+    return { label: `Proposed · ${proposal.confidence.toLowerCase()} confidence`, color: 'success' as const };
+  }
+  if (proposal.status === 'AMBIGUOUS') return { label: 'Ambiguous · needs a decision', color: 'warning' as const };
+  return { label: 'No key matched · needs review', color: 'default' as const };
+};
+
+const keyLabel = (matchedKey?: string | null) => {
+  switch (matchedKey) {
+    case 'MANUFACTURER_PART_NUMBER':
+      return 'manufacturer part number';
+    case 'CATALOGUE_PART_NUMBER':
+      return 'catalogue part number';
+    case 'MANUFACTURER_AND_ITEM_CODE':
+      return 'manufacturer + item code';
+    case 'ITEM_CODE':
+      return 'item code';
+    case 'DESCRIPTION':
+      return 'wording only';
+    default:
+      return 'no key';
+  }
+};
 
 const CustomerAwardWorkspace: React.FC<CustomerAwardWorkspaceProps> = ({
   quote,
@@ -161,8 +253,10 @@ const CustomerAwardWorkspace: React.FC<CustomerAwardWorkspaceProps> = ({
   const [poDate, setPoDate] = React.useState(today());
   const [receivedOn, setReceivedOn] = React.useState(today());
   const [convertAfterConfirmation, setConvertAfterConfirmation] = React.useState(true);
-  const [rows, setRows] = React.useState<CaptureLine[]>([]);
-  const [hasInitialisedRows, setHasInitialisedRows] = React.useState(false);
+  const [rows, setRows] = React.useState<CaptureLine[]>([emptyRow('1')]);
+  const [proposals, setProposals] = React.useState<Record<string, PurchaseOrderLineMatchProposal>>({});
+  /** FR-COM-01. The uploaded PO document these figures were read from, when there was one. */
+  const [sourceAttachmentId, setSourceAttachmentId] = React.useState<number | null>(null);
   const [validation, setValidation] = React.useState<ValidationResult>({ rows: {} });
   const [submitPhase, setSubmitPhase] = React.useState('');
   const identities = React.useRef({
@@ -180,13 +274,44 @@ const CustomerAwardWorkspace: React.FC<CustomerAwardWorkspaceProps> = ({
 
   const projection = projectionQuery.data ?? fallbackProjection;
 
+  /**
+   * FR-COM-04. The tenant's own tolerances, so this screen answers the SAME question the server
+   * answers when it writes the discrepancy report. It previously compared against a hardcoded
+   * 0.000001, which meant a manager who had set 2% still watched their operators be told "Price
+   * differs" on every rounding difference — on the one screen where the difference is still cheap
+   * to fix. Same fetch as CreateQuotePage, same cache key, so it is one request per session.
+   */
+  const policyQuery = useQuery({
+    queryKey: ['commercial-policy'],
+    queryFn: () => commercialPolicyService.getPolicy(),
+  });
+  const tolerances = policyQuery.data ?? DEFAULT_COMMERCIAL_TOLERANCES;
+
+  /** The tenant's units, so the buyer's unit can be captured rather than assumed to be ours. */
+  const unitsQuery = useQuery({
+    queryKey: ['uoms', 'tenant'],
+    queryFn: () => uomService.listForTenant(),
+  });
+  const units = React.useMemo(
+    () => (unitsQuery.data ?? []).filter((unit) => unit.isActive),
+    [unitsQuery.data],
+  );
+  const unitCode = React.useCallback(
+    (uomId: number | '' | null | undefined) =>
+      (uomId === '' || uomId === null || uomId === undefined
+        ? undefined
+        : units.find((unit) => unit.uomId === uomId)?.uomCode),
+    [units],
+  );
+
   React.useEffect(() => {
     setExternalPoNumber('');
     setPoDate(today());
     setReceivedOn(today());
     setConvertAfterConfirmation(true);
-    setRows([]);
-    setHasInitialisedRows(false);
+    setRows([emptyRow('1')]);
+    setProposals({});
+    setSourceAttachmentId(null);
     setValidation({ rows: {} });
     setSubmitPhase('');
     identities.current = {
@@ -196,13 +321,6 @@ const CustomerAwardWorkspace: React.FC<CustomerAwardWorkspaceProps> = ({
       conversion: createCustomerAwardCommandIdentity('convert'),
     };
   }, [quote.id]);
-
-  React.useEffect(() => {
-    if (!hasInitialisedRows && projectionQuery.isSuccess) {
-      setRows(createDefaultRows(projection.lines));
-      setHasInitialisedRows(true);
-    }
-  }, [hasInitialisedRows, projection.lines, projectionQuery.isSuccess]);
 
   const balanceByItem = React.useMemo(
     () => new Map(projection.lines.map((line) => [line.quoteItemId, line])),
@@ -216,8 +334,31 @@ const CustomerAwardWorkspace: React.FC<CustomerAwardWorkspaceProps> = ({
   const remainingAfterAward = Math.max(0, projection.remainingQuantity - selectedQuantity);
   const outcome = remainingAfterAward <= EPSILON ? 'Full award' : 'Partial award';
 
+  /** Identity keys are what the matcher reasons over, so editing one invalidates its proposal. */
+  const identityFields: Array<keyof CaptureLine> = React.useMemo(
+    () => ['externalLineReference', 'description', 'customerItemCode', 'manufacturerName', 'manufacturerPartNumber'],
+    [],
+  );
+
   const updateRow = (clientId: string, change: Partial<CaptureLine>) => {
-    setRows((current) => current.map((row) => (row.clientId === clientId ? { ...row, ...change } : row)));
+    setRows((current) => current.map((row) => {
+      if (row.clientId !== clientId) return row;
+      const next = { ...row, ...change };
+      // Award quantity is OUR acceptance of the buyer's ask, not a buyer figure, so it may track
+      // the quantity the buyer ordered until the operator overrides it.
+      if (change.orderedQuantity !== undefined && (row.awardedQuantity === '' || row.awardedQuantity === row.orderedQuantity)) {
+        next.awardedQuantity = change.orderedQuantity;
+      }
+      return next;
+    }));
+    if (identityFields.some((field) => field in change)) {
+      setProposals((current) => {
+        if (!(clientId in current)) return current;
+        const next = { ...current };
+        delete next[clientId];
+        return next;
+      });
+    }
     setValidation((current) => {
       const nextRows = { ...current.rows };
       delete nextRows[clientId];
@@ -225,21 +366,99 @@ const CustomerAwardWorkspace: React.FC<CustomerAwardWorkspaceProps> = ({
     });
   };
 
-  const addRow = () => {
-    const nextLine = projection.lines.find(
-      (line) => line.remainingQuantity > EPSILON && !rows.some((row) => row.quoteItemId === line.quoteItemId),
-    );
-    setRows((current) => [
-      ...current,
-      {
-        clientId: newClientId(),
-        externalLineReference: String(current.length + 1),
-        quoteItemId: nextLine?.quoteItemId ?? '',
-        orderedQuantity: nextLine ? String(nextLine.remainingQuantity) : '',
-        awardedQuantity: nextLine ? String(nextLine.remainingQuantity) : '',
-        unitPrice: nextLine ? String(nextLine.unitPrice) : '',
-      },
-    ]);
+  /**
+   * FR-COM-01. Replaces the capture form with what was read out of the BUYER's document.
+   *
+   * A figure the document did not state, or stated unreadably, arrives blank so the operator has
+   * to supply it. It must never fall back to the quote line the row is later matched to — that is
+   * exactly the substitution that made the discrepancy check compare the system against itself.
+   * The quote line stays unmatched here too: matching is a separate, evidenced decision.
+   */
+  const applyExtraction = (extraction: CustomerPurchaseOrderDocumentExtraction) => {
+    setSourceAttachmentId(extraction.sourceAttachmentId);
+    if (extraction.externalPoNumber) setExternalPoNumber(extraction.externalPoNumber);
+    if (extraction.poDate) {
+      const stated = extraction.poDate.slice(0, 10);
+      setPoDate(stated);
+      setReceivedOn((current) => (current < stated ? stated : current));
+    }
+    setRows(extraction.lines.map((line) => ({
+      clientId: newClientId(),
+      externalLineReference: line.externalLineReference || String(line.lineNumber),
+      description: line.description ?? '',
+      customerItemCode: line.customerItemCode ?? '',
+      manufacturerName: line.manufacturerName ?? '',
+      manufacturerPartNumber: line.manufacturerPartNumber ?? '',
+      quoteItemId: '',
+      orderedQuantity: line.orderedQuantity == null ? '' : String(line.orderedQuantity),
+      // The extractor reads the buyer's unit word and the intake panel already displays it; it was
+      // then dropped on the floor here, so the quantity travelled to the server with no unit at
+      // all. Resolved against the tenant's units where it can be, left blank and shown verbatim
+      // where it cannot — never silently replaced by the unit we quoted in.
+      uomId: resolveExtractedUom(line.unitOfMeasure, units) ?? '',
+      statedUnitOfMeasure: line.unitOfMeasure ?? '',
+      awardedQuantity: line.orderedQuantity == null ? '' : String(line.orderedQuantity),
+      unitPrice: line.unitPrice == null ? '' : String(line.unitPrice),
+    })));
+    setProposals({});
+    setValidation({ rows: {} });
+  };
+
+  const addRow = () => setRows((current) => [...current, emptyRow(String(current.length + 1))]);
+
+  const removeRow = (clientId: string) => {
+    setRows((current) => current.filter((row) => row.clientId !== clientId));
+    setProposals((current) => {
+      const next = { ...current };
+      delete next[clientId];
+      return next;
+    });
+  };
+
+  const hasAnyIdentityKey = rows.some((row) => row.customerItemCode.trim()
+    || row.manufacturerName.trim() || row.manufacturerPartNumber.trim());
+
+  const matchMutation = useMutation({
+    mutationFn: () => customerAwardService.proposeQuoteLineMatches({
+      quoteId: quote.id,
+      customerId: quote.customerId,
+      lines: rows.map((row) => ({
+        externalLineReference: row.externalLineReference.trim() || row.clientId,
+        description: trimmedOrNull(row.description),
+        customerItemCode: trimmedOrNull(row.customerItemCode),
+        manufacturerName: trimmedOrNull(row.manufacturerName),
+        manufacturerPartNumber: trimmedOrNull(row.manufacturerPartNumber),
+      })),
+    }),
+    onSuccess: (result) => {
+      // The server answers in the order it was asked, so proposals map back to rows by position.
+      const entries = result.lines
+        .map((line, index): [string | undefined, PurchaseOrderLineMatchProposal] => [rows[index]?.clientId, line])
+        .filter((entry): entry is [string, PurchaseOrderLineMatchProposal] => Boolean(entry[0]));
+      setProposals(Object.fromEntries(entries));
+    },
+  });
+
+  const proposedCount = Object.entries(proposals).filter(([clientId, proposal]) => proposal.status === 'PROPOSED'
+    && rows.find((row) => row.clientId === clientId)?.quoteItemId !== proposal.proposedQuoteItemId).length;
+
+  const applyProposal = (clientId: string, quoteItemId: number) => {
+    setRows((current) => current.map((row) => (row.clientId === clientId ? { ...row, quoteItemId } : row)));
+    setValidation((current) => {
+      const nextRows = { ...current.rows };
+      delete nextRows[clientId];
+      return { rows: nextRows };
+    });
+  };
+
+  const applyAllProposals = () => {
+    setRows((current) => current.map((row) => {
+      const proposal = proposals[row.clientId];
+      return proposal?.status === 'PROPOSED' && proposal.proposedQuoteItemId
+        ? { ...row, quoteItemId: proposal.proposedQuoteItemId }
+        : row;
+    }));
+    setValidation({ rows: {} });
   };
 
   const validate = (): ValidationResult => {
@@ -258,11 +477,12 @@ const CustomerAwardWorkspace: React.FC<CustomerAwardWorkspaceProps> = ({
       if (!normalizedReference) errors.reference = 'Required';
       else references.set(normalizedReference, (references.get(normalizedReference) ?? 0) + 1);
 
-      if (row.quoteItemId === '' || !balanceByItem.has(row.quoteItemId)) errors.quoteItem = 'Select a quote line';
-      if (!validPositive(row.orderedQuantity)) errors.ordered = 'Must be greater than zero';
+      if (!row.description.trim()) errors.description = "Enter the buyer's description";
+      if (row.quoteItemId === '' || !balanceByItem.has(row.quoteItemId)) errors.quoteItem = 'Confirm the quote line';
+      if (!validPositive(row.orderedQuantity)) errors.ordered = 'Enter the ordered quantity';
       if (!validPositive(row.awardedQuantity)) errors.awarded = 'Must be greater than zero';
-      if (!Number.isFinite(numberValue(row.unitPrice)) || numberValue(row.unitPrice) < 0) {
-        errors.unitPrice = 'Must be zero or greater';
+      if (row.unitPrice.trim() === '' || !Number.isFinite(numberValue(row.unitPrice)) || numberValue(row.unitPrice) < 0) {
+        errors.unitPrice = "Enter the buyer's unit price";
       }
 
       if (validPositive(row.orderedQuantity) && validPositive(row.awardedQuantity)
@@ -306,19 +526,22 @@ const CustomerAwardWorkspace: React.FC<CustomerAwardWorkspaceProps> = ({
         poDate,
         receivedOn,
         expectedVersion: 0,
-        lines: rows.map((row) => {
-          const quoteLine = balanceByItem.get(Number(row.quoteItemId))!;
-          return {
-            externalLineReference: row.externalLineReference.trim(),
-            productId: quoteLine.productId,
-            description: quoteLine.description,
-            orderedQuantity: numberValue(row.orderedQuantity),
-            uomId: quoteLine.uomId,
-            unitPrice: numberValue(row.unitPrice),
-            lineAmount: numberValue(row.unitPrice) * numberValue(row.orderedQuantity),
-          };
-        }),
-      }, identities.current.purchaseOrder);
+        // Buyer figures only. Nothing on this payload is read from the quote line the operator
+        // matched the row to; the quotation is the thing being compared against, not a source.
+        lines: rows.map((row) => ({
+          externalLineReference: row.externalLineReference.trim(),
+          description: row.description.trim(),
+          orderedQuantity: numberValue(row.orderedQuantity),
+          // The unit the buyer ordered in. Null means their PO stated none — an honest gap the
+          // server records as such, not an invitation to substitute the unit we quoted in.
+          uomId: row.uomId === '' ? null : row.uomId,
+          unitPrice: numberValue(row.unitPrice),
+          lineAmount: numberValue(row.unitPrice) * numberValue(row.orderedQuantity),
+          customerItemCode: trimmedOrNull(row.customerItemCode),
+          manufacturerName: trimmedOrNull(row.manufacturerName),
+          manufacturerPartNumber: trimmedOrNull(row.manufacturerPartNumber),
+        })),
+      }, identities.current.purchaseOrder, sourceAttachmentId);
 
       const poLineByReference = new Map(
         purchaseOrder.lines.map((line) => [normalizeReference(line.externalLineReference), line]),
@@ -509,6 +732,8 @@ const CustomerAwardWorkspace: React.FC<CustomerAwardWorkspaceProps> = ({
     );
   }
 
+  const busy = saveMutation.isPending;
+
   return (
     <Stack spacing={2.5}>
       <Stack
@@ -536,6 +761,15 @@ const CustomerAwardWorkspace: React.FC<CustomerAwardWorkspaceProps> = ({
         </Alert>
       )}
 
+      <Alert severity="info" variant="outlined">
+        Enter every figure from the customer&apos;s purchase order. What we quoted is shown beside each
+        field for comparison — it is never used to fill one in, so a real difference in price, quantity
+        or part shows up as a difference.
+      </Alert>
+
+      {/* FR-COM-01: upload the buyer's PO and read it, rather than retyping it. */}
+      <CustomerPoDocumentIntake disabled={busy} onApply={applyExtraction} />
+
       <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '2fr 1fr 1fr' }, gap: 2 }}>
         <TextField
           required
@@ -546,7 +780,7 @@ const CustomerAwardWorkspace: React.FC<CustomerAwardWorkspaceProps> = ({
             setExternalPoNumber(event.target.value);
             setValidation((current) => ({ ...current, form: undefined }));
           }}
-          disabled={saveMutation.isPending}
+          disabled={busy}
           slotProps={{ htmlInput: { maxLength: 100 } }}
         />
         <TextField
@@ -556,7 +790,7 @@ const CustomerAwardWorkspace: React.FC<CustomerAwardWorkspaceProps> = ({
           label="PO date"
           value={poDate}
           onChange={(event) => setPoDate(event.target.value)}
-          disabled={saveMutation.isPending}
+          disabled={busy}
           slotProps={{ inputLabel: { shrink: true } }}
         />
         <TextField
@@ -566,146 +800,318 @@ const CustomerAwardWorkspace: React.FC<CustomerAwardWorkspaceProps> = ({
           label="Received date"
           value={receivedOn}
           onChange={(event) => setReceivedOn(event.target.value)}
-          disabled={saveMutation.isPending}
+          disabled={busy}
           slotProps={{ inputLabel: { shrink: true } }}
         />
       </Box>
 
-      <TableContainer sx={{ border: '1px solid', borderColor: 'divider', borderRadius: 1, overflowX: 'auto' }}>
-        <Table size="small" sx={{ minWidth: 1040 }}>
-          <TableHead>
-            <TableRow sx={{ bgcolor: 'action.hover' }}>
-              <TableCell sx={{ fontWeight: 800, width: 150 }}>PO line</TableCell>
-              <TableCell sx={{ fontWeight: 800, minWidth: 280 }}>Quote line</TableCell>
-              <TableCell align="right" sx={{ fontWeight: 800, width: 130 }}>PO quantity</TableCell>
-              <TableCell align="right" sx={{ fontWeight: 800, width: 150 }}>PO unit price</TableCell>
-              <TableCell align="right" sx={{ fontWeight: 800, width: 140 }}>Award quantity</TableCell>
-              <TableCell align="right" sx={{ fontWeight: 800, width: 90 }}>Remaining</TableCell>
-              <TableCell sx={{ width: 48 }} />
-            </TableRow>
-          </TableHead>
-          <TableBody>
-            {rows.map((row) => {
-              const rowErrors = validation.rows[row.clientId] ?? {};
-              const selectedLine = row.quoteItemId === '' ? undefined : balanceByItem.get(row.quoteItemId);
-              return (
-                <TableRow key={row.clientId}>
-                  <TableCell sx={{ verticalAlign: 'top' }}>
-                    <TextField
-                      required
-                      fullWidth
-                      size="small"
-                      value={row.externalLineReference}
-                      onChange={(event) => updateRow(row.clientId, { externalLineReference: event.target.value })}
-                      error={Boolean(rowErrors.reference)}
-                      helperText={rowErrors.reference}
-                      disabled={saveMutation.isPending}
-                      slotProps={{ htmlInput: { 'aria-label': 'Customer PO line reference', maxLength: 50 } }}
-                    />
-                  </TableCell>
-                  <TableCell sx={{ verticalAlign: 'top' }}>
-                    <FormControl fullWidth size="small" error={Boolean(rowErrors.quoteItem)}>
-                      <InputLabel id={`quote-line-${row.clientId}`}>Quote line</InputLabel>
-                      <Select
-                        labelId={`quote-line-${row.clientId}`}
-                        label="Quote line"
-                        value={row.quoteItemId}
-                        onChange={(event) => {
-                          const quoteItemId = Number(event.target.value);
-                          const line = balanceByItem.get(quoteItemId);
-                          updateRow(row.clientId, {
-                            quoteItemId,
-                            orderedQuantity: line ? String(line.remainingQuantity) : row.orderedQuantity,
-                            awardedQuantity: line ? String(line.remainingQuantity) : row.awardedQuantity,
-                            unitPrice: line ? String(line.unitPrice) : row.unitPrice,
-                          });
-                        }}
-                        disabled={saveMutation.isPending}
+      <Stack
+        direction={{ xs: 'column', sm: 'row' }}
+        spacing={1}
+        sx={{ alignItems: { sm: 'center' }, justifyContent: 'space-between' }}
+      >
+        <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>Buyer PO lines</Typography>
+        <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap' }}>
+          <Button
+            size="small"
+            variant="outlined"
+            startIcon={matchMutation.isPending ? <CircularProgress size={15} color="inherit" /> : <MatchIcon />}
+            onClick={() => matchMutation.mutate()}
+            disabled={busy || matchMutation.isPending || !hasAnyIdentityKey}
+          >
+            Match to quote lines
+          </Button>
+          {proposedCount > 0 && (
+            <Button size="small" variant="contained" startIcon={<ConfirmIcon />} onClick={applyAllProposals} disabled={busy}>
+              {`Accept ${proposedCount} proposed ${proposedCount === 1 ? 'match' : 'matches'}`}
+            </Button>
+          )}
+        </Stack>
+      </Stack>
+
+      {!hasAnyIdentityKey && (
+        <Typography variant="caption" color="text.secondary">
+          Enter an item code, manufacturer or part number on at least one line to match against the quotation.
+        </Typography>
+      )}
+      {matchMutation.isError && <Alert severity="error">{apiErrorMessage(matchMutation.error)}</Alert>}
+      {matchMutation.isSuccess && (
+        <Alert severity={matchMutation.data.reviewCount > 0 ? 'warning' : 'success'} variant="outlined">
+          {`${matchMutation.data.proposedCount} of ${matchMutation.data.lines.length} lines matched a quote line on item `
+            + `code, manufacturer or part number. `}
+          {matchMutation.data.reviewCount > 0
+            ? `${matchMutation.data.reviewCount} need a decision — every match is a proposal until you accept it.`
+            : 'Every match is a proposal until you accept it.'}
+        </Alert>
+      )}
+
+      <Stack spacing={2}>
+        {rows.map((row, index) => {
+          const rowErrors = validation.rows[row.clientId] ?? {};
+          const selectedLine = row.quoteItemId === '' ? undefined : balanceByItem.get(row.quoteItemId);
+          const proposal = proposals[row.clientId];
+          const chip = proposal ? matchStatusChip(proposal) : undefined;
+          // FR-COM-04. Both chips now ask the SERVER's question, on the TENANT's tolerances.
+          //
+          // Price: buyer's unit price against the quoted unit price, inside the configured
+          // percentage or the absolute floor. Quantity: what WE are awarding against what the
+          // BUYER ordered — previously it compared the buyer's ordered quantity against the
+          // quotation's remaining quantity, which is a partial award and an ordinary event, so the
+          // chip fired on healthy lines and never on the case its label described.
+          const priceVariance = Boolean(selectedLine) && row.unitPrice.trim() !== ''
+            && Number.isFinite(numberValue(row.unitPrice))
+            && !priceMatches(numberValue(row.unitPrice), selectedLine!.unitPrice, tolerances);
+          const quantityVariance = validPositive(row.orderedQuantity) && validPositive(row.awardedQuantity)
+            && !quantityMatches(numberValue(row.awardedQuantity), numberValue(row.orderedQuantity), tolerances);
+          // The buyer ordering in a unit we did not quote in is a different commercial deal, and
+          // the server refuses to raise a sales order on it without a recorded acceptance.
+          const buyerUnitCode = unitCode(row.uomId);
+          const unitVariance = Boolean(selectedLine) && row.uomId !== ''
+            && selectedLine!.uomId != null && row.uomId !== selectedLine!.uomId;
+
+          return (
+            <Box
+              key={row.clientId}
+              sx={{ border: '1px solid', borderColor: 'divider', borderRadius: 1, p: 2 }}
+            >
+              <Stack
+                direction="row"
+                spacing={1}
+                sx={{ alignItems: 'center', justifyContent: 'space-between', mb: 1.5 }}
+              >
+                <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>{`Buyer line ${index + 1}`}</Typography>
+                <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
+                  {chip && <Chip size="small" label={chip.label} color={chip.color} variant="outlined" />}
+                  <Tooltip title="Remove line">
+                    <span>
+                      <IconButton
+                        size="small"
+                        aria-label={`Remove buyer line ${index + 1}`}
+                        onClick={() => removeRow(row.clientId)}
+                        disabled={busy}
                       >
-                        {projection.lines.filter((line) => line.remainingQuantity > EPSILON).map((line) => (
-                          <MenuItem key={line.quoteItemId} value={line.quoteItemId}>
-                            {line.productName || line.description} ({line.remainingQuantity} remaining)
-                          </MenuItem>
-                        ))}
-                      </Select>
-                      {rowErrors.quoteItem && <Typography variant="caption" color="error" sx={{ mx: 1.75, mt: 0.5 }}>{rowErrors.quoteItem}</Typography>}
-                    </FormControl>
-                  </TableCell>
-                  <TableCell sx={{ verticalAlign: 'top' }}>
-                    <TextField
-                      required
-                      fullWidth
+                        <DeleteIcon fontSize="small" />
+                      </IconButton>
+                    </span>
+                  </Tooltip>
+                </Stack>
+              </Stack>
+
+              <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: '1fr 2fr' }, gap: 1.5 }}>
+                <TextField
+                  required
+                  size="small"
+                  label="Buyer line reference"
+                  value={row.externalLineReference}
+                  onChange={(event) => updateRow(row.clientId, { externalLineReference: event.target.value })}
+                  error={Boolean(rowErrors.reference)}
+                  helperText={rowErrors.reference}
+                  disabled={busy}
+                  slotProps={{ htmlInput: { maxLength: 50 } }}
+                />
+                <TextField
+                  required
+                  size="small"
+                  label="Buyer description"
+                  value={row.description}
+                  onChange={(event) => updateRow(row.clientId, { description: event.target.value })}
+                  error={Boolean(rowErrors.description)}
+                  helperText={rowErrors.description}
+                  disabled={busy}
+                  slotProps={{ htmlInput: { maxLength: 1000 } }}
+                />
+              </Box>
+
+              <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: 'repeat(3, 1fr)' }, gap: 1.5, mt: 1.5 }}>
+                <TextField
+                  size="small"
+                  label="Buyer item code"
+                  value={row.customerItemCode}
+                  onChange={(event) => updateRow(row.clientId, { customerItemCode: event.target.value })}
+                  disabled={busy}
+                  helperText="Used to match the quote line"
+                />
+                <TextField
+                  size="small"
+                  label="Manufacturer"
+                  value={row.manufacturerName}
+                  onChange={(event) => updateRow(row.clientId, { manufacturerName: event.target.value })}
+                  disabled={busy}
+                />
+                <TextField
+                  size="small"
+                  label="Manufacturer part number"
+                  value={row.manufacturerPartNumber}
+                  onChange={(event) => updateRow(row.clientId, { manufacturerPartNumber: event.target.value })}
+                  disabled={busy}
+                />
+              </Box>
+
+              {proposal && (
+                <Box sx={{ mt: 1.5, p: 1.5, bgcolor: 'action.hover', borderRadius: 1 }}>
+                  <Typography variant="caption" sx={{ fontWeight: 700, display: 'block' }}>
+                    {`Matched on ${keyLabel(proposal.matchedKey)}`}
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
+                    {proposal.reason}
+                  </Typography>
+                  <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', gap: 1 }}>
+                    {proposal.candidates.map((candidate) => (
+                      <Button
+                        key={candidate.quoteItemId}
+                        size="small"
+                        variant={row.quoteItemId === candidate.quoteItemId ? 'contained' : 'outlined'}
+                        onClick={() => applyProposal(row.clientId, candidate.quoteItemId)}
+                        disabled={busy}
+                      >
+                        {`${candidate.quoteDescription} · ${candidate.remainingQuantity} left @ ${candidate.quotedUnitPrice}`}
+                      </Button>
+                    ))}
+                  </Stack>
+                </Box>
+              )}
+
+              <Divider sx={{ my: 1.5 }} />
+
+              <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: '2fr 1fr 1fr 1fr 1fr' }, gap: 1.5 }}>
+                <FormControl fullWidth size="small" error={Boolean(rowErrors.quoteItem)}>
+                  <InputLabel id={`quote-line-${row.clientId}`}>Quote line</InputLabel>
+                  <Select
+                    labelId={`quote-line-${row.clientId}`}
+                    label="Quote line"
+                    value={row.quoteItemId}
+                    onChange={(event) => applyProposal(row.clientId, Number(event.target.value))}
+                    disabled={busy}
+                  >
+                    {projection.lines.filter((line) => line.remainingQuantity > EPSILON).map((line) => (
+                      <MenuItem key={line.quoteItemId} value={line.quoteItemId}>
+                        {line.productName || line.description} ({line.remainingQuantity} remaining)
+                      </MenuItem>
+                    ))}
+                  </Select>
+                  {rowErrors.quoteItem && (
+                    <Typography variant="caption" color="error" sx={{ mx: 1.75, mt: 0.5 }}>{rowErrors.quoteItem}</Typography>
+                  )}
+                </FormControl>
+
+                <TextField
+                  required
+                  size="small"
+                  type="number"
+                  label="Buyer ordered"
+                  value={row.orderedQuantity}
+                  onChange={(event) => updateRow(row.clientId, { orderedQuantity: event.target.value })}
+                  error={Boolean(rowErrors.ordered)}
+                  helperText={rowErrors.ordered
+                    ?? (selectedLine ? `You quoted ${selectedLine.quotedQuantity}` : 'From the buyer PO')}
+                  disabled={busy}
+                  slotProps={{ htmlInput: { min: 0, step: 'any', 'aria-label': 'Quantity the buyer ordered' } }}
+                />
+
+                {/*
+                  FR-COM-04. The unit that quantity is measured in, taken from the buyer's PO.
+                  Left blank until someone states it: the quantity means nothing without it, and
+                  seeding it from the quotation is exactly what made "10 boxes" match "10 each".
+                */}
+                <FormControl fullWidth size="small">
+                  <InputLabel id={`buyer-uom-${row.clientId}`}>Buyer unit</InputLabel>
+                  <Select<number | ''>
+                    labelId={`buyer-uom-${row.clientId}`}
+                    label="Buyer unit"
+                    value={units.some((unit) => unit.uomId === row.uomId) ? row.uomId : ''}
+                    onChange={(event) => updateRow(row.clientId, {
+                      uomId: event.target.value === '' ? '' : Number(event.target.value),
+                    })}
+                    disabled={busy}
+                  >
+                    <MenuItem value=""><em>Not stated on the PO</em></MenuItem>
+                    {units.map((unit) => (
+                      <MenuItem key={unit.uomId} value={unit.uomId}>
+                        {unit.uomCode} — {unit.uomName}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                  <Typography
+                    variant="caption"
+                    color={row.statedUnitOfMeasure && row.uomId === '' ? 'warning.main' : 'text.secondary'}
+                    sx={{ mx: 1.75, mt: 0.5 }}
+                  >
+                    {row.statedUnitOfMeasure && row.uomId === ''
+                      ? `PO says "${row.statedUnitOfMeasure}" — not a configured unit`
+                      : selectedLine
+                        ? `You quoted in ${selectedLine.uomCode || 'no stated unit'}`
+                        : 'From the buyer PO'}
+                  </Typography>
+                </FormControl>
+
+                <TextField
+                  required
+                  size="small"
+                  type="number"
+                  label="Buyer unit price"
+                  value={row.unitPrice}
+                  onChange={(event) => updateRow(row.clientId, { unitPrice: event.target.value })}
+                  error={Boolean(rowErrors.unitPrice)}
+                  helperText={rowErrors.unitPrice
+                    ?? (selectedLine ? `You quoted ${selectedLine.unitPrice}` : 'From the buyer PO')}
+                  disabled={busy}
+                  slotProps={{ htmlInput: { min: 0, step: 'any', 'aria-label': 'Unit price the buyer ordered at' } }}
+                />
+
+                <TextField
+                  required
+                  size="small"
+                  type="number"
+                  label="Award quantity"
+                  value={row.awardedQuantity}
+                  onChange={(event) => updateRow(row.clientId, { awardedQuantity: event.target.value })}
+                  error={Boolean(rowErrors.awarded)}
+                  helperText={rowErrors.awarded
+                    ?? (selectedLine ? `${selectedLine.remainingQuantity} remaining on the quote` : 'What we accept')}
+                  disabled={busy}
+                  slotProps={{ htmlInput: { min: 0, max: selectedLine?.remainingQuantity, step: 'any', 'aria-label': 'Award quantity' } }}
+                />
+              </Box>
+
+              {(priceVariance || quantityVariance || unitVariance) && (
+                <Stack direction="row" spacing={1} sx={{ mt: 1.5, flexWrap: 'wrap', gap: 1 }}>
+                  {priceVariance && (
+                    <Chip
                       size="small"
-                      type="number"
-                      value={row.orderedQuantity}
-                      onChange={(event) => updateRow(row.clientId, { orderedQuantity: event.target.value })}
-                      error={Boolean(rowErrors.ordered)}
-                      helperText={rowErrors.ordered}
-                      disabled={saveMutation.isPending}
-                      slotProps={{ htmlInput: { min: 0, step: 'any', 'aria-label': 'Customer PO quantity' } }}
+                      color="warning"
+                      label={`Price differs beyond the ${tolerances.priceTolerancePercent}% tolerance — `
+                        + `you quoted ${selectedLine!.unitPrice}, buyer ordered ${row.unitPrice}`}
                     />
-                  </TableCell>
-                  <TableCell sx={{ verticalAlign: 'top' }}>
-                    <TextField
-                      required
-                      fullWidth
+                  )}
+                  {quantityVariance && (
+                    <Chip
                       size="small"
-                      type="number"
-                      value={row.unitPrice}
-                      onChange={(event) => updateRow(row.clientId, { unitPrice: event.target.value })}
-                      error={Boolean(rowErrors.unitPrice)}
-                      helperText={rowErrors.unitPrice
-                        || (selectedLine && numberValue(row.unitPrice) !== selectedLine.unitPrice
-                          ? `Quote: ${selectedLine.unitPrice}`
-                          : undefined)}
-                      disabled={saveMutation.isPending}
-                      slotProps={{ htmlInput: { min: 0, step: 'any', 'aria-label': 'Customer PO unit price' } }}
+                      color="info"
+                      label={`Quantity differs — buyer ordered ${row.orderedQuantity}`
+                        + `${buyerUnitCode ? ` ${buyerUnitCode}` : ''}, awarding ${row.awardedQuantity}`}
                     />
-                  </TableCell>
-                  <TableCell sx={{ verticalAlign: 'top' }}>
-                    <TextField
-                      required
-                      fullWidth
+                  )}
+                  {unitVariance && (
+                    <Chip
                       size="small"
-                      type="number"
-                      value={row.awardedQuantity}
-                      onChange={(event) => updateRow(row.clientId, { awardedQuantity: event.target.value })}
-                      error={Boolean(rowErrors.awarded)}
-                      helperText={rowErrors.awarded}
-                      disabled={saveMutation.isPending}
-                      slotProps={{ htmlInput: { min: 0, max: selectedLine?.remainingQuantity, step: 'any', 'aria-label': 'Award quantity' } }}
+                      color="warning"
+                      label={`Unit differs — you quoted in ${selectedLine!.uomCode || 'a different unit'}, `
+                        + `buyer ordered in ${buyerUnitCode || 'another unit'}`}
                     />
-                  </TableCell>
-                  <TableCell align="right" sx={{ verticalAlign: 'top', pt: 2.1, fontWeight: 700 }}>
-                    {selectedLine?.remainingQuantity ?? '-'}
-                  </TableCell>
-                  <TableCell sx={{ verticalAlign: 'top', pt: 1.2 }}>
-                    <Tooltip title="Remove line">
-                      <span>
-                        <IconButton
-                          size="small"
-                          aria-label="Remove PO line"
-                          onClick={() => setRows((current) => current.filter((item) => item.clientId !== row.clientId))}
-                          disabled={saveMutation.isPending}
-                        >
-                          <DeleteIcon fontSize="small" />
-                        </IconButton>
-                      </span>
-                    </Tooltip>
-                  </TableCell>
-                </TableRow>
-              );
-            })}
-          </TableBody>
-        </Table>
-      </TableContainer>
+                  )}
+                </Stack>
+              )}
+            </Box>
+          );
+        })}
+      </Stack>
 
       <Button
         variant="outlined"
         size="small"
         startIcon={<AddIcon />}
         onClick={addRow}
-        disabled={saveMutation.isPending}
+        disabled={busy}
         sx={{ alignSelf: 'flex-start' }}
       >
         Add PO line
@@ -721,23 +1127,23 @@ const CustomerAwardWorkspace: React.FC<CustomerAwardWorkspaceProps> = ({
             <Checkbox
               checked={convertAfterConfirmation}
               onChange={(event) => setConvertAfterConfirmation(event.target.checked)}
-              disabled={saveMutation.isPending}
+              disabled={busy}
             />
           )}
           label="Create sales order after confirmation"
         />
         <Stack direction="row" spacing={1} sx={{ justifyContent: 'flex-end' }}>
-          {onCancel && <Button color="inherit" onClick={onCancel} disabled={saveMutation.isPending}>Cancel</Button>}
+          {onCancel && <Button color="inherit" onClick={onCancel} disabled={busy}>Cancel</Button>}
           <Button
             variant="contained"
             onClick={submit}
-            disabled={saveMutation.isPending || rows.length === 0}
-            startIcon={saveMutation.isPending
+            disabled={busy || rows.length === 0}
+            startIcon={busy
               ? <CircularProgress size={17} color="inherit" />
               : convertAfterConfirmation ? <ConvertIcon /> : <ConfirmIcon />}
             sx={{ minWidth: 190, fontWeight: 800 }}
           >
-            {saveMutation.isPending ? submitPhase : convertAfterConfirmation ? 'Confirm and create order' : 'Confirm award'}
+            {busy ? submitPhase : convertAfterConfirmation ? 'Confirm and create order' : 'Confirm award'}
           </Button>
         </Stack>
       </Stack>

@@ -27,6 +27,12 @@ public static class AiExternalProviderTrustReasons
     /// <summary>A matching, live row exists but does not cover unstructured documents.</summary>
     public const string UnstructuredNotAuthorized = "external_authorization_unstructured_denied";
 
+    /// <summary>
+    /// The tenant's <see cref="AiProcessingPolicy.EgressPolicy"/> does not permit whole
+    /// unstructured document text to leave, whatever any single authorization says.
+    /// </summary>
+    public const string EgressPolicyForbidsWholeDocuments = "egress_policy_forbids_whole_documents";
+
     /// <summary>The tenant has no AI processing policy row at all.</summary>
     public const string PolicyMissing = "policy_missing";
 
@@ -59,10 +65,19 @@ public static class AiExternalProviderTrustReasons
 /// <para>
 /// The allow-list decides only WHETHER a destination may be used. Every other control —
 /// <see cref="AiProcessingPolicy.ExternalProcessingAllowed"/>, purpose/provider/model
-/// policy denial, the reserve/attempt/settle token ledger and its budgets, the per-document
-/// token cap, PII redaction before egress, the prompt-injection nonce boundary,
-/// strict-JSON-or-fail parsing and line-item count conservation — still runs unchanged
-/// afterwards. An authorization is a narrower door, not a bypass.
+/// policy denial, <see cref="AiProcessingPolicy.EgressPolicy"/>, the reserve/attempt/settle
+/// token ledger and its budgets, the per-document token cap, the prompt-injection nonce
+/// boundary, strict-JSON-or-fail parsing and line-item count conservation — still runs
+/// unchanged afterwards. An authorization is a narrower door, not a bypass.
+/// </para>
+///
+/// <para>
+/// NOT in that list, deliberately: PII redaction. Several comments in this module used to
+/// name it as a control that runs before egress. Nothing in this build redacts anything on
+/// the way to a provider — <see cref="AiProcessingPolicy.RedactionRequired"/> is persisted
+/// and validated on write and read by no egress path — and a control named in a comment but
+/// absent from the code is worse than an absent control, because it is the one an auditor
+/// stops looking for.
 /// </para>
 /// </summary>
 public sealed class AiExternalProviderAuthorization
@@ -191,6 +206,13 @@ public interface IAiExternalProviderTrust
 {
     /// <summary>The endpoint this process is configured to call, and why it is Local/External.</summary>
     AiProviderDescriptor ResolvedProvider { get; }
+
+    /// <summary>
+    /// EVERY destination this process can call — extraction and agent alike. A reservation
+    /// can only be authorized against a destination that appears here, so a client that
+    /// dials an origin no descriptor names is refused rather than merely un-exempted.
+    /// </summary>
+    IReadOnlyList<AiProviderDescriptor> KnownProviders { get; }
 
     /// <summary>
     /// Decides whether <paramref name="provider"/> may process work for

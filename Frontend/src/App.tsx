@@ -30,6 +30,14 @@ const IncomingPage = lazy(() => import('./pages/Inventory/Commercial/IncomingPag
 const MovementsPage = lazy(() => import('./pages/Inventory/Commercial/MovementsPage'));
 const DemandPage = lazy(() => import('./pages/Inventory/Commercial/DemandPage'));
 const RelatedResourcesPage = lazy(() => import('./pages/Inventory/Commercial/RelatedResourcesPage'));
+const StockLevelsPage = lazy(() => import('./pages/Inventory/Commercial/StockLevelsPage'));
+const ReorderAlertsPage = lazy(() => import('./pages/Inventory/Commercial/ReorderAlertsPage'));
+const CountVariancePage = lazy(() => import('./pages/Inventory/Commercial/CountVariancePage'));
+const StockAgeingPage = lazy(() => import('./pages/Inventory/Commercial/StockAgeingPage'));
+// Gate 5 / FR-MTR-01..05 — material lots, certificates, quarantine and where-used trace.
+const LotsPage = lazy(() => import('./pages/Inventory/Traceability/LotsPage'));
+const LotDetailPage = lazy(() => import('./pages/Inventory/Traceability/LotDetailPage'));
+const OrderTracePage = lazy(() => import('./pages/Inventory/Traceability/OrderTracePage'));
 const SuppliersPage = lazy(() => import('./pages/Suppliers/SuppliersPage'));
 const SupplierDetailPage = lazy(() => import('./pages/Suppliers/SupplierDetailPage'));
 const QuotedItemsPage = lazy(() => import('./pages/Suppliers/QuotedItemsPage'));
@@ -40,6 +48,7 @@ const LeadsPage = lazy(() => import('./pages/Leads/LeadsPage'));
 const OutstandingLeadsPage = lazy(() => import('./pages/Leads/OutstandingLeadsPage'));
 const AssignedLeadsPage = lazy(() => import('./pages/Leads/AssignedLeadsPage'));
 const ManualUploadLeadsPage = lazy(() => import('./pages/Leads/ManualUploadLeadsPage'));
+const WatchedFoldersPage = lazy(() => import('./pages/Leads/WatchedFoldersPage'));
 const LeadIngestionBatchPage = lazy(() => import('./pages/Leads/LeadIngestionBatchPage'));
 const PossibleMatchesPage = lazy(() => import('./pages/Leads/PossibleMatchesPage'));
 const DuplicateUploadsPage = lazy(() => import('./pages/Leads/DuplicateUploadsPage'));
@@ -72,7 +81,6 @@ const ClientPurchaseOrderReviewPage = lazy(() => import('./pages/Sales/ClientPur
 const OrderListPage = lazy(() => import('./pages/Sales/Orders/OrderListPage'));
 const CreateOrderPage = lazy(() => import('./pages/Sales/Orders/CreateOrderPage'));
 const OrderViewPage = lazy(() => import('./pages/Sales/Orders/OrderViewPage'));
-const OrderInvoicePage = lazy(() => import('./pages/Sales/Shipments/OrderInvoicePage'));
 const AccountsReceivablePage = lazy(() => import('./pages/Sales/Finance/AccountsReceivablePage'));
 const ShipmentListPage = lazy(() => import('./pages/Sales/Shipments/ShipmentListPage'));
 const CreateShipmentPage = lazy(() => import('./pages/Sales/Shipments/CreateShipmentPage'));
@@ -80,7 +88,11 @@ const ShipmentViewPage = lazy(() => import('./pages/Sales/Shipments/ShipmentView
 const ShipmentInvoicePage = lazy(() => import('./pages/Sales/Shipments/ShipmentInvoicePage'));
 const PriceStructurePage = lazy(() => import('./pages/Setup/PriceStructure/PriceStructurePage'));
 const SlaSettingsPage = lazy(() => import('./pages/Setup/Sla/SlaSettingsPage'));
+const ScheduledReportsPage = lazy(() => import('./pages/Setup/Reporting/ScheduledReportsPage'));
+const CommercialPolicyPage = lazy(() => import('./pages/Setup/CommercialPolicy/CommercialPolicyPage'));
 const MailboxPage = lazy(() => import('./pages/Setup/Mailbox/MailboxPage'));
+const RoutingRulesPage = lazy(() => import('./pages/Setup/RoutingRules/RoutingRulesPage'));
+const CustomFieldsPage = lazy(() => import('./pages/Setup/CustomFields/CustomFieldsPage'));
 const SalesTodayPage = lazy(() => import('./pages/SalesManagement/SalesTodayPage'));
 const TeamOverviewPage = lazy(() => import('./pages/SalesManagement/TeamOverviewPage'));
 const RepDirectoryPage = lazy(() => import('./pages/SalesManagement/RepDirectoryPage'));
@@ -224,7 +236,9 @@ function App() {
       <Route path="/sales/shipments/:id" element={<MainLayout><PermissionGuard moduleName="Shipments"><ShipmentViewPage /></PermissionGuard></MainLayout>} />
       
       {/* Sales Invoices/Documents */}
-      <Route path="/sales/orders/invoice/:id" element={<PermissionGuard moduleName="Orders"><OrderInvoicePage /></PermissionGuard>} />
+      {/* No order-level tax-invoice route: the governed AR document is issued by the finance
+          subsystem and is reached via /sales/finance. A page that renders an order as an
+          "invoice" is not the issued document and must not exist before the ZATCA gate. */}
       <Route path="/sales/shipments/invoice/:id" element={<PermissionGuard moduleName="Shipments"><ShipmentInvoicePage /></PermissionGuard>} />
       
       <Route path="/orders" element={<Navigate to="/sales/orders" replace />} />
@@ -261,10 +275,23 @@ function App() {
       {/* SLA & alert policy (WP-A2). Guarded by the generic setup module ("UOM"),
           matching /setup/master and /setup/price-structure. */}
       <Route path="/setup/sla" element={<MainLayout><PermissionGuard moduleName="UOM"><SlaSettingsPage /></PermissionGuard></MainLayout>} />
+      {/* FR-DSH-06 scheduled report delivery. Guarded by "Dashboard" because that is the module
+          the reporting endpoints check, and because the reports carry dashboard content — the
+          write side additionally requires a manager role at the API. */}
+      <Route path="/setup/scheduled-reports" element={<MainLayout><PermissionGuard moduleName="Dashboard"><ScheduledReportsPage /></PermissionGuard></MainLayout>} />
+      <Route path="/setup/commercial-policy" element={<MainLayout><PermissionGuard moduleName="UOM"><CommercialPolicyPage /></PermissionGuard></MainLayout>} />
       {/* Mailbox administration. Guarded by "Email & SMTP" — the module the supplier-email
           screen already uses — rather than the generic setup module, because these rows hold
           stored credentials and decide where customer-facing mail is sent from. */}
       <Route path="/setup/mailboxes" element={<MainLayout><PermissionGuard moduleName="Email & SMTP"><MailboxPage /></PermissionGuard></MainLayout>} />
+      {/* RFQ routing rules (FR-RFQ-07). Guarded by "Customers" because that is the module the
+          underlying commercial-routing endpoints check for both reading a customer's routing
+          profile and creating ownership/identifier rows. */}
+      <Route path="/setup/routing-rules" element={<MainLayout><PermissionGuard moduleName="Customers"><RoutingRulesPage /></PermissionGuard></MainLayout>} />
+      {/* AA-01 · tenant-defined custom fields. Guarded by the generic setup module ("UOM"),
+          matching /setup/master and /setup/sla; the API additionally requires a manager role
+          and edit permission on the module the field attaches to. */}
+      <Route path="/setup/custom-fields" element={<MainLayout><PermissionGuard moduleName="UOM"><CustomFieldsPage /></PermissionGuard></MainLayout>} />
 
       {/* Security Routes */}
       <Route path="/security/users" element={<MainLayout><PermissionGuard moduleName="Users"><UsersPage /></PermissionGuard></MainLayout>} />
@@ -279,6 +306,16 @@ function App() {
       <Route path="/inventory/movements" element={<MainLayout><PermissionGuard moduleName="Products"><MovementsPage /></PermissionGuard></MainLayout>} />
       <Route path="/inventory/demand" element={<MainLayout><PermissionGuard moduleName="Products"><DemandPage /></PermissionGuard></MainLayout>} />
       <Route path="/inventory/resources" element={<MainLayout><PermissionGuard moduleName="Products"><RelatedResourcesPage /></PermissionGuard></MainLayout>} />
+      {/* FR-INV-04/05/06. Four screens that had no interface at all: minimum/maximum levels and the
+          reorder alert ledger, and the two reports whose endpoints were complete and unreachable. */}
+      <Route path="/inventory/levels" element={<MainLayout><PermissionGuard moduleName="Products"><StockLevelsPage /></PermissionGuard></MainLayout>} />
+      <Route path="/inventory/reorder-alerts" element={<MainLayout><PermissionGuard moduleName="Products"><ReorderAlertsPage /></PermissionGuard></MainLayout>} />
+      <Route path="/inventory/count-variance" element={<MainLayout><PermissionGuard moduleName="Products"><CountVariancePage /></PermissionGuard></MainLayout>} />
+      <Route path="/inventory/ageing" element={<MainLayout><PermissionGuard moduleName="Products"><StockAgeingPage /></PermissionGuard></MainLayout>} />
+      <Route path="/inventory/lots" element={<MainLayout><PermissionGuard moduleName="Products"><LotsPage /></PermissionGuard></MainLayout>} />
+      <Route path="/inventory/lots/:lotId" element={<MainLayout><PermissionGuard moduleName="Products"><LotDetailPage /></PermissionGuard></MainLayout>} />
+      <Route path="/inventory/order-trace" element={<MainLayout><PermissionGuard moduleName="Products"><PermissionGuard moduleName="Orders"><OrderTracePage /></PermissionGuard></PermissionGuard></MainLayout>} />
+      <Route path="/inventory/order-trace/:orderId" element={<MainLayout><PermissionGuard moduleName="Products"><PermissionGuard moduleName="Orders"><OrderTracePage /></PermissionGuard></PermissionGuard></MainLayout>} />
       <Route path="/inventory/products" element={<MainLayout><PermissionGuard moduleName="Products"><ProductsPage /></PermissionGuard></MainLayout>} />
       <Route path="/inventory/products/:id" element={<MainLayout><PermissionGuard moduleName="Products"><ProductDetailPage /></PermissionGuard></MainLayout>} />
       <Route path="/inventory/categories" element={<MainLayout><PermissionGuard moduleName="Product Categories"><ProductCategoryPage /></PermissionGuard></MainLayout>} />
@@ -308,8 +345,13 @@ function App() {
       <Route path="/procurement/leads/possible-matches" element={<MainLayout><PermissionGuard moduleName="Leads"><PossibleMatchesPage /></PermissionGuard></MainLayout>} />
       <Route path="/procurement/leads/duplicates" element={<MainLayout><PermissionGuard moduleName="Leads"><DuplicateUploadsPage /></PermissionGuard></MainLayout>} />
       <Route path="/procurement/leads/inbound-mail" element={<MainLayout><PermissionGuard moduleName="Leads"><InboundMailTriagePage /></PermissionGuard></MainLayout>} />
-      {/* Customer 1 / Customer 2 folder-upload prototype removed from intake. Redirect legacy links to manual upload. */}
-      <Route path="/procurement/leads/folder-upload" element={<Navigate to="/procurement/leads/manual-upload" replace />} />
+      {/*
+        The watched-folder intake channel (FolderService, swept by EmailBackgroundService). The old
+        route redirected to manual upload, which left a channel that really runs on the server with
+        no operator surface at all.
+      */}
+      <Route path="/procurement/leads/watched-folders" element={<MainLayout><PermissionGuard moduleName="Leads"><WatchedFoldersPage /></PermissionGuard></MainLayout>} />
+      <Route path="/procurement/leads/folder-upload" element={<Navigate to="/procurement/leads/watched-folders" replace />} />
       <Route path="/procurement/leads/view/:id" element={<MainLayout><PermissionGuard moduleName="Leads"><LeadDetailPage /></PermissionGuard></MainLayout>} />
       <Route path="/procurement/leads/:id/convert" element={<MainLayout><PermissionGuard moduleName="Leads"><LeadConvertPage /></PermissionGuard></MainLayout>} />
       <Route path="/commercial-cases/:id?" element={<MainLayout><PermissionGuard moduleName="Leads"><CommercialCaseWorkspacePage /></PermissionGuard></MainLayout>} />
@@ -319,7 +361,8 @@ function App() {
       <Route path="/leads/outstanding" element={<Navigate to="/procurement/leads/outstanding" replace />} />
       <Route path="/leads/assigned" element={<Navigate to="/procurement/leads/assigned" replace />} />
       <Route path="/leads/manual-upload" element={<Navigate to="/procurement/leads/manual-upload" replace />} />
-      <Route path="/leads/folder-upload" element={<Navigate to="/procurement/leads/manual-upload" replace />} />
+      <Route path="/leads/folder-upload" element={<Navigate to="/procurement/leads/watched-folders" replace />} />
+      <Route path="/leads/watched-folders" element={<Navigate to="/procurement/leads/watched-folders" replace />} />
       <Route path="/leads/view/:id" element={<MainLayout><PermissionGuard moduleName="Leads"><LeadDetailPage /></PermissionGuard></MainLayout>} />
       <Route path="/leads" element={<Navigate to="/procurement/leads/all" replace />} />
 

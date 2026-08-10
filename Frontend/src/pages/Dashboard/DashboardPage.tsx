@@ -34,6 +34,7 @@ import dashboardService, {
   type Release01KpiUnit,
 } from '../../api/services/dashboardService';
 import commercialIntelligenceService from '../../api/services/commercialIntelligenceService';
+import GrossMarginPanel from './GrossMarginPanel';
 import { useAuth } from '../../context/AuthContext';
 
 const formatValue = (kpi: Release01KpiDTO): string => {
@@ -185,7 +186,22 @@ export default function DashboardPage() {
           <Typography variant="h4" sx={{ fontWeight: 900 }}>{isExecutiveToday ? 'Executive RFQ-to-Revenue' : 'Dashboard'}</Typography>
           <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mt: 0.5, flexWrap: 'wrap' }}>
             <Chip size="small" label={data?.definitionVersion ?? 'release-01'} variant="outlined" />
-            {data?.roleScope && <Chip size="small" label={data.roleScope.scope} variant="outlined" />}
+            {data?.roleScope && (
+              // The tier, in words. A raw 'managed_scope' on a board tile tells a director
+              // nothing about whose numbers they are reading.
+              <Chip
+                size="small"
+                variant="outlined"
+                label={
+                  data.roleScope.scope === 'tenant' ? 'Company-wide'
+                    : data.roleScope.scope === 'managed_scope'
+                      ? `Your managed scope — ${data.roleScope.accountTeamIds?.length ?? 0} account team(s)`
+                      : data.roleScope.scope === 'assigned_accounts'
+                        ? `Your assigned accounts — ${data.roleScope.accountTeamIds?.length ?? 0} account team(s)`
+                        : data.roleScope.scope
+                }
+              />
+            )}
             <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', color: 'text.secondary' }}>
               <FreshnessIcon sx={{ fontSize: 16 }} />
               <Typography variant="caption">
@@ -266,6 +282,12 @@ export default function DashboardPage() {
       ) : !dashboard.isError ? (
         <Alert severity="info">No KPI definitions are available for this period and role scope.</Alert>
       ) : null}
+
+      <Divider sx={{ my: 3 }} />
+      {/* FR-DSH-02. Its own panel rather than a KPI tile, because the figure only means
+          anything alongside its sample size, its coverage and its cost-basis disclosure, and a
+          tile has room for none of those. */}
+      {!invalidWindow && <GrossMarginPanel from={from} to={to} />}
 
       <Divider sx={{ my: 3 }} />
       <Stack direction="row" spacing={1.5} sx={{ flexWrap: 'wrap', gap: 1 }}>

@@ -34,7 +34,7 @@ public sealed class ProductControllerTenantAuthorizationTests
         using var database = new TestDb();
         using var context = database.ContextFor(null);
         var repository = DispatchProxy.Create<IProductRepository, UnexpectedRepositoryCall>();
-        var controller = new ProductController(repository, context)
+        var controller = new ProductController(repository, context, new StubMasterDataChangeHistoryReader())
         {
             ControllerContext = new ControllerContext
             {
@@ -60,7 +60,7 @@ public sealed class ProductControllerTenantAuthorizationTests
         Seed.EnsureBusinessUnit(context, 702);
         context.SaveChanges();
         var repository = DispatchProxy.Create<IProductRepository, UnexpectedRepositoryCall>();
-        var controller = new ProductController(repository, context)
+        var controller = new ProductController(repository, context, new StubMasterDataChangeHistoryReader())
         {
             ControllerContext = new ControllerContext
             {

@@ -1,4 +1,5 @@
 using ERP_RFQ_Automation.CustomFields;
+using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
 using System.Text.Json;
@@ -30,38 +31,32 @@ public sealed class CustomFieldApplicationServiceTests
     }
 
     [Fact]
-    public async Task Value_writes_are_typed_audited_idempotent_and_version_guarded()
+    public async Task The_legacy_value_write_path_fails_closed_and_names_its_replacement()
     {
+        // AA-01 retired this route: custom-field values live in ONE jsonb bag on the owning
+        // row. It fails loudly rather than 404-ing so an old caller is told where to go.
+        //
+        // Deliberately NOT carried over to the bag path, and therefore no longer covered by
+        // any test because the behaviour no longer exists: per-value optimistic concurrency,
+        // idempotency-key replay, and custom_field_value_history audit rows.
         using var db = await SeedLeadAsync();
         await using var context = db.ContextFor(71);
         var service = new CustomFieldApplicationService(context);
         await service.CreateDefinitionAsync(71, new CreateCustomFieldDefinitionCommand(
             "Lead", "project_code", new("Project code", CustomFieldDataType.Text, MinimumLength: 3),
             Activate: true), "admin", CancellationToken.None);
-        var create = new UpsertCustomFieldValueCommand(
-            new(Text: "ALPHA"), null, "value-create-701", "corr-create");
 
-        var first = await service.UpsertValueAsync(
-            71, "Lead", 701, "project_code", create, "user@example.com", false, CancellationToken.None);
-        var replay = await service.UpsertValueAsync(
-            71, "Lead", 701, "project_code", create, "user@example.com", false, CancellationToken.None);
-        var updated = await service.UpsertValueAsync(71, "Lead", 701, "project_code",
-            new(new(Text: "BRAVO"), 1, "value-update-701", "corr-update", "Customer correction"),
-            "user@example.com", false, CancellationToken.None);
+        var error = await Assert.ThrowsAsync<CustomFieldWritePathRetiredException>(() =>
+            service.UpsertValueAsync(71, "Lead", 701, "project_code",
+                new(new(Text: "ALPHA"), null, "value-create-701", "corr-create"),
+                "user@example.com", false, CancellationToken.None));
 
-        Assert.Equal(first, replay);
-        Assert.Equal(1, first.Version);
-        Assert.Equal(2, updated.Version);
-        Assert.Equal("BRAVO", updated.Value.Text);
-        Assert.Equal(2, await context.Set<CustomFieldValueHistory>().CountAsync());
-        await Assert.ThrowsAsync<CustomFieldConflictException>(() => service.UpsertValueAsync(
-            71, "Lead", 701, "project_code",
-            new(new(Text: "CHARLIE"), 1, "value-stale-701", "corr-stale"),
-            "user@example.com", false, CancellationToken.None));
+        Assert.Contains("/api/custom-fields/records/", error.Message);
+        Assert.Equal(0, await context.Set<CustomFieldValue>().CountAsync());
     }
 
     [Fact]
-    public async Task Sensitive_fields_are_hidden_and_cannot_be_edited_by_tenant_users()
+    public async Task Sensitive_fields_are_hidden_from_tenant_users_in_the_schema()
     {
         using var db = await SeedLeadAsync();
         await using var context = db.ContextFor(71);
@@ -75,50 +70,10 @@ public sealed class CustomFieldApplicationServiceTests
         var tenantSchema = await service.GetEntitySchemaAsync(71, "Lead", 701, false, CancellationToken.None);
         var managerSchema = await service.GetEntitySchemaAsync(71, "Lead", 701, true, CancellationToken.None);
 
+        // A tenant user does not see the field at all; a manager does. The matching EDIT gate
+        // now lives on the jsonb bag path — see CustomFieldBagTests.
         Assert.Empty(tenantSchema.Fields);
         Assert.Single(managerSchema.Fields);
-        await Assert.ThrowsAsync<CustomFieldConflictException>(() => service.UpsertValueAsync(
-            71, "Lead", 701, "target_margin",
-            new(new(Decimal: 12.5m), null, "margin-user", "corr-user"),
-            "user", false, CancellationToken.None));
-        var value = await service.UpsertValueAsync(
-            71, "Lead", 701, "target_margin",
-            new(new(Decimal: 12.5m), null, "margin-admin", "corr-admin"),
-            "admin", true, CancellationToken.None);
-        Assert.Equal(12.5m, value.Value.Decimal);
-    }
-
-    [Fact]
-    public async Task Idempotency_replay_is_bound_to_the_authorized_entity_and_definition()
-    {
-        using var db = await SeedLeadAsync();
-        await using var context = db.ContextFor(71);
-        var service = new CustomFieldApplicationService(context);
-        await service.CreateDefinitionAsync(71, new CreateCustomFieldDefinitionCommand(
-            "Lead", "public_note", new("Public note", CustomFieldDataType.Text), Activate: true),
-            "admin", CancellationToken.None);
-        await service.CreateDefinitionAsync(71, new CreateCustomFieldDefinitionCommand(
-            "Lead", "secret_note", new("Secret note", CustomFieldDataType.Text,
-                IsSensitive: true, ViewAccess: CustomFieldAccessLevel.ManagerOrAdmin,
-                EditAccess: CustomFieldAccessLevel.ManagerOrAdmin), Activate: true),
-            "admin", CancellationToken.None);
-        var key = "sensitive-operation-701";
-        await service.UpsertValueAsync(71, "Lead", 701, "secret_note",
-            new(new(Text: "restricted"), null, key, "corr-sensitive"),
-            "admin", true, CancellationToken.None);
-
-        await Assert.ThrowsAsync<CustomFieldConflictException>(() => service.UpsertValueAsync(
-            71, "Lead", 701, "public_note",
-            new(new(Text: "unrelated"), null, key, "corr-public"),
-            "user", false, CancellationToken.None));
-        await Assert.ThrowsAsync<CustomFieldConflictException>(() => service.UpsertValueAsync(
-            71, "Lead", 701, "secret_note",
-            new(new(Text: "restricted"), null, key, "corr-sensitive"),
-            "user", false, CancellationToken.None));
-        await Assert.ThrowsAsync<CustomFieldConflictException>(() => service.UpsertValueAsync(
-            71, "Lead", 701, "secret_note",
-            new(new(Text: "different payload"), null, key, "corr-sensitive"),
-            "admin", true, CancellationToken.None));
     }
 
     [Fact]
@@ -204,7 +159,7 @@ public sealed class CustomFieldApplicationServiceTests
     }
 
     [Fact]
-    public async Task Conditional_read_only_rules_are_enforced_by_schema_and_write_api()
+    public async Task Conditional_read_only_rules_are_still_reported_by_the_schema_read()
     {
         using var db = await SeedLeadAsync();
         await using var context = db.ContextFor(71);
@@ -218,19 +173,15 @@ public sealed class CustomFieldApplicationServiceTests
                 "control_state", CustomFieldComparisonOperator.Equal,
                 JsonSerializer.SerializeToElement("locked")))],
             DependencyDefinitionIds: [control.Id], Activate: true), "admin", CancellationToken.None);
-        var note = await service.UpsertValueAsync(71, "Lead", 701, "governed_note",
-            new(new(Text: "original"), null, "note-create", "corr-note"),
-            "user", false, CancellationToken.None);
-        await service.UpsertValueAsync(71, "Lead", 701, "control_state",
-            new(new(Text: "locked"), null, "control-create", "corr-control"),
-            "user", false, CancellationToken.None);
+        await SeedLegacyValueAsync(context, 71, "Lead", 701, "governed_note", new(Text: "original"));
+        await SeedLegacyValueAsync(context, 71, "Lead", 701, "control_state", new(Text: "locked"));
 
         var schema = await service.GetEntitySchemaAsync(71, "Lead", 701, false, CancellationToken.None);
+
+        // The READ side still reports the rule. ENFORCEMENT of conditional rules on write went
+        // with the retired EAV write path and is NOT reimplemented on the jsonb bag — stated
+        // here so the gap is visible in the suite rather than only in a report.
         Assert.True(schema.Fields.Single(x => x.StableKey == "governed_note").IsReadOnly);
-        await Assert.ThrowsAsync<CustomFieldConflictException>(() => service.UpsertValueAsync(
-            71, "Lead", 701, "governed_note",
-            new(new(Text: "changed"), note.Version, "note-update", "corr-note-update"),
-            "user", false, CancellationToken.None));
     }
 
     [Fact]
@@ -242,9 +193,7 @@ public sealed class CustomFieldApplicationServiceTests
         var definition = await service.CreateDefinitionAsync(71, new CreateCustomFieldDefinitionCommand(
             "Lead", "typed_value", new("Typed value", CustomFieldDataType.Text), Activate: true),
             "admin", CancellationToken.None);
-        await service.UpsertValueAsync(71, "Lead", 701, "typed_value",
-            new(new(Text: "text"), null, "typed-create", "corr-typed"),
-            "user", false, CancellationToken.None);
+        await SeedLegacyValueAsync(context, 71, "Lead", 701, "typed_value", new(Text: "text"));
 
         await Assert.ThrowsAsync<CustomFieldConflictException>(() => service.AddVersionAsync(
             71, definition.Id, new AddCustomFieldVersionCommand(
@@ -254,6 +203,34 @@ public sealed class CustomFieldApplicationServiceTests
         var stored = Assert.Single(await service.ListDefinitionsAsync(71, "Lead", CancellationToken.None));
         Assert.Single(stored.Versions);
         Assert.Equal(1, stored.ActiveVersionNumber);
+    }
+
+    /// <summary>
+    /// Writes a row into the legacy EAV value table directly. The table and its READ path are
+    /// still supported; only the service/API write path was retired, so tests that need
+    /// pre-existing legacy values seed them through the entities.
+    /// </summary>
+    private static async Task SeedLegacyValueAsync(
+        ErpRfqAutomationContext context, long businessUnitId, string entityType, long entityId,
+        string stableKey, CustomFieldValueInput input)
+    {
+        var definition = await context.Set<CustomFieldDefinition>().Include(x => x.Versions)
+            .SingleAsync(x => x.BusinessUnitId == businessUnitId && x.StableKey == stableKey);
+        var version = definition.Versions.Single(v => v.VersionNumber == definition.ActiveVersionNumber);
+
+        var record = await context.Set<CustomFieldRecord>().SingleOrDefaultAsync(x =>
+            x.BusinessUnitId == businessUnitId && x.EntityType == entityType && x.EntityId == entityId);
+        if (record is null)
+        {
+            record = CustomFieldRecord.Create(businessUnitId, entityType, entityId, DateTime.UtcNow);
+            context.Add(record);
+            await context.SaveChangesAsync();
+        }
+
+        context.Add(CustomFieldValue.Create(
+            businessUnitId, record.Id, definition.Id, version, input, "seed", DateTime.UtcNow));
+        await context.SaveChangesAsync();
+        context.ChangeTracker.Clear();
     }
 
     private static async Task<TestDb> SeedLeadAsync()

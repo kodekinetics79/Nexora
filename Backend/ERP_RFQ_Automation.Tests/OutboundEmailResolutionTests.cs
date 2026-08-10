@@ -370,6 +370,95 @@ public class OutboundEmailResolutionTests
             OutboundEmailFailureClassifier.Classify(
                 new SmtpException(SmtpStatusCode.MustIssueStartTlsFirst)).Kind);
 
+    // ---- MailKit -------------------------------------------------------------------------------
+    // The tests above all construct System.Net.Mail exceptions — a library SmtpEmailSender does not
+    // use and cannot throw. They passed over a classifier that classified nothing on the only
+    // transport we ship: every real SMTP failure reached the operator as Unknown, "the send failed
+    // for a reason we could not classify". These pin the types MailKit actually raises.
+
+    [Fact]
+    public void A_mailkit_authentication_failure_is_a_credential_problem_not_a_tls_one()
+    {
+        // MailKit.Security.AuthenticationException derives from System.Exception, NOT from
+        // System.Security.Authentication.AuthenticationException — so the arm written for TLS
+        // never matched it, and neither did anything else.
+        var failure = OutboundEmailFailureClassifier.Classify(
+            new MailKit.Security.AuthenticationException("535: 5.7.8 Username and Password not accepted"));
+
+        Assert.Equal(OutboundEmailFailureKind.AuthenticationFailed, failure.Kind);
+        Assert.Contains("username and password", failure.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void A_mailkit_service_not_authenticated_failure_is_not_read_as_unconfigured()
+    {
+        // This one is an InvalidOperationException, so it fell to the LooksUnconfigured arm's
+        // doorstep and past it — the operator was told nothing at all.
+        Assert.Equal(
+            OutboundEmailFailureKind.AuthenticationFailed,
+            OutboundEmailFailureClassifier.Classify(
+                new MailKit.ServiceNotAuthenticatedException("The SMTP server requires authentication.")).Kind);
+    }
+
+    [Fact]
+    public void A_server_that_drops_the_connection_on_a_bad_password_is_not_called_a_tls_problem()
+    {
+        // The exact message GoDaddy returned in live verification. It answers a wrong password by
+        // dropping the connection rather than with a 535, so MailKit raises a PROTOCOL exception —
+        // and reading that as TLS sent an operator with a bad password to go and check their port.
+        var failure = OutboundEmailFailureClassifier.Classify(
+            new MailKit.Net.Smtp.SmtpProtocolException(
+                "The SMTP server has unexpectedly disconnected: Authentication Failed for info@example.com"));
+
+        Assert.Equal(OutboundEmailFailureKind.AuthenticationFailed, failure.Kind);
+    }
+
+    [Fact]
+    public void A_protocol_failure_that_states_nothing_still_falls_back_to_the_tls_reading()
+    {
+        // With no text to read, the remaining cause is speaking plaintext at an implicit-TLS port.
+        Assert.Equal(
+            OutboundEmailFailureKind.TlsFailure,
+            OutboundEmailFailureClassifier.Classify(
+                new MailKit.Net.Smtp.SmtpProtocolException("Unexpected response from server.")).Kind);
+    }
+
+    [Fact]
+    public void A_mailkit_tls_handshake_failure_names_the_port_and_tls_disagreement()
+        => Assert.Equal(
+            OutboundEmailFailureKind.TlsFailure,
+            OutboundEmailFailureClassifier.Classify(
+                new MailKit.Security.SslHandshakeException("The SSL certificate was not accepted.")).Kind);
+
+    [Fact]
+    public void A_mailkit_relay_refusal_is_still_distinguished_from_a_bad_password()
+    {
+        // The same RFC 3463 reading as the System.Net.Mail path, because the two must not give an
+        // operator different advice for the same server response.
+        var failure = OutboundEmailFailureClassifier.Classify(
+            new MailKit.Net.Smtp.SmtpCommandException(
+                MailKit.Net.Smtp.SmtpErrorCode.SenderNotAccepted,
+                MailKit.Net.Smtp.SmtpStatusCode.MailboxUnavailable,
+                "5.7.1 Relay access denied"));
+
+        Assert.Equal(OutboundEmailFailureKind.RelayDenied, failure.Kind);
+        Assert.Equal("SMTP 550", failure.ProviderStatus);
+    }
+
+    [Fact]
+    public void The_ssrf_refusal_tells_the_operator_the_host_is_the_problem()
+    {
+        // MailEndpointPolicy throws a plain InvalidOperationException. Routing it to the generic
+        // "set the SMTP host" text would be the most expensive possible advice: the host IS set,
+        // and it is the thing that has to change.
+        var failure = OutboundEmailFailureClassifier.Classify(
+            new InvalidOperationException("The configured mail host resolves to a prohibited address."));
+
+        Assert.Equal(OutboundEmailFailureKind.NotConfigured, failure.Kind);
+        Assert.Contains("public address", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Set the SMTP host", failure.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Fact]
     public void A_socket_failure_nested_inside_an_smtp_exception_is_still_a_host_problem()
     {

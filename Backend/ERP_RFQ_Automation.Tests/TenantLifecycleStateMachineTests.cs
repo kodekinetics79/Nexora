@@ -308,6 +308,10 @@ public sealed class TenantLifecycleStateMachineTests
         var clock = new TenantLifecycleHarness.MutableTimeProvider();
         var service = TenantLifecycleHarness.Service(context, timeProvider: clock);
         var actor = TenantLifecycleHarness.Operator();
+        // Purged by a DIFFERENT Owner from the one who scheduled it. The service refuses a
+        // purge run by the operator who made the decision, so a test that used one actor for
+        // both was exercising a sequence no real offboarding can perform.
+        var purger = TenantLifecycleHarness.SecondApprover();
 
         await service.ScheduleDeletionAsync(tenant.Id,
             new ScheduleTenantDeletionRequest { Reason = GoodReason, RetentionDays = 7 },
@@ -329,7 +333,7 @@ public sealed class TenantLifecycleStateMachineTests
         // PurgeEligibleOn in storage.
         await Assert.ThrowsAnyAsync<Exception>(() => service.PurgeAsync(tenant.Id,
             new ConfirmTenantDestructionRequest { Reason = GoodReason, Confirmation = tenant.Name },
-            actor, null, CancellationToken.None));
+            purger, null, CancellationToken.None));
 
         await using var verify = db.ContextFor(null);
         var actions = await verify.Set<TenantLifecycleEvent>().Select(x => x.Action).ToListAsync();
@@ -401,6 +405,10 @@ public sealed class TenantLifecycleStateMachineTests
         var clock = new TenantLifecycleHarness.MutableTimeProvider();
         var service = TenantLifecycleHarness.Service(context, timeProvider: clock);
         var actor = TenantLifecycleHarness.Operator();
+        // Purged by a DIFFERENT Owner from the one who scheduled it. The service refuses a
+        // purge run by the operator who made the decision, so a test that used one actor for
+        // both was exercising a sequence no real offboarding can perform.
+        var purger = TenantLifecycleHarness.SecondApprover();
 
         await service.ScheduleDeletionAsync(tenant.Id,
             new ScheduleTenantDeletionRequest { Reason = GoodReason }, actor, null, CancellationToken.None);
@@ -410,7 +418,7 @@ public sealed class TenantLifecycleStateMachineTests
         // a purge that dies mid-flight.
         await Assert.ThrowsAnyAsync<Exception>(() => service.PurgeAsync(tenant.Id,
             new ConfirmTenantDestructionRequest { Reason = GoodReason, Confirmation = tenant.Name },
-            actor, null, CancellationToken.None));
+            purger, null, CancellationToken.None));
 
         await using var verify = db.ContextFor(null);
         var record = await verify.Set<TenantOffboarding>().SingleAsync();
@@ -443,6 +451,10 @@ public sealed class TenantLifecycleStateMachineTests
         var clock = new TenantLifecycleHarness.MutableTimeProvider();
         var service = TenantLifecycleHarness.Service(context, timeProvider: clock);
         var actor = TenantLifecycleHarness.Operator();
+        // Purged by a DIFFERENT Owner from the one who scheduled it. The service refuses a
+        // purge run by the operator who made the decision, so a test that used one actor for
+        // both was exercising a sequence no real offboarding can perform.
+        var purger = TenantLifecycleHarness.SecondApprover();
 
         await service.ScheduleDeletionAsync(tenant.Id,
             new ScheduleTenantDeletionRequest { Reason = GoodReason }, actor, null, CancellationToken.None);
@@ -452,7 +464,7 @@ public sealed class TenantLifecycleStateMachineTests
         // crashed process would — leaving the lease held.
         await Assert.ThrowsAnyAsync<Exception>(() => service.PurgeAsync(tenant.Id,
             new ConfirmTenantDestructionRequest { Reason = GoodReason, Confirmation = tenant.Name },
-            actor, null, CancellationToken.None));
+            purger, null, CancellationToken.None));
 
         // That failure was SEEN, so the lease was released and a retry is allowed immediately.
         await using (var reclaim = db.ContextFor(null))
@@ -470,7 +482,7 @@ public sealed class TenantLifecycleStateMachineTests
         var refusal = await Assert.ThrowsAsync<TenantOffboardingRefusedException>(() =>
             TenantLifecycleHarness.Service(second, timeProvider: clock).PurgeAsync(tenant.Id,
                 new ConfirmTenantDestructionRequest { Reason = GoodReason, Confirmation = tenant.Name },
-                actor, null, CancellationToken.None));
+                purger, null, CancellationToken.None));
 
         Assert.Equal(409, refusal.SuggestedStatusCode);
         Assert.Contains("already in progress", refusal.Message, StringComparison.OrdinalIgnoreCase);
@@ -492,6 +504,10 @@ public sealed class TenantLifecycleStateMachineTests
         var clock = new TenantLifecycleHarness.MutableTimeProvider();
         var service = TenantLifecycleHarness.Service(context, timeProvider: clock);
         var actor = TenantLifecycleHarness.Operator();
+        // Purged by a DIFFERENT Owner from the one who scheduled it. The service refuses a
+        // purge run by the operator who made the decision, so a test that used one actor for
+        // both was exercising a sequence no real offboarding can perform.
+        var purger = TenantLifecycleHarness.SecondApprover();
 
         await service.ScheduleDeletionAsync(tenant.Id,
             new ScheduleTenantDeletionRequest { Reason = GoodReason }, actor, null, CancellationToken.None);
@@ -511,7 +527,7 @@ public sealed class TenantLifecycleStateMachineTests
         var thrown = await Record.ExceptionAsync(() =>
             TenantLifecycleHarness.Service(retry, timeProvider: clock).PurgeAsync(tenant.Id,
                 new ConfirmTenantDestructionRequest { Reason = GoodReason, Confirmation = tenant.Name },
-                actor, null, CancellationToken.None));
+                purger, null, CancellationToken.None));
 
         Assert.NotNull(thrown);
         Assert.IsNotType<TenantOffboardingRefusedException>(thrown);
@@ -619,6 +635,10 @@ public sealed class TenantLifecycleStateMachineTests
         var clock = new TenantLifecycleHarness.MutableTimeProvider();
         var service = TenantLifecycleHarness.Service(context, timeProvider: clock);
         var actor = TenantLifecycleHarness.Operator();
+        // Purged by a DIFFERENT Owner from the one who scheduled it. The service refuses a
+        // purge run by the operator who made the decision, so a test that used one actor for
+        // both was exercising a sequence no real offboarding can perform.
+        var purger = TenantLifecycleHarness.SecondApprover();
 
         await service.ScheduleDeletionAsync(tenant.Id,
             new ScheduleTenantDeletionRequest { Reason = GoodReason }, actor, null, CancellationToken.None);
@@ -646,7 +666,7 @@ public sealed class TenantLifecycleStateMachineTests
         var thrown = await Record.ExceptionAsync(() =>
             TenantLifecycleHarness.Service(verify, timeProvider: clock).PurgeAsync(tenant.Id,
                 new ConfirmTenantDestructionRequest { Reason = GoodReason, Confirmation = tenant.Name },
-                actor, null, CancellationToken.None));
+                purger, null, CancellationToken.None));
 
         Assert.NotNull(thrown);
         Assert.IsNotType<TenantOffboardingRefusedException>(thrown);

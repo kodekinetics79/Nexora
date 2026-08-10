@@ -43,13 +43,31 @@ public interface ICommercialFinanceApplicationService
 }
 
 public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext context,
-    IInternalSourceJournalPostingService journalWriter)
+    IInternalSourceJournalPostingService journalWriter,
+    ERP_RFQ_Automation.Delivery.IDeliveredQuantityLedger deliveredQuantities)
     : ICommercialFinanceApplicationService
 {
     private readonly ErpRfqAutomationContext _context = context;
     private readonly IInternalSourceJournalPostingService _journalWriter = journalWriter;
+
+    /// <summary>
+    /// Gate 7 / FR-DLM-02. The delivered-quantity ledger, injected rather than queried inline, so
+    /// there is exactly one definition of "delivered" in the codebase and this path depends on it.
+    /// </summary>
+    private readonly ERP_RFQ_Automation.Delivery.IDeliveredQuantityLedger _deliveredQuantities
+        = deliveredQuantities;
+
+    // Convenience constructors for the direct-construction paths. They BUILD the ledger rather than
+    // defaulting it away: a null ledger would make the delivered-quantity ceiling silently optional,
+    // which is wiring-contract failure #3 — a reader with a fallback that hides the gap.
     public CommercialFinanceApplicationService(ErpRfqAutomationContext context)
-        : this(context, new InternalSourceJournalPostingService(context)) { }
+        : this(context, new InternalSourceJournalPostingService(context),
+            new ERP_RFQ_Automation.Delivery.DeliveredQuantityLedger(context)) { }
+
+    public CommercialFinanceApplicationService(ErpRfqAutomationContext context,
+        IInternalSourceJournalPostingService journalWriter)
+        : this(context, journalWriter,
+            new ERP_RFQ_Automation.Delivery.DeliveredQuantityLedger(context)) { }
 
     public async Task<ReceivableDocumentDto> CreateInvoiceAsync(
         long businessUnitId, long orderId, string idempotencyKey, CreateInvoiceRequest request, string actor)
@@ -88,6 +106,9 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
             .Select(x => new { OrderItemId = x.Key, Quantity = x.Sum(y => y.Quantity) })
             .ToDictionaryAsync(x => x.OrderItemId, x => x.Quantity);
 
+            var deliveryCaps = await _deliveredQuantities.CapsByOrderItemAsync(
+                businessUnitId, requested.Keys.ToArray());
+
             var document = new ReceivableDocument
         {
             BusinessUnitId = businessUnitId,
@@ -114,6 +135,40 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
             var alreadyInvoiced = priorLines.GetValueOrDefault(source.Id);
             if (alreadyInvoiced + pair.Value > source.Quantity)
                 throw new FinanceConflictException($"Invoice quantity exceeds the remaining quantity for order line {source.Id}.");
+
+            // Gate 7 / FR-DLM-02 and FR-DLM-07. The ordered quantity above is the contractual
+            // ceiling; this is the DELIVERED one. Billing a customer for goods they rejected, or for
+            // goods still on a lorry, is how a receivable becomes a dispute — and until this gate
+            // nothing in the system could tell the difference, because no delivered quantity
+            // existed (register item E50).
+            //
+            // The cap is ACCEPTED, not despatched. Despatch is a fact about the warehouse; what the
+            // customer signed for is a fact about the customer, and only the second one is
+            // defensible in front of a buyer who is refusing to pay. See DeliveredQuantityLedger for
+            // the full reasoning and for why both numbers are carried.
+            //
+            // WHERE THIS CEILING STOPS, stated rather than left to be discovered. It binds a line
+            // the delivery module knows about — one with at least one unit despatched. A line with
+            // NO despatch at all is not something this module can speak to, and invoicing it stays
+            // governed by the pre-existing order-status eligibility gate above, unchanged by this
+            // gate. That leaves advance and progress invoicing working exactly as it did.
+            //
+            // OPEN POLICY QUESTION for the product owner, deliberately not decided here: whether an
+            // order line should be invoiceable at all before anything ships. Closing that is a
+            // one-line change — drop the HasDeliveryActivity clause — and it is a commercial policy
+            // decision about advance billing, not an engineering one.
+            //
+            // ZATCA SEAM (FR-DLM-04, deferred by decision R1 pending credentials): the cleared tax
+            // invoice will be generated FROM this document, after this cap has been applied. No
+            // ZATCA code needs to know the ledger exists — the quantity it serialises has already
+            // been proved deliverable here.
+            if (deliveryCaps.TryGetValue(source.Id, out var cap) && cap.HasDeliveryActivity
+                && alreadyInvoiced + pair.Value > cap.AcceptedQuantity)
+                throw new FinanceConflictException(
+                    $"Invoice quantity exceeds the quantity the customer has accepted for order "
+                    + $"line {source.Id}: {cap.DespatchedQuantity} despatched, {cap.AcceptedQuantity} "
+                    + $"accepted, {alreadyInvoiced} already invoiced, {pair.Value} requested. "
+                    + "Confirm the delivery before invoicing it.");
 
             var ratio = pair.Value / source.Quantity;
             var gross = Round(pair.Value * source.UnitPrice);
@@ -1133,6 +1188,12 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
             .Select(x => new { OrderItemId = x.Key, Quantity = x.Sum(y => y.Quantity) })
             .ToDictionaryAsync(x => x.OrderItemId, x => x.Quantity);
 
+        // Gate 7 / FR-DLM-02. Re-checked HERE and not only at draft creation, for the same reason
+        // the ordered-quantity ceiling below is re-checked: a draft can be raised before the lorry
+        // comes back, and the customer can refuse two cartons in between. A ceiling that is only
+        // evaluated when the draft is written is a control a patient user walks straight past.
+        var deliveryCaps = await _deliveredQuantities.CapsByOrderItemAsync(businessUnitId, lineIds);
+
         foreach (var line in document.Lines)
         {
             if (!line.OrderItemId.HasValue)
@@ -1141,6 +1202,13 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
                 ?? throw new FinanceConflictException("The source order line no longer belongs to this order.");
             if (alreadyIssued.GetValueOrDefault(orderLine.Id) + line.Quantity > orderLine.Quantity)
                 throw new FinanceConflictException($"Issuing this document would exceed order line {orderLine.Id} quantity.");
+            if (deliveryCaps.TryGetValue(orderLine.Id, out var cap) && cap.HasDeliveryActivity
+                && alreadyIssued.GetValueOrDefault(orderLine.Id) + line.Quantity > cap.AcceptedQuantity)
+                throw new FinanceConflictException(
+                    $"Issuing this document would bill more than the customer accepted on order line "
+                    + $"{orderLine.Id}: {cap.AcceptedQuantity} accepted, "
+                    + $"{alreadyIssued.GetValueOrDefault(orderLine.Id)} already invoiced, "
+                    + $"{line.Quantity} on this document.");
         }
     }
 
@@ -1347,6 +1415,7 @@ public sealed class CommercialFinanceApplicationService(ErpRfqAutomationContext 
                 var strategy = _context.Database.CreateExecutionStrategy();
                 return await strategy.ExecuteAsync(async () =>
                 {
+                    _context.ChangeTracker.Clear();
                     await using var transaction = await _context.Database.BeginTransactionAsync(IsolationLevel.Serializable);
                     var result = await action();
                     await transaction.CommitAsync();

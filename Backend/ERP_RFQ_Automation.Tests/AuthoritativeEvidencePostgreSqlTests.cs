@@ -1176,8 +1176,11 @@ public sealed class AuthoritativeEvidencePostgreSqlTests
             new NoopLogger<DocumentIngestionService>(),
             Options.Create(new MalwareVerdictPolicyOptions { MaximumCleanVerdictAge = TimeSpan.FromHours(24) }));
 
+    // SEC-ING-02: the tenant context is mandatory. Every context these tests build comes from
+    // ContextFor(null) — the cross-tenant worker view — so the queue is given the matching
+    // null-tenant StubTenant and takes the deliberate nexora_pipeline_app role.
     private static ExtractionQueue NewQueue(ErpRfqAutomationContext context) =>
-        new(context, new NoopLogger<ExtractionQueue>());
+        new(context, new NoopLogger<ExtractionQueue>(), new StubTenant(null));
 
     private static FileInspectionResult ClearedInspection(int? inspectedLength = null) => new(
         FileInspectionStatus.Cleared, "text/csv", inspectedLength ?? ValidCsv().Length,

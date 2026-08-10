@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
+using ERP_RFQ_Automation.Sla;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -13,12 +14,24 @@ public sealed class CommercialLifecycleController : ControllerBase
 {
     private readonly ILifecycleApplicationService _lifecycle;
     private readonly IRoleGate _roleGate;
+    private readonly ILeadOutcomeReasons _leadOutcomeReasons;
 
-    public CommercialLifecycleController(ILifecycleApplicationService lifecycle, IRoleGate roleGate)
+    public CommercialLifecycleController(
+        ILifecycleApplicationService lifecycle, IRoleGate roleGate, ILeadOutcomeReasons leadOutcomeReasons)
     {
         _lifecycle = lifecycle;
         _roleGate = roleGate;
+        _leadOutcomeReasons = leadOutcomeReasons;
     }
+
+    /// <summary>
+    /// The governed outcome-reason picklist a lead loss must choose from. Identical rows to
+    /// <c>GET /api/Quote/outcome-reasons</c> — one vocabulary for the whole commercial cycle.
+    /// </summary>
+    [HttpGet("leads/outcome-reasons")]
+    [RequireModulePermission("Leads", PermissionAction.View)]
+    public Task<ActionResult<IReadOnlyList<OutcomeReasonDto>>> GetLeadOutcomeReasons(CancellationToken ct)
+        => Execute(() => _leadOutcomeReasons.GetAsync(TenantId(), ct));
 
     [HttpGet("leads/{id:long}/lifecycle")]
     [RequireModulePermission("Leads", PermissionAction.View)]

@@ -28,10 +28,18 @@ namespace ERP_RFQ_Automation.Services
             using var package = new ExcelPackage();
             var ws = package.Workbook.Worksheets.Add("SupplierTemplate");
 
+            // APPEND-ONLY. Existing columns keep their positions because the reader below indexes
+            // by column number and tenants keep filled-in copies of this template; a new field goes
+            // on the end. Column 11 = Tax Registration Number (added with the input-VAT evidence
+            // work — a supplier with none cannot have its input tax treated as recoverable).
             string[] headers = {
-                "Supplier Name*", "Contact Email", "Payment Terms", 
+                "Supplier Name*", "Contact Email", "Payment Terms",
                 "Address Line 1", "Address Line 2", "Postal Code",
-                "Success Rate (%)", "Avg Response Time (Days)", "Tags", "Comments"
+                "Success Rate (%)", "Avg Response Time (Days)", "Tags", "Comments",
+                // The KSA format is stated in the header rather than demonstrated in the sample
+                // row: a plausible-looking VAT number in a shipped template is the kind of value
+                // that ends up copied into a real supplier record.
+                "Tax Registration Number (KSA VAT: 15 digits, first and last digit 3)"
             };
 
             for (int i = 0; i < headers.Length; i++)
@@ -58,6 +66,12 @@ namespace ERP_RFQ_Automation.Services
 
         public async Task<ERP_RFQ_Automation.Models.ServiceResult<string>> UploadTemplateAsync(Stream fileStream, long businessUnitId, string createdBy)
         {
+            // FR-MDM-05 / E44 — see ProductUploaderService for the full note. The audit is captured
+            // at ErpRfqAutomationContext.SaveChanges and cannot be evaded from here; this line only
+            // marks the SOURCE so a bulk supplier import is separable from a screen edit.
+            using var auditSource = ERP_RFQ_Automation.MasterData.MasterDataAuditScope.PushSource(
+                ERP_RFQ_Automation.MasterData.MasterDataChangeSources.Import);
+
             ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
             using var package = new ExcelPackage(fileStream);
             var ws = package.Workbook.Worksheets[0];
@@ -66,6 +80,7 @@ namespace ERP_RFQ_Automation.Services
             if (rowCount < 2) return ERP_RFQ_Automation.Models.ServiceResult<string>.CreateFailure("The uploaded file is empty or missing data.");
 
             var suppliersToAdd = new List<Supplier>();
+            var rejectedRows = new List<string>();
             int successCount = 0;
             int skipCount = 0;
 
@@ -105,10 +120,22 @@ namespace ERP_RFQ_Automation.Services
                     }
 
                     // Check for duplicates in current list
-                    if (suppliersToAdd.Any(s => s.Name.Equals(name, StringComparison.OrdinalIgnoreCase) && 
+                    if (suppliersToAdd.Any(s => s.Name.Equals(name, StringComparison.OrdinalIgnoreCase) &&
                                               (string.IsNullOrEmpty(email) || s.ContactEmail == email)))
                     {
                         skipCount++;
+                        continue;
+                    }
+
+                    // Column 11, appended. A malformed registration number is REJECTED rather than
+                    // dropped: importing the supplier without it would silently create a record
+                    // whose input tax can never be treated as recoverable, and the importer would
+                    // have reported success.
+                    if (!ERP_RFQ_Automation.Tax.TaxRegistrationNumbers.TryCanonicalize(
+                            ws.Cells[row, 11].Text, "Tax Registration Number",
+                            out var taxRegistrationNumber, out var taxRegistrationError))
+                    {
+                        rejectedRows.Add($"Row {row} ({name}): {taxRegistrationError}");
                         continue;
                     }
 
@@ -125,6 +152,7 @@ namespace ERP_RFQ_Automation.Services
                         AvgResponseTime = int.TryParse(ws.Cells[row, 8].Text, out var art) ? art : null,
                         Tags = ws.Cells[row, 9].Text?.Trim(),
                         Comments = ws.Cells[row, 10].Text?.Trim(),
+                        TaxRegistrationNumber = taxRegistrationNumber,
                         ImageUrl = string.Empty, // Required in model
                         Buid = businessUnitId,
                         IsActive = true,
@@ -146,7 +174,9 @@ namespace ERP_RFQ_Automation.Services
                 
                 string msg = $"{successCount} suppliers imported successfully.";
                 if (skipCount > 0) msg += $" {skipCount} duplicates skipped.";
-                
+                if (rejectedRows.Count > 0)
+                    msg += $" {rejectedRows.Count} row(s) rejected: " + string.Join(" ", rejectedRows.Take(10));
+
                 return ERP_RFQ_Automation.Models.ServiceResult<string>.CreateSuccess(msg, msg);
             }
             catch (Exception ex)
@@ -168,8 +198,10 @@ namespace ERP_RFQ_Automation.Services
             using var package = new ExcelPackage();
             var ws = package.Workbook.Worksheets.Add("Suppliers");
 
+            // Append-only, same as the import template: column 9 = Tax Registration Number.
             string[] headers = {
-                "ID", "Supplier Name", "Contact Email", "Payment Terms", "Address", "Success Rate (%)", "Status", "Created On"
+                "ID", "Supplier Name", "Contact Email", "Payment Terms", "Address", "Success Rate (%)", "Status", "Created On",
+                "Tax Registration Number"
             };
 
             for (int i = 0; i < headers.Length; i++)
@@ -192,6 +224,7 @@ namespace ERP_RFQ_Automation.Services
                 ws.Cells[row, 6].Value = s.SuccessRate;
                 ws.Cells[row, 7].Value = (s.IsActive ?? true) ? "Active" : "Inactive";
                 ws.Cells[row, 8].Value = s.CreatedOn.ToString("yyyy-MM-dd HH:mm");
+                ws.Cells[row, 9].Value = s.TaxRegistrationNumber;
                 row++;
             }
 

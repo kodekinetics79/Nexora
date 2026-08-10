@@ -263,8 +263,10 @@ describe('draft save and resume', () => {
     expect(sparse.name).toBe('Acme Trading');
     expect(sparse.slug).toBe('');
     expect(sparse.billingMode).toBe('Billable');
-    expect(sparse.baseCurrencyCode).toBe('USD');
-    expect(sparse.locale).toBe('en-US');
+    // KSA-first provisioning defaults. The previous expectation pinned 'USD'/'en-US',
+    // which silently provisioned every new Saudi tenant in the wrong currency.
+    expect(sparse.baseCurrencyCode).toBe('SAR');
+    expect(sparse.locale).toBe('en-SA');
     expect(sparse.adminActivation).toBe('invite');
   });
 });

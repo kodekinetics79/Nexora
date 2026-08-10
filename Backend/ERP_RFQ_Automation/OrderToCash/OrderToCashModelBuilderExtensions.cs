@@ -5,6 +5,23 @@ namespace ERP_RFQ_Automation.OrderToCash;
 
 public static class OrderToCashModelBuilderExtensions
 {
+    /// <summary>
+    /// The sentinel for every settable number on <see cref="CommercialMatchingPolicy"/>. Negative:
+    /// none of those fields — two percentages, a tolerance percentage and a tolerance amount — can
+    /// legitimately hold it, and the tax percentages have a check constraint that forbids it, so it
+    /// can never collide with a value a customer chose.
+    ///
+    /// <para><b>Why this is necessary.</b> EF omits a property from an INSERT when its value equals
+    /// the property's SENTINEL, letting the database default supply it — and the sentinel defaults
+    /// to the CLR default. For <c>decimal</c> that is 0, and for <c>decimal?</c> it is null, so a
+    /// tenant saving "0% of supplier tax is recoverable" or "we have no output tax rate" wrote a row
+    /// that came back reading 100 and 15. The value the customer chose was silently replaced by the
+    /// default it was chosen to override — on the exact fields decision R18 and R17 exist to make
+    /// settable. Pinning the sentinel to an impossible number makes EF write every value the caller
+    /// actually set, while the database defaults still backfill existing rows on migration.</para>
+    /// </summary>
+    private const decimal NotAPercentage = -1m;
+
     public static void ConfigureOrderToCash(this ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<BusinessUnit>().HasAlternateKey(x => new { x.Id });
@@ -59,6 +76,60 @@ public static class OrderToCashModelBuilderExtensions
 
     private static void ConfigurePurchaseOrders(ModelBuilder modelBuilder)
     {
+        modelBuilder.Entity<CommercialMatchingPolicy>(entity =>
+        {
+            entity.ToTable("CommercialMatchingPolicies");
+            entity.HasKey(x => x.Id);
+            entity.HasAlternateKey(x => new { x.BusinessUnitId, x.Id });
+            // One policy per tenant. The unique index is what makes "create on demand" safe under
+            // concurrency: two requests racing to create the first row leaves one winner.
+            entity.HasIndex(x => x.BusinessUnitId).IsUnique();
+            // KSA default: a VAT-registered tenant making taxable supplies reclaims ALL supplier
+            // input tax, so none of it is a cost and none of it enters landed cost. A partly exempt
+            // trader sets its recovery ratio and the irrecoverable share becomes cost (R18).
+            // See CommercialMatchingPolicy.SupplierInputTaxRecoverablePercent.
+            entity.Property(x => x.SupplierInputTaxRecoverablePercent).HasPrecision(9, 4)
+                .HasDefaultValue(CommercialMatchingPolicy.FullyRecoverablePercent)
+                .HasSentinel(NotAPercentage);
+            // Nullable on purpose: null is "no rate stated", which derives NO tax and blocks the
+            // send, whereas 0 is the positive assertion "our rate is zero". Defaulting to the KSA
+            // standard rate keeps every existing tenant correct without a data migration.
+            entity.Property(x => x.OutputTaxRatePercent).HasPrecision(9, 4)
+                .HasDefaultValue(CommercialMatchingPolicy.KsaStandardOutputTaxRatePercent)
+                .HasSentinel(NotAPercentage);
+            // Both rates are percentages and neither is meaningful outside 0-100. Enforced in the
+            // database as well as the service, because the value re-bases every landed cost and
+            // every derived tax computed after it and there is no safe out-of-range reading.
+            // The CAST is not decoration. SQLite — which the portable test lane builds this schema
+            // on — has no decimal type and stores these columns as TEXT, and SQLite orders TEXT
+            // above every number, so a bare `"OutputTaxRatePercent" <= 100` is FALSE for every
+            // value and the constraint rejects 15. On PostgreSQL the cast is a no-op against a
+            // numeric column. Written this way the SAME invariant is enforced in both lanes rather
+            // than being certified only under Docker.
+            entity.ToTable(table =>
+            {
+                // Named short on purpose: the obvious name is 64 characters and PostgreSQL truncates
+                // identifiers at 63, which produced "…RecoverablePerce~" in the emitted DDL.
+                table.HasCheckConstraint("CK_CommercialMatchingPolicies_InputTaxRecoverablePercent",
+                    "CAST(\"SupplierInputTaxRecoverablePercent\" AS numeric) >= 0 AND " +
+                    "CAST(\"SupplierInputTaxRecoverablePercent\" AS numeric) <= 100");
+                table.HasCheckConstraint("CK_CommercialMatchingPolicies_OutputTaxRatePercent",
+                    "\"OutputTaxRatePercent\" IS NULL OR (CAST(\"OutputTaxRatePercent\" AS numeric) >= 0 AND " +
+                    "CAST(\"OutputTaxRatePercent\" AS numeric) <= 100)");
+            });
+            entity.Property(x => x.PriceTolerancePercent).HasPrecision(9, 4).HasDefaultValue(2.0m)
+                .HasSentinel(NotAPercentage);
+            entity.Property(x => x.PriceToleranceMinimumAmount).HasPrecision(18, 6).HasDefaultValue(0m)
+                .HasSentinel(NotAPercentage);
+            entity.Property(x => x.QuantityTolerancePercent).HasPrecision(9, 4).HasDefaultValue(0m)
+                .HasSentinel(NotAPercentage);
+            entity.Property(x => x.Version).HasDefaultValue(1).IsConcurrencyToken();
+            entity.Property(x => x.CreatedOn).HasDefaultValueSql("now()");
+            entity.Property(x => x.ModifiedBy).HasMaxLength(255);
+            // Tenant query filter lives in ErpRfqAutomationContext.Tenancy.cs with every other
+            // one, so the set of filtered entities is readable in a single place.
+        });
+
         modelBuilder.Entity<CustomerPurchaseOrder>(entity =>
         {
             entity.ToTable("CustomerPurchaseOrders");

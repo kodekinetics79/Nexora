@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import {
   Box, Typography, Paper, Table, TableHead, TableRow, TableCell,
   TableBody, IconButton, Button, Stack, Chip, TextField,
@@ -18,22 +18,23 @@ import {
 import { useAuth } from '../../../context/AuthContext';
 import orderService from '../../../api/services/orderService';
 import dayjs from 'dayjs';
-import { useSnackbar } from 'notistack';
-import commercialFinanceService from '../../../api/services/commercialFinanceService';
 
 import PermissionGuard from '../../../components/common/PermissionGuard';
+import InvoiceFromOrderDialog from './InvoiceFromOrderDialog';
 
 const OrderListPage: React.FC = () => {
   const navigate = useNavigate();
   const { userData } = useAuth();
   const businessUnitId = userData?.businessUnitId || 0;
   const [searchTerm, setSearchTerm] = useState('');
-  const { enqueueSnackbar } = useSnackbar();
-  const createInvoice = useMutation({
-    mutationFn: (orderId: number) => commercialFinanceService.createInvoiceFromOrder(orderId),
-    onSuccess: (document) => navigate(`/sales/finance?documentId=${document.id}`),
-    onError: (error: any) => enqueueSnackbar(error.response?.data?.detail ?? 'Invoice draft could not be created', { variant: 'error' }),
-  });
+  /**
+   * Gate 7 / FR-DLM-02. This icon used to fire the invoice call straight off the row, with
+   * `lines: null`, which the server expands to the full ORDERED quantity — so after any short
+   * delivery it was a guaranteed 409 against the accepted-quantity ceiling and the product had no
+   * other way in. It now opens the line-level screen, which is the only place an invoice is
+   * composed.
+   */
+  const [invoicing, setInvoicing] = useState<{ id: number; orderNo: string } | null>(null);
 
   const { data: orders = [], isLoading, isError, refetch } = useQuery({
     queryKey: ['orders-list', businessUnitId, searchTerm],
@@ -144,12 +145,15 @@ const OrderListPage: React.FC = () => {
                         <IconButton size="small" color="primary" onClick={() => navigate(`/sales/orders/${order.id}`)}><ViewIcon fontSize="small" /></IconButton>
                       </Tooltip>
                       <PermissionGuard moduleName="Accounts Receivable" action="create">
-                        <Tooltip title="Create invoice draft">
+                        <Tooltip title="Invoice what the customer accepted">
                           <IconButton
                             size="small"
                             color="info"
-                            disabled={createInvoice.isPending}
-                            onClick={() => createInvoice.mutate(order.id)}
+                            aria-label={`Invoice order ${order.orderNo || order.orderNumber}`}
+                            onClick={() => setInvoicing({
+                              id: order.id,
+                              orderNo: order.orderNo || order.orderNumber || String(order.id),
+                            })}
                           >
                             <InvoiceIcon fontSize="small" />
                           </IconButton>
@@ -176,6 +180,19 @@ const OrderListPage: React.FC = () => {
           </TableBody>
         </Table>
       </Paper>
+
+      {invoicing && (
+        <InvoiceFromOrderDialog
+          orderId={invoicing.id}
+          orderNo={invoicing.orderNo}
+          businessUnitId={businessUnitId}
+          onClose={() => setInvoicing(null)}
+          onCreated={(document) => {
+            setInvoicing(null);
+            navigate(`/sales/finance?documentId=${document.id}`);
+          }}
+        />
+      )}
     </Box>
   );
 };

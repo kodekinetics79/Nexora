@@ -501,6 +501,10 @@ public sealed class MailboxController(
                 ? "Active, but no poll has run yet. Allow one polling interval."
                 : "Active and attempted, but never completed a successful read.");
 
+        // MINUTES, and now true: this line said "minute(s)" while EmailBackgroundService read
+        // the same column as SECONDS. The unit of record is documented on
+        // EmailBackgroundService.MinimumPollIntervalMinutes; every surface states minutes and
+        // the poller now means it.
         return ("Healthy", $"Last read {row.LastSuccessfulPollOn:u}. Polling every {row.PollingInterval} minute(s).");
     }
 }

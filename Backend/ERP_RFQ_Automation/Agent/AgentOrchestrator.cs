@@ -4,6 +4,7 @@ using ERP_RFQ_Automation.Agent.Guardrails;
 using ERP_RFQ_Automation.Agent.Llm;
 using ERP_RFQ_Automation.Agent.Models;
 using ERP_RFQ_Automation.Models;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using ERP_RFQ_Automation.AI;
@@ -37,6 +38,7 @@ public sealed class AgentOrchestrator : IAgentOrchestrator
     private readonly IAgentLlm _llm;
     private readonly IAgentToolRegistry _tools;
     private readonly IAgentGuardrail _guardrail;
+    private readonly IAuthorizationService _authorization;
     private readonly ILogger<AgentOrchestrator> _log;
 
     public AgentOrchestrator(
@@ -44,12 +46,14 @@ public sealed class AgentOrchestrator : IAgentOrchestrator
         IAgentLlm llm,
         IAgentToolRegistry tools,
         IAgentGuardrail guardrail,
+        IAuthorizationService authorization,
         ILogger<AgentOrchestrator> log)
     {
         _db = db;
         _llm = llm;
         _tools = tools;
         _guardrail = guardrail;
+        _authorization = authorization;
         _log = log;
     }
 
@@ -57,7 +61,15 @@ public sealed class AgentOrchestrator : IAgentOrchestrator
         Guid? sessionId, string message, AgentToolContext ctx, [EnumeratorCancellation] CancellationToken ct)
     {
         // ---- Session bootstrap ----
+        // Resuming somebody else's transcript is a read of their questions and of every row
+        // the agent returned to them, so an id that is not this user's is refused outright
+        // rather than silently starting a new conversation.
         var session = await GetOrCreateSessionAsync(sessionId, message, ctx, ct);
+        if (session is null)
+        {
+            yield return AgentStreamEvent.ErrorEvent("That conversation does not belong to you.");
+            yield break;
+        }
         yield return AgentStreamEvent.SessionEvent(session.Id);
 
         // Reconstruct prior conversational context (plain text only, to keep
@@ -126,7 +138,10 @@ public sealed class AgentOrchestrator : IAgentOrchestrator
                 if (!tool.IsMutation)
                 {
                     var outcome = await ExecuteToolAsync(tool, use.Input, ctx, ct);
-                    resultBlocks.Add(AgentContentBlock.ToolResultBlock(use.Id, outcome.ResultJson, isError: !outcome.Ok));
+                    // Tool OUTPUT is untrusted evidence — supplier/customer text reaches the model
+                    // through here. Fenced; see AgentUntrustedContent.
+                    resultBlocks.Add(AgentContentBlock.ToolResultBlock(
+                        use.Id, AgentUntrustedContent.Fence(outcome.ResultJson), isError: !outcome.Ok));
                     await PersistMessageAsync(session, AgentMessageRole.Tool, outcome.Summary, use.Name, RawText(use.Input), outcome.ResultJson, seq++, ct);
                     yield return AgentStreamEvent.ToolResultEvent(use.Name, outcome.Ok, outcome.Summary);
                     continue;
@@ -139,7 +154,8 @@ public sealed class AgentOrchestrator : IAgentOrchestrator
                 {
                     var outcome = await ExecuteToolAsync(tool, use.Input, ctx, ct);
                     await AuditAsync(ctx, use.Name, outcome.Ok ? "Executed" : "Failed", RawText(use.Input), outcome.Summary, ct);
-                    resultBlocks.Add(AgentContentBlock.ToolResultBlock(use.Id, outcome.ResultJson, isError: !outcome.Ok));
+                    resultBlocks.Add(AgentContentBlock.ToolResultBlock(
+                        use.Id, AgentUntrustedContent.Fence(outcome.ResultJson), isError: !outcome.Ok));
                     await PersistMessageAsync(session, AgentMessageRole.Tool, outcome.Summary, use.Name, RawText(use.Input), outcome.ResultJson, seq++, ct);
                     yield return AgentStreamEvent.ToolResultEvent(use.Name, outcome.Ok, outcome.Summary);
                 }
@@ -184,8 +200,16 @@ public sealed class AgentOrchestrator : IAgentOrchestrator
 
     // ---------------- helpers ----------------
 
+    /// <summary>
+    /// The single dispatch point for every tool — the read path, the guardrail-allowed
+    /// mutation path and the approved-mutation path all funnel through here, which is why the
+    /// module-permission gate lives here and not in each tool.
+    /// </summary>
     private async Task<ToolExecutionOutcome> ExecuteToolAsync(IAgentTool tool, JsonElement input, AgentToolContext ctx, CancellationToken ct)
     {
+        var refusal = await AuthorizeToolAsync(tool, ctx, input, ct);
+        if (refusal is not null) return refusal;
+
         try
         {
             var result = await tool.ExecuteAsync(input, ctx, ct);
@@ -209,6 +233,54 @@ public sealed class AgentOrchestrator : IAgentOrchestrator
         }
     }
 
+    /// <summary>
+    /// Refuses a tool the caller may not run, and returns the refusal as the tool's own
+    /// result so the model is told "you are not allowed to do that" rather than being handed
+    /// the data. Returns null when the caller holds every declared grant.
+    ///
+    /// <para>Deny-by-default in three ways: an unmapped tool, a context with no principal,
+    /// and a context with no role are each a refusal. The policy consulted is the real
+    /// "ModulePermission:{module}:{action}" policy — the same object
+    /// <c>[RequireModulePermission]</c> resolves — so agent and HTTP surfaces cannot drift
+    /// apart. CustomFieldsController.cs:185-187 is the precedent for calling it by name.</para>
+    /// </summary>
+    private async Task<ToolExecutionOutcome?> AuthorizeToolAsync(
+        IAgentTool tool, AgentToolContext ctx, JsonElement input, CancellationToken ct)
+    {
+        if (!AgentToolPermissions.TryGetRequirements(tool.Name, out var requirements))
+            return await RefuseAsync(tool, ctx, input,
+                $"'{tool.Name}' declares no module permission, so no one is authorized to run it.", ct);
+
+        if (ctx.Principal is null)
+            return await RefuseAsync(tool, ctx, input,
+                $"'{tool.Name}' cannot run: this session carries no authenticated principal to authorize.", ct);
+
+        if (ctx.RoleId is null)
+            return await RefuseAsync(tool, ctx, input,
+                $"'{tool.Name}' cannot run: this session carries no role, so no permission can be resolved.", ct);
+
+        foreach (var requirement in requirements)
+        {
+            var result = await _authorization.AuthorizeAsync(ctx.Principal, null, requirement.Policy);
+            if (!result.Succeeded)
+                return await RefuseAsync(tool, ctx, input,
+                    $"You do not have {requirement.Module} ({requirement.Action}) permission, " +
+                    $"which '{tool.Name}' requires. Tell the user this and do not attempt it another way.", ct);
+        }
+
+        return null;
+    }
+
+    private async Task<ToolExecutionOutcome> RefuseAsync(
+        IAgentTool tool, AgentToolContext ctx, JsonElement input, string reason, CancellationToken ct)
+    {
+        _log.LogWarning("Agent tool {Tool} refused for role {RoleId} in BU {Bu}: {Reason}",
+            tool.Name, ctx.RoleId, ctx.BusinessUnitId, reason);
+        await AuditAsync(ctx, tool.Name, "Denied", RawText(input), reason, ct);
+        var json = JsonSerializer.Serialize(new { error = reason }, JsonOpts);
+        return new ToolExecutionOutcome(false, reason, json);
+    }
+
     private static string BuildSystemPrompt(AgentToolContext ctx)
     {
         var who = string.IsNullOrWhiteSpace(ctx.UserName) ? "a procurement user" : ctx.UserName;
@@ -222,7 +294,10 @@ public sealed class AgentOrchestrator : IAgentOrchestrator
             "tenant guardrails and may be queued for human approval; when a tool tells you an action is queued " +
             "for approval, clearly tell the user it is pending approval and do not claim it is done. " +
             "Explain your reasoning briefly, cite the concrete records (ids, numbers, amounts) you used, and " +
-            "never take a mutating action the user did not ask for. All data is already scoped to this tenant.";
+            "never take a mutating action the user did not ask for. All data is already scoped to this tenant, " +
+            "and every tool additionally enforces the user's own module permissions: if a tool answers that the " +
+            "user lacks a permission, say so plainly and do not try to obtain the same data through another tool.\n\n" +
+            AgentUntrustedContent.Policy;
     }
 
     private static AgentLlmMessage BuildAssistantHistoryMessage(AgentLlmTurnResult turn)
@@ -238,12 +313,19 @@ public sealed class AgentOrchestrator : IAgentOrchestrator
         return msg;
     }
 
-    private async Task<AgentSession> GetOrCreateSessionAsync(Guid? sessionId, string message, AgentToolContext ctx, CancellationToken ct)
+    /// <summary>
+    /// Resumes the caller's own session or starts a new one. Returns null when the supplied
+    /// id names a session this user does not own — the tenant filter alone is not enough,
+    /// because resuming replays the previous user's questions and answers into this turn.
+    /// A session with no recorded owner is not resumable by anyone.
+    /// </summary>
+    private async Task<AgentSession?> GetOrCreateSessionAsync(Guid? sessionId, string message, AgentToolContext ctx, CancellationToken ct)
     {
         if (sessionId is not null)
         {
             var existing = await _db.Set<AgentSession>().FirstOrDefaultAsync(s => s.Id == sessionId.Value, ct);
-            if (existing is not null) return existing;
+            if (existing is not null)
+                return ctx.UserId is not null && existing.CreatedByUserId == ctx.UserId ? existing : null;
         }
 
         var now = DateTime.UtcNow;

@@ -76,6 +76,7 @@ public sealed class EvidenceStorageAccrualService(
 
         return await db.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
         {
+            db.ChangeTracker.Clear();
             await using var tx = db.Database.CurrentTransaction is null
                 ? await db.Database.BeginTransactionAsync(ct)
                 : null;

@@ -432,7 +432,28 @@ namespace ERP_RFQ_Automation.Controllers
                                 RequestedBy = User.FindFirst(ClaimTypes.Email)?.Value ?? approvedBy
                             });
 
-                        if (sendResult.Held)
+                        // R5: the quote is created, but it is NOT emailed until a rep confirms
+                        // where its prices came from. This auto-send path has no rep in front
+                        // of it, so approval now generates the quote and stops short of the
+                        // customer's inbox rather than sending an unconfirmed price.
+                        if (sendResult.BlockedPendingPriceAttestation)
+                        {
+                            emailWarning = "Quote generated, but it was not sent: " +
+                                           (sendResult.PriceAttestationReason ??
+                                            "the price source has not been confirmed.") +
+                                           " Open the quote, confirm the price source, and send it from there.";
+                        }
+                        // R17: same shape for the tax gate. This auto-send path has no rep in front
+                        // of it, so it stops short of the customer's inbox rather than sending a
+                        // quotation with no VAT stated on it.
+                        else if (sendResult.BlockedPendingTaxDerivation)
+                        {
+                            emailWarning = "Quote generated, but it was not sent: " +
+                                           (sendResult.TaxDerivationReason ??
+                                            "a line's output tax has not been calculated.") +
+                                           " Open the quote, resolve the tax, and send it from there.";
+                        }
+                        else if (sendResult.Held)
                         {
                             emailWarning = "Quote generated, but sending is held for approval — pricing is below " +
                                            $"your floor ({sendResult.HoldSummary}). Track it in the Approvals inbox.";

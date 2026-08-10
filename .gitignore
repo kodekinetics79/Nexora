@@ -26,7 +26,26 @@ artifacts/
 
 # === Runtime upload content (user data / PII, not source) ===
 # These stay on disk (demo still renders them) but must not enter git history.
+#
+# SEC-G9: the six entries below the marker named paths NOTHING WRITES TO, while the three
+# paths the code actually writes were unignored and six demo files were tracked. Verified
+# against the writers rather than against the directory listing:
+#   ProductRepository.PersistAttachmentAsync  -> wwwroot/ProductAttachments/
+#   CustomerController.PersistCustomerImage   -> wwwroot/CustomerImages/
+#   UserController                            -> wwwroot/UserImages/   (was already covered)
+#   wwwroot/SupplierImages/  — no live writer; tracked content is legacy demo data
+# Pre-launch that content is demo data, so nothing here is a live disclosure. It is the
+# FIRST pilot tenant to upload a customer logo that puts tenant data in git permanently, and
+# git history is the one store this product cannot erase on request.
 Backend/ERP_RFQ_Automation/Uploads/
+Backend/ERP_RFQ_Automation/wwwroot/CustomerImages/
+Backend/ERP_RFQ_Automation/wwwroot/ProductAttachments/
+Backend/ERP_RFQ_Automation/wwwroot/SupplierImages/
+# The application also creates an Uploads/ tree relative to its WORKING DIRECTORY, which is
+# the repository root when it is started from there (Infrastructure/Storage/IFileStorage.cs
+# falls back to contentRoot/Uploads). Empty today — git tracks no empty directory — so this
+# is the entry that stops the first real ingest from landing in a commit.
+/Uploads/
 Backend/ERP_RFQ_Automation/wwwroot/uploads/
 Backend/ERP_RFQ_Automation/wwwroot/UserImage/
 Backend/ERP_RFQ_Automation/wwwroot/UserImages/

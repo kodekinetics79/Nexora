@@ -23,7 +23,13 @@ public sealed record ExtractionDeadLetterItem(
     DateTimeOffset CreatedOn,
     DateTimeOffset UpdatedOn,
     string Resolution,
-    bool BlocksReadiness);
+    bool BlocksReadiness,
+    /// <summary>
+    /// What an operator must do about <see cref="FailureCategory"/>, or null when the
+    /// category says it all. A fixed sentence per category from a closed set — never the
+    /// stored <c>LastError</c>, which can quote the customer's document.
+    /// </summary>
+    string? OperatorAction = null);
 
 public sealed record RecoverExtractionDeadLetterCommand(string Reason, string IdempotencyKey);
 
@@ -70,19 +76,24 @@ public sealed class ExtractionDeadLetterService(
 
         return rows
             .Where(x => x.SecurityBlocker || x.Resolution != ExtractionDeadLetterAction.SourceObjectUnavailable)
-            .Select(x => new ExtractionDeadLetterItem(
-            x.Job.Id,
-            x.Job.BatchId,
-            x.Job.SourceDocumentOccurrenceId,
-            x.Job.FileName ?? "Unnamed document",
-            x.Job.SourceType.ToString(),
-            x.Job.Attempts,
-            x.Job.MaxAttempts,
-            FailureCategory(x.Job.LastError),
-            AsUtc(x.Job.CreatedOn),
-            AsUtc(x.Job.UpdatedOn),
-            x.Resolution?.ToString() ?? "Open",
-            x.SecurityBlocker || x.Resolution != ExtractionDeadLetterAction.SourceObjectUnavailable))
+            .Select(x =>
+            {
+                var category = FailureCategory(x.Job.LastError);
+                return new ExtractionDeadLetterItem(
+                    x.Job.Id,
+                    x.Job.BatchId,
+                    x.Job.SourceDocumentOccurrenceId,
+                    x.Job.FileName ?? "Unnamed document",
+                    x.Job.SourceType.ToString(),
+                    x.Job.Attempts,
+                    x.Job.MaxAttempts,
+                    category,
+                    AsUtc(x.Job.CreatedOn),
+                    AsUtc(x.Job.UpdatedOn),
+                    x.Resolution?.ToString() ?? "Open",
+                    x.SecurityBlocker || x.Resolution != ExtractionDeadLetterAction.SourceObjectUnavailable,
+                    OperatorAction(category));
+            })
             .ToArray();
     }
 
@@ -490,6 +501,35 @@ public sealed class ExtractionDeadLetterService(
 
     private static string FailureCategory(string? error) => ClassifyFailure(error);
 
+    /// <summary>Tenant-facing name for a document refused because AI processing is not authorized.</summary>
+    internal const string AiNotAuthorizedCategory = "AI_NOT_AUTHORIZED";
+
+    /// <summary>
+    /// What the operator must DO about this category, in words, or null where the category
+    /// alone is the whole story.
+    ///
+    /// <para>
+    /// The raw <c>LastError</c> is deliberately still not on the DTO — it can quote document
+    /// content. This is the opposite: a fixed string per category, chosen from a closed set,
+    /// carrying no tenant data. Without it the AI refusal reached the screen as one
+    /// underscored word with nothing an operator could act on.
+    /// </para>
+    /// </summary>
+    internal static string? OperatorAction(string category) => category switch
+    {
+        AiNotAuthorizedCategory => ChunkedExtractionService.AiNotAuthorizedOperatorAction,
+        "MALWARE" => "The stored file failed malware inspection. It cannot be retried until a "
+            + "platform owner clears the disposition; recovery is blocked by design.",
+        "EVIDENCE_INTEGRITY" => "The stored bytes no longer match the hash recorded at intake. "
+            + "Re-upload the document from its original source; retrying this copy cannot succeed.",
+        "UNSUPPORTED_DOCUMENT" => "The file passed inspection but no reader in this deployment "
+            + "can parse it. Ask the sender for a PDF, Word or spreadsheet version.",
+        "PROCESSING_TIMEOUT" => "The model did not answer within the request timeout. Retrying is "
+            + "worthwhile; if it repeats, the document is likely too large for the configured "
+            + "output budget.",
+        _ => null
+    };
+
     /// <summary>
     /// The dead-letter failure vocabulary, shared with the metrics emission in
     /// <c>ExtractionWorker</c> so the <c>nexora.extraction.jobs.deadlettered</c> counter's
@@ -502,6 +542,14 @@ public sealed class ExtractionDeadLetterService(
         if (string.IsNullOrWhiteSpace(error)) return "UNCLASSIFIED";
         if (error.StartsWith("[EXTRACTION_INTAKE_", StringComparison.Ordinal))
             return "INTAKE_INVARIANT";
+        // BEFORE the PROVIDER rule below, which the refusal text would otherwise match: on a
+        // stock deploy this is the single most common failure — every PDF, email body and
+        // scan — and it reported as generic EXTRACTION_FAILURE, indistinguishable from a
+        // model timeout. Matched on the extractor's own closed marker rather than on prose,
+        // and Contains rather than StartsWith because the worker prefixes the reader's
+        // structured-fallback note onto the stored reason.
+        if (error.Contains(ChunkedExtractionService.AiNotAuthorizedCode, StringComparison.Ordinal))
+            return AiNotAuthorizedCategory;
         if (error.Contains("integrity", StringComparison.OrdinalIgnoreCase)) return "EVIDENCE_INTEGRITY";
         if (error.Contains("malware", StringComparison.OrdinalIgnoreCase)) return "MALWARE";
         if (error.Contains("unsupported", StringComparison.OrdinalIgnoreCase)) return "UNSUPPORTED_DOCUMENT";

@@ -155,13 +155,19 @@ public class PlatformAuthController : ControllerBase
         }
     }
 
+    // Sec-D2: the four endpoints below are the ONLY ones a password-only platform session may
+    // reach. PlatformScope now requires amr=mfa, so an operator who has never enrolled would
+    // otherwise be able to sign in and do nothing at all — including enrol. PlatformPolicies
+    // .Enrollment still pins the platform scheme and still requires scope=platform; it only
+    // omits the amr requirement, and it grants access to nothing but a person's own second
+    // factor and their own session.
     [HttpGet("mfa")]
-    [Authorize(Policy = PlatformPolicies.PlatformScope)]
+    [Authorize(Policy = PlatformPolicies.Enrollment)]
     public Task<PlatformMfaStatusResponse> GetMfaStatus(CancellationToken ct) =>
         _authService.GetMfaStatusAsync(ActorId(), ct);
 
     [HttpPost("mfa/enrollment")]
-    [Authorize(Policy = PlatformPolicies.PlatformScope)]
+    [Authorize(Policy = PlatformPolicies.Enrollment)]
     public async Task<ActionResult<PlatformMfaEnrollmentStartResponse>> BeginMfaEnrollment(CancellationToken ct)
     {
         try
@@ -175,7 +181,7 @@ public class PlatformAuthController : ControllerBase
     }
 
     [HttpPost("mfa/enrollment/confirm")]
-    [Authorize(Policy = PlatformPolicies.PlatformScope)]
+    [Authorize(Policy = PlatformPolicies.Enrollment)]
     public async Task<ActionResult<PlatformMfaEnrollmentConfirmResponse>> ConfirmMfaEnrollment(
         [FromBody] PlatformMfaEnrollmentConfirmRequest request, CancellationToken ct)
     {
@@ -191,8 +197,11 @@ public class PlatformAuthController : ControllerBase
         catch (UnauthorizedAccessException ex) { return Unauthorized(new { error = ex.Message }); }
     }
 
+    // Logout revokes only the caller's OWN jti and reads nothing. Refusing a password-only
+    // session here would leave an unenrolled operator unable to end the very session that
+    // cannot do anything else — a control that only makes the hole last longer.
     [HttpPost("logout")]
-    [Authorize(Policy = PlatformPolicies.PlatformScope)]
+    [Authorize(Policy = PlatformPolicies.Enrollment)]
     public async Task<IActionResult> Logout(CancellationToken ct)
     {
         var jti = User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Jti)?.Value;

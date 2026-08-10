@@ -325,15 +325,21 @@ public sealed class EmailChannelTruthfulnessTests
     {
         temp = Path.Combine(Path.GetTempPath(), "nexora-email-channel-tests", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(temp);
+        // SEC-ING-01: the poller now polls each mailbox inside a pushed tenant scope and refuses a
+        // mailbox whose scope did not reach the DbContext, so the harness has to carry the same
+        // accessor the service pushes into — one instance, because the scope is an AsyncLocal.
+        var tenantScope = new ERP_RFQ_Automation.MultiTenancy.TenantScopeAccessor();
         return new EmailService(
             context: db.ContextFor(null),
             env: new StubEnvironment(temp),
             logger: new NoopLogger<EmailService>(),
             llmService: new StubLlm(),
-            scopeFactory: new SingleContextScopeFactory(db),
+            scopeFactory: new SingleContextScopeFactory(db, tenantScope),
             configuration: new ConfigurationBuilder().Build(),
             storage: new TempStorage(temp),
-            pollerHealth: health);
+            pollerHealth: health,
+            workGate: null,
+            tenantScope: tenantScope);
     }
 
     private static void TryDelete(string path)
@@ -362,12 +368,23 @@ public sealed class EmailChannelTruthfulnessTests
     private sealed class SingleContextScopeFactory : IServiceScopeFactory
     {
         private readonly TestDb _db;
-        public SingleContextScopeFactory(TestDb db) => _db = db;
+        private readonly ERP_RFQ_Automation.MultiTenancy.ITenantScopeAccessor _tenantScope;
+
+        public SingleContextScopeFactory(
+            TestDb db, ERP_RFQ_Automation.MultiTenancy.ITenantScopeAccessor tenantScope)
+        {
+            _db = db;
+            _tenantScope = tenantScope;
+        }
 
         public IServiceScope CreateScope()
         {
             var services = new ServiceCollection();
-            services.AddScoped(_ => _db.ContextFor(null));
+            services.AddSingleton(_tenantScope);
+            // Reads the AMBIENT tenant at resolution time, exactly as HttpTenantContext does in
+            // its constructor. That is what makes the poller's push-before-CreateScope ordering
+            // observable here instead of assumed.
+            services.AddScoped(_ => _db.ContextFor(_tenantScope.BusinessUnitId));
             services.AddScoped<ERP_RFQ_Automation.Services.Interfaces.ILLMService>(_ => new StubLlm());
             return services.BuildServiceProvider().CreateScope();
         }

@@ -1,5 +1,6 @@
 using System.Globalization;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Reporting;
 using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.Intelligence.Decision;
@@ -15,8 +16,13 @@ namespace ERP_RFQ_Automation.Intelligence.Decision;
 ///   value    — per line: the lead's own UnitPrice, else the matched product's
 ///              FinalSalesPrice/SellingPrice, × quantity. Confidence is "high"
 ///              only when most lines were priced from real numbers.
-///   margin   — quantity/revenue-weighted (price - cost)/price over exact,
-///              matched+costed lines. Null when currency or cost is unknowable.
+///   margin   — value-weighted (price - cost)/price over the case's priced lines,
+///              read from the SAME service and the SAME records as the board's
+///              gross margin (IGrossMarginService.GetForCommercialCaseAsync over
+///              CustomerQuoteSourcingDecision). Null, with a stated reason, until a
+///              line has been priced from an approved supplier award — the product
+///              master's cost columns carry no currency and are never a landed cost,
+///              so they are not substituted for one.
 ///   customer — canonical tenant-qualified Lead.CustomerId first. Name/email
 ///              fallback is explicitly weaker and never decision-grade.
 ///   deadline — BidClosingDate vs now, sentinel dates (&lt; year 2000) ignored.
@@ -50,8 +56,13 @@ public sealed class LeadDecisionService : ILeadDecisionService
     private const int MaxSummaryLeads = 100;
 
     private readonly ErpRfqAutomationContext _db;
+    private readonly IGrossMarginService _margin;
 
-    public LeadDecisionService(ErpRfqAutomationContext db) => _db = db;
+    public LeadDecisionService(ErpRfqAutomationContext db, IGrossMarginService margin)
+    {
+        _db = db;
+        _margin = margin ?? throw new ArgumentNullException(nameof(margin));
+    }
 
     // ================================================================ full brief
 
@@ -71,6 +82,7 @@ public sealed class LeadDecisionService : ILeadDecisionService
                 l.BidClosingDate,
                 l.Aiconfidence,
                 l.CustomerId,
+                l.CommercialCaseId,
                 SenderEmail = l.EmailIngests != null ? l.EmailIngests.FromEmail : l.Clientemail,
                 Items = l.LeadItems
                     .OrderBy(li => li.Id)
@@ -103,7 +115,6 @@ public sealed class LeadDecisionService : ILeadDecisionService
         var estimatedValue = 0m;
         var pricedLines = 0;
         var pricedLinesWithKnownCurrency = 0;
-        var marginCostedItems = 0;
 
         foreach (var li in items)
         {
@@ -128,13 +139,16 @@ public sealed class LeadDecisionService : ILeadDecisionService
             {
                 pricedLines++;
                 if (!string.IsNullOrWhiteSpace(li.Currency)) pricedLinesWithKnownCurrency++;
-                if (li.Quantity > 0)
-                    estimatedValue += price.Value * li.Quantity;
+                // A line with no stated quantity contributes nothing to the estimate. It is not
+                // worth zero — it is unknown, and the brief says so through pricedLines rather
+                // than by pretending the line has no value.
+                if (li.Quantity is > 0)
+                    estimatedValue += price.Value * li.Quantity.Value;
             }
 
-            // Product master costs are not currency-qualified. Margin therefore
-            // remains unavailable until an authoritative currency-bearing cost
-            // source is wired into the decision brief.
+            // Product master costs are not currency-qualified and are not landed costs, so no cost
+            // is taken from this loop. Margin comes from the priced quote lines of the commercial
+            // case instead — see the margin block below GetBriefAsync's coverage section.
 
             // LEDGER AUTHORITY: this used to render "in stock" from Product.QtyOnHand — a legacy
             // denormalised column that is not per-warehouse, nets off nothing that is already
@@ -191,7 +205,15 @@ public sealed class LeadDecisionService : ILeadDecisionService
                                   && currencies.Count == 1;
         var currency = hasOneKnownCurrency ? currencies[0] : null;
         decimal? aggregateEstimatedValue = hasOneKnownCurrency ? Round2(estimatedValue) : null;
-        decimal? marginPotentialPct = null;
+
+        // ---- 3b. margin, from the one place a landed cost is decision-grade ----
+        // Not re-derived here: the same service, the same records and the same value-weighted
+        // formula the board's gross margin uses, narrowed to this lead's commercial case. A second
+        // calculation would be a second answer, and the two would drift the first time either moved.
+        var marginEvidence = await _margin.GetForCommercialCaseAsync(
+            businessUnitId, lead.CommercialCaseId, now, ct);
+        var marginPotentialPct = marginEvidence.MarginPercent;
+        var marginCostedItems = marginEvidence.CostedLines;
 
         // ---- 4. customer history -------------------------------------------
         var customer = await ResolveCustomerHistoryAsync(
@@ -222,7 +244,8 @@ public sealed class LeadDecisionService : ILeadDecisionService
         // with no product identities scores 0% on every lead, which the rules below used
         // to read as "skip" — on 100% of inbound enquiries.
         var catalogAssessable = await CatalogHasIdentitiesAsync(businessUnitId, ct);
-        (brief.Recommendation, brief.Reasons) = Recommend(brief, lead.Aiconfidence, catalogAssessable);
+        (brief.Recommendation, brief.Reasons) = Recommend(
+            brief, lead.Aiconfidence, catalogAssessable, marginEvidence.UnavailableReason);
         return brief;
     }
 
@@ -295,7 +318,7 @@ public sealed class LeadDecisionService : ILeadDecisionService
             });
             var coveragePct = Pct(covered, total);
 
-            var pricedItems = lead.Items.Where(i => i.UnitPrice is > 0m && i.Quantity > 0).ToList();
+            var pricedItems = lead.Items.Where(i => i.UnitPrice is > 0m && i.Quantity is > 0).ToList();
             var pricedCurrencies = pricedItems
                 .Select(i => i.Currency?.Trim().ToUpperInvariant())
                 .Where(c => !string.IsNullOrEmpty(c))
@@ -305,7 +328,7 @@ public sealed class LeadDecisionService : ILeadDecisionService
                                     && pricedItems.All(i => !string.IsNullOrWhiteSpace(i.Currency))
                                     && pricedCurrencies.Count == 1;
             decimal? estimatedValue = canAggregateValue
-                ? Round2(pricedItems.Sum(i => i.UnitPrice!.Value * i.Quantity))
+                ? Round2(pricedItems.Sum(i => i.UnitPrice!.Value * i.Quantity!.Value))
                 : null;
 
             var (daysLeft, urgency) = DeadlineBand(lead.BidClosingDate, now);
@@ -341,10 +364,13 @@ public sealed class LeadDecisionService : ILeadDecisionService
 
     // ================================================================ catalog matching
 
+    // Quantity is nullable because LeadItem.Quantity is: null means the document stated no
+    // readable quantity, and the value guard (`Quantity > 0`) already excludes such a line from
+    // every value estimate — a null is false there exactly as a 0 was, so no total changes.
     private sealed record ItemRow(
         long Id, string? ItemMaterialCode, string? ManufacturerPartNumber,
         string? ProductShortName, string? ProductShortDescription,
-        int Quantity, decimal? UnitPrice, string? Currency);
+        int? Quantity, decimal? UnitPrice, string? Currency);
 
     // Product.QtyOnHand is deliberately NOT projected here: stock for the brief comes from the
     // Inventory rows via AvailableToPromiseByProductAsync, never from the product master.
@@ -651,7 +677,7 @@ public sealed class LeadDecisionService : ILeadDecisionService
     /// not about the catalog — so it still yields skip.
     /// </summary>
     private static (string recommendation, List<string> reasons) Recommend(
-        LeadDecisionBrief b, decimal? aiConfidence, bool catalogAssessable)
+        LeadDecisionBrief b, decimal? aiConfidence, bool catalogAssessable, string? marginUnavailableReason)
     {
         var reasons = new List<string>();
         var c = b.Coverage;
@@ -687,6 +713,13 @@ public sealed class LeadDecisionService : ILeadDecisionService
             reasons.Add(margin >= BidMarginPct
                 ? $"Healthy margin potential (~{Fmt(margin)}%) on the items we can cost."
                 : $"Thin margin potential (~{Fmt(margin)}%) on the items we can cost.");
+        }
+        else if (marginUnavailableReason is { Length: > 0 })
+        {
+            // The gap is stated, never left blank. A blank reads like a loading state, and the
+            // consumers of this brief must be able to tell "not measured" from "measured as thin".
+            reasons.Add($"Margin is not measured yet — {char.ToLowerInvariant(marginUnavailableReason[0])}"
+                        + marginUnavailableReason[1..]);
         }
 
         // -- customer --

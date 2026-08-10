@@ -11,19 +11,57 @@ import {
   TextField,
   Typography,
 } from '@mui/material';
-import { ContentCopy as CopyIcon, Save as SaveIcon, Send as SendIcon } from '@mui/icons-material';
+import { ContentCopy as CopyIcon, Send as SendIcon, Save as SaveIcon } from '@mui/icons-material';
 import { useSnackbar } from 'notistack';
 import Stack from '../../components/Flex';
 import PageSection from '../../components/PageSection';
+import ReasonDialog from '../../components/ReasonDialog';
 import { ErrorState, LoadingState } from '../../components/States';
 import { fmtDateTime } from '../../components/format';
 import { platformApi } from '../../api/client';
 import { platformErrorMessage } from '../../api/apiError';
 import { platformKeys } from '../../api/queryKeys';
+import { usePlatformPermissions } from '../../auth/usePlatformPermissions';
 import type { Tenant, UpdateTenantProfileInput } from '../../types';
 
 const optional = (value: string): string | null => value.trim() || null;
-const when = (value: string | null): string => value ? fmtDateTime(value) : 'never';
+
+/**
+ * Why each of these cannot be edited here — the REASON, next to the field, not a blanket
+ * "governed elsewhere".
+ *
+ * An operator told only that something is refused assumes a missing feature and asks for it to
+ * be added. An operator told that the slug is stamped into every quote reference the customer
+ * has ever issued stops asking, and — the part that matters — knows what would break if it were
+ * granted. Each sentence names the thing downstream that depends on the value.
+ */
+const IMMUTABLE_FIELDS: Array<{ label: string; value: (tenant: Tenant) => string | null; why: string }> = [
+  {
+    label: 'Workspace slug',
+    value: (tenant) => tenant.slug,
+    why:
+      'Permanently immutable. The slug became the business unit code, which became the lead '
+      + 'reference prefix, which is stamped into the immutable master reference on every '
+      + 'commercial case and printed on every quote this tenant has issued. Renaming it would '
+      + 'orphan every reference already in the customer\'s own filing.',
+  },
+  {
+    label: 'Base currency',
+    value: (tenant) => tenant.baseCurrencyCode,
+    why:
+      'Permanently immutable. It is the base every stored conversion, unit cost and ledger '
+      + 'balance was computed against. Changing the label without restating the history would '
+      + 'silently reinterpret every figure the tenant has ever recorded.',
+  },
+  {
+    label: 'Plan, billing mode and rate card',
+    value: (tenant) => tenant.planCode,
+    why:
+      'Editable, on the Commercial tab, under the Billing policy rather than this one. What a '
+      + 'customer is charged is a separation-of-duties boundary: a support administrator may '
+      + 'operate a tenant and must not be able to move it onto a cheaper price list.',
+  },
+];
 
 const initialProfile = (tenant: Tenant): UpdateTenantProfileInput => ({
   name: tenant.name,
@@ -49,9 +87,27 @@ const initialProfile = (tenant: Tenant): UpdateTenantProfileInput => ({
 export default function ProfileAccessTab({ tenant }: { tenant: Tenant }) {
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
+  const permissions = usePlatformPermissions();
   const [profile, setProfile] = useState(() => initialProfile(tenant));
   const [resendReason, setResendReason] = useState('Customer did not receive the original activation email.');
   const [recoveryLink, setRecoveryLink] = useState<string | null>(null);
+  const [regionOpen, setRegionOpen] = useState(false);
+  const [region, setRegion] = useState(tenant.dataRegion ?? '');
+
+  useEffect(() => setRegion(tenant.dataRegion ?? ''), [tenant]);
+
+  const saveRegion = useMutation({
+    mutationFn: (reason: string) =>
+      platformApi.updateTenantDataRegion(tenant.id, { dataRegion: optional(region), reason }),
+    onSuccess: (updated) => {
+      queryClient.setQueryData(platformKeys.tenant(tenant.id), updated);
+      queryClient.invalidateQueries({ queryKey: platformKeys.tenants() });
+      setRegionOpen(false);
+      enqueueSnackbar('Contractual data region corrected and audited', { variant: 'success' });
+    },
+    onError: (error) =>
+      enqueueSnackbar(platformErrorMessage(error, 'Data region change refused'), { variant: 'error' }),
+  });
 
   useEffect(() => setProfile(initialProfile(tenant)), [tenant]);
 
@@ -83,9 +139,7 @@ export default function ProfileAccessTab({ tenant }: { tenant: Tenant }) {
       enqueueSnackbar(
         result.emailDispatched
           ? 'A new activation email was accepted by the provider'
-          : result.activationUrl
-            ? 'Email was not transmitted — use the one-time recovery link shown below'
-            : 'Email was not transmitted — an Owner must reissue it to receive the recovery link',
+          : 'Email was not transmitted — use the one-time recovery link shown below',
         { variant: result.emailDispatched ? 'success' : 'warning' },
       );
     },
@@ -129,8 +183,19 @@ export default function ProfileAccessTab({ tenant }: { tenant: Tenant }) {
     <Stack spacing={2.5}>
       <PageSection title="Company profile" subtitle="Updates the tenant registry, primary business unit and quote identity together.">
         <Stack spacing={2}>
-          <Alert severity="info">
-            Workspace slug, currency, residency and commercial terms use separate governed workflows and cannot be changed here.
+          <Alert severity="info" sx={{ borderRadius: 2 }}>
+            <AlertTitle sx={{ fontWeight: 800 }}>What this form cannot change, and why</AlertTitle>
+            <Stack spacing={1} sx={{ mt: 0.5 }}>
+              {IMMUTABLE_FIELDS.map((field) => (
+                <Box key={field.label}>
+                  <Typography variant="body2" sx={{ fontWeight: 700 }}>
+                    {field.label}
+                    {field.value(tenant) ? ` — ${field.value(tenant)}` : ''}
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">{field.why}</Typography>
+                </Box>
+              ))}
+            </Stack>
           </Alert>
           <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: '1fr 1fr' }, gap: 2 }}>
             {fields.map(([key, label, helper]) => (
@@ -172,10 +237,71 @@ export default function ProfileAccessTab({ tenant }: { tenant: Tenant }) {
         </Stack>
       </PageSection>
 
+      <PageSection
+        title="Contractual data region"
+        subtitle="Where this tenant's data is asserted to reside. Governed separately from the profile above."
+      >
+        <Stack spacing={2}>
+          <Alert severity="info" sx={{ borderRadius: 2 }}>
+            This is not a description of the customer, it is a claim about where their data
+            physically is — and two controls read it. A data asset cannot be registered in a
+            different region from this value, and tenant activation fails its residency control
+            unless the verified database asset matches it. So it can be corrected only INTO
+            agreement with the assets already registered: the assets are the evidence, this column
+            is the claim about them. The server names any asset that disagrees and refuses rather
+            than letting a residency control be satisfied by rewriting the claim instead of moving
+            the data.
+          </Alert>
+          <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems={{ sm: 'center' }}>
+            <TextField
+              label="Data region"
+              value={region}
+              onChange={(event) => setRegion(event.target.value)}
+              helperText="Blank is accepted only while the tenant is still provisioning."
+              disabled={!permissions.isOwner}
+              sx={{ flex: 1 }}
+            />
+            <Button
+              variant="outlined"
+              disabled={!permissions.isOwner || optional(region) === (tenant.dataRegion ?? null)}
+              onClick={() => setRegionOpen(true)}
+            >
+              Correct region
+            </Button>
+          </Stack>
+          {!permissions.isOwner && (
+            <Typography variant="body2" color="text.secondary">
+              Owner-only. Residency is a contractual commitment made during the sale and a control
+              an auditor reads; support may operate a tenant and may not restate where it lives.
+            </Typography>
+          )}
+        </Stack>
+      </PageSection>
+
+      <ReasonDialog
+        open={regionOpen}
+        title="Correct the contractual data region"
+        confirmLabel="Record the correction"
+        confirmColor="warning"
+        minReasonLength={15}
+        description={
+          <>
+            Changes {tenant.name}&apos;s recorded region from{' '}
+            <strong>{tenant.dataRegion ?? 'none'}</strong> to{' '}
+            <strong>{optional(region) ?? 'none'}</strong>. State on whose instruction, and against
+            which contract — this sentence is what an auditor reads when they ask why the residency
+            claim moved.
+          </>
+        }
+        busy={saveRegion.isPending}
+        onClose={() => setRegionOpen(false)}
+        onConfirm={(reason) => saveRegion.mutate(reason)}
+      />
+
       <PageSection title="Founding administrator access" subtitle="Delivery receipts and governed reissue for single-use activation links.">
         <Stack spacing={2}>
           {recoveryLink && (
-            <Alert severity="warning">
+            <Alert severity="warning" sx={{ borderRadius: 2 }}>
               <AlertTitle sx={{ fontWeight: 800 }}>Email was not transmitted — copy this link now</AlertTitle>
               This newly issued link is shown once and only its hash is stored. Deliver it through a secure channel.
               <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 1 }}>
@@ -215,8 +341,14 @@ export default function ProfileAccessTab({ tenant }: { tenant: Tenant }) {
                         Issued {fmtDateTime(invitation.issuedAtUtc)} · expires {fmtDateTime(invitation.expiresAtUtc)}
                       </Typography>
                       <Typography variant="body2" color={invitation.sendCount > 0 ? 'success.main' : 'error.main'} sx={{ fontWeight: 700 }}>
+                        {/* sendCount and lastSentAtUtc are written by the same statement, so a
+                            positive count with no timestamp cannot happen — but the type allows it,
+                            and rendering "Invalid Date" beside a delivery claim is worse than
+                            saying the timestamp is missing. */}
                         {invitation.sendCount > 0
-                          ? `Provider accepted ${invitation.sendCount} send(s); last ${when(invitation.lastSentAtUtc)}`
+                          ? `Provider accepted ${invitation.sendCount} send(s); last ${
+                              invitation.lastSentAtUtc ? fmtDateTime(invitation.lastSentAtUtc) : 'time not recorded'
+                            }`
                           : 'Never transmitted by an email provider'}
                       </Typography>
                     </Box>
@@ -237,7 +369,7 @@ export default function ProfileAccessTab({ tenant }: { tenant: Tenant }) {
           )}
           <Divider />
           <Typography variant="body2" color="text.secondary">
-            Configure and verify SMTP or SendGrid on Platform Settings → Email. A console provider records no delivery.
+            Configure and verify the real SMTP or SendGrid transport on Platform Settings → Email. A console provider records no delivery.
           </Typography>
         </Stack>
       </PageSection>

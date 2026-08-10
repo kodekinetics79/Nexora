@@ -301,18 +301,18 @@ public sealed class ProcurementApplicationServiceTests
         var purchaseOrder = await fixture.CreatePurchaseOrderAsync("receipt-flow", quantity: 8m);
         var lineId = await fixture.PurchaseOrderLineIdAsync(purchaseOrder.Id);
 
-        var partialCommand = fixture.Receipt(purchaseOrder.Id, lineId, 4m, 2, "receipt-partial", "GR-PARTIAL");
+        var partialCommand = fixture.Receipt(purchaseOrder.Id, lineId, 4m, 3, "receipt-partial", "GR-PARTIAL");
         var partial = await fixture.Execute(service => service.PostGoodsReceiptAsync(partialCommand));
         Assert.Equal(SupplierPurchaseOrderStatuses.PartiallyReceived, partial.PurchaseOrderStatus);
 
-        var overCommand = fixture.Receipt(purchaseOrder.Id, lineId, 5m, 3, "receipt-over", "GR-OVER");
+        var overCommand = fixture.Receipt(purchaseOrder.Id, lineId, 5m, 4, "receipt-over", "GR-OVER");
         await Assert.ThrowsAsync<ProcurementValidationException>(() => fixture.Execute(service =>
             service.PostGoodsReceiptAsync(overCommand)));
 
         await fixture.AssertReceiptStateAsync(expectedReceipts: 1, expectedMovements: 1,
             expectedReceived: 4m, expectedOnHand: ProcurementTestData.InitialOnHand + 4m);
 
-        var finalCommand = fixture.Receipt(purchaseOrder.Id, lineId, 4m, 3, "receipt-final", "GR-FINAL");
+        var finalCommand = fixture.Receipt(purchaseOrder.Id, lineId, 4m, 4, "receipt-final", "GR-FINAL");
         var final = await fixture.Execute(service => service.PostGoodsReceiptAsync(finalCommand));
         var replay = await fixture.Execute(service => service.PostGoodsReceiptAsync(finalCommand));
         Assert.Equal(SupplierPurchaseOrderStatuses.Received, final.PurchaseOrderStatus);
@@ -539,10 +539,11 @@ public sealed class ProcurementApplicationServiceTests
         await Assert.ThrowsAsync<ProcurementConflictException>(() => fixture.Execute(service =>
             service.PostGoodsReceiptAsync(fixture.Receipt(result.Id, lineId, 1m, 1, "draft-receipt", "GR-DRAFT"))));
 
+        var approved = await fixture.ApproveAsync(result.Id, "issue-po-approve");
         var deliveredOn = DateTime.UtcNow;
-        var issueCommand = fixture.Issue(result.Id, "issue-po", deliveredOn: deliveredOn);
+        var issueCommand = fixture.Issue(result.Id, "issue-po", approved.Version, deliveredOn);
         var issued = await fixture.Execute(service => service.IssuePurchaseOrderAsync(issueCommand));
-        Assert.Equal(SupplierPurchaseOrderStatuses.Issued, issued.Status);
+        Assert.Equal(SupplierPurchaseOrderStatuses.Sent, issued.Status);
         Assert.True((await fixture.Execute(service => service.IssuePurchaseOrderAsync(issueCommand))).Replayed);
         await Assert.ThrowsAsync<ProcurementConflictException>(() => fixture.Execute(service =>
             service.IssuePurchaseOrderAsync(issueCommand with
@@ -567,6 +568,9 @@ public sealed class ProcurementApplicationServiceTests
         var award = await fixture.CreateAwardAsync("evidence-contract", 8m);
         var draft = await fixture.Execute(service => service.CreatePurchaseOrderAsync(
             fixture.PurchaseOrder([award.Id], "evidence-contract-po")));
+        // Approved first, so these assertions still test the delivery-evidence contract rather than
+        // stopping at the approval gate that now precedes it.
+        await fixture.ApproveAsync(draft.Id, "evidence-contract-approve");
 
         await Assert.ThrowsAsync<ProcurementValidationException>(() => fixture.Execute(service =>
             service.IssuePurchaseOrderAsync(fixture.Issue(draft.Id, "bad-reference") with
@@ -605,6 +609,7 @@ public sealed class ProcurementApplicationServiceTests
                 await setup.SaveChangesAsync();
             }
 
+            await expiredQuoteFixture.ApproveAsync(draft.Id, "expired-at-issue-approve");
             var exception = await Assert.ThrowsAsync<ProcurementValidationException>(() => expiredQuoteFixture.Execute(service =>
                 service.IssuePurchaseOrderAsync(expiredQuoteFixture.Issue(draft.Id, "expired-at-issue"))));
             Assert.Contains("unexpired", exception.Message, StringComparison.OrdinalIgnoreCase);
@@ -614,6 +619,7 @@ public sealed class ProcurementApplicationServiceTests
         var staleAward = await staleDeliveryFixture.CreateAwardAsync("stale-delivery", 8m);
         var staleDraft = await staleDeliveryFixture.Execute(service => service.CreatePurchaseOrderAsync(
             staleDeliveryFixture.PurchaseOrder([staleAward.Id], "stale-delivery-po")));
+        await staleDeliveryFixture.ApproveAsync(staleDraft.Id, "stale-delivery-approve");
         await using (var setup = staleDeliveryFixture.Context())
         {
             var purchaseOrder = await setup.SupplierPurchaseOrders.SingleAsync(x => x.Id == staleDraft.Id);
@@ -639,7 +645,7 @@ public sealed class ProcurementApplicationServiceTests
 
         Assert.Equal(purchaseOrder.Id, Assert.Single(byNumber).Id);
         Assert.Equal(purchaseOrder.Id, Assert.Single(bySupplier).Id);
-        Assert.Equal(SupplierPurchaseOrderStatuses.Issued, Assert.Single(byNumber).Status);
+        Assert.Equal(SupplierPurchaseOrderStatuses.Sent, Assert.Single(byNumber).Status);
         Assert.Equal(8m, Assert.Single(byNumber).OpenQuantity);
     }
 
@@ -649,13 +655,13 @@ public sealed class ProcurementApplicationServiceTests
         using var fixture = new ProcurementScenario();
         var purchaseOrder = await fixture.CreatePurchaseOrderAsync("receipt-identity", quantity: 8m);
         var lineId = await fixture.PurchaseOrderLineIdAsync(purchaseOrder.Id);
-        var command = fixture.Receipt(purchaseOrder.Id, lineId, 3m, 2, "receipt-identity-first", "GR-IDENTITY");
+        var command = fixture.Receipt(purchaseOrder.Id, lineId, 3m, 3, "receipt-identity-first", "GR-IDENTITY");
         var first = await fixture.Execute(service => service.PostGoodsReceiptAsync(command));
 
         var replay = await fixture.Execute(service => service.PostGoodsReceiptAsync(command with
         {
             IdempotencyKey = "receipt-identity-retry",
-            ExpectedPurchaseOrderVersion = 3
+            ExpectedPurchaseOrderVersion = 4
         }));
         Assert.True(replay.Replayed);
         Assert.Equal(first.Id, replay.Id);
@@ -664,7 +670,7 @@ public sealed class ProcurementApplicationServiceTests
             service.PostGoodsReceiptAsync(command with
             {
                 IdempotencyKey = "receipt-identity-conflict",
-                ExpectedPurchaseOrderVersion = 3,
+                ExpectedPurchaseOrderVersion = 4,
                 Lines = [new PostGoodsReceiptLine(lineId, 2m)]
             })));
         await fixture.AssertReceiptStateAsync(1, 1, 3m, ProcurementTestData.InitialOnHand + 3m);
@@ -676,7 +682,7 @@ public sealed class ProcurementApplicationServiceTests
         using var fixture = new ProcurementScenario();
         var purchaseOrder = await fixture.CreatePurchaseOrderAsync("tenant-receipt-identity", quantity: 4m);
         var lineId = await fixture.PurchaseOrderLineIdAsync(purchaseOrder.Id);
-        var firstCommand = fixture.Receipt(purchaseOrder.Id, lineId, 2m, 2,
+        var firstCommand = fixture.Receipt(purchaseOrder.Id, lineId, 2m, 3,
             "tenant-receipt-first", "GR-TENANT-CANONICAL");
         var first = await fixture.Execute(service => service.PostGoodsReceiptAsync(firstCommand));
 
@@ -765,16 +771,16 @@ public sealed class ProcurementApplicationServiceTests
         }
 
         await Assert.ThrowsAsync<ProcurementValidationException>(() => fixture.Execute(service =>
-            service.PostGoodsReceiptAsync(fixture.Receipt(purchaseOrder.Id, lineId, 1m, 2,
+            service.PostGoodsReceiptAsync(fixture.Receipt(purchaseOrder.Id, lineId, 1m, 3,
                 "receipt-before-po", "GR-BEFORE") with { ReceivedOn = DateTime.UtcNow.AddDays(-1) })));
         var sameDay = await fixture.Execute(service => service.PostGoodsReceiptAsync(
-            fixture.Receipt(purchaseOrder.Id, lineId, 1m, 2, "receipt-same-day", "GR-SAME-DAY") with
+            fixture.Receipt(purchaseOrder.Id, lineId, 1m, 3, "receipt-same-day", "GR-SAME-DAY") with
             {
                 ReceivedOn = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Utc)
             }));
         Assert.Equal(SupplierPurchaseOrderStatuses.PartiallyReceived, sameDay.PurchaseOrderStatus);
         await Assert.ThrowsAsync<ProcurementValidationException>(() => fixture.Execute(service =>
-            service.PostGoodsReceiptAsync(fixture.Receipt(purchaseOrder.Id, lineId, 1m, 3,
+            service.PostGoodsReceiptAsync(fixture.Receipt(purchaseOrder.Id, lineId, 1m, 4,
                 "receipt-future", "GR-FUTURE") with { ReceivedOn = DateTime.UtcNow.AddHours(1) })));
     }
 
@@ -869,6 +875,21 @@ internal sealed class ProcurementScenario : IDisposable
         return await operation(new ProcurementApplicationService(context));
     }
 
+    /// <summary>
+    /// Runs against an explicit approval policy, so the segregation-of-duties rule can be exercised
+    /// in both the enforced and stood-down configurations rather than only in its default.
+    /// </summary>
+    public async Task<T> Execute<T>(Func<ProcurementApplicationService, Task<T>> operation,
+        bool segregationOfDutiesEnforced)
+    {
+        await using var context = Context();
+        return await operation(new ProcurementApplicationService(context,
+            Microsoft.Extensions.Options.Options.Create(new ProcurementApprovalOptions
+            {
+                SegregationOfDutiesEnforced = segregationOfDutiesEnforced
+            })));
+    }
+
     public CreateSolicitationCommand Solicitation(string key) => new(
         BusinessUnitId, RfqId, ProcurementTestData.Supplier, [RfqItemId], DateTime.UtcNow.AddDays(2),
         key, "qa", $"corr-{key}");
@@ -896,9 +917,29 @@ internal sealed class ProcurementScenario : IDisposable
     public CancelPurchaseOrderCommand Cancel(long poId, string key, string reason, long version = 1) => new(
         BusinessUnitId, poId, version, reason, key, "qa", $"corr-{key}");
 
-    public IssuePurchaseOrderCommand Issue(long poId, string key, long version = 1, DateTime? deliveredOn = null) => new(
+    /// <summary>
+    /// The version defaults to 2 because a releasable order has always been approved first, and
+    /// approval bumps the version. A test that wants to release a DRAFT passes version 1 explicitly.
+    /// </summary>
+    public IssuePurchaseOrderCommand Issue(long poId, string key, long version = 2, DateTime? deliveredOn = null) => new(
         BusinessUnitId, poId, version, $"provider-receipt:{key}", key, "qa", $"corr-{key}",
         new string('a', 64), deliveredOn ?? DateTime.UtcNow);
+
+    /// <summary>
+    /// The award approver is user 42 (see <see cref="Award"/>), so the default PO approver is a
+    /// different user: the fixture's normal path is the one that satisfies segregation of duties,
+    /// and a test that wants the violation asks for it by name.
+    /// </summary>
+    public const long AwardApproverUserId = 42;
+    public const long PurchaseOrderApproverUserId = 77;
+
+    public ApprovePurchaseOrderCommand Approve(long poId, string key, long version = 1,
+        long approverUserId = PurchaseOrderApproverUserId) => new(
+        BusinessUnitId, poId, version, approverUserId, key, $"buyer-{approverUserId}", $"corr-{key}");
+
+    public Task<PurchaseOrderApprovalResult> ApproveAsync(long poId, string key, long version = 1,
+        long approverUserId = PurchaseOrderApproverUserId) =>
+        Execute(service => service.ApprovePurchaseOrderAsync(Approve(poId, key, version, approverUserId)));
 
     public async Task<long> CreateEligibleQuoteAsync(string key)
     {
@@ -919,8 +960,35 @@ internal sealed class ProcurementScenario : IDisposable
         var award = await CreateAwardAsync(key, quantity);
         var draft = await Execute(service => service.CreatePurchaseOrderAsync(
             PurchaseOrder([award.Id], $"{key}-po")));
+        // FR-SPO-01. A draft is no longer releasable, so the fixture's "get me an issued PO" path
+        // walks the real gate rather than skipping it.
+        var approved = await ApproveAsync(draft.Id, $"{key}-approve");
         return await Execute(service => service.IssuePurchaseOrderAsync(
-            Issue(draft.Id, $"{key}-issue")));
+            Issue(draft.Id, $"{key}-issue", approved.Version)));
+    }
+
+    /// <summary>
+    /// Gives the seeded RFQ the commercial case a converted lead would have handed it, so a
+    /// purchase order raised from its awards has a real master reference to carry forward.
+    /// </summary>
+    public async Task<(long CaseId, string Serial)> AllocateCommercialCaseAsync()
+    {
+        await using var context = Context();
+        var rfq = await context.Rfqs.SingleAsync(x => x.Id == RfqId);
+        var serial = context.Entry(rfq).Property(x => x.NexoraSerial).CurrentValue!;
+        var commercialCase = new CommercialCase
+        {
+            Id = ProcurementTestData.CommercialCase,
+            BusinessUnitId = BusinessUnitId,
+            CreatedBy = "qa",
+            CreatedOn = DateTime.UtcNow
+        };
+        commercialCase.AssignIdentity(1, serial);
+        context.CommercialCases.Add(commercialCase);
+        await context.SaveChangesAsync();
+        context.Entry(rfq).Property(x => x.CommercialCaseId).CurrentValue = commercialCase.Id;
+        await context.SaveChangesAsync();
+        return (commercialCase.Id, serial);
     }
 
     public async Task<long> PurchaseOrderLineIdAsync(long purchaseOrderId)
@@ -985,6 +1053,7 @@ internal static class ProcurementTestData
     public const long Supplier = 96_050;
     public const long Rfq = 96_060;
     public const long RfqItem = 96_070;
+    public const long CommercialCase = 96_080;
     public const decimal InitialOnHand = 2m;
     private static readonly DateTime Now = new(2026, 7, 26, 12, 0, 0, DateTimeKind.Utc);
 

@@ -4,6 +4,7 @@ using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using ERP_RFQ_Automation.MasterData;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.CommercialRouting;
 using Microsoft.EntityFrameworkCore;
@@ -59,6 +60,11 @@ namespace ERP_RFQ_Automation.Services
 
         public async Task<ServiceResult<string>> UploadTemplateAsync(Stream fileStream, long businessUnitId, string createdBy)
         {
+            // FR-MDM-05 / E44 — see ProductUploaderService for the full note. The audit is captured
+            // at ErpRfqAutomationContext.SaveChanges and cannot be evaded from here; this line only
+            // marks the SOURCE so a bulk customer import is separable from a screen edit.
+            using var auditSource = MasterDataAuditScope.PushSource(MasterDataChangeSources.Import);
+
             ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
             using var package = new ExcelPackage(fileStream);
             var ws = package.Workbook.Worksheets[0];

@@ -19,6 +19,15 @@ import { isAxiosError } from 'axios';
  * Ordered most specific first, because a server that sends both a curated message and a field
  * list means the curated message.
  */
+/**
+ * The HTTP status a failed platform call came back with, or null when the request never got an
+ * answer. Exported because some failures need more than a sentence: a 409 on an optimistic
+ * concurrency token, for instance, is unrecoverable until the caller reloads the version it is
+ * editing, and a screen cannot do that without knowing a 409 is what happened.
+ */
+export const platformErrorStatus = (error: unknown): number | null =>
+  isAxiosError(error) && error.response ? error.response.status : null;
+
 export const platformErrorMessage = (error: unknown, fallback: string): string => {
   if (!isAxiosError(error)) return fallback;
 

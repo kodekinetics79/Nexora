@@ -282,8 +282,11 @@ public sealed class SourcingToolTests
     {
         using var seed = db.ContextFor(null);
         AgentSeed.Supplier(seed, SupplierId, Bu1, "Bolt Traders", "sales@bolts.example");
+        // The cap is denominated in the same USD the quotes below are, so these tests exercise
+        // cap ARITHMETIC without also exercising conversion. The currency is now mandatory: a
+        // policy with none cannot auto-execute at all (see AgentSpendCapCurrencyTests).
         AgentSeed.Policy(seed, Bu1, AgentAutonomyLevel.Act, maxAutoAwardValue: 1_000m,
-            requireApprovalForAwards: false);
+            requireApprovalForAwards: false, currencyId: 1);
         AgentSeed.Rfq(seed, RfqId, Bu1);
         seed.Currencies.Add(new Currency
         {
@@ -398,6 +401,12 @@ public sealed class SourcingToolTests
         public Task<PurchaseOrderResult> IssuePurchaseOrderAsync(IssuePurchaseOrderCommand command, CancellationToken ct = default) =>
             throw new NotSupportedException();
         public Task<GoodsReceiptResult> PostGoodsReceiptAsync(PostGoodsReceiptCommand command, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+        public Task<SupplierPurchaseOrderAcknowledgementResult> AcknowledgePurchaseOrderAsync(
+            AcknowledgeSupplierPurchaseOrderCommand command, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+        public Task<PurchaseOrderTradeTermsResult> AmendPurchaseOrderTradeTermsAsync(
+            AmendPurchaseOrderTradeTermsCommand command, CancellationToken ct = default) =>
             throw new NotSupportedException();
     }
 }

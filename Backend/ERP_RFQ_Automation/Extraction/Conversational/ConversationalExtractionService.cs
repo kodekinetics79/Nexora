@@ -97,13 +97,19 @@ public sealed class ConversationalExtractionService : IConversationalExtractionS
                     unstructuredPayload: true, ct);
             if (!decision.Allowed)
             {
-                _log.LogWarning(
+                // Same closed gate, same deterministic answer, so the same permanent
+                // disposition as the document path: retrying an email body against an
+                // unauthorized provider cannot produce a different result either.
+                _log.LogError(
                     "Conversational extraction REFUSED for tenant {Tenant}: external provider is not "
-                    + "authorized. {Descriptor} reason={Reason} message={Document}.",
-                    input.BusinessUnitId, descriptor, decision.Reason, input.SourceDocumentName);
+                    + "authorized. {Descriptor} reason={Reason} message={Document}. {Action}",
+                    input.BusinessUnitId, descriptor, decision.Reason, input.SourceDocumentName,
+                    ChunkedExtractionService.AiNotAuthorizedOperatorAction);
                 return Failed(input,
-                    $"{ChunkedExtractionService.ExternalUnstructuredRefusal} [denial: {decision.Reason}]",
-                    diagnostics);
+                    $"[{ChunkedExtractionService.AiNotAuthorizedCode}] "
+                    + $"{ChunkedExtractionService.ExternalUnstructuredRefusal} [denial: {decision.Reason}]",
+                    diagnostics,
+                    permanent: true);
             }
             diagnostics.Add(
                 $"External provider authorized for conversational extraction (authorization #{decision.AuthorizationId}).");
@@ -248,7 +254,8 @@ public sealed class ConversationalExtractionService : IConversationalExtractionS
     /// the reason appended) so the stored dead-letter error can say what actually happened
     /// instead of only the flattened summary.</param>
     private static ChunkedExtractionOutcome Failed(
-        DocumentExtractionInput input, string reason, List<string>? diagnostics = null)
+        DocumentExtractionInput input, string reason, List<string>? diagnostics = null,
+        bool permanent = false)
     {
         diagnostics ??= new List<string>();
         if (!diagnostics.Contains(reason))
@@ -256,6 +263,7 @@ public sealed class ConversationalExtractionService : IConversationalExtractionS
         return new ChunkedExtractionOutcome
         {
             Status = ExtractionOutcomeStatus.Failed,
+            PermanentFailure = permanent,
             Result = null,
             ExpectedItemCount = 0,
             ExtractedItemCount = 0,

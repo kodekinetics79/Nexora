@@ -14,6 +14,7 @@ import {
 } from '@mui/icons-material';
 import productService from '../../api/services/productService';
 import ProductFormDialog from './ProductFormDialog';
+import ChangeHistoryPanel from '../../components/common/ChangeHistoryPanel';
 import { useAuth } from '../../context/AuthContext';
 
 // ─── Info Row ──────────────────────────────────────────────────────────────
@@ -277,6 +278,20 @@ const ProductDetailPage: React.FC = () => {
             </Section>
           </Grid>
         )}
+
+        {/* ── Change history (FR-MDM-05) ──────────────────────────── */}
+        {/* Placed directly under Pricing's column rather than in a hidden tab: Final Landed Cost
+            is rendered two sections above, and the question "who last moved it, and from what"
+            has to be answerable on the same screen that shows the number. */}
+        <Grid size={{ xs: 12 }}>
+          <Section title="Change History">
+            <ChangeHistoryPanel
+              entityType="Product"
+              entityId={Number(id)}
+              emptyMessage="No changes have been recorded for this product since audit capture began."
+            />
+          </Section>
+        </Grid>
 
         {/* ── Attachments ─────────────────────────────────────────── */}
         {product.attachments && product.attachments.length > 0 && (

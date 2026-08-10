@@ -18,10 +18,13 @@ import {
   EmojiEvents as OutcomeIcon,
   ContentCopy as ReviseIcon,
 } from '@mui/icons-material';
-import quoteService, { type QuoteDTO } from '../../../api/services/quoteService';
+import quoteService, { type QuoteDTO, type PriceAttestationSource } from '../../../api/services/quoteService';
 import QuoteOutcomeDialog from './QuoteOutcomeDialog';
+import PriceConfirmationDialog from './PriceConfirmationDialog';
+import EmailPromptDialog from '../../../components/common/EmailPromptDialog';
 import SearchField from '../../../components/common/SearchField';
 import { useAuth } from '../../../context/AuthContext';
+import { presentableErrorMessage } from '../../../utils/apiErrors';
 import dayjs from 'dayjs';
 
 /**
@@ -92,6 +95,15 @@ const QuotesPage: React.FC = () => {
   });
   const [outcomeTarget, setOutcomeTarget] = useState<{ id: number; quoteNo: string } | null>(null);
 
+  // R5: emailing a quote from the LIST runs the identical recipient -> confirm-prices -> send
+  // flow the detail page runs, including the 409 `priceAttestationRequired` re-prompt. The two
+  // pages must not diverge: the list is where a rep works a pipeline, and a send that skipped
+  // the price confirmation would be refused by the server with nothing on screen to explain it.
+  const [emailTarget, setEmailTarget] = useState<
+    { id: number; quoteNo: string; customerEmail?: string; customerId?: number | null } | null>(null);
+  const [priceConfirmTarget, setPriceConfirmTarget] = useState<{ id: number; quoteNo: string } | null>(null);
+  const [pendingRecipient, setPendingRecipient] = useState('');
+
   const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ['quotes', paginationModel, search, state],
     queryFn: () => quoteService.getAll({
@@ -117,6 +129,70 @@ const QuotesPage: React.FC = () => {
     }
   });
 
+  // Step 2 of the send: the confirmation is on the record, now attempt the email.
+  // A `priceAttestationRequired` result means NOTHING was sent — the prices moved between
+  // the confirmation and the send — so the confirm dialog is deliberately left open for the
+  // rep to redo it, exactly as the detail page does.
+  const sendMutation = useMutation({
+    mutationFn: ({ id, recipientEmail }: { id: number; recipientEmail: string }) =>
+      quoteService.sendEmail(id, recipientEmail),
+    onSuccess: (result, variables) => {
+      if (result.priceAttestationRequired) {
+        setSnackbar({
+          open: true,
+          message: result.message || 'The prices changed. Confirm the price source again before sending.',
+          severity: 'error',
+        });
+        queryClient.invalidateQueries({ queryKey: ['quote-price-attestation', variables.id] });
+        return;
+      }
+      // R17: nothing was sent because a line's output tax was never calculated. Re-confirming the
+      // price source would not fix it, so the dialog closes and the server's sentence is shown.
+      if (result.taxDerivationRequired) {
+        setPriceConfirmTarget(null);
+        setSnackbar({
+          open: true,
+          message: result.message
+            || 'A line has no calculated tax. Set the output tax rate in Commercial Policy settings.',
+          severity: 'error',
+        });
+        return;
+      }
+      setPriceConfirmTarget(null);
+      if (result.held) {
+        // Not a failure and not a success: the send is parked in Approvals (WP-B3).
+        setSnackbar({
+          open: true,
+          message: result.message || 'Sent for approval — pricing is below your floor. Track it in Approvals.',
+          severity: 'error',
+        });
+        return;
+      }
+      setSnackbar({ open: true, message: 'Quote emailed to the customer', severity: 'success' });
+      queryClient.invalidateQueries({ queryKey: ['quotes'] });
+    },
+    onError: (error: unknown) => setSnackbar({
+      open: true,
+      message: presentableErrorMessage(error, 'The quote email could not be sent.'),
+      severity: 'error',
+    }),
+  });
+
+  // Step 1 of the send: record where the prices came from, then send. Both must succeed.
+  const confirmPriceMutation = useMutation({
+    mutationFn: ({ id, source, reference }: { id: number; source: PriceAttestationSource; reference: string }) =>
+      quoteService.confirmPriceAttestation(id, source, reference),
+    onSuccess: (_status, variables) => {
+      queryClient.invalidateQueries({ queryKey: ['quote-price-attestation', variables.id] });
+      sendMutation.mutate({ id: variables.id, recipientEmail: pendingRecipient });
+    },
+    onError: (error: unknown) => setSnackbar({
+      open: true,
+      message: presentableErrorMessage(error, 'The price confirmation could not be recorded.'),
+      severity: 'error',
+    }),
+  });
+
   const handleDownloadPdf = async (id: number, quoteNo: string) => {
     try {
       const blob = await quoteService.downloadPdf(id);
@@ -128,7 +204,13 @@ const QuotesPage: React.FC = () => {
       a.click();
       window.URL.revokeObjectURL(url);
     } catch (error) {
-      setSnackbar({ open: true, message: 'Failed to download PDF', severity: 'error' });
+      // R5: the commonest refusal here is now "the price source has not been confirmed",
+      // which the rep can act on immediately. "Failed to download PDF" would hide it.
+      setSnackbar({
+        open: true,
+        message: presentableErrorMessage(error, 'The quote PDF could not be exported.'),
+        severity: 'error',
+      });
     }
   };
 
@@ -137,10 +219,14 @@ const QuotesPage: React.FC = () => {
       field: 'nexoraSerial',
       headerName: 'Nexora Serial',
       width: 180,
-      valueGetter: (_value, row) => row.nexoraSerial || row.commercialCaseReference || '',
+      // No fallback through the lead or RFQ. The API used to substitute the parent's case when
+      // this document carried none, so a document outside the commercial case displayed one
+      // anyway. A blank here is real, and "Not linked" says so rather than reading as a
+      // still-loading cell.
+      valueGetter: (_value, row) => row.nexoraSerial || '',
       renderCell: (p) => (
-        <Typography sx={{ fontWeight: 800, fontFamily: 'monospace', fontSize: '0.8rem', color: p.value ? 'primary.main' : 'text.disabled' }}>
-          {p.value || 'Unassigned'}
+        <Typography sx={{ fontWeight: 800, fontFamily: 'monospace', fontSize: '0.8rem', color: p.value ? 'primary.main' : 'warning.main' }}>
+          {p.value || 'Not linked'}
         </Typography>
       ),
     },
@@ -239,11 +325,29 @@ const QuotesPage: React.FC = () => {
               <PdfIcon fontSize="small" color="error" />
             </IconButton>
           </Tooltip>
-          {hasPermission('Quotations', 'edit') && <Tooltip title="Email">
-            <IconButton size="small">
-              <EmailIcon fontSize="small" color="primary" />
-            </IconButton>
-          </Tooltip>}
+          {/*
+            Offered on SENT quotes only — the same rule the detail page applies, and the same
+            rule the outcome button above already uses. A DRAFT is marked "Ready to Send"
+            first; there is no second, quieter way to put a quote in front of a customer.
+          */}
+          {hasPermission('Quotations', 'edit') && (p.row.statusCode || p.row.statusValue)?.toUpperCase() === 'SENT' && (
+            <Tooltip title="Email this quote to the customer">
+              <span>
+                <IconButton
+                  size="small"
+                  disabled={sendMutation.isPending || confirmPriceMutation.isPending}
+                  onClick={() => setEmailTarget({
+                    id: p.row.id,
+                    quoteNo: p.row.quoteNo,
+                    customerEmail: p.row.customerEmail,
+                    customerId: p.row.customerId ?? null,
+                  })}
+                >
+                  <EmailIcon fontSize="small" color="primary" />
+                </IconButton>
+              </span>
+            </Tooltip>
+          )}
         </Stack>
       )
     },
@@ -303,6 +407,36 @@ const QuotesPage: React.FC = () => {
           rowHeight={70}
         />}
       </Paper>
+
+      <EmailPromptDialog
+        open={!!emailTarget}
+        title={emailTarget ? `Email quote ${emailTarget.quoteNo}` : 'Email quote'}
+        initialEmail={emailTarget?.customerEmail || ''}
+        loading={sendMutation.isPending}
+        businessUnitId={userData?.businessUnitId || 0}
+        customerId={emailTarget?.customerId ?? null}
+        onCancel={() => setEmailTarget(null)}
+        onConfirm={(email) => {
+          // R5: choosing the recipient does not send. The prices are confirmed first.
+          if (!emailTarget) return;
+          setPendingRecipient(email);
+          setPriceConfirmTarget({ id: emailTarget.id, quoteNo: emailTarget.quoteNo });
+          setEmailTarget(null);
+        }}
+      />
+
+      {priceConfirmTarget && (
+        <PriceConfirmationDialog
+          open
+          quoteId={priceConfirmTarget.id}
+          quoteNo={priceConfirmTarget.quoteNo}
+          recipientEmail={pendingRecipient}
+          submitting={confirmPriceMutation.isPending || sendMutation.isPending}
+          onCancel={() => setPriceConfirmTarget(null)}
+          onConfirm={(source, reference) =>
+            confirmPriceMutation.mutate({ id: priceConfirmTarget.id, source, reference })}
+        />
+      )}
 
       <QuoteOutcomeDialog
         open={!!outcomeTarget}

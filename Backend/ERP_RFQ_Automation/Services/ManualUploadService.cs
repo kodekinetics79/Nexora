@@ -203,21 +203,27 @@ namespace ERP_RFQ_Automation.Services
                 return ServiceResult<long>.CreateFailure("The uploaded documents do not appear to be RFQ-related. Please upload a valid Request for Quotation.");
             }
 
+            // SEC-ING-01: THIS BUSINESS UNIT'S mailbox or nothing. The fallback that used to sit
+            // here took the first active configuration on the PLATFORM when the tenant had none,
+            // and EmailIngest has no tenant column — its tenancy is derived through
+            // EmailConfigurationId, in the EF filter and in the table's RLS policy alike. So a
+            // tenant with no mailbox configured filed its manual upload under ANOTHER tenant's
+            // mailbox, which made the ingest row (and the /api/email-triage view of it) that
+            // tenant's row. Under the HTTP tenant role the fallback query already returned nothing,
+            // so this was latent rather than live — but "latent because a different layer stopped
+            // it" is not a reason to keep a cross-tenant write in the code.
             var defaultConfig = await _context.EmailConfigurations
                 .AsNoTracking()
                 .FirstOrDefaultAsync(e => e.IsActive && e.BusinessUnitId == businessUnitId);
 
             if (defaultConfig == null)
             {
-                defaultConfig = await _context.EmailConfigurations
-                    .AsNoTracking()
-                    .FirstOrDefaultAsync(e => e.IsActive);
-            }
-
-            if (defaultConfig == null)
-            {
-                _logger.LogError("No active email configuration found for manual upload.");
-                return ServiceResult<long>.CreateFailure("System configuration error: No active email configuration found.");
+                _logger.LogError(
+                    "No active email configuration found for business unit {BusinessUnitId}; a manual "
+                    + "upload cannot be filed under another business unit's mailbox.",
+                    businessUnitId);
+                return ServiceResult<long>.CreateFailure(
+                    "No active email configuration was found for this business unit. Configure a mailbox for it before uploading documents.");
             }
 
             var dummyIngest = new EmailIngest
@@ -276,14 +282,25 @@ namespace ERP_RFQ_Automation.Services
                 }
 
                 // --- DUPLICATE DETECTION ---
+                //
+                // SEC-ING-01: the same missing tenant predicate as the email door, in the same
+                // shape, written by the same hand. It is LATENT here and not a live leak: this
+                // runs on an authenticated HTTP request, so the EF global query filter has a
+                // tenant and PostgreSQL executes it as nexora_tenant_app under RLS — both layers
+                // are on. The identical code on the mailbox poller ran with a null tenant under
+                // the BYPASSRLS pipeline role, where both layers were off, and there it read every
+                // tenant's leads. Identical code, two paths, one cross-tenant read: which is
+                // exactly why the predicate is stated here too rather than left to the ambient
+                // scope. Duplicate detection is a per-business-unit question.
                 bool isDuplicate = false;
 
                 if (!string.IsNullOrWhiteSpace(ai.Rfqno))
                 {
-                    // Strict check: Same RFQ No and Buyer
+                    // Strict check: Same RFQ No and Buyer, within this business unit
                     isDuplicate = await _context.Leads
                         .AsNoTracking()
                         .AnyAsync(l =>
+                            l.BusinessUnitId == businessUnitId &&
                             l.Rfqno == ai.Rfqno &&
                             l.BuyersName == ai.BuyersName);
                 }
@@ -296,6 +313,7 @@ namespace ERP_RFQ_Automation.Services
                         isDuplicate = await _context.Leads
                             .AsNoTracking()
                             .AnyAsync(l =>
+                                l.BusinessUnitId == businessUnitId &&
                                 l.BuyersName == ai.BuyersName &&
                                 l.NoOfLineItems == ai.Items.Count &&
                                 l.LeadItems.Any(li =>
@@ -323,7 +341,12 @@ namespace ERP_RFQ_Automation.Services
                     DateTime? acknowledgmentDate = ParseDate(ai.AcknowledgmentDate);
                     DateTime? subDate = ParseDate(ai.SubDate);
 
-                    var items = ai.Items.Where(x => x.Quantity > 0).ToList();
+                    // Every extracted line is kept. Filtering on Quantity > 0 silently discarded any line
+                    // whose quantity the document did not state — the extractor is instructed to return
+                    // null in exactly that case — and the line count was taken from the filtered list, so
+                    // the loss was self-consistent and invisible. A line a reviewer can see and correct is
+                    // always better than a line that never existed.
+                    var items = ai.Items.ToList();
 
                     var lead = new Lead
                     {
@@ -945,17 +968,10 @@ namespace ERP_RFQ_Automation.Services
             return value.Length <= maxLength ? value : value.Substring(0, maxLength - 3) + "...";
         }
 
-        private DateTime? ParseDate(string? s)
-        {
-            if (string.IsNullOrWhiteSpace(s)) return null;
-            var formats = new[] { "yyyy-MM-dd", "dd/MM/yyyy", "MM/dd/yyyy", "dd-MM-yyyy", "d/M/yyyy" };
-            if (!DateTime.TryParseExact(s.Trim(), formats, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var d))
-                return null;
-            // Sentinel guard: extracted placeholders like 0001-01-01 parse "successfully"
-            // but are not real dates — treat anything before 2000 as unknown so the UI
-            // never renders "01 Jan 1". (Same rule as the extraction persister.)
-            return d.Year < 2000 ? null : d;
-        }
+        // Shared with every other ingestion door — see RfqDateParser. The sentinel guard this
+        // method used to own now applies uniformly, and this path no longer silently rejects
+        // the yyyy/MM/dd form that the email and folder doors accepted.
+        private DateTime? ParseDate(string? s) => Extraction.RfqDateParser.Parse(s);
 
         private string SanitizeFileName(string fileName)
         {

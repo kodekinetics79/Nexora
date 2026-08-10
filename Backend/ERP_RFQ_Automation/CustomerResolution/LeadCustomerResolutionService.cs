@@ -179,8 +179,15 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
         var ingestFrom = lead.EmailIngests?.FromEmail;
         if (string.IsNullOrWhiteSpace(ingestFrom) && lead.EmailIngestsId.HasValue)
         {
+            // SEC-ING-01: the tenant predicate is explicit because IgnoreQueryFilters removed the
+            // only other one. This lookup was `x.Id == lead.EmailIngestsId` and NOTHING else — the
+            // one call in this file (of ten) with no business-unit clause — and it is reachable
+            // from the mailbox poller, which until now ran with a null tenant under the BYPASSRLS
+            // pipeline role. EmailIngests carries no tenant column of its own, so the predicate
+            // goes through the owning mailbox exactly as the table's RLS policy does.
             ingestFrom = await _db.EmailIngests.AsNoTracking().IgnoreQueryFilters()
-                .Where(x => x.Id == lead.EmailIngestsId.Value)
+                .Where(x => x.Id == lead.EmailIngestsId.Value
+                            && x.EmailConfiguration.BusinessUnitId == businessUnitId)
                 .Select(x => x.FromEmail)
                 .SingleOrDefaultAsync(ct);
         }

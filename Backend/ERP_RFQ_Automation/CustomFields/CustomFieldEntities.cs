@@ -30,6 +30,18 @@ public sealed class CustomFieldDefinition
     public string? RetiredBy { get; private set; }
     public string? RetirementReason { get; private set; }
     public long Version { get; private set; }
+
+    /// <summary>
+    /// Position among the tenant's custom fields on this entity. Lower sorts first; ties fall
+    /// back to label. Drives form layout and the list-view column picker.
+    ///
+    /// Deliberately on the DEFINITION, not on the version. Label and data type are versioned
+    /// because a value must stay interpretable under the declaration it was captured with;
+    /// display order carries no such meaning. Versioning it would mean every drag of a row in
+    /// the admin screen burned one of the 20 permitted versions.
+    /// </summary>
+    public int DisplayOrder { get; private set; }
+
     public IReadOnlyCollection<CustomFieldVersion> Versions => _versions.AsReadOnly();
 
     public static CustomFieldDefinition Create(
@@ -56,6 +68,11 @@ public sealed class CustomFieldDefinition
         Version++;
     }
 
+    /// <summary>
+    /// Withdraws the field from use. This is NOT a delete: every value already written to an
+    /// owning row's jsonb bag stays exactly where it is and stays readable. The field simply
+    /// stops being offered for new input and stops appearing in the column picker.
+    /// </summary>
     public void Retire(string retiredBy, string reason, DateTime retiredOn)
     {
         if (Status == CustomFieldDefinitionStatus.Retired)
@@ -67,10 +84,41 @@ public sealed class CustomFieldDefinition
         Version++;
     }
 
+    /// <summary>Repositions the field. Cheap and unversioned — see <see cref="DisplayOrder"/>.</summary>
+    public void SetDisplayOrder(int displayOrder)
+    {
+        EnsureNotRetired();
+        if (displayOrder < 0) throw new CustomFieldDomainException("Display order cannot be negative.");
+        if (DisplayOrder == displayOrder) return;
+        DisplayOrder = displayOrder;
+        Version++;
+    }
+
+    /// <summary>
+    /// Brings a retired field back into use at its last active version.
+    ///
+    /// The retirement stamp (<see cref="RetiredOn"/>, <see cref="RetiredBy"/>,
+    /// <see cref="RetirementReason"/>) is deliberately NOT cleared: it is the record of the
+    /// last withdrawal and the admin screen shows it. Status is the single source of truth
+    /// for "is this field in use", so a reactivated field reads as Active with a retirement
+    /// history rather than as if nothing ever happened.
+    /// </summary>
+    public void Reactivate()
+    {
+        if (Status != CustomFieldDefinitionStatus.Retired)
+            throw new CustomFieldDomainException("Only a retired custom field can be reactivated.");
+        if (ActiveVersionNumber is null)
+            throw new CustomFieldDomainException(
+                "The custom field has no activated version to return to. Add and activate a version instead.");
+        Status = CustomFieldDefinitionStatus.Active;
+        Version++;
+    }
+
     private void EnsureNotRetired()
     {
         if (Status == CustomFieldDefinitionStatus.Retired)
-            throw new CustomFieldDomainException("Retired custom fields cannot be changed or reactivated.");
+            throw new CustomFieldDomainException(
+                "Retired custom fields cannot be changed. Reactivate the field first.");
     }
 
     internal static string Require(string? value, string name, int maximumLength)

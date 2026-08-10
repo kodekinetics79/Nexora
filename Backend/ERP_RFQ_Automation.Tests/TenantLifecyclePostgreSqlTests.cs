@@ -145,7 +145,10 @@ public sealed class TenantLifecyclePostgreSqlTests
         await using var db = Context();
         var result = await Service(db).PurgeAsync(tenant.Id,
             new ConfirmTenantDestructionRequest { Reason = OffboardingReason, Confirmation = tenant.Name },
-            TenantLifecycleHarness.Operator(), null, CancellationToken.None);
+            // A second Owner, because the operator who scheduled the deletion may not also carry
+            // it out. The rule landed while the PostgreSQL lane was unrunnable, so these tests
+            // still named the scheduling actor.
+            TenantLifecycleHarness.SecondApprover(), null, CancellationToken.None);
 
         Assert.True(result.RowsDeleted > 0);
 
@@ -170,7 +173,10 @@ public sealed class TenantLifecyclePostgreSqlTests
         await using var db = Context();
         await Service(db).PurgeAsync(tenant.Id,
             new ConfirmTenantDestructionRequest { Reason = OffboardingReason, Confirmation = tenant.Name },
-            TenantLifecycleHarness.Operator(), null, CancellationToken.None);
+            // A second Owner, because the operator who scheduled the deletion may not also carry
+            // it out. The rule landed while the PostgreSQL lane was unrunnable, so these tests
+            // still named the scheduling actor.
+            TenantLifecycleHarness.SecondApprover(), null, CancellationToken.None);
 
         await using var probe = Context();
         var setting = (await probe.Database
@@ -240,7 +246,7 @@ public sealed class TenantLifecyclePostgreSqlTests
         var tenant = await SchedulePurgeableAsync(88_105, "purge-twice");
         await using var db = Context();
         var service = Service(db);
-        var actor = TenantLifecycleHarness.Operator();
+        var actor = TenantLifecycleHarness.SecondApprover();
 
         await service.PurgeAsync(tenant.Id,
             new ConfirmTenantDestructionRequest { Reason = OffboardingReason, Confirmation = tenant.Name },
@@ -487,7 +493,7 @@ public sealed class TenantLifecyclePostgreSqlTests
 
         await using var db = Context();
         var service = Service(db);
-        var actor = TenantLifecycleHarness.Operator();
+        var actor = TenantLifecycleHarness.SecondApprover();
 
         var erasure = await service.ErasePersonalDataAsync(erasedTenant.Id,
             new ConfirmTenantDestructionRequest { Reason = ErasureReason, Confirmation = erasedTenant.Name },

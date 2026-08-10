@@ -13,7 +13,8 @@ public static class EntitlementEnforcementCoverage
             [TypedEntitlementCatalog.Quotes] = ["QuoteController"],
             [TypedEntitlementCatalog.Orders] = ["OrderController"],
             [TypedEntitlementCatalog.Procurement] = ["ProcurementController"],
-            [TypedEntitlementCatalog.Inventory] = ["InventoryIntelligenceController"],
+            [TypedEntitlementCatalog.Inventory] =
+                ["InventoryIntelligenceController", "MaterialTraceabilityController"],
             [TypedEntitlementCatalog.Ai] = ["AgentController"],
             [TypedEntitlementCatalog.EmailIntake] = ["EmailTriageController", "MailboxController"],
             [TypedEntitlementCatalog.SupplierSearch] = ["ProcurementController.SearchSourcingCandidates"],

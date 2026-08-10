@@ -126,8 +126,15 @@ public sealed class DocumentIngestionService : IDocumentIngestion
         ExtractionJobMetadata? metadata = null,
         CancellationToken ct = default)
     {
-        return _context.Database.CreateExecutionStrategy().ExecuteAsync(
-            () => IngestCoreAsync(bytes, fileName, businessUnitId, sourceType, batchId, priority, metadata, ct));
+        return _context.Database.CreateExecutionStrategy().ExecuteAsync(() =>
+        {
+            // EnableRetryOnFailure re-runs this delegate on the SAME DbContext, so attempt 1's
+            // tracked mutations would otherwise survive into attempt 2 and every re-query would
+            // return the already-tracked (stale) instance rather than the row as it now stands.
+            // IngestCoreAsync loads everything it writes, so nothing is lost by starting clean.
+            _context.ChangeTracker.Clear();
+            return IngestCoreAsync(bytes, fileName, businessUnitId, sourceType, batchId, priority, metadata, ct);
+        });
     }
 
     private async Task<IngestedDocument> IngestCoreAsync(

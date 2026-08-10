@@ -4,9 +4,15 @@ using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.QuoteDelivery;
 
+/// <param name="AttestedPriceFingerprint">
+/// R5 content binding recorded when the send was authorised; see
+/// <see cref="QuoteDeliveryRequest.AttestedPriceFingerprint"/>. The sender verifies the
+/// quote's CURRENT prices against it before a single byte of the PDF is produced.
+/// </param>
 public sealed record QuoteDeliveryEnvelope(
     long Id, long BusinessUnitId, long QuoteId, string RecipientEmail, string Subject,
-    string Body, string? FromEmail, string AttachmentFileName, int AttemptCount, Guid LeaseToken);
+    string Body, string? FromEmail, string AttachmentFileName, int AttemptCount, Guid LeaseToken,
+    string? AttestedPriceFingerprint = null);
 
 public interface IQuoteDeliveryStore
 {
@@ -63,7 +69,8 @@ public sealed class QuoteDeliveryStore(ErpRfqAutomationContext db) : IQuoteDeliv
             await transaction.CommitAsync(ct);
             return candidates.Select(x => new QuoteDeliveryEnvelope(
                 x.Id, x.BusinessUnitId, x.QuoteId, x.RecipientEmail, x.Subject, x.Body,
-                x.FromEmail, x.AttachmentFileName, x.AttemptCount, x.LeaseToken!.Value)).ToArray();
+                x.FromEmail, x.AttachmentFileName, x.AttemptCount, x.LeaseToken!.Value,
+                x.AttestedPriceFingerprint)).ToArray();
         });
     }
 

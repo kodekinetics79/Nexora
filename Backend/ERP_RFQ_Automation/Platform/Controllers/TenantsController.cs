@@ -185,6 +185,137 @@ public class TenantsController : ControllerBase
         return Ok(ToDto(updated));
     }
 
+    // PUT /api/platform/tenants/{id}/data-region
+    /// <summary>
+    /// Corrects the contractual data region — the only governed way this value can change after
+    /// provisioning.
+    ///
+    /// <para><b>Why it is not on the profile form.</b> <c>DataRegion</c> is not a description of the
+    /// tenant, it is an assertion about where their data physically is, and two controls already
+    /// depend on it: <c>TenantDataAssetRegistryService.RegisterAsync</c> refuses to register an asset
+    /// whose region differs, and the <c>data.residency-isolation</c> activation control passes only
+    /// when the verified PostgreSQL asset's region equals this value. So a region typed wrongly at
+    /// provisioning leaves a tenant that can never be activated and against which no data asset can
+    /// ever be registered — reachable only by direct SQL until now — while a region edited freely
+    /// afterwards would let an operator satisfy a residency control by rewriting the claim instead of
+    /// moving the data.</para>
+    ///
+    /// <para>The resolution is that the region may be corrected only into agreement with the assets
+    /// that are actually registered. Any registered asset sitting in a different region refuses the
+    /// change and is named, because that asset is the evidence of where the data really is and this
+    /// column is only a claim about it.</para>
+    ///
+    /// <para>Owner, not TenantAdmin: residency is a contractual commitment made during the sale and
+    /// a control an auditor reads. Support may operate a tenant and may not restate where it lives.</para>
+    /// </summary>
+    [HttpPut("{id:long}/data-region")]
+    [Authorize(Policy = PlatformPolicies.Owner)]
+    public async Task<ActionResult<TenantSummaryDto>> UpdateDataRegion(
+        long id, [FromBody] UpdateTenantDataRegionRequest request, CancellationToken ct)
+    {
+        if (!ModelState.IsValid) return BadRequest(ModelState);
+
+        var reason = Normalize(request.Reason);
+        if (reason is null || reason.Length < MinimumDataRegionReasonLength)
+            return BadRequest(new
+            {
+                error = $"A reason of at least {MinimumDataRegionReasonLength} characters is required. " +
+                        "Restating where a customer's data resides is a contractual assertion, and the " +
+                        "record has to say on what basis it was restated."
+            });
+
+        var region = Normalize(request.DataRegion);
+
+        var tenant = await _context.Set<Tenant>().IgnoreQueryFilters()
+            .FirstOrDefaultAsync(t => t.Id == id, ct);
+        if (tenant is null) return NotFound();
+
+        if (tenant.Status == TenantStatus.Archived)
+            return Conflict(new
+            {
+                error = "An archived tenant is a retention-controlled record. Restore it before " +
+                        "changing its recorded data region."
+            });
+
+        if (string.Equals(tenant.DataRegion, region, StringComparison.Ordinal))
+            return Conflict(new { error = "That is already this tenant's recorded data region." });
+
+        // Clearing it is refused on a tenant that is live or has been live. The residency control
+        // reads presence, so an empty region would silently withdraw a control that has already
+        // passed rather than surfacing as a failure anybody looks at.
+        if (region is null && tenant.Status != TenantStatus.Provisioning)
+            return BadRequest(new
+            {
+                error = "dataRegion cannot be cleared on a tenant that has left provisioning: the " +
+                        "data.residency-isolation activation control reads its presence, so clearing " +
+                        "it withdraws a control this tenant has already been certified against."
+            });
+
+        // The registered assets are the evidence; this column is the claim about them. A claim that
+        // disagrees with the evidence is refused rather than reconciled, and the disagreeing assets
+        // are named so the operator knows whether to correct the claim or move the data.
+        var conflicting = await _context.Set<DataAssets.TenantDataAsset>().AsNoTracking()
+            .Where(a => a.TenantId == id)
+            .Select(a => new { a.LogicalKey, a.Region, a.Status })
+            .ToListAsync(ct);
+        var mismatched = conflicting
+            .Where(a => region is null
+                        || !string.Equals(a.Region, region, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (mismatched.Count > 0)
+            return Conflict(new
+            {
+                error = "The tenant already has data assets registered in a different region, and this " +
+                        "column only claims what those assets prove. Move or re-register the assets " +
+                        "first: " +
+                        string.Join("; ", mismatched.Select(a => $"'{a.LogicalKey}' is in '{a.Region}' ({a.Status})")) +
+                        "."
+            });
+
+        var previous = tenant.DataRegion;
+        var now = DateTime.UtcNow;
+        var actor = User.FindFirst("email")?.Value ?? "platform";
+
+        var strategy = _context.Database.CreateExecutionStrategy();
+        try
+        {
+            await strategy.ExecuteAsync(async () =>
+            {
+                _context.ChangeTracker.Clear();
+                await using var tx = await _context.Database.BeginTransactionAsync(ct);
+
+                var target = await _context.Set<Tenant>().IgnoreQueryFilters()
+                    .FirstOrDefaultAsync(t => t.Id == id, ct)
+                    ?? throw new TenantNotFoundException();
+
+                target.DataRegion = region;
+                target.ModifiedOn = now;
+                target.ModifiedBy = actor;
+                await _context.SaveChangesAsync(ct);
+
+                await _audit.WriteAsync(User, "tenant.data-region.update", nameof(Tenant), id.ToString(),
+                    new { from = previous, to = region, reason },
+                    actAsTenantId: id, httpContext: HttpContext, ct: ct);
+
+                await tx.CommitAsync(ct);
+            });
+        }
+        catch (TenantNotFoundException)
+        {
+            return NotFound();
+        }
+
+        var updated = await _context.Set<Tenant>().IgnoreQueryFilters().AsNoTracking()
+            .Include(t => t.Plan).FirstAsync(t => t.Id == id, ct);
+        return Ok(ToDto(updated));
+    }
+
+    /// <summary>
+    /// Same floor as a billing exemption and a destruction reason, for the same reason: a
+    /// required field satisfied by "x" leaves a paper trail worth nothing.
+    /// </summary>
+    private const int MinimumDataRegionReasonLength = 15;
+
     // POST /api/platform/tenants  (provision)
     [HttpPost]
     [Authorize(Policy = PlatformPolicies.TenantAdmin)]
@@ -712,6 +843,59 @@ public class TenantsController : ControllerBase
                    $"Use adminActivation '{AdminActivationMethods.Password}' to set one directly.";
 
         return null;
+    }
+
+    private static string? ValidateEditableProfile(UpdateTenantProfileRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.Name)) return "name is required.";
+        if (Normalize(request.CountryCode) is string country
+            && (country.Length != 2 || !country.All(char.IsAsciiLetter)))
+            return $"countryCode '{country}' is not an ISO-3166-1 alpha-2 code (two letters, e.g. 'SA').";
+
+        if (Normalize(request.TimeZoneId) is string timeZone)
+        {
+            try
+            {
+                TimeZoneInfo.FindSystemTimeZoneById(timeZone);
+            }
+            catch (Exception exception) when (exception is TimeZoneNotFoundException or InvalidTimeZoneException)
+            {
+                return $"timeZoneId '{timeZone}' is not a time zone this server recognises; use an IANA identifier such as 'Asia/Riyadh'.";
+            }
+        }
+
+        return null;
+    }
+
+    private static object ProfileAuditSnapshot(Tenant tenant) => new
+    {
+        tenant.Name,
+        tenant.LegalName,
+        tenant.RegistrationNumber,
+        tenant.TaxNumber,
+        tenant.CountryCode,
+        tenant.Industry,
+        tenant.Website,
+        tenant.AddressLine1,
+        tenant.AddressLine2,
+        tenant.City,
+        tenant.StateProvince,
+        tenant.PostalCode,
+        tenant.Phone,
+        tenant.ContactEmail,
+        tenant.LogoUrl,
+        tenant.TimeZoneId,
+        tenant.Locale
+    };
+
+    private static string? PostalAddressOf(Tenant tenant)
+    {
+        var address = string.Join(", ", new[]
+        {
+            tenant.AddressLine1, tenant.AddressLine2, tenant.City, tenant.StateProvince,
+            tenant.PostalCode, tenant.CountryCode
+        }.Where(part => !string.IsNullOrWhiteSpace(part)));
+        return address.Length == 0 ? null : address;
     }
 
     /// <summary>
@@ -1281,59 +1465,6 @@ public class TenantsController : ControllerBase
         UpdatedOn = p.UpdatedOn,
         UpdatedBy = p.UpdatedBy
     };
-
-    private static string? ValidateEditableProfile(UpdateTenantProfileRequest request)
-    {
-        if (string.IsNullOrWhiteSpace(request.Name)) return "name is required.";
-        if (Normalize(request.CountryCode) is string country
-            && (country.Length != 2 || !country.All(char.IsAsciiLetter)))
-            return $"countryCode '{country}' is not an ISO-3166-1 alpha-2 code (two letters, e.g. 'SA').";
-
-        if (Normalize(request.TimeZoneId) is string timeZone)
-        {
-            try
-            {
-                TimeZoneInfo.FindSystemTimeZoneById(timeZone);
-            }
-            catch (Exception exception) when (exception is TimeZoneNotFoundException or InvalidTimeZoneException)
-            {
-                return $"timeZoneId '{timeZone}' is not a time zone this server recognises; use an IANA identifier such as 'Asia/Riyadh'.";
-            }
-        }
-
-        return null;
-    }
-
-    private static object ProfileAuditSnapshot(Tenant tenant) => new
-    {
-        tenant.Name,
-        tenant.LegalName,
-        tenant.RegistrationNumber,
-        tenant.TaxNumber,
-        tenant.CountryCode,
-        tenant.Industry,
-        tenant.Website,
-        tenant.AddressLine1,
-        tenant.AddressLine2,
-        tenant.City,
-        tenant.StateProvince,
-        tenant.PostalCode,
-        tenant.Phone,
-        tenant.ContactEmail,
-        tenant.LogoUrl,
-        tenant.TimeZoneId,
-        tenant.Locale
-    };
-
-    private static string? PostalAddressOf(Tenant tenant)
-    {
-        var address = string.Join(", ", new[]
-        {
-            tenant.AddressLine1, tenant.AddressLine2, tenant.City, tenant.StateProvince,
-            tenant.PostalCode, tenant.CountryCode
-        }.Where(part => !string.IsNullOrWhiteSpace(part)));
-        return address.Length == 0 ? null : address;
-    }
 
     private static string? Normalize(string? value)
         => string.IsNullOrWhiteSpace(value) ? null : value.Trim();

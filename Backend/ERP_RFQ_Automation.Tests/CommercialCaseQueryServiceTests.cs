@@ -79,6 +79,11 @@ public sealed class CommercialCaseQueryServiceTests
             contact.Email = "buyer-contact@apex.example";
             lead.ResolveCommercialIdentity(customer.Id, contact.Id, "CONFIRMED");
             seed.EmailIngests.Local.Single(x => x.Id == lead.EmailIngestsId).EmailSubject = "Urgent turbine request";
+            // Saved before the RFQ exists, because the commercial case is allocated during
+            // SaveChanges and the RFQ has to inherit a real one — the same order production uses
+            // (RfqRepository resolves the lead, then calls InheritCommercialIdentity).
+            await seed.SaveChangesAsync();
+
             var rfq = new ERP_RFQ_Automation.Models.Rfq
             {
                 Id = 908, Rfqno = "RFQ-UNIVERSAL", RecDate = DateTime.UtcNow,
@@ -89,6 +94,7 @@ public sealed class CommercialCaseQueryServiceTests
                 Id = 909, Rfqid = rfq.Id, ManufacturerPartNumber = "PN-UNIVERSAL-100",
                 Quantity = 1, CreatedBy = "test", CreatedDate = DateTime.UtcNow
             });
+            rfq.InheritCommercialIdentity(lead);
             seed.Rfqs.Add(rfq);
             await seed.SaveChangesAsync();
             caseId = lead.CommercialCaseId;

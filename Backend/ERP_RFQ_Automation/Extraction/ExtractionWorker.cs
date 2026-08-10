@@ -168,8 +168,33 @@ public sealed class ExtractionWorker : BackgroundService
         var processingStartedAt = System.Diagnostics.Stopwatch.GetTimestamp();
         double ElapsedMs() => System.Diagnostics.Stopwatch.GetElapsedTime(processingStartedAt).TotalMilliseconds;
 
+        // The push precedes the scope because ITenantContext captures the ambient tenant in its
+        // CONSTRUCTOR: a scope created first would resolve a DbContext that believes in no tenant,
+        // whatever is pushed afterwards.
         using var tenantScope = _tenantScope.Push(job.BusinessUnitId);
         using var scope = _scopeFactory.CreateScope();
+
+        // Fail closed, the contract SlaSweepWorker, QuoteDeliveryDispatcher, RoutingReconciliation-
+        // Worker and FinanceOutboxDispatcherService all carry and this worker did not. If the
+        // DbContext did not pick the pushed scope up, everything below — the document read, the
+        // extraction, the Lead + LeadItems write and the queue transitions — would run with a null
+        // tenant, which makes the EF query filters no-ops AND routes the connection to
+        // nexora_pipeline_app, created BYPASSRLS. Refusing the job leaves it leased; the lease
+        // expires and it is reclaimed, so this defers work rather than destroying it.
+        //
+        // GetService, not GetRequiredService: a container with no ErpRfqAutomationContext (the
+        // lease/heartbeat unit harnesses) can reach no tenant row from this scope at all — the
+        // queue, the persister and the reader all take the context — so there is nothing there to
+        // fail closed on. Wherever a context exists, the check is unconditional.
+        var scopedContext = scope.ServiceProvider.GetService<ErpRfqAutomationContext>();
+        if (scopedContext is not null && scopedContext.ScopedTenantId != job.BusinessUnitId)
+        {
+            throw new InvalidOperationException(
+                $"Extraction job {job.Id} refused to run for BU {job.BusinessUnitId}: the DbContext "
+                + $"resolved tenant {scopedContext.ScopedTenantId?.ToString() ?? "<none>"}. "
+                + "Tenant scope is mandatory for this worker.");
+        }
+
         var queue = scope.ServiceProvider.GetRequiredService<IExtractionQueue>();
 
         using var workCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -234,7 +259,8 @@ public sealed class ExtractionWorker : BackgroundService
             {
                 // Deterministic path bypasses the LLM entirely — no gate needed.
                 outcome = await extractor.ExtractStructuredAsync(
-                    input.StructuredRows!, job.BusinessUnitId, input.SourceDocumentName, workToken);
+                    input.StructuredRows!, job.BusinessUnitId, input.SourceDocumentName, workToken,
+                    input.DocumentNarrative);
             }
             else if (IsProseBody(jobMetadata)
                 && scope.ServiceProvider.GetService<Conversational.IConversationalExtractionService>()
@@ -271,17 +297,28 @@ public sealed class ExtractionWorker : BackgroundService
 
             if (outcome.Status == ExtractionOutcomeStatus.Failed || outcome.Result is null)
             {
-                // Retryable failure (NOT FailPermanentlyAsync): includes the allow-list
-                // fail-closed refusal for unstructured extraction, which must hold the
-                // document for review/retry, never dead-letter it on the first attempt.
+                // A failure that a retry could clear (a timeout, a truncated response, a
+                // provider outage) is rescheduled with backoff, as before. A failure whose
+                // cause is a DECISION is not: the allow-list refusal for unstructured
+                // extraction is a deterministically closed gate, and re-asking it five times
+                // on exponential backoff bought an hour of pointless retries and no new
+                // information. The gate itself is unchanged — this is about reporting.
                 var failureReason = ComposeFailureReason(outcome, input.StructuredFallbackNote);
-                if (!await queue.FailAsync(
-                        job.Id, workerId, job.Attempts, failureReason, workToken))
+                var permanent = outcome.PermanentFailure;
+                var errorCode = permanent && failureReason.Contains(
+                        ChunkedExtractionService.AiNotAuthorizedCode, StringComparison.Ordinal)
+                    ? "ai_not_authorized"
+                    : "extraction_failed";
+
+                var recorded = permanent
+                    ? await queue.FailPermanentlyAsync(job.Id, workerId, job.Attempts, failureReason, workToken)
+                    : await queue.FailAsync(job.Id, workerId, job.Attempts, failureReason, workToken);
+                if (!recorded)
                     LogLeaseLost(job.Id, workerId, "recording extraction failure");
                 else
                 {
-                    await MarkIntakeFailureAsync(job, "extraction_failed", workToken);
-                    RecordFailureMetrics(job, "extraction_failed", failureReason, ElapsedMs());
+                    await MarkIntakeFailureAsync(job, errorCode, workToken, permanent: permanent);
+                    RecordFailureMetrics(job, errorCode, failureReason, ElapsedMs(), permanent: permanent);
                 }
                 return true;
             }
@@ -619,6 +656,43 @@ public sealed class ExtractionWorker : BackgroundService
         return ExtractionJobMetadata.TryLoad(job);
     }
 
+    /// <summary>
+    /// The terminal-for-this-attempt classification an operator reads on the intake record.
+    /// A code with no first-class state leaves the occurrence's outcome alone rather than
+    /// inventing one — "we do not know" is a real answer and is already the NONE default.
+    /// </summary>
+    private static IngestionOutcomeState? OutcomeStateFor(string errorCode) => errorCode switch
+    {
+        "unsupported_format" => IngestionOutcomeState.UNSUPPORTED_FORMAT,
+        "ai_not_authorized" => IngestionOutcomeState.AI_NOT_AUTHORIZED,
+        _ => null
+    };
+
+    /// <summary>
+    /// Records the intake side of a failed attempt.
+    ///
+    /// <para>
+    /// This used to begin <c>if (db.Database.IsNpgsql()) return;</c> — a blanket early return
+    /// that meant NO intake occurrence was ever annotated in production. The guard was not
+    /// arbitrary: on PostgreSQL <c>trg_release01c_sync_intake_from_job</c> on
+    /// <c>"ExtractionJobs"</c> (function last replaced by migration 20260730193414) owns
+    /// <c>intake_status</c>, <c>last_error_category</c>,
+    /// <c>last_error_code</c> and <c>last_error_details</c>, deriving them from the job row,
+    /// and having the application write them too would race the trigger and could rewind it.
+    /// </para>
+    /// <para>
+    /// But that trigger does NOT write <c>outcome_state</c>, and never has. So the blanket
+    /// return was too wide by exactly one column: the WHY of a failure was dropped on the
+    /// floor for every production document. The guard is now scoped to the columns the
+    /// trigger actually owns, and the outcome state — the only part nothing else writes — is
+    /// recorded on both dialects.
+    /// </para>
+    /// <para>
+    /// The whole body is best-effort. The queue row is already durable by the time this runs,
+    /// and an annotation that threw would be caught by the caller's general handler and turned
+    /// into a second failure recording for a job that has already been failed.
+    /// </para>
+    /// </summary>
     private async Task MarkIntakeFailureAsync(
         ExtractionJob job,
         string errorCode,
@@ -626,18 +700,34 @@ public sealed class ExtractionWorker : BackgroundService
         bool permanent = false)
     {
         if (!job.SourceDocumentOccurrenceId.HasValue) return;
-        using var scope = _scopeFactory.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
-        if (db.Database.IsNpgsql()) return;
-        var occurrence = await db.Set<SourceDocumentOccurrence>()
-            .SingleAsync(x => x.BusinessUnitId == job.BusinessUnitId && x.Id == job.SourceDocumentOccurrenceId, ct);
-        if (occurrence.IntakeStatus == IntakeOccurrenceStatus.Processing)
+        try
         {
-            if (string.Equals(errorCode, "unsupported_format", StringComparison.OrdinalIgnoreCase))
-                occurrence.MarkOutcome(IngestionOutcomeState.UNSUPPORTED_FORMAT);
-            if (permanent || job.Attempts >= job.MaxAttempts) occurrence.MarkDeadLetter(errorCode);
-            else occurrence.MarkRetryable(errorCode);
-            await db.SaveChangesAsync(ct);
+            using var scope = _scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+            var occurrence = await db.Set<SourceDocumentOccurrence>()
+                .SingleAsync(x => x.BusinessUnitId == job.BusinessUnitId && x.Id == job.SourceDocumentOccurrenceId, ct);
+
+            // Never overwrite a classification something else already made — a malware or
+            // duplicate disposition outranks anything decided here.
+            if (occurrence.OutcomeState == IngestionOutcomeState.NONE
+                && OutcomeStateFor(errorCode) is { } state)
+                occurrence.MarkOutcome(state);
+
+            if (!db.Database.IsNpgsql() && occurrence.IntakeStatus == IntakeOccurrenceStatus.Processing)
+            {
+                if (permanent || job.Attempts >= job.MaxAttempts) occurrence.MarkDeadLetter(errorCode);
+                else occurrence.MarkRetryable(errorCode);
+            }
+
+            if (db.ChangeTracker.HasChanges())
+                await db.SaveChangesAsync(ct);
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex,
+                "Job {JobId} was failed as '{ErrorCode}' but its intake occurrence could not be annotated. "
+                + "The queue row is authoritative; the intake record understates the reason.",
+                job.Id, errorCode);
         }
     }
 
@@ -1426,6 +1516,7 @@ public sealed class LeadPersister : ILeadPersister
         string remarksPrefix)
     {
         var items = ai.Items ?? new List<LeadItemData>();
+        var bidClosingDate = SanitizeDate(ParseDate(ai.BidClosingDate));
         var lead = new Lead
         {
             // Data hygiene at write time: junk RFQ numbers and placeholder buyer
@@ -1435,7 +1526,17 @@ public sealed class LeadPersister : ILeadPersister
             Rfqno = IsPlausibleRfqNumber(ai.Rfqno) ? Truncate(ai.Rfqno!.Trim(), 100) : null,
             BuyersName = SanitizeBuyerName(Truncate(ai.BuyersName, 510)),
             RecDate = SanitizeDate(ParseDate(ai.RecDate)) ?? now,
-            BidClosingDate = SanitizeDate(ParseDate(ai.BidClosingDate)),
+            BidClosingDate = bidClosingDate,
+            // FR-RFQ-04. Kept ALONGSIDE the Gregorian value, never instead of it: the Gregorian
+            // date stays authoritative for every comparison and deadline calculation, and this
+            // is the rendering a Saudi government buyer actually published against.
+            BidClosingDateHijri = RfqDateParser.ToHijri(bidClosingDate),
+            // FR-RFQ-04 / FR-RFQ-03. Read from the document where it states them; null where it
+            // does not. Nothing here is inferred — an unstated delivery location is unknown, and
+            // an unknown delivery location is not the buyer's head office.
+            DeliveryLocation = Truncate(ai.DeliveryLocation, 500),
+            RequiredDeliveryDate = SanitizeDate(ParseDate(ai.RequiredDeliveryDate)),
+            AgreementReference = Truncate(ai.AgreementReference, 100),
             BiddingDecision = Truncate(ai.BiddingDecision, 100),
             AcknowledgmentDate = SanitizeDate(ParseDate(ai.AcknowledgmentDate)),
             SubDate = SanitizeDate(ParseDate(ai.SubDate)),
@@ -1509,6 +1610,11 @@ public sealed class LeadPersister : ILeadPersister
                     MimeType = MimeTypeFor(ext),
                     FileSize = size,
                     ContentType = MimeTypeFor(ext)?.Split('/')[0],
+                    // FR-RFQ-08. The digest the governed intake computed when these bytes were
+                    // captured — not a second one taken later, which would only prove the file
+                    // matches itself now. Recording it here is what makes "immutable" checkable
+                    // rather than merely intended.
+                    ContentSha256 = job.ContentHash,
                     CreatedOn = now,
                     UploadedDate = now
                 });
@@ -1552,15 +1658,7 @@ public sealed class LeadPersister : ILeadPersister
         return t is "product" or "service" or "mixed" ? t : null;
     }
 
-    private static readonly string[] DateFormats =
-        { "yyyy-MM-dd", "dd/MM/yyyy", "MM/dd/yyyy", "dd-MM-yyyy", "d/M/yyyy", "yyyy/MM/dd" };
-
-    private static DateTime? ParseDate(string? s)
-        => string.IsNullOrWhiteSpace(s)
-            ? null
-            : DateTime.TryParseExact(s.Trim(), DateFormats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var d)
-                ? d
-                : null;
+    private static DateTime? ParseDate(string? s) => RfqDateParser.Parse(s);
 
     private static string? Truncate(string? value, int max)
         => string.IsNullOrEmpty(value) ? null : (value.Length <= max ? value : value[..max]);

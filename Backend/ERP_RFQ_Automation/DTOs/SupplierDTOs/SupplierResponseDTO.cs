@@ -21,9 +21,21 @@
         public string? Comments { get; set; }
         public long? CurrencyId { get; set; }
         public string? CurrencyName { get; set; }
+        /// <summary>
+        /// The supplier's VAT/tax registration number, canonicalised. Null means "not captured",
+        /// which is what makes this supplier's input tax non-recoverable.
+        /// </summary>
+        public string? TaxRegistrationNumber { get; set; }
         public long? Buid { get; set; }
         public string? BusinessUnitName { get; set; }
         public bool? IsActive { get; set; }
+        /// <summary>
+        /// AA-01 · raw jsonb bag of tenant-defined custom field values, keyed by stable key.
+        /// Carried on the list payload so a custom-field column renders without a round trip
+        /// per row.
+        /// </summary>
+        public string? CustomFields { get; set; }
+
         public string GovernanceStatus { get; set; } = null!;
         public string VerificationStatus { get; set; } = null!;
         public string ComplianceStatus { get; set; } = null!;

@@ -41,6 +41,22 @@ public class PlatformBillingController : ControllerBase
     /// </summary>
     internal const int MinimumBillingModeReasonLength = 15;
 
+    /// <summary>
+    /// Same floor as a billing exemption. "Redirected the invoice" is not a reason; the person
+    /// reading this in a dispute needs to know on whose instruction it was redirected.
+    /// </summary>
+    internal const int MinimumAccountContactReasonLength = 15;
+
+    /// <summary>
+    /// The longest payment terms this accepts. Not a guess: <c>SubscriptionInvoiceService</c>
+    /// computes <c>DueAtUtc = IssuedAtUtc.AddDays(PaymentTermsDays ?? 30)</c>, so a mistyped 3650
+    /// produces an invoice that falls due in ten years and silently leaves the AR balance out of
+    /// every collections view for the rest of the company's life. Zero is allowed and means "due on
+    /// receipt", which is a real commercial term; negative is not a term, it is a typo that back-dates
+    /// the due date before the issue date.
+    /// </summary>
+    internal const int MaximumPaymentTermsDays = 365;
+
     private readonly ErpRfqAutomationContext _context;
     private readonly IBillingStatementService _billing;
     private readonly IPlatformAuditService _audit;
@@ -548,6 +564,7 @@ public class PlatformBillingController : ControllerBase
             tenant.PurchaseOrderReference,
             tenant.BillingContactName,
             tenant.BillingContactEmail,
+            tenant.BillingAddress,
             tenant.AccountOwnerEmail,
             risk,
             statements.Select(s => new BillingStatementSummaryDto(
@@ -693,6 +710,137 @@ public class PlatformBillingController : ControllerBase
         });
 
         return updated ?? await GetTenantBillingProfile(tenantId, ct);
+    }
+
+    // PUT /api/platform/billing/tenants/{tenantId}/account-contact
+    /// <summary>
+    /// Sets who at the customer receives an invoice, where it is sent, on what terms it falls due,
+    /// which of their references it must quote, the contract dates, and which of our own people
+    /// owns the account.
+    ///
+    /// <para><b>Why this endpoint had to exist.</b> Every one of these columns was written exactly
+    /// once, at provisioning, and never again — while <c>SubscriptionInvoiceService</c> reads all of
+    /// them. It <i>refuses to invoice at all</i> without <c>BillingContactEmail</c>, computes
+    /// <c>DueAtUtc</c> from <c>PaymentTermsDays</c>, and freezes
+    /// <c>BillingAddress/BillingContactName/BillingContactEmail/PurchaseOrderReference</c> into the
+    /// invoice's immutable buyer snapshot. So a customer who moved their accounts-payable mailbox
+    /// after go-live had no correction path short of direct SQL: their invoices kept being addressed
+    /// to a mailbox nobody reads, and — because the offboarding readiness gate requires a finalized
+    /// subscription invoice — a tenant whose contact was wrong could not even be offboarded.</para>
+    ///
+    /// <para><b>Which authority.</b> Billing (Owner | BillingAdmin), the same policy as commercial
+    /// terms and rate cards, because these values decide when a customer's money is due and where
+    /// the demand for it is sent. Support must not be able to redirect an invoice.</para>
+    ///
+    /// <para>Older invoices are deliberately NOT re-snapshotted. An issued invoice is evidence of
+    /// what was sent to whom on the day it was sent; correcting the tenant record must not silently
+    /// rewrite history. The change takes effect on the next invoice.</para>
+    /// </summary>
+    [HttpPut("tenants/{tenantId:long}/account-contact")]
+    public async Task<ActionResult<TenantBillingProfileDto>> SetTenantAccountContact(
+        long tenantId, [FromBody] SetTenantAccountContactRequest request, CancellationToken ct)
+    {
+        if (request is null) return BadRequest(new { error = "A request body is required." });
+
+        var reason = request.Reason?.Trim();
+        if (string.IsNullOrEmpty(reason) || reason.Length < MinimumAccountContactReasonLength)
+            return BadRequest(new
+            {
+                error = $"A reason of at least {MinimumAccountContactReasonLength} characters is required. " +
+                        "Redirecting a customer's invoice is exactly the change that has to be " +
+                        "attributable to somebody months later."
+            });
+
+        var tenant = await _context.Set<Tenant>().IgnoreQueryFilters().AsNoTracking()
+            .FirstOrDefaultAsync(t => t.Id == tenantId, ct);
+        if (tenant is null)
+            return NotFound(new { error = $"Tenant {tenantId} does not exist." });
+
+        if (ValidateAccountContact(request, tenant) is string validationError)
+            return BadRequest(new { error = validationError });
+
+        var updated = await MutateTenantAsync(tenantId, "billing.tenant.account-contact", ct, target =>
+        {
+            var before = AccountContactSnapshot(target);
+
+            target.BillingContactName = Normalize(request.BillingContactName);
+            target.BillingContactEmail = Normalize(request.BillingContactEmail);
+            target.BillingAddress = Normalize(request.BillingAddress);
+            target.PurchaseOrderReference = Normalize(request.PurchaseOrderReference);
+            target.PaymentTermsDays = request.PaymentTermsDays;
+            target.AccountOwnerEmail = Normalize(request.AccountOwnerEmail);
+            target.ContractStartOn = request.ContractStartOn;
+            target.ContractEndOn = request.ContractEndOn;
+
+            return new { before, after = AccountContactSnapshot(target), reason };
+        });
+
+        return updated ?? await GetTenantBillingProfile(tenantId, ct);
+    }
+
+    /// <summary>
+    /// Rejects the WRONG values, not merely the impossible ones — every rule here has a named
+    /// downstream reader that would otherwise fail later, quietly, and somewhere else.
+    /// </summary>
+    private static string? ValidateAccountContact(SetTenantAccountContactRequest request, Tenant tenant)
+    {
+        var contactEmail = Normalize(request.BillingContactEmail);
+
+        // Null and empty are values, and this is the one that matters: SubscriptionInvoiceService
+        // throws BillingConflictException without it, so clearing this field on a charged tenant
+        // stops their invoicing entirely and the symptom appears a month later in a billing run.
+        if (contactEmail is null && tenant.BillingMode != TenantBillingMode.Internal)
+            return "billingContactEmail cannot be cleared: invoicing refuses to issue without an " +
+                   "invoice recipient, so this tenant would stop being billable and could not be " +
+                   "offboarded either, because offboarding requires a finalized invoice. Supply an " +
+                   "address, or move the tenant to billingMode Internal first.";
+
+        if (contactEmail is not null && !IsPlausibleEmail(contactEmail))
+            return $"billingContactEmail '{contactEmail}' is not an email address.";
+
+        if (Normalize(request.AccountOwnerEmail) is string owner && !IsPlausibleEmail(owner))
+            return $"accountOwnerEmail '{owner}' is not an email address.";
+
+        if (request.PaymentTermsDays is int terms && (terms < 0 || terms > MaximumPaymentTermsDays))
+            return $"paymentTermsDays must be between 0 and {MaximumPaymentTermsDays}. It is added to " +
+                   "the issue date to compute when the invoice falls due, so a value outside that " +
+                   "range produces an invoice that is either overdue on issue or effectively never due.";
+
+        if (request.ContractStartOn is DateTime start && request.ContractEndOn is DateTime end
+            && end <= start)
+            return "contractEndOn must fall after contractStartOn.";
+
+        return null;
+    }
+
+    private static object AccountContactSnapshot(Tenant tenant) => new
+    {
+        tenant.BillingContactName,
+        tenant.BillingContactEmail,
+        tenant.BillingAddress,
+        tenant.PurchaseOrderReference,
+        tenant.PaymentTermsDays,
+        tenant.AccountOwnerEmail,
+        tenant.ContractStartOn,
+        tenant.ContractEndOn
+    };
+
+    private static string? Normalize(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    /// <summary>
+    /// A shape check, not an RFC 5322 parser. It exists to catch the transposed address and the
+    /// pasted display name, which are the real failures; deliverability is proven by sending, and
+    /// the invitation surface already reports whether a provider accepted the message.
+    /// </summary>
+    private static bool IsPlausibleEmail(string value)
+    {
+        var at = value.IndexOf('@');
+        if (at <= 0 || at != value.LastIndexOf('@') || at == value.Length - 1) return false;
+        var domain = value[(at + 1)..];
+        return !value.Any(char.IsWhiteSpace)
+               && domain.Contains('.')
+               && !domain.StartsWith('.') && !domain.EndsWith('.');
     }
 
     /// <summary>
@@ -945,6 +1093,9 @@ public sealed record TenantBillingProfileDto(
     string? PurchaseOrderReference,
     string? BillingContactName,
     string? BillingContactEmail,
+    // Present so the console can SHOW what the next invoice's buyer snapshot will say. It was
+    // settable at provisioning, frozen into every invoice thereafter, and visible nowhere.
+    string? BillingAddress,
     string? AccountOwnerEmail,
     TenantRevenueRisk RevenueRisk,
     IReadOnlyList<BillingStatementSummaryDto> Statements);
@@ -956,3 +1107,22 @@ public sealed record SetTenantCommercialTermsRequest(
     string? BillingModeReason,
     DateTime? TrialEndsOn,
     DateTime? BillingStartsOn);
+
+/// <summary>
+/// Who is invoiced, where, on what terms, under which contract, and who owns the account here.
+///
+/// <para>Every field is a full replacement rather than a patch: an omitted field clears the value,
+/// which is why the endpoint demands the whole block and audits before/after. A partial-update
+/// shape would make "the operator left this blank" and "the operator wants this cleared"
+/// indistinguishable on a set of fields where clearing one stops the customer being invoiced.</para>
+/// </summary>
+public sealed record SetTenantAccountContactRequest(
+    string? BillingContactName,
+    string? BillingContactEmail,
+    string? BillingAddress,
+    string? PurchaseOrderReference,
+    int? PaymentTermsDays,
+    string? AccountOwnerEmail,
+    DateTime? ContractStartOn,
+    DateTime? ContractEndOn,
+    string? Reason);

@@ -82,6 +82,17 @@ export interface LeadResponseDTO {
   leadSource: string;
   recDate: string;
   bidClosingDate: string;
+  // FR-RFQ-04. The date the BUYER asked for delivery on. NOT the bid deadline above and
+  // NOT a supplier lead time — three different dates, and quoting a lead time without
+  // this one in view is how a promise gets made that cannot be kept. Null/absent means
+  // the document never stated one, and is rendered as an explicit gap.
+  requiredDeliveryDate?: string | null;
+  // FR-RFQ-04. bidClosingDate in the Umm al-Qura calendar, shown ALONGSIDE the Gregorian
+  // date, never instead of it — a Hijri deadline read as a Gregorian one loses the bid.
+  bidClosingDateHijri?: string | null;
+  // FR-RFQ-03. The standing agreement / frame contract this inquiry is called off
+  // against. Distinct from rfqno (the inquiry's own reference).
+  agreementReference?: string | null;
   emailSource: string;
   clientemail: string;
   status: string;
@@ -132,7 +143,8 @@ export interface LeadItemResponseDTO {
   itemMaterialCode?: string;
   productShortName?: string;
   productShortDescription?: string;
-  quantity?: number;
+  /** Null when the source document stated no readable quantity — render the gap, never a 0. */
+  quantity?: number | null;
   unitOfMeasure?: string;
   currency?: string;
   unitPrice?: number;
@@ -151,6 +163,15 @@ export interface LeadItemResponseDTO {
   // Unrecognized customer-document columns preserved verbatim at extraction time
   // ({"original column header": "cell value"}); absent/null when none.
   extraFields?: Record<string, string> | null;
+  /**
+   * AA-01 · tenant-defined custom field values for this line, as the RAW jsonb string keyed by
+   * custom-field stable key. Read by useColumnPreferences to materialise `cf:` columns on the
+   * lead line grid. Null when the tenant has defined no fields or this line carries no values.
+   *
+   * Not the same thing as `extraFields`: that is the buyer's own column headings captured
+   * verbatim and ungoverned; this is values against fields the tenant defined and typed.
+   */
+  customFields?: string | null;
 }
 
 export interface AttachmentResponseDTO {
@@ -177,6 +198,10 @@ export interface AcceptedLeadResponseDTO {
   customerMatchReasonCode?: string | null;
   customerMatchConfidence?: number | null;
   clientCandidates?: ClientCandidateDTO[] | null;
+  // FR-RFQ-04. The delivery date the BUYER asked for, carried onto the accepted-lead
+  // queues because that is where a trader works the bid and commits a lead time.
+  // Never the submission deadline and never a supplier lead time.
+  requiredDeliveryDate?: string | null;
   acceptedDate: string;
   assignedToFullName?: string;
   assignedToId?: number;
@@ -235,7 +260,8 @@ export interface AcceptedLeadItemDTO {
   currency?: string;
   unitOfMeasure?: string;
   unitPrice?: number;
-  quantity: number;
+  /** Null when the source document stated no readable quantity. */
+  quantity: number | null;
   storageLocation?: string;
   manufacturerName?: string;
   manufacturerPartNumber?: string;
@@ -254,6 +280,32 @@ export interface PaginatedResponse<T> {
   totalCount: number;
   pageNumber: number;
   pageSize: number;
+}
+
+/**
+ * One run of the watched-folder sweep.
+ *
+ * Mirrors `FolderProcessingReport` in Backend/ERP_RFQ_Automation/Services/FolderService.cs,
+ * returned by POST /api/Email/process-all-folder-leads. Counts are per RUN across all three
+ * watched folders, not per folder — the backend does not break them down.
+ *
+ * - `enqueued`   documents accepted into the extraction queue for the first time
+ * - `duplicates` documents whose content had already been ingested (no new inquiry)
+ * - `rejected`   documents quarantined (unsupported type, empty, oversized, symlink,
+ *                or three failed staging attempts)
+ * - `failed`     documents left in place to be retried on the next sweep
+ */
+export interface FolderSweepReportDTO {
+  batchId: string;
+  enqueued: number;
+  duplicates: number;
+  rejected: number;
+  failed: number;
+}
+
+/** POST /api/Email/upload-leads-folder — the server acknowledges the write, nothing more. */
+export interface FolderUploadResultDTO {
+  message?: string;
 }
 
 export type LeadOccurrenceClassification =
@@ -638,15 +690,32 @@ const leadService = {
       headers: { 'Content-Type': 'multipart/form-data' },
     });
   },
-  uploadToFolder: async (formData: FormData, folderType: string): Promise<any> => {
-    const r = await axiosInstance.post(`/api/Email/upload-leads-folder?folderType=${folderType}`, formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    });
+  /**
+   * Places documents into one of this business unit's watched folders on the server
+   * (`Tenants/{businessUnitId}/Watched/{folderType}` under the configured storage root),
+   * for operators who cannot reach that filesystem themselves.
+   *
+   * POST /api/Email/upload-leads-folder?folderType=Shared|SEC|Aramco
+   * (EmailController.UploadLeadsToFolder, requires Leads:Create). The files are only
+   * WRITTEN here — nothing is ingested until the folder is swept.
+   */
+  uploadToFolder: async (formData: FormData, folderType: string): Promise<FolderUploadResultDTO> => {
+    const r = await axiosInstance.post<FolderUploadResultDTO>(
+      `/api/Email/upload-leads-folder?folderType=${encodeURIComponent(folderType)}`,
+      formData,
+      { headers: { 'Content-Type': 'multipart/form-data' } },
+    );
     return r.data;
   },
 
-  processAllFolderLeads: async (): Promise<any> => {
-    const r = await axiosInstance.post('/api/Email/process-all-folder-leads');
+  /**
+   * Runs the watched-folder sweep on demand — the same sweep
+   * (FolderService.ProcessAllFoldersAsync) the background service runs on its own cycle.
+   * POST /api/Email/process-all-folder-leads (EmailController.ProcessAllFolderLeads,
+   * requires Leads:Create), returns 202 with the real per-run counts.
+   */
+  processAllFolderLeads: async (): Promise<FolderSweepReportDTO> => {
+    const r = await axiosInstance.post<FolderSweepReportDTO>('/api/Email/process-all-folder-leads');
     return r.data;
   },
 

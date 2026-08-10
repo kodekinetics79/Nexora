@@ -11,7 +11,13 @@ namespace ERP_RFQ_Automation.Interfaces
         Task<QuoteResponseDTO> GetByIdAsync(long id, long businessUnitId);
         Task AddAsync(Quote quote);
         Task UpdateAsync(Quote quote);
-        Task DeleteAsync(long id, long businessUnitId);
+        /// <summary>
+        /// Removes a quotation: a reasoned, audited state change that hard-deletes only a clean
+        /// draft. Replaces the unguarded <c>DeleteAsync</c>, which destroyed the quote's R5 price
+        /// attestations and R7 validity extensions along with it. Returns null when the quote does
+        /// not exist in this tenant.
+        /// </summary>
+        Task<QuoteRemovalOutcome?> RemoveAsync(long id, long businessUnitId, string reason, string actor);
         Task<QuoteStatsDTO> GetQuoteStatsAsync(long businessUnitId);
     }
 }

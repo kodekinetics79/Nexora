@@ -31,6 +31,7 @@ using ERP_RFQ_Automation.Intelligence.Decision;
 using ERP_RFQ_Automation.Boq;
 using ERP_RFQ_Automation.Infrastructure;
 using ERP_RFQ_Automation.Infrastructure.Storage;
+using ERP_RFQ_Automation.MasterData;
 using ERP_RFQ_Automation.MultiTenancy;
 using ERP_RFQ_Automation.CommercialCases;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
@@ -266,13 +267,32 @@ builder.Services.AddScoped<IRfqRepository, RfqRepository>();
 builder.Services.AddScoped<IQuoteRepository, QuoteRepository>();
 builder.Services.AddScoped<ISupplierPurchaseHistoryRepository, SupplierPurchaseHistoryRepository>();
 builder.Services.AddScoped<ISupplierQuotedItemRepository, SupplierQuotedItemRepository>();
+// FR-SPO-01. Bound from configuration so a one-buyer trading company can stand the control down
+// deliberately; unbound configuration leaves it enforced, which is the default in the options type.
+builder.Services.Configure<ERP_RFQ_Automation.Procurement.ProcurementApprovalOptions>(
+    builder.Configuration.GetSection(ERP_RFQ_Automation.Procurement.ProcurementApprovalOptions.SectionName));
 builder.Services.AddScoped<IProcurementApplicationService, ProcurementApplicationService>();
 builder.Services.AddScoped<IProcurementHandoffService, ProcurementHandoffService>();
 builder.Services.AddScoped<IProcurementIntegrationService, ProcurementIntegrationService>();
+// Gate 5 / Module 6 (FR-MAS-01..05). Inbound supplier shipments, the Saudi entry-point master and
+// the per-BU lead times the Material Available Date is derived from. Keyed to the supplier PO
+// (decision R3); the outbound Models.Shipment is untouched.
+builder.Services
+    .AddScoped<ERP_RFQ_Automation.InboundLogistics.IInboundShipmentApplicationService,
+        ERP_RFQ_Automation.InboundLogistics.InboundShipmentApplicationService>();
+// The Gate 4/Gate 5 seam. Injected into ProcurementApplicationService so a goods receipt settles
+// the inbound shipment that carried the material inside the receipt's own transaction, rather than
+// leaving a shipment reading as in flight after its stock has already landed.
+builder.Services
+    .AddScoped<ERP_RFQ_Automation.InboundLogistics.IInboundShipmentReceiptSettlement,
+        ERP_RFQ_Automation.InboundLogistics.InboundShipmentReceiptSettlement>();
 builder.Services.AddSingleton<IProcurementDeliveryConfiguration, ProcurementDeliveryConfiguration>();
 builder.Services.AddScoped<SupplierQuoteInboxService>();
 builder.Services.AddScoped<SupplierNegotiationService>();
 builder.Services.AddScoped<SupplierQuoteCommercialService>();
+// The write path for the per-tenant commercial policy (input-tax recoverability, output tax rate,
+// PO tolerances). The read path is an extension method on the DbContext and needs no registration.
+builder.Services.AddScoped<ERP_RFQ_Automation.OrderToCash.CommercialMatchingPolicyService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.CommercialLearning.CommercialLearningService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.CommercialLearning.LearningGovernanceService>();
 builder.Services.AddScoped<SupplierQuoteDocumentIntakeService>();
@@ -294,6 +314,10 @@ builder.Services.AddScoped<ERP_RFQ_Automation.BankReconciliation.Services.IBankR
 builder.Services.AddScoped<ERP_RFQ_Automation.BankReconciliation.Services.IBankAdjustmentService, ERP_RFQ_Automation.BankReconciliation.Services.BankAdjustmentService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.GeneralLedger.IInternalSourceJournalPostingService, ERP_RFQ_Automation.GeneralLedger.InternalSourceJournalPostingService>();
 builder.Services.AddScoped<ICustomerAwardApplicationService, CustomerAwardApplicationService>();
+// FR-COM-01: reading an uploaded customer PO instead of re-keying it.
+builder.Services.AddScoped<
+    ERP_RFQ_Automation.OrderToCash.PurchaseOrderIntake.ICustomerPurchaseOrderDocumentService,
+    ERP_RFQ_Automation.OrderToCash.PurchaseOrderIntake.CustomerPurchaseOrderDocumentService>();
 builder.Services.AddScoped<IShipmentRepository, ShipmentRepository>();
 builder.Services.AddScoped<IQuoteConfigurationRepository, QuoteConfigurationRepository>();
 builder.Services.AddScoped<IDashboardRepository, DashboardRepository>();
@@ -314,6 +338,25 @@ builder.Services.AddScoped<ERP_RFQ_Automation.CommercialIntelligence.Exceptions.
 builder.Services.AddScoped<ERP_RFQ_Automation.CommercialIntelligence.Opportunity.IOpportunityPriorityApplicationService, ERP_RFQ_Automation.CommercialIntelligence.Opportunity.OpportunityPriorityApplicationService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.CommercialIntelligence.Growth.GrowthIntelligenceService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.Inventory.IOrderStockReservationService, ERP_RFQ_Automation.Inventory.OrderStockReservationService>();
+// Gate 5 / FR-MTR-01..05. The recorder is registered so ProcurementApplicationService receives it
+// by injection rather than falling back to its default construction, which keeps one instance per
+// request and one place to substitute it in tests.
+builder.Services.AddScoped<ERP_RFQ_Automation.Traceability.IMaterialLotRecorder, ERP_RFQ_Automation.Traceability.MaterialLotRecorder>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Traceability.IMaterialTraceabilityService, ERP_RFQ_Automation.Traceability.MaterialTraceabilityService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Traceability.IMaterialLotCertificateService, ERP_RFQ_Automation.Traceability.MaterialLotCertificateService>();
+// Gate 7 / FR-DLM-01..07. The delivered-quantity ledger is the single definition of "delivered" in
+// the product: the invoice ceiling, the delivery note and the order screens all read it, so it is
+// registered once and injected rather than reconstructed, and there is exactly one place to change
+// what the word means.
+builder.Services.AddScoped<ERP_RFQ_Automation.Delivery.IDeliveredQuantityLedger, ERP_RFQ_Automation.Delivery.DeliveredQuantityLedger>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Delivery.IDeliveryConfirmationService, ERP_RFQ_Automation.Delivery.DeliveryConfirmationService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Delivery.IDeliveryProofEvidenceService, ERP_RFQ_Automation.Delivery.DeliveryProofEvidenceService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Delivery.IDeliveryNoteReadService, ERP_RFQ_Automation.Delivery.DeliveryNoteReadService>();
+// Gate 6 / FR-INV-03. The seam that makes a goods issue declare the lots it moved. Registered
+// unconditionally: NullLotFulfilmentDeclarer exists only so a caller cannot be written against a
+// null reference, and if it were ever reached here, lot consumption would silently stop being
+// declared and where-used trace would go quietly incomplete.
+builder.Services.AddScoped<ERP_RFQ_Automation.Inventory.ILotFulfilmentDeclarer, ERP_RFQ_Automation.Traceability.MaterialLotFulfilmentDeclarer>();
 builder.Services.AddSingleton<ERP_RFQ_Automation.Inventory.Commercial.IProductIdentityResolver, ERP_RFQ_Automation.Inventory.Commercial.ProductIdentityResolver>();
 builder.Services.AddSingleton<ERP_RFQ_Automation.Inventory.Commercial.IFulfilmentRouteService, ERP_RFQ_Automation.Inventory.Commercial.FulfilmentRouteService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.ProductIntelligence.IProductResolutionCatalog, ERP_RFQ_Automation.ProductIntelligence.EfProductResolutionCatalog>();
@@ -328,6 +371,10 @@ builder.Services.AddScoped<ILifecycleOutboxStore, LifecycleOutboxStore>();
 builder.Services.AddCommercialFinanceOutboxDispatcher(builder.Configuration);
 builder.Services.AddScoped<ICommercialRoutingApplicationService, CommercialRoutingApplicationService>();
 builder.Services.AddScoped<ICustomFieldApplicationService, CustomFieldApplicationService>();
+// AA-01 · tenant-defined custom fields (jsonb value bag) + per-user list-view columns.
+builder.Services.AddScoped<ICustomFieldBagService, CustomFieldBagService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.ListViews.IListViewPreferenceService,
+    ERP_RFQ_Automation.ListViews.ListViewPreferenceService>();
 builder.Services.AddSingleton<DeterministicRoutingEngine>();
 builder.Services.AddSingleton(new RoutingPolicy());
 // CLIENT ORGANISATION IDENTITY. The policy is a singleton so the thresholds behind every
@@ -351,10 +398,25 @@ builder.Services.AddScoped<IAuthorizationHandler, PermissionHandler>();
 // body that leaks no module names.
 builder.Services.AddMemoryCache();
 builder.Services.AddScoped<IRoleGate, RoleGate>();
+// FR-CST-02 / FR-DSH-05: the account-team scope every customer, dashboard and search read is
+// filtered by. Scoped because it reads team membership through the request-scoped DbContext, and
+// because the answer is a property of the CALLER — a singleton would have to be keyed by user and
+// would then be a cache of authorization decisions with no invalidation.
+builder.Services.AddScoped<IAccountTeamScopeResolver, AccountTeamScopeResolver>();
+// FR-DSH-04: the cross-entity quick search behind the top bar. Scoped for the same reason —
+// its permission and account-scope decisions are the caller's, not the process's.
+builder.Services.AddScoped<ERP_RFQ_Automation.Search.IGlobalSearchService,
+    ERP_RFQ_Automation.Search.GlobalSearchService>();
 // RC-7: IAM audit trail. Scoped because it writes through the SAME request-scoped DbContext the
 // repositories use — that shared instance is what makes an audit event commit or roll back with
 // the mutation it describes, rather than being a best-effort log line beside it.
 builder.Services.AddScoped<IIamAuditWriter, IamAuditWriter>();
+// FR-MDM-05 / E44: the READ side of the master-data before/after trail. The WRITE side needs no
+// registration at all — it is invoked from ErpRfqAutomationContext.SaveChanges, which is the point
+// no write path (controller, repository, worker or spreadsheet uploader) can go around.
+builder.Services.AddScoped<
+    ERP_RFQ_Automation.MasterData.IMasterDataChangeHistoryReader,
+    ERP_RFQ_Automation.MasterData.MasterDataChangeHistoryReader>();
 builder.Services.AddSingleton<TenantSmtpConcurrencyGate>();
 builder.Services.AddSingleton<IOutboundSmtpTransport, MailKitOutboundSmtpTransport>();
 // Stateless — every call carries its own settings — so a singleton is correct.
@@ -442,33 +504,49 @@ builder.Services.AddHttpClient<OllamaLlmService>(client =>
     client.BaseAddress = new Uri(string.IsNullOrWhiteSpace(ollamaBaseUrl)
         ? "http://localhost:11434/"
         : ollamaBaseUrl);
-});
+})
+    // The endpoint classification is decided once, from configuration. Without this the
+    // client would happily follow a 307 off the loopback service — re-sending the method and
+    // the document body to an arbitrary host — and would dial whatever address the name
+    // resolved to at request time, which need not be the address that was classified.
+    // AiEgressGuard refuses redirects outright and re-validates every connection against the
+    // class this endpoint was classified as. (AI/AiEgressGuard.cs)
+    .ConfigurePrimaryHttpMessageHandler(services =>
+    {
+        var endpointResolver = services.GetRequiredService<IAiProviderEndpointResolver>();
+        return AiEgressGuard.CreateHandler(() => endpointResolver.Current.ProviderClass);
+    })
+    // SEC-G9: IHttpClientFactory's own logging writes the FULL request and response header
+    // collection at Trace, and HttpClientFactoryOptions.ShouldRedactHeaderValue defaults to
+    // redacting NOTHING. OllamaLlmService sets Authorization: Bearer <provider key>, so raising
+    // the log level for a single diagnostic session — the one thing anyone does while chasing an
+    // inference failure — would write the live key into the log sink. Named explicitly rather
+    // than left to the default, in all five registrations.
+    .RedactLoggedHeaders(OutboundHttpRedaction.SensitiveHeaders);
 
 // CORS restricted to configured frontend origins (SEC-13). AllowAnyOrigin is
 // unsafe for a system with authenticated, tenant-scoped data. Always include
 // the known deployment origins, then merge env-configured origins for previews
-// and future custom domains. Normalize trailing slashes because CORS origin
-// matching is exact.
-var configuredCorsOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? [];
-var corsOrigins = configuredCorsOrigins
-    .Concat([
-        "http://localhost:5173",
-        "http://localhost:4173",
-        "http://localhost:3000",
-        "http://127.0.0.1:5173",
-        "http://127.0.0.1:4173",
-        "http://127.0.0.1:3000",
-        "https://nexora1-ai.vercel.app"
-    ])
-    .Where(origin => !string.IsNullOrWhiteSpace(origin))
-    .Select(origin => origin.Trim().TrimEnd('/'))
-    .Distinct(StringComparer.OrdinalIgnoreCase)
-    .ToArray();
+// and future custom domains.
+//
+// SEC-G9: the six loopback origins this list used to carry UNCONDITIONALLY are now
+// Development-only (TransportSecurityPolicy.DevelopmentOrigins). A CORS allow-list is
+// enforced by the browser and not by the network, so while production admitted
+// http://localhost:5173 any page a developer — or an attacker — served on that origin
+// could call the production API and READ the response, with whatever bearer token the
+// visitor's session carried. Normalisation and exact-match semantics are unchanged.
+var corsOrigins = TransportSecurityPolicy.ResolveCorsOrigins(
+    builder.Configuration, builder.Environment.IsDevelopment());
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("DefaultCors", policy =>
     {
-        policy.WithOrigins(corsOrigins).AllowAnyMethod().AllowAnyHeader();
+        // FR-RFQ-08: the attachment download states whether the bytes were proved to match the
+        // digest recorded at capture. The frontend is a different origin, so without an explicit
+        // expose-list the browser hides that header and "unverified" would silently read as
+        // "fine" — the exact ambiguity the header exists to remove.
+        policy.WithOrigins(corsOrigins).AllowAnyMethod().AllowAnyHeader()
+            .WithExposedHeaders(ERP_RFQ_Automation.Controllers.FileController.IntegrityHeader);
     });
 });
 // Configure JWT Authentication
@@ -639,8 +717,34 @@ builder.Services.AddScoped<ERP_RFQ_Automation.MultiTenancy.ISlaPolicyReader,
 // ==== SLA & deadline engine + quote outcome capture (Sla/) ====
 // After AddNotifications(...) — SlaNotifications depends on IEmailSender.
 builder.Services.AddScoped<ERP_RFQ_Automation.Sla.IQuoteOutcomeService, ERP_RFQ_Automation.Sla.QuoteOutcomeService>();
+// The lead-stage loss reuses the quote's governed picklist rather than owning a second one.
+builder.Services.AddScoped<ERP_RFQ_Automation.Sla.ILeadOutcomeReasons, ERP_RFQ_Automation.Sla.LeadOutcomeReasons>();
 builder.Services.AddSingleton<ERP_RFQ_Automation.Sla.ISlaNotifications, ERP_RFQ_Automation.Sla.SlaNotifications>();
 builder.Services.AddHostedService<ERP_RFQ_Automation.Sla.SlaSweepWorker>();
+
+// ==== Gate 6 / FR-INV-04: minimum, maximum and reorder alerts (Inventory/) ====
+// After the SLA registrations above: the reorder sweep reuses ISlaNotifications as its delivery
+// channel and SlaSweepWorker's claim primitives as its send-once ledger, so the two engines cannot
+// drift apart on whether a message can be sent twice.
+builder.Services.AddScoped<ERP_RFQ_Automation.Inventory.IStockLedgerService,
+                           ERP_RFQ_Automation.Inventory.StockLedgerService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Inventory.IReorderAlertService,
+                           ERP_RFQ_Automation.Inventory.ReorderAlertService>();
+builder.Services.AddHostedService<ERP_RFQ_Automation.Inventory.ReorderAlertSweepWorker>();
+
+// ==== Gate 8: dashboards, scheduled reporting (Reporting/) ====
+builder.Services.AddScoped<ERP_RFQ_Automation.Reporting.IGrossMarginService,
+                           ERP_RFQ_Automation.Reporting.GrossMarginService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Reporting.IReportRenderer,
+                           ERP_RFQ_Automation.Reporting.ReportRenderer>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Reporting.IReportBuilder,
+                           ERP_RFQ_Automation.Reporting.ReportBuilder>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Reporting.IReportSubscriptionService,
+                           ERP_RFQ_Automation.Reporting.ReportSubscriptionService>();
+builder.Services.AddSingleton<ERP_RFQ_Automation.Reporting.IReportDelivery,
+                              ERP_RFQ_Automation.Reporting.ReportDelivery>();
+builder.Services.AddHostedService<ERP_RFQ_Automation.Reporting.ScheduledReportWorker>();
+
 builder.Services.AddScoped<ERP_RFQ_Automation.PlatformGovernance.PlatformGovernanceService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.PlatformGovernance.HumanActionService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.PlatformGovernance.AiTrustCenterService>();
@@ -744,6 +848,15 @@ await SyncFinanceProviderSecretsAsync(
 if (app.Environment.IsProduction())
     await ValidateRuntimeDatabaseRoleAsync(connectionString);
 
+// Sec-D1: prove the tenant plane can actually READ the columns that tenant-status enforcement
+// and plan limits are resolved from, before serving a request. Runs in every environment that
+// has the execution roles (it no-ops where they do not exist), because the failure it catches —
+// a deployment cut between the grant-narrowing migration and the migration that granted the
+// column a later query started projecting — is a release-ordering accident, not a
+// production-only one. Throws, and is deliberately not caught: a process that cannot enforce
+// suspension or plan limits must not serve traffic.
+await TenantAccessGrantContract.AssertReadableAsync(connectionString, app.Logger);
+
 static string ResolveDirectMigrationConnection(string runtimeConnection)
     => runtimeConnection.Replace("-pooler.", ".", StringComparison.OrdinalIgnoreCase);
 
@@ -825,12 +938,18 @@ app.UseExceptionHandler(errApp => errApp.Run(async ctx =>
     await ctx.Response.WriteAsync("{\"error\":\"An unexpected error occurred.\"}");
 }));
 
-// Baseline security headers (SEC-13)
+// Baseline security headers (SEC-13). SEC-G9 adds the Content-Security-Policy this set was
+// missing; the policy itself and the reasoning behind every directive live in
+// Infrastructure/TransportSecurityPolicy.cs. Set here rather than per-endpoint so it covers
+// EVERY response, including the ones a future middleware registration starts producing —
+// which is the whole point, given three writers store user-supplied files under the web root.
+var contentSecurityPolicy = TransportSecurityPolicy.ContentSecurityPolicyFor(app.Environment);
 app.Use(async (ctx, next) =>
 {
     ctx.Response.Headers["X-Content-Type-Options"] = "nosniff";
     ctx.Response.Headers["X-Frame-Options"] = "DENY";
     ctx.Response.Headers["Referrer-Policy"] = "no-referrer";
+    ctx.Response.Headers["Content-Security-Policy"] = contentSecurityPolicy;
     await next();
 });
 
@@ -848,13 +967,78 @@ if (app.Environment.IsDevelopment())
     app.UseSwagger();
     app.UseSwaggerUI();
 }
-//app.UseHttpsRedirection(); // enable at deploy time once TLS is terminated in front of the app
+// SEC-G9: transport security — HTTPS redirection and HSTS, which were absent.
+//
+// WHAT UseForwardedHeaders ACTUALLY DOES HERE — measured, and the opposite of the intuitive
+// reading. TLS is terminated at the hosting edge, so the socket is always plain HTTP. The
+// process learns the real scheme from X-Forwarded-Proto via UseForwardedHeaders (above, and
+// deliberately EARLIER in the pipeline than this line so the rewrite has already happened).
+// It looks as though that rewrite could not occur, because Program.cs clears
+// KnownProxies/KnownNetworks and no environment repopulates them — appsettings.json has no
+// ForwardedHeaders section and render.yaml states the edge ranges "have not yet been supplied".
+// It occurs anyway: ForwardedHeadersMiddleware runs its known-address check ONLY when at least
+// one entry exists, so an empty pair trusts EVERY caller. Request.Scheme is therefore rewritten
+// today, from anyone — which is precisely the spoofing exposure the SEC-H6 note above warns of
+// for X-Forwarded-For. ForwardedHeadersBehaviourTests pins all of this.
+//
+// The consequence that shapes this block: the middleware CONSUMES X-Forwarded-Proto, so nothing
+// downstream can read it. A redirect keyed on that header can never fire — a control that looks
+// configured and does nothing. The decision is keyed on X-Original-Proto instead, which
+// ForwardedHeadersMiddleware writes exactly when it rewrote the scheme.
+//
+// WHY NOT THE FRAMEWORK PAIR. UseHttpsRedirection redirects any request whose scheme is not
+// https. Behind an edge that terminates TLS and does NOT label the scheme, that is every
+// request, each answered with a 307 the edge forwards straight back — an infinite redirect.
+// UseLoopSafeHttpsRedirection redirects only a request KNOWN to be plain: a configured trusted
+// edge makes the scheme authoritative, or X-Original-Proto shows an edge labelled it. Where
+// neither holds the scheme is genuinely unknowable and the request is SERVED. That pass-through
+// is the loop guard and is what makes ON-by-default safe. Nothing about SEC-H6 is weakened: this
+// middleware reads forwarding headers only to choose between redirect and serve, while the
+// client address the rate limiter and PlatformNetworkAccessMiddleware depend on still comes
+// solely from the normalized RemoteIpAddress.
+//
+// HSTS rides the same request-is-secure test rather than UseHsts, so it cannot end up as a
+// header that is configured and never emitted. Development is excluded outright; the local
+// console and the E2E harness both drive http://127.0.0.1 against a host with no certificate.
+//
+// STILL OWED BY THE DEPLOYMENT, and it is configuration rather than code: set
+// ForwardedHeaders:KnownProxies/:KnownNetworks to the edge's ranges. Until then any caller can
+// spoof X-Forwarded-For, so the rate limiter's per-IP partition and the platform network
+// boundary are working from an attacker-supplied address — a pre-existing SEC-H6 gap this gate
+// did not create and cannot close from code.
+var httpsRedirectionEnabled =
+    TransportSecurityPolicy.ShouldRedirectToHttps(app.Environment, app.Configuration);
+var forwardedSchemeIsTrusted = TransportSecurityPolicy.ForwardedProtoIsTrusted(app.Configuration);
+if (httpsRedirectionEnabled)
+{
+    app.UseLoopSafeHttpsRedirection(TransportSecurityPolicy.HstsHeaderValue, forwardedSchemeIsTrusted);
+}
+if (!app.Environment.IsDevelopment())
+{
+    app.Logger.LogInformation(
+        "Transport security: HTTPS redirection and HSTS {State}; forwarded scheme is {Trust}. " +
+        "Set ForwardedHeaders:KnownProxies or :KnownNetworks to the edge ranges to make the scheme " +
+        "authoritative, or {Key} to override the first value.",
+        httpsRedirectionEnabled ? "ENABLED" : "DISABLED",
+        forwardedSchemeIsTrusted ? "TRUSTED" : "UNTRUSTED (only requests labelled X-Forwarded-Proto are redirected)",
+        TransportSecurityPolicy.HttpsRedirectionEnabledKey);
+}
+// DELIBERATELY ABSENT: app.UseStaticFiles(). ProductRepository.PersistAttachmentAsync,
+// CustomerController and UserController all write user-supplied bytes under WebRootPath with
+// the uploaded extension preserved, and .html is on DocumentIntakeAllowList — so that one line
+// would publish stored HTML on the API origin, unauthenticated, and the frontend keeps its JWT
+// in localStorage. The Content-Security-Policy set above is the second line of defence if it is
+// ever added; do not treat it as permission to add it.
 // Use CORS
 app.UseCors("DefaultCors");
 app.UseAuthentication();
 app.UseReadOnlyImpersonationGuard();
 // Tenant + correlation-id logging scope — AFTER auth so the businessUnitId claim exists.
 app.UsePlatformObservability();
+// FR-MDM-05 / E44: publishes the authenticated caller as the ambient actor for master-data audit
+// rows. AFTER UseAuthentication for the same reason as the line above — before it, User carries no
+// claims and every audit row would be attributed to "system".
+app.UseMasterDataAuditActor();
 // Authenticated tenant routes fail closed when a token has no valid tenant claim.
 app.UseTenantClaimGuard();
 app.UseTenantStatusGuard();

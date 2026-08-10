@@ -29,8 +29,16 @@ namespace ERP_RFQ_Automation.Services
             // Defaulted rather than required so the existing call sites keep compiling, but never
             // null: a null here would silently reinstate the stock leak this service exists to
             // close, and the service depends on nothing but the same DbContext.
+            // The lot declarer is composed from the same context for the same reason. It is the
+            // REAL adapter, not the null one: an order confirmed through this path issues stock
+            // through ConsumeOrderLinesAsync, and a no-op declarer here would leave every such
+            // issue undeclared in where-used trace with nothing on any screen to say so.
             _stock = stock ?? new ERP_RFQ_Automation.Inventory.OrderStockReservationService(
-                context, new ERP_RFQ_Automation.Inventory.InventoryAvailabilityService(context));
+                context, new ERP_RFQ_Automation.Inventory.InventoryAvailabilityService(context),
+                new ERP_RFQ_Automation.Traceability.MaterialLotFulfilmentDeclarer(context,
+                    new ERP_RFQ_Automation.Traceability.MaterialTraceabilityService(context,
+                        new ERP_RFQ_Automation.Inventory.StockLedgerService(context),
+                        new ERP_RFQ_Automation.Inventory.InventoryAvailabilityService(context))));
         }
 
         public async Task<IEnumerable<OrderDto>> GetAllOrdersAsync(long businessUnitId)
@@ -53,6 +61,16 @@ namespace ERP_RFQ_Automation.Services
             if (dto.Items == null || dto.Items.Count == 0)
                 throw new ArgumentException("An order must contain at least one line item.");
 
+            // FR-COM-07. The originating document is resolved BEFORE any money is computed, so a
+            // request that cannot name its case is rejected outright rather than half-built.
+            //
+            // There is deliberately no "allocate a new case here" branch. A commercial case is a
+            // one-to-one principal of a Lead (UX_Leads_CommercialCaseID), so minting one for a
+            // counter sale would have to manufacture a phantom lead, and Phase 1 (BRD v3.0 §2)
+            // starts the spine at an inquiry — there is no walk-in/counter-sale requirement to
+            // serve. An order with no preceding inquiry is refused, not silently unlinked.
+            var origin = await ResolveOrderOriginAsync(dto, businessUnitId);
+
             // FIN-12: reject non-positive quantity/price and negative tax/discount before any math.
             foreach (var it in dto.Items)
             {
@@ -74,6 +92,13 @@ namespace ERP_RFQ_Automation.Services
             decimal totalDiscount = 0m;
             decimal totalTax = 0m;
 
+            // R17: one policy read for the whole order, so every line is taxed on one answer.
+            var outputTaxRatePercent = await _context.ResolveOutputTaxRatePercentAsync(businessUnitId);
+            if (outputTaxRatePercent is null)
+                throw new InvalidOperationException(
+                    "This business unit has no output tax rate configured, so an order's tax cannot be derived. " +
+                    "Set the output tax rate in Commercial Policy settings before creating orders.");
+
             foreach (var itemDto in dto.Items)
             {
                 // FIN-09: round each line to currency scale before summing.
@@ -84,10 +109,11 @@ namespace ERP_RFQ_Automation.Services
                 decimal lineDiscount = RoundCurrency(itemDto.Discount);
                 if (lineDiscount > lineGross) lineDiscount = lineGross;
 
-                // FIN-01: tax is resolved server-side (see ResolveLineTaxAmount). For the
-                // pilot it uses the client-entered amount clamped non-negative; the totals
-                // below are still fully recomputed so nothing the client sends is trusted wholesale.
-                decimal lineTax = ResolveLineTaxAmount(itemDto.TaxAmount, lineGross - lineDiscount, businessUnitId);
+                // FIN-01 / R17: tax is DERIVED server-side from the tenant's output tax rate (see
+                // ResolveLineTaxAmount). itemDto.TaxAmount is ignored — accepting it is what let an
+                // order be booked with no tax at all. The null case is impossible here because the
+                // missing-rate guard above already refused the request.
+                decimal lineTax = ResolveLineTaxAmount(lineGross - lineDiscount, outputTaxRatePercent) ?? 0m;
 
                 decimal lineTotal = RoundCurrency(lineGross - lineDiscount + lineTax);
 
@@ -163,6 +189,7 @@ namespace ERP_RFQ_Automation.Services
                 CreatedOn = DateTime.Now,
                 IsActive = true
             };
+            origin.ApplyTo(order);
 
             // Attach the server-computed line items (see recompute above).
             foreach (var computedItem in computedItems)
@@ -175,6 +202,59 @@ namespace ERP_RFQ_Automation.Services
             return MapToDto(createdOrder);
         }
 
+        /// <summary>
+        /// The document a manually raised order inherits its commercial case from.
+        ///
+        /// <para>Resolution is strongest-link-first — RFQ, then lead — and every candidate is
+        /// re-read inside this tenant, so a client cannot name another tenant's document to borrow
+        /// its case. A request naming no originating document, or naming one that itself has no
+        /// case, is refused: those are the two ways an order used to escape the spine.</para>
+        /// </summary>
+        private async Task<OrderOrigin> ResolveOrderOriginAsync(CreateOrderDto dto, long businessUnitId)
+        {
+            if (dto.RfqId is > 0)
+            {
+                var rfq = await _context.Rfqs
+                    .FirstOrDefaultAsync(r => r.Id == dto.RfqId.Value && r.BusinessUnitId == businessUnitId)
+                    ?? throw new InvalidOperationException(
+                        $"RFQ {dto.RfqId.Value} was not found in this business unit.");
+                if (!rfq.CommercialCaseId.HasValue)
+                    throw new InvalidOperationException(
+                        $"RFQ {rfq.Rfqno} carries no commercial case, so an order cannot inherit one from it.");
+                return new OrderOrigin(rfq, null);
+            }
+
+            if (dto.LeadId is > 0)
+            {
+                var lead = await _context.Leads
+                    .FirstOrDefaultAsync(l => l.Id == dto.LeadId.Value && l.BusinessUnitId == businessUnitId)
+                    ?? throw new InvalidOperationException(
+                        $"Lead {dto.LeadId.Value} was not found in this business unit.");
+                if (lead.CommercialCaseId <= 0)
+                    throw new InvalidOperationException(
+                        $"Lead {lead.Rfqno} carries no commercial case, so an order cannot inherit one from it.");
+                return new OrderOrigin(null, lead);
+            }
+
+            throw new InvalidOperationException(
+                "An order must originate from an inquiry. Supply the RFQ or lead it fulfils — " +
+                "a sales order cannot be created outside a commercial case.");
+        }
+
+        private sealed record OrderOrigin(Rfq? Rfq, Lead? Lead)
+        {
+            public void ApplyTo(Order order)
+            {
+                if (Rfq is not null) order.InheritCommercialIdentity(Rfq);
+                else if (Lead is not null) order.InheritCommercialIdentity(Lead);
+                else throw new InvalidOperationException("An order must originate from an inquiry.");
+
+                if (!order.HasCommercialIdentity)
+                    throw new InvalidOperationException(
+                        "The originating document did not yield a commercial case for this order.");
+            }
+        }
+
         public async Task<OrderDto> CreateOrderFromRfqAsync(long rfqId, long businessUnitId)
         {
             var rfq = await _context.Rfqs
@@ -182,6 +262,9 @@ namespace ERP_RFQ_Automation.Services
                 .FirstOrDefaultAsync(r => r.Id == rfqId && r.BusinessUnitId == businessUnitId);
 
             if (rfq == null) throw new Exception("RFQ not found");
+            if (!rfq.CommercialCaseId.HasValue)
+                throw new InvalidOperationException(
+                    $"RFQ {rfq.Rfqno} carries no commercial case, so an order cannot inherit one from it.");
 
             // Fetch Default Statuses
             var draftStatus = await _context.SetupMasters
@@ -209,9 +292,6 @@ namespace ERP_RFQ_Automation.Services
                 Rfqid = rfq.Id,
                 LeadId = rfq.LeadId,
                 CustomerId = rfq.CustomerId ?? 0,
-                CommercialCaseId = rfq.CommercialCaseId,
-                NexoraSerial = rfq.NexoraSerial,
-                ContactId = rfq.ContactId,
                 BusinessUnitId = businessUnitId,
                 StatusId = draftStatus.SetupId,
                 PaymentStatusId = unpaidStatus?.SetupId,
@@ -223,6 +303,7 @@ namespace ERP_RFQ_Automation.Services
                 CreatedOn = DateTime.Now,
                 IsActive = true
             };
+            order.InheritCommercialIdentity(rfq);
 
             // Map RFQ Items to Order Items
             foreach (var rfqItem in rfq.Rfqitems)
@@ -267,6 +348,21 @@ namespace ERP_RFQ_Automation.Services
             if (quote.CustomerId == null || quote.CustomerId == 0)
                 throw new Exception("Cannot create order: The source Quote does not have a linked Customer.");
 
+            // R17 OUTPUT-TAX GATE. The same blocker the quote's own PDF and send paths run
+            // (QuoteService.TaxDerivationBlocker), on the same policy rate, so a quotation this
+            // platform refuses to ISSUE cannot become a sales order by the side door.
+            //
+            // A line whose TaxRatePercentApplied is null was never taxed at all. This method used to
+            // read that null as `?? 0m` and book a standard-rated supply at SAR 0.00 VAT — and the
+            // AR invoice pro-rated from the order (CommercialFinanceApplicationService) inherited
+            // the zero. Under KSA law a document with no VAT separately stated is deemed
+            // VAT-inclusive, so the seller owes 15/115 ≈ 13.04% of the price out of its own margin.
+            // Refusing is the only honest answer: nobody can state a tax nobody derived.
+            if (QuoteService.TaxDerivationBlocker(quote.QuoteItems,
+                    await _context.ResolveOutputTaxRatePercentAsync(businessUnitId)) is { } taxBlocker)
+                throw new InvalidOperationException(
+                    $"Quote '{quote.QuoteNo}' cannot become a sales order yet. {taxBlocker}");
+
             // Fetch Default Statuses
             var draftStatus = await _context.SetupMasters
                 .FirstOrDefaultAsync(s => s.SetupType == "OrderStatus" && s.SetupCode == "DRAFT");
@@ -287,7 +383,7 @@ namespace ERP_RFQ_Automation.Services
 
             var grossSubtotal = RoundCurrency(quote.QuoteItems.Sum(i => RoundCurrency(i.Quantity * i.UnitPrice)));
             var itemDiscount = RoundCurrency(quote.QuoteItems.Sum(i => RoundCurrency(i.Discount ?? 0m)));
-            var totalTax = RoundCurrency(quote.QuoteItems.Sum(i => RoundCurrency(i.TaxAmount ?? 0m)));
+            var totalTax = RoundCurrency(quote.QuoteItems.Sum(i => RoundCurrency(DerivedTax(quote, i))));
             var preHeaderTotal = quote.FinancialCalculationVersion >= 2
                 ? RoundCurrency(grossSubtotal - itemDiscount + totalTax)
                 : RoundCurrency(grossSubtotal - itemDiscount);
@@ -303,9 +399,6 @@ namespace ERP_RFQ_Automation.Services
                 LeadId = quote.Rfq?.LeadId,
                 Rfqid = quote.Rfqid,
                 CustomerId = quote.CustomerId.Value,
-                CommercialCaseId = quote.CommercialCaseId,
-                NexoraSerial = quote.NexoraSerial,
-                ContactId = quote.ContactId,
                 BusinessUnitId = businessUnitId,
                 StatusId = draftStatus.SetupId,
                 PaymentStatusId = unpaidStatus?.SetupId,
@@ -320,10 +413,12 @@ namespace ERP_RFQ_Automation.Services
                 CreatedOn = DateTime.Now,
                 IsActive = true
             };
+            order.InheritCommercialIdentity(quote);
 
             // Map Quote Items to Order Items
             foreach (var qItem in quote.QuoteItems)
             {
+                var lineTax = DerivedTax(quote, qItem);
                 order.OrderItems.Add(new OrderItem
                 {
                     ProductId = qItem.ProductId ?? 0,
@@ -331,9 +426,9 @@ namespace ERP_RFQ_Automation.Services
                     Quantity = qItem.Quantity,
                     UnitPrice = qItem.UnitPrice,
                     Discount = qItem.Discount ?? 0,
-                    TaxAmount = qItem.TaxAmount ?? 0,
+                    TaxAmount = lineTax,
                     TotalAmount = RoundCurrency(
-                        (qItem.Quantity * qItem.UnitPrice) - (qItem.Discount ?? 0m) + (qItem.TaxAmount ?? 0m)),
+                        (qItem.Quantity * qItem.UnitPrice) - (qItem.Discount ?? 0m) + lineTax),
                     CreatedBy = "System",
                     CreatedDate = DateTime.Now,
                     IsActive = true
@@ -469,6 +564,7 @@ namespace ERP_RFQ_Automation.Services
             var strategy = _context.Database.CreateExecutionStrategy();
             await strategy.ExecuteAsync(async () =>
             {
+                _context.ChangeTracker.Clear();
                 await using var transaction = await _context.Database.BeginTransactionAsync();
                 await work();
                 await transaction.CommitAsync();
@@ -520,6 +616,8 @@ namespace ERP_RFQ_Automation.Services
                     order.Customer?.BillingCity,
                     order.Customer?.BillingCountry
                 }.Where(s => !string.IsNullOrEmpty(s))),
+                CurrencyId = order.CurrencyId,
+                CurrencyCode = order.Currency?.Code,
                 SubTotal = order.SubTotal ?? 0,
                 TaxAmount = order.TaxAmount ?? 0,
                 DiscountAmount = order.DiscountAmount ?? 0,
@@ -541,32 +639,42 @@ namespace ERP_RFQ_Automation.Services
         // Half-away-from-zero matches standard commercial/accounting rounding.
         private static decimal RoundCurrency(decimal value) => Math.Round(value, 2, MidpointRounding.AwayFromZero);
 
-        // FIN-01: server-side tax resolution.
-        // The client-supplied TaxAmount is NOT trusted. Ideally we would compute
-        // round(taxableBase * rate) from the applicable Taxis row, but that rate cannot be
-        // resolved from OrderService today:
-        //   * Taxis (Models/Taxis.cs: TaxRate/TaxType/Country/State/BusinessUnitId/EffectiveDate)
-        //     is NOT mapped in ErpRfqAutomationContext — there is no DbSet<Taxis> and no entity
-        //     configuration, so it cannot be queried here.
-        //   * There is no FK from Order/OrderItem to a tax row, and selecting the correct rate
-        //     needs BU + customer country/state + tax-type context not available in this method.
-        // Until the schema exposes a resolvable rate, we charge 0 tax (conservative and
-        // non-forgeable) rather than trusting the client value.
-        // TODO(FIN-01): map Taxis in the DbContext, add a resolver keyed by BU/country/state/
-        // tax-type, then return RoundCurrency(taxableBase * rate) here. Requires schema/context
-        // follow-up outside OrderService.
-        // FIN-01: a deterministic server-side tax engine is not yet possible — the
-        // Taxis table is not mapped in the DbContext and there is no
-        // BU/country/state/tax-type resolver. For the pilot we accept the client's
-        // entered line tax as a workflow value (clamped non-negative) and STILL
-        // recompute every order total from it server-side, so totals always reconcile
-        // with the lines and a bogus header total can never be submitted.
-        // TODO(FIN-01): map Taxis, add a BU/country/state/tax-type resolver, and
-        // compute tax as round(taxableBase * rate) instead of accepting the amount.
-        private decimal ResolveLineTaxAmount(decimal submittedTax, decimal taxableBase, long businessUnitId)
-        {
-            return submittedTax < 0 ? 0m : RoundCurrency(submittedTax);
-        }
+        /// <summary>
+        /// R17: a quote line's output tax, or a refusal. Never <c>?? 0m</c>.
+        ///
+        /// <para>Null on <c>QuoteItem.TaxAmount</c> means "never derived", and coercing it to zero is
+        /// what let a standard-rated supply become a sales order — and then an AR invoice — stating
+        /// SAR 0.00 VAT. The gate at the top of <see cref="CreateOrderFromQuoteAsync"/> has already
+        /// refused every quote carrying one, so reaching this throw means a line went null between
+        /// the gate and here; failing loudly is the only safe answer left.</para>
+        /// </summary>
+        private static decimal DerivedTax(Quote quote, QuoteItem item) =>
+            item.TaxAmount ?? throw new InvalidOperationException(
+                $"Quote '{quote.QuoteNo}' line {item.Id} has no derived output tax, so a sales order " +
+                "cannot state its VAT. Price the line and set the output tax rate in Commercial Policy settings.");
+
+        /// <summary>
+        /// FIN-01 / R17: the order line's output tax, DERIVED from the business unit's
+        /// <c>CommercialMatchingPolicy.OutputTaxRatePercent</c> — not accepted from the client.
+        ///
+        /// <para>This method used to return the submitted amount unchanged, above a standing
+        /// TODO(FIN-01) that waited for a jurisdiction-aware tax engine to exist. Decision R8 says
+        /// that engine is never being built, and waiting for it meant every order carried whatever
+        /// tax the operator typed — including nothing. One tenant-level rate, set by the customer,
+        /// is the whole answer the platform needs and it is available now.</para>
+        ///
+        /// <para><b>Known gap, stated rather than hidden.</b> R19's tax category lives on the QUOTE
+        /// line, not the order line, and the order DTO carries no link back to the quote line it
+        /// came from. An order is therefore taxed as a standard-rated supply. For a genuinely
+        /// zero-rated export re-keyed as an order this over-states tax, which is visible on the
+        /// document and correctable; the alternative — trusting a typed zero — under-states it
+        /// silently and costs 15/115 of the line. Carrying the category from quote line to order
+        /// line is the next increment, and it needs an order-line-to-quote-line link that does not
+        /// exist today.</para>
+        /// </summary>
+        private static decimal? ResolveLineTaxAmount(decimal taxableBase, decimal? outputTaxRatePercent) =>
+            OutputTaxFormula.Derive(RoundCurrency(taxableBase), outputTaxRatePercent,
+                QuoteLineTaxCategories.Standard);
 
         private OrderDto MapToDto(Order order)
         {
@@ -590,6 +698,13 @@ namespace ERP_RFQ_Automation.Services
                 PaymentStatusId = order.PaymentStatusId,
                 PaymentStatus = order.PaymentStatus?.SetupValue ?? "Unpaid",
                 PaymentMethodId = order.PaymentMethodId,
+                // Order.CurrencyId is persisted and the repository Includes the navigation; the
+                // DTO simply never carried it, which left every Orders/Shipments amount rendered
+                // without its denomination. Null Currency means the include was not applied on
+                // this read path OR the order genuinely has none — both render as unknown, and
+                // neither is silently defaulted to a house currency.
+                CurrencyId = order.CurrencyId,
+                CurrencyCode = order.Currency?.Code,
                 TotalAmount = order.TotalAmount,
                 SubTotal = order.SubTotal ?? 0,
                 TaxAmount = order.TaxAmount ?? 0,

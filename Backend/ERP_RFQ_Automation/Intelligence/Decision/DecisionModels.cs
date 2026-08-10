@@ -32,15 +32,25 @@ public sealed class LeadDecisionBrief
     public string? Currency { get; set; }
 
     /// <summary>
-    /// Quantity/revenue-weighted (revenue - cost) / revenue, as a percentage
-    /// (0-100). Null without costed lines or one known currency.
+    /// Value-weighted (revenue - cost) / revenue, as a percentage (0-100), over the priced lines of
+    /// this lead's commercial case. Produced by <c>IGrossMarginService.GetForCommercialCaseAsync</c>
+    /// from <c>CustomerQuoteSourcingDecision</c> — the same records and the same formula as the
+    /// board-facing gross margin, so the two can never disagree. Null, with the reason stated in
+    /// <see cref="Reasons"/>, until a line has been priced from an approved supplier award.
     /// </summary>
     public decimal? MarginPotentialPct { get; set; }
 
-    /// <summary>Lead lines with authoritative price, quantity, cost, and matching currency evidence.</summary>
+    /// <summary>
+    /// Demand lines carrying a currency-qualified landed cost and the customer price built from it.
+    /// This counts <b>quote</b> lines, not lead lines: it is how many lines could be costed at all.
+    /// </summary>
     public int MarginCostedItems { get; set; }
 
-    /// <summary>True only when every Lead line contributed to the margin calculation.</summary>
+    /// <summary>
+    /// True only when the costed lines cover every Lead line. Consumers that gate on a whole-lead
+    /// margin read this; a partial figure still appears in <see cref="MarginPotentialPct"/> and is
+    /// described in <see cref="Reasons"/> as covering only the items we can cost.
+    /// </summary>
     public bool IsMarginComplete { get; set; }
 
     public CustomerHistory Customer { get; set; } = new();
@@ -87,7 +97,12 @@ public sealed class CoverageItem
 {
     public long LeadItemId { get; set; }
     public string? Description { get; set; }
-    public int Quantity { get; set; }
+
+    /// <summary>
+    /// Null when the source document stated no readable quantity. Rendered as an explicit gap,
+    /// never as 0 — a coverage line reading "0" tells a rep the buyer wants nothing.
+    /// </summary>
+    public int? Quantity { get; set; }
     public bool Matched { get; set; }
 
     /// <summary>"code" | "mpn" - how the exact catalog match was made (null when unmatched).</summary>

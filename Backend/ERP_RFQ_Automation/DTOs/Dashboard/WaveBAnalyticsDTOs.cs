@@ -131,25 +131,23 @@ namespace ERP_RFQ_Automation.DTOs.Dashboard
         public decimal? RespondedValue { get; set; }
 
         /// <summary>
-        /// Quoted-vs-floor margin proxy: average (unitPrice − cost) / unitPrice over
-        /// quote lines whose matched product has a known cost floor
-        /// (FinalLandedCost ?? UnitCost — the same cost basis the pricing engine
-        /// uses for its floor). Null when no line has floor data.
+        /// The window the funnel counts cover. This funnel has never been period-filtered, and a
+        /// reader looking at an all-time funnel beside a 90-day margin needs to be told which is
+        /// which — so the scope is stated on the contract rather than assumed.
         /// </summary>
-        public decimal? AvgMarginPct { get; set; }
+        public string FunnelScope { get; set; } = AllTimeScope;
 
-        /// <summary>Quote lines that had floor data and were included in AvgMarginPct.</summary>
-        public int MarginSampleLines { get; set; }
+        /// <summary>Every record in the business unit, with no date filter.</summary>
+        public const string AllTimeScope = "all_time";
 
-        /// <summary>
-        /// Quote lines that had floor data but were EXCLUDED from AvgMarginPct because their
-        /// quote currency could not be converted to base currency (or the quote carried no
-        /// currency). A non-zero value here means the margin sample is incomplete.
-        /// </summary>
-        public int MarginLinesExcludedForFx { get; set; }
-
-        /// <summary>All priced quote lines in the BU (denominator for floor coverage).</summary>
-        public int TotalQuoteLines { get; set; }
+        // AvgMarginPct / MarginSampleLines / MarginLinesExcludedForFx / TotalQuoteLines were
+        // REMOVED here, not deprecated. The figure was an unweighted mean of per-line percentages
+        // taken against Product.FinalLandedCost — a column that is not a landed cost — over every
+        // quote line ever written including drafts and lost bids. Leaving it in place under a
+        // warning comment would have kept a wrong number on a live API contract. The replacement is
+        // GET /api/dashboard/gross-margin (Reporting/GrossMarginService), which is value-weighted,
+        // reads the quote-time sourcing decision, filters to accepted quotes in a stated window,
+        // and returns "unavailable" instead of a number when it cannot be computed.
 
         public DateTime GeneratedAt { get; set; }
     }

@@ -22,7 +22,9 @@ public sealed class CustomFieldPersistenceTests
         Assert.NotNull(model.FindEntityType(typeof(CustomFieldDependency)));
         Assert.NotNull(model.FindEntityType(typeof(CustomFieldRecord)));
         Assert.NotNull(model.FindEntityType(typeof(CustomFieldValue)));
-        Assert.NotNull(model.FindEntityType(typeof(CustomFieldValueHistory)));
+        // CustomFieldValueHistory is deliberately NOT in the model any more (FR-MDM-05 / E44): it
+        // was mapped, tenant-filtered and trigger-protected but had no writer, so it was a control
+        // that reported clean because it was empty. See CustomFields/CustomFieldValues.cs.
 
         var definition = model.FindEntityType(typeof(CustomFieldDefinition))!;
         Assert.Contains(definition.GetIndexes(), index => index.IsUnique &&

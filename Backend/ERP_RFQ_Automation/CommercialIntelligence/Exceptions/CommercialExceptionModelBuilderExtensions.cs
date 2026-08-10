@@ -13,10 +13,19 @@ public static class CommercialExceptionModelBuilderExtensions
         {
             entity.ToTable("commercial_exception_cases", table =>
             {
+                // Gate 7 widened both of these for FR-DLM-07. Every branch now names ALL THREE
+                // source columns — the two pre-existing branches gained "DeliveryProofLineId" IS
+                // NULL — because a constraint that only mentions the columns it knew about at the
+                // time silently permits the new one to be set alongside the old ones, and "which
+                // source is this case really from" would stop having one answer.
                 table.HasCheckConstraint("CK_commercial_exception_cases_Source",
-                    "(\"ExceptionType\" = 'UnassignedLead' AND \"UnassignedWorkItemId\" IS NOT NULL AND \"FollowUpTaskId\" IS NULL) OR (\"ExceptionType\" = 'OverdueFollowUp' AND \"FollowUpTaskId\" IS NOT NULL AND \"UnassignedWorkItemId\" IS NULL)");
+                    "(\"ExceptionType\" = 'UnassignedLead' AND \"UnassignedWorkItemId\" IS NOT NULL AND \"FollowUpTaskId\" IS NULL AND \"DeliveryProofLineId\" IS NULL) "
+                    + "OR (\"ExceptionType\" = 'OverdueFollowUp' AND \"FollowUpTaskId\" IS NOT NULL AND \"UnassignedWorkItemId\" IS NULL AND \"DeliveryProofLineId\" IS NULL) "
+                    + "OR (\"ExceptionType\" = 'DeliveryShortfall' AND \"DeliveryProofLineId\" IS NOT NULL AND \"FollowUpTaskId\" IS NULL AND \"UnassignedWorkItemId\" IS NULL)");
                 table.HasCheckConstraint("CK_commercial_exception_cases_SourceIdentity",
-                    "(\"ExceptionType\" = 'UnassignedLead' AND \"SourceType\" = 'UnassignedWorkItem' AND \"SourceId\" = \"UnassignedWorkItemId\") OR (\"ExceptionType\" = 'OverdueFollowUp' AND \"SourceType\" = 'FollowUpTask' AND \"SourceId\" = \"FollowUpTaskId\")");
+                    "(\"ExceptionType\" = 'UnassignedLead' AND \"SourceType\" = 'UnassignedWorkItem' AND \"SourceId\" = \"UnassignedWorkItemId\") "
+                    + "OR (\"ExceptionType\" = 'OverdueFollowUp' AND \"SourceType\" = 'FollowUpTask' AND \"SourceId\" = \"FollowUpTaskId\") "
+                    + "OR (\"ExceptionType\" = 'DeliveryShortfall' AND \"SourceType\" = 'DeliveryProofLine' AND \"SourceId\" = \"DeliveryProofLineId\")");
                 table.HasCheckConstraint("CK_commercial_exception_cases_SourceVersion", "\"SourceVersion\" >= 1");
                 table.HasCheckConstraint("CK_commercial_exception_cases_Status",
                     "\"Status\" IN ('Open','Acknowledged','Resolved','Dismissed')");
@@ -51,6 +60,13 @@ public static class CommercialExceptionModelBuilderExtensions
                 .OnDelete(DeleteBehavior.Restrict);
             entity.HasOne<UnassignedWorkItem>().WithMany()
                 .HasForeignKey(x => new { x.BusinessUnitId, x.UnassignedWorkItemId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id })
+                .OnDelete(DeleteBehavior.Restrict);
+            // Gate 7 / FR-DLM-07. The foreign key is what makes a WRONG shortfall id impossible
+            // rather than merely visible, and it is tenant-qualified for the same reason the other
+            // two are.
+            entity.HasOne<Delivery.DeliveryProofLine>().WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.DeliveryProofLineId })
                 .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id })
                 .OnDelete(DeleteBehavior.Restrict);
         });

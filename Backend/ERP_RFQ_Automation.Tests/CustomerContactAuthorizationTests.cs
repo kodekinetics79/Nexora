@@ -138,7 +138,11 @@ public sealed class CustomerContactAuthorizationTests
 
         Assert.IsType<CreatedAtActionResult>(result.Result);
         Assert.Equal(41, repository.AddedCustomer?.Buid);
-        Assert.Equal("test-user", repository.AddedCustomer?.CreatedBy);
+        // The actor is the token's NameIdentifier. It is "77" rather than the old literal
+        // "test-user" only because this fixture now issues a NUMERIC user id, which FR-CST-02's
+        // scope resolution requires and which every real token already carries. The assertion is
+        // unchanged in substance: the actor comes from the claim, never from the request body.
+        Assert.Equal("77", repository.AddedCustomer?.CreatedBy);
     }
 
     [Fact]
@@ -279,11 +283,20 @@ public sealed class CustomerContactAuthorizationTests
         string? businessUnitClaim,
         IFileInspectionService? fileInspection = null)
     {
-        var claims = new List<Claim> { new(ClaimTypes.NameIdentifier, "test-user") };
+        // A numeric user id and a role id, because FR-CST-02 resolves the caller's account scope
+        // from both and refuses a request it cannot scope. The identifier used to be the literal
+        // "test-user", which no token in production carries.
+        var claims = new List<Claim>
+        {
+            new(ClaimTypes.NameIdentifier, "77"),
+            new("roleId", "9")
+        };
         if (businessUnitClaim is not null)
             claims.Add(new Claim("businessUnitId", businessUnitClaim));
 
-        return new CustomerController(repository, new TestWebHostEnvironment(), fileInspection ?? new ClearingFileInspectionService())
+        return new CustomerController(
+            repository, new TestWebHostEnvironment(), fileInspection ?? new ClearingFileInspectionService(),
+            new StubMasterDataChangeHistoryReader(), new TenantWideScopeResolver())
         {
             ControllerContext = new ControllerContext
             {
@@ -335,6 +348,18 @@ public sealed class CustomerContactAuthorizationTests
                 "Cleared", "test", null));
     }
 
+    /// <summary>
+    /// These tests are about the TENANT boundary and the permission attributes, not about the
+    /// account-team tier, so the scope resolver is stubbed tenant-wide here. The account-team
+    /// narrowing is certified separately by Gate8AccountTeamScopeTests against real rows.
+    /// </summary>
+    private sealed class TenantWideScopeResolver : IAccountTeamScopeResolver
+    {
+        public Task<AccountTeamScope> ResolveAsync(
+            long userId, long roleId, long businessUnitId, DateTime asOfUtc, CancellationToken ct = default)
+            => Task.FromResult(AccountTeamScope.TenantWide(userId));
+    }
+
     private sealed class CapturingCustomerRepository : ICustomerRepository
     {
         public string? CapturedEmail { get; private set; }
@@ -344,8 +369,9 @@ public sealed class CustomerContactAuthorizationTests
         public Customer? AddedCustomer { get; private set; }
         public bool WasAccessed { get; private set; }
 
-        public Task<Customer?> GetByEmailAsync(string email, long businessUnitId)
+        public Task<Customer?> GetByEmailAsync(string email, long businessUnitId, AccountTeamScope scope)
         {
+            CapturedScope = scope;
             WasAccessed = true;
             CapturedEmail = email;
             CapturedBusinessUnitId = businessUnitId;
@@ -356,17 +382,23 @@ public sealed class CustomerContactAuthorizationTests
 
         public Task<(IEnumerable<CustomerResponseDTO>, int TotalCount)> GetAllAsync(
             int pageNumber, int pageSize, long? id, string? name, string? contactEmail,
-            bool? isActive, string? docId, long businessUnitId)
+            bool? isActive, string? docId, long businessUnitId, AccountTeamScope scope)
         {
             WasAccessed = true;
             CapturedBusinessUnitId = businessUnitId;
+            CapturedScope = scope;
             return Task.FromResult<(IEnumerable<CustomerResponseDTO>, int)>(([], 0));
         }
 
-        public Task<Customer> GetByIdAsync(long id, long businessUnitId)
+        /// <summary>FR-CST-02: the scope the controller resolved and handed down. Captured so a
+        /// test can assert the controller does not read customers unscoped.</summary>
+        public AccountTeamScope? CapturedScope { get; private set; }
+
+        public Task<Customer> GetByIdAsync(long id, long businessUnitId, AccountTeamScope scope)
         {
             WasAccessed = true;
             CapturedBusinessUnitId = businessUnitId;
+            CapturedScope = scope;
             return Task.FromResult(Result ?? new Customer { Id = id, Name = "Customer", Buid = businessUnitId });
         }
 

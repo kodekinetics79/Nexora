@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using ERP_RFQ_Automation.Agent.Models;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.OrderToCash;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
 
@@ -291,7 +292,8 @@ public sealed class SupplierNegotiationService(ErpRfqAutomationContext context)
             .Select(x => x.Code).SingleOrDefaultAsync(cancellationToken)
             ?? $"Currency {effectiveCurrencyId}";
         return new NegotiationInput(quote, currentRevision, supplier, competitors, selectedSnapshots,
-            decisions, currencyCode, now, decisionTotal);
+            decisions, currencyCode, now, decisionTotal,
+            await context.ResolveSupplierInputTaxRecoverablePercentAsync(businessUnitId, cancellationToken));
     }
 
     internal static SupplierNegotiationWorkspace BuildWorkspace(NegotiationInput input)
@@ -304,7 +306,9 @@ public sealed class SupplierNegotiationService(ErpRfqAutomationContext context)
             new SupplierNegotiationRound(effective.CurrentRevision.RevisionNumber, effective.CurrencyCode,
                 effective.CurrentRevision.ValidUntil, effective.CurrentRevision.Incoterms,
                 effective.CurrentRevision.PaymentTerms, effective.CurrentRevision.FreightAmount,
-                effective.CurrentRevision.TaxAmount, effective.CurrentRevision.CapturedOn),
+                effective.CurrentRevision.TaxAmount, effective.CurrentRevision.CapturedOn,
+                effective.CurrentRevision.DutyAmount, effective.CurrentRevision.OtherAmount,
+                effective.CurrentRevision.DiscountAmount),
             SupplierBidQualityFlagCodes.All, flags, recommendations, effective.PriorDecisions,
             effective.PriorDecisionTotal,
             effective.PriorDecisionTotal > effective.PriorDecisions.Count);
@@ -365,6 +369,9 @@ public sealed class SupplierNegotiationService(ErpRfqAutomationContext context)
             Incoterms = source.Incoterms,
             FreightAmount = source.FreightAmount,
             TaxAmount = source.TaxAmount,
+            DutyAmount = source.DutyAmount,
+            OtherAmount = source.OtherAmount,
+            DiscountAmount = source.DiscountAmount,
             PaymentTerms = source.PaymentTerms,
             Notes = source.Notes,
             RequiresReview = source.RequiresReview,
@@ -452,6 +459,9 @@ public sealed class SupplierNegotiationService(ErpRfqAutomationContext context)
             case "INCOTERMS": revision.Incoterms = value; break;
             case "FREIGHTAMOUNT" when TryDecimal(value, out var freight): revision.FreightAmount = freight; break;
             case "TAXAMOUNT" when TryDecimal(value, out var tax): revision.TaxAmount = tax; break;
+            case "DUTYAMOUNT" when TryDecimal(value, out var duty): revision.DutyAmount = duty; break;
+            case "OTHERAMOUNT" when TryDecimal(value, out var other): revision.OtherAmount = other; break;
+            case "DISCOUNTAMOUNT" when TryDecimal(value, out var discount): revision.DiscountAmount = discount; break;
             case "PAYMENTTERMS": revision.PaymentTerms = value; break;
         }
     }
@@ -672,7 +682,7 @@ public sealed class SupplierNegotiationService(ErpRfqAutomationContext context)
                 .Select(x => CommercialPrice(x)!.Value).OrderBy(x => x).ToArray();
             if (cohort.Length < 2) continue;
             var median = Median(cohort);
-            var current = CurrentLandedUnitCost(input.CurrentRevision, line);
+            var current = CurrentLandedUnitCost(input.CurrentRevision, line, input.SupplierInputTaxRecoverablePercent);
             if (median > 0 && (current > median * 1.25m || current < median * .75m))
                 yield return $"Line {line.LineNumber}: current {current:F4}; cohort median {median:F4}; n={cohort.Length}";
         }
@@ -687,7 +697,7 @@ public sealed class SupplierNegotiationService(ErpRfqAutomationContext context)
                 .Select(x => CommercialPrice(x)!.Value).OrderBy(x => x).ToArray();
             if (cohort.Length < 2) continue;
             var median = Median(cohort);
-            var current = CurrentLandedUnitCost(input.CurrentRevision, line);
+            var current = CurrentLandedUnitCost(input.CurrentRevision, line, input.SupplierInputTaxRecoverablePercent);
             if (median > 0 && current > median * 1.25m)
                 yield return $"Line {line.LineNumber}: current {current:F4}; cohort median {median:F4}; n={cohort.Length}";
         }
@@ -741,7 +751,7 @@ public sealed class SupplierNegotiationService(ErpRfqAutomationContext context)
         foreach (var selected in input.SelectedOffers.Where(x => x.RfqItemId == line.RfqItemId &&
                      x.CurrencyId == input.CurrentRevision.CurrencyId && x.LandedUnitCost > 0))
         {
-            var current = CurrentLandedUnitCost(input.CurrentRevision, line);
+            var current = CurrentLandedUnitCost(input.CurrentRevision, line, input.SupplierInputTaxRecoverablePercent);
             if (current > selected.LandedUnitCost * 1.02m)
                 yield return $"Line {line.LineNumber}: current landed {current:F4}; selected snapshot {selected.LandedUnitCost:F4}";
         }
@@ -832,14 +842,24 @@ public sealed class SupplierNegotiationService(ErpRfqAutomationContext context)
     /// BLOCKING flag. When the two sides used different allocation bases the flag fired on
     /// arithmetic rather than on anything the supplier did.
     /// </summary>
-    private static decimal CurrentLandedUnitCost(SupplierQuoteRevision revision, SupplierQuoteLine line)
+    private static decimal CurrentLandedUnitCost(SupplierQuoteRevision revision, SupplierQuoteLine line,
+        decimal supplierInputTaxRecoverablePercent)
     {
         var totalLineValue = LandedCostFormula.TotalLineValue(
             revision.Lines.Select(x => (x.UnitPrice, x.Quantity)));
         var lineValue = LandedCostFormula.LineValue(line.UnitPrice, line.Quantity);
         var freight = LandedCostFormula.AllocateByValue(revision.FreightAmount, lineValue, totalLineValue);
         var tax = LandedCostFormula.AllocateByValue(revision.TaxAmount, lineValue, totalLineValue);
-        return LandedCostFormula.UnitCost(line.UnitPrice, line.Quantity, freight, tax);
+        // Duty, other and discount are allocated here for the same reason freight is: this figure
+        // is compared against the PERSISTED SupplierQuotedItem.LandedUnitCost, and the projection
+        // now carries all five charges. Omitting three of them here would reopen exactly the
+        // arithmetic-disagreement failure this method's summary describes — a CRITICAL, blocking
+        // POST_SELECTION_PRICE_INCREASE on an import quote that had not moved at all.
+        var duty = LandedCostFormula.AllocateByValue(revision.DutyAmount, lineValue, totalLineValue);
+        var other = LandedCostFormula.AllocateByValue(revision.OtherAmount, lineValue, totalLineValue);
+        var discount = LandedCostFormula.AllocateByValue(revision.DiscountAmount, lineValue, totalLineValue);
+        return LandedCostFormula.UnitCost(line.UnitPrice, line.Quantity, freight, tax,
+            supplierInputTaxRecoverablePercent, duty, other, discount);
     }
     private static decimal Median(IReadOnlyList<decimal> values) => values.Count % 2 == 1
         ? values[values.Count / 2]
@@ -917,7 +937,12 @@ internal sealed record NegotiationInput(
     IReadOnlyCollection<SupplierNegotiationDecisionView> PriorDecisions,
     string CurrencyCode,
     DateTime NowUtc,
-    int PriorDecisionTotal = 0);
+    int PriorDecisionTotal = 0,
+    // The tenant's CommercialMatchingPolicy.SupplierInputTaxRecoverablePercent, carried in because the
+    // evidence builders are static and pure but must reach the same landed-cost number the
+    // projection persisted — otherwise the >2% gap that raises a blocking CRITICAL
+    // POST_SELECTION_PRICE_INCREASE reopens, this time on the tax term.
+    decimal SupplierInputTaxRecoverablePercent = CommercialMatchingPolicy.FullyRecoverablePercent);
 
 internal sealed record NegotiationProjection(
     long Id,

@@ -6,7 +6,10 @@ using ERP_RFQ_Automation.Agent.Models;
 using ERP_RFQ_Automation.Inventory;
 using ERP_RFQ_Automation.Inventory.Commercial;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.OrderToCash;
+using ERP_RFQ_Automation.SupplierQuotes;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using Npgsql;
 
 namespace ERP_RFQ_Automation.Procurement;
@@ -14,8 +17,42 @@ namespace ERP_RFQ_Automation.Procurement;
 public sealed class ProcurementApplicationService : IProcurementApplicationService
 {
     private readonly ErpRfqAutomationContext _db;
+    private readonly ProcurementApprovalOptions _approvalOptions;
 
-    public ProcurementApplicationService(ErpRfqAutomationContext db) => _db = db;
+    /// <summary>
+    /// FR-MTR-01. Turns each received line into material lots inside this service's own receipt
+    /// transaction. Optional in the same sense as the approval policy above — absent means the
+    /// default recorder, never "no lots". A receipt that committed stock without committing the lot
+    /// explaining it would be untraceable material, which is the one thing Module 5 exists to
+    /// prevent, so there is no construction that switches it off.
+    /// </summary>
+    private readonly Traceability.IMaterialLotRecorder _lotRecorder;
+
+    /// <summary>
+    /// FR-MAS-05 / the Gate 4–Gate 5 seam. Settles the inbound shipments that were carrying the
+    /// material a receipt just booked in, inside this service's own receipt transaction.
+    ///
+    /// <para>Optional in exactly the sense the lot recorder is: absent means the default settlement,
+    /// never "no settlement". A receipt that moved stock while the shipment carrying it still read
+    /// as in flight is the defect this closes, so there is no construction that switches it off.</para>
+    /// </summary>
+    private readonly InboundLogistics.IInboundShipmentReceiptSettlement _receiptSettlement;
+
+    /// <summary>
+    /// The approval policy is optional so that every existing construction site keeps compiling, but
+    /// its absence means enforced, not absent: a caller that does not configure segregation of
+    /// duties gets the control, and has to opt out deliberately.
+    /// </summary>
+    public ProcurementApplicationService(
+        ErpRfqAutomationContext db, IOptions<ProcurementApprovalOptions>? approvalOptions = null,
+        Traceability.IMaterialLotRecorder? lotRecorder = null,
+        InboundLogistics.IInboundShipmentReceiptSettlement? receiptSettlement = null)
+    {
+        _db = db;
+        _approvalOptions = approvalOptions?.Value ?? new ProcurementApprovalOptions();
+        _lotRecorder = lotRecorder ?? new Traceability.MaterialLotRecorder(db);
+        _receiptSettlement = receiptSettlement ?? new InboundLogistics.InboundShipmentReceiptSettlement(db);
+    }
 
     public async Task<SourcingCaseView> CreateOrOpenSourcingCaseAsync(
         CreateSourcingCaseCommand command, CancellationToken ct = default)
@@ -35,6 +72,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
             var replay = await _db.SourcingCases.Include(x => x.Candidates).SingleOrDefaultAsync(x =>
                 x.BusinessUnitId == command.BusinessUnitId
@@ -192,6 +230,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
             var sourcingCase = await _db.SourcingCases.Include(x => x.Candidates).SingleOrDefaultAsync(x =>
                 x.BusinessUnitId == command.BusinessUnitId && x.Id == command.SourcingCaseId, ct)
@@ -261,6 +300,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
             var sourcingCase = await _db.SourcingCases.Include(x => x.Candidates).SingleOrDefaultAsync(x =>
                 x.BusinessUnitId == command.BusinessUnitId && x.Id == command.SourcingCaseId, ct)
@@ -416,6 +456,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
             var replay = await _db.ProcurementEvents.AsNoTracking().SingleOrDefaultAsync(x =>
                 x.BusinessUnitId == command.BusinessUnitId
@@ -602,11 +643,33 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var outbox = await _db.ProcurementOutboxMessages.AsNoTracking()
             .Where(x => x.BusinessUnitId == businessUnitId && solicitations.Select(s => s.Id).Contains(x.SupplierSolicitationId))
             .ToDictionaryAsync(x => x.SupplierSolicitationId, ct);
+        // Which of these lines will the lot recorder demand a declaration for? The receipt screen
+        // cannot ask for a batch number or a serial list unless it is told, and a product whose row
+        // cannot be read is UNTRACKED here for exactly the same reason it would be at receipt time —
+        // the recorder refuses an unknown product outright, so this never invents a permissive mode.
+        var purchaseOrderProductIds = purchaseOrders.SelectMany(x => x.Lines).Select(x => x.ProductId)
+            .Distinct().ToArray();
+        var trackingByProduct = (await _db.Products.AsNoTracking()
+                .Where(x => (x.Buid == null || x.Buid == businessUnitId) && purchaseOrderProductIds.Contains(x.Id))
+                .Select(x => new { x.Id, x.SerialTracking, x.BatchTracking })
+                .ToListAsync(ct))
+            .ToDictionary(x => x.Id,
+                x => Traceability.MaterialLotTrackingModes.FromProduct(x.SerialTracking, x.BatchTracking));
         var poByAward = purchaseOrders.SelectMany(x => x.Lines.Select(line => new { line.SourcingAwardId, PurchaseOrderId = x.Id }))
             .ToDictionary(x => x.SourcingAwardId, x => x.PurchaseOrderId);
         var awardQuoteIds = awards.Where(x => x.SupplierQuotedItemId.HasValue).Select(x => x.SupplierQuotedItemId!.Value).ToHashSet();
 
-        var incomingByItem = purchaseOrders.SelectMany(x => x.Lines)
+        // Every purchase order on the RFQ is loaded above because the panel below lists them all —
+        // a cancelled order must stay visible. Only the ones that are actually committed supply may
+        // reduce a line's shortfall, and this projection used to have no status predicate at all.
+        // A DRAFT nobody had released and a CANCELLED order whose awards had already been reverted
+        // both counted as incoming, so the screen showed a line as covered with shortfall 0 while
+        // the command path behind it said the line still needed sourcing — and nobody re-sourced
+        // the cancelled order because the screen said there was nothing to do. Same set as
+        // GetNetSourcingRequirementAsync, deliberately.
+        var incomingByItem = purchaseOrders
+            .Where(SupplierPurchaseOrderStatuses.IsCommittedSupplyPredicate)
+            .SelectMany(x => x.Lines)
             .GroupBy(x => x.RfqItemId)
             .ToDictionary(x => x.Key, x => x.Sum(line => Math.Max(0m, line.OrderedQuantity - line.ReceivedQuantity)));
         var authoritativeOfferIds = quoteRows.Where(x =>
@@ -622,8 +685,14 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         foreach (var productGroup in items.Where(x => x.ProductId.HasValue).GroupBy(x => x.ProductId!.Value))
         {
             var stock = inventory.Where(x => x.ProductId == productGroup.Key).ToArray();
-            var remainingStock = stock.Sum(x => Math.Max(0m, x.QtyOnHand - reservations.GetValueOrDefault(x.Id)
-                - x.AllocatedQuantity - x.QuarantineQuantity - x.DamagedQuantity - x.ExpiredQuantity - x.SafetyStockQuantity));
+            // ATP is defined once, in InventoryQuantityMath. This site used to spell the formula
+            // out by hand; it agreed with the canonical one, which is luck rather than a
+            // guarantee — the same file records that these expressions once agreed by luck and
+            // then diverged, and a buyer sizing a purchase order needs the same number the
+            // salesperson quoted from.
+            var remainingStock = stock.Sum(x => Inventory.InventoryQuantityMath.AvailableToPromise(
+                x.QtyOnHand, reservations.GetValueOrDefault(x.Id), x.AllocatedQuantity,
+                x.QuarantineQuantity, x.DamagedQuantity, x.ExpiredQuantity, x.SafetyStockQuantity));
             foreach (var item in productGroup.OrderBy(x => x.Id))
             {
                 var demandAfterCommittedSupply = Math.Max(0m, (decimal)item.Quantity
@@ -669,7 +738,8 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 row.CurrencyId ?? 0, currencyCodes.GetValueOrDefault(row.CurrencyId ?? 0) ?? "N/A", row.Quantity,
                 row.AvailableQuantity, row.UnitPrice ?? 0, row.FreightCost, row.DutyCost, row.OtherCost,
                 row.LandedUnitCost, row.LeadTimeDays, row.ReliabilitySnapshot, row.ValidUntil, comparison.Eligible,
-                comparison.Blockers, awardQuoteIds.Contains(row.Id), row.Version);
+                comparison.Blockers, awardQuoteIds.Contains(row.Id), row.Version, comparison.CostWarnings,
+                workbenchRevisions.GetValueOrDefault(row.SourceSupplierQuoteRevisionId ?? 0)?.Incoterms);
         }).ToArray();
         var awardViews = awards.Select(award => new SourcingAwardView(award.Id, award.RfqItemId ?? 0,
             award.SupplierQuotedItemId ?? 0, award.SupplierId,
@@ -683,7 +753,13 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             po.Version, po.Lines.Select(line => new SupplierPurchaseOrderLineView(line.Id, line.RfqItemId, line.ProductId,
                 items.Single(x => x.Id == line.RfqItemId).ProductShortDescription ?? $"RFQ line {line.RfqItemId}",
                 line.OrderedQuantity, line.ReceivedQuantity, Math.Max(0m, line.OrderedQuantity - line.ReceivedQuantity),
-                line.UnitCost, line.LandedUnitCost, line.WarehouseId)).ToArray())).ToArray();
+                line.UnitCost, line.LandedUnitCost, line.WarehouseId,
+                trackingByProduct.GetValueOrDefault(line.ProductId, Traceability.MaterialLotTrackingModes.Untracked),
+                line.HsCode, line.CountryOfOrigin)).ToArray(),
+            po.ApprovedBy, po.ApprovedOn,
+            po.AcknowledgementStatus, po.AcknowledgedBy, po.AcknowledgedOn,
+            po.RevisedLeadTimeDays, po.CommittedShipDate, po.AcknowledgementNote,
+            po.Incoterm, po.PortOfLoading, po.PortOfDischarge)).ToArray();
 
         return new ProcurementWorkbench(rfq.Id, rfq.Rfqno, rfq.NexoraSerial, rfq.Customer?.Name,
             currencyCodes.Values.FirstOrDefault(), lines,
@@ -714,6 +790,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
             var existing = await _db.Set<SupplierSolicitation>()
                 .SingleOrDefaultAsync(x => x.BusinessUnitId == command.BusinessUnitId && x.IdempotencyKey == command.IdempotencyKey.Trim(), ct);
@@ -895,6 +972,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
             var existingEvent = await _db.ProcurementEvents.AsNoTracking().FirstOrDefaultAsync(x =>
                 x.BusinessUnitId == command.BusinessUnitId && x.EventType == "SUPPLIER_SOLICITATION_RETRY_QUEUED"
@@ -948,6 +1026,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
             var responseKeyPrefix = $"{command.IdempotencyKey.Trim()}:";
             var replay = await _db.SupplierQuotedItems.Where(x => x.BusinessUnitId == command.BusinessUnitId
@@ -998,6 +1077,15 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 throw new ProcurementConflictException("The supplier quote revision must be newer than the current revision.");
 
             var now = DateTime.UtcNow;
+            // One policy read for the whole revision, so every line of one capture is costed on the
+            // same answer to "is the supplier's tax a cost?".
+            var inputTaxRecoverablePercent = await _db.ResolveSupplierInputTaxRecoverablePercentAsync(
+                command.BusinessUnitId, ct);
+            // Excluding that tax from cost books a reclaim against ZATCA, which has to name the
+            // supplier's VAT registration. Refuse the capture rather than persist a landed cost
+            // built on a deduction we could not substantiate.
+            await _db.EnsureSupplierInputTaxIsClaimableAsync(command.BusinessUnitId,
+                solicitation.SupplierId, command.Lines.Sum(x => x.TaxAmount), inputTaxRecoverablePercent, ct);
             var canonicalReference = await _db.SupplierQuotes.AsNoTracking()
                 .Where(x => x.BusinessUnitId == command.BusinessUnitId
                     && x.SupplierSolicitationId == solicitation.Id)
@@ -1009,9 +1097,17 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                     solicitation.NexoraSerial, canonicalReference, command.Revision,
                     SupplierQuotes.SupplierQuoteCaptureChannels.Manual, null,
                     $"procurement-workbench:{solicitation.Id}:revision:{command.Revision}", hash,
-                    currencies[0], command.ValidUntil, null,
-                    command.Lines.Sum(x => x.FreightCost + x.DutyCost + x.OtherCost),
-                    command.Lines.Sum(x => x.TaxAmount), null, null,
+                    currencies[0], command.ValidUntil, NormalizeIncoterm(command.Incoterms),
+                    // Each charge travels as itself. This used to collapse freight, duty and other
+                    // into the single FreightAmount field and DROP the discount entirely, so a
+                    // later re-projection of the canonical revision recomputed landed cost without
+                    // the discount the buyer had been given — a different number from the one the
+                    // award and the purchase order were built on, with nothing to explain the gap.
+                    command.Lines.Sum(x => x.FreightCost),
+                    command.Lines.Sum(x => x.TaxAmount),
+                    command.Lines.Sum(x => x.DutyCost),
+                    command.Lines.Sum(x => x.OtherCost),
+                    command.Lines.Sum(x => x.DiscountAmount), null, null,
                     command.Lines.Select((line, index) => new SupplierQuotes.CaptureSupplierQuoteLine(
                         index + 1, line.RfqItemId, demandLines[line.RfqItemId].Id,
                         rfqLines[line.RfqItemId].ManufacturerPartNumber ?? rfqLines[line.RfqItemId].ItemMaterialCode,
@@ -1062,7 +1158,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 DiscountAmount = line.DiscountAmount,
                 MinimumOrderQuantity = line.MinimumOrderQuantity,
                 ReliabilitySnapshot = line.ReliabilitySnapshot,
-                LandedUnitCost = CalculateLandedUnitCost(line),
+                LandedUnitCost = CalculateLandedUnitCost(line, inputTaxRecoverablePercent),
                 QuoteRevision = command.Revision,
                 ResponseIdempotencyKey = $"{command.IdempotencyKey.Trim()}:{line.RfqItemId}",
                 RequestHash = hash,
@@ -1135,6 +1231,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
             var replay = await _db.Set<SourcingAward>().SingleOrDefaultAsync(x => x.BusinessUnitId == command.BusinessUnitId
                 && x.IdempotencyKey == command.IdempotencyKey.Trim(), ct);
@@ -1186,8 +1283,18 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 existingAward.Version++;
             }
             var now = DateTime.UtcNow;
-            var awardLandedUnitCost = CalculateAwardLandedUnitCost(
-                quote, command.Quantity, includeFixedCharges: awardedFromQuote == 0);
+            // No includeFixedCharges flag any more: every award carries the share of the line's
+            // charges its own quantity earns. The flag made the first award of a split carry 100%
+            // of the freight and every later award carry none, so which award was entered first
+            // decided what each one cost.
+            // Same reclaim, one step further down the chain: this landed cost becomes the purchase
+            // order and the customer price, so the entitlement is checked here too.
+            var awardInputTaxRecoverablePercent =
+                await _db.ResolveSupplierInputTaxRecoverablePercentAsync(command.BusinessUnitId, ct);
+            await _db.EnsureSupplierInputTaxIsClaimableAsync(command.BusinessUnitId, quote.SupplierId,
+                quote.TaxAmount ?? 0m, awardInputTaxRecoverablePercent, ct);
+            var awardLandedUnitCost = CalculateAwardLandedUnitCost(quote, command.Quantity,
+                awardInputTaxRecoverablePercent);
             var award = new SourcingAward
             {
                 BusinessUnitId = command.BusinessUnitId,
@@ -1227,6 +1334,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
             var replay = await _db.SupplierPurchaseOrders.SingleOrDefaultAsync(x => x.BusinessUnitId == command.BusinessUnitId
                 && x.IdempotencyKey == command.IdempotencyKey.Trim(), ct);
@@ -1234,9 +1342,9 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             {
                 EnsureReplay(replay.RequestHash, hash);
                 await tx.CommitAsync(ct);
-                return new PurchaseOrderResult(replay.Id, replay.PurchaseOrderNumber, replay.Status, true);
+                return new PurchaseOrderResult(replay.Id, replay.PurchaseOrderNumber, replay.Status, true, replay.Version);
             }
-            await RequireRfqAsync(command.BusinessUnitId, command.RfqId, ct);
+            var rfq = await RequireRfqAsync(command.BusinessUnitId, command.RfqId, ct);
             var supplier = await RequireSupplierAsync(command.BusinessUnitId, command.SupplierId, ct);
             var supplierBlockers = SupplierRfqBlockingReasons(supplier);
             if (supplierBlockers.Count > 0)
@@ -1290,12 +1398,32 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 BusinessUnitId = command.BusinessUnitId, RfqId = command.RfqId, SupplierId = command.SupplierId,
                 CurrencyId = command.CurrencyId, PurchaseOrderNumber = $"PENDING-{hash[..32]}", Status = SupplierPurchaseOrderStatuses.Draft,
                 TotalValue = awards.Sum(x => x.LandedUnitCost!.Value * x.Quantity!.Value), ExpectedOn = command.ExpectedOn,
-                IdempotencyKey = command.IdempotencyKey.Trim(), RequestHash = hash, CreatedOn = now, CreatedBy = command.Actor.Trim()
+                IdempotencyKey = command.IdempotencyKey.Trim(), RequestHash = hash, CreatedOn = now, CreatedBy = command.Actor.Trim(),
+                Incoterm = NormalizeIncoterm(command.Incoterm),
+                PortOfLoading = NormalizePort(command.PortOfLoading, "Port of loading"),
+                PortOfDischarge = NormalizePort(command.PortOfDischarge, "Port of discharge")
             };
+            // Both inside the same serializable transaction as the INSERT, so a purchase order can
+            // never be committed without the customer chain and the master reference it is supposed
+            // to quote. Origin first: it is what CarryCommercialCaseAsync falls back to when the RFQ
+            // predates case allocation, and reading it before it is written is why that fallback had
+            // never once executed.
+            var customerOrigin = await AttachCustomerOriginAsync(po, command.BusinessUnitId,
+                command.AwardIds, ct);
+            await CarryCommercialCaseAsync(po, rfq, ct);
             _db.SupplierPurchaseOrders.Add(po);
             await _db.SaveChangesAsync(ct);
             po.PurchaseOrderNumber = $"PO-{now:yyyy}-{po.Id:D10}";
             await _db.SaveChangesAsync(ct);
+            // Tenant-scoped: the product ids come from this tenant's own supplier quotes, but a
+            // lookup without the predicate would let a cross-tenant id collision decide what we
+            // declare to customs.
+            var originProductIds = quotes.Values.Where(x => x.ProductId.HasValue)
+                .Select(x => x.ProductId!.Value).Distinct().ToArray();
+            var productOrigins = await _db.Products.AsNoTracking()
+                .Where(x => x.Buid == command.BusinessUnitId && originProductIds.Contains(x.Id)
+                            && x.CountryOfOrigin != null)
+                .ToDictionaryAsync(x => x.Id, x => x.CountryOfOrigin, ct);
             foreach (var award in awards)
             {
                 var quote = quotes[award.SupplierQuotedItemId!.Value];
@@ -1330,16 +1458,413 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                     BusinessUnitId = command.BusinessUnitId, SourcingAwardId = award.Id, SupplierQuotedItemId = quote.Id,
                     RfqId = command.RfqId, RfqItemId = rfqItemId, ProductId = productId,
                     WarehouseId = command.WarehouseId, InventoryId = inventory?.Id,
-                    OrderedQuantity = orderedQuantity, UnitCost = quote.UnitPrice!.Value, LandedUnitCost = award.LandedUnitCost!.Value
+                    OrderedQuantity = orderedQuantity, UnitCost = quote.UnitPrice!.Value, LandedUnitCost = award.LandedUnitCost!.Value,
+                    // Seeded from master data so the customs fields are populated by default rather
+                    // than left null for someone to notice at the border. Product carries no HS code
+                    // today, so that stays a per-order entry until it earns a place on the catalogue.
+                    CountryOfOrigin = productOrigins.GetValueOrDefault(productId)
                 });
                 award.Status = "CONVERTED_TO_PO";
                 award.Version++;
             }
             AddEvent(command.BusinessUnitId, "SupplierPurchaseOrder", po.Id, po.Version, "SUPPLIER_PO_CREATED",
-                command.Actor, command.CorrelationId, command.IdempotencyKey, JsonSerializer.Serialize(new { command.AwardIds, command.WarehouseId }), now);
+                command.Actor, command.CorrelationId, command.IdempotencyKey, JsonSerializer.Serialize(new
+                {
+                    command.AwardIds,
+                    command.WarehouseId,
+                    po.DemandSource,
+                    // What the customer chain could and could not prove at the moment the order was
+                    // committed, recorded with the decision. A null key here is a gap that existed
+                    // then, not one introduced later by a document being deleted.
+                    po.CustomerPurchaseOrderId,
+                    po.CustomerOrderId,
+                    po.QuoteId,
+                    customerOriginUnresolved = customerOrigin.UnresolvedReasons
+                }), now);
             await _db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
-            return new PurchaseOrderResult(po.Id, po.PurchaseOrderNumber, po.Status, false);
+            return new PurchaseOrderResult(po.Id, po.PurchaseOrderNumber, po.Status, false, po.Version);
+        });
+    }
+
+    /// <summary>
+    /// FR-SPO-01. Moves a draft supplier purchase order to APPROVED, naming the buyer who
+    /// authorised it and the moment they did.
+    ///
+    /// <para>Approval is a separate act from release for a reason: the auto-drafted order that
+    /// arrives from an award is a proposal, and until now the only record that anyone had accepted
+    /// it was the fact that someone had pressed issue. Nothing was written down, so nothing could
+    /// be reviewed, and nothing could be checked against the award decision that produced it.</para>
+    ///
+    /// <para>The segregation-of-duties check compares this approver against the approver of every
+    /// sourcing award on the order. Where an award carries no approver at all the check is refused
+    /// rather than skipped — an unverifiable control that reports success is worse than no control,
+    /// because it produces an audit trail that says a separation was observed when nobody
+    /// established that it was.</para>
+    /// </summary>
+    public async Task<PurchaseOrderApprovalResult> ApprovePurchaseOrderAsync(
+        ApprovePurchaseOrderCommand command, CancellationToken ct = default)
+    {
+        ValidateCommand(command.BusinessUnitId, command.IdempotencyKey, command.Actor, command.CorrelationId);
+        if (command.ApprovedByUserId is not > 0)
+            throw new ProcurementValidationException(
+                "An authenticated approver identity is required to approve a purchase order.");
+        var approverId = command.ApprovedByUserId.Value;
+        var segregationEnforced = _approvalOptions.SegregationOfDutiesEnforced;
+        var hash = Hash(new { command.PurchaseOrderId, command.ExpectedVersion, approverId });
+        var strategy = _db.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(async () =>
+        {
+            _db.ChangeTracker.Clear();
+            await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+            var replayEvent = await _db.ProcurementEvents.AsNoTracking().SingleOrDefaultAsync(x =>
+                x.BusinessUnitId == command.BusinessUnitId && x.EventType == "SUPPLIER_PO_APPROVED"
+                && x.IdempotencyKey == command.IdempotencyKey.Trim(), ct);
+            if (replayEvent is not null)
+            {
+                using var replayPayload = JsonDocument.Parse(replayEvent.PayloadJson);
+                EnsureReplay(replayPayload.RootElement.GetProperty("requestHash").GetString(), hash);
+                var replayed = await _db.SupplierPurchaseOrders.SingleAsync(x =>
+                    x.BusinessUnitId == command.BusinessUnitId && x.Id == replayEvent.AggregateId, ct);
+                await tx.CommitAsync(ct);
+                return new PurchaseOrderApprovalResult(replayed.Id, replayed.PurchaseOrderNumber, replayed.Status,
+                    replayed.ApprovedByUserId ?? approverId, replayed.ApprovedBy ?? command.Actor.Trim(),
+                    replayed.ApprovedOn ?? replayEvent.OccurredOn, replayed.Version,
+                    replayPayload.RootElement.GetProperty("segregationOfDutiesEnforced").GetBoolean(), true);
+            }
+
+            var po = await _db.SupplierPurchaseOrders.Include(x => x.Lines).SingleOrDefaultAsync(x =>
+                    x.BusinessUnitId == command.BusinessUnitId && x.Id == command.PurchaseOrderId, ct)
+                ?? throw new ProcurementValidationException("Purchase order was not found.");
+            if (po.Version != command.ExpectedVersion)
+                throw new ProcurementConflictException("The purchase order changed; refresh before approving.");
+            if (po.Status == SupplierPurchaseOrderStatuses.Approved)
+                throw new ProcurementConflictException("The purchase order is already approved.");
+            if (po.Status != SupplierPurchaseOrderStatuses.Draft)
+                throw new ProcurementConflictException("Only a draft purchase order can be approved.");
+
+            // Tenant-scoped by business unit as well as by id: the award ids arrive from this
+            // tenant's own PO lines, but re-reading them without the tenant predicate would make a
+            // cross-tenant id collision decide a control question.
+            var awardIds = po.Lines.Select(x => x.SourcingAwardId).Distinct().ToArray();
+            var awards = await _db.Set<SourcingAward>().AsNoTracking()
+                .Where(x => x.BusinessUnitId == command.BusinessUnitId && awardIds.Contains(x.Id))
+                .Select(x => new { x.Id, x.AwardedByUserId }).ToArrayAsync(ct);
+            var awardApprovers = awards.Where(x => x.AwardedByUserId.HasValue)
+                .Select(x => x.AwardedByUserId!.Value).Distinct().ToArray();
+            if (segregationEnforced)
+            {
+                if (awards.Length != awardIds.Length || awards.Any(x => !x.AwardedByUserId.HasValue))
+                    throw new ProcurementValidationException(
+                        "Segregation of duties cannot be verified: a sourcing award on this purchase order "
+                        + "does not record the user who approved it.");
+                if (awardApprovers.Contains(approverId))
+                    throw new ProcurementValidationException(
+                        "Segregation of duties refuses this approval: the same user approved the sourcing "
+                        + "award for these lines. A second buyer must approve the purchase order, or "
+                        + $"{ProcurementApprovalOptions.SectionName}:SegregationOfDutiesEnforced must be "
+                        + "turned off deliberately.");
+            }
+
+            var now = DateTime.UtcNow;
+            po.Status = SupplierPurchaseOrderStatuses.Approved;
+            po.ApprovedByUserId = approverId;
+            po.ApprovedBy = command.Actor.Trim();
+            po.ApprovedOn = now;
+            po.Version++;
+            po.ModifiedOn = now;
+            po.ModifiedBy = command.Actor.Trim();
+            AddEvent(command.BusinessUnitId, "SupplierPurchaseOrder", po.Id, po.Version, "SUPPLIER_PO_APPROVED",
+                command.Actor, command.CorrelationId, command.IdempotencyKey,
+                JsonSerializer.Serialize(new
+                {
+                    requestHash = hash,
+                    approvedByUserId = approverId,
+                    approvedBy = po.ApprovedBy,
+                    approvedOn = now,
+                    // The policy is recorded with the decision. Configuration can be changed
+                    // afterwards; what a past approval was actually checked against cannot.
+                    segregationOfDutiesEnforced = segregationEnforced,
+                    awardIds,
+                    awardApproverUserIds = awardApprovers
+                }), now);
+            await _db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
+            return new PurchaseOrderApprovalResult(po.Id, po.PurchaseOrderNumber, po.Status, approverId,
+                po.ApprovedBy!, now, po.Version, segregationEnforced, false);
+        });
+    }
+
+    /// <summary>Incoterms are stored upper-case and validated against the 2020 set, never free text.</summary>
+    private static string? NormalizeIncoterm(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        var code = value.Trim().ToUpperInvariant();
+        if (!Incoterms.Codes.Contains(code))
+            throw new ProcurementValidationException(
+                $"'{value.Trim()}' is not an Incoterms 2020 code. Use one of: "
+                + string.Join(", ", Incoterms.Codes.OrderBy(x => x, StringComparer.Ordinal)) + ".");
+        return code;
+    }
+
+    private static string? NormalizePort(string? value, string field)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        var port = value.Trim();
+        if (port.Length > 120)
+            throw new ProcurementValidationException($"{field} must be 120 characters or fewer.");
+        return port;
+    }
+
+    private static string? NormalizeCustomsField(string? value, int maxLength, string field)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        var text = value.Trim();
+        if (text.Length > maxLength)
+            throw new ProcurementValidationException($"{field} must be {maxLength} characters or fewer.");
+        return text;
+    }
+
+    /// <summary>
+    /// FR-SPO-06. Sets or corrects the shipping and customs terms of an order that has not yet
+    /// been dispatched to the supplier.
+    ///
+    /// <para>Null means "leave unchanged", not "clear". A sparse amendment is the common case —
+    /// correcting one line's HS code — and treating an omitted field as a deletion would let a
+    /// narrow edit silently wipe the Incoterm the rest of the order depends on.</para>
+    /// </summary>
+    public async Task<PurchaseOrderTradeTermsResult> AmendPurchaseOrderTradeTermsAsync(
+        AmendPurchaseOrderTradeTermsCommand command, CancellationToken ct = default)
+    {
+        ValidateCommand(command.BusinessUnitId, command.IdempotencyKey, command.Actor, command.CorrelationId);
+
+        var incoterm = NormalizeIncoterm(command.Incoterm);
+        var portOfLoading = NormalizePort(command.PortOfLoading, "Port of loading");
+        var portOfDischarge = NormalizePort(command.PortOfDischarge, "Port of discharge");
+        var lineEdits = (command.Lines ?? []).Select(line => new PurchaseOrderLineTradeTerms(
+            line.LineId,
+            NormalizeCustomsField(line.HsCode, 20, "HS code"),
+            NormalizeCustomsField(line.CountryOfOrigin, 100, "Country of origin"))).ToArray();
+        if (lineEdits.Select(x => x.LineId).Distinct().Count() != lineEdits.Length)
+            throw new ProcurementValidationException("A purchase order line can appear only once in an amendment.");
+        // A line entry whose fields all normalise away — omitted, empty or whitespace — asks for
+        // nothing. Accepting it would bump the version and write an amendment event recording a
+        // change that never happened, which is a false entry in the audit trail rather than a
+        // harmless no-op.
+        var emptyLines = lineEdits.Where(x => x.HsCode is null && x.CountryOfOrigin is null)
+            .Select(x => x.LineId).ToArray();
+        if (emptyLines.Length > 0)
+            throw new ProcurementValidationException(
+                $"Purchase order line(s) {string.Join(", ", emptyLines)} were listed without an HS code "
+                + "or a country of origin. Remove them, or give them a value to set.");
+        if (incoterm is null && portOfLoading is null && portOfDischarge is null && lineEdits.Length == 0)
+            throw new ProcurementValidationException("The amendment changes nothing.");
+
+        var hash = Hash(new
+        {
+            command.PurchaseOrderId, command.ExpectedVersion, incoterm, portOfLoading, portOfDischarge,
+            lines = lineEdits
+        });
+        var strategy = _db.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(async () =>
+        {
+            _db.ChangeTracker.Clear();
+            await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+            var replayEvent = await _db.ProcurementEvents.AsNoTracking().SingleOrDefaultAsync(x =>
+                x.BusinessUnitId == command.BusinessUnitId && x.EventType == "SUPPLIER_PO_TRADE_TERMS_AMENDED"
+                && x.IdempotencyKey == command.IdempotencyKey.Trim(), ct);
+            if (replayEvent is not null)
+            {
+                using var replayPayload = JsonDocument.Parse(replayEvent.PayloadJson);
+                EnsureReplay(replayPayload.RootElement.GetProperty("requestHash").GetString(), hash);
+                var replayed = await _db.SupplierPurchaseOrders.Include(x => x.Lines).SingleAsync(x =>
+                    x.BusinessUnitId == command.BusinessUnitId && x.Id == replayEvent.AggregateId, ct);
+                await tx.CommitAsync(ct);
+                return TradeTermsResult(replayed, true);
+            }
+
+            var po = await _db.SupplierPurchaseOrders.Include(x => x.Lines).SingleOrDefaultAsync(x =>
+                    x.BusinessUnitId == command.BusinessUnitId && x.Id == command.PurchaseOrderId, ct)
+                ?? throw new ProcurementValidationException("Purchase order was not found.");
+            if (po.Version != command.ExpectedVersion)
+                throw new ProcurementConflictException("The purchase order changed; refresh before amending.");
+            if (po.Status is not (SupplierPurchaseOrderStatuses.Draft or SupplierPurchaseOrderStatuses.Approved))
+                throw new ProcurementConflictException(
+                    "Shipping and customs terms can only be changed before the order goes to the supplier. "
+                    + "Cancel and re-raise the order to change them now.");
+
+            var unknown = lineEdits.Select(x => x.LineId).Except(po.Lines.Select(x => x.Id)).ToArray();
+            if (unknown.Length > 0)
+                throw new ProcurementValidationException(
+                    $"Purchase order line(s) {string.Join(", ", unknown)} do not belong to this purchase order.");
+
+            var now = DateTime.UtcNow;
+            if (incoterm is not null) po.Incoterm = incoterm;
+            if (portOfLoading is not null) po.PortOfLoading = portOfLoading;
+            if (portOfDischarge is not null) po.PortOfDischarge = portOfDischarge;
+            foreach (var edit in lineEdits)
+            {
+                var line = po.Lines.Single(x => x.Id == edit.LineId);
+                if (edit.HsCode is not null) line.HsCode = edit.HsCode;
+                if (edit.CountryOfOrigin is not null) line.CountryOfOrigin = edit.CountryOfOrigin;
+            }
+            po.Version++;
+            po.ModifiedOn = now;
+            po.ModifiedBy = command.Actor.Trim();
+            AddEvent(command.BusinessUnitId, "SupplierPurchaseOrder", po.Id, po.Version,
+                "SUPPLIER_PO_TRADE_TERMS_AMENDED", command.Actor, command.CorrelationId, command.IdempotencyKey,
+                JsonSerializer.Serialize(new
+                {
+                    requestHash = hash,
+                    incoterm = po.Incoterm,
+                    portOfLoading = po.PortOfLoading,
+                    portOfDischarge = po.PortOfDischarge,
+                    lines = po.Lines.Select(x => new { x.Id, x.HsCode, x.CountryOfOrigin }).ToArray()
+                }), now);
+            await _db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
+            return TradeTermsResult(po, false);
+        });
+    }
+
+    private static PurchaseOrderTradeTermsResult TradeTermsResult(SupplierPurchaseOrder po, bool replayed)
+        => new(po.Id, po.PurchaseOrderNumber, po.Incoterm, po.PortOfLoading, po.PortOfDischarge,
+            po.Lines.OrderBy(x => x.Id)
+                .Select(x => new PurchaseOrderLineTradeTerms(x.Id, x.HsCode, x.CountryOfOrigin)).ToArray(),
+            po.Version, replayed);
+
+    /// <summary>
+    /// FR-SPO-03. Records the supplier's answer to a dispatched order.
+    ///
+    /// <para>Only ACCEPTED advances <c>Status</c> to ACKNOWLEDGED. A counter is a supplier asking
+    /// for different terms and a rejection is a refusal; neither is agreement, so neither is
+    /// allowed to display as an acknowledged order. All three stamp
+    /// <c>AcknowledgementStatus</c>/<c>AcknowledgedOn</c>, which is what stops
+    /// <see cref="Sla.SlaSweepWorker"/> escalating an order the supplier has in fact answered —
+    /// the buyer still owes a decision on a counter or a rejection, and that decision is a
+    /// separate governed action (re-source, or cancel).</para>
+    ///
+    /// <para>A counter's revised lead time and committed ship date are written onto the order
+    /// because the ship-date reminder sweep reads them: a counter that moved the date silently
+    /// would keep reminding against a date the supplier has already disowned.</para>
+    /// </summary>
+    public async Task<SupplierPurchaseOrderAcknowledgementResult> AcknowledgePurchaseOrderAsync(
+        AcknowledgeSupplierPurchaseOrderCommand command, CancellationToken ct = default)
+    {
+        ValidateCommand(command.BusinessUnitId, command.IdempotencyKey, command.Actor, command.CorrelationId);
+
+        var status = (command.AcknowledgementStatus ?? string.Empty).Trim().ToUpperInvariant();
+        if (status is not (SupplierAcknowledgementStatuses.Accepted
+            or SupplierAcknowledgementStatuses.Rejected or SupplierAcknowledgementStatuses.Countered))
+            throw new ProcurementValidationException(
+                "A supplier acknowledgement must be ACCEPTED, REJECTED or COUNTERED.");
+
+        var acknowledgedBy = (command.AcknowledgedBy ?? string.Empty).Trim();
+        if (acknowledgedBy.Length == 0)
+            throw new ProcurementValidationException(
+                "Record who at the supplier acknowledged this order.");
+        if (acknowledgedBy.Length > 255)
+            throw new ProcurementValidationException(
+                "The supplier contact name must be 255 characters or fewer.");
+
+        var note = string.IsNullOrWhiteSpace(command.Note) ? null : command.Note.Trim();
+        if (note is { Length: > 1000 })
+            throw new ProcurementValidationException(
+                "The acknowledgement note must be 1000 characters or fewer.");
+        if (status == SupplierAcknowledgementStatuses.Rejected && note is null)
+            throw new ProcurementValidationException(
+                "A rejected order must record the supplier's reason.");
+
+        if (command.RevisedLeadTimeDays is <= 0)
+            throw new ProcurementValidationException(
+                "A revised lead time must be a positive number of days.");
+        if (status == SupplierAcknowledgementStatuses.Countered
+            && command.RevisedLeadTimeDays is null && command.CommittedShipDate is null)
+            throw new ProcurementValidationException(
+                "A countered order must state the revised lead time or the committed ship date the "
+                + "supplier is offering instead.");
+        // A changed lead time IS the counter. Accepting it under the ACCEPTED label would record
+        // agreement to terms nobody agreed to, and a rejected order has no schedule at all.
+        if (status != SupplierAcknowledgementStatuses.Countered && command.RevisedLeadTimeDays is not null)
+            throw new ProcurementValidationException(
+                "A revised lead time is a counter-offer. Record this answer as COUNTERED.");
+        if (status == SupplierAcknowledgementStatuses.Rejected && command.CommittedShipDate is not null)
+            throw new ProcurementValidationException(
+                "A rejected order has no committed ship date.");
+
+        var hash = Hash(new
+        {
+            command.PurchaseOrderId, command.ExpectedVersion, status, acknowledgedBy,
+            command.RevisedLeadTimeDays, command.CommittedShipDate, note
+        });
+        var strategy = _db.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(async () =>
+        {
+            _db.ChangeTracker.Clear();
+            await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+            var replayEvent = await _db.ProcurementEvents.AsNoTracking().SingleOrDefaultAsync(x =>
+                x.BusinessUnitId == command.BusinessUnitId && x.EventType == "SUPPLIER_PO_ACKNOWLEDGED"
+                && x.IdempotencyKey == command.IdempotencyKey.Trim(), ct);
+            if (replayEvent is not null)
+            {
+                using var replayPayload = JsonDocument.Parse(replayEvent.PayloadJson);
+                EnsureReplay(replayPayload.RootElement.GetProperty("requestHash").GetString(), hash);
+                var replayed = await _db.SupplierPurchaseOrders.SingleAsync(x =>
+                    x.BusinessUnitId == command.BusinessUnitId && x.Id == replayEvent.AggregateId, ct);
+                await tx.CommitAsync(ct);
+                return new SupplierPurchaseOrderAcknowledgementResult(replayed.Id, replayed.PurchaseOrderNumber,
+                    replayed.Status, replayed.AcknowledgementStatus ?? status,
+                    replayed.AcknowledgedBy ?? acknowledgedBy, replayed.AcknowledgedOn ?? replayEvent.OccurredOn,
+                    replayed.RevisedLeadTimeDays, replayed.CommittedShipDate, replayed.AcknowledgementNote,
+                    replayed.Version, true);
+            }
+
+            var po = await _db.SupplierPurchaseOrders.SingleOrDefaultAsync(x =>
+                    x.BusinessUnitId == command.BusinessUnitId && x.Id == command.PurchaseOrderId, ct)
+                ?? throw new ProcurementValidationException("Purchase order was not found.");
+            if (po.Version != command.ExpectedVersion)
+                throw new ProcurementConflictException("The purchase order changed; refresh before acknowledging.");
+            if (po.AcknowledgementStatus is not null)
+                throw new ProcurementConflictException(
+                    "This order already carries a supplier acknowledgement.");
+            if (po.Status is not (SupplierPurchaseOrderStatuses.Sent or SupplierPurchaseOrderStatuses.Issued))
+                throw new ProcurementConflictException(
+                    "Only an order that has been dispatched to the supplier can be acknowledged.");
+
+            var now = DateTime.UtcNow;
+            if (command.CommittedShipDate is { } shipDate && shipDate < DateOnly.FromDateTime(now))
+                throw new ProcurementValidationException(
+                    "The committed ship date cannot be in the past.");
+
+            po.AcknowledgementStatus = status;
+            po.AcknowledgedBy = acknowledgedBy;
+            po.AcknowledgedOn = now;
+            po.AcknowledgementNote = note;
+            if (command.RevisedLeadTimeDays is { } leadTime) po.RevisedLeadTimeDays = leadTime;
+            if (command.CommittedShipDate is { } committed) po.CommittedShipDate = committed;
+            if (status == SupplierAcknowledgementStatuses.Accepted)
+                po.Status = SupplierPurchaseOrderStatuses.Acknowledged;
+            po.Version++;
+            po.ModifiedOn = now;
+            po.ModifiedBy = command.Actor.Trim();
+            AddEvent(command.BusinessUnitId, "SupplierPurchaseOrder", po.Id, po.Version, "SUPPLIER_PO_ACKNOWLEDGED",
+                command.Actor, command.CorrelationId, command.IdempotencyKey,
+                JsonSerializer.Serialize(new
+                {
+                    requestHash = hash,
+                    acknowledgementStatus = status,
+                    acknowledgedBy,
+                    acknowledgedOn = now,
+                    revisedLeadTimeDays = po.RevisedLeadTimeDays,
+                    committedShipDate = po.CommittedShipDate,
+                    note,
+                    resultingStatus = po.Status
+                }), now);
+            await _db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
+            return new SupplierPurchaseOrderAcknowledgementResult(po.Id, po.PurchaseOrderNumber, po.Status,
+                status, acknowledgedBy, now, po.RevisedLeadTimeDays, po.CommittedShipDate, note,
+                po.Version, false);
         });
     }
 
@@ -1361,6 +1886,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
             var replayEvent = await _db.ProcurementEvents.AsNoTracking().SingleOrDefaultAsync(x =>
                 x.BusinessUnitId == command.BusinessUnitId && x.EventType == "SUPPLIER_PO_ISSUED"
@@ -1372,15 +1898,25 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 var replayPo = await _db.SupplierPurchaseOrders.SingleAsync(x => x.BusinessUnitId == command.BusinessUnitId
                     && x.Id == replayEvent.AggregateId, ct);
                 await tx.CommitAsync(ct);
-                return new PurchaseOrderResult(replayPo.Id, replayPo.PurchaseOrderNumber, replayPo.Status, true);
+                return new PurchaseOrderResult(replayPo.Id, replayPo.PurchaseOrderNumber, replayPo.Status, true, replayPo.Version);
             }
 
             var po = await _db.SupplierPurchaseOrders.Include(x => x.Lines).SingleOrDefaultAsync(x => x.BusinessUnitId == command.BusinessUnitId
                 && x.Id == command.PurchaseOrderId, ct) ?? throw new ProcurementValidationException("Purchase order was not found.");
             if (po.Version != command.ExpectedVersion)
                 throw new ProcurementConflictException("The purchase order changed; refresh before issuing.");
-            if (po.Status != SupplierPurchaseOrderStatuses.Draft)
-                throw new ProcurementConflictException("Only a draft purchase order can be issued.");
+            // FR-SPO-01. Release is now downstream of a named approval. A draft is a proposal: it
+            // used to be releasable by anyone holding Orders/Edit, with no record that a buyer had
+            // ever accepted the commitment. ISSUED rows raised before this gate existed keep their
+            // meaning — this refuses a new release, it does not reinterpret an old one.
+            if (po.Status == SupplierPurchaseOrderStatuses.Draft)
+                throw new ProcurementConflictException(
+                    "A draft purchase order must be approved before it can be released to the supplier.");
+            if (po.Status != SupplierPurchaseOrderStatuses.Approved)
+                throw new ProcurementConflictException("Only an approved purchase order can be released to the supplier.");
+            if (po.ApprovedByUserId is null || po.ApprovedOn is null)
+                throw new ProcurementConflictException(
+                    "The purchase order is marked approved but records no approver; it cannot be released.");
             var now = DateTime.UtcNow;
             if (deliveredOn!.Value < po.CreatedOn || deliveredOn.Value > now.AddMinutes(5))
                 throw new ProcurementValidationException("The delivery evidence timestamp must be UTC, after PO creation, and not future-dated.");
@@ -1392,7 +1928,16 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 && x.ValidUntil != null && x.ValidUntil > now, ct);
             if (validQuoteCount != quoteIds.Length)
                 throw new ProcurementValidationException("Every purchase order line must retain an unexpired authoritative supplier quote at issuance.");
-            po.Status = SupplierPurchaseOrderStatuses.Issued;
+            // FR-SPO-04. Release writes SENT, not the legacy ISSUED that conflated "a buyer
+            // authorised this" with "the supplier has it". Both halves of that split now exist in
+            // data: APPROVED is written by ApprovePurchaseOrderAsync, SENT here. ISSUED is not
+            // retired — rows raised before the split carry it and rewriting history is worse than
+            // mapping it — so it stays a readable synonym for this state and every guard that
+            // accepts one accepts the other (SupplierPurchaseOrderStatuses.WithSupplier, and the
+            // OpenForReceipt / Cancellable sets built beside it).
+            po.Status = SupplierPurchaseOrderStatuses.Sent;
+            // Dispatch, not approval, is what a supplier's acknowledgement is late against.
+            po.SentToSupplierOn = deliveredOn;
             po.Version++;
             po.ModifiedOn = now;
             po.ModifiedBy = command.Actor.Trim();
@@ -1443,7 +1988,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 }), deliveredOn.Value);
             await _db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
-            return new PurchaseOrderResult(po.Id, po.PurchaseOrderNumber, po.Status, false);
+            return new PurchaseOrderResult(po.Id, po.PurchaseOrderNumber, po.Status, false, po.Version);
         });
     }
 
@@ -1471,6 +2016,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
             var replayEvent = await _db.ProcurementEvents.AsNoTracking().SingleOrDefaultAsync(x =>
                 x.BusinessUnitId == command.BusinessUnitId && x.EventType == "SUPPLIER_PO_CANCELLED"
@@ -1482,7 +2028,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 var replayPo = await _db.SupplierPurchaseOrders.SingleAsync(x => x.BusinessUnitId == command.BusinessUnitId
                     && x.Id == replayEvent.AggregateId, ct);
                 await tx.CommitAsync(ct);
-                return new PurchaseOrderResult(replayPo.Id, replayPo.PurchaseOrderNumber, replayPo.Status, true);
+                return new PurchaseOrderResult(replayPo.Id, replayPo.PurchaseOrderNumber, replayPo.Status, true, replayPo.Version);
             }
 
             var po = await _db.SupplierPurchaseOrders.Include(x => x.Lines)
@@ -1492,15 +2038,20 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 throw new ProcurementConflictException("The purchase order changed; refresh before cancelling.");
             if (po.Status == SupplierPurchaseOrderStatuses.Cancelled)
                 throw new ProcurementConflictException("The purchase order is already cancelled.");
-            // The only remaining statuses are PARTIALLY_RECEIVED and RECEIVED, both of which mean
-            // stock has physically landed and is already governed by the reservation ledger;
-            // cancelling their paperwork would strand it. The line-level check is the same rule
-            // stated against the quantities, so a future status transition cannot bypass it.
-            if (po.Status is not (SupplierPurchaseOrderStatuses.Draft or SupplierPurchaseOrderStatuses.Issued)
+            // The excluded statuses are PARTIALLY_RECEIVED and RECEIVED, where stock has physically
+            // landed and is already governed by the reservation ledger, and IN_PRODUCTION and
+            // SHIPPED, where the supplier has committed materially. The line-level quantity check
+            // states the same rule against the numbers, so a future status transition cannot
+            // bypass it.
+            // DRAFT, APPROVED, SENT, ISSUED and ACKNOWLEDGED are all cancellable: an order that is
+            // authorised, or even accepted, but against which nothing has shipped has committed
+            // nothing physical, and leaving it uncancellable would recreate exactly the stranded-PO
+            // trap this method exists to close — one status further along.
+            if (!SupplierPurchaseOrderStatuses.Cancellable.Contains(po.Status)
                 || po.Lines.Any(x => x.ReceivedQuantity > 0m))
                 throw new ProcurementConflictException(
-                    "Goods have already been received against this purchase order; only a draft or "
-                    + "issued purchase order can be cancelled.");
+                    "This purchase order can no longer be cancelled: either goods have been received "
+                    + "against it, or the supplier has already committed materially to it.");
 
             var now = DateTime.UtcNow;
             po.Status = SupplierPurchaseOrderStatuses.Cancelled;
@@ -1544,7 +2095,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 JsonSerializer.Serialize(new { requestHash = hash, reason, awardIds, incomingIds }), now);
             await _db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
-            return new PurchaseOrderResult(po.Id, po.PurchaseOrderNumber, po.Status, false);
+            return new PurchaseOrderResult(po.Id, po.PurchaseOrderNumber, po.Status, false, po.Version);
         });
     }
 
@@ -1560,6 +2111,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         {
             return await strategy.ExecuteAsync(async () =>
             {
+                _db.ChangeTracker.Clear();
             await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
             var replay = await _db.GoodsReceipts.SingleOrDefaultAsync(x => x.BusinessUnitId == command.BusinessUnitId
                 && x.IdempotencyKey == command.IdempotencyKey.Trim(), ct);
@@ -1585,8 +2137,9 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             var po = await _db.SupplierPurchaseOrders.Include(x => x.Lines).SingleOrDefaultAsync(x => x.BusinessUnitId == command.BusinessUnitId
                 && x.Id == command.PurchaseOrderId, ct) ?? throw new ProcurementValidationException("Purchase order was not found.");
             if (po.Version != command.ExpectedPurchaseOrderVersion) throw new ProcurementConflictException("The purchase order changed; refresh before receiving.");
-            if (po.Status is not (SupplierPurchaseOrderStatuses.Issued or SupplierPurchaseOrderStatuses.PartiallyReceived))
-                throw new ProcurementConflictException("Only an issued or partially received purchase order is open for receipt.");
+            if (!SupplierPurchaseOrderStatuses.OpenForReceipt.Contains(po.Status))
+                throw new ProcurementConflictException(
+                    "Only a purchase order that is with the supplier and not yet settled is open for receipt.");
             var now = DateTime.UtcNow;
             var issuedOn = await _db.ProcurementEvents.AsNoTracking()
                 .Where(x => x.BusinessUnitId == command.BusinessUnitId
@@ -1608,6 +2161,9 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             };
             _db.GoodsReceipts.Add(receipt);
             await _db.SaveChangesAsync(ct);
+            // FR-MTR-01. Collected as each line is posted, then handed to the lot recorder inside
+            // this same transaction — see the call below the loop.
+            var lotLines = new List<Traceability.ReceiptLotLine>(command.Lines.Count);
             foreach (var requested in command.Lines)
             {
                 var line = po.Lines.Single(x => x.Id == requested.PurchaseOrderLineId);
@@ -1639,6 +2195,9 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 line.InventoryId = inventory.Id;
                 line.ReceivedQuantity += requested.Quantity;
                 line.Version++;
+                lotLines.Add(new Traceability.ReceiptLotLine(
+                    line.Id, line.ProductId, inventory.Id, command.WarehouseId, requested.Quantity,
+                    line.CountryOfOrigin, line.RfqItemId, requested.Lot));
                 if (line.IncomingInventoryId is not null)
                 {
                     var incoming = await _db.IncomingInventory.SingleAsync(x => x.BusinessUnitId == command.BusinessUnitId
@@ -1655,13 +2214,46 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                         ? IncomingInventoryStatus.Received : IncomingInventoryStatus.PartiallyReceived;
                 }
             }
+            // FR-MTR-01 — the integration point. Received material becomes identifiable lots inside
+            // the receipt's own transaction, so a receipt can never commit stock that no trace can
+            // reach. Every line gets a lot: the tracking mode decides whether the operator supplies
+            // a serial, a batch number, or nothing at all.
+            var lots = await _lotRecorder.RecordReceiptLotsAsync(new Traceability.ReceiptLotContext(
+                command.BusinessUnitId, receipt.Id, receipt.ReceiptNumber, po.Id, po.SupplierId,
+                po.CommercialCaseId, po.NexoraSerial, command.ReceivedOn, command.Actor.Trim(), lotLines), ct);
+
+            // FR-MAS-05 — the Gate 4/Gate 5 seam. The receipt is the human act; the inbound shipment
+            // that carried the material is settled here, in this same transaction, and stamps
+            // RECEIVED_AT_WAREHOUSE only once the receipt has taken in everything it carried. The
+            // reverse wiring — a milestone raising a receipt — is deliberately NOT built: see
+            // InboundShipmentReceiptSettlement for why a batch- or serial-tracked line makes it
+            // impossible without inventing a lot number.
+            var settlements = await _receiptSettlement.SettleAsync(
+                new InboundLogistics.ReceiptSettlementContext(
+                    command.BusinessUnitId, receipt.Id, receipt.ReceiptNumber, po.Id, command.ReceivedOn,
+                    command.Actor.Trim(), command.CorrelationId, command.IdempotencyKey,
+                    command.Lines.Select(x => new InboundLogistics.ReceiptSettlementLine(
+                        x.PurchaseOrderLineId, x.Quantity)).ToArray()),
+                ct);
+
             po.Status = po.Lines.All(x => x.ReceivedQuantity >= x.OrderedQuantity)
                 ? SupplierPurchaseOrderStatuses.Received : SupplierPurchaseOrderStatuses.PartiallyReceived;
             po.Version++;
             po.ModifiedOn = now;
             po.ModifiedBy = command.Actor.Trim();
             AddEvent(command.BusinessUnitId, "GoodsReceipt", receipt.Id, receipt.Version, "GOODS_RECEIPT_POSTED",
-                command.Actor, command.CorrelationId, command.IdempotencyKey, JsonSerializer.Serialize(new { po.Id, command.Lines }), now);
+                command.Actor, command.CorrelationId, command.IdempotencyKey, JsonSerializer.Serialize(new
+                {
+                    po.Id,
+                    command.Lines,
+                    lots = lots.Select(x => new { x.Id, x.LotNumber, x.TrackingMode, x.QuantityReceived }),
+                    // Which inbound shipments this receipt settled, so the goods-receipt event
+                    // itself names the crossing rather than leaving it to be inferred.
+                    shipments = settlements.Select(x => new
+                    {
+                        x.ShipmentId, x.ShipmentNumber, x.QuantityApplied, x.ReceiptState, x.MilestoneStamped
+                    }),
+                }), now);
             await _db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
                 return new GoodsReceiptResult(receipt.Id, receipt.ReceiptNumber, po.Status, false);
@@ -1952,7 +2544,57 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             row.QuoteDate.Value.AddDays(row.LeadTimeDays.Value) > requiredOn.Value)
             blockers.Add("delivery date missed");
         return new QuoteComparisonLine(row.Id, row.SupplierId, row.Quantity, row.AvailableQuantity, row.UnitPrice ?? 0,
-            row.LandedUnitCost, row.CurrencyId ?? 0, row.LeadTimeDays, row.ReliabilitySnapshot, row.ValidUntil, blockers, blockers.Count == 0);
+            row.LandedUnitCost, row.CurrencyId ?? 0, row.LeadTimeDays, row.ReliabilitySnapshot, row.ValidUntil, blockers,
+            blockers.Count == 0, CostCompletenessWarnings(row, canonicalRevision));
+    }
+
+    /// <summary>
+    /// Says out loud when an offer's cost build-up looks incomplete, without refusing it.
+    ///
+    /// <para>A supplier quoting EXW or FOB has, by definition, not paid Saudi import duty — the
+    /// buyer will, at the border, after the price is agreed. When such a quote records zero duty,
+    /// the landed cost is short by the whole duty, and the customer price derived from it is short
+    /// by <c>duty / (1 - margin)</c>: at 5% duty and a 20% target margin, 6.25% under on every
+    /// import. Nothing in the platform used to say so; the offer simply sorted best on landed cost
+    /// and won the comparison for being incomplete.</para>
+    ///
+    /// <para>This is a warning and not a blocker, and it derives NOTHING. It does not compute a
+    /// duty, look up a rate, or read an HS code — decision R8 rules all of that out. It states the
+    /// two facts it can see, the Incoterm and the recorded duty, and leaves the buyer to decide.</para>
+    /// </summary>
+    private static IReadOnlyCollection<string> CostCompletenessWarnings(SupplierQuotedItem row,
+        SupplierQuotes.SupplierQuoteRevision? canonicalRevision)
+    {
+        // The EFFECTIVE Incoterm, not the captured one. A reviewer who corrects EXW to DDP has
+        // changed the commercial position, and a warning that went on reading the raw column would
+        // be the same accepted-and-ignored failure this whole change is about, one level down.
+        var incoterm = canonicalRevision is null ? null
+            : AcceptedHeaderCorrection(canonicalRevision, "Incoterms") ?? canonicalRevision.Incoterms;
+        if (row.DutyCost != 0m || !Incoterms.IsNonDelivered(incoterm)) return [];
+        return [$"Incoterm {incoterm!.Trim().ToUpperInvariant()} is not a delivered term, so the " +
+            "Supplier has not cleared import customs and duty is not inside this price — but the " +
+            "offer records no duty. Landed cost, and every price derived from it, is understated " +
+            "by the duty until it is captured."];
+    }
+
+    /// <summary>
+    /// The latest ACCEPTED correction to a header field on a canonical revision, or null when the
+    /// field has never been corrected. Header evidence is the evidence with no line behind it.
+    /// </summary>
+    private static string? AcceptedHeaderCorrection(
+        SupplierQuotes.SupplierQuoteRevision revision, string fieldName)
+    {
+        var latestDecisions = revision.ReviewDecisions.GroupBy(x => x.SupplierQuoteFieldEvidenceId)
+            .ToDictionary(x => x.Key, x => x.OrderByDescending(y => y.ReviewedOn)
+                .ThenByDescending(y => y.Id).First());
+        return revision.Evidence
+            .Where(x => x.SupplierQuoteLineId is null &&
+                NormalizeAlternateField(x.FieldName) == NormalizeAlternateField(fieldName))
+            .OrderByDescending(x => x.Id)
+            .Select(x => latestDecisions.GetValueOrDefault(x.Id))
+            .Where(x => x?.Status == SupplierQuotes.SupplierQuoteReviewStatuses.Corrected)
+            .Select(x => x!.CorrectedValue?.Trim())
+            .FirstOrDefault(x => !string.IsNullOrWhiteSpace(x));
     }
 
     private static bool HasCanonicalLineage(SupplierQuotedItem row) => row.SourceSupplierQuoteId.HasValue &&
@@ -2041,9 +2683,8 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             .Where(x => x.Buid == businessUnitId && x.ProductId == rfqItem.ProductId)
             .Select(x => new
             {
-                x.Id,
-                Available = x.QtyOnHand - x.AllocatedQuantity - x.QuarantineQuantity - x.DamagedQuantity
-                    - x.ExpiredQuantity - x.SafetyStockQuantity
+                x.Id, x.QtyOnHand, x.AllocatedQuantity, x.QuarantineQuantity, x.DamagedQuantity,
+                x.ExpiredQuantity, x.SafetyStockQuantity
             }).ToListAsync(ct);
         var inventoryIds = inventory.Select(x => x.Id).ToArray();
         var reserved = await _db.Set<StockReservation>().AsNoTracking()
@@ -2051,7 +2692,13 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 && x.Status == StockReservationStatus.Active)
             .GroupBy(x => x.InventoryId).Select(x => new { InventoryId = x.Key, Quantity = x.Sum(v => v.Quantity) })
             .ToDictionaryAsync(x => x.InventoryId, x => x.Quantity, ct);
-        var available = inventory.Sum(x => Math.Max(0m, x.Available - reserved.GetValueOrDefault(x.Id)));
+        // Canonical ATP. The hand-rolled version this replaced also clamped per row, but it
+        // subtracted the buckets in the projection and the holds afterwards, so a future bucket
+        // added to InventoryQuantityMath would have been silently missing here — the net
+        // sourcing requirement would then have under-bought against stock that cannot be sold.
+        var available = inventory.Sum(x => Inventory.InventoryQuantityMath.AvailableToPromise(
+            x.QtyOnHand, reserved.GetValueOrDefault(x.Id), x.AllocatedQuantity, x.QuarantineQuantity,
+            x.DamagedQuantity, x.ExpiredQuantity, x.SafetyStockQuantity));
         var siblingItems = await _db.Rfqitems.AsNoTracking()
             .Where(x => x.Rfqid == rfqItem.Rfqid && x.ProductId == rfqItem.ProductId)
             .OrderBy(x => x.Id)
@@ -2064,10 +2711,18 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         // draft whose supplier quotes had lapsed suppressed this line's net requirement forever
         // and CreateSolicitationAsync refused to re-source it as "already fully covered". Only an
         // order actually placed with a supplier reduces what still has to be bought.
+        //
+        // It was then rewritten as a hand-written ISSUED-or-PARTIALLY_RECEIVED list, and that list
+        // was not widened when ACKNOWLEDGED was added. A supplier ACCEPTING an order therefore
+        // deleted its own coverage: the shortfall reopened, CreateSolicitationAsync no longer
+        // refused it, and a second sourcing case, award and purchase order were raised for material
+        // already on order — duplicate committed spend, one user, no concurrency. The shared set
+        // beside the status constants is now the only statement of which states are supply, and
+        // GetWorkbenchAsync reads the same set, so the screen a buyer decides from and the command
+        // path that enforces the decision cannot disagree.
         var activePurchaseOrderIds = _db.SupplierPurchaseOrders.AsNoTracking()
-            .Where(x => x.BusinessUnitId == businessUnitId
-                && (x.Status == SupplierPurchaseOrderStatuses.Issued
-                    || x.Status == SupplierPurchaseOrderStatuses.PartiallyReceived))
+            .Where(x => x.BusinessUnitId == businessUnitId)
+            .Where(SupplierPurchaseOrderStatuses.IsCommittedSupply)
             .Select(x => x.Id);
         var incomingByItem = await _db.SupplierPurchaseOrderLines.AsNoTracking()
             .Where(x => x.BusinessUnitId == businessUnitId && siblingIds.Contains(x.RfqItemId)
@@ -2124,25 +2779,82 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             command.WarehouseId,
             ReceiptNumber = command.ReceiptNumber.Trim().ToUpperInvariant(),
             command.ReceivedOn,
+            // FR-MTR-01: the lot declaration is part of the request's business identity. Left out,
+            // a retry under the same idempotency key that named a DIFFERENT batch number would be
+            // silently accepted as a replay of the first — returning success while the lot on
+            // record described material that never arrived.
             Lines = command.Lines.OrderBy(x => x.PurchaseOrderLineId)
-                .Select(x => new { x.PurchaseOrderLineId, x.Quantity }).ToArray()
+                .Select(x => new
+                {
+                    x.PurchaseOrderLineId,
+                    x.Quantity,
+                    Lot = x.Lot is null ? null : new
+                    {
+                        x.Lot.LotNumber,
+                        SerialNumbers = x.Lot.SerialNumbers?.OrderBy(s => s, StringComparer.Ordinal).ToArray(),
+                        x.Lot.CountryOfOrigin,
+                        x.Lot.ManufacturerName,
+                        x.Lot.ManufacturerPartNumber,
+                        x.Lot.SupplierBatchReference,
+                        x.Lot.ManufactureDate,
+                        x.Lot.ExpiryDate,
+                    },
+                }).ToArray()
         });
 
-    private static decimal CalculateLandedUnitCost(CaptureSupplierQuoteLine line)
+    /// <summary>
+    /// Landed cost of a workbench-captured supplier quote line. Freight, duty and other captured
+    /// charges are costs of getting the goods here; recoverable input tax is not a cost at all and
+    /// is filtered out by <see cref="LandedCostFormula.CostBearingTax"/> against the tenant's
+    /// <c>CommercialMatchingPolicy.SupplierInputTaxRecoverablePercent</c>. Leaving it in overstated cost
+    /// and then had the margin applied to it, because customer price is landed / (1 - margin).
+    /// </summary>
+    private static decimal CalculateLandedUnitCost(CaptureSupplierQuoteLine line, decimal supplierInputTaxRecoverablePercent)
     {
-        var total = line.UnitPrice * line.Quantity + line.FreightCost + line.DutyCost + line.OtherCost + line.TaxAmount - line.DiscountAmount;
+        var total = line.UnitPrice * line.Quantity + line.FreightCost + line.DutyCost + line.OtherCost
+            + LandedCostFormula.CostBearingTax(line.TaxAmount, supplierInputTaxRecoverablePercent) - line.DiscountAmount;
         if (total <= 0) throw new ProcurementValidationException("Calculated landed cost must be positive.");
         return decimal.Round(total / line.Quantity, 4, MidpointRounding.AwayFromZero);
     }
 
+    /// <summary>
+    /// Same rule as <see cref="CalculateLandedUnitCost"/>, applied to an award — with the line's
+    /// charges PRO-RATED to the awarded quantity.
+    ///
+    /// <para>The charges on a <see cref="SupplierQuotedItem"/> are the line's share of the round,
+    /// computed for the FULL quoted quantity. This method used to hand the whole of them to the
+    /// first award of a line and none of them to any later award, then divide by the awarded
+    /// quantity alone. On a quote of 100 units at 100 carrying 1,000 of freight — a true landed
+    /// cost of 110 — awarding 20 produced 150 (36% overstated) and the residual 80 produced 100
+    /// (9% understated). Both figures land on <c>SourcingAward.LandedUnitCost</c> and
+    /// <c>TotalValue</c>, then on <c>SupplierPurchaseOrderLine.LandedUnitCost</c> and the purchase
+    /// order's committed-spend total, and then on the customer price via
+    /// <c>landed / (1 - margin)</c>.</para>
+    ///
+    /// <para>Pro-rating restores the property that matters: any set of awards that between them
+    /// take the whole quoted quantity costs exactly what the whole line costs, and each award on
+    /// its own costs what its own units cost. Rounding is at the shared 4dp scale, so a split can
+    /// differ from the whole by at most one unit in the last place per award.</para>
+    ///
+    /// <para>The assumption being made explicit: pro-rating treats the quoted charges as varying
+    /// with quantity. A genuinely fixed shipment charge — one lorry, whether it carries 20 units or
+    /// 100 — is under-recovered on a partial award by this rule. Representing that needs a
+    /// per-charge fixed/variable flag the capture contract does not have, and inventing one here
+    /// would be a rate model rather than capture. Loading 100% of it onto whichever award happened
+    /// to be entered first, which is what the code did, is not a better answer to that problem.</para>
+    /// </summary>
     private static decimal CalculateAwardLandedUnitCost(
-        SupplierQuotedItem quote, decimal awardedQuantity, bool includeFixedCharges)
+        SupplierQuotedItem quote, decimal awardedQuantity, decimal supplierInputTaxRecoverablePercent)
     {
-        var fixedCharges = includeFixedCharges
-            ? quote.FreightCost + quote.DutyCost + quote.OtherCost
-                + (quote.TaxAmount ?? 0m) - (quote.DiscountAmount ?? 0m)
-            : 0m;
-        var total = (quote.UnitPrice ?? 0m) * awardedQuantity + fixedCharges;
+        var quotedQuantity = quote.Quantity;
+        var freight = LandedCostFormula.ProRateToAward(quote.FreightCost, awardedQuantity, quotedQuantity);
+        var duty = LandedCostFormula.ProRateToAward(quote.DutyCost, awardedQuantity, quotedQuantity);
+        var other = LandedCostFormula.ProRateToAward(quote.OtherCost, awardedQuantity, quotedQuantity);
+        var tax = LandedCostFormula.ProRateToAward(
+            LandedCostFormula.CostBearingTax(quote.TaxAmount ?? 0m, supplierInputTaxRecoverablePercent),
+            awardedQuantity, quotedQuantity);
+        var discount = LandedCostFormula.ProRateToAward(quote.DiscountAmount ?? 0m, awardedQuantity, quotedQuantity);
+        var total = (quote.UnitPrice ?? 0m) * awardedQuantity + freight + duty + other + tax - discount;
         if (total <= 0) throw new ProcurementValidationException("Calculated award landed cost must be positive.");
         return decimal.Round(total / awardedQuantity, 4, MidpointRounding.AwayFromZero);
     }
@@ -2160,6 +2872,169 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
     private async Task<Rfq> RequireRfqAsync(long businessUnitId, long rfqId, CancellationToken ct)
         => await _db.Rfqs.SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.Id == rfqId, ct)
             ?? throw new ProcurementValidationException("RFQ was not found in the authenticated tenant.");
+
+    /// <summary>A resolved master reference: the case row, and the serial printed against it.</summary>
+    private sealed record CaseReference(long? CommercialCaseId, string? NexoraSerial);
+
+    /// <summary>
+    /// What the customer chain could prove about a supplier purchase order, and — named, not
+    /// implied — what it could not.
+    /// </summary>
+    private sealed record CustomerOriginResolution(IReadOnlyList<string> UnresolvedReasons);
+
+    /// <summary>
+    /// FR-COM-07. Resolves the customer documents a supplier purchase order is being raised to
+    /// satisfy and writes them onto the order before it is inserted.
+    ///
+    /// <para>The route is the governed bridge and nothing else. <c>CustomerQuoteSourcingDecision</c>
+    /// is the immutable record that an approved supplier award was made to cover one customer quote
+    /// line; from there the customer award allocation names the client PO, and the sales order names
+    /// the award. Deriving any of these from the RFQ instead would re-instate exactly the de-facto
+    /// spine this column set exists to invert — an RFQ can carry lines for several quotations, and
+    /// "the customer PO that shares this RFQ" is a guess dressed as a key.</para>
+    ///
+    /// <para>Every key is taken only when the chain resolves to exactly one document. Awards
+    /// consolidated onto one supplier order can legitimately serve two customer quotations, and a
+    /// purchase order that names one of them would read as a fact. Ambiguity, an unbuilt link and an
+    /// order raised outside the customer flow all leave the key null with a stated reason, which the
+    /// created event records and <c>CommercialCaseQueryService</c> reports as a traceability gap.
+    /// A STOCK order is skipped: no chain is consulted and no key is written.</para>
+    ///
+    /// <para>Every read is scoped to the purchase order's own business unit, so a customer document
+    /// belonging to another tenant resolves to nothing rather than onto this tenant's paperwork.</para>
+    /// </summary>
+    private async Task<CustomerOriginResolution> AttachCustomerOriginAsync(SupplierPurchaseOrder po,
+        long businessUnitId, IReadOnlyCollection<long> awardIds, CancellationToken ct)
+    {
+        if (po.DemandSource == SupplierPurchaseOrderDemandSources.Stock)
+            return new CustomerOriginResolution([]);
+
+        var unresolved = new List<string>();
+        var decisions = await _db.CustomerQuoteSourcingDecisions.AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId && awardIds.Contains(x.SourcingAwardId))
+            .Select(x => new { x.QuoteId, x.QuoteItemId })
+            .ToListAsync(ct);
+        if (decisions.Count == 0)
+        {
+            po.AttachCustomerOrigin(businessUnitId, null, null, null);
+            return new CustomerOriginResolution(
+            [
+                "No approved customer sourcing decision links these sourcing awards to a customer "
+                + "quotation, so the customer quotation, client purchase order and sales order are all unknown."
+            ]);
+        }
+
+        var quoteId = SingleOrNull(decisions.Select(x => x.QuoteId));
+        if (quoteId is null)
+            unresolved.Add("These sourcing awards cover lines on more than one customer quotation, "
+                + "so no single quotation is the origin of this order.");
+
+        var quoteItemIds = decisions.Select(x => x.QuoteItemId).Distinct().ToArray();
+        var customerAwardIds = await _db.CustomerAwardLineAllocations.AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId && quoteItemIds.Contains(x.QuoteItemId))
+            .Select(x => x.CustomerAwardId).Distinct().ToArrayAsync(ct);
+        var customerAwardId = SingleOrNull(customerAwardIds);
+
+        long? customerPurchaseOrderId = null;
+        long? customerOrderId = null;
+        if (customerAwardId is null)
+        {
+            unresolved.Add(customerAwardIds.Length == 0
+                ? "The customer quotation line behind these awards has not been awarded against a "
+                  + "client purchase order, so no client PO or sales order can be named yet."
+                : "The customer quotation lines behind these awards belong to more than one customer "
+                  + "award, so no single client PO or sales order is the origin of this order.");
+        }
+        else
+        {
+            customerPurchaseOrderId = await _db.CustomerAwards.AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId && x.Id == customerAwardId.Value)
+                .Select(x => (long?)x.CustomerPurchaseOrderId)
+                .SingleOrDefaultAsync(ct);
+            if (customerPurchaseOrderId is null)
+                unresolved.Add("The customer award behind these sourcing awards is not readable in "
+                    + "this tenant, so the client purchase order cannot be named.");
+
+            customerOrderId = SingleOrNull(await _db.Orders.AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId && x.CustomerAwardId == customerAwardId.Value)
+                .Select(x => x.Id).ToArrayAsync(ct));
+            if (customerOrderId is null)
+                unresolved.Add("The customer award behind these sourcing awards has not been converted "
+                    + "to a sales order yet, so no sales order can be named on this purchase order.");
+        }
+
+        po.AttachCustomerOrigin(businessUnitId, customerPurchaseOrderId, customerOrderId, quoteId);
+        return new CustomerOriginResolution(unresolved);
+    }
+
+    /// <summary>
+    /// The one distinct value, or null when there is none or more than one. Ambiguity is not a
+    /// value: picking the first would write a key that reads as a fact and is a coin toss.
+    /// </summary>
+    private static long? SingleOrNull(IEnumerable<long> values)
+    {
+        var distinct = values.Distinct().Take(2).ToArray();
+        return distinct.Length == 1 ? distinct[0] : null;
+    }
+
+    /// <summary>
+    /// Puts the commercial case on a supplier purchase order as it is built, so the document can
+    /// state its own master reference instead of forcing a join back up the chain every time a
+    /// buyer, a supplier or an auditor asks which case it belongs to.
+    ///
+    /// <para>The RFQ is asked first because every customer-demand purchase order is raised against
+    /// one, and the RFQ inherited the case from the lead at conversion. Only when the RFQ predates
+    /// case allocation does the customer chain the order already carries get asked, in the order
+    /// the case travels down it: client PO, then sales order, then quotation.</para>
+    ///
+    /// <para>A STOCK order is skipped outright, and an unresolved chain leaves the reference null.
+    /// A replenishment order has no case, and a case invented for a document that cannot prove one
+    /// would be quoted back at us as though it were real.</para>
+    /// </summary>
+    private async Task CarryCommercialCaseAsync(SupplierPurchaseOrder po, Rfq rfq, CancellationToken ct)
+    {
+        if (po.DemandSource == SupplierPurchaseOrderDemandSources.Stock)
+            return;
+
+        if (rfq.CommercialCaseId.HasValue || !string.IsNullOrWhiteSpace(rfq.NexoraSerial))
+        {
+            po.InheritCommercialIdentity(rfq.BusinessUnitId, rfq.CommercialCaseId, rfq.NexoraSerial);
+            return;
+        }
+
+        var chain = await ResolveCustomerChainCaseAsync(po, ct);
+        if (chain is not null)
+            po.InheritCommercialIdentity(po.BusinessUnitId, chain.CommercialCaseId, chain.NexoraSerial);
+    }
+
+    /// <summary>
+    /// Reads the case from the customer document the purchase order names. Every lookup is scoped
+    /// to the purchase order's own business unit, so a customer key that has drifted to another
+    /// tenant resolves to nothing rather than to that tenant's master reference.
+    /// </summary>
+    private async Task<CaseReference?> ResolveCustomerChainCaseAsync(
+        SupplierPurchaseOrder po, CancellationToken ct)
+    {
+        if (po.CustomerPurchaseOrderId is { } customerPurchaseOrderId)
+            return await _db.CustomerPurchaseOrders.AsNoTracking()
+                .Where(x => x.BusinessUnitId == po.BusinessUnitId && x.Id == customerPurchaseOrderId)
+                .Select(x => new CaseReference(x.CommercialCaseId, x.CommercialCase.MasterReference))
+                .SingleOrDefaultAsync(ct);
+
+        if (po.CustomerOrderId is { } customerOrderId)
+            return await _db.Orders.AsNoTracking()
+                .Where(x => x.BusinessUnitId == po.BusinessUnitId && x.Id == customerOrderId)
+                .Select(x => new CaseReference(x.CommercialCaseId, x.NexoraSerial))
+                .SingleOrDefaultAsync(ct);
+
+        if (po.QuoteId is { } quoteId)
+            return await _db.Quotes.AsNoTracking()
+                .Where(x => x.BusinessUnitId == po.BusinessUnitId && x.Id == quoteId)
+                .Select(x => new CaseReference(x.CommercialCaseId, x.NexoraSerial))
+                .SingleOrDefaultAsync(ct);
+
+        return null;
+    }
 
     private async Task<Supplier> RequireSupplierAsync(long businessUnitId, long supplierId, CancellationToken ct)
     {

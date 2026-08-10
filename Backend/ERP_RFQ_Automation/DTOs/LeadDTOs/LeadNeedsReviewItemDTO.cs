@@ -14,5 +14,20 @@ namespace ERP_RFQ_Automation.DTOs.Lead
         public string? ReviewReason { get; set; }
         public DateTime? ReceivedOn { get; set; }
         public long ReviewVersion { get; set; }
+
+        /// <summary>
+        /// Lines on this document that a human still has to look at, from the evidence
+        /// ledger's own per-line validation status — the SAME verdict the review screen
+        /// renders, so the queue and the workbench can never disagree.
+        ///
+        /// <para>
+        /// The client has typed and rendered this since the needs-check count replaced the
+        /// confidence percentage, and nothing served it: a reader with no writer, so every
+        /// row fell back to the bare line count. Null stays meaningful — a document whose
+        /// path wrote no ledger has no per-line verdict, and the queue shows the line count
+        /// alone rather than inventing a figure.
+        /// </para>
+        /// </summary>
+        public int? LinesNeedingCheck { get; set; }
     }
 }

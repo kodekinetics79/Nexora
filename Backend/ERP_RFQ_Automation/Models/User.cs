@@ -15,6 +15,17 @@ public partial class User
 
     public string Email { get; set; } = null!;
 
+    /// <summary>
+    /// SEC-G9, belt-and-braces. No endpoint returns this entity today — every path maps to a DTO,
+    /// and that was verified rather than assumed — so this attribute changes no current response.
+    /// It exists because the failure it prevents is silent: a future action that returns
+    /// <c>User</c> (or any object graph that reaches one through a navigation) would serialise
+    /// the hash with no compiler error, no test failure, and nothing on screen to notice. A
+    /// password hash is offline-crackable material and the one property on this entity that must
+    /// never cross the wire, so the guard belongs on the property rather than on the discipline
+    /// of every future controller.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore]
     public string PasswordHash { get; set; } = null!;
 
     public string ImageUrl { get; set; } = null!;

@@ -15,11 +15,35 @@ public sealed class RfqSpreadsheetRow
     public string? BidClosingDate { get; set; }
     public string? ProductName { get; set; }
     public string? Quantity { get; set; }
+
+    /// <summary>
+    /// The buyer's own unit word, verbatim. Spreadsheets were previously parsed with no unit
+    /// column at all, so a line reading "500 M" of cable was ingested as a bare 500 and quoted
+    /// as 500 each. The column is read here and canonicalised downstream; it is never defaulted.
+    /// </summary>
+    public string? UnitOfMeasure { get; set; }
+
     public string? UnitPrice { get; set; }
     public string? Currency { get; set; }
     public string? ManufacturerName { get; set; }
     public string? ManufacturerPartNumber { get; set; }
     public string? LeadTimeDays { get; set; }
+
+    /// <summary>FR-RFQ-04. Saudi region or city for delivery, in the buyer's own wording.</summary>
+    public string? DeliveryLocation { get; set; }
+
+    /// <summary>FR-RFQ-04. The delivery date the buyer is asking for — never a supplier lead time.</summary>
+    public string? RequiredDeliveryDate { get; set; }
+
+    /// <summary>FR-RFQ-03. Standing agreement / frame contract this inquiry calls off against.</summary>
+    public string? AgreementReference { get; set; }
+
+    /// <summary>
+    /// The buyer's own note against the line ("OEM only", "Urgent requirement", "Equivalent
+    /// accepted"). Commercially load-bearing — it changes what may be quoted — and was
+    /// previously read from no format at all, so it was dropped with no diagnostic.
+    /// </summary>
+    public string? ItemText { get; set; }
 
     public string SourceAddress(string fieldName, string legacyColumn)
     {
@@ -40,11 +64,16 @@ public static class RfqSpreadsheetFields
     public const string BidClosingDate = nameof(RfqSpreadsheetRow.BidClosingDate);
     public const string ProductName = nameof(RfqSpreadsheetRow.ProductName);
     public const string Quantity = nameof(RfqSpreadsheetRow.Quantity);
+    public const string UnitOfMeasure = nameof(RfqSpreadsheetRow.UnitOfMeasure);
     public const string UnitPrice = nameof(RfqSpreadsheetRow.UnitPrice);
     public const string Currency = nameof(RfqSpreadsheetRow.Currency);
     public const string ManufacturerName = nameof(RfqSpreadsheetRow.ManufacturerName);
     public const string ManufacturerPartNumber = nameof(RfqSpreadsheetRow.ManufacturerPartNumber);
     public const string LeadTimeDays = nameof(RfqSpreadsheetRow.LeadTimeDays);
+    public const string ItemText = nameof(RfqSpreadsheetRow.ItemText);
+    public const string DeliveryLocation = nameof(RfqSpreadsheetRow.DeliveryLocation);
+    public const string RequiredDeliveryDate = nameof(RfqSpreadsheetRow.RequiredDeliveryDate);
+    public const string AgreementReference = nameof(RfqSpreadsheetRow.AgreementReference);
 }
 
 public sealed class CanonicalRfqImportResult

@@ -238,7 +238,12 @@ public sealed class AuthenticatedHttpRlsTests(Release01BHttpApplication app)
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         using var payload = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
         Assert.Equal("release-01", payload.RootElement.GetProperty("definitionVersion").GetString());
-        Assert.Equal("assigned_to_me", payload.RootElement.GetProperty("roleScope").GetProperty("scope").GetString());
+        // "assigned_accounts", not the old "assigned_to_me": FR-DSH-05 replaced the binary
+        // tenant-or-mine scope on this endpoint with three tiers, and the middle one — the accounts
+        // of the teams a supervisor manages — is the whole point of the change. The old name could
+        // not express it. Opportunity and exception services still report the binary value and are
+        // deliberately unchanged.
+        Assert.Equal("assigned_accounts", payload.RootElement.GetProperty("roleScope").GetProperty("scope").GetString());
         Assert.DoesNotContain(Release01BHttpApplication.TenantBLeadId.ToString(), payload.RootElement.GetRawText(), StringComparison.Ordinal);
 
         var forbidden = await denied.GetAsync($"/api/Dashboard/release-01?from={from}&to={to}");

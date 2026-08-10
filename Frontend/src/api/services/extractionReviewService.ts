@@ -19,9 +19,13 @@ export interface NeedsReviewItem {
   receivedOn: string | null;
   reviewVersion: number;
   /**
-   * Lines on this document with a blank required field or a flagged source
-   * check. Optional: older backends do not compute it, and the queue then shows
-   * the line count alone rather than inventing a figure.
+   * Lines on this document that a human still has to look at, served from the
+   * evidence ledger's own per-line validation status — the same verdict the
+   * review screen renders, so the queue and the workbench cannot disagree.
+   *
+   * Null when the document's extraction path wrote no ledger (PDF/OCR/model),
+   * because there is then no per-line verdict at all; the queue shows the bare
+   * line count rather than claiming "0 of 8 need a check".
    *
    * NOTE: `aiconfidence` is still on the wire but is deliberately not rendered
    * anywhere. It is not a measured accuracy — see pages/ExtractionReview/needsCheck.ts.
@@ -42,6 +46,11 @@ export interface ReviewHeaderPayload {
   rfqno?: string;
   buyersName?: string;
   bidClosingDate?: string;
+  /**
+   * FR-RFQ-04. The delivery date the BUYER asked for — never a supplier lead time.
+   * Correctable here because extraction is the only thing that has ever written it.
+   */
+  requiredDeliveryDate?: string;
   opportunityNo?: string;
   headerRemarks?: string;
   /**
@@ -210,6 +219,19 @@ export interface LeadFieldEvidenceEntry {
   valueKind?: string | null;
   /** Unvalidated | Valid | Warning | Invalid (FieldValidationStatus). */
   validationStatus?: string | null;
+  /**
+   * The certainty the extractor recorded for THIS value, 0..1. Captured by the
+   * evidence ledger since it was built and omitted from the DTO until now, so a
+   * reviewer could see where a value came from but not whether it was read with
+   * certainty or salvaged.
+   *
+   * NOT an accuracy, and never rendered as a percentage: on the deterministic
+   * path it is a parse verdict from a closed set (1.0 parsed exactly, 0.2 source
+   * text that could not be interpreted, 0 nothing stated). See
+   * pages/ExtractionReview/fieldCertainty.ts, which renders its meaning.
+   * Absent on older backends and on paths that write no ledger.
+   */
+  confidence?: number | null;
   extractor?: string | null;
   /**
    * Normalisation steps applied between raw and normalized. The backend stores
@@ -225,6 +247,17 @@ export interface LeadFieldEvidenceEntry {
 export interface LeadFieldEvidenceResponse {
   leadId: number;
   entries: LeadFieldEvidenceEntry[];
+  /**
+   * The document's own prose OUTSIDE the extracted table, verbatim and unparsed
+   * — the instruction block naming required warranty, validity, country of
+   * origin, Incoterms and submission method, and any "as per attached
+   * specification". It was read and discarded for every document on this path
+   * until now, recoverable only by opening the source file by hand.
+   *
+   * Absent when the document had none, when the extraction path retains none,
+   * or on older backends.
+   */
+  documentNarrative?: string | null;
   /**
    * Whether the extraction path for this document wrote a source-address
    * ledger at all. Absent on older backends — callers should fall back to

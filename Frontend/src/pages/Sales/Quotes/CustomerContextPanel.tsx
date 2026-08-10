@@ -40,7 +40,14 @@ const CustomerContextPanel: React.FC<CustomerContextPanelProps> = ({ customerId 
   if (context.isError) return null;
 
   const data = context.data;
-  const isNewCustomer = data && data.totalQuotes === 0 && data.ordersLast24Months === 0;
+  // A customer we have already turned down (or been turned down by) before quoting is not new,
+  // even when no quote was ever raised.
+  const isNewCustomer = data && data.totalQuotes === 0 && data.ordersLast24Months === 0
+    && !data.leadStageLosses;
+  // Prefer the rate whose denominator includes inquiries dropped before quoting.
+  const winRate = data ? data.inquiryWinRatePct ?? data.winRatePct : null;
+  const leadLossReasons = (data?.recentLeadLosses ?? [])
+    .map((loss) => loss.outcomeReasonName ?? 'Reason not recorded');
 
   return (
     <Card sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none', mt: 2 }}>
@@ -69,11 +76,11 @@ const CustomerContextPanel: React.FC<CustomerContextPanelProps> = ({ customerId 
               <Typography variant="body2" color="text.secondary">
                 Win rate
               </Typography>
-              {data.winRatePct !== null ? (
+              {winRate !== null && winRate !== undefined ? (
                 <Chip
                   size="small"
-                  label={`${data.winRatePct.toFixed(0)}%`}
-                  color={data.winRatePct >= 50 ? 'success' : data.winRatePct >= 25 ? 'warning' : 'error'}
+                  label={`${winRate.toFixed(0)}%`}
+                  color={winRate >= 50 ? 'success' : winRate >= 25 ? 'warning' : 'error'}
                   sx={{ fontWeight: 800 }}
                 />
               ) : (
@@ -82,6 +89,17 @@ const CustomerContextPanel: React.FC<CustomerContextPanelProps> = ({ customerId 
                 </Typography>
               )}
             </Box>
+            {data.leadStageLosses > 0 && (
+              <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                <Typography variant="body2" color="text.secondary">
+                  Dropped before quoting
+                </Typography>
+                <Typography variant="body2" sx={{ fontWeight: 700 }} title={leadLossReasons.join(', ')}>
+                  {data.leadStageLosses}
+                  {leadLossReasons[0] ? ` · ${leadLossReasons[0]}` : ''}
+                </Typography>
+              </Box>
+            )}
             <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
               <Typography variant="body2" color="text.secondary">
                 Quotes sent

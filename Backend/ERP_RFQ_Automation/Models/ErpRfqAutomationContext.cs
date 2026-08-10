@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using ERP_RFQ_Automation.Services;
 using ERP_RFQ_Automation.CustomFields;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
+using ERP_RFQ_Automation.MasterData;
 using ERP_RFQ_Automation.Security;
 
 namespace ERP_RFQ_Automation.Models;
@@ -135,15 +136,33 @@ public partial class ErpRfqAutomationContext : DbContext
         LeadPersistenceRules.Prepare(this);
         CustomFieldGovernanceInterceptor.Validate(ChangeTracker);
         LifecycleGovernanceInterceptor.Validate(ChangeTracker);
-        return base.SaveChanges(acceptAllChangesOnSuccess);
+        MasterDataAuditInterceptor.ValidateAppendOnly(ChangeTracker);
+        // FR-MDM-05 / E44. Captured HERE, not in the controllers, because every other write path
+        // — the spreadsheet uploader above all — goes around a controller and none of them can go
+        // around SaveChanges. Update and delete audits are enlisted into this very batch; creates
+        // need the database-generated key and are flushed immediately after (see Materialise).
+        var audit = MasterDataAuditInterceptor.Capture(this);
+        var written = base.SaveChanges(acceptAllChangesOnSuccess);
+        if (!audit.HasDeferredCreates || !acceptAllChangesOnSuccess) return written;
+        audit.Materialise(this);
+        return written + base.SaveChanges(acceptAllChangesOnSuccess);
     }
 
-    public override Task<int> SaveChangesAsync(bool acceptAllChangesOnSuccess, CancellationToken cancellationToken = default)
+    public override async Task<int> SaveChangesAsync(bool acceptAllChangesOnSuccess, CancellationToken cancellationToken = default)
     {
         LeadPersistenceRules.Prepare(this);
         CustomFieldGovernanceInterceptor.Validate(ChangeTracker);
         LifecycleGovernanceInterceptor.Validate(ChangeTracker);
-        return base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+        MasterDataAuditInterceptor.ValidateAppendOnly(ChangeTracker);
+        var audit = MasterDataAuditInterceptor.Capture(this);
+        var written = await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+        // acceptAllChangesOnSuccess == false means the caller intends to accept the change tracker
+        // later; the original entities are still Added, so a second save here would insert them
+        // twice. Nothing in this codebase passes false — the guard is here so that stays true by
+        // construction rather than by luck.
+        if (!audit.HasDeferredCreates || !acceptAllChangesOnSuccess) return written;
+        audit.Materialise(this);
+        return written + await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
     }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -327,7 +346,17 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.Password)
                 .HasMaxLength(ProtectedSecretConverter.ProtectedColumnMaxLength)
                 .HasConversion(new ProtectedSecretConverter());
-            entity.Property(e => e.PollingInterval).HasDefaultValue(300);
+            // MINUTES. 300 was the seconds-era default and read as a five-hour poll once the
+            // unit changed — failure #10, a default that inverts its own meaning. Paid by
+            // 20260810133238, which moves the column default to 5 and deliberately does NOT
+            // touch a single row: 300 is a legal operator setting meaning five hours both
+            // before and after the unit change, so a blanket `WHERE PollingInterval = 300`
+            // would silently rewrite the settings of any tenant who had chosen it. Every
+            // stored value keeps its number and changes meaning from seconds to minutes,
+            // which can only ever slow a mailbox down — the transition cannot create the
+            // hazard it removes. The default is unreachable through the product anyway; both
+            // the create and the update path always write PollingInterval explicitly.
+            entity.Property(e => e.PollingInterval).HasDefaultValue(5);
             entity.Property(e => e.Protocol).HasMaxLength(50);
             entity.Property(e => e.UseSsl)
                 .HasDefaultValue(true)
@@ -1023,6 +1052,29 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.TaxAmount)
                 .HasDefaultValue(0m)
                 .HasColumnType("decimal(18, 6)");
+            // R19: the tax treatment the user stated. Nullable so pre-R19 rows keep their shape,
+            // defaulted to STANDARD so a new row is a domestic standard-rated sale unless someone
+            // says otherwise. The check constraint is the guarantee the serializer and the auditor
+            // rely on: there is no fifth value and no free text.
+            entity.Property(e => e.TaxCategory).HasMaxLength(24)
+                .HasDefaultValue(OrderToCash.QuoteLineTaxCategories.Standard);
+            entity.Property(e => e.TaxCategoryReason).HasMaxLength(500);
+            // R17: the rate applied when the tax was derived, and — being null only when derivation
+            // never happened — the marker the send gate refuses on. Deliberately NO default value:
+            // a default would make EF omit the column on insert and the null would become that
+            // default, which is exactly the trap TaxAmount above falls into.
+            entity.Property(e => e.TaxRatePercentApplied).HasPrecision(9, 4);
+            entity.HasCheckConstraint("CK_QuoteItems_TaxCategory",
+                "\"TaxCategory\" IS NULL OR \"TaxCategory\" IN ('STANDARD', 'ZERO_RATED_EXPORT', 'EXEMPT', 'OUT_OF_SCOPE_RCM')");
+            // A non-standard treatment without a stated reason is the record that cannot be
+            // defended later, so the database refuses it rather than trusting every write path.
+            // Deliberately no trim() call: the portable test lane builds this schema on SQLite,
+            // where PostgreSQL's btrim does not exist and the whole DDL fails to parse. Whitespace
+            // is stripped by the service before it reaches here, so <> '' is the same guarantee
+            // expressed in SQL both engines accept.
+            entity.HasCheckConstraint("CK_QuoteItems_TaxCategoryReason",
+                "\"TaxCategory\" IS NULL OR \"TaxCategory\" = 'STANDARD' OR " +
+                "(\"TaxCategoryReason\" IS NOT NULL AND \"TaxCategoryReason\" <> '')");
             entity.Property(e => e.TotalAmount).HasColumnType("decimal(18, 6)");
             // Mirrors Rfqitem.UnitOfMeasure (max 200).
             entity.Property(e => e.UnitOfMeasure).HasMaxLength(200);
@@ -1381,6 +1433,17 @@ public partial class ErpRfqAutomationContext : DbContext
         modelBuilder.Entity<Shipment>(entity =>
         {
             entity.HasKey(e => e.Id).HasName("PK__Shipment__3214EC2732EE97FF");
+
+            // The commercial case is a read key: CommercialCaseQueryService selects shipments that
+            // DECLARE the case rather than walking order → shipment, so this index carries the
+            // case-detail page. The foreign key makes a wrong case id impossible rather than merely
+            // visible. Nullable, because legacy shipments raised before the case existed have none.
+            entity.HasOne<CommercialCase>()
+                .WithMany()
+                .HasForeignKey(e => new { e.BusinessUnitId, e.CommercialCaseId })
+                .HasPrincipalKey(e => new { e.BusinessUnitId, e.Id })
+                .OnDelete(DeleteBehavior.Restrict);
+            entity.HasIndex(e => new { e.BusinessUnitId, e.CommercialCaseId });
 
             entity.Property(e => e.Id).HasColumnName("ID");
             entity.Property(e => e.ActualDeliveryDate);

@@ -80,7 +80,10 @@ public sealed record VerbatimLeadItemSnapshot(
     string? Currency,
     string? UnitOfMeasure,
     decimal? UnitPrice,
-    int Quantity,
+
+    // Nullable in lockstep with LeadItem.Quantity: a verbatim snapshot that turned "the buyer
+    // stated no quantity" into 0 would restore a demand for zero units on amendment.
+    int? Quantity,
     string? StorageLocation,
     string? ManufacturerName,
     string? ManufacturerPartNumber,

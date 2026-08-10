@@ -172,6 +172,21 @@ public sealed class StructuredEvidenceLedgerPersister
         }
         await _context.SaveChangesAsync(ct);
 
+        // The document's own prose outside the table, retained as evidence rather than
+        // discarded. It carries the warranty, validity, country-of-origin and Incoterms
+        // requirements, the submission method and any "as per attached specification" — none
+        // of which reached the lead before, for every document on this path. It goes in as a
+        // Text region on the ledger, so it inherits the ledger's immutability and its
+        // retention policy, and needs no new column anywhere.
+        if (!string.IsNullOrWhiteSpace(outcome.DocumentNarrative) && pages.Count > 0)
+        {
+            var narrativePage = pages.Values.OrderBy(p => p.PageNumber).First();
+            _context.Add(DocumentRegion.Create(job.BusinessUnitId, narrativePage.Id,
+                DocumentRegionType.Text, 0, 0, 1, 1, outcome.DocumentNarrative.Trim(),
+                confidence: 1m, sourceAddress: null));
+            await _context.SaveChangesAsync(ct);
+        }
+
         var regions = new Dictionary<string, DocumentRegion>(StringComparer.Ordinal);
         foreach (var field in pendingFields)
         {

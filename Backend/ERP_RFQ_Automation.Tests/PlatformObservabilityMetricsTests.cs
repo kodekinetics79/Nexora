@@ -30,7 +30,7 @@ public class PlatformObservabilityMetricsTests
         using var harness = new MetricsHarness();
         using var db = new TestDb();
         using var ctx = db.ContextFor(businessUnitId);
-        var queue = new ExtractionQueue(ctx, new NoopLogger<ExtractionQueue>(), harness.Metrics);
+        var queue = new ExtractionQueue(ctx, new NoopLogger<ExtractionQueue>(), new StubTenant(businessUnitId), null, harness.Metrics);
 
         var result = await queue.EnqueueAsync(Request(businessUnitId, "aa01"));
 
@@ -48,7 +48,7 @@ public class PlatformObservabilityMetricsTests
         using var harness = new MetricsHarness();
         using var db = new TestDb();
         using var ctx = db.ContextFor(businessUnitId);
-        var queue = new ExtractionQueue(ctx, new NoopLogger<ExtractionQueue>(), harness.Metrics);
+        var queue = new ExtractionQueue(ctx, new NoopLogger<ExtractionQueue>(), new StubTenant(businessUnitId), null, harness.Metrics);
 
         await queue.EnqueueAsync(Request(businessUnitId, "aa02"));
         var second = await queue.EnqueueAsync(Request(businessUnitId, "aa02"));
@@ -65,10 +65,10 @@ public class PlatformObservabilityMetricsTests
         using var harness = new MetricsHarness();
         using var db = new TestDb();
         using (var a = db.ContextFor(77_103))
-            await new ExtractionQueue(a, new NoopLogger<ExtractionQueue>(), harness.Metrics)
+            await new ExtractionQueue(a, new NoopLogger<ExtractionQueue>(), new StubTenant(77_103), null, harness.Metrics)
                 .EnqueueAsync(Request(77_103, "aa03"));
         using (var b = db.ContextFor(77_104))
-            await new ExtractionQueue(b, new NoopLogger<ExtractionQueue>(), harness.Metrics)
+            await new ExtractionQueue(b, new NoopLogger<ExtractionQueue>(), new StubTenant(77_104), null, harness.Metrics)
                 .EnqueueAsync(Request(77_104, "aa03"));
 
         var tenants = harness.For("nexora.extraction.jobs.enqueued")
@@ -814,7 +814,7 @@ public class PlatformObservabilityMetricsTests
 
         public Task<ChunkedExtractionOutcome> ExtractStructuredAsync(
             IReadOnlyList<RfqSpreadsheetRow> rows, long businessUnitId, string sourceName,
-            CancellationToken ct = default) => throw new NotSupportedException();
+            CancellationToken ct = default, string? documentNarrative = null) => throw new NotSupportedException();
     }
 
     private sealed class FixedPersister : ILeadPersister

@@ -6,3 +6,8 @@ export { default as IncomingPage } from './IncomingPage';
 export { default as MovementsPage } from './MovementsPage';
 export { default as DemandPage } from './DemandPage';
 export { default as RelatedResourcesPage } from './RelatedResourcesPage';
+export { default as StockLevelsPage } from './StockLevelsPage';
+export { default as ReorderAlertsPage } from './ReorderAlertsPage';
+export { default as CountVariancePage } from './CountVariancePage';
+export { default as StockAgeingPage } from './StockAgeingPage';
+export { default as StockActionsDialog } from './StockActionsDialog';

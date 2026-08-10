@@ -10,6 +10,7 @@ import {
   parseTransformations,
   type LeadFieldEvidenceEntry,
 } from '../../api/services/extractionReviewService';
+import { describeCertainty } from './fieldCertainty';
 
 // ---------------------------------------------------------------------------
 // Glass box: where did this value come from?
@@ -99,6 +100,7 @@ const FieldEvidencePopover: React.FC<FieldEvidencePopoverProps> = ({
   const address = entry?.sourceAddress ?? null;
   const transformations = entry ? parseTransformations(entry) : [];
   const meta = validationMeta(entry?.validationStatus);
+  const certainty = describeCertainty(entry);
 
   return (
     <Popover
@@ -191,6 +193,24 @@ const FieldEvidencePopover: React.FC<FieldEvidencePopoverProps> = ({
                 </Stack>
               )}
             </Row>
+
+            {certainty && (
+              <Row label="How certain">
+                <Stack spacing={0.5}>
+                  <Chip
+                    size="small"
+                    color={certainty.color}
+                    variant="outlined"
+                    label={certainty.label}
+                    sx={{ fontWeight: 700, fontSize: '0.65rem', height: 22, alignSelf: 'flex-start' }}
+                  />
+                  <Typography variant="body2" color="text.secondary">{certainty.detail}</Typography>
+                  {certainty.recorded && (
+                    <Typography variant="caption" color="text.disabled">{certainty.recorded}</Typography>
+                  )}
+                </Stack>
+              </Row>
+            )}
 
             <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: 'wrap', alignItems: 'center' }}>
               <Chip size="small" color={meta.color} variant="outlined" label={meta.label} sx={{ fontWeight: 700, fontSize: '0.65rem', height: 22 }} />

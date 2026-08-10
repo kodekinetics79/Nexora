@@ -1,8 +1,10 @@
 using System.Data;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using ERP_RFQ_Automation.Deduplication;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.Models;
@@ -156,12 +158,19 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         // axes. Ordering is by EVIDENCE first and similarity second: the lead whose customer and
         // reference corroborate is the one to offer a reviewer, even when a commodity line item
         // makes an unrelated lead score marginally higher.
-        var assessments = candidates
+        var scored = candidates
             .Select(x => new MatchAssessment(x, Similarity(candidate, x),
                 Evidence(scope, CustomerScope(x, null)),
                 ReferenceEvidence(normalizedRfq, CustomerReference(x)),
                 ReferenceAmends(normalizedRfq, CustomerReference(x)),
-                groupedLeadIds.Contains(x.Id)))
+                groupedLeadIds.Contains(x.Id),
+                DuplicateRules.DuplicateReason(candidate, x)))
+            .ToList();
+
+        // The revision arms below stay gated on commercial-content similarity alone. FR-RFQ-06
+        // duplicates are deliberately NOT admitted here: that rule can fire on buyer and dates
+        // with poor line overlap, and a low-similarity match must never auto-link as a revision.
+        var assessments = scored
             .Where(x => x.Score >= PossibleMatchThreshold)
             .OrderByDescending(x => x.EvidenceRank).ThenByDescending(x => x.Score)
             .ToList();
@@ -177,6 +186,17 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
                 ["Corroborated logical document group, customer identity, and commercial content."], tx, ownsTransaction, ct);
 
         var ranked = assessments.FirstOrDefault();
+
+        // FR-RFQ-06: same buyer, same item, overlapping dates — held for human review BEFORE any
+        // record is created. Content similarity may be well under the match threshold here (two
+        // extractions of one tender can disagree on wording), which is precisely why this arm
+        // exists rather than relying on the similarity score. A contradicted candidate is
+        // excluded: when the buyer's own reference says these are different inquiries, they are.
+        ranked ??= scored
+            .Where(x => x.BrdDuplicateReason is not null && !x.Contradicted)
+            .OrderBy(x => x.Lead.CreatedDate).ThenBy(x => x.Lead.Id)
+            .FirstOrDefault();
+
         if (ranked is not null && !ranked.Contradicted)
         {
             // An amendment whose reference gained a revision marker ("RFQ-4471" -> "RFQ-4471 Rev B")
@@ -190,9 +210,44 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
                     ["Same tenant and customer, an amended form of the same customer RFQ reference, and near-identical commercial content."],
                     tx, ownsTransaction, ct);
 
+            // FR-RFQ-05, stated by the requirement in exactly these words: "when a closing-date
+            // amendment is received, version the existing RFQ rather than create a duplicate."
+            //
+            // The arm above only fires when the customer changed their reference STRING. A tender
+            // amendment normally does not: the same reference and the same lines come back with a
+            // moved deadline, and the arm above misses it. When the sender is resolved on both
+            // sides that case is already caught much earlier by the scope-plus-reference arm; what
+            // reached here — and became a human queue item — is the amendment whose own customer
+            // identity is UNRESOLVED, the manually uploaded amendment PDF carrying no address at
+            // all. Its reference is still the buyer's own identity statement, and it corroborates.
+            //
+            // Every guard that protects FR-RFQ-06 is kept:
+            //  * a CONTRADICTING customer scope is refused outright, so a different buyer can
+            //    never auto-link however well the lines and the reference agree — that stays the
+            //    "two contacts, one reference" decision a human owns;
+            //  * the reference must positively corroborate, so an absent or conflicting reference
+            //    still reaches the review queue;
+            //  * ReferenceAmends keeps the direction rule: the amendment may carry the same or an
+            //    extended reference, never a superseded one, so the canonical record is not rolled
+            //    back to older commercial values;
+            //  * sameness of the commercial content is decided by the SAME similarity machinery
+            //    and the SAME bar as the arm above, so a genuine second inquiry whose lines differ
+            //    materially is not swallowed.
+            // Only the deadline may differ, in EITHER direction: tenders are both extended and
+            // pulled forward, and neither is more of an amendment than the other.
+            if (ranked.Scope != MatchEvidence.Contradicting
+                && ranked.Reference == MatchEvidence.Corroborating
+                && ranked.ReferenceAmends
+                && ranked.Score >= ConfidentRevisionThreshold
+                && ClosingDateAmended(candidate.BidClosingDate, ranked.Lead.BidClosingDate))
+                return await CreateRevisionAsync(ranked.Lead, candidate, intake, fingerprint, scope,
+                    [$"Closing-date amendment: the same customer RFQ reference and unchanged line items, with the bid closing date moved from {ClosingDateText(ranked.Lead.BidClosingDate)} to {ClosingDateText(candidate.BidClosingDate)}."],
+                    tx, ownsTransaction, ct);
+
             var occurrence = NewOccurrence(candidate.BusinessUnitId, intake, fingerprint, scope,
                 LeadOccurrenceClassification.PossibleMatchReviewRequired, ranked.Score,
-                [ranked.Grouped
+                [ranked.BrdDuplicateReason is { } duplicateReason ? duplicateReason
+                    : ranked.Grouped
                     ? "Documents share a logical group and similar content, but canonical identity requires review."
                     : ranked.Reference == MatchEvidence.Corroborating
                         ? "The customer RFQ reference and commercial content match an existing inquiry, but customer identity is unresolved or differs."
@@ -706,8 +761,12 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
     {
         if (_db.Database.CurrentTransaction is not null || !_db.Database.IsRelational())
             return DecideMatchCoreAsync(bu, occurrenceId, request, actorId, ct);
-        return _db.Database.CreateExecutionStrategy().ExecuteAsync(
-            () => DecideMatchCoreAsync(bu, occurrenceId, request, actorId, ct));
+        return _db.Database.CreateExecutionStrategy().ExecuteAsync(() =>
+        {
+            // Only on THIS branch — see EstablishBaselineRevisionAsync.
+            _db.ChangeTracker.Clear();
+            return DecideMatchCoreAsync(bu, occurrenceId, request, actorId, ct);
+        });
     }
 
     private async Task<LeadReconciliationResult> DecideMatchCoreAsync(long bu, long occurrenceId,
@@ -857,8 +916,15 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         ArgumentNullException.ThrowIfNull(request);
         if (_db.Database.CurrentTransaction is not null || !_db.Database.IsRelational())
             return EstablishBaselineCoreAsync(businessUnitId, leadId, request, ct);
-        return _db.Database.CreateExecutionStrategy().ExecuteAsync(
-            () => EstablishBaselineCoreAsync(businessUnitId, leadId, request, ct));
+        return _db.Database.CreateExecutionStrategy().ExecuteAsync(() =>
+        {
+            // Only on THIS branch: the guard above hands an ambient transaction straight to the
+            // core, and clearing there would discard the caller's uncommitted unit of work.
+            // Here the strategy owns the attempt and may re-run the delegate on this same
+            // DbContext, so attempt 1's mutations must not be visible to attempt 2.
+            _db.ChangeTracker.Clear();
+            return EstablishBaselineCoreAsync(businessUnitId, leadId, request, ct);
+        });
     }
 
     private async Task<LeadReconciliationResult> EstablishBaselineCoreAsync(
@@ -1083,7 +1149,11 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         foreach (var item in source.LeadItems) target.LeadItems.Add(CloneCurrentItem(item));
     }
     public static string Fingerprint(Lead lead) => Hash(JsonSerializer.Serialize(Snapshot(lead)));
-    private sealed record ItemFingerprintSnapshot(string? line, string? part, string? description, int Quantity, string? uom, string? date);
+    // Quantity is nullable because LeadItem.Quantity is. A line whose quantity was never
+    // stated now serialises as null instead of 0, so it hashes differently from a line that
+    // really does say 0 — which is the point: two documents that differ in whether they state
+    // a quantity are not the same document, and dedup must not treat them as one.
+    private sealed record ItemFingerprintSnapshot(string? line, string? part, string? description, int? Quantity, string? uom, string? date);
     private static object Snapshot(Lead x) => new { rfq = Normalize(x.Rfqno), buyer = Normalize(x.BuyersName), closing = x.BidClosingDate?.ToUniversalTime().ToString("O"),
         items = x.LeadItems.Select(ItemSnapshot).OrderBy(i => i.part).ThenBy(i => i.line).ToArray() };
     private static ItemFingerprintSnapshot ItemSnapshot(LeadItem x) => new(Normalize(x.LineItemNo), Normalize(x.ManufacturerPartNumber ?? x.ItemMaterialCode),
@@ -1147,7 +1217,7 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
     private enum MatchEvidence { Contradicting, Absent, Corroborating }
 
     private sealed record MatchAssessment(Lead Lead, decimal Score, MatchEvidence Scope, MatchEvidence Reference,
-        bool ReferenceAmends, bool Grouped)
+        bool ReferenceAmends, bool Grouped, string? BrdDuplicateReason = null)
     {
         /// <summary>
         /// The identity evidence positively says "different inquiry". The customer's own RFQ
@@ -1211,6 +1281,35 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         shorter.Length >= 4 && longer.Length > shorter.Length
         && longer.StartsWith(shorter, StringComparison.Ordinal)
         && char.IsLetter(longer[shorter.Length]);
+
+    /// <summary>
+    /// The incoming document states a DIFFERENT bid closing date from the canonical lead.
+    ///
+    /// <para>Both sides must state one. A deadline appearing where the previous extraction found
+    /// none is a better reading of the same document, not an amendment of the deadline, and a
+    /// deadline disappearing is a worse one — neither should auto-link on the strength of a date.
+    /// Direction is deliberately not consulted: a tender is extended as often as it is pulled
+    /// forward, and both are amendments.</para>
+    /// </summary>
+    private static bool ClosingDateAmended(DateTime? incoming, DateTime? canonical) =>
+        incoming.HasValue && canonical.HasValue
+        && ClosingInstant(incoming.Value) != ClosingInstant(canonical.Value);
+
+    /// <summary>
+    /// Compares two closing dates as instants without inventing a timezone. A value read back
+    /// from the store carries <see cref="DateTimeKind.Unspecified"/> while a freshly extracted one
+    /// is often <see cref="DateTimeKind.Utc"/>; <c>ToUniversalTime</c> shifts only the former by
+    /// the host's offset, which would report one identical deadline as two on any machine not
+    /// running in UTC.
+    /// </summary>
+    private static DateTime ClosingInstant(DateTime value) =>
+        value.Kind == DateTimeKind.Unspecified ? value : value.ToUniversalTime();
+
+    /// <summary>The reviewer-facing rendering of a closing date named in a decision reason.</summary>
+    private static string ClosingDateText(DateTime? value) =>
+        value.HasValue
+            ? ClosingInstant(value.Value).ToString("yyyy-MM-dd HH:mm 'UTC'", CultureInfo.InvariantCulture)
+            : "none";
 
     private static string Diff(object previous, object current) => JsonSerializer.Serialize(new { previous, current });
     private static string ProposedSnapshot(string differencesJson)

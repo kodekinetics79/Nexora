@@ -100,13 +100,22 @@ namespace ERP_RFQ_Automation.Notifications.Runtime
         public OutboundEmailSettingsSnapshot Current =>
             Volatile.Read(ref _cached)?.Settings ?? OutboundEmailSettingsSnapshot.FromOptions(_configured);
 
-        /// <summary>Drops the cached transport so the next resolve rebuilds. Called after a save in
-        /// this process; other instances converge within <see cref="RevalidationInterval"/>.</summary>
-        public void Invalidate()
-        {
-            Volatile.Write(ref _cached, null);
-            _validUntil = default;
-        }
+        /// <summary>
+        /// Expires the cached transport so the next resolve rebuilds. Called after a save in this
+        /// process; other instances converge within <see cref="RevalidationInterval"/>.
+        ///
+        /// <para><b>Expires, but does not discard.</b> Nulling <c>_cached</c> made
+        /// <see cref="Current"/> — which has no I/O and therefore cannot rebuild — fall back to
+        /// <c>appsettings</c> until some other caller happened to await <see cref="ResolveAsync"/>.
+        /// That window is on a live path: the effective-options view is <c>IOptions</c> for the
+        /// whole application, and the tenant-invitation service reads <c>AppBaseUrl</c> through it,
+        /// so provisioning a tenant in the seconds after an operator saved produced an activation
+        /// link built from the configuration file rather than from what was just saved — delivered
+        /// perfectly, and leading nowhere. Clearing <c>_validUntil</c> alone forces the rebuild
+        /// without ever reporting a configuration nobody chose; the version comparison in
+        /// <see cref="ResolveAsync"/> still rebuilds because the save bumped Version.</para>
+        /// </summary>
+        public void Invalidate() => _validUntil = default;
 
         public async Task<ResolvedOutboundTransport> ResolveAsync(CancellationToken ct = default)
         {

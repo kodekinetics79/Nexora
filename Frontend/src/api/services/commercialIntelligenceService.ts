@@ -319,6 +319,7 @@ export interface InventoryExceptionDTO {
 }
 
 export interface AvailabilityDTO {
+  inventoryId: number;
   productId: number;
   partNumber: string;
   productName: string;
@@ -329,7 +330,155 @@ export interface AvailabilityDTO {
   available: number;
   incoming: number;
   reorderPoint?: number | null;
+  /**
+   * FR-INV-04. Null means the level has NOT been configured for this item and warehouse — it does
+   * not mean zero, and the screen must not render it as a blank cell that reads like one. A null
+   * minimum is why an item that has run out raises nothing: nobody has said what "enough" is.
+   */
+  minimumLevel?: number | null;
+  maximumLevel?: number | null;
+  safetyStock: number;
   leadTimeDays?: number | null;
+}
+
+/** FR-INV-04. One stock row's live position against the levels configured for it. */
+export interface StockLevelRowDTO {
+  inventoryId: number;
+  productId: number;
+  partNumber: string;
+  productName: string;
+  warehouseId: number;
+  warehouseName: string;
+  onHand: number;
+  available: number;
+  incoming: number;
+  projected: number;
+  minimumLevel?: number | null;
+  maximumLevel?: number | null;
+  reorderPoint: number;
+  /** The single worst condition this row qualifies for, or null when it breaches nothing. */
+  breach?: 'OUT_OF_STOCK' | 'BELOW_MINIMUM' | 'REORDER_POINT' | 'OVERSTOCK' | null;
+  thresholdQuantity: number;
+  shortfallQuantity: number;
+  /** False when no level is configured at all. "Nothing is wrong" and "nobody is looking" are
+   * different answers and the screen states which one it is showing. */
+  monitored: boolean;
+}
+
+export interface StockLevelsDTO {
+  generatedAt: string;
+  rowCount: number;
+  configuredCount: number;
+  breachedCount: number;
+  unmonitoredCount: number;
+  rows: StockLevelRowDTO[];
+}
+
+/** FR-INV-04. One raised reorder or overstock alert. */
+export interface ReorderAlertDTO {
+  id: number;
+  inventoryId: number;
+  productId: number;
+  warehouseId: number;
+  partNumber: string;
+  productName?: string | null;
+  warehouseName: string;
+  kind: 'OUT_OF_STOCK' | 'BELOW_MINIMUM' | 'REORDER_POINT' | 'OVERSTOCK';
+  status: 'OPEN' | 'ACKNOWLEDGED' | 'RESOLVED';
+  severity: string;
+  onHandQuantity: number;
+  availableQuantity: number;
+  incomingQuantity: number;
+  projectedQuantity: number;
+  thresholdQuantity: number;
+  shortfallQuantity: number;
+  raisedOn: string;
+  /** How many people were mailed a copy. Zero is a real state — the alert is on the ledger and
+   * nobody has been told — and is rendered as such rather than left blank. */
+  notifiedCount: number;
+  acknowledgedOn?: string | null;
+  acknowledgedBy?: string | null;
+  acknowledgementReason?: string | null;
+  resolvedOn?: string | null;
+  resolutionReason?: string | null;
+  version: number;
+}
+
+export interface ReorderAlertsDTO {
+  generatedAt: string;
+  alertCount: number;
+  rows: ReorderAlertDTO[];
+}
+
+/** FR-INV-05. One counted line: what the book said, what the counter found, and the gap. */
+export interface StockCountVarianceRowDTO {
+  inventoryId: number;
+  productId: number;
+  partNumber: string;
+  productName: string;
+  warehouseId: number;
+  warehouseName: string;
+  bookQuantity: number;
+  countedQuantity: number;
+  variance: number;
+  /** Null when the book value was zero: a count finding 5 units where the system knew of none is
+   * an infinite percentage, and reporting 0% or 500% would both be inventions. */
+  variancePercent?: number | null;
+  countedOn: string;
+  countedBy: string;
+  reason?: string | null;
+}
+
+export interface StockCountVarianceDTO {
+  countedRows: number;
+  netVariance: number;
+  absoluteVariance: number;
+  rows: StockCountVarianceRowDTO[];
+}
+
+/** FR-INV-06. One inventory row's ageing position. */
+export interface StockAgeingRowDTO {
+  inventoryId: number;
+  productId: number;
+  partNumber: string;
+  productName: string;
+  warehouseId: number;
+  warehouseName: string;
+  onHand: number;
+  unitCost: number;
+  carryingValue: number;
+  lastReceiptOn?: string | null;
+  lastIssueOn?: string | null;
+  daysSinceLastIssue?: number | null;
+  daysSinceLastReceipt?: number | null;
+  band: 'CURRENT' | 'SLOW_MOVING' | 'VERY_SLOW' | 'OBSOLETE' | 'UNDATED';
+}
+
+export interface StockAgeingDTO {
+  rowCount: number;
+  carryingValue: number;
+  bands: Array<{ band: string; rowCount: number; units: number; carryingValue: number }>;
+  rows: StockAgeingRowDTO[];
+}
+
+/** The state of one inventory row after a stock write. */
+export interface StockLedgerResultDTO {
+  inventoryId: number;
+  productId: number;
+  warehouseId: number;
+  onHand: number;
+  quarantine: number;
+  damaged: number;
+  expired: number;
+  safetyStock: number;
+  movementId?: number | null;
+  /** FR-INV-05. What the system believed was on hand immediately BEFORE a count. */
+  bookQuantity?: number | null;
+  countedQuantity?: number | null;
+  variance?: number | null;
+  countAgreed?: boolean;
+  minimumLevel?: number | null;
+  maximumLevel?: number | null;
 }
 
 export interface WarehouseIntelligenceDTO {
@@ -357,7 +506,58 @@ export interface ReservationDTO {
   demandReference: string;
   nexoraSerial?: string | null;
   requiredAt?: string | null;
+  /**
+   * FR-INV-01. The material lot this hold physically names. Null is a real state, not a loading
+   * one: stock that entered by opening count, adjustment or transfer has no goods receipt behind
+   * it and therefore no lot, so a recall cannot reach it. The screen must say so.
+   */
+  materialLotId?: number | null;
+  lotNumber?: string | null;
   version: number;
+}
+
+/** FR-INV-01. One lot's reservable position on an inventory row, in warehouse pick order. */
+export interface ReservableLotDTO {
+  materialLotId: number;
+  lotNumber: string;
+  remaining: number;
+  held: number;
+  reservable: number;
+  expiryDate?: string | null;
+  receivedOn: string;
+}
+
+export interface InventoryLotAvailabilityDTO {
+  inventoryId: number;
+  onHand: number;
+  reserved: number;
+  available: number;
+  lotControlledQuantity: number;
+  unlottedQuantity: number;
+  lots: ReservableLotDTO[];
+}
+
+/** FR-INV-01. The recall population for one lot: who holds it and who has already had it. */
+export interface LotCommitmentDTO {
+  reservationId: number;
+  orderId?: number | null;
+  orderItemId?: number | null;
+  quantity: number;
+  status: string;
+  createdOn: string;
+}
+
+export interface LotCommitmentsDTO {
+  materialLotId: number;
+  lotNumber: string;
+  status: string;
+  quantityReceived: number;
+  quantityConsumed: number;
+  heldQuantity: number;
+  consumedQuantity: number;
+  affectedOrders: { orderId: number; orderNo?: string | null }[];
+  held: LotCommitmentDTO[];
+  consumed: LotCommitmentDTO[];
 }
 
 export interface IncomingStockDTO {
@@ -497,6 +697,12 @@ const commercialIntelligenceService = {
     (await axiosInstance.get<WarehouseIntelligenceDTO[]>(`${inventoryRoot}/warehouses`)).data,
   getReservations: async (params: ListParams = {}): Promise<ReservationDTO[]> =>
     (await axiosInstance.get<ReservationDTO[]>(`${inventoryRoot}/reservations`, { params })).data,
+  getReservableLots: async (inventoryId: number): Promise<InventoryLotAvailabilityDTO> =>
+    (await axiosInstance.get<InventoryLotAvailabilityDTO>(
+      `${inventoryRoot}/inventory/${inventoryId}/lots`)).data,
+  getLotCommitments: async (materialLotId: number): Promise<LotCommitmentsDTO> =>
+    (await axiosInstance.get<LotCommitmentsDTO>(
+      `${inventoryRoot}/lots/${materialLotId}/commitments`)).data,
   releaseReservation: async (id: number, expectedVersion: number, idempotencyKey: string): Promise<void> => {
     await axiosInstance.post(`${inventoryRoot}/reservations/${id}/release`, { expectedVersion }, { headers: { 'Idempotency-Key': idempotencyKey } });
   },
@@ -506,6 +712,53 @@ const commercialIntelligenceService = {
     (await axiosInstance.get<InventoryMovementDTO[]>(`${inventoryRoot}/movements`, { params })).data,
   getDemand: async (params: ListParams = {}): Promise<DemandDTO[]> =>
     (await axiosInstance.get<DemandDTO[]>(`${inventoryRoot}/demand`, { params })).data,
+  // ---- FR-INV-04: minimum/maximum levels and reorder alerts ----
+  getStockLevels: async (breachedOnly = false): Promise<StockLevelsDTO> =>
+    (await axiosInstance.get<StockLevelsDTO>(`${inventoryRoot}/stock/levels`, { params: { breachedOnly } })).data,
+  setStockLevels: async (
+    productId: number, warehouseId: number,
+    minimumLevel: number | null, maximumLevel: number | null,
+    idempotencyKey: string,
+  ): Promise<StockLedgerResultDTO> =>
+    // Both levels are always sent. There is no partial update: a payload that silently kept a
+    // stale maximum would be indistinguishable on screen from one that cleared it.
+    (await axiosInstance.post<StockLedgerResultDTO>(`${inventoryRoot}/stock/levels`,
+      { productId, warehouseId, minimumLevel, maximumLevel },
+      { headers: { 'Idempotency-Key': idempotencyKey } })).data,
+  getReorderAlerts: async (params: { status?: string; kind?: string } = {}): Promise<ReorderAlertsDTO> =>
+    (await axiosInstance.get<ReorderAlertsDTO>(`${inventoryRoot}/reorder-alerts`, { params })).data,
+  acknowledgeReorderAlert: async (id: number, expectedVersion: number, reason: string): Promise<void> => {
+    await axiosInstance.post(`${inventoryRoot}/reorder-alerts/${id}/acknowledge`, { expectedVersion, reason });
+  },
+
+  // ---- FR-INV-05 / FR-INV-06: variance and ageing ----
+  getCountVariance: async (params: { from?: string; to?: string; varianceOnly?: boolean } = {}): Promise<StockCountVarianceDTO> =>
+    (await axiosInstance.get<StockCountVarianceDTO>(`${inventoryRoot}/stock/count-variance`, { params })).data,
+  getStockAgeing: async (params: { warehouseId?: number; band?: string } = {}): Promise<StockAgeingDTO> =>
+    (await axiosInstance.get<StockAgeingDTO>(`${inventoryRoot}/stock/ageing`, { params })).data,
+
+  // ---- the stock-mutation half of the controller, which until now had no caller at all ----
+  recordStockCount: async (productId: number, warehouseId: number, countedQuantity: number, reason: string | undefined, idempotencyKey: string): Promise<StockLedgerResultDTO> =>
+    (await axiosInstance.post<StockLedgerResultDTO>(`${inventoryRoot}/stock/count`,
+      { productId, warehouseId, countedQuantity, reason },
+      { headers: { 'Idempotency-Key': idempotencyKey } })).data,
+  adjustStock: async (productId: number, warehouseId: number, delta: number, reason: string | undefined, idempotencyKey: string): Promise<StockLedgerResultDTO> =>
+    (await axiosInstance.post<StockLedgerResultDTO>(`${inventoryRoot}/stock/adjust`,
+      { productId, warehouseId, delta, reason },
+      { headers: { 'Idempotency-Key': idempotencyKey } })).data,
+  reclassifyStock: async (productId: number, warehouseId: number, bucket: 'Quarantine' | 'Damaged' | 'Expired', quantity: number, reason: string | undefined, idempotencyKey: string): Promise<StockLedgerResultDTO> =>
+    (await axiosInstance.post<StockLedgerResultDTO>(`${inventoryRoot}/stock/reclassify`,
+      { productId, warehouseId, bucket, quantity, reason },
+      { headers: { 'Idempotency-Key': idempotencyKey } })).data,
+  setSafetyStock: async (productId: number, warehouseId: number, safetyStock: number, idempotencyKey: string): Promise<StockLedgerResultDTO> =>
+    (await axiosInstance.post<StockLedgerResultDTO>(`${inventoryRoot}/stock/safety-stock`,
+      { productId, warehouseId, safetyStock },
+      { headers: { 'Idempotency-Key': idempotencyKey } })).data,
+  transferStock: async (productId: number, fromWarehouseId: number, toWarehouseId: number, quantity: number, reason: string | undefined, idempotencyKey: string): Promise<{ from: StockLedgerResultDTO; to: StockLedgerResultDTO }> =>
+    (await axiosInstance.post<{ from: StockLedgerResultDTO; to: StockLedgerResultDTO }>(`${inventoryRoot}/stock/transfer`,
+      { productId, fromWarehouseId, toWarehouseId, quantity, reason },
+      { headers: { 'Idempotency-Key': idempotencyKey } })).data,
+
   getRelatedResources: async (): Promise<InventoryResourceDTO[]> =>
     (await axiosInstance.get<InventoryResourceDTO[]>(`${inventoryRoot}/related-resources`)).data,
   resolveLeadLines: async (leadId: number, limit: 10 | 20 | 50): Promise<CommercialLineResolutionDTO[]> =>

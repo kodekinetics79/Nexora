@@ -11,6 +11,18 @@ export interface SlaPolicyDTO {
   quoteAutoExpireDays: number;
   approvalEscalationHours: number;
   deadlineBufferHours: number;
+  /** FR-QTM-07 trigger 2: days after submission with no customer response. */
+  quoteNoResponseExpiryDays: number;
+  /** FR-SPO-07: working days before a committed ship date to remind the buyer. */
+  supplierShipDateReminderDays: number;
+  /** FR-SPO-07: working hours without a supplier acknowledgement before escalating. */
+  supplierAckEscalationHours: number;
+  /**
+   * FR-SBF-01: working days before a bid closes at which RFQ lines still carrying no
+   * Quote/No-Quote decision are chased. 0 means NOT CONFIGURED — the sweep sends nothing —
+   * rather than "chase immediately".
+   */
+  quoteDecisionReminderDays: number;
 }
 
 export type SlaPolicyUpdate = Partial<Omit<SlaPolicyDTO, 'businessUnitId'>>;

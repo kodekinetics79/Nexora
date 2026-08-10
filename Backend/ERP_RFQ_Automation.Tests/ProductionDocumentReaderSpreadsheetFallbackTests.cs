@@ -24,31 +24,30 @@ public sealed class ProductionDocumentReaderSpreadsheetFallbackTests
 {
     // ---- unrecognized layouts fall back instead of dead-lettering ---------
 
+    // This fixture opens with a title row ("Request for Quotation - C001046140") above an
+    // otherwise ordinary header: S.No | Material Code | Material Description | UOM | Req Qty |
+    // Delivery Location. It used to be classed as unrecognized purely because the header was
+    // assumed to be row 1 and none of those column spellings were known — so a perfectly
+    // readable RFQ was handed to the LLM, which is blocked for external providers in the
+    // deployed configuration, and dead-lettered. It is now read deterministically.
     [Fact]
-    public async Task UnrecognizedXlsLayout_FallsBackToUnstructuredText_InsteadOfFailingPermanently()
+    public async Task TitleBlockAboveTheHeader_IsReadStructurally_WithTheUnitColumn()
     {
         var bytes = ReadFixture("unrecognized-layout-rfq.xls");
         var reader = CreateReader(bytes);
 
         var result = await reader.ReadAsync(CreateJob("C001046140.xls", "xls"));
 
-        Assert.False(result.IsStructured);
-        Assert.Null(result.StructuredRows);
-        Assert.Equal(ExtractionProcessingPath.NativeParser, result.ProcessingPath);
+        Assert.True(result.IsStructured);
+        Assert.NotNull(result.StructuredRows);
+        // The deterministic path, not the LLM fallback — no model is involved at all.
+        Assert.Equal(ExtractionProcessingPath.DeterministicRules, result.ProcessingPath);
 
-        // Honest, specific user-facing context: read fine, layout unrecognized, what's next.
-        Assert.NotNull(result.StructuredFallbackNote);
-        Assert.Contains("read successfully", result.StructuredFallbackNote);
-        Assert.Contains("column layout was not recognized", result.StructuredFallbackNote);
-        Assert.Contains("AI-assisted extraction", result.StructuredFallbackNote);
-        Assert.Contains("held for review", result.StructuredFallbackNote);
-
-        // The rendered text carries sheet name + tab-joined rows for the LLM/reviewer.
-        Assert.StartsWith("[SPREADSHEET LAYOUT NOT RECOGNIZED", result.HeaderText);
-        Assert.Contains("[Worksheet: Enquiry]", result.HeaderText);
-        Assert.Contains("Material Code\tMaterial Description\tUOM", result.HeaderText);
-        Assert.Contains("MAT-88001\tBall valve DN50 PN16 stainless\tEA\t12", result.HeaderText);
-        Assert.NotEmpty(result.LineItemRegions);
+        var first = result.StructuredRows!.First();
+        Assert.Equal("MAT-88001", first.ManufacturerPartNumber);
+        Assert.Equal("Ball valve DN50 PN16 stainless", first.ProductName);
+        Assert.Equal("EA", first.UnitOfMeasure);
+        Assert.Equal("12", first.Quantity);
     }
 
     [Fact]
@@ -56,10 +55,10 @@ public sealed class ProductionDocumentReaderSpreadsheetFallbackTests
     {
         var bytes = BuildXlsx(worksheet =>
         {
-            worksheet.Cells[1, 1].Value = "Enquiry Ref";
-            worksheet.Cells[1, 2].Value = "Material Description";
-            worksheet.Cells[1, 3].Value = "UOM";
-            worksheet.Cells[1, 4].Value = "Req Qty";
+            worksheet.Cells[1, 1].Value = "Section";
+            worksheet.Cells[1, 2].Value = "Narrative";
+            worksheet.Cells[1, 3].Value = "Owner";
+            worksheet.Cells[1, 4].Value = "Status";
             worksheet.Cells[2, 1].Value = "ENQ-77";
             worksheet.Cells[2, 2].Value = "Gate valve DN80";
             worksheet.Cells[2, 3].Value = "EA";
@@ -78,7 +77,7 @@ public sealed class ProductionDocumentReaderSpreadsheetFallbackTests
     [Fact]
     public async Task UnrecognizedCsvHeaders_WithDataRows_FallsBackToUnstructuredText()
     {
-        var csv = "Enquiry Ref,Material Description,UOM,Req Qty\nENQ-1,Ball valve,EA,12\n";
+        var csv = "Section,Narrative,Owner,Status\nENQ-1,Ball valve,EA,12\n";
         var reader = CreateReader(Encoding.UTF8.GetBytes(csv));
 
         var result = await reader.ReadAsync(CreateJob("enquiry.csv", "csv"));
@@ -129,8 +128,8 @@ public sealed class ProductionDocumentReaderSpreadsheetFallbackTests
     [Fact]
     public async Task UnrecognizedXlsFallback_ReachesLlmExtraction_WhenLocalProviderIsAvailable()
     {
-        var reader = CreateReader(ReadFixture("unrecognized-layout-rfq.xls"));
-        var input = await reader.ReadAsync(CreateJob("C001046140.xls", "xls"));
+        var reader = CreateReader(UnrecognizableWorkbook());
+        var input = await reader.ReadAsync(CreateJob("enquiry.xlsx", "xlsx"));
 
         var llm = new StubLlm(AiProviderClass.Local, Ext.Result(Ext.Items(3, 0.9), 0.9));
         var service = new ChunkedExtractionService(
@@ -147,8 +146,8 @@ public sealed class ProductionDocumentReaderSpreadsheetFallbackTests
     [Fact]
     public async Task UnrecognizedXlsFallback_RespectsExternalAllowListGate_FailsClosedWithZeroEgress()
     {
-        var reader = CreateReader(ReadFixture("unrecognized-layout-rfq.xls"));
-        var input = await reader.ReadAsync(CreateJob("C001046140.xls", "xls"));
+        var reader = CreateReader(UnrecognizableWorkbook());
+        var input = await reader.ReadAsync(CreateJob("enquiry.xlsx", "xlsx"));
 
         var llm = new StubLlm(AiProviderClass.External, Ext.Result(Ext.Items(3, 0.9), 0.9));
         var service = new ChunkedExtractionService(
@@ -168,6 +167,22 @@ public sealed class ProductionDocumentReaderSpreadsheetFallbackTests
 
     private static byte[] ReadFixture(string name)
         => File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "Fixtures", name));
+
+    /// <summary>
+    /// A workbook whose headers carry no commercial meaning, so the deterministic parser
+    /// genuinely cannot map a single column. Used to keep the fail-closed fallback path under
+    /// test now that ordinary RFQ column spellings — including title blocks above the header —
+    /// are read structurally.
+    /// </summary>
+    private static byte[] UnrecognizableWorkbook() => BuildXlsx(worksheet =>
+    {
+        worksheet.Cells[1, 1].Value = "Section";
+        worksheet.Cells[1, 2].Value = "Narrative";
+        worksheet.Cells[1, 3].Value = "Owner";
+        worksheet.Cells[2, 1].Value = "MAT-88001";
+        worksheet.Cells[2, 2].Value = "Ball valve DN50 PN16 stainless";
+        worksheet.Cells[2, 3].Value = "Jubail Plant";
+    });
 
     private static byte[] BuildXlsx(Action<OfficeOpenXml.ExcelWorksheet> populate)
     {

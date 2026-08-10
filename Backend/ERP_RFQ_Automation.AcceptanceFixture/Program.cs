@@ -862,7 +862,9 @@ async Task<long> EnsureNegotiationSupplierQuoteAsync(
     var result = await new SupplierQuoteInboxService(db).CaptureAsync(new ERP_RFQ_Automation.SupplierQuotes.CaptureSupplierQuoteCommand(
         tenantId, quoteSupplier.Id, solicitation.Id, sourcingCase.Id, rfq.NexoraSerial!,
         quoteReference, 1, SupplierQuoteCaptureChannels.Manual, null, sourceIdentity, sourceHash,
-        quoteCurrency.Id, now.AddDays(30), "FCA", 30m, 0m, "Net 30",
+        // Duty stays zero against an FCA term on purpose: the fixture is what the cost-completeness
+        // warning fires on, so acceptance walks a buyer past the very case the panel named.
+        quoteCurrency.Id, now.AddDays(30), "FCA", 30m, 0m, 0m, 0m, 0m, "Net 30",
         "Authorized synthetic quote for authenticated V2.4 browser acceptance.",
         new[]
         {
@@ -1050,7 +1052,11 @@ async Task<Rfq> EnsureRfqAsync(Lead lead, string rfqNumber)
         rfq.Rfqitems.Add(new Rfqitem { LineItemNo = item.LineItemNo,
             ProductId = productId == 0 ? null : productId, ProductShortDescription = item.ProductShortDescription,
             ItemMaterialCode = item.ItemMaterialCode, ManufacturerPartNumber = item.ManufacturerPartNumber,
-            CommodityProduct = item.CommodityProduct, ItemText = item.ItemText, Quantity = item.Quantity,
+            CommodityProduct = item.CommodityProduct, ItemText = item.ItemText,
+            // The fixture builds every line with a stated quantity; RFQItems.Quantity is NOT NULL
+            // and CHECK > 0, so an unquantified lead line is a fixture bug, not a runtime case.
+            Quantity = item.Quantity ?? throw new InvalidOperationException(
+                $"Fixture lead line {item.LineItemNo} has no quantity."),
             UnitOfMeasure = item.UnitOfMeasure ?? "EA", CreatedBy = fixtureActor, CreatedDate = now });
     }
     db.Add(rfq); await db.SaveChangesAsync(); return rfq;
@@ -1075,6 +1081,8 @@ async Task EnsureLineResolutionsAsync(Lead lead, Rfq rfq, Product full, Product 
     {
         var item = lines[index];
         if (resolvedLines.Contains(revisionLines[index].Id)) continue;
+        var itemQuantity = item.Quantity ?? throw new InvalidOperationException(
+            $"Fixture lead line {item.LineItemNo} has no quantity.");
         var partNumber = item.ManufacturerPartNumber ?? $"LINE-{index + 1}";
         var (productId, classification, atp, incomingAvailable) = partNumber switch
         {
@@ -1089,11 +1097,11 @@ async Task EnsureLineResolutionsAsync(Lead lead, Rfq rfq, Product full, Product 
             ? "[{\"resourceId\":\"supplier-quote:core\",\"businessUnitId\":80101,\"kind\":\"SupplierQuoteHistory\",\"supplierId\":1,\"displayName\":\"Precision Controls Supply\",\"matchReason\":\"Tenant-local supplier history\",\"score\":0.9,\"evidenceReference\":\"CORE-SQ-OOS-300\"}]"
             : "[]";
         var fulfilment = partNumber == "CORE-ATP-100"
-            ? $"{{\"classification\":\"MultipleWarehouses\",\"requestedQuantity\":{item.Quantity},\"allocatedQuantity\":{item.Quantity},\"shortageQuantity\":0,\"allocations\":[{{\"warehouseId\":{primaryWarehouse.Id},\"inventoryId\":{sufficientPrimary.Id},\"warehouseCode\":\"CORE-PRIMARY\",\"quantity\":8,\"availableBeforeAllocation\":18}},{{\"warehouseId\":{overflowWarehouse.Id},\"inventoryId\":{sufficientOverflow.Id},\"warehouseCode\":\"CORE-OVERFLOW\",\"quantity\":2,\"availableBeforeAllocation\":15}}]}}"
-            : $"{{\"classification\":\"{(atp > 0 ? "PartialStock" : "NoStock")}\",\"requestedQuantity\":{item.Quantity},\"allocatedQuantity\":{atp},\"shortageQuantity\":{Math.Max(0, item.Quantity - atp)},\"allocations\":[]}}";
+            ? $"{{\"classification\":\"MultipleWarehouses\",\"requestedQuantity\":{itemQuantity},\"allocatedQuantity\":{itemQuantity},\"shortageQuantity\":0,\"allocations\":[{{\"warehouseId\":{primaryWarehouse.Id},\"inventoryId\":{sufficientPrimary.Id},\"warehouseCode\":\"CORE-PRIMARY\",\"quantity\":8,\"availableBeforeAllocation\":18}},{{\"warehouseId\":{overflowWarehouse.Id},\"inventoryId\":{sufficientOverflow.Id},\"warehouseCode\":\"CORE-OVERFLOW\",\"quantity\":2,\"availableBeforeAllocation\":15}}]}}"
+            : $"{{\"classification\":\"{(atp > 0 ? "PartialStock" : "NoStock")}\",\"requestedQuantity\":{itemQuantity},\"allocatedQuantity\":{atp},\"shortageQuantity\":{Math.Max(0, itemQuantity - atp)},\"allocations\":[]}}";
         db.Add(new LeadLineCommercialResolution { BusinessUnitId = tenantId, LeadId = lead.Id,
             LeadRevisionId = revision.Id, LeadLineId = revisionLines[index].Id, RfqId = rfq.Id,
-            ProductId = productId, RequestedPartNumber = partNumber, RequestedQuantity = item.Quantity,
+            ProductId = productId, RequestedPartNumber = partNumber, RequestedQuantity = itemQuantity,
             Classification = classification, AvailableToPromise = atp, IncomingAvailable = incomingAvailable,
             FulfilmentJson = fulfilment, RelatedResourcesJson = related,
             ProductResolutionJson = productId.HasValue ? $"{{\"decisionState\":\"AutoLinked\",\"resolvedProductId\":{productId.Value}}}" : "{\"decisionState\":\"Unresolved\"}",

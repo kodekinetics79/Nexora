@@ -86,6 +86,14 @@ export const permissionsForRole = (role: string | null | undefined): PlatformPer
  */
 export const REQUIRED_ROLE_COPY = {
   owner: 'Owner only. This action is irreversible, so it is deliberately not available to support.',
+  /**
+   * The email screen is Owner-gated too, but for a different reason, and the `owner` copy above
+   * was written for tenant deletion. Saying "irreversible" on a change that is versioned, audited
+   * and reversible teaches operators that the tooltip is boilerplate — and the next one they
+   * dismiss is the one that mattered.
+   */
+  platformEmail:
+    'Owner only. Changing the address the product sends from — and the credentials behind it — is a privileged act, so it is deliberately not available to support.',
   tenantAdmin: 'Requires the Owner or SupportAdmin role.',
   billing: 'Requires the Owner or BillingAdmin role. Billing is separated from tenant operations on purpose.',
   impersonate: 'Requires the Owner or SupportAdmin role.',

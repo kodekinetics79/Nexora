@@ -3,6 +3,7 @@ using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.DTOs.LookupDTOs;
 using ERP_RFQ_Automation.DTOs.ProductDTOs;
 using ERP_RFQ_Automation.Interfaces;
+using ERP_RFQ_Automation.MasterData;
 using ERP_RFQ_Automation.Models;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -20,11 +21,16 @@ namespace ERP_RFQ_Automation.Controllers
     {
         private readonly IProductRepository _repository;
         private readonly ErpRfqAutomationContext _context;
+        private readonly IMasterDataChangeHistoryReader _changeHistory;
 
-        public ProductController(IProductRepository repository, ErpRfqAutomationContext context)
+        public ProductController(
+            IProductRepository repository,
+            ErpRfqAutomationContext context,
+            IMasterDataChangeHistoryReader changeHistory)
         {
             _repository = repository;
             _context = context;
+            _changeHistory = changeHistory;
         }
 
         private bool TryGetTenantId(out long businessUnitId) =>
@@ -342,6 +348,36 @@ namespace ERP_RFQ_Automation.Controllers
 
             await _repository.UpdateAsync(product, request.Buid, request.Attachments);
 
+            // FR-INV-04. Push the reorder point down to the stock rows that actually drive the
+            // alert.
+            //
+            // Inventory.ReorderPoint is copied from the product ONCE, when the stock row is first
+            // created (StockLedgerService.ResolveInventoryAsync), and was never re-synced. Every
+            // exception surface — the overview's BelowReorderPoint list, the warehouse exception
+            // counts, the demand/buying list — reads Inventory.ReorderPoint, while this screen
+            // writes Product.ReorderPoint. So raising a reorder point on a product that already
+            // held stock changed nothing anybody could see: the setting existed, the field saved,
+            // the alert kept using the old number, and the only symptom was an alert that never
+            // fired.
+            //
+            // Per warehouse rather than per product, because that is the grain the alert is
+            // evaluated at; the item master supplies the default for every location that has not
+            // been given its own.
+            var stockRows = await _context.Set<Models.Inventory>()
+                .Where(x => x.Buid == request.Buid && x.ProductId == id
+                            && x.ReorderPoint != product.ReorderPoint)
+                .ToListAsync();
+            if (stockRows.Count > 0)
+            {
+                foreach (var row in stockRows)
+                {
+                    row.ReorderPoint = product.ReorderPoint;
+                    row.ModifiedBy = Actor();
+                    row.ModifiedOn = DateTime.UtcNow;
+                }
+                await _context.SaveChangesAsync();
+            }
+
             // Reload the product to include attachments
             var savedProduct = await _repository.GetByIdAsync(id, request.Buid);
 
@@ -551,6 +587,33 @@ namespace ERP_RFQ_Automation.Controllers
             {
                 return Problem(statusCode: StatusCodes.Status500InternalServerError,
                     title: "Stock details could not be loaded.");
+            }
+        }
+
+        /// <summary>
+        /// FR-MDM-05 — the before/after trail for one product, newest first.
+        ///
+        /// <para>This is the endpoint that makes <c>FinalLandedCost</c> answerable. That column is
+        /// the cost basis reported margin is computed from, it is hand-editable on the product
+        /// screen and through column 28 of the import sheet, and before register item E44 was
+        /// closed nothing anywhere recorded who moved it or from what.</para>
+        /// </summary>
+        [HttpGet("{id}/change-history")]
+        [RequireModulePermission("Products", PermissionAction.View)]
+        public async Task<ActionResult<IReadOnlyList<MasterDataChangeEventDto>>> GetChangeHistory(
+            long id, [FromQuery] int limit = 50)
+        {
+            if (!TryGetTenantId(out var targetBUId)) return Forbid();
+
+            try
+            {
+                return Ok(await _changeHistory.ReadAsync(
+                    MasterDataEntityTypes.Product, id, targetBUId, limit, HttpContext.RequestAborted));
+            }
+            catch (Exception)
+            {
+                return Problem(statusCode: StatusCodes.Status500InternalServerError,
+                    title: "The product change history could not be loaded.");
             }
         }
 

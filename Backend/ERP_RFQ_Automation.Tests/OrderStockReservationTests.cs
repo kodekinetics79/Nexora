@@ -60,7 +60,7 @@ public class OrderStockReservationTests
     private static OrderStockReservationService Service(TestDb db)
     {
         var ctx = db.ContextFor(Bu);
-        return new OrderStockReservationService(ctx, new InventoryAvailabilityService(ctx));
+        return InventoryServices.OrderStock(ctx);
     }
 
     [Fact]

@@ -14,6 +14,14 @@ import {
   Tooltip,
   ListItemText,
   InputBase,
+  Popper,
+  Paper,
+  ClickAwayListener,
+  List,
+  ListItemButton,
+  Chip,
+  CircularProgress,
+  Alert,
 } from '@mui/material';
 import {
   Menu as MenuIcon,
@@ -27,6 +35,12 @@ import {
 import { useNavigate } from 'react-router-dom';
 import { useAppTheme } from '../../context/ThemeContext';
 import { useAuth } from '../../context/AuthContext';
+import searchService, {
+  ENTITY_LABELS,
+  MIN_SEARCH_LENGTH,
+  routeForHit,
+  type GlobalSearchResponse,
+} from '../../api/services/searchService';
 
 interface NavbarProps {
   onToggleSidebar: () => void;
@@ -40,6 +54,7 @@ interface NavbarProps {
 const PROFILE_BUTTON_ID = 'account-menu-button';
 const PROFILE_MENU_ID = 'account-menu';
 const COLOR_MENU_ID = 'color-theme-menu';
+const SEARCH_RESULTS_ID = 'global-search-results';
 
 const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth, sidebarExpanded, sidebarId }) => {
   const { mode, setMode, primaryColor, setPrimaryColor } = useAppTheme();
@@ -63,30 +78,78 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth, sidebarEx
         .toUpperCase()
     : '';
 
-  // Quick-jump destinations for the command bar (⌘K / Ctrl+K to focus, Enter to jump).
-  const quickNav: { keywords: string[]; path: string }[] = [
-    { keywords: ['lead', 'leads'], path: '/procurement/leads/all' },
-    { keywords: ['rfq', 'rfqs'], path: '/procurement/rfqs/all' },
-    { keywords: ['quote', 'quotes', 'quotation', 'quotations'], path: '/sales/quotes' },
-    { keywords: ['order', 'orders'], path: '/sales/orders' },
-    { keywords: ['shipment', 'shipments', 'logistics'], path: '/sales/shipments' },
-    { keywords: ['product', 'products', 'inventory'], path: '/inventory/products' },
-    { keywords: ['supplier', 'suppliers'], path: '/suppliers' },
-    { keywords: ['customer', 'customers'], path: '/customers' },
-    { keywords: ['user', 'users'], path: '/security/users' },
-    { keywords: ['dashboard', 'home', 'overview'], path: '/dashboard' },
-  ];
+  // FR-DSH-04 — a real cross-entity search.
+  //
+  // What used to be here: a ten-entry keyword->route table, no network request, and an
+  // unmatched term navigating silently to /dashboard. A search for a customer that does not
+  // exist was indistinguishable from a search for one that does — the wiring contract's
+  // failure #7, a control that reports success while doing nothing. Every branch below now
+  // ends in a STATED outcome: results, "no results", or the server's own error.
+  const [results, setResults] = React.useState<GlobalSearchResponse | null>(null);
+  const [searching, setSearching] = React.useState(false);
+  const [searchError, setSearchError] = React.useState<string | null>(null);
+  const [searchOpen, setSearchOpen] = React.useState(false);
+  const searchAnchorRef = React.useRef<HTMLDivElement>(null);
+  const trimmedQuery = searchValue.trim();
 
-  const handleQuickSearch = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key !== 'Enter') return;
-    const query = searchValue.trim().toLowerCase();
-    if (!query) return;
-    const match = quickNav.find((entry) =>
-      entry.keywords.some((k) => k === query || k.includes(query) || query.includes(k))
-    );
-    navigate(match ? match.path : '/dashboard');
+  React.useEffect(() => {
+    if (trimmedQuery.length < MIN_SEARCH_LENGTH) {
+      setResults(null);
+      setSearchError(null);
+      setSearching(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    // Debounced, so a typed word costs one query rather than one per keystroke.
+    const timer = window.setTimeout(async () => {
+      setSearching(true);
+      setSearchError(null);
+      try {
+        const response = await searchService.search({ q: trimmedQuery, limit: 5 }, controller.signal);
+        setResults(response);
+        setSearchOpen(true);
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        setResults(null);
+        // The server's message is surfaced verbatim; the client invents no copy that could
+        // contradict it, and a failure is never rendered as "no results".
+        const detail = (error as { response?: { data?: unknown } })?.response?.data;
+        setSearchError(
+          typeof detail === 'string' && detail.trim()
+            ? detail
+            : 'Search is unavailable right now. Nothing was searched.',
+        );
+        setSearchOpen(true);
+      } finally {
+        if (!controller.signal.aborted) setSearching(false);
+      }
+    }, 250);
+
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [trimmedQuery]);
+
+  const openHit = (path: string) => {
+    setSearchOpen(false);
     setSearchValue('');
     searchInputRef.current?.blur();
+    navigate(path);
+  };
+
+  const handleQuickSearch = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Escape') {
+      setSearchOpen(false);
+      return;
+    }
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    // Enter opens the first result. When there is none it does NOTHING and the panel keeps
+    // saying so — it does not navigate somewhere plausible.
+    const first = results?.hits?.[0];
+    if (first) openHit(routeForHit(first));
   };
 
   React.useEffect(() => {
@@ -160,41 +223,143 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth, sidebarEx
           >
             <MenuIcon />
           </IconButton>
-          <Box
-            sx={{
-              display: { xs: 'none', md: 'flex' },
-              alignItems: 'center',
-              backgroundColor: mode === 'dark' ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.03)',
-              px: 2,
-              py: 0.5,
-              borderRadius: 2,
-              width: 320,
-              border: '1px solid',
-              borderColor: 'divider',
-            }}
-          >
-            <SearchIcon aria-hidden sx={{ color: 'text.secondary', mr: 1, fontSize: 18 }} />
-            <InputBase
-              inputRef={searchInputRef}
-              value={searchValue}
-              onChange={(e) => setSearchValue(e.target.value)}
-              onKeyDown={handleQuickSearch}
-              placeholder="Search anything..."
-              type="search"
-              // Placeholders are not a reliable accessible name (SC 4.1.2) —
-              // they disappear on input and are ignored by some AT.
-              inputProps={{ 'aria-label': 'Search the application, press Enter to jump' }}
-              sx={{
-                flex: 1,
-                fontSize: '0.875rem',
-                color: 'text.primary',
-                '& input::placeholder': { color: 'text.secondary', opacity: 0.7 },
-              }}
-            />
-            <Box aria-hidden sx={{ ml: 'auto', px: 0.8, py: 0.2, backgroundColor: 'action.hover', borderRadius: 1, border: '1px solid', borderColor: 'divider' }}>
-              <Typography variant="caption" sx={{ fontWeight: 700, fontSize: 10, opacity: 0.8 }}>⌘ K</Typography>
+          <ClickAwayListener onClickAway={() => setSearchOpen(false)}>
+            <Box sx={{ display: { xs: 'none', md: 'block' } }}>
+              <Box
+                ref={searchAnchorRef}
+                sx={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  backgroundColor: mode === 'dark' ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.03)',
+                  px: 2,
+                  py: 0.5,
+                  borderRadius: 2,
+                  width: 320,
+                  border: '1px solid',
+                  borderColor: 'divider',
+                }}
+              >
+                <SearchIcon aria-hidden sx={{ color: 'text.secondary', mr: 1, fontSize: 18 }} />
+                <InputBase
+                  inputRef={searchInputRef}
+                  value={searchValue}
+                  onChange={(e) => setSearchValue(e.target.value)}
+                  onKeyDown={handleQuickSearch}
+                  onFocus={() => { if (results || searchError) setSearchOpen(true); }}
+                  placeholder="Search customers, suppliers, products, documents..."
+                  type="search"
+                  // Placeholders are not a reliable accessible name (SC 4.1.2) —
+                  // they disappear on input and are ignored by some AT.
+                  inputProps={{
+                    'aria-label':
+                      'Search customers, suppliers, products, enquiries, quotes, orders and shipments',
+                    'aria-expanded': searchOpen,
+                    'aria-controls': SEARCH_RESULTS_ID,
+                    role: 'combobox',
+                    'aria-autocomplete': 'list',
+                  }}
+                  sx={{
+                    flex: 1,
+                    fontSize: '0.875rem',
+                    color: 'text.primary',
+                    '& input::placeholder': { color: 'text.secondary', opacity: 0.7 },
+                  }}
+                />
+                {searching ? (
+                  <CircularProgress size={14} aria-label="Searching" sx={{ ml: 1 }} />
+                ) : (
+                  <Box aria-hidden sx={{ ml: 'auto', px: 0.8, py: 0.2, backgroundColor: 'action.hover', borderRadius: 1, border: '1px solid', borderColor: 'divider' }}>
+                    <Typography variant="caption" sx={{ fontWeight: 700, fontSize: 10, opacity: 0.8 }}>⌘ K</Typography>
+                  </Box>
+                )}
+              </Box>
+
+              <Popper
+                open={searchOpen && trimmedQuery.length >= MIN_SEARCH_LENGTH}
+                anchorEl={searchAnchorRef.current}
+                placement="bottom-start"
+                sx={{ zIndex: (theme) => theme.zIndex.modal }}
+              >
+                <Paper
+                  id={SEARCH_RESULTS_ID}
+                  elevation={8}
+                  sx={{ mt: 1, width: 460, maxHeight: 480, overflowY: 'auto', borderRadius: 3, border: '1px solid', borderColor: 'divider' }}
+                >
+                  {searchError && (
+                    // A failed request is NOT rendered as "no results" — the two mean opposite
+                    // things and conflating them is how a broken search looks like an empty estate.
+                    <Alert severity="error" sx={{ borderRadius: 0 }}>{searchError}</Alert>
+                  )}
+
+                  {!searchError && results && results.hits.length === 0 && (
+                    <Box sx={{ p: 2 }}>
+                      <Typography variant="body2" sx={{ fontWeight: 700 }}>
+                        Nothing matches “{results.query}”.
+                      </Typography>
+                      <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+                        Searched {results.searchedEntities.length} record types. Nothing was opened.
+                      </Typography>
+                    </Box>
+                  )}
+
+                  {!searchError && results && results.hits.length > 0 && (
+                    <List dense role="listbox" aria-label="Search results" sx={{ py: 0.5 }}>
+                      {results.hits.map((hit) => (
+                        <ListItemButton
+                          key={`${hit.entity}-${hit.id}`}
+                          role="option"
+                          onClick={() => openHit(routeForHit(hit))}
+                          sx={{ alignItems: 'flex-start', gap: 1 }}
+                        >
+                          <Chip
+                            size="small"
+                            label={ENTITY_LABELS[hit.entity]}
+                            sx={{ fontWeight: 700, fontSize: 10, height: 20, mt: 0.25 }}
+                          />
+                          <Box sx={{ minWidth: 0, flex: 1 }}>
+                            <Typography variant="body2" sx={{ fontWeight: 700 }} noWrap>
+                              {hit.title}
+                            </Typography>
+                            <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block' }} noWrap>
+                              {hit.subtitle || 'No secondary reference recorded'}
+                              {hit.status ? ` · ${hit.status}` : ''}
+                            </Typography>
+                            {/* Why this row is here. Without it a hit on a VAT number next to a
+                                name search reads as a bug. */}
+                            <Typography variant="caption" sx={{ color: 'text.disabled', display: 'block' }}>
+                              matched on {hit.matchedOn}
+                            </Typography>
+                          </Box>
+                        </ListItemButton>
+                      ))}
+                    </List>
+                  )}
+
+                  {/* Stated gaps. A shorter answer with no explanation is indistinguishable from
+                      "nothing matched", which is the defect this whole control replaces. */}
+                  {!searchError && results && (results.notes.length > 0 || results.deniedEntities.length > 0 || results.truncated.length > 0) && (
+                    <Box sx={{ px: 2, py: 1, borderTop: '1px solid', borderColor: 'divider' }}>
+                      {results.truncated.length > 0 && (
+                        <Typography variant="caption" sx={{ display: 'block', color: 'text.secondary' }}>
+                          More {results.truncated.map((e) => ENTITY_LABELS[e].toLowerCase()).join(', ')} results exist than are shown.
+                        </Typography>
+                      )}
+                      {results.deniedEntities.length > 0 && (
+                        <Typography variant="caption" sx={{ display: 'block', color: 'text.secondary' }}>
+                          Not searched — you do not have access to: {results.deniedEntities.map((e) => ENTITY_LABELS[e]).join(', ')}.
+                        </Typography>
+                      )}
+                      {results.notes.map((note) => (
+                        <Typography key={note} variant="caption" sx={{ display: 'block', color: 'text.secondary' }}>
+                          {note}
+                        </Typography>
+                      ))}
+                    </Box>
+                  )}
+                </Paper>
+              </Popper>
             </Box>
-          </Box>
+          </ClickAwayListener>
         </Box>
 
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>

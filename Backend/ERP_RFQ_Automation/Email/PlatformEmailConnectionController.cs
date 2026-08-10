@@ -108,6 +108,17 @@ public sealed class PlatformEmailConnectionController(
         var secret = string.IsNullOrEmpty(request.Password) ? stored?.SmtpPassword ?? string.Empty : request.Password;
         var username = First(request.Username, stored?.SmtpUsername) ?? string.Empty;
 
+        // "Use the one you already hold" only works when one is held. Before the first save there
+        // is no stored row at all — which is exactly the state an operator setting this up for the
+        // first time is in — and the probe authenticates unconditionally, so an empty box became
+        // AUTH with an empty password and came back as "the mail server rejected the username or
+        // password". That sends the operator to re-check a credential they were never asked for.
+        // Say what is actually missing instead.
+        if (!string.IsNullOrWhiteSpace(username) && string.IsNullOrEmpty(secret))
+            return BadRequest(
+                "No password to test with. A username is set but nothing is stored yet, so type the " +
+                "password into the form before testing the connection.");
+
         if (!MailEndpointPolicy.IsAllowedEndpoint(host, port))
             return BadRequest("That host is not an address this server may connect to.");
 

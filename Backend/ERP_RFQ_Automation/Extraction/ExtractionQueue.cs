@@ -44,29 +44,45 @@ public sealed class ExtractionQueue : IExtractionQueue
 {
     private readonly ErpRfqAutomationContext _context;
     private readonly ILogger<ExtractionQueue> _log;
-    private readonly ITenantContext? _tenantContext;
+    private readonly ITenantContext _tenantContext;
     private readonly IEntitlementService? _entitlements;
     private readonly ERP_RFQ_Automation.Platform.Hardening.NexoraMetrics? _metrics;
 
-    public ExtractionQueue(
-        ErpRfqAutomationContext context,
-        ILogger<ExtractionQueue> log,
-        ERP_RFQ_Automation.Platform.Hardening.NexoraMetrics? metrics = null)
-    {
-        _context = context;
-        _log = log;
-        _metrics = metrics;
-    }
-
+    /// <summary>
+    /// SEC-ING-02: <see cref="ITenantContext"/> is MANDATORY, and the short
+    /// <c>(context, log, metrics)</c> constructor that used to make it optional is gone.
+    ///
+    /// <para>That constructor left <c>_tenantContext</c> null, and
+    /// <see cref="PrepareExecutionScopeAsync"/> then returned without issuing any
+    /// <c>SET LOCAL ROLE</c> at all — so every raw statement this class runs (the claim, the
+    /// head-of-line sweep, the lease renewal, the status transitions) executed on the connection's
+    /// own login role. That role OWNS the tables, and a table owner is exempt from its own
+    /// row-level-security policies unless the table is declared FORCE, which none of ours are.
+    /// It was not on a production path — the container resolves this constructor because
+    /// <see cref="ITenantContext"/> is registered — but it was one <c>new ExtractionQueue(...)</c>
+    /// away from being one, and a constructor whose only distinguishing behaviour is "no isolation"
+    /// is not a thing to leave lying next to the one that has it.</para>
+    ///
+    /// <para>A caller that genuinely needs the cross-tenant view (the claim, which must see every
+    /// tenant's queue before it picks one) passes a context whose <c>BusinessUnitId</c> is null and
+    /// gets <c>nexora_pipeline_app</c> — deliberate, named, and the same role the live null-tenant
+    /// path already used.</para>
+    /// </summary>
     public ExtractionQueue(
         ErpRfqAutomationContext context,
         ILogger<ExtractionQueue> log,
         ITenantContext tenantContext,
         IEntitlementService? entitlements = null,
         ERP_RFQ_Automation.Platform.Hardening.NexoraMetrics? metrics = null)
-        : this(context, log, metrics)
     {
-        _tenantContext = tenantContext;
+        _context = context;
+        _log = log;
+        _metrics = metrics;
+        _tenantContext = tenantContext
+            ?? throw new ArgumentNullException(nameof(tenantContext),
+                "ExtractionQueue runs raw SQL and must know which PostgreSQL role to set. "
+                + "Pass a tenant context whose BusinessUnitId is null for the deliberate "
+                + "cross-tenant claim; never omit it.");
         _entitlements = entitlements;
     }
 
@@ -647,10 +663,19 @@ WHERE ""Id"" = @id AND ""LeasedBy"" = @worker AND ""Attempts"" = @attempt
         return rows;
     }
 
+    /// <summary>
+    /// SEC-ING-02: there is no longer a "no tenant context" branch that returns without setting a
+    /// role. Every statement this class issues now runs under one of exactly two named roles:
+    /// <c>nexora_tenant_app</c> with the tenant GUC set, or <c>nexora_pipeline_app</c> for the
+    /// deliberate cross-tenant claim. Neither is the table owner.
+    /// </summary>
     private async Task PrepareExecutionScopeAsync(
         DbConnection connection, DbTransaction transaction, CancellationToken ct)
     {
-        if (_tenantContext is null)
+        // Roles and row-level security are PostgreSQL concepts; the portable SQLite lane has
+        // neither, and SET LOCAL ROLE is a syntax error there. Nothing is skipped by this branch —
+        // there is no isolation layer on SQLite to skip.
+        if (!_context.Database.IsNpgsql())
             return;
 
         await using var setup = connection.CreateCommand();

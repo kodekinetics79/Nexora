@@ -1,6 +1,7 @@
 using OfficeOpenXml;
 using OfficeOpenXml.DataValidation;
 using ERP_RFQ_Automation.Inventory;
+using ERP_RFQ_Automation.MasterData;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
 using System.Drawing;
@@ -129,6 +130,15 @@ namespace ERP_RFQ_Automation.Services
 
         public async Task<ServiceResult<string>> UploadTemplateAsync(Stream fileStream, long businessUnitId, string createdBy)
         {
+            // FR-MDM-05 / E44. The audit itself is NOT wired here — it is captured at
+            // ErpRfqAutomationContext.SaveChanges, so this method could not evade it even if this
+            // line were deleted. What this line does is re-label the ambient actor's SOURCE, so a
+            // thousand-row bulk edit of FinalLandedCost is distinguishable in the trail from a
+            // single edit on the product screen. Bulk import is where unaudited mass changes
+            // happen, and "who changed every landed cost in the catalogue last Tuesday" is a
+            // different review question from "who edited this one product".
+            using var auditSource = MasterDataAuditScope.PushSource(MasterDataChangeSources.Import);
+
             using var package = new ExcelPackage(fileStream);
             var worksheet = package.Workbook.Worksheets[0];
             int rowCount = worksheet.Dimension?.Rows ?? 0;

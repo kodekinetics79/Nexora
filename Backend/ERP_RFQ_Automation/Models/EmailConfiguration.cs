@@ -39,6 +39,20 @@ public partial class EmailConfiguration
 
     public bool UseSsl { get; set; }
 
+    /// <summary>
+    /// MINUTES between inbound polls, 1..1440. Ignored for SMTP mailboxes.
+    ///
+    /// <para>The unit is stated here because its absence cost sixty times the intended poll
+    /// rate: the DTOs, the mailbox screen and the health text all said minutes while
+    /// <c>EmailBackgroundService</c> read the column as seconds. See
+    /// <c>EmailBackgroundService.MinimumPollIntervalMinutes</c> for the full account and for
+    /// what the change means for stored values.</para>
+    ///
+    /// <para>SCHEMA DEBT: the column default is still <c>300</c>, which was 300 seconds and is
+    /// now 300 minutes. It must move to <c>5</c> — the same number the create/update DTOs
+    /// default to. Recorded in <c>docs/WIRING_CONTRACT.md</c>; it is unreachable through the
+    /// product, because every create and update writes the value explicitly.</para>
+    /// </summary>
     public int PollingInterval { get; set; }
 
     public bool IsActive { get; set; }

@@ -182,7 +182,8 @@ public sealed class ExtractionWorkerLeaseTests
         }
 
         public Task<ChunkedExtractionOutcome> ExtractStructuredAsync(
-            IReadOnlyList<RfqSpreadsheetRow> rows, long businessUnitId, string sourceName, CancellationToken ct = default)
+            IReadOnlyList<RfqSpreadsheetRow> rows, long businessUnitId, string sourceName, CancellationToken ct = default,
+            string? documentNarrative = null)
             => throw new NotSupportedException();
     }
 

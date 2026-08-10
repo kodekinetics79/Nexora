@@ -89,9 +89,17 @@ namespace ERP_RFQ_Automation.Repositories
             var dtos = rfqs.Select(r => new RfqResponseDTO
             {
                 Id = r.Id,
-                CommercialCaseId = r.CommercialCaseId ?? (r.Lead != null ? r.Lead.CommercialCaseId : null),
-                CommercialCaseReference = r.NexoraSerial ?? (r.Lead != null ? r.Lead.CommercialCaseReference : null),
-                NexoraSerial = r.NexoraSerial ?? (r.Lead != null ? r.Lead.CommercialCaseReference : null),
+                // The RFQ's OWN commercial identity, never one derived from its lead.
+                //
+                // These three fields used to fall back through `?? r.Lead.CommercialCaseId`, which
+                // is the same silent foreign-key substitution that made the case column decorative
+                // in the timeline reader: an RFQ with a NULL column displayed a case anyway, so the
+                // rows the case workspace now reports as traceability gaps were masked on the one
+                // screen a user would notice them. A null here is the truth and the UI renders it
+                // as "not linked".
+                CommercialCaseId = r.CommercialCaseId,
+                CommercialCaseReference = r.NexoraSerial,
+                NexoraSerial = r.NexoraSerial,
                 Rfqno = r.Rfqno,
                 BuyersName = r.BuyersName,
                 RecDate = r.RecDate,
@@ -172,9 +180,10 @@ namespace ERP_RFQ_Automation.Repositories
             return new RfqResponseDTO
             {
                 Id = rfq.Id,
-                CommercialCaseId = rfq.CommercialCaseId ?? rfq.Lead?.CommercialCaseId,
-                CommercialCaseReference = rfq.NexoraSerial ?? rfq.Lead?.CommercialCaseReference,
-                NexoraSerial = rfq.NexoraSerial ?? rfq.Lead?.CommercialCaseReference,
+                // See the list projection above: the RFQ states its own case or states none.
+                CommercialCaseId = rfq.CommercialCaseId,
+                CommercialCaseReference = rfq.NexoraSerial,
+                NexoraSerial = rfq.NexoraSerial,
                 Rfqno = rfq.Rfqno,
                 BuyersName = rfq.BuyersName,
                 RecDate = rfq.RecDate,

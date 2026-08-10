@@ -148,6 +148,7 @@ public sealed class QuoteDraftHandoffTests
             });
 
         var service = new QuoteService(context, null!, new NullQuoteConfigurationRepository());
+        await Attest(context, quoteId, 9405);
         var pdf = await service.GenerateQuotePdfAsync(quoteId, 9405);
 
         var text = PdfText(pdf);
@@ -180,6 +181,7 @@ public sealed class QuoteDraftHandoffTests
             });
 
         var service = new QuoteService(context, null!, new NullQuoteConfigurationRepository());
+        await Attest(context, quoteId, 9406);
         var pdf = await service.GenerateQuotePdfAsync(quoteId, 9406);
 
         Assert.NotEmpty(pdf);
@@ -190,7 +192,19 @@ public sealed class QuoteDraftHandoffTests
         Assert.DoesNotContain("Your RFQ Reference", text);
     }
 
-    /// <summary>A complete, priced, non-draft quote (optionally RFQ-linked) that passes
+    /// <summary>
+    /// R5: the PDF is the commercial document, so rendering one now requires a recorded
+    /// price-provenance attestation covering the quote's current prices — the same gate the
+    /// send path has always had. These tests are about what the document PRINTS, not about
+    /// the gate, so they satisfy it explicitly. QuotePriceAttestationTests owns the gate.
+    /// </summary>
+    private static Task Attest(ErpRfqAutomationContext context, long quoteId, long tenant) =>
+        new ERP_RFQ_Automation.Intelligence.Pricing.PriceAttestationService(context).AttestAsync(
+            quoteId, tenant,
+            ERP_RFQ_Automation.Intelligence.Pricing.PriceAttestationSources.SupplierQuote,
+            "SQ-TEST", null, "tests", default);
+
+    /// <summary>A complete, priced, TAXED, non-draft quote (optionally RFQ-linked) that passes
     /// every PDF export gate; returns the quote id.</summary>
     private static long SeedPrintableQuote(
         ErpRfqAutomationContext context, long tenant, long baseId, string? customerRfqNo,
@@ -238,7 +252,14 @@ public sealed class QuoteDraftHandoffTests
                 UnitOfMeasure = line.Uom,
                 CustomerLineRef = line.Ref,
                 UnitPrice = 10m,
-                TotalAmount = 50m,
+                // R17: the PDF gate refuses a line whose output tax was never derived, the same
+                // way the send gate does — the document IS the commercial thing, and a quotation
+                // with no VAT stated on it is deemed VAT-inclusive. 5 x 10.00 = 50.00 net, 7.50
+                // VAT at the KSA standard rate, 57.50 gross.
+                TaxAmount = 7.50m,
+                TaxCategory = ERP_RFQ_Automation.OrderToCash.QuoteLineTaxCategories.Standard,
+                TaxRatePercentApplied = 15m,
+                TotalAmount = 57.50m,
                 CreatedBy = "seed",
                 CreatedDate = DateTime.UtcNow
             });
@@ -300,7 +321,12 @@ public sealed class QuoteDraftHandoffTests
                 LineItemNo = line.LineItemNo,
                 ItemMaterialCode = line.ItemMaterialCode,
                 ProductShortDescription = line.ProductShortDescription,
-                Quantity = line.Quantity,
+                // LeadItem.Quantity is nullable so an unread quantity is distinguishable from a
+                // real zero; Rfqitem.Quantity is NOT NULL and positive-checked. Production
+                // (LeadRepository.CreateRfqFromLeadAsync) refuses an unquantified line rather than
+                // coalescing it, so the fixture refuses too instead of silently seeding a 0.
+                Quantity = line.Quantity ?? throw new InvalidOperationException(
+                    $"Fixture lead line '{line.LineItemNo}' states no quantity; an RFQ line cannot be built from it."),
                 UnitOfMeasure = line.UnitOfMeasure,
                 CreatedBy = "seed",
                 CreatedDate = DateTime.UtcNow

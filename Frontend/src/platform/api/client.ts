@@ -48,6 +48,7 @@ import type {
   RateCard,
   RevenueRiskReport,
   SavePlatformEmailSettingsInput,
+  SetAccountContactInput,
   SetCommercialTermsInput,
   SlugAvailability,
   SubmitProvisioningResult,
@@ -85,6 +86,7 @@ import type {
   TestOutboundEmailResult,
   UpdateRateCardInput,
   UpdateTenantAiPolicyInput,
+  UpdateTenantDataRegionInput,
   UpdateTenantProfileInput,
   ResendTenantAdminInvitationResult,
   UsageRatingCorrection,
@@ -152,6 +154,7 @@ export interface PlatformApi {
   listTenants(): Promise<Tenant[]>;
   getTenant(id: string): Promise<Tenant>;
   updateTenantProfile(id: string, input: UpdateTenantProfileInput): Promise<Tenant>;
+  updateTenantDataRegion(id: string, input: UpdateTenantDataRegionInput): Promise<Tenant>;
   listTenantAdminInvitations(id: string): Promise<TenantAdminInvitation[]>;
   resendTenantAdminInvitation(
     id: string,
@@ -301,6 +304,7 @@ export interface PlatformApi {
     body: { rateCardId: string | null; reason: string },
   ): Promise<TenantBillingProfile>;
   setTenantCommercialTerms(tenantId: string, body: SetCommercialTermsInput): Promise<TenantBillingProfile>;
+  setTenantAccountContact(tenantId: string, body: SetAccountContactInput): Promise<TenantBillingProfile>;
   getStatement(id: string): Promise<BillingStatement>;
 
   // --- support desk ---
@@ -878,6 +882,10 @@ const httpPlatformApi: PlatformApi = {
     normalizeTenant((await platformHttp.get<BackendTenant>(`/api/platform/tenants/${id}`)).data),
   updateTenantProfile: async (id, input) =>
     normalizeTenant((await platformHttp.put<BackendTenant>(`/api/platform/tenants/${id}/profile`, input)).data),
+  updateTenantDataRegion: async (id, input) =>
+    normalizeTenant(
+      (await platformHttp.put<BackendTenant>(`/api/platform/tenants/${id}/data-region`, input)).data,
+    ),
   listTenantAdminInvitations: async (id) =>
     (await platformHttp.get<TenantAdminInvitation[]>(`/api/platform/tenants/${id}/admin-invitations`)).data
       .map((item) => ({ ...item, id: String(item.id), userId: String(item.userId) })),
@@ -1191,6 +1199,10 @@ const httpPlatformApi: PlatformApi = {
       businessUnitId: asId(wire.businessUnitId as string | number),
       tables: (wire.tables as TenantPurgePreview['tables']) ?? [],
       preserved: (wire.preserved as string[]) ?? [],
+      // Defaulted like its neighbours rather than left to the spread. An older server that does
+      // not send it must degrade to "no reasons shown" — the dialog reads .length on this, and a
+      // blast-radius screen that throws is strictly worse than one that says less.
+      preservedDetail: (wire.preservedDetail as TenantPurgePreview['preservedDetail']) ?? [],
     };
   },
   exportTenantData: async (tenantId, body) => {
@@ -1380,6 +1392,13 @@ const httpPlatformApi: PlatformApi = {
     normalizeBillingProfile(
       (await platformHttp.put<WireRecord>(
         `/api/platform/billing/tenants/${tenantId}/commercial-terms`,
+        body,
+      )).data,
+    ),
+  setTenantAccountContact: async (tenantId, body) =>
+    normalizeBillingProfile(
+      (await platformHttp.put<WireRecord>(
+        `/api/platform/billing/tenants/${tenantId}/account-contact`,
         body,
       )).data,
     ),

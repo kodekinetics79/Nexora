@@ -87,7 +87,13 @@ public sealed class BrandDemandRepository
                     Variants = g.Select(x => x.Raw).Distinct(StringComparer.OrdinalIgnoreCase).Count(),
                     Lines = g.Count(),
                     Documents = g.Select(x => x.LeadId).Distinct().Count(),
-                    Quantity = g.Sum(x => (long)x.Quantity)
+                    // Sum only the lines that STATE a quantity, and report null when none do.
+                    // The cast used to be `(long)x.Quantity` on a non-nullable column; on a
+                    // nullable one it throws on the first unquantified line, and coalescing to
+                    // zero would silently understate the brand's demand instead.
+                    Quantity = g.Any(x => x.Quantity.HasValue)
+                        ? g.Where(x => x.Quantity.HasValue).Sum(x => (long)x.Quantity!.Value)
+                        : (long?)null
                 };
             })
             .OrderByDescending(g => g.Lines)

@@ -20,10 +20,12 @@ namespace ERP_RFQ_Automation.Authorization;
 /// unreachable screen, and a module that stops being enforced cannot linger as a checkbox that
 /// grants nothing.</para>
 ///
-/// <para><b>Deliberately absent:</b> Teams, User Groups, File Management, Bulk Uploaders and
-/// Contacts. Nothing gates them, so a checkbox for them would revoke nothing while implying it
-/// did — worse than having no checkbox at all. They belong here the moment an endpoint enforces
-/// them, and the test above is what will require it.</para>
+/// <para><b>Deliberately absent:</b> Teams, User Groups, File Management and Bulk Uploaders.
+/// Nothing gates them, so a checkbox for them would revoke nothing while implying it did — worse
+/// than having no checkbox at all. They belong here the moment an endpoint enforces them, and the
+/// test above is what will require it. (Contacts was on this list too; it is not a gap — the
+/// contact endpoints gate on the PARENT record's module, "Customers" or "Suppliers", which is the
+/// correct authority for a contact and is why no "Contacts" module is wanted.)</para>
 /// </summary>
 public static class ModuleCatalog
 {
@@ -68,6 +70,28 @@ public static class ModuleCatalog
                 new("Roles & Permissions", "Roles and what each role may do"),
                 new("Business Units", "Business unit setup and details"),
                 new("Email & SMTP", "Mailboxes leads are read from and quotes are sent through"),
+            ],
+
+            // Sec-D4. CurrencyController carried nothing but a class-level [Authorize] on all
+            // eleven of its actions, and there was no module here it COULD have been gated with.
+            // That is the whole defect: an authenticated user with a zero-permission role — no
+            // RolePermissions rows at all — could create an effective-dated FX rate and then
+            // approve their own, and only Approved rates are visible to conversion
+            // (Fx/FxConversionService). An approved rate then drives the below-floor pricing
+            // guard, the AI agent's spend cap, quote totals, revenue reporting and award
+            // recommendation. It was the shortest path in this product from "can log in" to
+            // "can move money".
+            //
+            // Three modules rather than one, because they are three different authorities:
+            // holding the currency list is not the same as quoting a rate, and quoting a rate is
+            // emphatically not the same as making it real. The split follows the Banking area
+            // above, which already separates "Bank Adjustments" from "Bank Adjustment Approval"
+            // for exactly this reason.
+            ["Currency and exchange rates"] =
+            [
+                new("Currencies", "Currencies this business unit trades in, and their symbols"),
+                new("Exchange Rates", "Effective-dated conversion rates, and the rate frozen onto each document"),
+                new("Exchange Rate Approval", "Approving a rate so that quotes and orders convert at it"),
             ],
 
             ["Receivables"] =

@@ -8,7 +8,7 @@ import {
 } from '@mui/material';
 import {
   ArrowBack as BackIcon,
-  Print as PrintIcon,
+  ReceiptLong as ReceivableIcon,
   Email as EmailIcon,
   LocalShipping as ShipmentIcon
 } from '@mui/icons-material';
@@ -19,7 +19,7 @@ import dayjs from 'dayjs';
 const OrderViewPage: React.FC = () => {
   const { id } = useParams();
   const navigate = useNavigate();
-  const { userData } = useAuth();
+  const { userData, hasPermission } = useAuth();
   const businessUnitId = userData?.businessUnitId || 0;
 
   const { data: order, isLoading } = useQuery({
@@ -54,7 +54,12 @@ const OrderViewPage: React.FC = () => {
           </Stack>
         </Box>
         <Stack direction="row" spacing={1.5}>
-          <Button variant="outlined" startIcon={<PrintIcon />} size="small" onClick={() => window.open(`/sales/orders/invoice/${order.id}`, '_blank')}>Print Invoice</Button>
+          {/* There is deliberately no "Print Invoice" action here. A tax invoice is the numbered,
+              persisted document the finance subsystem issues — not a rendering of the order.
+              This links to the governed AR register instead; it is not order-filtered yet. */}
+          {hasPermission('Accounts Receivable', 'view') && (
+            <Button variant="outlined" startIcon={<ReceivableIcon />} size="small" onClick={() => navigate('/sales/finance')}>Accounts Receivable</Button>
+          )}
           <Button variant="outlined" startIcon={<EmailIcon />} size="small">Email</Button>
           {!order.hasShipments && !['Shipped', 'Delivered', 'Cancelled'].includes(order.status) && (
              <Button 

@@ -95,7 +95,17 @@ export interface PricePreviewLine {
   quantity: number | null;
   currency: string | null;
   recommendedUnitPrice: number | null;
+  /**
+   * The awarded supplier's landed unit cost, denominated in `floorCurrency` — NOT necessarily in
+   * this line's `currency`. null means NO FLOOR IS ESTABLISHED (no supplier award recorded), which
+   * must be shown as a gap and must never be rendered or defaulted to 0.
+   */
   floorUnitPrice: number | null;
+  /** Currency of `floorUnitPrice`. Never compare a price to the floor without checking this. */
+  floorCurrency: string | null;
+  /** Plain-language provenance of the floor; null exactly when there is no floor. */
+  floorBasis: string | null;
+  /** Margin of the recommendation over the floor as a PERCENT — 20 means 20%, not 0.2. */
   marginPct: number | null;
   /** 0..1 — never shown raw in the UI. */
   confidence: number | null;
@@ -217,14 +227,30 @@ export interface CustomerContextCompletenessDTO {
   demandLinesTruncated: boolean;
 }
 
+/** A loss recorded on the inquiry itself, before any quotation existed. */
+export interface CustomerLeadLossSummaryDTO {
+  leadId: number;
+  commercialCaseReference: string | null;
+  rfqNo: string | null;
+  lostOn: string | null;
+  /** From the same governed picklist a quote outcome reason comes from. */
+  outcomeReasonName: string | null;
+  outcomeNote: string | null;
+}
+
 export interface CustomerContextDTO {
   customerId: number;
   customerName: string | null;
   totalQuotes: number;
   wonQuotes: number;
   lostQuotes: number;
-  /** 0–100; null while nothing has been decided yet. */
+  /** 0–100; null while no QUOTE has been decided yet. */
   winRatePct: number | null;
+  /** Inquiries lost or abandoned before a quotation existed, each with a governed reason. */
+  leadStageLosses: number;
+  /** 0–100 over every decided inquiry — quotes won and lost, plus lead-stage losses. */
+  inquiryWinRatePct: number | null;
+  recentLeadLosses: CustomerLeadLossSummaryDTO[];
   ordersLast24Months: number;
   orderValueLast24Months: number | null;
   orderValueStatus: string;

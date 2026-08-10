@@ -24,6 +24,9 @@ import countryService from '../../api/services/countryService';
 import cityService from '../../api/services/cityService';
 import { useAuth } from '../../context/AuthContext';
 import SearchField from '../../components/common/SearchField';
+import ColumnPreferences from '../../components/common/ColumnPreferences';
+import CustomFieldValuesEditor from '../../components/common/CustomFieldValuesEditor';
+import useColumnPreferences from '../../hooks/useColumnPreferences';
 import UploadExportToolbar from '../../components/common/UploadExportToolbar';
 import { useSnackbar } from 'notistack';
 
@@ -122,6 +125,8 @@ const SuppliersPage: React.FC = () => {
 
   // List state
   const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ pageSize: 10, page: 0 });
+  // AA-01 · per-user column layout + tenant-defined Supplier fields as columns.
+  const columnPreferences = useColumnPreferences('suppliers.list');
   const [search, setSearch] = useState('');
 
   // Dialog state
@@ -364,6 +369,8 @@ const SuppliersPage: React.FC = () => {
       {/* Search */}
       <Paper sx={{ p: 1, mb: 1.5, display: 'flex', gap: 2, alignItems: 'center', backgroundColor: 'background.paper', borderRadius: 2 }}>
         <SearchField value={search} onChange={setSearch} placeholder={t('search_suppliers')} />
+        <Box sx={{ flexGrow: 1 }} />
+        <ColumnPreferences preferences={columnPreferences} />
       </Paper>
 
       {/* Grid */}
@@ -371,7 +378,7 @@ const SuppliersPage: React.FC = () => {
         {(error as any)?.response?.data?.detail || (error as Error)?.message || 'Suppliers could not be loaded.'}
       </Alert>}
       <Paper sx={{ height: 'calc(100vh - 220px)', width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
-        <DataGrid rows={data?.items ?? []} columns={columns} rowCount={data?.totalCount ?? 0} loading={isLoading} pageSizeOptions={[10, 25, 50]} paginationModel={paginationModel} paginationMode="server" onPaginationModelChange={setPaginationModel} getRowId={(r) => r.id} disableRowSelectionOnClick />
+        <DataGrid rows={data?.items ?? []} columns={columnPreferences.arrangeColumns(columns)} rowCount={data?.totalCount ?? 0} loading={isLoading} pageSizeOptions={[10, 25, 50]} paginationModel={paginationModel} paginationMode="server" onPaginationModelChange={setPaginationModel} getRowId={(r) => r.id} disableRowSelectionOnClick columnVisibilityModel={columnPreferences.columnVisibilityModel} onColumnVisibilityModelChange={columnPreferences.onColumnVisibilityModelChange} />
       </Paper>
 
       {/* ── Dialog ─────────────────────────────────────────────────────────── */}
@@ -574,6 +581,14 @@ const SuppliersPage: React.FC = () => {
               <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 600 }}>{canCreateContact ? 'No contacts yet. Add the first contact.' : 'No contacts are recorded.'}</Typography>
             </Box>
           )}
+
+          {/* AA-01 · fields this tenant defined on Supplier. Renders nothing when none exist,
+              and only once the record is persisted — a value bag needs a row to hang on. */}
+          <CustomFieldValuesEditor
+            entityType="Supplier"
+            entityId={selectedRecord?.id ?? null}
+            canEdit={canEditSupplier}
+          />
 
         </DialogContent>
 

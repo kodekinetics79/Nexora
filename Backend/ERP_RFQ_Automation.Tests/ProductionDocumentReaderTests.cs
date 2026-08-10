@@ -70,8 +70,8 @@ public sealed class ProductionDocumentReaderTests
 
         var result = await reader.ReadAsync(CreateJob("rfq.docx", "docx"));
 
-        Assert.Equal("RFQ 42\nPart Number\tQuantity\nABC-100\t25\nDelivery: urgent", result.HeaderText);
-        Assert.Contains("Part Number\tQuantity", result.LineItemRegions);
+        Assert.Equal("RFQ 42\nNarrative\tOwner\nABC-100\t25\nDelivery: urgent", result.HeaderText);
+        Assert.Contains("Narrative\tOwner", result.LineItemRegions);
         Assert.Contains("ABC-100\t25", result.LineItemRegions);
         Assert.False(result.PageCountAuthoritative);
     }
@@ -177,6 +177,12 @@ public sealed class ProductionDocumentReaderTests
         FileType = fileType
     };
 
+    /// <summary>
+    /// Deliberately headed with columns that mean nothing commercially. A table headed
+    /// "Part Number | Quantity" is now read deterministically as line items, which is the point
+    /// of the DOCX table path; this test is about the TEXT rendering used when no table maps,
+    /// so it needs a table the mapper genuinely cannot recognise.
+    /// </summary>
     private static byte[] CreateDocxWithCommercialTable()
     {
         using var stream = new MemoryStream();
@@ -187,7 +193,7 @@ public sealed class ProductionDocumentReaderTests
                 new Body(
                     ParagraphWithText("RFQ 42"),
                     new Table(
-                        new TableRow(TableCellWithText("Part Number"), TableCellWithText("Quantity")),
+                        new TableRow(TableCellWithText("Narrative"), TableCellWithText("Owner")),
                         new TableRow(TableCellWithText("ABC-100"), TableCellWithText("25"))),
                     ParagraphWithText("Delivery: urgent")));
             main.Document.Save();

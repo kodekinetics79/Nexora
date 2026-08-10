@@ -17,6 +17,7 @@ import {
 import { useAuth } from '../../../context/AuthContext';
 import rfqService from '../../../api/services/rfqService';
 import quoteService from '../../../api/services/quoteService';
+import commercialPolicyService from '../../../api/services/commercialPolicyService';
 import setupService from '../../../api/services/setupService';
 import productService from '../../../api/services/productService';
 import CustomerContextPanel from './CustomerContextPanel';
@@ -71,6 +72,15 @@ const CreateQuotePage: React.FC = () => {
     queryKey: ['setup-discount-types'],
     queryFn: () => setupService.getAll({ setupType: 'DiscountType', pageSize: 50 }).then(r => r.items),
   });
+
+  // The business unit's output tax rate, so this screen previews the tax the server will derive
+  // instead of showing a flat zero. Null means the tenant has stated no rate — the quote will save
+  // but cannot be sent until one is set in Commercial Policy settings.
+  const { data: commercialPolicy } = useQuery({
+    queryKey: ['commercial-policy'],
+    queryFn: () => commercialPolicyService.getPolicy(),
+  });
+  const outputTaxRatePercent = commercialPolicy?.outputTaxRatePercent ?? null;
 
   // Calculate Totals
   const subtotal = useMemo(() => {
@@ -141,6 +151,15 @@ const CreateQuotePage: React.FC = () => {
     }
     item.totalAmount = itemRawTotal - itemDiscount;
     item.discount = itemDiscount;
+
+    // R17: preview the output tax the server will DERIVE on save. This screen used to send and
+    // display a flat zero, so the quote it created came back carrying tax the create page had said
+    // was nil. Every line created here is standard rated; a non-standard treatment is stated on the
+    // edit screen, which is where the reason for it can be captured.
+    const taxableBase = Math.max(0, Math.round((itemRawTotal - itemDiscount) * 100) / 100);
+    item.taxAmount = outputTaxRatePercent === null
+      ? 0
+      : Math.round(taxableBase * outputTaxRatePercent) / 100;
 
     newItems[index] = item;
     setItems(newItems);
@@ -238,7 +257,13 @@ const CreateQuotePage: React.FC = () => {
                   label="Customer from RFQ"
                   value={selectedRfq?.customerName || 'Customer unresolved'}
                   disabled
-                  helperText={(selectedRfq?.nexoraSerial || selectedRfq?.commercialCaseReference) ? `Nexora Serial: ${selectedRfq.nexoraSerial || selectedRfq.commercialCaseReference}` : 'Select an RFQ to preserve commercial identity'}
+                  // Three distinct states, because "no RFQ chosen yet" and "the chosen RFQ has no
+                  // commercial case" are different problems and only the second blocks the quote.
+                  helperText={selectedRfq?.nexoraSerial
+                    ? `Nexora Serial: ${selectedRfq.nexoraSerial}`
+                    : selectedRfq
+                      ? 'This RFQ is not linked to a commercial case, so a quotation cannot inherit one from it.'
+                      : 'Select an RFQ to preserve commercial identity'}
                 />
               </Grid>
               <Grid size={{ xs: 12, md: 4 }}>

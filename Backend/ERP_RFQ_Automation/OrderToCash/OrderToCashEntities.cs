@@ -22,6 +22,29 @@ public sealed class CustomerPurchaseOrder
     public string? ModifiedBy { get; set; }
     public string? CancellationReason { get; set; }
 
+    /// <summary>
+    /// FR-COM-02 / FR-COM-07. The quotation this purchase order responds to, and the RFQ it
+    /// originated from.
+    ///
+    /// <para>The order previously reached its quotation only through <c>CustomerAward</c>, so a PO
+    /// that had been uploaded but not yet allocated was connected to nothing, and the RFQ was two
+    /// hops away through a nullable link. The award still records WHAT was awarded; these record
+    /// WHAT THE BUYER WAS ANSWERING, which is knowable the moment the document arrives.</para>
+    ///
+    /// <para>Nullable because a purchase order can legitimately arrive before anyone has matched
+    /// it, and an unmatched PO must be storable rather than rejected.</para>
+    /// </summary>
+    public long? QuoteId { get; set; }
+
+    public long? RfqId { get; set; }
+
+    /// <summary>
+    /// FR-COM-01. The uploaded purchase-order document this record was read from. Without it the
+    /// commercial record has no evidence behind it — a reviewer resolving a price discrepancy has
+    /// nothing to check the figure against.
+    /// </summary>
+    public long? SourceAttachmentId { get; set; }
+
     public BusinessUnit BusinessUnit { get; set; } = null!;
     public CommercialCase CommercialCase { get; set; } = null!;
     public Customer Customer { get; set; } = null!;
@@ -42,6 +65,24 @@ public sealed class CustomerPurchaseOrderLine
     public int? UomId { get; set; }
     public decimal? UnitPrice { get; set; }
     public decimal? LineAmount { get; set; }
+
+    /// <summary>
+    /// FR-COM-02 identity keys, captured as the BUYER printed them.
+    ///
+    /// <para>Matching a PO line back to its quotation is specified on item code, manufacturer and
+    /// part number. The line carried none of the three, so the three-key match was not merely
+    /// unimplemented — it was impossible, and the product fell back to a human choosing a quote
+    /// line from a dropdown.</para>
+    ///
+    /// <para>Stored verbatim rather than normalised: these are the buyer's own strings and are the
+    /// evidence a reviewer checks a match against. Normalisation belongs in the matcher.</para>
+    /// </summary>
+    public string? CustomerItemCode { get; set; }
+
+    public string? ManufacturerName { get; set; }
+
+    public string? ManufacturerPartNumber { get; set; }
+
     public long Version { get; set; } = 1;
 
     public CustomerPurchaseOrder PurchaseOrder { get; set; } = null!;

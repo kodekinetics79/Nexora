@@ -40,6 +40,31 @@ public sealed class StockReservation
     /// <summary>The specific order line, when known.</summary>
     public long? OrderItemId { get; set; }
 
+    /// <summary>
+    /// FR-INV-01. The material lot this hold names — the physical units a picker is authorised to
+    /// take, not merely the product they may take them from.
+    ///
+    /// <para><b>Why the hold has to name the lot.</b> Quarantining one of two lots correctly removes
+    /// its quantity from available-to-promise, so no NEW order can be promised it. It does nothing
+    /// about an existing hold, because a hold that names only an inventory row is satisfied by any
+    /// unit on that row — including the recalled ones. The system-side door was shut at declaration
+    /// and the physical one was not. A hold that names its lot lets
+    /// <c>ConsumeAsync</c> refuse the recalled units outright, lets quarantine release exactly the
+    /// orders that were holding THAT lot rather than displacing whoever happened to be newest, and
+    /// lets a recall answer "which orders are affected" instead of "which orders hold the product".</para>
+    ///
+    /// <para><b>Why it is nullable, and what that costs.</b> Lots are created by goods receipt and
+    /// only by goods receipt (<c>IMaterialLotRecorder</c>). Opening balances, cycle-count increases,
+    /// adjustments and inter-warehouse transfers all raise on-hand with no lot behind them, so an
+    /// inventory row's physical stock legitimately exceeds the sum of its lots. Requiring a lot here
+    /// would mean either fabricating lots with no supplier purchase order behind them — the exact
+    /// untraceable stock the traceability module exists to prevent — or refusing to reserve stock the
+    /// business really holds. So the un-lotted balance is reservable, and every read reports it as a
+    /// <b>named gap</b> (<see cref="OrderLineIssue.IssuedWithoutLot"/>,
+    /// <c>LotCommitmentView</c>) rather than as a blank that reads like completeness.</para>
+    /// </summary>
+    public long? MaterialLotId { get; set; }
+
     /// <summary>Held quantity. Immutable after creation.</summary>
     public decimal Quantity { get; set; }
 

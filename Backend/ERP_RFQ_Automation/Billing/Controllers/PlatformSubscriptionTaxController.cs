@@ -73,6 +73,7 @@ public sealed class PlatformSubscriptionTaxController(
         var strategy = db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            db.ChangeTracker.Clear();
             await using var transaction = await db.Database.BeginTransactionAsync(ct);
             var result = await operation();
             await transaction.CommitAsync(ct);

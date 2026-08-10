@@ -47,7 +47,12 @@ namespace ERP_RFQ_Automation.Notifications
             services.AddHttpClient(SendGridEmailSender.HttpClientName, client =>
             {
                 client.Timeout = TimeSpan.FromSeconds(30);
-            });
+            })
+                // SEC-G9: SendGridEmailSender sets Authorization: Bearer <api key>. The factory's
+                // logging handlers write every header at Trace and redact nothing by default, so
+                // raising the log level once while chasing a delivery failure — precisely when
+                // someone would — would have written the live key into the log sink.
+                .RedactLoggedHeaders(ERP_RFQ_Automation.Infrastructure.OutboundHttpRedaction.SensitiveHeaders);
 
             // ==== transport selection ================================================================
             //

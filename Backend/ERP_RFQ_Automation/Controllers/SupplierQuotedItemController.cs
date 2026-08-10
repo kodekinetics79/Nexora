@@ -8,6 +8,7 @@ using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.DTOs.SupplierQuotedItem;
 using ERP_RFQ_Automation.Authorization;
 using Microsoft.AspNetCore.Authorization;
+using ERP_RFQ_Automation.Security;
 
 namespace ERP_RFQ_Automation.Controllers
 {
@@ -39,7 +40,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(500, $"Internal server error: {ex.Message}");
+                return this.ServerError(ex, "Internal server error.");
             }
         }
 
@@ -63,7 +64,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(500, $"Internal server error: {ex.Message}");
+                return this.ServerError(ex, "Internal server error.");
             }
         }
 
@@ -83,7 +84,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(500, $"Internal server error: {ex.Message}");
+                return this.ServerError(ex, "Internal server error.");
             }
         }
 
@@ -126,7 +127,9 @@ namespace ERP_RFQ_Automation.Controllers
                     ValidUntil = dto.ValidUntil,
                     TaxAmount = dto.TaxAmount,
                     DiscountAmount = dto.DiscountAmount,
-                    CreatedBy = dto.CreatedBy,
+                    // RC-7 / Sec-A1: server-derived. This row is supplier PRICING, and its
+                    // CreatedBy was the only record of who entered it.
+                    CreatedBy = ActorContext.From(User).Stamp,
                     CreatedDate = DateTime.UtcNow,
                     IsActive = dto.IsActive,
                     BusinessUnitId = targetBUId
@@ -138,7 +141,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(500, $"Internal server error: {ex.Message}");
+                return this.ServerError(ex, "Internal server error.");
             }
         }
 
@@ -173,7 +176,7 @@ namespace ERP_RFQ_Automation.Controllers
                     ValidUntil = dto.ValidUntil,
                     TaxAmount = dto.TaxAmount,
                     DiscountAmount = dto.DiscountAmount,
-                    ModifiedBy = dto.CreatedBy, // Using CreatedBy for ModifiedBy in update for simplicity here
+                    ModifiedBy = ActorContext.From(User).Stamp,
                     ModifiedDate = DateTime.UtcNow,
                     IsActive = dto.IsActive,
                     BusinessUnitId = targetBUId
@@ -188,7 +191,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(500, $"Internal server error: {ex.Message}");
+                return this.ServerError(ex, "Internal server error.");
             }
         }
 
@@ -208,7 +211,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(500, $"Internal server error: {ex.Message}");
+                return this.ServerError(ex, "Internal server error.");
             }
         }
     }

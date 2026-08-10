@@ -24,6 +24,7 @@ import contactService from '../../api/services/contactService';
 import intelligenceService from '../../api/services/intelligenceService';
 import commercialLearningService from '../../api/services/commercialLearningService';
 import commercialIntelligenceService from '../../api/services/commercialIntelligenceService';
+import ChangeHistoryPanel from '../../components/common/ChangeHistoryPanel';
 import { useAuth } from '../../context/AuthContext';
 
 const healthWindow = () => {
@@ -45,6 +46,20 @@ const InfoRow: React.FC<{ label: string; value: React.ReactNode }> = ({ label, v
     </Box>
   </Box>
 );
+
+/** A value that has not been captured, rendered as a stated gap rather than a blank. */
+const Gap: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+  <Typography component="span" sx={{ color: 'text.disabled', fontSize: '0.875rem', fontWeight: 500 }}>
+    {children}
+  </Typography>
+);
+
+/** Stored sector CODE to label. The code is what is stored; a renamed label cannot orphan rows. */
+const SECTOR_LABELS: Record<string, string> = {
+  GOVERNMENT: 'Government',
+  SEMI_GOVERNMENT: 'Semi-Government',
+  PRIVATE: 'Private',
+};
 
 const Section: React.FC<{ title: string; icon: React.ReactNode; children: React.ReactNode }> = ({ title, icon, children }) => (
   <Box>
@@ -314,6 +329,33 @@ const CustomerDetailPage: React.FC = () => {
           </Section>
         </Grid>
 
+        {/* FR-CST-01 · the identifiers a KSA counterparty is verified against, and the account team
+            that owns the relationship. Each absent value states WHAT is absent rather than showing
+            the generic em dash, because "not captured" and "not applicable" are different facts and
+            only one of them is somebody's job to fix. */}
+        <Grid size={{ xs: 12, md: 6 }}>
+          <Section title="Registration &amp; account" icon={<BillingIcon sx={{ fontSize: 16 }} />}>
+            <InfoRow
+              label="CR number"
+              value={customer.commercialRegistrationNumber ?? <Gap>Not captured</Gap>}
+            />
+            <InfoRow
+              label="VAT registration number"
+              value={customer.taxRegistrationNumber ?? <Gap>Not captured</Gap>}
+            />
+            <InfoRow label="Sector" value={SECTOR_LABELS[customer.sector ?? ''] ?? <Gap>Not classified</Gap>} />
+            <InfoRow label="Region" value={customer.regionName ?? <Gap>Not stated</Gap>} />
+            <InfoRow
+              label="Account team"
+              value={customer.accountTeamName ?? (
+                <Typography component="span" sx={{ color: 'warning.main', fontSize: '0.875rem', fontWeight: 700 }}>
+                  No account team — readable tenant-wide
+                </Typography>
+              )}
+            />
+          </Section>
+        </Grid>
+
         <Grid size={{ xs: 12, md: 6 }}>
           <Section title="Billing Address" icon={<BillingIcon sx={{ fontSize: 16 }} />}>
             <InfoRow label="Address Line 1" value={customer.billingAddressLine1} />
@@ -333,6 +375,21 @@ const CustomerDetailPage: React.FC = () => {
             <InfoRow label="State" value={customer.shippingState} />
             <InfoRow label="Country" value={customer.shippingCountry} />
             <InfoRow label="Postal Code" value={customer.shippingPostalCode} />
+          </Section>
+        </Grid>
+
+        {/* FR-MDM-05 · the record's own before/after trail. Placed after the addresses it audits,
+            because a changed billing address is the most common master-data edit on this screen
+            and "when did that change, and who changed it" is the question it raises. */}
+        <Grid size={{ xs: 12 }}>
+          <Section title="Change history" icon={<HistoryIcon sx={{ fontSize: 16 }} />}>
+            {!canViewCustomers
+              ? <Alert severity="info">Customer view permission is required.</Alert>
+              : <ChangeHistoryPanel
+                  entityType="Customer"
+                  entityId={Number(id)}
+                  emptyMessage="No changes have been recorded for this customer since audit capture began."
+                />}
           </Section>
         </Grid>
       </Grid>

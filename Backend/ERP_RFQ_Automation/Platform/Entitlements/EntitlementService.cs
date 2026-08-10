@@ -100,6 +100,7 @@ public sealed class EntitlementService : IEntitlementService
     public async Task<EntitlementDecision> CheckSeatAvailabilityAsync(long businessUnitId, CancellationToken ct = default)
     {
         var access = await _tenantAccess.GetAccessAsync(businessUnitId, ct);
+        if (Unresolved(access) is { } unresolved) return unresolved;
 
         // A plan with MaxSeats 0 is an operator saying "unlimited" about a tenant they
         // have already priced; only the total ABSENCE of a plan reaches the floor below.
@@ -127,6 +128,7 @@ public sealed class EntitlementService : IEntitlementService
     public async Task<EntitlementDecision> CheckDocumentQuotaAsync(long businessUnitId, CancellationToken ct = default)
     {
         var access = await _tenantAccess.GetAccessAsync(businessUnitId, ct);
+        if (Unresolved(access) is { } unresolved) return unresolved;
 
         if (access.Plan is not { MaxDocsPerMonth: > 0 } plan)
         {
@@ -160,6 +162,8 @@ public sealed class EntitlementService : IEntitlementService
                 $"Entitlement '{entitlement}' is not available because its server execution boundary is not implemented.");
 
         var access = await _tenantAccess.GetAccessAsync(businessUnitId, ct);
+        if (Unresolved(access) is { } unresolved) return unresolved;
+
         if (!access.HasTenant)
             return EntitlementDecision.Deny(0, 0,
                 $"Entitlement '{entitlement}' is unavailable because no governed platform tenant owns this business unit.");
@@ -179,6 +183,25 @@ public sealed class EntitlementService : IEntitlementService
         var access = await _tenantAccess.GetAccessAsync(businessUnitId, ct);
         return access.Plan is { Weight: > 0 } plan ? plan.Weight : fallbackWeight;
     }
+
+    /// <summary>
+    /// Sec-D1: the single expression of "the platform plane did not answer, so nothing is
+    /// permitted". Returns a denial when the snapshot is unresolvable and null otherwise, so each
+    /// check reads as one guard line rather than repeating the rule four times — which is how the
+    /// fourth one comes to disagree.
+    ///
+    /// <para>It has to be a DENY and not <c>Unlimited</c>: an unresolvable snapshot has a null
+    /// Plan, and every limit below treats a null plan as "no limit". Without this guard an
+    /// unreadable platform plane would grant unlimited seats, unlimited documents and every typed
+    /// feature — which is precisely the failure that made this change necessary.</para>
+    /// </summary>
+    private static EntitlementDecision? Unresolved(TenantAccessSnapshot access)
+        => access.IsUnresolvable
+            ? EntitlementDecision.Deny(0, 0,
+                access.UnresolvedReason
+                ?? "This organization's subscription could not be confirmed, so its entitlements "
+                   + "cannot be granted. Please try again shortly.")
+            : null;
 
     private Task<int> CountActiveUsersAsync(long businessUnitId, CancellationToken ct)
         => _context.Users

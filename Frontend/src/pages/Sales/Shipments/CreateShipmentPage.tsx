@@ -4,7 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Box, Typography, Paper, Grid, TextField, Button, Divider, Table,
   TableHead, TableRow, TableCell, TableBody, MenuItem, Stack,
-  Card, CardContent, CircularProgress, Breadcrumbs, Link
+  Card, CardContent, CircularProgress, Breadcrumbs, Link, Alert
 } from '@mui/material';
 import {
   Save as SaveIcon,
@@ -29,8 +29,21 @@ interface FormState {
   trackingNumber: string;
   shippingAddress: string;
   notes: string;
+  complianceOverrideReason: string;
   items: ShipmentItemDTO[];
 }
+
+/**
+ * The server's message, verbatim. It names the line, the ordered quantity, what has already
+ * shipped and what was declared — or which lot is quarantined, or which certificate has lapsed.
+ * Inventing client copy here would contradict the only account of the refusal that is true.
+ */
+const serverMessage = (error: unknown): string | null => {
+  const data = (error as { response?: { data?: unknown } })?.response?.data;
+  if (typeof data === 'string' && data.trim()) return data;
+  const message = (data as { message?: unknown })?.message;
+  return typeof message === 'string' && message.trim() ? message : null;
+};
 
 const CreateShipmentPage: React.FC = () => {
   const { id: paramId } = useParams<{ id: string }>();
@@ -56,6 +69,7 @@ const CreateShipmentPage: React.FC = () => {
     trackingNumber: '',
     shippingAddress: '',
     notes: '',
+    complianceOverrideReason: '',
     items: [],
   });
 
@@ -87,6 +101,29 @@ const CreateShipmentPage: React.FC = () => {
     enabled: !!form.orderId,
   });
 
+  // Every despatch already made against this order. The Ship Qty ceiling is the REMAINING
+  // quantity, not the ordered quantity: three despatches of 50 against an order for 100 each
+  // looked legal on their own, and the server (which is the only ceiling that counts) refuses
+  // them cumulatively. The screen has to offer the same arithmetic or it invites the refusal.
+  const { data: priorShipments } = useQuery({
+    queryKey: ['shipments-for-order', form.orderId, businessUnitId],
+    queryFn: () => shipmentService.getByOrderId(Number(form.orderId), businessUnitId),
+    enabled: !!form.orderId,
+  });
+
+  const shippedByLine = React.useMemo(() => {
+    const totals = new Map<number, number>();
+    (priorShipments || [])
+      .filter(shipment => !isEdit || shipment.id !== Number(shipmentId))
+      .forEach(shipment => shipment.items.forEach(item => {
+        totals.set(item.orderItemId, (totals.get(item.orderItemId) || 0) + item.quantity);
+      }));
+    return totals;
+  }, [priorShipments, isEdit, shipmentId]);
+
+  const remainingFor = (orderItemId: number, orderedQuantity: number) =>
+    Math.max(0, orderedQuantity - (shippedByLine.get(orderItemId) || 0));
+
   useEffect(() => {
     if (isEdit && existingShipment) {
       setForm({
@@ -100,21 +137,25 @@ const CreateShipmentPage: React.FC = () => {
         trackingNumber: existingShipment.trackingNumber || '',
         shippingAddress: existingShipment.shippingAddress || '',
         notes: existingShipment.notes || '',
+        complianceOverrideReason: '',
         items: existingShipment.items,
       });
     } else if (selectedOrder && !isEdit && form.items.length === 0) {
       setForm(prev => ({
         ...prev,
         shippingAddress: selectedOrder.notes || '', // Default address from order notes
+        // Default to what is LEFT to ship, not to the ordered quantity. Defaulting to the full
+        // order on a line that is already half despatched pre-fills a quantity the server will
+        // refuse, and the operator's only clue was a 200 that silently over-shipped.
         items: selectedOrder.items.map(item => ({
           orderItemId: item.id,
           productName: item.productName,
-          quantity: item.quantity,
+          quantity: remainingFor(item.id, item.quantity),
           notes: ''
         }))
       }));
     }
-  }, [isEdit, existingShipment, selectedOrder, form.items.length]);
+  }, [isEdit, existingShipment, selectedOrder, form.items.length, shippedByLine]);
 
   const mutation = useMutation({
     mutationFn: (data: CreateShipmentDTO) => 
@@ -124,6 +165,13 @@ const CreateShipmentPage: React.FC = () => {
       navigate('/sales/shipments');
     },
   });
+
+  // The refusal is rendered verbatim. Before this, a rejected despatch resolved into a generic
+  // failure and the operator was left guessing which of over-shipment, quarantined stock or a
+  // lapsed certificate had stopped them — three different problems with three different fixes.
+  const submitError = mutation.isError ? serverMessage(mutation.error) : null;
+  const needsComplianceOverride =
+    !!submitError && submitError.toLowerCase().includes('expired certificate');
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target;
@@ -151,6 +199,10 @@ const CreateShipmentPage: React.FC = () => {
       trackingNumber: form.trackingNumber,
       shippingAddress: form.shippingAddress,
       notes: form.notes,
+      // Only sent when the operator has actually typed one. The server refuses an override on a
+      // despatch where every lot is in date, so sending an empty string would be indistinguishable
+      // from an override nobody asked for.
+      complianceOverrideReason: form.complianceOverrideReason.trim() || undefined,
       items: form.items.map(item => ({
         orderItemId: item.orderItemId,
         quantity: item.quantity,
@@ -309,8 +361,32 @@ const CreateShipmentPage: React.FC = () => {
                     onChange={handleInputChange}
                   />
                 </Grid>
+                {/* FR-MTR-02. Shown only once the server has actually refused for a lapsed
+                    certificate. Rendering it unconditionally would make signing for a documented
+                    risk a field the despatch clerk fills in every time, and an override that is
+                    always present stops meaning anything — which is why the server refuses one
+                    supplied for material whose certificates are all in date. */}
+                {needsComplianceOverride && (
+                  <Grid size={12}>
+                    <TextField
+                      fullWidth
+                      required
+                      label="Certificate override — reason and authority"
+                      name="complianceOverrideReason"
+                      multiline
+                      rows={2}
+                      value={form.complianceOverrideReason}
+                      onChange={handleInputChange}
+                      helperText="Kept on the lot declaration permanently and shown on both traces. Your name is recorded with it."
+                    />
+                  </Grid>
+                )}
               </Grid>
             </Paper>
+
+            {submitError && (
+              <Alert severity="error" sx={{ mt: 3 }}>{submitError}</Alert>
+            )}
 
             <Paper sx={{ mt: 3, borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none', overflow: 'hidden' }}>
               <Box sx={{ p: 2, bgcolor: 'grey.50', borderBottom: '1px solid', borderColor: 'divider' }}>
@@ -320,33 +396,49 @@ const CreateShipmentPage: React.FC = () => {
                 <TableHead>
                   <TableRow sx={{ bgcolor: 'grey.100' }}>
                     <TableCell sx={{ fontWeight: 800 }}>Product</TableCell>
-                    <TableCell sx={{ fontWeight: 800 }} align="right">Order Qty</TableCell>
-                    <TableCell sx={{ fontWeight: 800 }} align="right" width={120}>Ship Qty</TableCell>
+                    <TableCell sx={{ fontWeight: 800 }} align="right">Order Qty (units)</TableCell>
+                    <TableCell sx={{ fontWeight: 800 }} align="right">Already Shipped (units)</TableCell>
+                    <TableCell sx={{ fontWeight: 800 }} align="right">Remaining (units)</TableCell>
+                    <TableCell sx={{ fontWeight: 800 }} align="right" width={120}>Ship Qty (units)</TableCell>
                     <TableCell sx={{ fontWeight: 800 }}>Item Notes</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
                   {form.items.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={4} align="center" sx={{ py: 3 }}>
+                      <TableCell colSpan={6} align="center" sx={{ py: 3 }}>
                         <Typography variant="body2" color="text.secondary">Select an order to load items</Typography>
                       </TableCell>
                     </TableRow>
                   ) : (
                     form.items.map((item, index) => {
                       const orderItem = selectedOrder?.items.find(oi => oi.id === item.orderItemId);
+                      const ordered = orderItem?.quantity ?? 0;
+                      const alreadyShipped = shippedByLine.get(item.orderItemId) || 0;
+                      const remaining = remainingFor(item.orderItemId, ordered);
+                      const overRemaining = item.quantity > remaining;
                       return (
                         <TableRow key={index}>
                           <TableCell sx={{ fontWeight: 600 }}>{item.productName || orderItem?.productName}</TableCell>
-                          <TableCell align="right">{orderItem?.quantity || 0}</TableCell>
+                          <TableCell align="right">{ordered}</TableCell>
+                          <TableCell align="right">{alreadyShipped}</TableCell>
+                          <TableCell align="right" sx={{ fontWeight: 700 }}>{remaining}</TableCell>
                           <TableCell align="right">
                             <TextField
                               type="number"
                               size="small"
                               value={item.quantity}
                               onChange={(e) => handleItemQuantityChange(index, Number(e.target.value))}
+                              error={overRemaining}
+                              // The ceiling is REMAINING, and it is a real ceiling: the number
+                              // input's `max` is advisory (it does not stop a paste or a keyed
+                              // value), which is exactly why the server now enforces the same
+                              // rule. This is a courtesy, not the control.
+                              helperText={overRemaining
+                                ? `Only ${remaining} left to ship on this line`
+                                : undefined}
                               slotProps={{
-                                htmlInput: { min: 1, max: orderItem?.quantity || 9999 }
+                                htmlInput: { min: 0, max: remaining }
                               }}
                             />
                           </TableCell>

@@ -19,6 +19,8 @@ public static class QuoteDeliveryModelBuilderExtensions
             entity.Property(x => x.AttachmentFileName).HasMaxLength(255).IsRequired();
             entity.Property(x => x.LeaseOwner).HasMaxLength(200);
             entity.Property(x => x.LastErrorCode).HasMaxLength(160);
+            // Lowercase hex SHA-256 produced by PriceAttestationService.ComputeFingerprint.
+            entity.Property(x => x.AttestedPriceFingerprint).HasMaxLength(64);
             entity.Property(x => x.Version).IsConcurrencyToken();
             entity.HasIndex(x => new { x.BusinessUnitId, x.IdempotencyKey }).IsUnique();
             entity.HasIndex(x => new { x.CompletedOn, x.DeadLetteredOn, x.AvailableOn, x.LeaseUntil });

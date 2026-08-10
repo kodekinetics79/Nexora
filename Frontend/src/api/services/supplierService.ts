@@ -20,6 +20,13 @@ export interface SupplierDTO {
   comments?: string;
   currencyId?: number;
   currencyName?: string;
+  /**
+   * VAT/tax registration number. Optional, but a supplier without one cannot have the input tax
+   * it charges treated as recoverable — the reclaim has to name the supplier to ZATCA — so
+   * capturing supplier quotes from it will be refused while the tenant's recoverable percentage
+   * is above zero.
+   */
+  taxRegistrationNumber?: string;
   buid?: number;
   businessUnitName?: string;
   isActive?: boolean;

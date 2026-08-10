@@ -118,38 +118,34 @@ public sealed class CustomFieldValue
     }
 }
 
-public sealed class CustomFieldValueHistory
-{
-    private CustomFieldValueHistory() { }
-    public long Id { get; private set; }
-    public long BusinessUnitId { get; private set; }
-    public long CustomFieldValueId { get; private set; }
-    public string? BeforeJson { get; private set; }
-    public string? AfterJson { get; private set; }
-    public string ChangeType { get; private set; } = null!;
-    public string ChangedBy { get; private set; } = null!;
-    public DateTime ChangedOn { get; private set; }
-    public string? Reason { get; private set; }
-    public string CorrelationId { get; private set; } = null!;
-    public string IdempotencyKey { get; private set; } = null!;
-    public string RequestHash { get; private set; } = null!;
-
-    public static CustomFieldValueHistory Create(
-        long businessUnitId, long valueId, string changeType, string? beforeJson, string? afterJson,
-        string changedBy, DateTime changedOn, string correlationId, string idempotencyKey,
-        string requestHash, string? reason = null) =>
-        new()
-        {
-            BusinessUnitId = businessUnitId > 0 ? businessUnitId : throw new CustomFieldDomainException("A business unit is required."),
-            CustomFieldValueId = valueId > 0 ? valueId : throw new CustomFieldDomainException("A persisted value is required."),
-            ChangeType = CustomFieldDefinition.Require(changeType, nameof(changeType), 30),
-            BeforeJson = beforeJson,
-            AfterJson = afterJson,
-            ChangedBy = CustomFieldDefinition.Require(changedBy, nameof(changedBy), 200),
-            ChangedOn = CustomFieldDefinition.RequireUtc(changedOn, nameof(changedOn)),
-            CorrelationId = CustomFieldDefinition.Require(correlationId, nameof(correlationId), 100),
-            IdempotencyKey = CustomFieldDefinition.Require(idempotencyKey, nameof(idempotencyKey), 160),
-            RequestHash = CustomFieldDefinition.Require(requestHash, nameof(requestHash), 64),
-            Reason = reason
-        };
-}
+// ============================================================================================
+// CustomFieldValueHistory was REMOVED here as part of closing FR-MDM-05 / register item E44.
+//
+// It was a fully built control that could never hold a row. The class was declared, mapped to
+// custom_field_value_history, tenant-filtered, indexed, given a unique idempotency key and
+// protected from UPDATE and DELETE by both the governance interceptor and a database trigger —
+// and its Create method had ZERO call sites. Nothing in the product ever wrote to it.
+//
+// That is worse than an absent table, and worse in a specific way. An auditor testing "were
+// custom-field values ever changed without a record?" queries the history, finds no exceptions,
+// and concludes the control works. It reports clean because it is EMPTY. An absent table at
+// least fails the test honestly.
+//
+// Wiring it was not an option. The relational value model it hangs off is not the live storage:
+// production writes tenant-defined values into a jsonb bag on the entity itself
+// (Customer.CustomFieldsJson, Supplier.CustomFieldsJson, LeadItem.CustomFieldsJson — see
+// CustomFieldBagService), and CustomFieldValue.Create is likewise called from nowhere but a
+// test. A history keyed by CustomFieldValueId cannot record a change to a value that has no
+// CustomFieldValue row. Wiring it would have meant migrating the storage model, which is not
+// this change and is not authorised by the BRD.
+//
+// The control it pretended to provide is now actually delivered, by a different mechanism:
+// CustomFieldsJson is an ordinary audited property of Customer and Supplier, so every change to
+// a tenant-defined custom field on those two entities is captured with its before and after
+// value by MasterDataAuditInterceptor. LeadItem.CustomFieldsJson is NOT covered — a lead line is
+// not master data and sits outside FR-MDM-05.
+//
+// The table, its trigger and its indexes still exist in the database. Dropping them is a
+// migration, and migration authorship is reserved to the integration owner; the exact delta is
+// stated in the change report accompanying this work.
+// ============================================================================================

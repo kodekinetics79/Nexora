@@ -160,7 +160,7 @@ public sealed class SupplierReadinessGatingTests
     private static SupplierController Controller(ISupplierRepository repository)
     {
         var identity = new ClaimsIdentity([new Claim("businessUnitId", "98000")], "test");
-        return new SupplierController(repository)
+        return new SupplierController(repository, new StubMasterDataChangeHistoryReader())
         {
             ControllerContext = new ControllerContext
             {

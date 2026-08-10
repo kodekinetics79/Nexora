@@ -22,6 +22,11 @@ public static class PricingServiceCollectionExtensions
         // convention as the other pricing tools; line lives in Sla/WAVEB-WIRING.md.
         services.AddScoped<IBelowFloorGuard, BelowFloorGuard>();
 
+        // R5 price-provenance attestation (Decision Register R5). QuoteService constructs
+        // its own instance for the send gate so the gate cannot be omitted by construction;
+        // this registration serves QuoteController's read/confirm endpoints.
+        services.AddScoped<IPriceAttestationService, PriceAttestationService>();
+
         return services;
     }
 }

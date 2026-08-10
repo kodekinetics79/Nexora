@@ -410,11 +410,18 @@ public sealed class AwardRfqTool : IAgentTool
             return AgentToolResult.Fail(
                 "This supplier award requires human approval. Complete it in the authenticated procurement workflow.");
 
+        // COMPARISON SITE 4. The total is denominated in the supplier quote's OWN currency
+        // (quote.CurrencyId); the cap is denominated in policy.CurrencyId. Comparing the two
+        // numbers directly — which is what this line used to do — made a cap of 10,000 stop a
+        // 10,000 SAR award and a 10,000 USD award alike. AgentSpendCap converts with approved,
+        // effective-dated FX evidence first, and refuses rather than guessing when it cannot.
         var authoritativeTotal = quote.LandedUnitCost.Value * quantity.Value;
-        if (authoritativeTotal > policy.MaxAutoAwardValue)
+        var capVerdict = await new AgentSpendCap(_db).EvaluateAsync(
+            ctx.BusinessUnitId, authoritativeTotal, quote.CurrencyId, policy, policy.MaxAutoAwardValue,
+            "award", DateTime.UtcNow, ct);
+        if (!capVerdict.MayAutoExecute)
             return AgentToolResult.Fail(
-                $"Authoritative award value {authoritativeTotal:0.##} exceeds the tenant agent cap " +
-                $"{policy.MaxAutoAwardValue:0.##}. Complete this award in the authenticated procurement workflow.");
+                $"{capVerdict.Reason} Complete this award in the authenticated procurement workflow.");
 
         var semanticHash = SemanticHash(JsonSerializer.Serialize(new
         {

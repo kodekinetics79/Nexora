@@ -155,6 +155,12 @@ public static class EmailIngestEnqueuer
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 // Poison-attachment isolation: continue with the remaining documents.
+                //
+                // The skip MUST also reach the durable ledger. This was the one skip path that
+                // recorded nothing, so a transient storage failure on the single attachment
+                // carrying the BoQ left a Queued ingest, a body-only lead, and a log line — the
+                // exact loss the ING-06 note below describes, reintroduced through the catch.
+                RecordSkippedAttachment(part.FileName, $"could not be queued ({ex.GetType().Name})");
                 logger.LogError(ex, "Failed to enqueue attachment {FileName} for ingest {IngestId}.",
                     part.FileName, ingest.Id);
             }

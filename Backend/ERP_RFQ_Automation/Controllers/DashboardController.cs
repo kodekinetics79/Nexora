@@ -16,12 +16,13 @@ namespace ERP_RFQ_Automation.Controllers
     public class DashboardController : ControllerBase
     {
         private readonly IDashboardRepository _repository;
-        private readonly IRoleGate _roleGate;
+        private readonly IAccountTeamScopeResolver _accountScope;
 
-        public DashboardController(IDashboardRepository repository, IRoleGate roleGate)
+        public DashboardController(
+            IDashboardRepository repository, IAccountTeamScopeResolver accountScope)
         {
             _repository = repository;
-            _roleGate = roleGate;
+            _accountScope = accountScope;
         }
 
         [HttpGet("release-01")]
@@ -50,11 +51,15 @@ namespace ERP_RFQ_Automation.Controllers
             if (effectiveTo - effectiveFrom > TimeSpan.FromDays(366))
                 return BadRequest("The dashboard window cannot exceed 366 days.");
 
-            var tenantWide = await _roleGate.IsManagerOrAdminAsync(roleId, businessUnitId);
+            // FR-DSH-05. This used to be `IsManagerOrAdminAsync ? tenant : assigned_to_me` — a
+            // boolean that collapsed the BRD's three tiers into two and gave a supervisor the whole
+            // tenant. The resolver returns the middle tier as a first-class answer.
+            var scope = await _accountScope.ResolveAsync(
+                userId, roleId, businessUnitId, generatedAt, cancellationToken);
+
             var data = await _repository.GetRelease01Async(
                 businessUnitId,
-                tenantWide ? null : userId,
-                tenantWide ? "tenant" : "assigned_to_me",
+                scope,
                 effectiveFrom,
                 effectiveTo,
                 generatedAt,

@@ -41,7 +41,7 @@ import { platformErrorMessage } from '../../api/apiError';
 import { platformKeys } from '../../api/queryKeys';
 import { usePlatformPermissions } from '../../auth/usePlatformPermissions';
 import { REQUIRED_ROLE_COPY } from '../../auth/permissions';
-import type { Tenant, TenantOffboardingStatus } from '../../types';
+import type { Tenant, TenantOffboardingStatus, TenantPurgeResult } from '../../types';
 
 /**
  * The platform's own floor, mirrored so the operator is told before the request rather
@@ -95,6 +95,7 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
   const [purgeOpen, setPurgeOpen] = useState(false);
   const [eraseOpen, setEraseOpen] = useState(false);
   const [exportNotice, setExportNotice] = useState<string | null>(null);
+  const [purgeReceipt, setPurgeReceipt] = useState<TenantPurgeResult | null>(null);
   const [holdOpen, setHoldOpen] = useState(false);
   const [releaseHoldId, setReleaseHoldId] = useState<string | null>(null);
   const [holdScope, setHoldScope] = useState('AllTenantData');
@@ -205,6 +206,11 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
       enqueueSnackbar(`${fmtNumber(result.rowsDeleted)} rows destroyed across ${result.tablesTouched} tables`, {
         variant: 'warning',
       });
+      // The server computes what SURVIVED — lifecycle events, platform audit records, the support
+      // threads it redacted rather than deleted — and the console used to throw all of it away and
+      // show only the body count. A toast that says what was destroyed and nothing about what was
+      // kept is the half of the answer an operator cannot give a customer.
+      setPurgeReceipt(result);
       setPurgeOpen(false);
       invalidate();
     },
@@ -509,7 +515,10 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
                     variant="contained"
                     color="error"
                     startIcon={<PurgeIcon />}
-                    disabled={disabled || destructiveHoldGuard || !status.canPurge}
+                    disabled={
+                      disabled || destructiveHoldGuard || !status.canPurge
+                      || status.purgeRequiresDifferentApprover
+                    }
                     onClick={() => setPurgeOpen(true)}
                   >
                     Purge tenant records
@@ -531,6 +540,29 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
                 )}
               </RoleGate>
 
+              {permissions.isOwner && status.purgeRequiresDifferentApprover && (
+                <Alert severity="warning" sx={{ borderRadius: 2 }}>
+                  <AlertTitle sx={{ fontWeight: 800 }}>A second Owner has to run this purge</AlertTitle>
+                  You scheduled this deletion
+                  {status.deletionApprovedBy ? ` (${status.deletionApprovedBy})` : ''}, so the server
+                  will refuse a purge from you. Destroying a customer&apos;s records is the one act
+                  here that no later reviewer can correct, and every other control on the path —
+                  the role, the typed name, the reason, the clock — is one person satisfying a rule.
+                  The platform already requires an independent checker to finalize an invoice, to
+                  approve an exchange rate and to release a legal hold; this is the same rule.
+                  Ask another Owner to carry it out.
+                </Alert>
+              )}
+
+              {permissions.isOwner && status.canPurge && !status.purgeRequiresDifferentApprover
+                && status.deletionApprovedBy && (
+                <Alert severity="info" sx={{ borderRadius: 2 }}>
+                  Scheduled by <strong>{status.deletionApprovedBy}</strong>. You are the second
+                  approver: carrying this out is your independent decision, and it is recorded as
+                  one.
+                </Alert>
+              )}
+
               {!permissions.isOwner && (
                 <Alert severity="info" sx={{ borderRadius: 2 }}>
                   The destructive verbs are Owner-only by design: a support engineer must be able to take a
@@ -538,6 +570,37 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
                 </Alert>
               )}
             </Stack>
+
+            {/* The retained half of the answer. The server counts what survived; before this it
+                was returned on every purge response and rendered nowhere. */}
+            {purgeReceipt && (
+              <Alert
+                severity="warning"
+                sx={{ borderRadius: 2, mt: 2 }}
+                onClose={() => setPurgeReceipt(null)}
+              >
+                <AlertTitle sx={{ fontWeight: 800 }}>Purge complete — what was destroyed and what was kept</AlertTitle>
+                <Typography variant="body2" sx={{ mb: 1 }}>{purgeReceipt.summary}</Typography>
+                <Stack spacing={0.5}>
+                  <Typography variant="body2">
+                    <strong>Destroyed:</strong> {fmtNumber(purgeReceipt.rowsDeleted)} rows across{' '}
+                    {purgeReceipt.tablesTouched} tables.
+                  </Typography>
+                  <Typography variant="body2">
+                    <strong>Kept:</strong> {fmtNumber(purgeReceipt.lifecycleEventsRetained)} lifecycle
+                    events and {fmtNumber(purgeReceipt.platformAuditRecordsRetained)} platform audit
+                    records — the account of how this customer was treated, which is the operator&apos;s
+                    record and not theirs.
+                  </Typography>
+                  <Typography variant="body2">
+                    <strong>Redacted rather than deleted:</strong>{' '}
+                    {fmtNumber(purgeReceipt.supportTicketsRedacted)} support tickets, with{' '}
+                    {fmtNumber(purgeReceipt.supportNotesErased)} notes erased — the tickets survive as
+                    our record of what was promised; the customer&apos;s words inside them do not.
+                  </Typography>
+                </Stack>
+              </Alert>
+            )}
 
             {status.disclosures.length > 0 && (
               <Box sx={{ mt: 2, p: 1.5, borderRadius: 2, bgcolor: 'action.hover' }}>
@@ -808,10 +871,28 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
                   </Stack>
                 ))}
               </Box>
-              {preview.data.preserved.length > 0 && (
-                <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
-                  Preserved: {preview.data.preserved.join(', ')}
-                </Typography>
+              {/* What SURVIVES, with the reason, at the same weight as what dies.
+                  This used to be a comma-joined list of table names in caption text, which told an
+                  operator that something was kept and nothing about why — and "why" is the half
+                  they have to be able to repeat to a customer asking what we still hold on them. */}
+              {preview.data.preservedDetail.length > 0 && (
+                <Box sx={{ mt: 2 }}>
+                  <Typography variant="subtitle2" sx={{ fontWeight: 800, mb: 0.5 }}>
+                    Kept, and why — {preview.data.preservedDetail.length} tables
+                  </Typography>
+                  <Box sx={{ maxHeight: 200, overflowY: 'auto', borderRadius: 2, bgcolor: 'action.hover', p: 1 }}>
+                    {preview.data.preservedDetail.map((entry) => (
+                      <Box key={entry.table} sx={{ mb: 1 }}>
+                        <Typography variant="caption" sx={{ fontFamily: 'monospace', fontWeight: 700, display: 'block' }}>
+                          {entry.table}
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary">
+                          {entry.reason}
+                        </Typography>
+                      </Box>
+                    ))}
+                  </Box>
+                </Box>
               )}
             </Box>
           ) : (

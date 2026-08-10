@@ -33,12 +33,19 @@ FRONTEND_PORT="${NEXORA_FRONTEND_PORT:-5173}"
 BACKEND_URL="http://127.0.0.1:${BACKEND_PORT}"
 FRONTEND_URL="http://127.0.0.1:${FRONTEND_PORT}"
 
-# Local-only credentials. The owner password is 12+ characters because PlatformOwnerSeeder
-# refuses anything shorter rather than silently creating a weak account.
+# Local-only credentials. Emails default; PASSWORDS DELIBERATELY DO NOT.
+#
+# SEC-G9: both passwords used to carry a literal `${VAR:-<default>}` fallback, so the operator
+# and checker credentials for the platform control plane were published in a tracked file and
+# were what every run that did not set the variable actually used. Loopback binding is not a
+# mitigation for that — it decides who can reach the console, not what the password is, and the
+# same literal is one `docker run -p` or one copied-into-a-shared-environment away from being a
+# real credential. scripts/e2e/run-phase1-base-journey.sh already generates its secrets per run;
+# this follows it, and refuses rather than inventing one silently.
 OWNER_EMAIL="${NEXORA_OWNER_EMAIL:-owner@nexora.local}"
-OWNER_PASSWORD="${NEXORA_OWNER_PASSWORD:-LocalOwner!2026}"
 CHECKER_EMAIL="${NEXORA_CHECKER_EMAIL:-checker@nexora.local}"
-CHECKER_PASSWORD="${NEXORA_CHECKER_PASSWORD:-LocalChecker!2026}"
+OWNER_PASSWORD="${NEXORA_OWNER_PASSWORD:-}"
+CHECKER_PASSWORD="${NEXORA_CHECKER_PASSWORD:-}"
 
 log()  { printf '\033[1;36m[nexora]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[nexora]\033[0m %s\n' "$*"; }
@@ -83,10 +90,65 @@ for pair in "API:$BACKEND_PORT:NEXORA_BACKEND_PORT" "frontend:$FRONTEND_PORT:NEX
   fi
 done
 
+# SEC-G9: fail here rather than fall back to a committed literal. PlatformOwnerSeeder refuses
+# anything under 12 characters rather than silently creating a weak account, so the check
+# mirrors it — a run that dies at the seeder five steps later, with the database already up, is
+# a worse version of the same message.
+for pair in "NEXORA_OWNER_PASSWORD:$OWNER_PASSWORD" "NEXORA_CHECKER_PASSWORD:$CHECKER_PASSWORD"; do
+  var="${pair%%:*}"; value="${pair#*:}"
+  if [[ -z "$value" ]]; then
+    die "$var is not set. This script no longer ships a default password for the platform
+     control plane. Choose one for this machine, e.g.:
+
+       export $var=\"\$(python3 -c 'import secrets;print(\"Local!\"+secrets.token_urlsafe(18))')\"
+
+     Both NEXORA_OWNER_PASSWORD and NEXORA_CHECKER_PASSWORD are required."
+  fi
+  [[ ${#value} -ge 12 ]] || die "$var must be at least 12 characters; PlatformOwnerSeeder refuses anything shorter."
+done
+
 mkdir -p "$RUN_DIR"
 # Secrets exist only for the lifetime of this run; nothing here is reused or persisted.
 APP_SECRET="$(python3 -c 'import secrets;print(secrets.token_urlsafe(48))')"
 PG_PASSWORD="$(python3 -c 'import secrets;print(secrets.token_urlsafe(24))')"
+
+# ---- the one secret that must NOT be per-run -------------------------------------------------
+# Security:SecretProtectionKey encrypts stored mail credentials at rest (AES-256-GCM). With no key
+# configured the API generates a PROCESS-LIFETIME one, so anything saved on the platform email
+# screen becomes undecryptable the moment the API restarts — which, on a script that restarts the
+# API every run, is always. The operator's symptom is "I configured SMTP, and it forgot it again",
+# which is indistinguishable from the settings never saving at all.
+#
+# So this one is generated once and kept, in the same gitignored run directory as the MFA seeds and
+# with the same 0600. It is a DEVELOPMENT key: production supplies its own and refuses to boot
+# without it (SecretProtection.CreateFromConfiguration).
+SECRET_KEY_FILE="$RUN_DIR/secret-protection-key"
+if [[ ! -s "$SECRET_KEY_FILE" ]]; then
+  python3 -c 'import base64,os;print(base64.b64encode(os.urandom(32)).decode())' >"$SECRET_KEY_FILE"
+  chmod 600 "$SECRET_KEY_FILE"
+  log "Generated a persistent local secret-protection key at $SECRET_KEY_FILE."
+fi
+SECRET_PROTECTION_KEY="$(tr -d '\n' <"$SECRET_KEY_FILE")"
+
+# ---- outbound containment ---------------------------------------------------------------------
+# DraftOnly by default: a local database full of plausible-looking addresses must not be one saved
+# setting away from mailing real customers. It is a default rather than a hard-code, because with
+# it hard-coded there was NO way to prove outbound mail works locally — every test send returned
+# "nothing was transmitted", and an operator verifying an SMTP fix could not tell a correct
+# configuration from a broken one.
+#
+#   NEXORA_OUTBOUND_GUARD=Live ./scripts/local/run-platform-console.sh
+#
+# Anything other than DraftOnly is announced loudly below, because the difference is whether real
+# people receive what this box sends.
+OUTBOUND_GUARD="${NEXORA_OUTBOUND_GUARD:-DraftOnly}"
+case "$OUTBOUND_GUARD" in
+  Live|AllowListOnly|Redirect|DraftOnly) ;;
+  *) die "NEXORA_OUTBOUND_GUARD must be Live, AllowListOnly, Redirect or DraftOnly (got '$OUTBOUND_GUARD')." ;;
+esac
+if [[ "$OUTBOUND_GUARD" != "DraftOnly" ]]; then
+  log "OUTBOUND GUARD IS '$OUTBOUND_GUARD' — this run can transmit real email to real addresses."
+fi
 
 # ---------------------------------------------------------------- postgres
 if docker ps -a --format '{{.Names}}' | grep -qx "$PG_CONTAINER"; then
@@ -136,7 +198,8 @@ log "Starting the API on $BACKEND_URL (applying ~200 migrations on first run)."
   Platform__BootstrapOwnerEmail="$OWNER_EMAIL" \
   Platform__BootstrapOwnerPassword="$OWNER_PASSWORD" \
   Notifications__AppBaseUrl="$FRONTEND_URL" \
-  Notifications__OutboundGuard__Mode=DraftOnly \
+  Notifications__OutboundGuard__Mode="$OUTBOUND_GUARD" \
+  Security__SecretProtectionKey="$SECRET_PROTECTION_KEY" \
   ASPNETCORE_ENVIRONMENT=Development \
   ASPNETCORE_URLS="$BACKEND_URL" \
   dotnet run --no-build --no-launch-profile
@@ -295,18 +358,25 @@ cat <<BANNER
   ────────────────────────────────────────────────────────────────
    Operator console   ${FRONTEND_URL}/platform/tenants
    Email              ${OWNER_EMAIL}
-   Password           ${OWNER_PASSWORD}
+   Password           the value of \$NEXORA_OWNER_PASSWORD (not printed)
    MFA seed file      ${RUN_DIR}/platform-owner-mfa-secret (mode 600; never printed)
    Checker email      ${CHECKER_EMAIL}
-   Checker password   ${CHECKER_PASSWORD}
+   Checker password   the value of \$NEXORA_CHECKER_PASSWORD (not printed)
    Checker MFA file   ${RUN_DIR}/platform-checker-mfa-secret (mode 600; never printed)
+   Outbound guard     ${OUTBOUND_GUARD}
   ────────────────────────────────────────────────────────────────
 
    Click "Provision Tenant" for the four-step wizard.
 
-   Invitation emails are NOT sent — the notifications provider is the
-   console logger — so the handover screen shows the activation link
+   Invitation emails are NOT sent — the notifications provider starts as
+   the console logger — so the handover screen shows the activation link
    directly. Paste it into the browser to finish as the customer would.
+
+   To make mail actually leave this box: configure SMTP at
+   ${FRONTEND_URL}/platform/email, and re-run with
+   NEXORA_OUTBOUND_GUARD=Live. With the guard on DraftOnly (the default)
+   nothing is transmitted however correct the SMTP settings are, and a
+   test send will say so rather than appearing to succeed.
 
    Logs: .local-run/backend.log  .local-run/frontend.log
    Stop: Ctrl-C, or ./scripts/local/run-platform-console.sh --stop

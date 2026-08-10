@@ -24,7 +24,10 @@ namespace ERP_RFQ_Automation.Repositories
         {
             IQueryable<Quote> query = _context.Quotes
                 .AsNoTracking()
-                .Where(q => q.BusinessUnitId == businessUnitId)
+                // Withdrawn quotes are gone from the working list but not from the database — that
+                // is the whole point of removal being a state change. They remain readable by id
+                // and through QuoteRemovalRecords.
+                .Where(q => q.BusinessUnitId == businessUnitId && q.RemovedOn == null)
                 .Include(q => q.Customer)
                 .Include(q => q.Rfq).ThenInclude(r => r.Lead)
                 .Include(q => q.Status)
@@ -152,9 +155,15 @@ namespace ERP_RFQ_Automation.Repositories
                 LeadId = q.Rfq?.LeadId,
                 SourceLeadRevision = q.SourceLeadRevision,
                 SourceRfqRevision = q.SourceRfqRevision,
-                CommercialCaseId = q.CommercialCaseId ?? q.Rfq?.CommercialCaseId ?? q.Rfq?.Lead?.CommercialCaseId,
-                NexoraSerial = q.NexoraSerial ?? q.Rfq?.NexoraSerial ?? q.Rfq?.Lead?.CommercialCaseReference,
-                ContactId = q.ContactId ?? q.Rfq?.ContactId,
+                // The quote's OWN commercial identity, never one re-derived through its RFQ or
+                // lead. The `?? q.Rfq?... ?? q.Rfq?.Lead?...` chain that used to be here invented a
+                // case for a quote that carries none — a spreadsheet-uploaded quotation, for
+                // instance — and so hid exactly the documents the case workspace exists to surface.
+                // Production sets all three through Quote.InheritCommercialIdentity; a null means
+                // that never happened, and the UI says so.
+                CommercialCaseId = q.CommercialCaseId,
+                NexoraSerial = q.NexoraSerial,
+                ContactId = q.ContactId,
                 LifecycleVersion = q.LifecycleVersion,
                 Version = q.RevisionNo,
                 CustomerId = q.CustomerId,
@@ -175,6 +184,8 @@ namespace ERP_RFQ_Automation.Repositories
                 OutcomeNote = q.OutcomeNote,
                 IsStale = ERP_RFQ_Automation.Sla.SlaComputed.IsStale(q.Status?.SetupCode, q.SentOn, q.RespondedOn, staleQuoteDays),
                 DaysSinceSent = ERP_RFQ_Automation.Sla.SlaComputed.DaysSinceSent(q.SentOn),
+                ValidityExtendedOn = q.ValidityExtendedOn,
+                CanExtendValidity = QuoteService.IsValidityExtendable(q.Status?.SetupCode, q.Status?.SetupValue, q.OutcomeOn),
                 CurrencyId = q.CurrencyId,
                 CurrencyCode = q.Currency?.Code,
                 TotalAmount = q.TotalAmount,
@@ -280,21 +291,136 @@ namespace ERP_RFQ_Automation.Repositories
             await _context.SaveChangesAsync();
         }
 
-        public async Task DeleteAsync(long id, long businessUnitId)
+        /// <summary>
+        /// Removes a quotation. This used to be <c>_context.Quotes.Remove</c> with no status
+        /// guard, no reason, no audit event and no tombstone — reachable from
+        /// <c>DELETE /api/Quote/{id}</c> with the Quotations Delete permission.
+        ///
+        /// <para>What made that serious was not the quote row. It was the cascade: QuoteItems, the
+        /// R5 <c>QuotePriceAttestations</c> and the R7 <c>QuoteValidityExtensions</c> all went with
+        /// it. Those last two are the evidence for two ratified controls, and a control whose
+        /// evidence is deleted by the same button that deletes the record is not a control. The
+        /// edit path was already guarded at <c>QuoteService.UpdateQuoteAsync</c> (FIN-05); deletion
+        /// simply never got the same treatment.</para>
+        ///
+        /// <para>The rule now:</para>
+        /// <list type="bullet">
+        /// <item>A reason is mandatory in every case.</item>
+        /// <item>Past DRAFT — sent, accepted, rejected, ordered, expired — the quote is WITHDRAWN:
+        /// the row stays, marked with who/when/why, and drops out of the list and the pipeline
+        /// stats. The customer holds a document with these numbers on it; the record of what we
+        /// offered is not ours to destroy.</item>
+        /// <item>A DRAFT that carries price-attestation or validity-extension evidence, or that an
+        /// order was built from, is withdrawn too. Attestation happens BEFORE the send, while the
+        /// quote is still DRAFT, so "draft" does not imply "nothing was ever confirmed".</item>
+        /// <item>Only a clean draft — never attested, never extended, no order — is actually
+        /// deleted, and even then a tombstone is written first.</item>
+        /// </list>
+        ///
+        /// <para>Every path writes a <see cref="QuoteRemovalRecord"/>, which carries no FK to
+        /// Quotes so it survives the one case where the row does not.</para>
+        /// </summary>
+        /// <returns>What was done, so the caller can report it. Null when no such quote exists in
+        /// this tenant — the endpoint stays idempotent, as it was before.</returns>
+        public async Task<QuoteRemovalOutcome?> RemoveAsync(long id, long businessUnitId, string reason, string actor)
         {
-            var quote = await _context.Quotes.FirstOrDefaultAsync(q => q.Id == id && q.BusinessUnitId == businessUnitId);
-            if (quote != null)
+            if (string.IsNullOrWhiteSpace(reason))
+                throw new QuoteRemovalRefusedException(
+                    "A reason is required to remove a quotation. Say why it is being removed — " +
+                    "the reason is the record.");
+            if (string.IsNullOrWhiteSpace(actor))
+                throw new QuoteRemovalRefusedException(
+                    "The removing user could not be identified from the request.");
+
+            var quote = await _context.Quotes
+                .Include(q => q.Status)
+                .FirstOrDefaultAsync(q => q.Id == id && q.BusinessUnitId == businessUnitId);
+            if (quote == null) return null;
+
+            if (quote.RemovedOn != null)
+                throw new QuoteRemovalRefusedException(
+                    $"Quote '{quote.QuoteNo}' was already removed on " +
+                    $"{quote.RemovedOn:yyyy-MM-dd} by {quote.RemovedBy}.");
+
+            var attestationCount = await _context.QuotePriceAttestations
+                .CountAsync(x => x.BusinessUnitId == businessUnitId && x.QuoteId == id);
+            var extensionCount = await _context.QuoteValidityExtensions
+                .CountAsync(x => x.BusinessUnitId == businessUnitId && x.QuoteId == id);
+            var orderCount = await _context.Orders
+                .CountAsync(o => o.BusinessUnitId == businessUnitId && o.QuoteId == id);
+
+            var isDraft = await IsDraftAsync(quote);
+            var hardDeletable = isDraft && attestationCount == 0 && extensionCount == 0 && orderCount == 0;
+            var removedOn = DateTime.UtcNow;
+            var trimmedReason = reason.Trim();
+            var trimmedActor = actor.Trim();
+
+            _context.QuoteRemovalRecords.Add(new QuoteRemovalRecord
+            {
+                BusinessUnitId = businessUnitId,
+                QuoteId = quote.Id,
+                QuoteNo = quote.QuoteNo,
+                Mode = hardDeletable ? QuoteRemovalModes.DraftDiscarded : QuoteRemovalModes.Withdrawn,
+                Reason = trimmedReason,
+                RemovedBy = trimmedActor,
+                RemovedOn = removedOn,
+                CustomerId = quote.CustomerId,
+                StatusId = quote.StatusId,
+                StatusCode = quote.Status?.SetupCode ?? quote.Status?.SetupValue,
+                CurrencyId = quote.CurrencyId,
+                TotalAmount = quote.TotalAmount,
+                PriceAttestationCount = attestationCount,
+                ValidityExtensionCount = extensionCount
+            });
+
+            if (hardDeletable)
             {
                 _context.Quotes.Remove(quote);
-                await _context.SaveChangesAsync();
             }
+            else
+            {
+                quote.RemovedOn = removedOn;
+                quote.RemovedBy = trimmedActor;
+                quote.RemovalReason = trimmedReason;
+                quote.ModifiedBy = trimmedActor;
+                quote.ModifiedDate = removedOn;
+            }
+
+            // Tombstone and state change commit together. A tombstone without the removal, or a
+            // removal without the tombstone, would each be worse than neither.
+            await _context.SaveChangesAsync();
+
+            return new QuoteRemovalOutcome(quote.QuoteNo,
+                hardDeletable ? QuoteRemovalModes.DraftDiscarded : QuoteRemovalModes.Withdrawn,
+                removedOn);
+        }
+
+        // Same DRAFT resolution as QuoteService.IsQuoteInDraftAsync: SetupMaster code first
+        // (BU-scoped, then any BU), then the documented legacy id. Never a bare magic number.
+        private const long DraftQuoteStatusIdFallback = 42;
+
+        private async Task<bool> IsDraftAsync(Quote quote)
+        {
+            if (!quote.StatusId.HasValue) return true;
+
+            var draftStatus = await _context.SetupMasters.AsNoTracking()
+                .FirstOrDefaultAsync(s => s.SetupType == "QuoteStatus" && s.SetupCode == "DRAFT"
+                    && s.BusinessUnitId == quote.BusinessUnitId);
+            draftStatus ??= await _context.SetupMasters.AsNoTracking()
+                .FirstOrDefaultAsync(s => s.SetupType == "QuoteStatus" && s.SetupCode == "DRAFT");
+
+            return draftStatus != null
+                ? quote.StatusId.Value == draftStatus.SetupId
+                : quote.StatusId.Value == DraftQuoteStatusIdFallback;
         }
 
         public async Task<QuoteStatsDTO> GetQuoteStatsAsync(long businessUnitId)
         {
             var quotes = await _context.Quotes
                 .AsNoTracking()
-                .Where(q => q.BusinessUnitId == businessUnitId)
+                // A withdrawn quote is not part of the pipeline; counting it would overstate both
+                // the open value and the acceptance rate.
+                .Where(q => q.BusinessUnitId == businessUnitId && q.RemovedOn == null)
                 .Select(q => new { q.Id, q.StatusId, q.ValidUntil, q.TotalAmount, q.CurrencyId })
                 .ToListAsync();
 

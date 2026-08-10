@@ -82,11 +82,21 @@ namespace ERP_RFQ_Automation.Notifications.Runtime
         /// no send at all, and everything upstream still reports success.</summary>
         public bool TransmitsMail => NormalizedProvider is "smtp" or "sendgrid";
 
-        /// <summary>True when the selected provider has the credentials it needs. Distinguishes
-        /// "configured and broken" from "never configured", which are different operator tasks.</summary>
+        /// <summary>
+        /// True when the selected provider has the credentials it needs. Distinguishes "configured
+        /// and broken" from "never configured", which are different operator tasks.
+        ///
+        /// <para>A host alone was enough to call SMTP credentialed, so the "selected but has no
+        /// credentials, so every send fails" warning could never fire for the one provider most
+        /// likely to be half-filled — a username typed without its password read as fully
+        /// configured, and the first evidence otherwise was the server rejecting the login. An
+        /// absent username is NOT half-filled: an anonymous internal smarthost is legitimate and
+        /// SmtpEmailSender deliberately skips AUTH for it.</para>
+        /// </summary>
         public bool HasProviderCredentials => NormalizedProvider switch
         {
-            "smtp" => !string.IsNullOrWhiteSpace(SmtpHost),
+            "smtp" => !string.IsNullOrWhiteSpace(SmtpHost) &&
+                      (string.IsNullOrWhiteSpace(SmtpUsername) || !string.IsNullOrWhiteSpace(SmtpPassword)),
             "sendgrid" => !string.IsNullOrWhiteSpace(SendGridApiKey),
             _ => true
         };
@@ -170,5 +180,34 @@ namespace ERP_RFQ_Automation.Notifications.Runtime
                     options.OutboundGuard?.AllowedDomains?.ToList() ?? new List<string>()
             };
         }
+
+        /// <summary>
+        /// SEC-G9. A record's compiler-generated ToString prints EVERY property, so the single
+        /// most natural line anyone could write while diagnosing a delivery failure —
+        /// <c>_logger.LogInformation("resolved outbound settings {Settings}", snapshot)</c> —
+        /// would put the tenant's SMTP password and SendGrid API key into the log aggregator in
+        /// cleartext. The type documents above that its secrets never leave the process; nothing
+        /// enforced that, and the enforcement belongs here rather than in every future call
+        /// site's memory. Matches the same overrides on <c>IssuedTenantAdminInvitation</c> and
+        /// <c>ProvisioningSubmitResult</c>.
+        ///
+        /// <para>The marker distinguishes "set" from "not set", because the difference is the
+        /// answer to the operator's actual question — a provider selected with no credential is
+        /// a different fault from a credential the provider rejected — and it discloses nothing:
+        /// <c>HasProviderCredentials</c> already states it, and is already on the read model.</para>
+        /// </summary>
+        public override string ToString() =>
+            $"OutboundEmailSettingsSnapshot {{ Origin = {Origin}, Version = {Version}, "
+            + $"UpdatedAtUtc = {UpdatedAtUtc:O}, Provider = {Provider}, FromAddress = {FromAddress}, "
+            + $"FromName = {FromName}, ReplyToAddress = {ReplyToAddress}, AppBaseUrl = {AppBaseUrl}, "
+            + $"SmtpHost = {SmtpHost}, SmtpPort = {SmtpPort}, SmtpUsername = {SmtpUsername}, "
+            + $"SmtpPassword = {Marker(SmtpPassword)}, SmtpEnableSsl = {SmtpEnableSsl}, "
+            + $"SmtpTimeoutMs = {SmtpTimeoutMs}, SendGridApiKey = {Marker(SendGridApiKey)}, "
+            + $"SendGridApiBaseUrl = {SendGridApiBaseUrl}, OutboundGuardMode = {OutboundGuardMode}, "
+            + $"OutboundGuardRedirectTo = {OutboundGuardRedirectTo}, "
+            + $"OutboundGuardSubjectTag = {OutboundGuardSubjectTag} }}";
+
+        private static string Marker(string? secret) =>
+            string.IsNullOrEmpty(secret) ? "none" : "[redacted]";
     }
 }

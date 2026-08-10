@@ -126,6 +126,7 @@ public partial class ErpRfqAutomationContext
         modelBuilder.Entity<AccountingPeriod>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<JournalEntry>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<JournalEntryLine>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<CommercialMatchingPolicy>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<CustomerPurchaseOrder>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<CustomerPurchaseOrderLine>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<CustomerAward>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
@@ -213,6 +214,45 @@ public partial class ErpRfqAutomationContext
         // unrecognized customer-document columns, stored as jsonb.
         modelBuilder.Entity<LeadItem>().Property(e => e.ExtraFields).HasColumnType("jsonb");
 
+        // AA-01 · tenant-defined custom fields. ONE jsonb value bag per owning row (see
+        // Models/CustomFieldBagPartials.cs for why it is a bag and not per-tenant DDL).
+        // The column is named "CustomFields" on the table; the CLR property carries the
+        // Json suffix so it reads honestly at the call site.
+        modelBuilder.Entity<Customer>().Property(e => e.CustomFieldsJson)
+            .HasColumnName("CustomFields").HasColumnType("jsonb");
+        modelBuilder.Entity<Supplier>().Property(e => e.CustomFieldsJson)
+            .HasColumnName("CustomFields").HasColumnType("jsonb");
+        modelBuilder.Entity<LeadItem>().Property(e => e.CustomFieldsJson)
+            .HasColumnName("CustomFields").HasColumnType("jsonb");
+
+        // AA-01 · per-user, per-business-unit, per-view column layout.
+        //
+        // The query filter below is load-bearing beyond reads: it enrols this table in
+        // PostgreSqlProductionDialectTests, which FAILS unless a matching
+        // nexora_tenant_isolation RLS policy exists. That policy is the integration
+        // owner's to write — see the schema delta in the AA-01 handover.
+        modelBuilder.Entity<ERP_RFQ_Automation.ListViews.ColumnPreference>(entity =>
+        {
+            entity.ToTable("UserColumnPreferences");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.ViewKey).HasMaxLength(100).IsRequired();
+            entity.Property(e => e.UpdatedBy).HasMaxLength(200).IsRequired();
+            entity.Property(e => e.ColumnsJson).HasColumnName("Columns").HasColumnType("jsonb").IsRequired();
+
+            // One layout per (tenant, user, view). The unique index is what makes an
+            // upsert safe under concurrent saves from two browser tabs.
+            entity.HasIndex(e => new { e.BusinessUnitId, e.UserId, e.ViewKey })
+                .IsUnique()
+                .HasDatabaseName("UX_UserColumnPreferences_BU_User_View");
+
+            entity.HasOne<BusinessUnit>().WithMany()
+                .HasForeignKey(e => e.BusinessUnitId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne<User>().WithMany()
+                .HasForeignKey(e => e.UserId).OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        });
+
         // WP-A3 duplicate flag (partial properties in Lead.Duplicate.cs). Columns are
         // added by a lead-generated migration; see Deduplication/DEDUP-WIRING.md.
         modelBuilder.Entity<Lead>().Property(e => e.DuplicateStatus).HasMaxLength(20);
@@ -243,14 +283,40 @@ public partial class ErpRfqAutomationContext
         // Stock reservation ledger (portable relational model; enabled for the SQLite suite).
         modelBuilder.ApplyInventoryReservationModel();
         modelBuilder.ApplyCommercialInventoryModel();
+        // FR-INV-04. Must follow both of the above: it adds two columns and a CHECK to the Inventory
+        // table those configure, and its alert table hangs off Inventory's (Buid, Id) alternate key,
+        // which ApplyCommercialInventoryModel declares.
+        modelBuilder.ApplyReorderAlertModel(
+            e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         ConfigureProcurementModel(modelBuilder);
+        // Gate 5 / FR-MTR-01..05. Must follow the procurement configuration: material lots hang off
+        // the supplier purchase order, its lines and the goods receipt, and reference their
+        // (BusinessUnitId, Id) alternate keys. See Models/ErpRfqAutomationContext.Traceability.cs.
+        ConfigureMaterialTraceabilityModel(modelBuilder);
+        // Gate 7 / FR-DLM-01..07. Must follow traceability: the proof of delivery hangs off the
+        // shipment's (BusinessUnitId, Id) alternate key, which the traceability configuration
+        // declares because the despatch note is a target of the forward lot link.
+        // See Models/ErpRfqAutomationContext.Delivery.cs.
+        ConfigureDeliveryModel(modelBuilder);
         ConfigureCommercialDocumentsModel(modelBuilder);
         ConfigureSupplierGovernanceModel(modelBuilder);
+        // Tax registration numbers on Suppliers and BusinessUnits — the evidence the input-VAT
+        // position rests on. See Models/ErpRfqAutomationContext.TaxRegistration.cs.
+        ConfigureTaxRegistrationModel(modelBuilder);
         ConfigureSupplierQuotesModel(modelBuilder);
         ConfigureCommercialLearningModel(modelBuilder);
         ConfigurePlatformGovernanceModel(modelBuilder);
         modelBuilder.Entity<Quote>().HasAlternateKey(x => new { x.BusinessUnitId, x.Id });
         modelBuilder.Entity<QuoteItem>().HasAlternateKey(x => new { x.Id, x.QuoteId });
+        // R5 price-provenance attestation — must follow the Quote alternate key it
+        // references. See Models/ErpRfqAutomationContext.PriceAttestation.cs.
+        ConfigurePriceAttestationModel(modelBuilder);
+        // R7 reasoned quote-validity extensions — same ordering constraint, same reason.
+        // See Models/ErpRfqAutomationContext.QuoteValidity.cs.
+        ConfigureQuoteValidityModel(modelBuilder);
+        // Reasoned, audited quote removal + the tombstone that outlives a discarded draft.
+        // See Models/ErpRfqAutomationContext.QuoteRemoval.cs.
+        ConfigureQuoteRemovalModel(modelBuilder);
         modelBuilder.Entity<ERP_RFQ_Automation.Inventory.StockReservation>()
             .HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<CustomerIdentifier>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
@@ -294,7 +360,8 @@ public partial class ErpRfqAutomationContext
         modelBuilder.Entity<CustomFieldDependency>().HasQueryFilter(e => CurrentTenantId == null || e.Version.Definition.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<CustomFieldRecord>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<CustomFieldValue>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
-        modelBuilder.Entity<CustomFieldValueHistory>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        // CustomFieldValueHistory was removed (FR-MDM-05 / E44) — it was mapped, filtered and
+        // trigger-protected but never written to. See CustomFields/CustomFieldValues.cs.
 
         // PostgreSQL-backed enterprise foundations.
         if (Database.IsNpgsql())
@@ -702,6 +769,14 @@ public partial class ErpRfqAutomationContext
         // Same partial-splice pattern; implementation in ErpRfqAutomationContext.Sla.cs.
         ConfigureSlaModel(modelBuilder);
 
+        // ==== Gate 8 scheduled reporting (Reporting/) ====
+        modelBuilder.ApplyReportingModel(
+            e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+
+        // ==== Gate 8 customer master + account team (FR-CST-01/02) ====
+        // Columns on the EXISTING Customers table, which already carries its RLS policy and grant.
+        modelBuilder.ApplyCustomerMasterModel(Database.IsNpgsql());
+
         // ==== Passive AI metrics + quote revisions (WP-B4, Metrics/) ====
         // Same partial-splice pattern; implementation in ErpRfqAutomationContext.Metrics.cs.
         ConfigureMetricsModel(modelBuilder);
@@ -727,6 +802,13 @@ public partial class ErpRfqAutomationContext
 
         // ==== Platform-owned tenant data-boundary inventory (Platform/DataAssets/) ====
         modelBuilder.ApplyTenantDataAssetModel();
+
+        // ==== Master-data before/after audit (FR-MDM-05, register item E44, MasterData/) ====
+        // Same partial-splice pattern; implementation in
+        // ErpRfqAutomationContext.MasterDataAudit.cs. Declared LAST because MasterDataFieldChanges
+        // takes a composite foreign key onto the MasterDataChangeEvents alternate key, and the
+        // principal must be configured before the dependent.
+        ConfigureMasterDataAuditModel(modelBuilder);
     }
 
     /// <summary>

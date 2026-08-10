@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.DTOs.Dashboard;
 using ERP_RFQ_Automation.DTOs.CurrencyDTOs;
@@ -634,11 +635,14 @@ namespace ERP_RFQ_Automation.Repositories
                 })
                 .ToListAsync();
 
+            // Both non-null by the `UnitPrice > 0 && Quantity > 0` filter on the query above; a
+            // line with no stated quantity is excluded there, exactly as a zero one was, so the
+            // pipeline value is unchanged by quantity becoming nullable.
             var totalLeadFx = await fx.TotalAsync(businessUnitId,
-                leadLines.Select(li => new FxAmount(li.UnitPrice!.Value * li.Quantity, MapCode(li.Currency))).ToArray(), now);
+                leadLines.Select(li => new FxAmount(li.UnitPrice!.Value * li.Quantity!.Value, MapCode(li.Currency))).ToArray(), now);
             var acceptedLeadFx = await fx.TotalAsync(businessUnitId,
                 leadLines.Where(li => li.Accepted)
-                    .Select(li => new FxAmount(li.UnitPrice!.Value * li.Quantity, MapCode(li.Currency))).ToArray(), now);
+                    .Select(li => new FxAmount(li.UnitPrice!.Value * li.Quantity!.Value, MapCode(li.Currency))).ToArray(), now);
 
             // ── Stage 3+4: quoted / won (quote totals) ──
             var pipelineQuotes = await _context.Quotes.AsNoTracking()
@@ -709,56 +713,20 @@ namespace ERP_RFQ_Automation.Repositories
             var forecastAvailable = awaitingFx.Total.HasValue && respondedFx.Total.HasValue;
             var forecastReason = awaitingFx.UnavailableReason ?? respondedFx.UnavailableReason;
 
-            // ── Quoted-vs-floor margin proxy. Floor = the pricing engine's cost
-            //    basis (FinalLandedCost ?? UnitCost); only lines where that floor
-            //    actually exists are sampled — never guessed. ──
-            // FX fix: this subtracted Product.FinalLandedCost/UnitCost from QuoteItem.UnitPrice.
-            // QuoteItem has no currency of its own (it inherits Quote.CurrencyId) and Product has
-            // NO currency column at all, so a EUR quote line was being differenced against a cost
-            // in an undeclared unit — a per-row unit error that was then averaged across rows.
-            // Product costs are treated as base-currency, which is the convention the rest of the
-            // codebase already relies on (ProductRepository nulls out cost when the base currency
-            // is ambiguous). The quote line's price is therefore converted INTO base currency
-            // before the subtraction, and any line whose currency has no approved rate is excluded
-            // from the sample and counted in MarginLinesExcludedForFx rather than contributing a
-            // fabricated margin.
-            var marginRows = await _context.QuoteItems.AsNoTracking()
-                .Where(qi => qi.Quote.BusinessUnitId == businessUnitId && qi.UnitPrice > 0)
-                .Select(qi => new
-                {
-                    qi.UnitPrice,
-                    CurrencyId = qi.Quote.CurrencyId,
-                    Cost = qi.Product != null ? (qi.Product.FinalLandedCost ?? qi.Product.UnitCost) : null
-                })
-                .ToListAsync();
-
-            var baseCurrencyId = await fx.ResolveBaseCurrencyIdAsync(businessUnitId);
-            var marginSamples = new List<decimal>();
-            var marginExcludedForFx = 0;
-            if (baseCurrencyId is not null)
-            {
-                // Rates are resolved once per currency, not once per line.
-                var rateByCurrency = new Dictionary<long, decimal?>();
-                foreach (var row in marginRows.Where(r => r.Cost.HasValue && r.Cost.Value > 0))
-                {
-                    if (row.CurrencyId is null) { marginExcludedForFx++; continue; }
-                    if (!rateByCurrency.TryGetValue(row.CurrencyId.Value, out var rate))
-                    {
-                        var resolution = await fx.ResolveRateAsync(businessUnitId, row.CurrencyId.Value, baseCurrencyId.Value, now);
-                        rate = resolution.Found ? resolution.Rate : (decimal?)null;
-                        rateByCurrency[row.CurrencyId.Value] = rate;
-                    }
-                    if (rate is null) { marginExcludedForFx++; continue; }
-
-                    var priceInBase = FxConversionService.RoundMoney(row.UnitPrice * rate.Value);
-                    if (priceInBase <= 0) { marginExcludedForFx++; continue; }
-                    marginSamples.Add((priceInBase - row.Cost!.Value) / priceInBase);
-                }
-            }
-            else
-            {
-                marginExcludedForFx = marginRows.Count(r => r.Cost.HasValue && r.Cost.Value > 0);
-            }
+            // ── Gross margin is NOT computed here any more. ──
+            // It used to be: average of per-line (unitPrice - (Product.FinalLandedCost ?? UnitCost))
+            // / unitPrice, over every quote line ever written. Three defects in one figure.
+            //   1. WRONG COST. FinalLandedCost is not a landed cost. SupplierPurchaseHistoryRepository
+            //      sets it to the last purchase row's bare UnitPrice, ignoring freight, duty and
+            //      currency; it is also free-typed in the product form and imported from a
+            //      spreadsheet column. The cost the PRICE was built on lives on
+            //      CustomerQuoteSourcingDecision.SupplierLandedUnitCost and was never read.
+            //   2. UNWEIGHTED MEAN OF RATIOS. A 1-unit line at 60% and a 10,000-unit line at 5%
+            //      reported 32.5%, which is the gross margin of nothing.
+            //   3. NO PERIOD AND NO OUTCOME FILTER. Drafts and lost bids were in the sample.
+            // Reporting/GrossMarginService computes it value-weighted from the sourcing decision,
+            // period-filtered on accepted quotes, and returns "unavailable" rather than a number
+            // when the evidence is not there. Exposed at GET /api/dashboard/gross-margin.
 
             return new PipelineAnalyticsDTO
             {
@@ -787,32 +755,53 @@ namespace ERP_RFQ_Automation.Repositories
                 AwaitingResponseValue = awaitingFx.Total,
                 RespondedQuotes = responded.Count,
                 RespondedValue = respondedFx.Total,
-                AvgMarginPct = marginSamples.Count > 0
-                    ? Math.Round(marginSamples.Average() * 100m, 1, MidpointRounding.AwayFromZero)
-                    : null,
-                MarginSampleLines = marginSamples.Count,
-                MarginLinesExcludedForFx = marginExcludedForFx,
-                TotalQuoteLines = marginRows.Count,
+                FunnelScope = PipelineAnalyticsDTO.AllTimeScope,
                 GeneratedAt = now
             };
         }
 
         public async Task<DashboardRelease01DTO> GetRelease01Async(
             long businessUnitId,
-            long? ownerUserId,
-            string roleScope,
+            AccountTeamScope scope,
             DateTime from,
             DateTime to,
             DateTime generatedAt,
             CancellationToken cancellationToken = default)
         {
             if (businessUnitId <= 0) throw new ArgumentOutOfRangeException(nameof(businessUnitId));
+            ArgumentNullException.ThrowIfNull(scope);
             if (from >= to) throw new ArgumentException("The dashboard reporting window is invalid.");
             if (generatedAt < to) throw new ArgumentException("The generated-at boundary cannot precede the reporting window.");
 
+            // FR-DSH-05, three tiers rather than the previous boolean.
+            //
+            //   tenant             - no owner or account predicate at all.
+            //   managed_scope      - the supervisor's own work, their team members' work, AND the
+            //                        accounts their teams hold. The third clause is what makes this
+            //                        a real middle tier: a lead on a team account that has not been
+            //                        assigned to anybody yet is precisely the work a supervisor is
+            //                        there to see, and a pure "assigned to one of my people" filter
+            //                        would hide it.
+            //   assigned_accounts  - the rep's own work and the accounts of the teams they are on.
+            //
+            // The account clause reads Customer.AccountTeamId through the SAME predicate the
+            // customer list and the quick search use (AccountTeamReadFilter), so the three surfaces
+            // cannot drift apart. Delete AccountTeamId and this query stops compiling.
+            var accountCustomerIds = AccountTeamReadFilter.CustomerIdsInScope(
+                _context, businessUnitId, scope, generatedAt);
+            var scopeUserIds = scope.UserIds;
+
             var scopedLeads = _context.Leads.AsNoTracking()
-                .Where(lead => lead.BusinessUnitId == businessUnitId
-                    && (!ownerUserId.HasValue || lead.AssignTo == ownerUserId.Value));
+                .Where(lead => lead.BusinessUnitId == businessUnitId);
+
+            // The branch is taken in C#, not inside the expression tree: a null check on a
+            // subquery cannot be translated to SQL, and leaving it in the predicate makes the
+            // whole query fall back to client evaluation — which on a lead table means loading
+            // the tenant into memory to decide who may see it.
+            if (accountCustomerIds is not null)
+                scopedLeads = scopedLeads.Where(lead =>
+                    (lead.AssignTo != null && scopeUserIds.Contains(lead.AssignTo.Value))
+                    || (lead.CustomerId != null && accountCustomerIds.Contains(lead.CustomerId.Value)));
 
             var leadRows = await scopedLeads
                 .Where(lead => lead.CreatedDate < to)
@@ -901,8 +890,10 @@ namespace ERP_RFQ_Automation.Repositories
                 Filter = new DashboardRelease01FilterDTO { From = from, To = to },
                 RoleScope = new DashboardRelease01RoleScopeDTO
                 {
-                    Scope = roleScope,
-                    OwnerUserId = ownerUserId
+                    Scope = scope.ScopeName,
+                    OwnerUserId = scope.IsTenantWide ? null : scope.UserId,
+                    AccountTeamIds = scope.TeamIds.ToList(),
+                    ScopedUserIds = scope.IsTenantWide ? new List<long>() : scope.UserIds.ToList()
                 },
                 Kpis = kpis
             };

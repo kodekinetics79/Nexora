@@ -77,6 +77,19 @@ namespace ERP_RFQ_Automation.DTOs
         public long? PaymentStatusId { get; set; }
         public string PaymentStatus { get; set; } = null!;
         public long? PaymentMethodId { get; set; }
+
+        /// <summary>
+        /// The currency every monetary figure on this DTO is denominated in.
+        /// <c>Order.CurrencyId</c> has always been persisted, but no order DTO exposed it, so the
+        /// Orders and Shipments screens had no way to render an amount with its currency and were
+        /// left implying one. Null means the order itself has no currency recorded — render it as
+        /// unknown rather than defaulting to a house currency.
+        /// </summary>
+        public long? CurrencyId { get; set; }
+
+        /// <summary>ISO code of <see cref="CurrencyId"/>, e.g. "SAR". Null when unset.</summary>
+        public string? CurrencyCode { get; set; }
+
         public decimal TotalAmount { get; set; }
         public decimal SubTotal { get; set; }
         public decimal TaxAmount { get; set; }
@@ -122,6 +135,11 @@ namespace ERP_RFQ_Automation.DTOs
         public string? CustomerEmail { get; set; }
         public string? CustomerPhone { get; set; }
         public string? CustomerAddress { get; set; }
+
+        /// <summary>Denomination of every figure below. See <see cref="OrderDto.CurrencyCode"/>.</summary>
+        public long? CurrencyId { get; set; }
+        public string? CurrencyCode { get; set; }
+
         public decimal SubTotal { get; set; }
         public decimal TaxAmount { get; set; }
         public decimal DiscountAmount { get; set; }

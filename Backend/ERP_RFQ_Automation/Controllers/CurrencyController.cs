@@ -1,3 +1,4 @@
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.DTOs.CurrencyDTOs;
 using ERP_RFQ_Automation.Fx;
 using ERP_RFQ_Automation.Interfaces;
@@ -10,14 +11,44 @@ using System;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Collections.Generic;
+using ERP_RFQ_Automation.Security;
 
 namespace ERP_RFQ_Automation.Controllers
 {
+    /// <summary>
+    /// Currencies and the effective-dated FX rates conversions actually read.
+    ///
+    /// <para><b>Sec-D4.</b> Every action on this controller used to carry nothing but the
+    /// class-level <c>[Authorize]</c> — no module permission, no manager role, no entitlement —
+    /// while every sibling controller gated each action. Six of them are writes. The consequence
+    /// was not theoretical: a user with a zero-permission role could <c>POST fx-rates</c> and then
+    /// <c>POST fx-rates/{id}/approve</c> on their own rate, and only Approved rows are visible to
+    /// <c>FxConversionService</c>. That forged rate then converts quote totals, sets the
+    /// below-floor pricing guard's threshold and re-bases the AI agent's spend cap.</para>
+    ///
+    /// <para>Two things were missing and both are fixed here: the permissions (the three modules
+    /// added to <see cref="ModuleCatalog"/>), and the SEPARATION between raising a rate and making
+    /// it real. Approval is a distinct, higher module, and the creator of a rate cannot approve it
+    /// — the same maker-checker rule <c>CommercialFinanceApplicationService</c> already applies to
+    /// write-offs and refunds.</para>
+    /// </summary>
     [Route("api/[controller]")]
     [ApiController]
     [Authorize]
     public class CurrencyController : ControllerBase
     {
+        /// <summary>Holding the currency list.</summary>
+        private const string CurrenciesModule = "Currencies";
+
+        /// <summary>Quoting a rate, and freezing one onto a document.</summary>
+        private const string FxRatesModule = "Exchange Rates";
+
+        /// <summary>Making a rate real. Deliberately a different module from
+        /// <see cref="FxRatesModule"/>: a role can be granted one without the other, which is what
+        /// makes the maker-checker rule below enforceable by configuration rather than by
+        /// convention.</summary>
+        private const string FxApprovalModule = "Exchange Rate Approval";
+
         private readonly ICurrencyRepository _repository;
         private readonly ErpRfqAutomationContext _context;
         private readonly IFxConversionService _fx;
@@ -39,6 +70,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpGet]
+        [RequireModulePermission(CurrenciesModule, PermissionAction.View)]
         public async Task<ActionResult<PaginatedCurrencyResponseDTO>> GetAll(
             [FromQuery] long? businessUnitId = null,
             [FromQuery] int pageNumber = 1,
@@ -98,11 +130,12 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(500, $"Error retrieving data: {ex.Message}");
+                return this.ServerError(ex, "Error retrieving data.");
             }
         }
 
         [HttpGet("{id}")]
+        [RequireModulePermission(CurrenciesModule, PermissionAction.View)]
         public async Task<ActionResult<CurrencyResponseDTO>> GetById(long id, [FromQuery] long? businessUnitId = null)
         {
             try
@@ -123,6 +156,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpPost]
+        [RequireModulePermission(CurrenciesModule, PermissionAction.Create)]
         public async Task<ActionResult<CurrencyResponseDTO>> Create([FromBody] CurrencyCreateRequestDTO request)
         {
             if (!ModelState.IsValid)
@@ -142,7 +176,10 @@ namespace ERP_RFQ_Automation.Controllers
                 IsBaseCurrency = request.IsBaseCurrency ?? false,
                 BusinessUnitId = request.BusinessUnitID,
                 IsActive = request.IsActive ?? true,
-                CreatedBy = User.Identity?.Name ?? request.CreatedBy ?? "System",
+                // Sec-A1: the client-supplied CreatedBy always won here, because Identity.Name is
+                // never populated under the tenant bearer scheme. Attribution now comes from the
+                // token only.
+                CreatedBy = ActorContext.From(User).Stamp,
                 CreatedOn = DateTime.UtcNow
             };
 
@@ -150,7 +187,10 @@ namespace ERP_RFQ_Automation.Controllers
             return CreatedAtAction(nameof(GetById), new { id = currency.Id, businessUnitId = currency.BusinessUnitId }, MapToResponse(currency));
         }
 
+        // Edit rather than a lesser action on purpose: this body carries IsBaseCurrency and
+        // ExchangeRate, so "editing a currency" can re-base every legacy conversion in the tenant.
         [HttpPut("{id}")]
+        [RequireModulePermission(CurrenciesModule, PermissionAction.Edit)]
         public async Task<IActionResult> Update(long id, [FromBody] CurrencyUpdateRequestDTO request)
         {
             if (!ModelState.IsValid)
@@ -172,7 +212,7 @@ namespace ERP_RFQ_Automation.Controllers
                 existing.IsBaseCurrency = request.IsBaseCurrency ?? false;
                 existing.BusinessUnitId = request.BusinessUnitID;
                 existing.IsActive = request.IsActive ?? true;
-                existing.ModifiedBy = User.Identity?.Name ?? request.ModifiedBy ?? "System";
+                existing.ModifiedBy = ActorContext.From(User).Stamp;
                 existing.ModifiedOn = DateTime.UtcNow;
 
                 await _repository.UpdateAsync(existing);
@@ -189,6 +229,7 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         [HttpDelete("{id}")]
+        [RequireModulePermission(CurrenciesModule, PermissionAction.Delete)]
         public async Task<IActionResult> Delete(long id, [FromQuery] long? businessUnitId = null)
         {
             try
@@ -217,6 +258,7 @@ namespace ERP_RFQ_Automation.Controllers
 
         /// <summary>Effective-dated rates for this business unit, newest window first.</summary>
         [HttpGet("fx-rates")]
+        [RequireModulePermission(FxRatesModule, PermissionAction.View)]
         public async Task<ActionResult<List<FxRateResponseDTO>>> GetFxRates(
             [FromQuery] long? businessUnitId = null,
             [FromQuery] long? fromCurrencyId = null,
@@ -246,6 +288,7 @@ namespace ERP_RFQ_Automation.Controllers
         /// approved — an unapproved rate can never move a commercial total.
         /// </summary>
         [HttpPost("fx-rates")]
+        [RequireModulePermission(FxRatesModule, PermissionAction.Create)]
         public async Task<ActionResult<FxRateResponseDTO>> CreateFxRate(
             [FromBody] FxRateCreateRequestDTO request, [FromQuery] long? businessUnitId = null)
         {
@@ -287,7 +330,13 @@ namespace ERP_RFQ_Automation.Controllers
                 Source = string.IsNullOrWhiteSpace(request.Source) ? "Manual" : request.Source.Trim(),
                 Status = FxRateStatuses.Pending,
                 Version = 1,
-                CreatedBy = User.Identity?.Name ?? "System",
+                // ActorContext.Stamp, not User.Identity?.Name. The tenant bearer scheme never
+                // configures a NameClaimType, so Identity.Name is ALWAYS null here and every rate
+                // in the database was created by "System" — which would have made the
+                // maker-checker comparison below a comparison of two identical constants, i.e. no
+                // control at all. The stamp is derived from the validated token and nothing in a
+                // request body can influence it.
+                CreatedBy = ActorContext.From(User).Stamp,
                 CreatedOn = DateTime.UtcNow,
                 Note = request.Note
             };
@@ -299,8 +348,22 @@ namespace ERP_RFQ_Automation.Controllers
             return Ok(MapFxRate(rate, codes));
         }
 
-        /// <summary>Approves a rate, making it visible to conversions from its effective date.</summary>
+        /// <summary>
+        /// Approves a rate, making it visible to conversions from its effective date.
+        ///
+        /// <para><b>Sec-D4: the maker may not be the checker.</b> Approval is the ONLY thing that
+        /// turns a stored number into a number that moves money — <c>FxConversionService</c> reads
+        /// Approved rows and nothing else — so one person doing both halves is not an approval, it
+        /// is a self-assertion with an audit column attached. Same rule and same wording as
+        /// <c>CommercialFinanceApplicationService</c>, which already refuses a write-off's creator
+        /// the right to post it.</para>
+        ///
+        /// <para>It also gates on a DIFFERENT module from <c>CreateFxRate</c>, so a tenant can
+        /// actually staff the two halves separately. Gating both on the same module would leave
+        /// the rule true only until someone granted one role both, which is the normal case.</para>
+        /// </summary>
         [HttpPost("fx-rates/{id}/approve")]
+        [RequireModulePermission(FxApprovalModule, PermissionAction.Edit)]
         public async Task<ActionResult<FxRateResponseDTO>> ApproveFxRate(long id, [FromQuery] long? businessUnitId = null)
         {
             var buId = ResolveBusinessUnit(businessUnitId);
@@ -310,8 +373,27 @@ namespace ERP_RFQ_Automation.Controllers
             if (rate is null) return NotFound("Exchange rate not found.");
             if (rate.Status == FxRateStatuses.Approved) return Conflict("This exchange rate is already approved.");
 
+            var approver = ActorContext.From(User).Stamp;
+
+            // Unattributable maker → refuse, rather than assume. A rate whose CreatedBy is absent
+            // or the legacy "System" placeholder cannot be shown to have been raised by someone
+            // else, and approving it would let a maker launder their own rate through a row that
+            // simply does not record them. ProcurementApplicationService takes the identical line
+            // when a sourcing award does not record its approver: segregation that cannot be
+            // VERIFIED is not segregation. Such a rate is re-raised, not rescued.
+            if (string.IsNullOrWhiteSpace(rate.CreatedBy)
+                || string.Equals(rate.CreatedBy, "System", StringComparison.OrdinalIgnoreCase))
+                return Conflict(
+                    "Segregation of duties cannot be verified: this exchange rate does not record "
+                    + "who created it. Raise the rate again and have a second person approve it.");
+
+            if (string.Equals(rate.CreatedBy, approver, StringComparison.OrdinalIgnoreCase))
+                return Conflict(
+                    "The person who created an exchange rate cannot approve it. A second approver "
+                    + "must confirm the rate before quotes and orders convert at it.");
+
             rate.Status = FxRateStatuses.Approved;
-            rate.ApprovedBy = User.Identity?.Name ?? "System";
+            rate.ApprovedBy = approver;
             rate.ApprovedOn = DateTime.UtcNow;
             rate.Version += 1;
             await _context.SaveChangesAsync();
@@ -327,6 +409,7 @@ namespace ERP_RFQ_Automation.Controllers
         /// wording the commercial totals surface.
         /// </summary>
         [HttpGet("fx-rates/effective")]
+        [RequireModulePermission(FxRatesModule, PermissionAction.View)]
         public async Task<IActionResult> GetEffectiveRate(
             [FromQuery] long fromCurrencyId, [FromQuery] long toCurrencyId,
             [FromQuery] DateTime? asOf = null, [FromQuery] long? businessUnitId = null)
@@ -365,6 +448,7 @@ namespace ERP_RFQ_Automation.Controllers
         /// against the document, with the rate row and effective date it came from.
         /// </summary>
         [HttpGet("fx-snapshots/{documentType}/{documentId}")]
+        [RequireModulePermission(FxRatesModule, PermissionAction.View)]
         public async Task<ActionResult<List<FxRateSnapshotResponseDTO>>> GetFxSnapshots(
             string documentType, long documentId, [FromQuery] long? businessUnitId = null)
         {
@@ -398,7 +482,11 @@ namespace ERP_RFQ_Automation.Controllers
         /// Freezes the current approved rate against a document so later rate corrections cannot
         /// restate it. Idempotent: an existing snapshot is returned unchanged.
         /// </summary>
+        // Create, not View: a snapshot is a WRITE that fixes the rate a document will be
+        // restated against forever. It is idempotent, which is not the same as harmless — the
+        // first caller decides the number.
         [HttpPost("fx-snapshots/{documentType}/{documentId}")]
+        [RequireModulePermission(FxRatesModule, PermissionAction.Create)]
         public async Task<IActionResult> CaptureFxSnapshot(
             string documentType, long documentId,
             [FromQuery] long fromCurrencyId, [FromQuery] long toCurrencyId,
@@ -410,7 +498,7 @@ namespace ERP_RFQ_Automation.Controllers
             try
             {
                 var snapshot = await _fx.CaptureSnapshotAsync(buId, documentType, documentId,
-                    fromCurrencyId, toCurrencyId, asOf ?? DateTime.UtcNow, User.Identity?.Name ?? "System");
+                    fromCurrencyId, toCurrencyId, asOf ?? DateTime.UtcNow, ActorContext.From(User).Stamp);
                 return Ok(new
                 {
                     snapshot.Id, snapshot.DocumentType, snapshot.DocumentId,

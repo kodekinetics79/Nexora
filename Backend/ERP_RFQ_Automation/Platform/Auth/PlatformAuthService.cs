@@ -91,6 +91,12 @@ public class PlatformAuthService : IPlatformAuthService
             return withChallenge(await GetOrCreateChallengeAsync(user.Id, issuedAt));
         }
 
+        // Sec-D2: an operator who has never enrolled still gets a token — refusing one outright
+        // would make first-run enrollment impossible and would lock out the bootstrap owner on a
+        // fresh deployment. What changed is what that token is WORTH: with no amr=mfa claim it
+        // now satisfies PlatformPolicies.Enrollment only, so it can read its own MFA status,
+        // enrol, and log out, and nothing else. It used to satisfy PlatformScope and therefore
+        // every read on the control plane.
         var response = IssuePlatformSession(user, issuedAt, mfaAuthenticatedAtUtc: null);
         await _context.SaveChangesAsync();
 
@@ -372,7 +378,11 @@ public class PlatformAuthService : IPlatformAuthService
             PlatformRole = user.PlatformRole.ToString(),
             Token = token,
             ExpiresAtUtc = expires,
-            MfaRequired = false
+            MfaRequired = false,
+            // Sec-D2: a session minted without a second factor carries no amr=mfa claim and
+            // therefore satisfies only PlatformPolicies.Enrollment. Say so on the response
+            // rather than leaving the operator to discover it as a wall of 403s.
+            MfaEnrollmentRequired = mfaAuthenticatedAtUtc is null
         };
     }
 

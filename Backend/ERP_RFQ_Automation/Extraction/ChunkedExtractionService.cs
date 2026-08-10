@@ -109,6 +109,28 @@ public sealed class DocumentExtractionInput
     /// readable and WHY an AI path (or a review hold) followed.
     /// </summary>
     public string? StructuredFallbackNote { get; init; }
+
+    /// <summary>
+    /// The document's own prose OUTSIDE the parsed table — the instruction block, the
+    /// warranty and validity terms, the country-of-origin and Incoterms requirements, the
+    /// submission method, and the "as per attached specification" that turns a line into a
+    /// different quotation.
+    ///
+    /// <para>
+    /// The structured input used to be built with an empty header and the line-item regions
+    /// alone, so on the deterministic path this text was read and thrown away for every
+    /// document — 120 of 120 in the pilot corpus, each of which ends with exactly such a
+    /// block. The original file is retained as immutable evidence, so it was recoverable
+    /// only by a human opening the source by hand.
+    /// </para>
+    /// <para>
+    /// It is NOT parsed into fields here. Making it visible beside the extracted lines is
+    /// most of the value, and inventing fields from prose is how a specification reference
+    /// becomes a wrong commercial fact. It is also never sent to a model: the deterministic
+    /// path makes no provider call at all.
+    /// </para>
+    /// </summary>
+    public string? DocumentNarrative { get; init; }
 }
 
 public sealed class ChunkedExtractionOutcome
@@ -150,6 +172,27 @@ public sealed class ChunkedExtractionOutcome
     /// of attempting to reconstruct it from the flattened commercial projection.
     /// </summary>
     public CanonicalRfqImportResult? CanonicalImport { get; init; }
+
+    /// <summary>
+    /// The document's own prose outside the parsed table, carried from
+    /// <see cref="DocumentExtractionInput.DocumentNarrative"/> so persistence can retain it
+    /// as evidence and the reviewer can read it beside the lines.
+    /// </summary>
+    public string? DocumentNarrative { get; init; }
+
+    /// <summary>
+    /// TRUE when retrying this document cannot change the answer, so the worker must
+    /// dead-letter it on the first attempt instead of spending five attempts on
+    /// exponential backoff against a deterministic refusal.
+    ///
+    /// <para>
+    /// Set only where the cause is a decision rather than a condition: today, an external
+    /// AI provider the tenant has not authorized. A timeout, a truncated response, a
+    /// provider outage and a transient storage error are all still retryable — the default
+    /// is false, so a new failure mode is retryable until someone proves otherwise.
+    /// </para>
+    /// </summary>
+    public bool PermanentFailure { get; init; }
 }
 
 public interface IChunkedExtractionService
@@ -168,7 +211,12 @@ public interface IChunkedExtractionService
     /// <see cref="ICanonicalRfqNormalizer"/> with full per-field confidence + evidence and
     /// bypasses the LLM entirely. This is the single biggest throughput/cost lever.
     /// </summary>
-    Task<ChunkedExtractionOutcome> ExtractStructuredAsync(IReadOnlyList<RfqSpreadsheetRow> rows, long businessUnitId, string sourceName, CancellationToken ct = default);
+    /// <param name="documentNarrative">
+    /// The document's own prose outside the table, retained for the reviewer. Optional and
+    /// null by default: the deterministic parse does not depend on it, and a caller that has
+    /// none simply passes nothing.
+    /// </param>
+    Task<ChunkedExtractionOutcome> ExtractStructuredAsync(IReadOnlyList<RfqSpreadsheetRow> rows, long businessUnitId, string sourceName, CancellationToken ct = default, string? documentNarrative = null);
 }
 
 /// <summary>
@@ -201,6 +249,34 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         "External processing is blocked for unstructured documents until a locally reduced, " +
         "redacted field/row payload is available; send this document to human review or " +
         "configure a local model.";
+
+    /// <summary>
+    /// The machine-readable marker that makes the refusal ABOVE reportable.
+    ///
+    /// <para>
+    /// The gate is correct and unchanged — nothing here weakens it. What was broken is that
+    /// its refusal was indistinguishable from a model timeout by the time it reached anyone:
+    /// the tenant-facing category function matched on integrity / malware / unsupported /
+    /// timeout / provider, and neither the refusal text nor any denial code matched a single
+    /// one, so it surfaced as generic EXTRACTION_FAILURE with the underlying error stripped
+    /// from the DTO. The marker is a closed token, carried in the stored failure reason and
+    /// matched by <c>ExtractionDeadLetterService.ClassifyFailure</c>, so the refusal has one
+    /// name from the extractor to the operator's screen.
+    /// </para>
+    /// </summary>
+    internal const string AiNotAuthorizedCode = "EXTRACTION_AI_NOT_AUTHORIZED";
+
+    /// <summary>
+    /// What an operator must actually DO. A category alone is a diagnosis; this is the
+    /// prescription, and it names the two switches rather than describing a state.
+    /// </summary>
+    internal const string AiNotAuthorizedOperatorAction =
+        "This document needs AI reading, and external AI processing is not authorized for this "
+        + "tenant. Nothing was sent to any provider. To process documents of this kind, either "
+        + "authorize the configured inference endpoint for this tenant in the AI trust centre "
+        + "(a platform owner must grant it; it is off by default and deliberately so), or point "
+        + "the deployment at a local model on a loopback address. Until one of those is done, "
+        + "only spreadsheets and Word documents whose lines are in a table can be read.";
 
     private readonly ILLMService _llm;
     private readonly ICanonicalRfqNormalizer _normalizer;
@@ -275,7 +351,8 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
     public Task<ChunkedExtractionOutcome> ExtractAsync(DocumentExtractionInput input, CancellationToken ct = default)
     {
         if (input.IsStructured && input.StructuredRows is { Count: > 0 })
-            return ExtractStructuredAsync(input.StructuredRows, input.BusinessUnitId, input.SourceDocumentName, ct);
+            return ExtractStructuredAsync(input.StructuredRows, input.BusinessUnitId, input.SourceDocumentName, ct,
+                input.DocumentNarrative);
         return ExtractUnstructuredAsync(input, ct);
     }
 
@@ -305,11 +382,22 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
 
             if (!decision.Allowed)
             {
-                _log.LogWarning(
+                // A closed gate is a DETERMINISTIC answer, so this is reported as permanent
+                // on the first attempt. It used to return a retryable failure, and the job
+                // then re-asked the same closed gate five times on exponential backoff —
+                // about an hour of pointless retries before dead-lettering, with a reason
+                // nobody could act on when it got there. Fail closed on the processing;
+                // never fail silently on the reporting.
+                _log.LogError(
                     "Unstructured extraction REFUSED for tenant {Tenant}: external provider is not authorized. "
-                    + "{Descriptor} reason={Reason} document={Document}.",
-                    input.BusinessUnitId, descriptor, decision.Reason, input.SourceDocumentName);
-                return Failed(expected, $"{ExternalUnstructuredRefusal} [denial: {decision.Reason}]", input);
+                    + "{Descriptor} reason={Reason} document={Document}. {Action}",
+                    input.BusinessUnitId, descriptor, decision.Reason, input.SourceDocumentName,
+                    AiNotAuthorizedOperatorAction);
+                return Failed(
+                    expected,
+                    $"[{AiNotAuthorizedCode}] {ExternalUnstructuredRefusal} [denial: {decision.Reason}]",
+                    input,
+                    permanent: true);
             }
 
             _log.LogWarning(
@@ -619,7 +707,8 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
     }
 
     public Task<ChunkedExtractionOutcome> ExtractStructuredAsync(
-        IReadOnlyList<RfqSpreadsheetRow> rows, long businessUnitId, string sourceName, CancellationToken ct = default)
+        IReadOnlyList<RfqSpreadsheetRow> rows, long businessUnitId, string sourceName, CancellationToken ct = default,
+        string? documentNarrative = null)
     {
         // Deterministic parse — runs in milliseconds for 10k rows, no LLM call.
         var import = _normalizer.NormalizeSpreadsheetRows(rows, businessUnitId);
@@ -668,7 +757,7 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             }
         }
         else if (anyNeedsReview)
-            reviewReason = "One or more fields need review (see canonical validation issues).";
+            reviewReason = DescribeCanonicalReview(import);
         else if (overall < MinAcceptableConfidence)
             reviewReason = $"Overall confidence {overall:F2} below threshold.";
 
@@ -685,6 +774,7 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             Diagnostics = diagnostics,
             SplitResults = splitResults,
             CanonicalImport = import,
+            DocumentNarrative = documentNarrative,
             ProcessingPath = ExtractionProcessingPath.DeterministicRules
         });
     }
@@ -749,13 +839,54 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         return items.Count > 0 ? (headerConf * 0.4) + (itemConf * 0.6) : headerConf;
     }
 
+    /// <summary>
+    /// Names WHICH fields need review, instead of "one or more fields need review (see
+    /// canonical validation issues)" — a sentence that pointed at a ledger the reviewer
+    /// cannot open and that read identically whether one closing date was unstated or every
+    /// line was unreadable. Bounded: distinct messages only, first three, then a count.
+    /// </summary>
+    private static string DescribeCanonicalReview(CanonicalRfqImportResult import)
+    {
+        var reasons = import.Documents
+            .SelectMany(d => d.Issues)
+            .Where(i => i.Severity != ValidationSeverity.Info)
+            .Select(i => i.Message)
+            .Where(m => !string.IsNullOrWhiteSpace(m))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
+        var linesNeedingReview = import.Documents
+            .SelectMany(d => d.LineItems)
+            .Count(l => l.ValidationStatus != ValidationStatus.Valid);
+        if (linesNeedingReview > 0)
+        {
+            var totalLines = import.Documents.Sum(d => d.LineItems.Count);
+            reasons.Add($"{linesNeedingReview} of {totalLines} line(s) have a field the document states elsewhere but not here.");
+        }
+
+        if (reasons.Count == 0)
+            return "One or more fields need review.";
+
+        var head = string.Join(" ", reasons.Take(3));
+        return reasons.Count > 3 ? $"{head} (+{reasons.Count - 3} more)" : head;
+    }
+
+    /// <summary>
+    /// Deterministic-path document confidence. Same rule as
+    /// <see cref="AverageConfidence(CanonicalRfqLineItem)"/>: a header field the document
+    /// states nowhere is excluded, because confidence is a reading measure and there was
+    /// nothing there to read. It is NOT excused from review — the closing-date issue in
+    /// <c>CanonicalRfqNormalizer.CollectValueIssues</c> still fires, because a date the buyer
+    /// normally states is a commercial gap a human must resolve even when we read the
+    /// document perfectly.
+    /// </summary>
     private static double ComputeOverallConfidence(List<LeadItemData> items, CanonicalRfqDocument header)
     {
-        var headerConf = new[]
-        {
-            (double)header.RfqNo.Confidence, (double)header.BuyerName.Confidence,
-            (double)header.ReceivedDate.Confidence, (double)header.BidClosingDate.Confidence
-        }.Average();
+        var headerConf = Stated(
+            (header.RfqNo.StatedInDocument, header.RfqNo.Confidence),
+            (header.BuyerName.StatedInDocument, header.BuyerName.Confidence),
+            (header.ReceivedDate.StatedInDocument, header.ReceivedDate.Confidence),
+            (header.BidClosingDate.StatedInDocument, header.BidClosingDate.Confidence));
         var itemConf = items.Select(i => i.ItemConfidence ?? 0).DefaultIfEmpty(0).Average();
         return items.Count > 0 ? (headerConf * 0.4) + (itemConf * 0.6) : headerConf;
     }
@@ -784,8 +915,16 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         => new(
             doc.RfqNo.Value, (double)doc.RfqNo.Confidence,
             doc.BuyerName.Value, (double)doc.BuyerName.Confidence,
-            FormatDate(doc.ReceivedDate.Value), (double)doc.ReceivedDate.Confidence,
-            FormatDate(doc.BidClosingDate.Value), (double)doc.BidClosingDate.Confidence,
+            // Kind-guarded for the same reason as RequiredDeliveryDate below and UnitPrice in
+            // MapCanonicalItem: CanonicalValue<DateTime>.Value is a non-nullable struct, so a date
+            // the document never stated formatted as the sentinel "0001-01-01" and was emitted as
+            // though it were read. SanitizeDate happened to discard it downstream; nothing here
+            // depended on that, and a diagnostic printing the contract showed a date that exists
+            // in no document.
+            doc.ReceivedDate.Kind == CanonicalValueKind.Normalized ? FormatDate(doc.ReceivedDate.Value) : null,
+            (double)doc.ReceivedDate.Confidence,
+            doc.BidClosingDate.Kind == CanonicalValueKind.Normalized ? FormatDate(doc.BidClosingDate.Value) : null,
+            (double)doc.BidClosingDate.Confidence,
             null, 0,
             null, 0,
             null, 0,
@@ -794,7 +933,16 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             null, 0,
             null, 0,
             overall,
-            items);
+            items,
+            // Everything between `items` and the intake block below is a trailing optional
+            // parameter, so these are passed by name rather than padding a dozen nulls.
+            DeliveryLocation: doc.DeliveryLocation.Value,
+            DeliveryLocationConfidence: (double)doc.DeliveryLocation.Confidence,
+            RequiredDeliveryDate: doc.RequiredDeliveryDate.Kind == CanonicalValueKind.Normalized
+                ? FormatDate(doc.RequiredDeliveryDate.Value) : null,
+            RequiredDeliveryDateConfidence: (double)doc.RequiredDeliveryDate.Confidence,
+            AgreementReference: doc.AgreementReference.Value,
+            AgreementReferenceConfidence: (double)doc.AgreementReference.Confidence);
 
     private static LeadItemData MapCanonicalItem(CanonicalRfqLineItem line)
         => new(
@@ -809,35 +957,86 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             Alternative: null, AlternativeConfidence: 0,
             ProductShortDescription: null, ProductShortDescriptionConfidence: 0,
             Currency: line.Currency.Value, CurrencyConfidence: (double)line.Currency.Confidence,
-            UnitOfMeasure: null, UnitOfMeasureConfidence: 0,
-            UnitPrice: line.UnitPrice.Value == 0 && line.UnitPrice.Confidence == 0 ? null : line.UnitPrice.Value,
+            UnitOfMeasure: line.UnitOfMeasure.Value, UnitOfMeasureConfidence: (double)line.UnitOfMeasure.Confidence,
+            // Only a value the normalizer actually PARSED is emitted. Testing "zero with zero
+            // confidence" let an UNPARSEABLE value through as a real 0, because a failed parse
+            // still leaves the struct at its default while carrying a non-zero confidence.
+            UnitPrice: line.UnitPrice.Kind == CanonicalValueKind.Normalized ? line.UnitPrice.Value : null,
             UnitPriceConfidence: (double)line.UnitPrice.Confidence,
-            Quantity: line.Quantity.Value, QuantityConfidence: (double)line.Quantity.Confidence,
+            // Same rule as UnitPrice above, and it was the one field here that did not carry it.
+            // A failed quantity parse leaves the struct at 0, so "unreadable" left this method as
+            // the number 0 and was quoted to the customer as an order for nothing. A quantity we
+            // could not read is null, the line routes to a human, and nothing downstream is told
+            // a number the document never stated.
+            Quantity: line.Quantity.Kind == CanonicalValueKind.Normalized ? line.Quantity.Value : null,
+            QuantityConfidence: (double)line.Quantity.Confidence,
             StorageLocation: null, StorageLocationConfidence: 0,
             ManufacturerName: line.ManufacturerName.Value, ManufacturerNameConfidence: (double)line.ManufacturerName.Confidence,
             ManufacturerPartNumber: line.ManufacturerPartNumber.Value, ManufacturerPartNumberConfidence: (double)line.ManufacturerPartNumber.Confidence,
             AlternateProductName: null, AlternateProductNameConfidence: 0,
             AlternatePartNumber: null, AlternatePartNumberConfidence: 0,
-            ItemText: null, ItemTextConfidence: 0,
+            ItemText: line.ItemText.Value, ItemTextConfidence: (double)line.ItemText.Confidence,
             MaterialPotext: null, MaterialPotextConfidence: 0,
-            LeadTime: line.LeadTimeDays.Value == 0 && line.LeadTimeDays.Confidence == 0
-                ? null : line.LeadTimeDays.Value.ToString(CultureInfo.InvariantCulture),
+            // Same rule as UnitPrice. A lead time of 0 means "deliver immediately"; emitting it
+            // for a value we could not read is a false commercial fact, not a harmless default.
+            LeadTime: line.LeadTimeDays.Kind == CanonicalValueKind.Normalized
+                ? line.LeadTimeDays.Value.ToString(CultureInfo.InvariantCulture) : null,
             LeadTimeConfidence: (double)line.LeadTimeDays.Confidence,
             ReceivedDate: null, ReceivedDateConfidence: 0,
             BidClosingDateLine: null, BidClosingDateLineConfidence: 0,
             ItemConfidence: AverageConfidence(line));
 
+    /// <summary>
+    /// Confidence in how well this line was READ, over the fields the document actually
+    /// asserts. A field the document states nowhere (<see cref="CanonicalValue{T}.StatedInDocument"/>)
+    /// contributes nothing: there was nothing there to read, so averaging its zero in
+    /// measures the document's shape rather than our accuracy. On an inbound RFQ that is
+    /// five of these seven fields — price, currency, brand, part number, lead time are what
+    /// the supplier is being ASKED for — which held every document in the 120-document pilot
+    /// corpus at 0.557, under the 0.60 acceptance threshold, with all 641 lines read
+    /// byte-perfectly.
+    ///
+    /// <para>A field whose source text WAS present and could not be parsed stays Stated and
+    /// keeps its 0.2, so a genuine misread still drags the number down.</para>
+    /// </summary>
     private static double AverageConfidence(CanonicalRfqLineItem line)
-        => new[]
-        {
-            (double)line.ProductName.Confidence, (double)line.Quantity.Confidence,
-            (double)line.UnitPrice.Confidence, (double)line.Currency.Confidence,
-            (double)line.ManufacturerName.Confidence, (double)line.ManufacturerPartNumber.Confidence,
-            (double)line.LeadTimeDays.Confidence
-        }.Average();
+        => Stated(
+            (line.ProductName.StatedInDocument, line.ProductName.Confidence),
+            (line.Quantity.StatedInDocument, line.Quantity.Confidence),
+            (line.UnitPrice.StatedInDocument, line.UnitPrice.Confidence),
+            (line.Currency.StatedInDocument, line.Currency.Confidence),
+            (line.ManufacturerName.StatedInDocument, line.ManufacturerName.Confidence),
+            (line.ManufacturerPartNumber.StatedInDocument, line.ManufacturerPartNumber.Confidence),
+            (line.LeadTimeDays.StatedInDocument, line.LeadTimeDays.Confidence));
 
+    /// <summary>
+    /// Averages the confidences of the STATED members only. An all-unstated set averages to
+    /// 0 rather than throwing — it cannot occur on a real line (product name and quantity are
+    /// required), and a silent exception here would take out the whole document.
+    /// </summary>
+    private static double Stated(params (bool StatedInDocument, decimal Confidence)[] values)
+        => values.Where(v => v.StatedInDocument).Select(v => (double)v.Confidence)
+            .DefaultIfEmpty(0).Average();
+
+    /// <summary>
+    /// Renders a canonical date for the string-typed extraction contract, KEEPING a stated time of
+    /// day.
+    ///
+    /// <para>FR-RFQ-04 requires the bid closing date and its time. The normalizer reads
+    /// "2026-09-01 14:00" correctly, and this method used to render it "2026-09-01" — so the
+    /// deadline reached the lead as midnight and a tender closing at 14:00 showed as a whole-day
+    /// deadline. A quote submitted at 15:00 looked on time and was late.</para>
+    ///
+    /// <para>The round-trip form is one <c>RfqDateParser</c> already accepts, so the worker that
+    /// re-reads this string recovers the same instant. A midnight value still renders date-only,
+    /// so nothing that never stated a time changes shape.</para>
+    /// </summary>
     private static string? FormatDate(DateTime? value)
-        => value?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        => value is not { } date
+            ? null
+            : date.TimeOfDay == TimeSpan.Zero
+                ? date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)
+                : date.ToString("yyyy-MM-dd'T'HH:mm:ss", CultureInfo.InvariantCulture);
 
     private static ExtractionProcessingPath EffectivePath(DocumentExtractionInput input, AiProviderClass providerClass)
         => providerClass switch
@@ -854,7 +1053,8 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
     /// see it.
     /// </param>
     private static ChunkedExtractionOutcome Failed(
-        int expected, string reason, DocumentExtractionInput? input = null, List<string>? diagnostics = null)
+        int expected, string reason, DocumentExtractionInput? input = null, List<string>? diagnostics = null,
+        bool permanent = false)
     {
         diagnostics ??= new List<string>();
         if (!diagnostics.Contains(reason))
@@ -862,6 +1062,7 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         return new ChunkedExtractionOutcome
         {
             Status = ExtractionOutcomeStatus.Failed,
+            PermanentFailure = permanent,
             Result = null,
             ExpectedItemCount = expected,
             ExtractedItemCount = 0,

@@ -21,7 +21,27 @@ public interface IProcurementApplicationService
     Task<QuoteComparisonResult> CompareQuotesAsync(long businessUnitId, long rfqItemId, CancellationToken ct = default);
     Task<AwardResult> ApproveAwardAsync(ApproveAwardCommand command, CancellationToken ct = default);
     Task<PurchaseOrderResult> CreatePurchaseOrderAsync(CreatePurchaseOrderCommand command, CancellationToken ct = default);
+
+    /// <summary>
+    /// FR-SPO-01. Authorises a draft supplier purchase order for release, recording who approved it
+    /// and when.
+    ///
+    /// <para>Without this step a draft went straight to the supplier: the only thing standing
+    /// between an auto-drafted order and committed spend was the Orders/Edit permission of whoever
+    /// clicked issue, and no row anywhere named a buyer who had accepted the commitment. Approval
+    /// is the named decision; release is the dispatch that follows it.</para>
+    /// </summary>
+    Task<PurchaseOrderApprovalResult> ApprovePurchaseOrderAsync(
+        ApprovePurchaseOrderCommand command, CancellationToken ct = default)
+        => throw new NotSupportedException("Purchase order approval is not supported by this procurement adapter.");
+
     Task<PurchaseOrderResult> IssuePurchaseOrderAsync(IssuePurchaseOrderCommand command, CancellationToken ct = default);
+
+    Task<SupplierPurchaseOrderAcknowledgementResult> AcknowledgePurchaseOrderAsync(
+        AcknowledgeSupplierPurchaseOrderCommand command, CancellationToken ct = default);
+
+    Task<PurchaseOrderTradeTermsResult> AmendPurchaseOrderTradeTermsAsync(
+        AmendPurchaseOrderTradeTermsCommand command, CancellationToken ct = default);
 
     /// <summary>
     /// Cancels a purchase order that will never be received, releasing the supply it committed.
@@ -158,7 +178,13 @@ public sealed record CaptureSupplierQuoteCommand(
     string IdempotencyKey,
     string Actor,
     string CorrelationId,
-    IReadOnlyCollection<CaptureSupplierQuoteLine> Lines);
+    IReadOnlyCollection<CaptureSupplierQuoteLine> Lines,
+    // The trade term the Supplier quoted on. Trailing and optional so existing callers keep
+    // working, but not decorative: the canonical revision this command writes had no Incoterm at
+    // all, so the cost-completeness warning — "this is an EXW quote recording no duty" — could
+    // never fire for anything captured on the buyer workbench. An unrecorded term is recorded as
+    // unrecorded, never guessed.
+    string? Incoterms = null);
 
 public sealed record CaptureSupplierQuoteLine(
     long RfqItemId,
@@ -204,6 +230,59 @@ public sealed record CreatePurchaseOrderCommand(
     IReadOnlyCollection<long> AwardIds,
     string IdempotencyKey,
     string Actor,
+    string CorrelationId,
+    string? Incoterm = null,
+    string? PortOfLoading = null,
+    string? PortOfDischarge = null);
+
+/// <summary>
+/// FR-SPO-06. Corrects the shipping and customs terms of an order that has not yet gone to the
+/// supplier.
+///
+/// <para>Amendment stops at dispatch on purpose: once the PDF is with the supplier, the Incoterm
+/// they hold and the Incoterm we hold must not silently diverge. Changing terms after that is a
+/// re-issue, not an edit.</para>
+///
+/// <para>Line entries are optional and sparse — a caller sends only the lines it is changing, so
+/// correcting one HS code does not require restating the whole order.</para>
+/// </summary>
+public sealed record AmendPurchaseOrderTradeTermsCommand(
+    long BusinessUnitId,
+    long PurchaseOrderId,
+    long ExpectedVersion,
+    string IdempotencyKey,
+    string Actor,
+    string CorrelationId,
+    string? Incoterm = null,
+    string? PortOfLoading = null,
+    string? PortOfDischarge = null,
+    IReadOnlyCollection<PurchaseOrderLineTradeTerms>? Lines = null);
+
+public sealed record PurchaseOrderLineTradeTerms(long LineId, string? HsCode, string? CountryOfOrigin);
+
+public sealed record PurchaseOrderTradeTermsResult(
+    long Id,
+    string Number,
+    string? Incoterm,
+    string? PortOfLoading,
+    string? PortOfDischarge,
+    IReadOnlyCollection<PurchaseOrderLineTradeTerms> Lines,
+    long Version,
+    bool Replayed);
+
+/// <summary>
+/// FR-SPO-01. <paramref name="ApprovedByUserId"/> is the identity the segregation-of-duties rule is
+/// enforced on, and is separate from <paramref name="Actor"/>: the actor is the audited display
+/// name, which a rename can change, while the user id is the key compared against the award
+/// approver. An approval that cannot name its user id cannot be checked, and is refused.
+/// </summary>
+public sealed record ApprovePurchaseOrderCommand(
+    long BusinessUnitId,
+    long PurchaseOrderId,
+    long ExpectedVersion,
+    long? ApprovedByUserId,
+    string IdempotencyKey,
+    string Actor,
     string CorrelationId);
 
 public sealed record IssuePurchaseOrderCommand(
@@ -226,6 +305,45 @@ public sealed record CancelPurchaseOrderCommand(
     string Actor,
     string CorrelationId);
 
+/// <summary>
+/// FR-SPO-03. The supplier's answer to a dispatched order: accepted, rejected, or accepted on
+/// different terms.
+///
+/// <para><paramref name="AcknowledgedBy"/> names the supplier-side person who answered, and is
+/// distinct from <paramref name="Actor"/>, the internal user who recorded it. Nexora has no
+/// supplier portal, so a buyer keys in what the supplier said by phone or email; conflating the
+/// two would attribute the supplier's commitment to our own staff.</para>
+///
+/// <para>A counter that names neither a revised lead time nor a committed ship date says nothing,
+/// and a rejection without a reason cannot be acted on, so both are refused rather than stored as
+/// an empty acknowledgement that merely silences the escalation sweep.</para>
+/// </summary>
+public sealed record AcknowledgeSupplierPurchaseOrderCommand(
+    long BusinessUnitId,
+    long PurchaseOrderId,
+    long ExpectedVersion,
+    string AcknowledgementStatus,
+    string AcknowledgedBy,
+    string IdempotencyKey,
+    string Actor,
+    string CorrelationId,
+    int? RevisedLeadTimeDays = null,
+    DateOnly? CommittedShipDate = null,
+    string? Note = null);
+
+public sealed record SupplierPurchaseOrderAcknowledgementResult(
+    long Id,
+    string Number,
+    string Status,
+    string AcknowledgementStatus,
+    string AcknowledgedBy,
+    DateTime AcknowledgedOn,
+    int? RevisedLeadTimeDays,
+    DateOnly? CommittedShipDate,
+    string? Note,
+    long Version,
+    bool Replayed);
+
 public sealed record PostGoodsReceiptCommand(
     long BusinessUnitId,
     long PurchaseOrderId,
@@ -238,7 +356,20 @@ public sealed record PostGoodsReceiptCommand(
     string Actor,
     string CorrelationId);
 
-public sealed record PostGoodsReceiptLine(long PurchaseOrderLineId, decimal Quantity);
+/// <summary>
+/// FR-MTR-01. <paramref name="Lot"/> is what the operator says about the material on this line —
+/// the supplier's batch number, the serial numbers, the country the goods actually came from.
+///
+/// <para>Optional with a default so every existing construction site keeps compiling, and because
+/// it is genuinely absent for untracked bulk material: the receipt still produces a lot, it is just
+/// identified from the receipt rather than by a number somebody typed. A batch- or serial-tracked
+/// product with no declaration is refused by the recorder rather than quietly given a made-up
+/// identifier.</para>
+/// </summary>
+public sealed record PostGoodsReceiptLine(
+    long PurchaseOrderLineId,
+    decimal Quantity,
+    Traceability.ReceiptLotDeclaration? Lot = null);
 
 public sealed record ProcurementWorkbench(
     long RfqId,
@@ -270,16 +401,42 @@ public sealed record SupplierOfferView(long Id, long SolicitationId, long RfqIte
     string SupplierName, string? QuoteReference, int QuoteRevision, long CurrencyId, string CurrencyCode,
     decimal Quantity, decimal? AvailableQuantity, decimal UnitPrice, decimal FreightCost, decimal DutyCost,
     decimal OtherCost, decimal? LandedUnitCost, int? LeadTimeDays, decimal? ReliabilitySnapshot,
-    DateTime? ValidUntil, bool Eligible, IReadOnlyCollection<string> BlockingReasons, bool Awarded, long Version);
+    DateTime? ValidUntil, bool Eligible, IReadOnlyCollection<string> BlockingReasons, bool Awarded, long Version,
+    // Non-blocking cost-completeness warnings — see QuoteComparisonLine.CostWarnings. Carried on
+    // the offer as well as the comparison because the workbench is where the buyer looks before
+    // deciding, and an incomplete cost build-up that nobody is shown is priced silently.
+    IReadOnlyCollection<string>? CostWarnings = null,
+    string? Incoterm = null);
 public sealed record SourcingAwardView(long Id, long RfqItemId, long SupplierQuotedItemId, long SupplierId,
     string SupplierName, decimal Quantity, decimal LandedUnitCost, long CurrencyId, string CurrencyCode,
     string Status, string? Rationale, long? PurchaseOrderId, long Version);
+/// <summary>
+/// <paramref name="TrackingMode"/> is <c>SERIAL</c>, <c>LOT</c> or <c>UNTRACKED</c>, computed from the
+/// product exactly as <c>Traceability.MaterialLotTrackingModes.FromProduct</c> computes it at receipt
+/// time. It is on this view because the receipt screen has to ask for what the recorder will demand:
+/// without it, turning on a product's batch or serial switch made every goods receipt for that
+/// product throw inside the receipt transaction, naming a field no screen offered.
+/// </summary>
 public sealed record SupplierPurchaseOrderLineView(long Id, long RfqItemId, long ProductId, string Description,
     decimal OrderedQuantity, decimal ReceivedQuantity, decimal OpenQuantity, decimal UnitCost,
-    decimal LandedUnitCost, long WarehouseId);
+    decimal LandedUnitCost, long WarehouseId, string TrackingMode,
+    string? HsCode = null, string? CountryOfOrigin = null);
+/// <summary>
+/// FR-SPO-01. <c>ApprovedBy</c> and <c>ApprovedOn</c> are optional so that ISSUED rows raised before
+/// approval existed still project — they are genuinely unapproved, and rendering them as blank is
+/// the truth rather than a gap to be filled in.
+/// </summary>
 public sealed record SupplierPurchaseOrderView(long Id, long RfqId, string PurchaseOrderNumber,
     long SupplierId, string SupplierName, long CurrencyId, string CurrencyCode, string Status,
-    decimal TotalValue, DateOnly? ExpectedOn, long Version, IReadOnlyCollection<SupplierPurchaseOrderLineView> Lines);
+    decimal TotalValue, DateOnly? ExpectedOn, long Version, IReadOnlyCollection<SupplierPurchaseOrderLineView> Lines,
+    string? ApprovedBy = null, DateTime? ApprovedOn = null,
+    // FR-SPO-03 and FR-SPO-06 read path. Without these the buyer records a counter or a rejection,
+    // nothing on screen changes, and the only feedback is a 409 the next time they try. The revised
+    // lead time and the rejection reason are the entire point of capturing an acknowledgement, so a
+    // view that omits them makes the write path pointless.
+    string? AcknowledgementStatus = null, string? AcknowledgedBy = null, DateTime? AcknowledgedOn = null,
+    int? RevisedLeadTimeDays = null, DateOnly? CommittedShipDate = null, string? AcknowledgementNote = null,
+    string? Incoterm = null, string? PortOfLoading = null, string? PortOfDischarge = null);
 public sealed record SupplierPurchaseOrderSummary(
     long Id, string PurchaseOrderNumber, long RfqId, string RfqNumber, string? NexoraSerial,
     long SupplierId, string SupplierName, string CurrencyCode, string Status, decimal TotalValue,
@@ -287,7 +444,25 @@ public sealed record SupplierPurchaseOrderSummary(
 public sealed record SolicitationResult(long Id, string Status, bool Replayed);
 public sealed record SupplierQuoteResult(IReadOnlyCollection<long> LineIds, bool Replayed);
 public sealed record AwardResult(long Id, string Status, decimal LandedUnitCost, bool Replayed);
-public sealed record PurchaseOrderResult(long Id, string Number, string Status, bool Replayed);
+// Version travels with the result because the next call in the lifecycle — approve, issue, receive —
+// is optimistically concurrent against it. Without it a caller must refetch to make one more move.
+public sealed record PurchaseOrderResult(long Id, string Number, string Status, bool Replayed, long Version);
+
+/// <summary>
+/// FR-SPO-01. Carries the approval back with the policy that was in force when it was granted, so a
+/// caller and an auditor read the same fact: an approval taken with segregation of duties switched
+/// off is not the same approval as one taken with it on.
+/// </summary>
+public sealed record PurchaseOrderApprovalResult(
+    long Id,
+    string Number,
+    string Status,
+    long ApprovedByUserId,
+    string ApprovedBy,
+    DateTime ApprovedOn,
+    long Version,
+    bool SegregationOfDutiesEnforced,
+    bool Replayed);
 public sealed record GoodsReceiptResult(long Id, string Number, string PurchaseOrderStatus, bool Replayed);
 
 public sealed record QuoteComparisonResult(long RfqItemId, IReadOnlyCollection<QuoteComparisonLine> Lines, long? RecommendedSupplierQuotedItemId);
@@ -303,7 +478,13 @@ public sealed record QuoteComparisonLine(
     decimal? Reliability,
     DateTime? ValidUntil,
     IReadOnlyCollection<string> Blockers,
-    bool Eligible);
+    bool Eligible,
+    // Distinct from Blockers on purpose. A blocker refuses the award; a warning says the cost
+    // build-up looks incomplete and leaves the buyer to judge it. An EXW quote with no duty
+    // recorded is perfectly awardable — it is just probably underpriced, and the buyer is the only
+    // one who can say. Defaulted so a caller that constructs a line without warnings gets an empty
+    // list rather than a null to dereference.
+    IReadOnlyCollection<string>? CostWarnings = null);
 
 public sealed class ProcurementValidationException : InvalidOperationException
 {

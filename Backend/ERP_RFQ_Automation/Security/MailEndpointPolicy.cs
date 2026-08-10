@@ -90,10 +90,36 @@ public static class MailEndpointPolicy
     /// Resolves, validates, and returns a socket connected to one of the validated addresses.
     /// The caller owns disposal.
     /// </summary>
-    public static async Task<Socket> ConnectAsync(
+    public static Task<Socket> ConnectAsync(
         string host, int port, CancellationToken cancellationToken)
+        => ConnectAsync(host, port, IsPublicAddress,
+            "The configured mail host resolves to a prohibited address.", cancellationToken);
+
+    /// <summary>
+    /// The same resolve-then-connect discipline against a caller-supplied admission rule.
+    ///
+    /// <para>Mail is not the only outbound dial in this server that takes a name from
+    /// configuration or from a tenant. The AI egress guard needs the mirror-image rule — a
+    /// deployment that declares itself LOCAL must reach loopback and nothing else — and it
+    /// needs it applied at connect time, not once at startup, for exactly the DNS-rebinding
+    /// reason this class already documents. Sharing the loop rather than copying it means
+    /// there is one implementation of "resolve, admit EVERY address or none, then connect to
+    /// one of the addresses you actually validated".</para>
+    /// </summary>
+    /// <param name="isAdmissible">Applied to every resolved address. All must pass, not any.</param>
+    /// <param name="rejectionMessage">Surfaced when the admission rule refuses the name.</param>
+    public static async Task<Socket> ConnectAsync(
+        string host, int port, Func<IPAddress, bool> isAdmissible, string rejectionMessage,
+        CancellationToken cancellationToken)
     {
-        var addresses = await ResolveAsync(host, cancellationToken);
+        ArgumentNullException.ThrowIfNull(isAdmissible);
+        var normalized = Normalize(host);
+        var addresses = IPAddress.TryParse(normalized, out var literal)
+            ? [literal]
+            : await Dns.GetHostAddressesAsync(normalized, cancellationToken);
+
+        if (addresses.Length == 0 || addresses.Any(x => !isAdmissible(x)))
+            throw new InvalidOperationException(rejectionMessage);
 
         Exception? lastError = null;
         foreach (var address in addresses)
@@ -115,6 +141,17 @@ public static class MailEndpointPolicy
         }
 
         throw new SocketException((lastError as SocketException)?.ErrorCode ?? (int)SocketError.HostUnreachable);
+    }
+
+    /// <summary>
+    /// True only for an address that is this machine. The IPv4-mapped-IPv6 unwrap is the
+    /// point: <c>::ffff:127.0.0.1</c> is loopback and
+    /// <see cref="IPAddress.IsLoopback(IPAddress)"/> alone does not say so.
+    /// </summary>
+    public static bool IsLoopbackAddress(IPAddress address)
+    {
+        if (address.IsIPv4MappedToIPv6) address = address.MapToIPv4();
+        return IPAddress.IsLoopback(address);
     }
 
     public static bool IsPublicAddress(IPAddress address)

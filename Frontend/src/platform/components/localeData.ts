@@ -97,7 +97,7 @@ export function resolvedTimeZone(): string {
 
 /** Common BCP-47 tags offered as suggestions; any valid tag is still accepted. */
 export const LOCALE_SUGGESTIONS = [
-  'en-US', 'en-GB', 'en-AE', 'en-IN', 'en-AU', 'en-CA', 'en-ZA',
+  'en-SA', 'en-US', 'en-GB', 'en-AE', 'en-IN', 'en-AU', 'en-CA', 'en-ZA',
   'fr-FR', 'de-DE', 'es-ES', 'it-IT', 'nl-NL', 'pt-BR', 'ar-AE', 'ar-SA', 'ja-JP', 'zh-CN',
 ];
 

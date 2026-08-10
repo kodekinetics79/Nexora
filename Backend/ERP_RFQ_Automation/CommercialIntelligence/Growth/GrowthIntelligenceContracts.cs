@@ -76,8 +76,17 @@ public sealed record PeriodComparison(DateTime FromUtc, DateTime ToUtc,
 
 public sealed record TrendMetric(int CurrentCount, int PreviousCount, decimal? TrendPercent);
 
+/// <param name="LeadStageLossCount">
+/// Inquiries lost or abandoned before a quotation existed. They carry a governed outcome reason and
+/// belong in the conversion denominator; counting only decided QUOTES flatters the funnel by hiding
+/// every inquiry that was never bid.
+/// </param>
+/// <param name="InquiryConversionPercent">
+/// Won quotes over every decided inquiry — decided quotes PLUS lead-stage losses.
+/// </param>
 public sealed record QuoteFunnelMetric(int EligibleRfqCount, int QuotedRfqCount,
-    decimal? CoveragePercent, int DecidedQuoteCount, int WonQuoteCount, decimal? ConversionPercent);
+    decimal? CoveragePercent, int DecidedQuoteCount, int WonQuoteCount, decimal? ConversionPercent,
+    int LeadStageLossCount = 0, decimal? InquiryConversionPercent = null);
 
 public sealed record AcceptedPriceEvidence(long QuoteId, long QuoteItemId, string QuoteNumber,
     long CurrencyId, string CurrencyCode, decimal Quantity, decimal UnitPrice, DateTime AcceptedAtUtc,

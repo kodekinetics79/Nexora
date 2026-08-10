@@ -18,6 +18,13 @@ namespace ERP_RFQ_Automation.CommercialFinance;
 /// nothing but business unit ids), then claim inside a pushed tenant scope with a fail-closed
 /// guard. The wildcard is no longer on any production path.</para>
 ///
+/// <para>The DISPATCH half was still unscoped after that: <c>Parallel.ForEachAsync</c> forks each
+/// message onto its own execution context and <see cref="DispatchAsync"/> opened a fresh DI scope
+/// with no tenant, so the completion and failure transitions ran under the BYPASSRLS pipeline role.
+/// A push around the loop cannot fix that — it does not survive the fork — so the push is now the
+/// FIRST statement inside <see cref="DispatchAsync"/>, before the scope is created, with the same
+/// fail-closed guard.</para>
+///
 /// <para><b>Why the gate filters the CLAIM and not the dispatch.</b> Claiming a message increments
 /// <c>AttemptCount</c>. Leasing a suspended tenant's events and then declining to publish them
 /// would re-claim them every cycle, inflate the attempt count against a <c>MaxAttempts</c> ceiling
@@ -222,17 +229,18 @@ public sealed class FinanceOutboxDispatcherService : BackgroundService
     }
 
     /// <summary>
-    /// Fail closed. If the DbContext in this scope did not resolve the pushed tenant, the claim
-    /// below would fall back to the <c>ScopedTenantId ?? 0</c> wildcard and lease every tenant's
-    /// rows again — which is exactly the defect being fixed, so it must be an error rather than a
-    /// warning.
+    /// Fail closed, on BOTH halves of the cycle. If the DbContext in this scope did not resolve the
+    /// pushed tenant, the claim would fall back to the <c>ScopedTenantId ?? 0</c> wildcard and lease
+    /// every tenant's rows again, and the dispatch would complete or fail a message under the
+    /// BYPASSRLS pipeline role — which is exactly the defect being fixed, so it must be an error
+    /// rather than a warning.
     /// </summary>
     private static void EnsureScoped(IServiceProvider provider, long businessUnitId)
     {
         var db = provider.GetRequiredService<ErpRfqAutomationContext>();
         if (db.ScopedTenantId == businessUnitId) return;
         throw new InvalidOperationException(
-            $"Finance outbox dispatch refused to claim for BU {businessUnitId}: the DbContext resolved "
+            $"Finance outbox dispatch refused to run for BU {businessUnitId}: the DbContext resolved "
             + $"tenant {db.ScopedTenantId?.ToString() ?? "<none>"}. Tenant scope is mandatory for this worker.");
     }
 
@@ -241,7 +249,27 @@ public sealed class FinanceOutboxDispatcherService : BackgroundService
         FinanceOutboxDispatcherOptions options,
         CancellationToken cancellationToken)
     {
+        // THE PUSH IS THE FIRST STATEMENT HERE, and it has to be.
+        //
+        // The scope is an AsyncLocal. Parallel.ForEachAsync forks this method onto its own
+        // execution contexts, and an AsyncLocal set in the caller before the fork is COPIED into
+        // the fork but a push/dispose pair around the loop cannot bracket what the fork does after
+        // the loop moves on — so a scope pushed around the ForEachAsync above would not survive
+        // into these bodies in any dependable way. The push has to be inside the fork, and it has
+        // to precede CreateAsyncScope: ITenantContext captures the ambient tenant in its
+        // CONSTRUCTOR, so the DbContext resolved from this scope is fixed the moment the scope
+        // first resolves it.
+        //
+        // Until now every dispatch ran with a null tenant and therefore under the BYPASSRLS
+        // pipeline role. It was contained only because CompleteAsync/FailAsync key on the message
+        // id PLUS the lease token this worker itself minted — containment by accident, one query
+        // change away from being a cross-tenant write. With the scope pushed, the store's
+        // ExecuteUpdate predicates also carry the global query filter, so the transition can only
+        // touch a row that belongs to the tenant the message came from.
+        var tenantScope = TenantScope();
+        using var tenant = tenantScope.Push(message.BusinessUnitId);
         await using var scope = _scopeFactory.CreateAsyncScope();
+        EnsureScoped(scope.ServiceProvider, message.BusinessUnitId);
         var publisher = scope.ServiceProvider.GetRequiredService<IFinanceEventPublisher>();
         var store = scope.ServiceProvider.GetRequiredService<IFinanceOutboxStore>();
 

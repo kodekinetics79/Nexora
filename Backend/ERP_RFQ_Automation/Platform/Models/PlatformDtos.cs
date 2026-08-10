@@ -23,6 +23,19 @@ public class PlatformLoginResponse
     public bool MfaRequired { get; set; }
     public Guid? MfaChallengeId { get; set; }
     public DateTime? MfaChallengeExpiresAtUtc { get; set; }
+
+    /// <summary>
+    /// Sec-D2: true when this token was issued WITHOUT a second factor because the operator has
+    /// never enrolled. The token is real but satisfies only
+    /// <c>PlatformPolicies.Enrollment</c> — every other platform endpoint answers 403 until
+    /// <c>POST /api/platform/auth/mfa/enrollment/confirm</c> succeeds.
+    ///
+    /// <para>It is on the login response rather than left for the client to infer from a 403,
+    /// because a control the user cannot see is a control they cannot satisfy: without this flag
+    /// the first-run operator's only signal is every screen failing at once, with nothing saying
+    /// which one to open. The client routes on this to the enrollment screen.</para>
+    /// </summary>
+    public bool MfaEnrollmentRequired { get; set; }
     [System.Text.Json.Serialization.JsonIgnore]
     public bool RecoveryCodeUsed { get; set; }
 }
@@ -36,7 +49,26 @@ public sealed class PlatformMfaChallengeRequest
 }
 
 public sealed record PlatformMfaStatusResponse(bool Enabled, DateTime? EnabledAtUtc, int RecoveryCodesRemaining);
-public sealed record PlatformMfaEnrollmentStartResponse(string Secret, string OtpAuthUri);
+
+/// <summary>
+/// The one response that carries a live TOTP enrolment seed. It is served exactly once, to the
+/// operator who is enrolling, and it must reach no other surface.
+/// </summary>
+public sealed record PlatformMfaEnrollmentStartResponse(string Secret, string OtpAuthUri)
+{
+    /// <summary>
+    /// SEC-G9. A record's compiler-generated ToString prints EVERY property, so a single
+    /// <c>_logger.LogInformation("enrolment started {Response}", response)</c> would write the
+    /// operator's TOTP seed to the log — and a seed in a log is a second factor that is no longer
+    /// a factor, because anyone with log access can generate the codes. <see cref="OtpAuthUri"/>
+    /// is redacted with it and is not a lesser secret: the otpauth:// URI EMBEDS the same seed
+    /// in its query string, which is exactly how the QR code carries it. Redacted at the source
+    /// rather than by trusting every future call site, matching the same override on
+    /// <c>IssuedTenantAdminInvitation</c> and <c>ProvisioningSubmitResult</c>.
+    /// </summary>
+    public override string ToString() =>
+        "PlatformMfaEnrollmentStartResponse { Secret = [redacted], OtpAuthUri = [redacted] }";
+}
 
 public sealed class PlatformMfaEnrollmentConfirmRequest
 {
@@ -45,7 +77,18 @@ public sealed class PlatformMfaEnrollmentConfirmRequest
 }
 
 public sealed record PlatformMfaEnrollmentConfirmResponse(
-    DateTime EnabledAtUtc, IReadOnlyList<string> RecoveryCodes);
+    DateTime EnabledAtUtc, IReadOnlyList<string> RecoveryCodes)
+{
+    /// <summary>
+    /// SEC-G9, and the same defect as on the enrolment start response. Recovery codes bypass the
+    /// second factor by design, so a logged list is a standing set of single-use passwords for the
+    /// platform-owner plane. The COUNT is kept because it is what an operator diagnosing an
+    /// enrolment actually needs, and it is already public on <c>PlatformMfaStatusResponse</c>.
+    /// </summary>
+    public override string ToString() =>
+        $"PlatformMfaEnrollmentConfirmResponse {{ EnabledAtUtc = {EnabledAtUtc:O}, "
+        + $"RecoveryCodes = [redacted, {RecoveryCodes?.Count ?? 0} issued] }}";
+}
 
 // ---- Tenants -------------------------------------------------------------
 
@@ -105,8 +148,8 @@ public class TenantSummaryDto
 
 /// <summary>
 /// Editable customer identity fields. Commercial terms, slug, residency and base currency are
-/// intentionally absent because they have separate governed workflows or immutable lineage.
-/// Blank optional values clear the corresponding profile field.
+/// intentionally absent: each has its own governed workflow or becomes immutable commercial
+/// lineage after provisioning. Null/blank optional values clear the corresponding profile field.
 /// </summary>
 public sealed class UpdateTenantProfileRequest
 {
@@ -131,6 +174,24 @@ public sealed class UpdateTenantProfileRequest
     [StringLength(35)] public string? Locale { get; set; }
 
     [Required, StringLength(1000, MinimumLength = 3)]
+    public string Reason { get; set; } = null!;
+}
+
+/// <summary>
+/// Corrects the contractual data region. Deliberately its OWN request rather than a field on
+/// <see cref="UpdateTenantProfileRequest"/>: the profile form is Owner-or-SupportAdmin and describes
+/// the customer, while this asserts where their data physically is, gates tenant activation, and is
+/// Owner-only. Putting it on the same form would have made a contractual residency claim editable by
+/// whoever was correcting a postcode.
+/// </summary>
+public sealed class UpdateTenantDataRegionRequest
+{
+    /// <summary>The region the tenant's registered data assets are actually in. Null clears it,
+    /// which is only accepted while the tenant is still Provisioning.</summary>
+    [StringLength(32)]
+    public string? DataRegion { get; set; }
+
+    [Required, StringLength(1000, MinimumLength = 15)]
     public string Reason { get; set; } = null!;
 }
 

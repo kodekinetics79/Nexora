@@ -31,6 +31,15 @@ public partial class ErpRfqAutomationContext
         {
             e.ToTable("SlaPolicies");
             e.HasKey(x => x.Id);
+            // FR-QTM-07: the knob formerly called QuoteAutoExpireDays is now the GRACE
+            // allowance added to the validity date (default 0, was 14). The property was
+            // renamed for honesty; the COLUMN keeps its legacy name so the rename costs
+            // no migration. QuoteNoResponseExpiryDays (the 90-day submission rule) is a
+            // genuinely new column.
+            e.Property(x => x.QuoteExpiryGraceDays).HasColumnName("QuoteAutoExpireDays");
+            // FR-SPO-07 knobs. Plain integer columns, no special mapping — they are listed
+            // here only so the migration owner can see the whole SlaPolicy surface in one
+            // place (SLA-WIRING.md §2 carries the DDL).
             e.Property(x => x.CreatedOn).HasDefaultValueSql("now()");
             e.Property(x => x.UpdatedOn).HasDefaultValueSql("now()");
             e.HasIndex(x => x.BusinessUnitId).IsUnique().HasDatabaseName("UX_SlaPolicies_BU");
@@ -44,15 +53,34 @@ public partial class ErpRfqAutomationContext
             e.Property(x => x.EntityType).HasMaxLength(40).IsRequired();
             e.Property(x => x.Level).HasMaxLength(20).IsRequired();
             e.Property(x => x.DedupKey).HasMaxLength(120).IsRequired();
+            e.Property(x => x.Recipient).HasMaxLength(320);
+            e.Property(x => x.Status).HasMaxLength(16).IsRequired();
+            e.Property(x => x.Provider).HasMaxLength(64);
+            e.Property(x => x.AcceptanceReference).HasMaxLength(200);
+            e.Property(x => x.OutcomeReason).HasMaxLength(120);
             e.Property(x => x.CreatedOn).HasDefaultValueSql("now()");
             e.HasIndex(x => new { x.BusinessUnitId, x.EntityType, x.EntityId, x.Level })
                 .HasDatabaseName("IX_SlaEvents_BU_Entity_Level");
             // SCALE-OUT: the send-once guarantee is enforced by the DATABASE, not by a
             // lookup-before-insert race. Two SlaSweepWorker instances both INSERT their
             // claim; exactly one wins and sends, the loser gets 23505 and skips.
-            // The digest's DedupKey carries the UTC day so it still repeats daily.
+            // The digest's DedupKey carries the UTC day so it still repeats daily, and an
+            // email claim carries a recipient discriminator so one person's failed copy can
+            // never suppress another's.
+            //
+            // PARTIAL, on purpose. Releasing a claim used to DELETE the row, which destroyed
+            // the audit record of the attempt; it is now a status transition, so the released
+            // row is still there and would otherwise hold the key forever and silence the
+            // alert permanently. RELEASED means "definitely not sent", and only that status is
+            // excluded — CLAIMED, SENT and UNCERTAIN all still occupy the key, so an alert
+            // whose delivery is merely unprovable is never sent a second time.
+            //
+            // The filter is written in SQL both providers accept (PostgreSQL in production,
+            // SQLite via EnsureCreated on the portable lane), so the boundary is the same in
+            // both lanes rather than being enforced in only one of them.
             e.HasIndex(x => new { x.BusinessUnitId, x.DedupKey })
                 .IsUnique()
+                .HasFilter($"\"Status\" <> '{SlaEventStatuses.Released}'")
                 .HasDatabaseName("UX_SlaEvents_BU_DedupKey");
             e.HasQueryFilter(x => CurrentTenantId == null || x.BusinessUnitId == CurrentTenantId);
         });

@@ -51,7 +51,8 @@ public sealed class SupplierQuoteInboxController(
                 request.NexoraSerial, request.SupplierQuoteReference, request.RevisionNumber,
                 request.CaptureChannel, request.SourceDocumentId, request.SourceIdentity, request.SourceSha256,
                 request.CurrencyId, request.ValidUntil, request.Incoterms, request.FreightAmount,
-                request.TaxAmount, request.PaymentTerms, request.Notes, request.Lines, request.Evidence,
+                request.TaxAmount, request.DutyAmount, request.OtherAmount, request.DiscountAmount,
+                request.PaymentTerms, request.Notes, request.Lines, request.Evidence,
                 RequiredHeader("Idempotency-Key"), Actor(), RequiredHeader("X-Correlation-ID")),
                 RequestAborted);
             return Created($"/api/supplier-quote-inbox/{result.SupplierQuoteId}", result);
@@ -71,8 +72,9 @@ public sealed class SupplierQuoteInboxController(
                     request.NexoraSerial, request.SupplierQuoteReference, request.RevisionNumber,
                     request.CurrencyId, request.ValidUntil, request.Incoterms, request.PaymentTerms,
                     request.Notes, RequiredHeader("Idempotency-Key"), Actor(),
-                    RequiredHeader("X-Correlation-ID")), content, request.File.FileName,
-                request.File.Length, RequestAborted);
+                    RequiredHeader("X-Correlation-ID"), request.FreightAmount, request.TaxAmount,
+                    request.DutyAmount, request.OtherAmount, request.DiscountAmount),
+                content, request.File.FileName, request.File.Length, RequestAborted);
             return Accepted(result);
         });
 
@@ -188,7 +190,12 @@ public sealed record CaptureSupplierQuoteInboxRequest(
     string? PaymentTerms,
     string? Notes,
     IReadOnlyCollection<CaptureSupplierQuoteLine> Lines,
-    IReadOnlyCollection<CaptureSupplierQuoteEvidence> Evidence);
+    IReadOnlyCollection<CaptureSupplierQuoteEvidence> Evidence,
+    // Trailing and defaulted so an existing client that posts no duty keeps working and records a
+    // truthful zero, rather than being rejected or — worse — having a duty invented for it.
+    decimal DutyAmount = 0m,
+    decimal OtherAmount = 0m,
+    decimal DiscountAmount = 0m);
 
 public sealed record ProjectSupplierQuoteRequest(long ExpectedVersion);
 public sealed record SupplierNegotiationDecisionRequest(long ExpectedQuoteVersion,
@@ -212,4 +219,15 @@ public sealed class SupplierQuoteDocumentUploadRequest
     public string? Incoterms { get; init; }
     public string? PaymentTerms { get; init; }
     public string? Notes { get; init; }
+
+    /// <summary>
+    /// The round charges, entered alongside the file. A spreadsheet of part numbers and unit prices
+    /// does not state the freight, and the intake path used to hardcode zero for it — so the
+    /// headline ingestion path produced quotes whose landed cost was the bare unit price.
+    /// </summary>
+    public decimal FreightAmount { get; init; }
+    public decimal TaxAmount { get; init; }
+    public decimal DutyAmount { get; init; }
+    public decimal OtherAmount { get; init; }
+    public decimal DiscountAmount { get; init; }
 }

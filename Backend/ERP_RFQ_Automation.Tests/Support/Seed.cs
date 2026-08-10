@@ -16,6 +16,28 @@ public static class Seed
     public static BusinessUnit EnsureBusinessUnit(ErpRfqAutomationContext ctx, long id)
         => ctx.BusinessUnits.Find(id) ?? BusinessUnit(ctx, id);
 
+    /// <summary>
+    /// A business unit for a database pinned to an EARLIER migration, seeded by raw SQL naming only
+    /// the columns that existed then — the same reason <see cref="HistoricalLead"/> exists.
+    ///
+    /// <para>The populated-upgrade rehearsals migrate down to a fixed target, seed, then upgrade.
+    /// Seeding through the current model makes EF name every column the model knows about, so each
+    /// new column added upstream — <c>TaxRegistrationNumber</c> was the one that broke it — turns
+    /// into <c>42703</c> against the older schema. That failure looks like a migration defect and
+    /// is not one, which is the expensive kind of red.</para>
+    /// </summary>
+    public static void HistoricalBusinessUnit(ErpRfqAutomationContext ctx, long id)
+    {
+        if (ctx.ChangeTracker.HasChanges())
+            ctx.SaveChanges();
+
+        ctx.Database.ExecuteSql($"""
+            INSERT INTO "BusinessUnits" ("ID", "BusinessUnitCode", "BusinessUnitName", "IsActive", "CreatedBy", "CreatedOn")
+            VALUES ({id}, {$"BU{id}"}, {$"Business Unit {id}"}, true, 'seed', now())
+            ON CONFLICT ("ID") DO NOTHING;
+            """);
+    }
+
     public static BusinessUnit BusinessUnit(ErpRfqAutomationContext ctx, long id)
     {
         var bu = new BusinessUnit
@@ -129,8 +151,11 @@ public static class Seed
     public static Lead HistoricalLead(
         ErpRfqAutomationContext ctx, long leadId, long businessUnitId, string? buyersName = "Acme Buyer")
     {
-        if (ctx.BusinessUnits.Find(businessUnitId) is null)
-            BusinessUnit(ctx, businessUnitId);
+        // Raw SQL, not Find: on an untracked id Find issues a SELECT naming every column the
+        // CURRENT model maps, so against a database pinned to an earlier migration it raises 42703
+        // for whichever column was added upstream most recently. That reads as a migration defect
+        // and is not one.
+        HistoricalBusinessUnit(ctx, businessUnitId);
         // Flush whatever the caller staged (its own business units and their reference
         // configuration) so the raw INSERT below has its foreign-key targets.
         if (ctx.ChangeTracker.HasChanges())
@@ -169,6 +194,34 @@ public static class Seed
         // Unchanged, so EF never re-inserts it and never selects its columns.
         ctx.Attach(lead);
         return lead;
+    }
+
+    /// <summary>
+    /// Stamps a sales order's commercial identity for tests that seed a document graph directly
+    /// instead of going through a creation service.
+    ///
+    /// <para>Private setters, deliberately, exactly as on <see cref="HistoricalLead"/>: an Order
+    /// takes its case from the document it came from and nothing else may assign it. A test is not
+    /// allowed to be the exception that reopens the setter, so the fixture reaches through
+    /// reflection and the production surface stays closed.</para>
+    /// </summary>
+    public static Models.Order StampCommercialCase(
+        Models.Order order, long commercialCaseId, string nexoraSerial, long? contactId = null)
+    {
+        typeof(Models.Order).GetProperty(nameof(Models.Order.CommercialCaseId))!
+            .SetValue(order, (long?)commercialCaseId);
+        typeof(Models.Order).GetProperty(nameof(Models.Order.NexoraSerial))!
+            .SetValue(order, nexoraSerial);
+        if (contactId.HasValue)
+            typeof(Models.Order).GetProperty(nameof(Models.Order.ContactId))!.SetValue(order, contactId);
+        return order;
+    }
+
+    /// <summary>Sets only the contact, for fixtures that predate the commercial case entirely.</summary>
+    public static Models.Order StampContact(Models.Order order, long? contactId)
+    {
+        typeof(Models.Order).GetProperty(nameof(Models.Order.ContactId))!.SetValue(order, contactId);
+        return order;
     }
 
     public static LeadItem LeadItem(long id, string? lineItemNo, int quantity, string? productName = "Widget")

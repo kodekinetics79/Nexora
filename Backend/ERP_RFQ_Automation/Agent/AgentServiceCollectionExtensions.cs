@@ -1,6 +1,8 @@
+using ERP_RFQ_Automation.AI;
 using ERP_RFQ_Automation.Agent.Guardrails;
 using ERP_RFQ_Automation.Agent.Llm;
 using ERP_RFQ_Automation.Agent.Tools;
+using ERP_RFQ_Automation.Infrastructure;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -19,9 +21,28 @@ public static class AgentServiceCollectionExtensions
         // ---- LLM: real Claude when a key is present, deterministic mock otherwise ----
         var apiKey = configuration["Agent:Anthropic:ApiKey"];
         if (!string.IsNullOrWhiteSpace(apiKey))
-            services.AddHttpClient<IAgentLlm, AnthropicAgentLlm>(c => c.Timeout = TimeSpan.FromSeconds(120));
+        {
+            // The agent posts the whole conversation to this origin, so it is classified by
+            // the same rules as every other AI destination and its socket is opened through
+            // the same guard: no redirects (a 307 would re-send the conversation to whatever
+            // host it named), and the resolved address must match the classification at
+            // connect time, not merely at startup.
+            var anthropic = AiProviderEndpoint.Describe(
+                AnthropicProviderDefaults.Provider,
+                AnthropicProviderDefaults.BaseUrl(configuration),
+                AnthropicProviderDefaults.Model(configuration));
+            services.AddHttpClient<IAgentLlm, AnthropicAgentLlm>(c => c.Timeout = TimeSpan.FromSeconds(120))
+                .ConfigurePrimaryHttpMessageHandler(() =>
+                    AiEgressGuard.CreateHandler(() => anthropic.ProviderClass))
+                // SEC-G9: AnthropicAgentLlm sends the API key as x-api-key. The factory's own
+                // logging handlers write every header at Trace and redact nothing by default, so
+                // one diagnostic session at Trace would have put the live key in the log sink.
+                .RedactLoggedHeaders(OutboundHttpRedaction.SensitiveHeaders);
+        }
         else
+        {
             services.AddSingleton<IAgentLlm, MockAgentLlm>();
+        }
 
         // ---- Tools (registered as IAgentTool; discovered by the registry) ----
         services.AddScoped<IAgentTool, SearchRfqsTool>();

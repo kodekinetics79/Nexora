@@ -42,6 +42,14 @@ export type ExtractionDeadLetter = {
   updatedOn: string;
   resolution: string;
   blocksReadiness: boolean;
+  /**
+   * What an operator must DO about `failureCategory`, in words. Absent when the
+   * category says it all, and absent from older backends. Never the raw stored
+   * error — that can quote the customer's document — but a fixed sentence per
+   * category. Without it, `AI_NOT_AUTHORIZED` reached the screen as two
+   * underscored words with nothing actionable behind them.
+   */
+  operatorAction?: string | null;
 };
 
 export type DeadLetterRecoveryResult = {

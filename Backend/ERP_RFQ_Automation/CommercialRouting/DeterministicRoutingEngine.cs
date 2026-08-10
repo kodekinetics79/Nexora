@@ -106,9 +106,16 @@ public sealed class DeterministicRoutingEngine
         if (ownership.Scope is OwnershipScope.CustomerException or OwnershipScope.GeneralCustomer)
             return true;
 
-        return request.ScopeKeys.TryGetValue(ownership.Scope, out var requestKey)
-            && !string.IsNullOrWhiteSpace(requestKey)
-            && string.Equals(requestKey.Trim(), ownership.ScopeKey?.Trim(), StringComparison.OrdinalIgnoreCase);
+        if (!request.ScopeKeys.TryGetValue(ownership.Scope, out var requestKey)) return false;
+
+        // Both sides are collapsed the same way so that whitespace noise in a region copied out
+        // of a document cannot miss a hand-typed rule. A blank on EITHER side must never match:
+        // two empty strings comparing equal would make a scoped rule fire on every RFQ and
+        // outrank every rule beneath it, which is the one failure worse than never firing.
+        var derived = RoutingScopeKeys.CollapseWhitespace(requestKey);
+        var configured = RoutingScopeKeys.CollapseWhitespace(ownership.ScopeKey);
+        return derived.Length > 0 && configured.Length > 0
+            && string.Equals(derived, configured, StringComparison.OrdinalIgnoreCase);
     }
 
     private static RoutingUserAvailability? Availability(RoutingRequest request, long userId) =>
@@ -195,6 +202,19 @@ public sealed class DeterministicRoutingEngine
                 outcome = outcome.ToString(),
                 decisionCode = code,
                 requestHash = request.RequestHash,
+                // Why each scope did or did not have a key to match on. An underived scope is
+                // recorded with its reason rather than omitted, so "no Territory rule was
+                // written" stays distinguishable from "this RFQ stated no region".
+                scopeKeys = (request.ScopeKeyDerivations ?? [])
+                    .OrderBy(derivation => derivation.Scope)
+                    .Select(derivation => new
+                    {
+                        scope = derivation.Scope.ToString(),
+                        key = derivation.Key,
+                        derived = derivation.IsDerived,
+                        source = derivation.Source
+                    })
+                    .ToArray(),
                 workloadPolicy = new
                 {
                     maximumPoints = policy.MaximumWorkloadPoints,

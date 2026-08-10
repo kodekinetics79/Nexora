@@ -47,8 +47,13 @@ public sealed class ConversionPreviewItem
     public long LeadItemId { get; init; }
     /// <summary>The raw text the line was extracted from (short name / description).</summary>
     public string? SourceText { get; init; }
-    /// <summary>Raw quantity as stored on the lead line.</summary>
-    public int Quantity { get; init; }
+    /// <summary>
+    /// Raw quantity as stored on the lead line, or null when the source document stated none we
+    /// could read. The client already renders this as <c>number | null</c> and falls back to
+    /// <c>NormalizedQuantity</c>, so a null shows the operator an empty box to fill rather than a
+    /// pre-filled zero to approve.
+    /// </summary>
+    public int? Quantity { get; init; }
     /// <summary>Raw unit-of-measure string as stored on the lead line.</summary>
     public string? UnitOfMeasure { get; init; }
     public decimal? NormalizedQuantity { get; init; }

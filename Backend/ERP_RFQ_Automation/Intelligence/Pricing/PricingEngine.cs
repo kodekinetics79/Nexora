@@ -17,6 +17,13 @@ namespace ERP_RFQ_Automation.Intelligence.Pricing;
 /// currency contract required for financial authority. No synthetic cost or approval
 /// floor is inferred.
 ///
+/// COST FLOOR — separate from the blend and not a signal at all. PriceLine.FloorUnitPrice is the
+/// awarded supplier's landed unit cost for that RFQ line (CustomerQuoteSourcingDecision), carried
+/// with its own currency in PriceLine.FloorCurrency. It is READ, never derived: it is the identical
+/// figure the governed customer price was built from, so the price the customer sees and the floor
+/// it is checked against can never drift apart. A line with no awarded sourcing decision has NO
+/// floor and stays null — never 0, which would assert that any price is acceptable.
+///
 /// CURRENCY — no FX conversion is invented. Each line is priced in its own currency
 /// (Rfqitem.CurrencyId/Currency). A signal with a different or missing explicit currency
 /// is excluded. Unknown currency evidence is excluded.
@@ -90,8 +97,27 @@ public sealed class PricingEngine : IPricingEngine
 
         // ---- batched signal fetches (one query per signal, never per line) ----
 
+        // THE COST FLOOR. Not a signal and not a blend: the awarded supplier's landed unit cost,
+        // recorded on CustomerQuoteSourcingDecision by the governed award-to-quote pricing bridge.
+        // It is the same number the customer price was derived from (landed / (1 - margin)), which
+        // is exactly why it is the honest floor — the two cannot drift apart.
+        //
+        // MOST RECENT decision per RFQ line wins. Re-pricing a line appends a new decision row
+        // (the table is append-only, keyed by idempotency key), so the latest row is the sourcing
+        // that is actually in force. A line with NO decision has NO floor and stays null — see
+        // PriceLine.FloorUnitPrice: null is a visible gap, zero would be a lie.
+        var sourcingDecisions = await _db.CustomerQuoteSourcingDecisions.AsNoTracking()
+            .Where(d => d.BusinessUnitId == businessUnitId && d.RfqId == rfqId)
+            .Select(d => new { d.Id, d.RfqItemId, d.SupplierLandedUnitCost, d.CurrencyId, d.CreatedOn })
+            .ToListAsync(ct);
+        var floorByRfqItem = sourcingDecisions
+            .GroupBy(d => d.RfqItemId)
+            .ToDictionary(g => g.Key,
+                g => g.OrderByDescending(d => d.CreatedOn).ThenByDescending(d => d.Id).First());
+
         var lineCurrencyIds = items.Where(i => i.CurrencyId.HasValue)
                                    .Select(i => i.CurrencyId!.Value)
+                                   .Concat(floorByRfqItem.Values.Select(d => d.CurrencyId))
                                    .Distinct()
                                    .ToArray();
         var currencyCodeById = lineCurrencyIds.Length == 0
@@ -143,12 +169,34 @@ public sealed class PricingEngine : IPricingEngine
                     AddRecentQuoteCandidate(candidates, aqRows, targetCurrency, lineQty, now);
             }
 
+            decimal? floor = null;
+            string? floorCurrency = null;
+            string? floorBasis = null;
+            if (floorByRfqItem.TryGetValue(item.Id, out var decision))
+            {
+                floor = decision.SupplierLandedUnitCost;
+                // The floor's currency is the AWARD's currency, not the RFQ line's. When the code
+                // cannot be named the floor is still published — dropping it would fail OPEN — and
+                // the guard refuses the comparison instead (BelowFloorGuard, fail-closed branch).
+                floorCurrency = currencyCodeById.TryGetValue(decision.CurrencyId, out var fc)
+                    && !string.IsNullOrWhiteSpace(fc) ? fc.Trim() : null;
+                floorBasis = floorCurrency is null
+                    ? $"Awarded supplier landed unit cost {Fmt(floor.Value)} from sourcing decision " +
+                      $"{decision.Id} ({FmtMonth(decision.CreatedOn)}); its currency could not be identified, " +
+                      "so no price can be checked against it until an approved exchange rate exists."
+                    : $"Cost floor {Fmt(floor.Value)} {floorCurrency} — the awarded supplier's landed " +
+                      $"unit cost from sourcing decision {decision.Id} ({FmtMonth(decision.CreatedOn)}).";
+            }
+
             preview.Lines.Add(BuildLine(
                 item.Id,
                 item.Description ?? $"Line {item.Id}",
                 lineQty,
                 targetCurrency,
-                candidates));
+                candidates,
+                floor,
+                floorCurrency,
+                floorBasis));
         }
 
         var totals = preview.Lines.Where(x => !string.IsNullOrWhiteSpace(x.Currency) && x.RecommendedUnitPrice > 0)
@@ -210,19 +258,32 @@ public sealed class PricingEngine : IPricingEngine
     // ------------------------------------------------------------------ blending
 
     private static PriceLine BuildLine(long rfqItemId, string description, decimal quantity,
-        string? currency, List<Candidate> candidates)
+        string? currency, List<Candidate> candidates,
+        decimal? floor, string? floorCurrency, string? floorBasis)
     {
         var line = new PriceLine
         {
             RfqItemId = rfqItemId,
             Description = description,
             Quantity = quantity,
-            Currency = currency
+            Currency = currency,
+            // The floor is set BEFORE every early return below, deliberately. It comes from the
+            // award, not from the sell-side blend, so a line with an awarded cost and no accepted
+            // quote history still has a floor — and that is precisely the first-time item the send
+            // gate used to wave through with nothing to compare against.
+            FloorUnitPrice = floor,
+            FloorCurrency = floorCurrency,
+            FloorBasis = floorBasis
         };
+
+        // The floor is stated on EVERY line, present or absent. A silent omission is the blank
+        // that reads like a loading state; "no cost floor is established" is the visible gap.
+        var floorSentence = floorBasis ?? NoFloorEstablished;
 
         if (candidates.Count == 0)
         {
-            line.Rationale = "No governed pricing evidence is available for this line; review it in the Customer Quote workflow.";
+            line.Rationale = "No governed pricing evidence is available for this line; review it in the " +
+                             "Customer Quote workflow. " + floorSentence;
             line.Confidence = 0m;
             line.NeedsAttention = true;
             return line;
@@ -234,6 +295,8 @@ public sealed class PricingEngine : IPricingEngine
         candidates = candidates.Where(c => CurrencyOk(c.CurrencyCode, currency)).ToList();
         if (candidates.Count == 0)
         {
+            line.Rationale = "The only pricing evidence for this line is in another currency, so none of " +
+                             "it was used. " + floorSentence;
             line.Confidence = 0m;
             line.NeedsAttention = true;
             return line;
@@ -245,8 +308,12 @@ public sealed class PricingEngine : IPricingEngine
         var totalWeight = ordered.Sum(c => c.Weight);
         var recommended = Round4(ordered.Aggregate(0m, (acc, c) => acc + c.Price * (decimal)(c.Weight / totalWeight)));
 
-        decimal? floor = null;
-        decimal? marginPct = null;
+        // Margin is only meaningful when both sides are the same money. This advisory does not
+        // convert (see the CURRENCY note at the top of the file); the send gate does, because that
+        // is where refusing costs nothing and guessing costs a deal.
+        decimal? marginPct = floor is > 0m && recommended > 0m && CurrencyOk(floorCurrency, currency)
+            ? Math.Round((recommended - floor.Value) / recommended * 100m, 2, MidpointRounding.AwayFromZero)
+            : null;
 
         // Confidence: dominant effective weight (already priority × recency × qty),
         // plus a small bonus per corroborating signal, plus an agreement bonus when the
@@ -257,11 +324,10 @@ public sealed class PricingEngine : IPricingEngine
         var confidence = Math.Clamp(dominant.Weight + 0.05 * (ordered.Count - 1) + agreement, 0.05, 0.98);
 
         line.RecommendedUnitPrice = recommended;
-        line.FloorUnitPrice = floor;
         line.MarginPct = marginPct;
         line.Confidence = Math.Round((decimal)confidence, 2, MidpointRounding.AwayFromZero);
         line.NeedsAttention = line.Confidence < 0.5m;
-        line.Rationale = BuildRationale(dominant, ordered.Count);
+        line.Rationale = BuildRationale(dominant, ordered.Count, floorSentence);
         line.Signals = ordered.Select(c => new PriceSignal
         {
             Source = c.Source,
@@ -273,11 +339,20 @@ public sealed class PricingEngine : IPricingEngine
         return line;
     }
 
-    private static string BuildRationale(Candidate dominant, int signalCount)
+    /// <summary>
+    /// Said in full whenever a line has no awarded sourcing decision. The absence is stated in
+    /// words on purpose: a blank floor reads as "not loaded yet", and a zero would read as
+    /// "any price is acceptable".
+    /// </summary>
+    private const string NoFloorEstablished =
+        "No cost floor is established for this line: no supplier award has been recorded against it, " +
+        "so there is nothing to check a price against.";
+
+    private static string BuildRationale(Candidate dominant, int signalCount, string floorSentence)
     {
         var corroboration = signalCount > 1 ? $", corroborated by {signalCount - 1} other signal(s)" : "";
         return $"Based on your last accepted quote for this product ({FmtMonth(dominant.Date)})" +
-            corroboration + " (shadow advice; no authoritative cost floor).";
+            corroboration + " (shadow advice). " + floorSentence;
     }
 
     // ------------------------------------------------------------------ helpers

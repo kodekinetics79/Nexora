@@ -10,6 +10,16 @@ using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.SupplierQuotes;
 
+/// <summary>
+/// An uploaded Supplier Quote document, plus the header facts the document itself cannot be
+/// trusted to yield.
+///
+/// <para>The charge fields are on this command because they were not: intake passed literal zeros
+/// for freight and tax, and had no field for duty, other or discount at all. A document-ingested
+/// supplier quote therefore could not carry freight under any circumstances — landed cost equalled
+/// unit price on the platform's headline ingestion path, and every price derived from it was short
+/// by <c>freight / (1 - margin)</c>.</para>
+/// </summary>
 public sealed record SupplierQuoteDocumentIntakeCommand(
     long BusinessUnitId,
     long SupplierId,
@@ -25,7 +35,12 @@ public sealed record SupplierQuoteDocumentIntakeCommand(
     string? Notes,
     string IdempotencyKey,
     string Actor,
-    string CorrelationId);
+    string CorrelationId,
+    decimal FreightAmount = 0m,
+    decimal TaxAmount = 0m,
+    decimal DutyAmount = 0m,
+    decimal OtherAmount = 0m,
+    decimal DiscountAmount = 0m);
 
 public sealed record SupplierQuoteDocumentIntakeResult(
     long SourceDocumentId,
@@ -64,6 +79,13 @@ public sealed class SupplierQuoteDocumentIntakeService(
             throw new SupplierQuoteValidationException("The Supplier Quote file type is not supported.");
         if (declaredLength is <= 0 or > MaxBytes)
             throw new SupplierQuoteValidationException("Supplier Quote files must be between 1 byte and 25 MB.");
+        // Checked here as well as in CaptureAsync, because a PDF or image upload never reaches
+        // CaptureAsync — it stops at classification — and a negative charge accepted silently on
+        // that path would surface later as a corrupted revision nobody could explain.
+        if (command.FreightAmount < 0 || command.TaxAmount < 0 || command.DutyAmount < 0 ||
+            command.OtherAmount < 0 || command.DiscountAmount < 0)
+            throw new SupplierQuoteValidationException(
+                "Freight, tax, duty, other charges, and discount cannot be negative.");
 
         await using var buffer = new MemoryStream();
         await content.CopyToAsync(buffer, cancellationToken);
@@ -110,7 +132,9 @@ public sealed class SupplierQuoteDocumentIntakeService(
                 command.SourcingCaseId, command.NexoraSerial, command.SupplierQuoteReference,
                 command.RevisionNumber, SupplierQuoteCaptureChannels.Upload, sourceDocumentId,
                 $"source-document:{sourceDocumentId}", ingested.ContentHash, command.CurrencyId,
-                command.ValidUntil, command.Incoterms, 0, 0, command.PaymentTerms, command.Notes,
+                command.ValidUntil, command.Incoterms, command.FreightAmount, command.TaxAmount,
+                command.DutyAmount, command.OtherAmount, command.DiscountAmount,
+                command.PaymentTerms, command.Notes,
                 lines, [], command.IdempotencyKey, command.Actor, command.CorrelationId), cancellationToken);
             classified = await classification.LinkSupplierQuoteAsync(command.BusinessUnitId,
                 classified.Id, classified.Version, projected.SupplierQuoteId, cancellationToken);

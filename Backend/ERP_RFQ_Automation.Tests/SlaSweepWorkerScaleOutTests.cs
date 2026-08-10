@@ -268,6 +268,33 @@ public sealed class SlaSweepWorkerScaleOutTests
     }
 
     [Fact]
+    public async Task The_manager_copy_of_an_overdue_alert_is_claimed_and_not_re_sent()
+    {
+        // The manager copy of the overdue-deadline alert had NO claim at all and its result was
+        // discarded, so every 5-minute sweep mailed the manager again for as long as the lead
+        // stayed overdue. It is the same (lead, level) alert addressed to a different person,
+        // which the recipient-scoped dedup key expresses directly.
+        using var host = new WorkerHost();
+        await host.SeedOverdueLeadWithManagerAsync();
+
+        var worker = host.CreateSlaWorker();
+        await worker.SweepOnceAsync(default);
+        await worker.SweepOnceAsync(default);
+
+        Assert.Equal(2, host.Notifications.Sent.Count);
+        Assert.Single(host.Notifications.Sent, s => s.ToEmail == "owner1@tenant1.test");
+        Assert.Single(host.Notifications.Sent, s => s.ToEmail == "manager1@tenant1.test");
+
+        using var verify = host.UnscopedContext();
+        var events = await verify.Set<SlaEvent>().IgnoreQueryFilters().ToListAsync();
+        Assert.Equal(2, events.Count);
+        Assert.All(events, e => Assert.Equal(SlaEventStatuses.Sent, e.Status));
+        Assert.Equal(
+            new[] { "manager1@tenant1.test", "owner1@tenant1.test" },
+            events.Select(e => e.Recipient).OrderBy(x => x).ToArray());
+    }
+
+    [Fact]
     public async Task Two_instances_sweeping_the_same_tenants_send_each_alert_once()
     {
         // The defect verbatim: two SlaSweepWorker instances against the same database.
@@ -334,20 +361,20 @@ public sealed class SlaSweepWorkerScaleOutTests
         private readonly object _gate = new();
         public List<SentAlert> Sent { get; } = new();
 
-        public Task<bool> SendDeadlineAlertAsync(
+        public Task<SlaSendResult> SendDeadlineAlertAsync(
             string toEmail, string? toName, string level, string entityLabel,
             string headline, string detail, long businessUnitId, CancellationToken ct = default)
         {
             lock (_gate) Sent.Add(new SentAlert(toEmail, level, businessUnitId));
-            return Task.FromResult(true);
+            return Task.FromResult(new SlaSendResult(SlaSendOutcome.Sent, "test-transport", "accepted"));
         }
 
-        public Task<bool> SendStaleQuotesDigestAsync(
+        public Task<SlaSendResult> SendStaleQuotesDigestAsync(
             string toEmail, string? toName, IReadOnlyList<StaleQuoteDigestLine> lines,
             long businessUnitId, CancellationToken ct = default)
         {
             lock (_gate) Sent.Add(new SentAlert(toEmail, "stale", businessUnitId));
-            return Task.FromResult(true);
+            return Task.FromResult(new SlaSendResult(SlaSendOutcome.Sent, "test-transport", "accepted"));
         }
     }
 
@@ -445,7 +472,29 @@ public sealed class SlaSweepWorkerScaleOutTests
             await seed.SaveChangesAsync();
         }
 
-        private static void AddUser(ErpRfqAutomationContext ctx, long id, long buid, string email)
+        /// <summary>One overdue lead whose assignee HAS a manager, so both the assignee copy
+        /// and the manager copy of the alert are produced.</summary>
+        public async Task SeedOverdueLeadWithManagerAsync()
+        {
+            await using var seed = UnscopedContext();
+
+            Seed.EnsureBusinessUnit(seed, Bu1);
+            await seed.SaveChangesAsync();
+
+            AddUser(seed, id: 33, buid: Bu1, email: "manager1@tenant1.test");
+            AddUser(seed, id: 11, buid: Bu1, email: "owner1@tenant1.test", managerId: 33);
+            await seed.SaveChangesAsync();
+
+            Seed.Lead(seed, leadId: 101, businessUnitId: Bu1).BidClosingDate = DateTime.UtcNow.AddDays(-2);
+            await seed.SaveChangesAsync();
+
+            var lead = await seed.Leads.IgnoreQueryFilters().SingleAsync(l => l.Id == 101);
+            lead.AssignTo = 11;
+            await seed.SaveChangesAsync();
+        }
+
+        private static void AddUser(
+            ErpRfqAutomationContext ctx, long id, long buid, string email, long? managerId = null)
             => ctx.Users.Add(new User
             {
                 Id = id,
@@ -455,6 +504,7 @@ public sealed class SlaSweepWorkerScaleOutTests
                 PasswordHash = "x",
                 ImageUrl = "n/a",
                 Buid = buid,
+                ManagerId = managerId,
                 IsActive = true,
                 CreatedBy = "seed",
                 CreatedOn = DateTime.UtcNow

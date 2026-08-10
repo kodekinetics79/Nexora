@@ -204,7 +204,14 @@ public static class TenantBaselineCatalog
                 // write off a receivable.
                 Read("Accounts Receivable"),
                 Read("Customer Statements"),
-                Read("Collection Controls")
+                Read("Collection Controls"),
+
+                // Sec-D4: quotes convert at an approved FX rate, so this desk has to be able to
+                // SEE which rate its numbers came from. It cannot raise one and cannot approve
+                // one — "Exchange Rate Approval" is absent here on purpose, for the same reason
+                // the finance desk below has no reconciliation-approval authority.
+                Read("Currencies"),
+                Read("Exchange Rates")
             ]),
 
         new("SALES_REP", "Sales Representative",
@@ -235,7 +242,12 @@ public static class TenantBaselineCatalog
                 Read("Suppliers"),
                 Read("Supplier History"),
                 Read("Products"),
-                Read("Product Categories")
+                Read("Product Categories"),
+
+                // The currency picker on a quote is a read of this module. Without it the quote
+                // screen renders an empty dropdown rather than a denial, which is worse.
+                Read("Currencies"),
+                Read("Exchange Rates")
             ]),
 
         new("PROCUREMENT_OFFICER", "Procurement Officer",
@@ -262,7 +274,13 @@ public static class TenantBaselineCatalog
                 // without also granting sales-order write. That is a limitation of the module
                 // list, not a decision taken here — a procurement officer who cannot issue a
                 // purchase order has no job.
-                Work("Orders")
+                Work("Orders"),
+
+                // Supplier quotes arrive in the supplier's currency and are compared in the
+                // tenant's, so this desk reads the rate that made the comparison. Raising and
+                // approving rates both stay with finance.
+                Read("Currencies"),
+                Read("Exchange Rates")
             ]),
 
         new("FINANCE_OFFICER", "Finance Officer",
@@ -305,7 +323,16 @@ public static class TenantBaselineCatalog
                 // make the preparer and the approver different people, and a starter role that
                 // held them would collapse that distinction on day one.
                 Read("General Ledger"),
-                Read("Accounting Periods")
+                Read("Accounting Periods"),
+
+                // Sec-D4: finance maintains the currency list and RAISES exchange rates. It does
+                // not approve them. "Exchange Rate Approval" is withheld exactly as Bank
+                // Reconciliation Approval is above — an approved rate re-bases every quote, the
+                // below-floor pricing guard and the AI spend cap, and a starter role that could
+                // both raise and approve one would make the maker-checker rule in
+                // CurrencyController true only on paper.
+                Work("Currencies"),
+                ReadAdd("Exchange Rates")
             ])
     ];
 }

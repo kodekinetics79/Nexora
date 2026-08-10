@@ -275,6 +275,7 @@ public sealed class ProcurementDispatchWorker : BackgroundService
         var strategy = db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            db.ChangeTracker.Clear();
             await using var tx = await db.Database.BeginTransactionAsync(
                 db.Database.IsNpgsql() ? IsolationLevel.ReadCommitted : IsolationLevel.Serializable, ct);
             var now = await DatabaseUtcNowAsync(db, ct);
@@ -387,6 +388,13 @@ public sealed class ProcurementDispatchWorker : BackgroundService
         var strategy = db.Database.CreateExecutionStrategy();
         await strategy.ExecuteAsync(async () =>
         {
+            // EnableRetryOnFailure re-runs this delegate on the SAME DbContext. Without the
+            // clear, a 40001 from SaveChangesAsync below would leave the message tracked with
+            // Status already flipped to Sent, the re-query would hand that tracked instance
+            // back, and the ownership guard would throw — leaving the outbox row PROCESSING to
+            // be fenced as DELIVERY_UNCERTAIN and inviting a human to re-send an RFQ the
+            // supplier already has. Everything this delegate touches is re-read below.
+            db.ChangeTracker.Clear();
             await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
             var message = await db.ProcurementOutboxMessages.SingleAsync(x => x.Id == claim.MessageId, ct);
             var now = await DatabaseUtcNowAsync(db, ct);

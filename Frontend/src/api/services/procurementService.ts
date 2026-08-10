@@ -73,6 +73,8 @@ export interface SupplierOffer {
   blockingReasons: string[];
   awarded: boolean;
   version: number;
+  costWarnings?: string[] | null;
+  incoterm?: string | null;
 }
 
 export interface QuoteComparisonLine {
@@ -88,6 +90,10 @@ export interface QuoteComparisonLine {
   validUntil?: string | null;
   blockers: string[];
   eligible: boolean;
+  // Non-blocking: the offer can be awarded, but its landed cost looks incomplete — an EXW or FOB
+  // quote recording no import duty, for instance. Kept apart from blockers so a warning can never
+  // be mistaken for a refusal, or a refusal softened into a warning.
+  costWarnings?: string[] | null;
 }
 
 export interface QuoteComparisonResult {
@@ -123,6 +129,33 @@ export interface PurchaseOrderLine {
   unitCost: number;
   landedUnitCost: number;
   warehouseId: number;
+  /** FR-SPO-06. Customs data. A KSA import cannot be cleared without both. */
+  hsCode?: string | null;
+  /** Seeded from the product master when the order is raised; correctable until dispatch. */
+  countryOfOrigin?: string | null;
+  /**
+   * What the lot recorder will demand when this line is received: "SERIAL" needs one serial per
+   * received unit, "LOT" needs the supplier's batch number, "UNTRACKED" needs nothing. Computed
+   * server-side from the product's tracking switches so the screen and the guard cannot disagree.
+   */
+  trackingMode: MaterialTrackingMode;
+}
+
+export type MaterialTrackingMode = "SERIAL" | "LOT" | "UNTRACKED";
+
+/**
+ * The traceability declaration a goods receipt carries per line. Dates are calendar dates
+ * (YYYY-MM-DD) because the server binds them to DateOnly — an ISO instant is rejected.
+ */
+export interface ReceiptLotDeclaration {
+  lotNumber?: string | null;
+  serialNumbers?: string[] | null;
+  countryOfOrigin?: string | null;
+  manufacturerName?: string | null;
+  manufacturerPartNumber?: string | null;
+  supplierBatchReference?: string | null;
+  manufactureDate?: string | null;
+  expiryDate?: string | null;
 }
 
 export interface SupplierPurchaseOrder {
@@ -133,11 +166,111 @@ export interface SupplierPurchaseOrder {
   supplierName: string;
   currencyId: number;
   currencyCode: string;
-  status: "DRAFT" | "ISSUED" | "PARTIALLY_RECEIVED" | "RECEIVED" | "CANCELLED";
+  /**
+   * FR-SPO-04. APPROVED sits between DRAFT and release. ISSUED is retained because rows raised
+   * before the approval gate existed still carry it.
+   */
+  status:
+    | "DRAFT"
+    | "APPROVED"
+    | "SENT"
+    | "ACKNOWLEDGED"
+    | "IN_PRODUCTION"
+    | "SHIPPED"
+    | "ISSUED"
+    | "PARTIALLY_RECEIVED"
+    | "RECEIVED"
+    | "CLOSED"
+    | "CANCELLED";
   totalValue: number;
   expectedOn?: string | null;
   version: number;
   lines: PurchaseOrderLine[];
+  /** FR-SPO-01. Null on orders raised before approval existed — genuinely unapproved, not missing. */
+  approvedBy?: string | null;
+  approvedOn?: string | null;
+  /**
+   * FR-SPO-03. The supplier's answer. Null means unanswered — which for a dispatched order is the
+   * state the escalation sweep is chasing, not a blank to be ignored.
+   *
+   * Only ACCEPTED moves `status` to ACKNOWLEDGED. A COUNTERED or REJECTED order keeps the status it
+   * had, so these fields are the ONLY signal that the supplier has said something the buyer must
+   * act on.
+   */
+  acknowledgementStatus?: SupplierAcknowledgementStatus | null;
+  acknowledgedBy?: string | null;
+  acknowledgedOn?: string | null;
+  revisedLeadTimeDays?: number | null;
+  committedShipDate?: string | null;
+  acknowledgementNote?: string | null;
+  /** FR-SPO-06. Incoterms 2020 code. */
+  incoterm?: string | null;
+  portOfLoading?: string | null;
+  portOfDischarge?: string | null;
+}
+
+/**
+ * FR-SPO-03. The supplier's answer to a dispatched order.
+ *
+ * COUNTERED is "accepted on different terms" — normally a revised lead time. It and REJECTED are
+ * answers but not agreement, so neither moves the order to ACKNOWLEDGED.
+ */
+export type SupplierAcknowledgementStatus =
+  | "ACCEPTED"
+  | "REJECTED"
+  | "COUNTERED";
+
+export interface SupplierPurchaseOrderAcknowledgementResult {
+  id: number;
+  number: string;
+  /** ACKNOWLEDGED only for ACCEPTED; a counter or a rejection leaves the status where it was. */
+  status: SupplierPurchaseOrder["status"];
+  acknowledgementStatus: SupplierAcknowledgementStatus;
+  /** The supplier's own person, not the Nexora user who recorded the answer. */
+  acknowledgedBy: string;
+  acknowledgedOn: string;
+  revisedLeadTimeDays?: number | null;
+  committedShipDate?: string | null;
+  note?: string | null;
+  version: number;
+  replayed: boolean;
+}
+
+/**
+ * FR-SPO-06. Incoterms 2020, the closed set the server validates against. Anything else is refused
+ * — free text here is a contractual allocation of freight and risk that no system can interpret.
+ */
+export const INCOTERMS_2020 = [
+  "EXW",
+  "FCA",
+  "FAS",
+  "FOB",
+  "CFR",
+  "CIF",
+  "CPT",
+  "CIP",
+  "DAP",
+  "DPU",
+  "DDP",
+] as const;
+
+export type Incoterm = (typeof INCOTERMS_2020)[number];
+
+export interface PurchaseOrderLineTradeTerms {
+  lineId: number;
+  hsCode?: string | null;
+  countryOfOrigin?: string | null;
+}
+
+export interface PurchaseOrderTradeTermsResult {
+  id: number;
+  number: string;
+  incoterm?: string | null;
+  portOfLoading?: string | null;
+  portOfDischarge?: string | null;
+  lines: PurchaseOrderLineTradeTerms[];
+  version: number;
+  replayed: boolean;
 }
 
 export interface SupplierPurchaseOrderSummary {
@@ -528,6 +661,10 @@ const procurementService = {
       warehouseId: number;
       expectedOn: string;
       idempotencyKey: string;
+      /** FR-SPO-06. Optional at creation; correctable until the order is dispatched. */
+      incoterm?: Incoterm | null;
+      portOfLoading?: string | null;
+      portOfDischarge?: string | null;
     },
   ): Promise<CreatePurchaseOrderResult> => {
     const { idempotencyKey, ...body } = request;
@@ -538,6 +675,35 @@ const procurementService = {
         {
           headers: commandHeaders(idempotencyKey),
         },
+      ),
+    );
+  },
+
+  /**
+   * FR-SPO-01. Approves a drafted supplier purchase order for release.
+   *
+   * The approver is never sent in the body — the server takes it from the authenticated
+   * principal, because a client that could name its own approver could name the award approver
+   * and satisfy the segregation-of-duties check by assertion.
+   */
+  approvePurchaseOrder: async (
+    purchaseOrderId: number,
+    request: { expectedVersion: number; idempotencyKey: string },
+  ): Promise<{
+    id: number;
+    number: string;
+    status: string;
+    approvedBy: string;
+    approvedOn: string;
+    version: number;
+    segregationOfDutiesEnforced: boolean;
+  }> => {
+    const { idempotencyKey, ...body } = request;
+    return unwrap(
+      await axiosInstance.post(
+        `/api/procurement/purchase-orders/${purchaseOrderId}/approve`,
+        body,
+        { headers: commandHeaders(idempotencyKey) },
       ),
     );
   },
@@ -562,6 +728,70 @@ const procurementService = {
     );
   },
 
+  /**
+   * FR-SPO-06. Sets or corrects Incoterm, ports and per-line customs data before dispatch.
+   *
+   * OMITTING a field leaves it unchanged; it does NOT clear it. Callers must send only what they
+   * are actually changing — passing `null` or an empty string for a field the buyer did not touch
+   * is indistinguishable from leaving it out, so nothing here can be used to blank a value. The
+   * server refuses an amendment after the order has gone to the supplier.
+   */
+  amendPurchaseOrderTradeTerms: async (
+    purchaseOrderId: number,
+    request: {
+      expectedVersion: number;
+      incoterm?: Incoterm | null;
+      portOfLoading?: string | null;
+      portOfDischarge?: string | null;
+      lines?: PurchaseOrderLineTradeTerms[];
+      idempotencyKey: string;
+    },
+  ): Promise<PurchaseOrderTradeTermsResult> => {
+    const { idempotencyKey, ...body } = request;
+    return unwrap(
+      await axiosInstance.post<PurchaseOrderTradeTermsResult>(
+        `/api/procurement/purchase-orders/${purchaseOrderId}/trade-terms`,
+        body,
+        { headers: commandHeaders(idempotencyKey) },
+      ),
+    );
+  },
+
+  /**
+   * FR-SPO-03. Records what the supplier said about a dispatched order.
+   *
+   * `acknowledgedBy` is the SUPPLIER's person and is sent in the body; the Nexora user who keyed
+   * it in is taken by the server from the authenticated principal. Nexora has no supplier portal,
+   * so these are always two different people and the audit trail keeps them apart.
+   *
+   * Nothing is validated here that the server does not validate itself — a counter needs a revised
+   * lead time or a committed ship date, a rejection needs a note and cannot carry a ship date, a
+   * revised lead time is COUNTERED-only and must be positive, and a committed ship date must not be
+   * in the past. The caller surfaces the server's own refusal rather than paraphrasing it.
+   */
+  acknowledgePurchaseOrder: async (
+    purchaseOrderId: number,
+    request: {
+      expectedVersion: number;
+      acknowledgementStatus: SupplierAcknowledgementStatus;
+      acknowledgedBy: string;
+      revisedLeadTimeDays?: number | null;
+      /** Calendar date, `YYYY-MM-DD`. The server holds this as a date, not an instant. */
+      committedShipDate?: string | null;
+      note?: string | null;
+      idempotencyKey: string;
+    },
+  ): Promise<SupplierPurchaseOrderAcknowledgementResult> => {
+    const { idempotencyKey, ...body } = request;
+    return unwrap(
+      await axiosInstance.post<SupplierPurchaseOrderAcknowledgementResult>(
+        `/api/procurement/purchase-orders/${purchaseOrderId}/acknowledge`,
+        body,
+        { headers: commandHeaders(idempotencyKey) },
+      ),
+    );
+  },
+
   postReceipt: async (
     purchaseOrderId: number,
     request: {
@@ -570,7 +800,16 @@ const procurementService = {
       receiptNumber: string;
       expectedPurchaseOrderVersion: number;
       idempotencyKey: string;
-      lines: Array<{ purchaseOrderLineId: number; quantity: number }>;
+      lines: Array<{
+        purchaseOrderLineId: number;
+        quantity: number;
+        /**
+         * Required for a batch- or serial-tracked line; the server refuses the receipt without it
+         * and the refusal names the missing field. Omitted entirely for an untracked line, which
+         * gets a receipt-derived lot number.
+         */
+        lot?: ReceiptLotDeclaration;
+      }>;
     },
   ) => {
     const { idempotencyKey, ...body } = request;

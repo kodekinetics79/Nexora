@@ -16,15 +16,11 @@ public sealed class InventoryIntelligenceController(
     ErpRfqAutomationContext db,
     ICommercialLineResolutionApplicationService lineResolution,
     IInventoryAvailabilityService inventoryAvailability,
-    IOrderStockReservationService orderStock) : ControllerBase
+    IOrderStockReservationService orderStock,
+    IStockLedgerService ledger,
+    IReorderAlertService reorderAlerts) : ControllerBase
 {
-    /// <summary>
-    /// The stock ledger is constructed here rather than injected because Program.cs is owned by a
-    /// concurrent workstream during this change; it depends on nothing but the DbContext, so this
-    /// is behaviourally identical to a scoped DI registration. See the module report for the
-    /// one-line registration that should replace this.
-    /// </summary>
-    private readonly IStockLedgerService _ledger = new StockLedgerService(db);
+    private readonly IStockLedgerService _ledger = ledger;
 
     /// <summary>The largest number of rows any list endpoint will return in one response.</summary>
     private const int MaxRows = 500;
@@ -133,9 +129,12 @@ public sealed class InventoryIntelligenceController(
     public async Task<ActionResult> Availability([FromQuery] string? search, [FromQuery] long? warehouseId, CancellationToken ct)
         // Bounded: this used to materialise every inventory row in the tenant and render all of
         // them. Narrow with search/warehouseId rather than scrolling.
-        => Ok((await AvailabilityRows(search, warehouseId, ct)).Take(MaxRows).Select(x => new { x.ProductId, x.PartNumber, x.ProductName,
+        => Ok((await AvailabilityRows(search, warehouseId, ct)).Take(MaxRows).Select(x => new { x.InventoryId, x.ProductId, x.PartNumber, x.ProductName,
             x.WarehouseId, x.WarehouseName, x.OnHand, x.Reserved, x.Available, x.Incoming,
-            reorderPoint = (decimal?)x.ReorderPoint, x.LeadTimeDays }));
+            reorderPoint = (decimal?)x.ReorderPoint,
+            // FR-INV-04. Nullable all the way to the client: null is "not configured", and the
+            // screen renders it as such rather than as a blank cell that reads like zero.
+            x.MinimumLevel, x.MaximumLevel, x.SafetyStock, x.LeadTimeDays }));
 
     /// <summary>
     /// Records a counted physical quantity for a product in a warehouse, creating the inventory
@@ -167,6 +166,135 @@ public sealed class InventoryIntelligenceController(
     public Task<ActionResult> SetSafetyStock(SafetyStockRequest request, CancellationToken ct)
         => LedgerAction(() => _ledger.SetSafetyStockAsync(TenantId(), request.ProductId, request.WarehouseId,
             request.SafetyStock, Actor(), ct));
+
+    /// <summary>
+    /// FR-INV-04. Sets the minimum and maximum stock levels for one item in one warehouse.
+    ///
+    /// <para>Both are nullable and null is a value the caller can send: it clears the level and
+    /// leaves the item unmonitored for that side. There is no partial update — a request states
+    /// both levels, because a payload that silently kept a stale maximum would be
+    /// indistinguishable on screen from one that cleared it.</para>
+    /// </summary>
+    [HttpPost("stock/levels")]
+    [RequireModulePermission("Products", PermissionAction.Edit)]
+    public Task<ActionResult> SetStockLevels(StockLevelsRequest request, CancellationToken ct)
+        => LedgerAction(() => _ledger.SetStockLevelsAsync(TenantId(), request.ProductId,
+            request.WarehouseId, request.MinimumLevel, request.MaximumLevel, Actor(), ct));
+
+    /// <summary>
+    /// FR-INV-04. Every stock row's live position against the levels configured for it — including
+    /// the rows with no level set at all, which are reported as UNMONITORED rather than as healthy.
+    ///
+    /// <para>This is the same computation the sweep raises alerts from, served by the same function,
+    /// so the screen and the alert can never disagree about what is short.</para>
+    /// </summary>
+    [HttpGet("stock/levels")]
+    [RequireModulePermission("Products", PermissionAction.View)]
+    public async Task<ActionResult> StockLevels([FromQuery] bool breachedOnly = false, CancellationToken ct = default)
+    {
+        var rows = await reorderAlerts.EvaluateAsync(TenantId(), ct);
+        var filtered = rows.Where(x => !breachedOnly || x.Kind is not null).ToArray();
+        return Ok(new
+        {
+            generatedAt = DateTime.UtcNow,
+            rowCount = rows.Count,
+            configuredCount = rows.Count(x => x.IsConfigured),
+            breachedCount = rows.Count(x => x.Kind is not null),
+            // Named rather than implied. A tenant that has configured nothing gets no alerts, and
+            // the honest description of that state is "nothing is being watched", not "all healthy".
+            unmonitoredCount = rows.Count(x => !x.IsConfigured),
+            rows = filtered
+                .OrderBy(x => x.Kind is null ? 1 : 0).ThenBy(x => x.PartNumber)
+                .Take(MaxRows)
+                .Select(x => new
+                {
+                    x.InventoryId, x.ProductId, x.PartNumber, x.ProductName,
+                    x.WarehouseId, x.WarehouseName,
+                    x.OnHand, x.Available, x.Incoming, projected = x.Projected,
+                    x.MinimumLevel, x.MaximumLevel, x.ReorderPoint,
+                    breach = x.Kind, x.ThresholdQuantity, x.ShortfallQuantity,
+                    monitored = x.IsConfigured,
+                }),
+        });
+    }
+
+    /// <summary>
+    /// FR-INV-04. The reorder alert ledger. Open and acknowledged alerts by default, because a
+    /// resolved alert is history and burying today's four alerts under a year of resolved ones is
+    /// how an exception screen stops being read.
+    /// </summary>
+    [HttpGet("reorder-alerts")]
+    [RequireModulePermission("Products", PermissionAction.View)]
+    public async Task<ActionResult> ReorderAlerts(
+        [FromQuery] string? status, [FromQuery] string? kind, CancellationToken ct = default)
+    {
+        if (status is not null && !ReorderAlertStatuses.IsKnown(status))
+            return BadRequest(new { error = "status must be OPEN, ACKNOWLEDGED or RESOLVED." });
+        if (kind is not null && !ReorderAlertKinds.IsKnown(kind))
+            return BadRequest(new
+            {
+                error = "kind must be one of " + string.Join(", ", ReorderAlertKinds.AllForQuery) + ".",
+            });
+
+        var tenant = TenantId();
+        // The status set is declared once on ReorderAlertStatuses and PROJECTED here for the query.
+        // Consulting the set object itself inside the predicate would bind to the interface's own
+        // Contains, which EF cannot translate and which throws only at runtime.
+        var wanted = status is null ? ReorderAlertStatuses.LiveForQuery : [status];
+
+        var rows = await (
+            from alert in db.Set<InventoryReorderAlert>().AsNoTracking()
+            join inventory in db.Set<Models.Inventory>().AsNoTracking() on alert.InventoryId equals inventory.Id
+            join product in db.Products.AsNoTracking() on alert.ProductId equals product.Id into products
+            from product in products.DefaultIfEmpty()
+            join warehouse in db.Set<Warehouse>().AsNoTracking() on alert.WarehouseId equals warehouse.Id into warehouses
+            from warehouse in warehouses.DefaultIfEmpty()
+            where alert.BusinessUnitId == tenant && inventory.Buid == tenant
+                  && wanted.Contains(alert.Status)
+                  && (kind == null || alert.Kind == kind)
+            orderby alert.Severity, alert.RaisedOn descending
+            select new
+            {
+                alert.Id, alert.InventoryId, alert.ProductId, alert.WarehouseId,
+                partNumber = product != null ? product.PartNo : inventory.PartNo,
+                productName = product != null ? product.ProductName : inventory.ProductName,
+                warehouseName = warehouse != null ? warehouse.WarehouseName : "Unassigned",
+                alert.Kind, alert.Status, alert.Severity,
+                alert.OnHandQuantity, alert.AvailableQuantity, alert.IncomingQuantity,
+                alert.ProjectedQuantity, alert.ThresholdQuantity, alert.ShortfallQuantity,
+                alert.RaisedOn, alert.NotifiedCount,
+                alert.AcknowledgedOn, alert.AcknowledgedBy, alert.AcknowledgementReason,
+                alert.ResolvedOn, alert.ResolutionReason, alert.Version,
+            }).Take(MaxRows).ToListAsync(ct);
+
+        return Ok(new { generatedAt = DateTime.UtcNow, alertCount = rows.Count, rows });
+    }
+
+    /// <summary>
+    /// FR-INV-04. Records that a named person has taken an alert, with their reason. The
+    /// acknowledgement does not silence the condition — the alert stays on the ledger and resolves
+    /// itself when the stock recovers — it records that somebody owns it.
+    /// </summary>
+    [HttpPost("reorder-alerts/{id:long}/acknowledge")]
+    [RequireModulePermission("Products", PermissionAction.Edit)]
+    public async Task<ActionResult> AcknowledgeReorderAlert(
+        long id, AcknowledgeAlertRequest request, CancellationToken ct)
+    {
+        try
+        {
+            var alert = await reorderAlerts.AcknowledgeAsync(TenantId(), id, request.ExpectedVersion,
+                Actor(), request.Reason, ct);
+            return Ok(new
+            {
+                alert.Id, alert.Status, alert.AcknowledgedOn, alert.AcknowledgedBy,
+                alert.AcknowledgementReason, alert.Version,
+            });
+        }
+        catch (KeyNotFoundException ex) { return NotFound(new { error = ex.Message }); }
+        catch (DbUpdateConcurrencyException) { return Conflict(new { error = "This alert was changed by somebody else. Reload and try again." }); }
+        catch (ReorderAlertException ex) { return Conflict(new { error = ex.Message }); }
+        catch (ArgumentException ex) { return BadRequest(new { error = ex.Message }); }
+    }
 
     /// <summary>Moves physical stock between two of the tenant's warehouses.</summary>
     [HttpPost("stock/transfer")]
@@ -266,8 +394,148 @@ public sealed class InventoryIntelligenceController(
                 productName = product != null ? product.ProductName : inventory.ProductName, warehouseName = warehouse != null ? warehouse.WarehouseName : "Unassigned",
                 reservation.Quantity, status = reservation.Status.ToString(), demandType = reservation.OrderId.HasValue ? "Order" : "Hold",
                 demandReference = reservation.OrderId.HasValue ? $"Order {reservation.OrderId}" : reservation.IdempotencyKey,
+                // FR-INV-01. What the hold physically NAMES. Null is a real and visible state —
+                // stock with no receipt behind it — and the screen must show it as an absent lot
+                // rather than as a blank column, because a hold nobody can trace is the thing a
+                // recall discovers too late.
+                reservation.MaterialLotId,
+                lotNumber = db.Set<ERP_RFQ_Automation.Traceability.MaterialLot>()
+                    .Where(l => l.BusinessUnitId == tenant && l.Id == reservation.MaterialLotId)
+                    .Select(l => l.LotNumber).FirstOrDefault(),
                 nexoraSerial = (string?)null, requiredAt = (DateTime?)null, version = reservation.Version };
         return Ok(await query.Take(250).ToListAsync(ct));
+    }
+
+    /// <summary>
+    /// FR-INV-01. The lots on one inventory row that a hold may still name, in the order the
+    /// warehouse should pick them (first-expired-first-out). This is the same list the order
+    /// allocator walks, served by the same function — a screen that showed a different pick order
+    /// from the one the allocator uses would be worse than no screen.
+    /// </summary>
+    [HttpGet("inventory/{inventoryId:long}/lots")]
+    [RequireModulePermission("Products", PermissionAction.View)]
+    public async Task<ActionResult> ReservableLots(long inventoryId, CancellationToken ct)
+    {
+        var tenant = TenantId();
+        var exists = await db.Set<Models.Inventory>().AsNoTracking()
+            .AnyAsync(x => x.Id == inventoryId && x.Buid == tenant, ct);
+        if (!exists) return NotFound(new { error = "Inventory row was not found in this business unit." });
+
+        var lots = await inventoryAvailability.GetReservableLotsAsync(tenant, inventoryId, ct);
+        var availability = await inventoryAvailability.GetAvailabilityAsync(tenant, inventoryId, ct);
+        var lotCovered = lots.Sum(x => x.Remaining);
+
+        return Ok(new
+        {
+            inventoryId,
+            availability.OnHand,
+            availability.Reserved,
+            availability.Available,
+            // The un-lotted balance is stated, never implied. Stock that entered by opening count,
+            // adjustment or transfer has no receipt behind it and therefore no lot, so a hold
+            // against it names nothing and a recall cannot reach it. Showing only the lots would
+            // read as full coverage.
+            lotControlledQuantity = lotCovered,
+            unlottedQuantity = Math.Max(0m, availability.OnHand - availability.Quarantine
+                - availability.Damaged - availability.Expired - lotCovered),
+            lots = lots.Select(x => new
+            {
+                x.MaterialLotId, x.LotNumber, x.Remaining, x.Held, x.Reservable, x.ExpiryDate, x.ReceivedOn
+            }),
+        });
+    }
+
+    /// <summary>
+    /// FR-INV-01. The recall population for one lot: the orders holding it now and the orders it
+    /// has already been issued to.
+    ///
+    /// <para>This is the question lot-level reservation exists to answer. Before it, a recall could
+    /// only ask "which orders hold this PRODUCT", which over-reaches on to customers whose material
+    /// came from a sound lot — and under-reaches the moment an order holds stock across two
+    /// warehouses.</para>
+    /// </summary>
+    [HttpGet("lots/{materialLotId:long}/commitments")]
+    [RequireModulePermission("Products", PermissionAction.View)]
+    public async Task<ActionResult> LotCommitments(long materialLotId, CancellationToken ct)
+    {
+        var tenant = TenantId();
+        var lot = await db.Set<ERP_RFQ_Automation.Traceability.MaterialLot>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == tenant && x.Id == materialLotId)
+            .Select(x => new { x.Id, x.LotNumber, x.Status, x.QuantityReceived, x.QuantityConsumed })
+            .SingleOrDefaultAsync(ct);
+        if (lot is null) return NotFound(new { error = "Material lot was not found in this business unit." });
+
+        var commitments = await inventoryAvailability.GetLotCommitmentsAsync(tenant, materialLotId, ct);
+        var orderIds = commitments.AffectedOrderIds;
+        var orderNumbers = orderIds.Count == 0
+            ? new Dictionary<long, string>()
+            : await db.Orders.AsNoTracking()
+                .Where(o => o.BusinessUnitId == tenant && orderIds.Contains(o.Id))
+                .ToDictionaryAsync(o => o.Id, o => o.OrderNo, ct);
+
+        return Ok(new
+        {
+            materialLotId, lot.LotNumber, lot.Status,
+            lot.QuantityReceived, lot.QuantityConsumed,
+            heldQuantity = commitments.HeldQuantity,
+            consumedQuantity = commitments.ConsumedQuantity,
+            affectedOrders = orderIds.Select(id => new { orderId = id, orderNo = orderNumbers.GetValueOrDefault(id) }),
+            held = commitments.Held.Select(Commitment),
+            consumed = commitments.Consumed.Select(Commitment),
+        });
+
+        object Commitment(LotCommitment x) => new
+        {
+            x.ReservationId, x.OrderId, x.OrderItemId, x.Quantity,
+            status = x.Status.ToString(), x.CreatedOn,
+        };
+    }
+
+    /// <summary>FR-INV-05. Counted versus book, per counted stock row.</summary>
+    [HttpGet("stock/count-variance")]
+    [RequireModulePermission("Products", PermissionAction.View)]
+    public async Task<ActionResult> CountVariance(
+        [FromQuery] DateTime? from, [FromQuery] DateTime? to, [FromQuery] bool varianceOnly = true,
+        CancellationToken ct = default)
+    {
+        var rows = await _ledger.GetCountVarianceAsync(TenantId(), from, to, varianceOnly, ct);
+        return Ok(new
+        {
+            countedRows = rows.Count,
+            netVariance = rows.Sum(x => x.Variance),
+            absoluteVariance = rows.Sum(x => Math.Abs(x.Variance)),
+            rows = rows.Take(MaxRows).Select(x => new
+            {
+                x.InventoryId, x.ProductId, x.PartNumber, x.ProductName, x.WarehouseId, x.WarehouseName,
+                x.BookQuantity, x.CountedQuantity, x.Variance, x.VariancePercent,
+                x.CountedOn, x.CountedBy, x.Reason,
+            }),
+        });
+    }
+
+    /// <summary>FR-INV-06. Slow-moving and obsolete stock, aged from the last physical issue.</summary>
+    [HttpGet("stock/ageing")]
+    [RequireModulePermission("Products", PermissionAction.View)]
+    public async Task<ActionResult> StockAgeing(
+        [FromQuery] long? warehouseId, [FromQuery] string? band, CancellationToken ct = default)
+    {
+        var rows = await _ledger.GetStockAgeingAsync(TenantId(), warehouseId, band, ct);
+        return Ok(new
+        {
+            rowCount = rows.Count,
+            carryingValue = rows.Sum(x => x.CarryingValue),
+            bands = rows.GroupBy(x => x.Band).OrderBy(g => g.Key).Select(g => new
+            {
+                band = g.Key, rowCount = g.Count(), units = g.Sum(x => x.OnHand),
+                carryingValue = g.Sum(x => x.CarryingValue),
+            }),
+            rows = rows.Take(MaxRows).Select(x => new
+            {
+                x.InventoryId, x.ProductId, x.PartNumber, x.ProductName, x.WarehouseId, x.WarehouseName,
+                x.OnHand, x.UnitCost, x.CarryingValue, x.LastReceiptOn, x.LastIssueOn,
+                x.DaysSinceLastIssue, x.DaysSinceLastReceipt, x.Band,
+            }),
+        });
     }
 
     [HttpPost("reservations/{id:long}/release")]
@@ -374,6 +642,7 @@ public sealed class InventoryIntelligenceController(
             {
                 InventoryId = stock.Id, stock.QtyOnHand, stock.AllocatedQuantity, stock.QuarantineQuantity,
                 stock.DamagedQuantity, stock.ExpiredQuantity, stock.SafetyStockQuantity, stock.ReorderPoint,
+                stock.MinimumLevel, stock.MaximumLevel,
                 ProductId = product.Id, product.PartNo, product.ProductName, product.LeadTime,
                 WarehouseId = warehouse.Id, warehouse.WarehouseName
             }).ToListAsync(ct);
@@ -396,7 +665,7 @@ public sealed class InventoryIntelligenceController(
             return new AvailabilityRow(x.InventoryId, x.ProductId, x.PartNo, x.ProductName ?? x.PartNo,
                 x.WarehouseId, x.WarehouseName, x.QtyOnHand, held, available,
                 incoming.Where(i => i.ProductId == x.ProductId && i.WarehouseId == x.WarehouseId).Sum(i => i.OpenQuantity),
-                x.ReorderPoint, x.LeadTime); }).ToList();
+                x.ReorderPoint, x.LeadTime, x.MinimumLevel, x.MaximumLevel, x.SafetyStockQuantity); }).ToList();
     }
 
     private long TenantId() => long.TryParse(User.FindFirst("businessUnitId")?.Value, out var id) && id > 0 ? id : throw new InvalidOperationException("Business Unit ID is required.");
@@ -425,6 +694,18 @@ public sealed record StockAdjustRequest(long ProductId, long WarehouseId, decima
 public sealed record StockReclassifyRequest(long ProductId, long WarehouseId, StockBucket Bucket, decimal Quantity, string? Reason);
 public sealed record SafetyStockRequest(long ProductId, long WarehouseId, decimal SafetyStock);
 public sealed record StockTransferRequest(long ProductId, long FromWarehouseId, long ToWarehouseId, decimal Quantity, string? Reason);
+
+/// <summary>
+/// FR-INV-04. Both levels are nullable and both are always stated: null clears the level and means
+/// "not configured", which is a different thing from zero and is rendered differently.
+/// </summary>
+public sealed record StockLevelsRequest(long ProductId, long WarehouseId, decimal? MinimumLevel, decimal? MaximumLevel);
+
+/// <summary>FR-INV-04. The reason is required — an acknowledgement with no reason is a mute button
+/// with nobody's name on it.</summary>
+public sealed record AcknowledgeAlertRequest(uint ExpectedVersion, string Reason);
+
 public sealed record AvailabilityRow(long InventoryId, long ProductId, string PartNumber, string ProductName,
     long WarehouseId, string WarehouseName, decimal OnHand, decimal Reserved, decimal Available,
-    decimal Incoming, decimal ReorderPoint, int? LeadTimeDays);
+    decimal Incoming, decimal ReorderPoint, int? LeadTimeDays,
+    decimal? MinimumLevel = null, decimal? MaximumLevel = null, decimal SafetyStock = 0m);

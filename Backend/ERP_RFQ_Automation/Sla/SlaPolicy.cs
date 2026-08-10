@@ -26,8 +26,26 @@ public sealed class SlaPolicy
     /// <summary>Days after sending with no customer response before a quote counts as stale.</summary>
     public int StaleQuoteDays { get; set; } = 7;
 
-    /// <summary>Days after coalesce(ValidUntil, SentOn) at which a SENT quote auto-expires.</summary>
-    public int QuoteAutoExpireDays { get; set; } = 14;
+    /// <summary>
+    /// FR-QTM-07 trigger 1 — GRACE days added to the quote's validity date before it
+    /// auto-expires. The default is 0: "mark a quotation Expired AFTER its validity
+    /// date" means the day the date passes, not a fortnight later. Kept configurable so
+    /// a tenant that wants a courtesy window can buy one deliberately.
+    ///
+    /// <para>Stored in the legacy <c>QuoteAutoExpireDays</c> column (see
+    /// <c>ConfigureSlaModel</c>) — the property was renamed because its meaning changed
+    /// from "days after coalesce(ValidUntil, SentOn)" to "days after ValidUntil"; the
+    /// column name is left alone so no rename migration is needed.</para>
+    /// </summary>
+    public int QuoteExpiryGraceDays { get; set; }
+
+    /// <summary>
+    /// FR-QTM-07 trigger 2 — days after SUBMISSION (<c>Quote.SentOn</c>) at which a quote
+    /// with NO recorded customer response (<c>Quote.RespondedOn</c> is null) auto-expires,
+    /// whatever its validity date says. This is the rule that catches quotes sent without
+    /// a ValidUntil at all, which trigger 1 can never see.
+    /// </summary>
+    public int QuoteNoResponseExpiryDays { get; set; } = 90;
 
     /// <summary>Hours a copilot approval may stay pending before managers are alerted.</summary>
     public int ApprovalEscalationHours { get; set; } = 4;
@@ -38,6 +56,42 @@ public sealed class SlaPolicy
     /// tune it once that ships. Not yet consumed by the sweep.
     /// </summary>
     public int DeadlineBufferHours { get; set; } = 12;
+
+    /// <summary>
+    /// FR-SPO-07 reminder — WORKING days before a supplier order's committed ship date at
+    /// which the buyer is reminded, counted with a Friday–Saturday weekend
+    /// (<see cref="BusinessCalendar"/>). Default 3: enough notice to chase a supplier and
+    /// still re-plan, without a reminder so early nobody acts on it.
+    ///
+    /// <para>NEW COLUMN — needs a migration (owned by the lead), see SLA-WIRING.md §2.</para>
+    /// </summary>
+    public int SupplierShipDateReminderDays { get; set; } = 3;
+
+    /// <summary>
+    /// FR-SPO-07 escalation — WORKING hours an order may sit with the supplier unacknowledged
+    /// before a supervisor is told. Default 48: two working days is the shortest window that
+    /// does not escalate a normal overnight response, and counting it in working hours means
+    /// an order that reaches a supplier on Thursday evening escalates on Tuesday, not on
+    /// Saturday into a closed office.
+    ///
+    /// <para>NEW COLUMN — needs a migration (owned by the lead), see SLA-WIRING.md §2.</para>
+    /// </summary>
+    public int SupplierAckEscalationHours { get; set; } = 48;
+
+    /// <summary>
+    /// FR-SBF-01 — WORKING days before an RFQ's bid closing date at which lines still carrying
+    /// <c>ParticipationDecision = Pending</c> are chased. Default 3, matching
+    /// <see cref="WarnDaysBeforeClose"/>: the same lead time the deadline alert already uses, so a
+    /// tenant does not have to reason about two different notions of "soon".
+    ///
+    /// <para>Non-positive means NOT CONFIGURED (register R12), not "chase immediately". The backfill
+    /// for this column is <c>DEFAULT 3</c> — the SAME value as the code default above, stated here
+    /// because a backfill that disagrees with the initializer is failure #10 in the wiring contract
+    /// and the reason a whole order book once became instantly overdue.</para>
+    ///
+    /// <para>NEW COLUMN — needs a migration (owned by the lead), see SLA-WIRING.md §2.</para>
+    /// </summary>
+    public int QuoteDecisionReminderDays { get; set; } = 3;
 
     public DateTime CreatedOn { get; set; }
     public DateTime UpdatedOn { get; set; }
@@ -50,8 +104,12 @@ public sealed class SlaPolicy
         WarnDaysBeforeClose = 3,
         CriticalDaysBeforeClose = 1,
         StaleQuoteDays = 7,
-        QuoteAutoExpireDays = 14,
+        QuoteExpiryGraceDays = 0,
+        QuoteNoResponseExpiryDays = 90,
         ApprovalEscalationHours = 4,
-        DeadlineBufferHours = 12
+        DeadlineBufferHours = 12,
+        SupplierShipDateReminderDays = 3,
+        SupplierAckEscalationHours = 48,
+        QuoteDecisionReminderDays = 3
     };
 }

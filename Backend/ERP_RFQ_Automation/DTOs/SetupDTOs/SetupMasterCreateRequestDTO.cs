@@ -25,8 +25,9 @@ namespace ERP_RFQ_Automation.DTOs
         public short? RoleRank { get; set; }
 
         public bool? IsActive { get; set; } = true;
-
-        [Required]
-        public string CreatedBy { get; set; } = null!;
+        // Sec-A1: the actor field is GONE, not merely ignored. Leaving `CreatedBy` on the
+        // request contract invites the next writer of this endpoint to read it, which is how
+        // the forgery got here. Attribution is derived from the validated token by
+        // ActorContext.From(User).Stamp and cannot be influenced by a request body.
     }
 }

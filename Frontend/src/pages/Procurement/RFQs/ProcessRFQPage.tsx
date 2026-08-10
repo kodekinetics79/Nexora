@@ -35,6 +35,7 @@ import customerService from '../../../api/services/customerService';
 import supplierService from '../../../api/services/supplierService';
 import { useAuth } from '../../../context/AuthContext';
 import { presentableErrorMessage, toPresentableError } from '../../../utils/apiErrors';
+import { parseMoneyInput } from '../../../utils/currency';
 import { toast } from 'react-hot-toast';
 import supplierQuotedItemService from '../../../api/services/supplierQuotedItemService';
 import { useTranslation } from 'react-i18next';
@@ -64,6 +65,21 @@ interface ProcessItem extends AcceptedLeadItemDTO {
   preferredSupplierEmail?: string;
   selectedName?: string; // To show the name of the selected product/quote
 }
+
+/**
+ * A lead line whose quantity the source document actually stated, as a number the RFQ payload can
+ * carry. `AcceptedLeadItemDTO.quantity` is `number | null` because "the document stated no readable
+ * quantity" is a real outcome of extraction, and it is NOT the same thing as zero — a line nobody
+ * could read a quantity from must be answered by a person, not silently sourced for none.
+ *
+ * This is written as a type predicate rather than a plain boolean so the submit path can map over
+ * the filtered lines and hand `RfqitemCreatePayload` a proven `number`, instead of asserting one
+ * with `!` and hoping the guard above it still runs. The three conditions are the same ones the
+ * server enforces, so the message the user sees here is the message they would have got from a
+ * round-trip 400.
+ */
+const hasStatedQuantity = (item: ProcessItem): item is ProcessItem & { quantity: number } =>
+  item.quantity !== null && Number.isInteger(item.quantity) && item.quantity >= 1;
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
@@ -259,8 +275,14 @@ const ItemRow: React.FC<ItemRowProps> = React.memo(({ item, index, onUpdate, onR
     onUpdate(index, { quantity: Number(e.target.value) });
   }, [index, onUpdate]);
 
+  // The field no longer embeds a currency symbol in its editable value, so parsing no longer
+  // depends on stripping one. `parseMoneyInput` still tolerates a pasted symbol or grouped
+  // figure and returns null rather than NaN, so an unparseable entry leaves the previous price
+  // untouched instead of writing a corrupt number to the line.
   const handlePriceChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    onUpdate(index, { unitPrice: Number(e.target.value.replace('$ ', '')) });
+    const parsed = parseMoneyInput(e.target.value);
+    if (parsed === null) return;
+    onUpdate(index, { unitPrice: parsed });
   }, [index, onUpdate]);
 
   const handleRemove = useCallback(() => onRemove(index), [index, onRemove]);
@@ -275,7 +297,8 @@ const ItemRow: React.FC<ItemRowProps> = React.memo(({ item, index, onUpdate, onR
         partNo: item.manufacturerPartNumber,
         manufacturer: item.manufacturerName,
         businessUnitId: businessUnitId,
-        quantity: item.quantity,
+        // Not stated stays not stated: sending 0 would ask inventory to price a line for none.
+        quantity: item.quantity ?? undefined,
       });
       if (res.hasExactMatch && res.exactMatch) {
         const exact = res.exactMatch;
@@ -286,7 +309,10 @@ const ItemRow: React.FC<ItemRowProps> = React.memo(({ item, index, onUpdate, onR
           qtyOnHand: exact.qtyOnHand ?? 0,
           availableToPromise: exact.availableToPromise ?? 0,
           incomingAvailable: exact.incomingAvailable ?? 0,
-          projectedShortage: exact.projectedShortage ?? Math.max(0, item.quantity - (exact.availableToPromise ?? 0)),
+          // A shortage cannot be derived from a quantity nobody could read. undefined renders as
+          // an unknown; 0 would render as "none short", which is a claim about stock we cannot make.
+          projectedShortage: exact.projectedShortage
+            ?? (item.quantity === null ? undefined : Math.max(0, item.quantity - (exact.availableToPromise ?? 0))),
           availabilityStatus: exact.availabilityStatus,
           leadTimeDays: exact.leadTimeDays,
           expectedAvailableOn: exact.expectedAvailableOn,
@@ -489,9 +515,10 @@ const ItemRow: React.FC<ItemRowProps> = React.memo(({ item, index, onUpdate, onR
         <TextField
           size="small"
           type="number"
-          value={item.quantity}
+          value={item.quantity ?? ''}
           onChange={handleQtyChange}
-          error={!Number.isInteger(item.quantity) || item.quantity < 1}
+          error={item.quantity === null || !Number.isInteger(item.quantity) || item.quantity < 1}
+          helperText={item.quantity === null ? 'Not stated' : undefined}
           slotProps={{ htmlInput: { min: 1, step: 1, 'aria-label': `Quantity for ${item.productShortName || 'item'}` } }}
           sx={{ width: 80, '& .MuiInputBase-root': { height: 32, fontSize: '0.75rem', fontWeight: 700 } }}
         />
@@ -499,11 +526,23 @@ const ItemRow: React.FC<ItemRowProps> = React.memo(({ item, index, onUpdate, onR
 
       {/* Price */}
       <TableCell align="center">
+        {/*
+          The currency is shown as a read-only adornment sourced from the line, never baked into
+          the editable value. When the line carries no currency the number stands alone rather
+          than borrowing a symbol.
+        */}
         <TextField
           size="small"
-          value={`$ ${(item.unitPrice ?? 0).toFixed(2)}`}
+          type="number"
+          value={item.unitPrice ?? 0}
           onChange={handlePriceChange}
-          sx={{ width: 100, '& .MuiInputBase-root': { height: 32, fontSize: '0.75rem', fontWeight: 700 } }}
+          slotProps={{
+            input: item.currency
+              ? { startAdornment: <InputAdornment position="start"><Typography variant="caption" sx={{ fontWeight: 700 }}>{item.currency}</Typography></InputAdornment> }
+              : undefined,
+            htmlInput: { min: 0, step: 0.01, 'aria-label': `Unit price for ${item.productShortName || 'item'}${item.currency ? ` in ${item.currency}` : ''}` },
+          }}
+          sx={{ width: 130, '& .MuiInputBase-root': { height: 32, fontSize: '0.75rem', fontWeight: 700 } }}
         />
       </TableCell>
 
@@ -788,7 +827,7 @@ const ItemDetailsDialog: React.FC<{
         name: item.productShortName,
         partNo: item.manufacturerPartNumber,
         manufacturer: item.manufacturerName,
-        quantity: item.quantity,
+        quantity: item.quantity ?? undefined,
       });
       setMatchingResult(res);
     } catch (e) {
@@ -1097,7 +1136,7 @@ const ProcessRFQPage: React.FC = () => {
               partNo: it.manufacturerPartNumber,
               manufacturer: it.manufacturerName,
               businessUnitId: userData?.businessUnitId,
-              quantity: it.quantity,
+              quantity: it.quantity ?? undefined,
             });
             if (res.hasExactMatch && res.exactMatch) {
               const exact = res.exactMatch;
@@ -1108,7 +1147,8 @@ const ProcessRFQPage: React.FC = () => {
                 qtyOnHand: exact.qtyOnHand ?? 0,
                 availableToPromise: exact.availableToPromise ?? 0,
                 incomingAvailable: exact.incomingAvailable ?? 0,
-                projectedShortage: exact.projectedShortage ?? Math.max(0, it.quantity - (exact.availableToPromise ?? 0)),
+                projectedShortage: exact.projectedShortage
+                  ?? (it.quantity === null ? undefined : Math.max(0, it.quantity - (exact.availableToPromise ?? 0))),
                 availabilityStatus: exact.availabilityStatus,
                 leadTimeDays: exact.leadTimeDays,
                 expectedAvailableOn: exact.expectedAvailableOn,
@@ -1197,14 +1237,16 @@ const ProcessRFQPage: React.FC = () => {
     mutationFn: (payload: RfqCreatePayload) => rfqService.create(payload),
     onSuccess: (createdRfq: RfqResponseDTO) => {
       // The backend guarantees commercial-case lineage (the chosen lead, or a governed shell lead
-      // when none was sent); name the case when the response carries it.
+      // when none was sent), and the response now reports the RFQ's OWN case rather than falling
+      // back to its lead's. A lead id is therefore no longer evidence of a case: claiming one on
+      // that basis is exactly the substitution that was removed from the API.
       const caseRef = createdRfq?.commercialCaseReference?.trim();
       if (caseRef) {
         toast.success(`Draft RFQ created — linked to commercial case ${caseRef}.`);
-      } else if (createdRfq?.commercialCaseId != null || createdRfq?.leadId != null) {
+      } else if (createdRfq?.commercialCaseId != null) {
         toast.success('Draft RFQ created — linked to its commercial case.');
       } else {
-        toast.success('Draft RFQ created successfully');
+        toast.error('Draft RFQ created, but it is not linked to a commercial case and cannot be traced to delivery.');
       }
       const createdId = Number(createdRfq?.id ?? 0);
       navigate(createdId > 0 ? `/procurement/rfqs/${createdId}/sourcing` : '/procurement/rfqs/draft');
@@ -1229,7 +1271,8 @@ const ProcessRFQPage: React.FC = () => {
 
     // The backend requires a whole-number Quantity >= 1 on every line; catch it here so the user
     // fixes the field instead of getting a round-trip 400.
-    const invalidQtyCount = includedItems.filter(i => !Number.isInteger(i.quantity) || i.quantity < 1).length;
+    const quantifiedItems = includedItems.filter(hasStatedQuantity);
+    const invalidQtyCount = includedItems.length - quantifiedItems.length;
     if (invalidQtyCount > 0) {
       toast.error(`${invalidQtyCount === 1 ? '1 line needs' : `${invalidQtyCount} lines need`} a whole-number quantity of at least 1 before the RFQ can be created.`);
       return;
@@ -1257,7 +1300,7 @@ const ProcessRFQPage: React.FC = () => {
       rfqtype: lead.rfqtype,
       customerId: matchedCustomer?.id,
       leadId: lead.id,
-      rfqitems: includedItems.map(item => ({
+      rfqitems: quantifiedItems.map(item => ({
         companyRef: item.companyRef,
         customerAccountPortalId: item.customerAccountPortalId,
         customerRfqno: item.customerRfqno,

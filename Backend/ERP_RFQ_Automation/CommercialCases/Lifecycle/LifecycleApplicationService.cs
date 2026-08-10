@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Sla;
 using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.CommercialCases.Lifecycle;
@@ -25,8 +26,18 @@ public sealed class LifecycleApplicationService : ILifecycleApplicationService
     private const string RfqAggregate = "Rfq";
     private const string QuoteAggregate = "Quote";
     private readonly ErpRfqAutomationContext _db;
+    private readonly ILeadOutcomeReasons _leadOutcomeReasons;
 
-    public LifecycleApplicationService(ErpRfqAutomationContext db) => _db = db;
+    /// <param name="leadOutcomeReasons">
+    /// The governed outcome-reason picklist shared with the quote outcome flow. Optional so the
+    /// existing lightweight <c>new LifecycleApplicationService(db)</c> constructions keep working;
+    /// the fallback reads the same SetupMaster rows, it just cannot seed them.
+    /// </param>
+    public LifecycleApplicationService(ErpRfqAutomationContext db, ILeadOutcomeReasons? leadOutcomeReasons = null)
+    {
+        _db = db;
+        _leadOutcomeReasons = leadOutcomeReasons ?? new LeadOutcomeReasons(db);
+    }
 
     public async Task<LifecycleStateView> GetLeadStateAsync(long businessUnitId, long leadId, CancellationToken ct)
     {
@@ -149,6 +160,20 @@ public sealed class LifecycleApplicationService : ILifecycleApplicationService
             throw new LifecycleValidationException(
                 "AI-extracted commercial facts must be approved before the lead can be qualified.");
 
+        // A lead that ends before a quotation exists must say WHY, using the same governed
+        // vocabulary a quote outcome uses. Resolved BEFORE anything is mutated, so an ungoverned
+        // reason leaves the lead — and the audit trail — untouched.
+        long? leadOutcomeReasonId = null;
+        var recordsLeadLoss = !reopen && LifecyclePolicy.RecordsLeadLoss(aggregateType, targetCode);
+        if (recordsLeadLoss)
+        {
+            var reasonCode = Clean(command.ReasonCode);
+            leadOutcomeReasonId = await _leadOutcomeReasons.ResolveAsync(businessUnitId, reasonCode, ct)
+                ?? throw new LifecycleValidationException(
+                    $"'{reasonCode}' is not one of this business unit's governed outcome reasons. " +
+                    "Choose a reason from the outcome-reason list.");
+        }
+
         if (_db.Database.IsNpgsql())
         {
             var triggerReason = string.Join(": ", new[]
@@ -167,6 +192,12 @@ public sealed class LifecycleApplicationService : ILifecycleApplicationService
         aggregate.SetStatus(target.SetupId);
         aggregate.IncrementVersion();
         var now = DateTime.UtcNow;
+        if (recordsLeadLoss)
+            aggregate.RecordLeadOutcome(leadOutcomeReasonId, Truncate(Clean(command.ReasonNotes), 500), now);
+        else if (reopen && aggregateType == LeadAggregate)
+            // A reopened lead is no longer lost. Clearing the stamp keeps win/loss reporting honest;
+            // the append-only lifecycle events still carry the full history of what happened.
+            aggregate.RecordLeadOutcome(null, null, null);
         var lifecycleEvent = new CommercialLifecycleEvent
         {
             BusinessUnitId = businessUnitId,
@@ -396,6 +427,9 @@ public sealed class LifecycleApplicationService : ILifecycleApplicationService
 
     private static string? Clean(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
+    private static string? Truncate(string? value, int max)
+        => string.IsNullOrEmpty(value) ? null : value.Length <= max ? value : value[..max];
+
     private static void EnsureLinked(Rfq rfq)
     {
         if (rfq.Lead == null || rfq.Lead.CommercialCaseId <= 0 || string.IsNullOrWhiteSpace(rfq.Lead.CommercialCaseReference))
@@ -475,6 +509,19 @@ public sealed class LifecycleApplicationService : ILifecycleApplicationService
             if (_lead != null) _lead.LifecycleVersion = Version;
             else if (_rfq != null) _rfq.LifecycleVersion = Version;
             else _quote!.LifecycleVersion = Version;
+        }
+
+        /// <summary>
+        /// Stamps (or clears) the lead's terminal outcome. Deliberately the same three columns the
+        /// quote carries — reason, note, date — written inside the very SaveChanges that records the
+        /// lifecycle event, so a loss and its explanation are never persisted apart.
+        /// </summary>
+        public void RecordLeadOutcome(long? reasonId, string? note, DateTime? occurredOn)
+        {
+            if (_lead == null) return;
+            _lead.OutcomeReasonId = reasonId;
+            _lead.OutcomeNote = note;
+            _lead.OutcomeOn = occurredOn;
         }
     }
 }

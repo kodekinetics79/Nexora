@@ -14,11 +14,16 @@ namespace ERP_RFQ_Automation.Controllers
     {
         private readonly IAuthRepository _authRepository;
         private readonly ILoginAttemptThrottle _loginThrottle;
+        private readonly ILogger<AuthController> _logger;
 
-        public AuthController(IAuthRepository authRepository, ILoginAttemptThrottle loginThrottle)
+        public AuthController(
+            IAuthRepository authRepository,
+            ILoginAttemptThrottle loginThrottle,
+            ILogger<AuthController> logger)
         {
             _authRepository = authRepository;
             _loginThrottle = loginThrottle;
+            _logger = logger;
         }
 
         // POST: api/Auth/Login
@@ -69,12 +74,18 @@ namespace ERP_RFQ_Automation.Controllers
                     LoginPlane.Tenant, request?.Email, HttpContext.RequestAborted);
                 return Ok(response);
             }
-            catch (TenantAccessDeniedException ex)
+            catch (EntitlementDeniedException ex)
             {
-                // Credentials were valid — the ORGANIZATION is suspended/archived, so
-                // this is a 403 problem+json denial, not a credential failure (and it
-                // must not feed the failed-attempt lockout counter). P2-A10: rendered
-                // by the single canonical EntitlementProblemFilter shape.
+                // Credentials were valid — the ORGANIZATION is suspended/archived (403), or its
+                // subscription could not be confirmed at all because the platform plane is
+                // unreadable (503, Sec-D1). Neither is a credential failure, so neither may feed
+                // the failed-attempt lockout counter. P2-A10: rendered by the single canonical
+                // EntitlementProblemFilter shape. Caught as the BASE type rather than
+                // TenantAccessDeniedException specifically, so a denial added later cannot fall
+                // through to the catch-all below and be answered as a 500.
+                if (ex is TenantAccessUnresolvableException)
+                    Response.Headers.RetryAfter =
+                        TenantAccessUnresolvableException.RetryAfterSeconds.ToString();
                 return EntitlementProblemFilter.ToResult(ex);
             }
             catch (UnauthorizedAccessException ex)
@@ -85,7 +96,18 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new { error = $"Error during login: {ex.Message}" });
+                // Sec-A3: this is the product's ONE anonymous endpoint, so the caller here is by
+                // definition unauthenticated — and it used to answer with ex.Message. An Npgsql or
+                // EF exception names the schema, the table, the column and the constraint it
+                // tripped on, which handed an unauthenticated caller a partial map of the database
+                // for the price of a malformed login. The detail goes to the log, where it is
+                // correlatable; the caller gets a fixed string. Same shape as
+                // ProcurementController's catch-all, which already did this correctly.
+                _logger.LogError(ex, "Tenant login failed with an unhandled error.");
+                return StatusCode(StatusCodes.Status500InternalServerError, new
+                {
+                    error = "Sign-in could not be completed. Please try again."
+                });
             }
         }
     }

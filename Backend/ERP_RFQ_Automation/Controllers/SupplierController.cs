@@ -3,6 +3,7 @@ using ERP_RFQ_Automation.DTOs.BusinessUnit;
 using ERP_RFQ_Automation.DTOs.CurrencyDTOs;
 using ERP_RFQ_Automation.DTOs.SupplierDTOs;
 using ERP_RFQ_Automation.Interfaces;
+using ERP_RFQ_Automation.MasterData;
 using ERP_RFQ_Automation.Models;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -17,10 +18,37 @@ namespace ERP_RFQ_Automation.Controllers
     public class SupplierController : ControllerBase
     {
         private readonly ISupplierRepository _repository;
+        private readonly IMasterDataChangeHistoryReader _changeHistory;
 
-        public SupplierController(ISupplierRepository repository)
+        public SupplierController(
+            ISupplierRepository repository, IMasterDataChangeHistoryReader changeHistory)
         {
             _repository = repository;
+            _changeHistory = changeHistory;
+        }
+
+        /// <summary>FR-MDM-05 — the before/after trail for one supplier, newest first. Payment
+        /// terms are classified COMMERCIAL by the capture, so a change to when money leaves is
+        /// visible in the trail without the reader having to recognise the column name.</summary>
+        [HttpGet("{id}/change-history")]
+        [RequireModulePermission("Suppliers", PermissionAction.View)]
+        public async Task<ActionResult<IReadOnlyList<MasterDataChangeEventDto>>> GetChangeHistory(
+            long id, [FromQuery] int limit = 50)
+        {
+            if (!TryGetAuthenticatedTenant(out var businessUnitId))
+                return Forbid();
+
+            try
+            {
+                return Ok(await _changeHistory.ReadAsync(
+                    MasterDataEntityTypes.Supplier, id, businessUnitId, limit, HttpContext.RequestAborted));
+            }
+            catch (Exception)
+            {
+                return StatusCode(StatusCodes.Status500InternalServerError, Problem(
+                    StatusCodes.Status500InternalServerError, "Supplier history unavailable",
+                    "Unable to retrieve the supplier change history."));
+            }
         }
 
         // GET: api/Supplier?pageNumber=1&pageSize=10&id=1&name=abc&contactEmail=abc@example.com&taxId=123&currencyId=1&isActive=true&businessUnitId=1
@@ -122,6 +150,11 @@ namespace ERP_RFQ_Automation.Controllers
                     Tags = request.Tags,
                     Comments = request.Comments,
                     CurrencyId = request.CurrencyId,
+                    // Canonicalised so "300 000 000 000 003" and "300-000-000-000-003" are stored
+                    // as one value and the tenant-unique index actually catches a duplicate
+                    // counterparty. Format is already validated by the DTO attribute.
+                    TaxRegistrationNumber = ERP_RFQ_Automation.Tax.TaxRegistrationNumbers
+                        .Normalize(request.TaxRegistrationNumber),
                     Buid = businessUnitId,
                     IsActive = true,
                     CreatedBy = actor,
@@ -174,6 +207,8 @@ namespace ERP_RFQ_Automation.Controllers
                 existing.Tags = request.Tags;
                 existing.Comments = request.Comments;
                 existing.CurrencyId = request.CurrencyId;
+                existing.TaxRegistrationNumber = ERP_RFQ_Automation.Tax.TaxRegistrationNumbers
+                    .Normalize(request.TaxRegistrationNumber);
                 // Activation is exclusively controlled by Supplier governance.
                 existing.ModifiedBy = GetAuthenticatedActor();
                 existing.ModifiedOn = DateTime.UtcNow;
@@ -262,10 +297,12 @@ namespace ERP_RFQ_Automation.Controllers
                 Tags = supplier.Tags,
                 Comments = supplier.Comments,
                 CurrencyId = supplier.CurrencyId,
-                CurrencyName = supplier.Currency != null ? supplier.Currency.CurrencyName : null, 
+                CurrencyName = supplier.Currency != null ? supplier.Currency.CurrencyName : null,
+                TaxRegistrationNumber = supplier.TaxRegistrationNumber,
                 Buid = supplier.Buid,
                 BusinessUnitName = supplier.Bu != null ? supplier.Bu.BusinessUnitName : null,
                 IsActive = supplier.IsActive,
+                CustomFields = supplier.CustomFieldsJson,
                 GovernanceStatus = supplier.GovernanceStatus,
                 VerificationStatus = supplier.VerificationStatus,
                 ComplianceStatus = supplier.ComplianceStatus,

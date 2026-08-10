@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Mvc;
 using System;
 using System.Linq;
 using System.Threading.Tasks;
+using ERP_RFQ_Automation.Security;
 
 namespace ERP_RFQ_Automation.Controllers
 {
@@ -96,7 +97,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error: {ex.Message}");
+                return this.ServerError(ex, "Error.");
             }
         }
 
@@ -134,7 +135,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error: {ex.Message}");
+                return this.ServerError(ex, "Error.");
             }
         }
 
@@ -159,7 +160,8 @@ namespace ERP_RFQ_Automation.Controllers
                     ParentCategoryId = request.ParentCategoryId,
                     BusinessUnitId = request.BusinessUnitId,
                     IsActive = true,
-                    CreatedBy = request.CreatedBy,
+                    // RC-7 / Sec-A1: server-derived from the validated token, never the body.
+                    CreatedBy = ActorContext.From(User).Stamp,
                     CreatedOn = DateTime.UtcNow
                 };
 
@@ -181,7 +183,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error: {ex.Message}");
+                return this.ServerError(ex, "Error.");
             }
         }
 
@@ -205,7 +207,7 @@ namespace ERP_RFQ_Automation.Controllers
                 category.Description = request.Description;
                 category.ParentCategoryId = request.ParentCategoryId;
                 category.IsActive = request.IsActive ?? true;
-                category.ModifiedBy = request.ModifiedBy;
+                category.ModifiedBy = ActorContext.From(User).Stamp;
                 category.ModifiedOn = DateTime.UtcNow;
 
                 await _repository.UpdateAsync(category);
@@ -214,7 +216,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error updating category: {ex.Message}");
+                return this.ServerError(ex, "Error updating category.");
             }
         }
 
@@ -237,7 +239,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error deleting category: {ex.Message}");
+                return this.ServerError(ex, "Error deleting category.");
             }
         }
     }

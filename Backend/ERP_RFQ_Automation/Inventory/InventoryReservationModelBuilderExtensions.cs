@@ -61,6 +61,19 @@ public static class InventoryReservationModelBuilderExtensions
             entity.HasIndex(x => new { x.BusinessUnitId, x.OrderId })
                 .HasDatabaseName("IX_stock_reservations_order");
 
+            // FR-INV-01 lot-level reservation. The recall question — "which orders are holding
+            // THIS lot right now" — is one indexed predicate, not a scan of every active hold.
+            // Filtered so the index carries only the rows that name a lot; the un-lotted balance
+            // is answered by the availability index above.
+            entity.HasIndex(x => new { x.BusinessUnitId, x.MaterialLotId, x.Status })
+                .HasFilter("\"MaterialLotId\" IS NOT NULL")
+                .HasDatabaseName("IX_stock_reservations_lot");
+
+            // No foreign key to material_lots on purpose. A lot is quarantined and released, never
+            // deleted, so referential integrity buys nothing here — while a hard FK would make the
+            // reservation ledger un-writable in any deployment where the traceability tables have
+            // not been migrated yet, which is the state PostgreSQL is in today. The lot id is
+            // validated against the tenant's own lots on the write path instead.
             entity.HasOne<Models.Inventory>()
                 .WithMany()
                 .HasForeignKey(x => new { x.BusinessUnitId, x.InventoryId })
