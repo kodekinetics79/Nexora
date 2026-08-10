@@ -1,12 +1,17 @@
 using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Notifications;
+using ERP_RFQ_Automation.Platform.Auth;
 using ERP_RFQ_Automation.Platform.Models;
 using ERP_RFQ_Automation.Platform.Onboarding;
+using ERP_RFQ_Automation.Platform.Services;
 using ERP_RFQ_Automation.Tests.Support;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using System.Security.Claims;
 
 namespace ERP_RFQ_Automation.Tests;
 
@@ -48,6 +53,13 @@ public sealed class TenantActivationInvitationTests
             return Task.FromResult<EmailDeliveryReceipt?>(
                 Accept ? new EmailDeliveryReceipt("capture", "captured-1", DateTimeOffset.UtcNow) : null);
         }
+    }
+
+    private sealed class NullAudit : IPlatformAuditService
+    {
+        public Task WriteAsync(ClaimsPrincipal actor, string action, string? targetType = null,
+            string? targetId = null, object? metadata = null, long? actAsTenantId = null,
+            HttpContext? httpContext = null, CancellationToken ct = default) => Task.CompletedTask;
     }
 
     private static TenantAdminInvitationService Service(
@@ -543,6 +555,47 @@ public sealed class TenantActivationInvitationTests
         await using var context2 = db.ContextFor(null);
         Assert.Equal(TenantActivationStatus.Activated,
             (await Service(context2).RedeemAsync(issued.Token, GoodPassword, null)).Status);
+    }
+
+    [Theory]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    public async Task Reissue_returns_the_single_use_link_only_when_email_was_not_transmitted(
+        bool providerAccepts, bool expectsRecoveryLink)
+    {
+        using var db = new TestDb();
+        var (tenant, admin) = await SeedTenantWithAdminAsync(
+            db, $"activation-reissue-{providerAccepts}", $"reissue-{providerAccepts}@customer.example");
+        await IssueAsync(db, tenant, admin);
+
+        var sender = new CapturingEmailSender { Accept = providerAccepts };
+        await using var context = db.ContextFor(null);
+        var controller = new TenantAdminInvitationsController(
+            Service(context, sender), context, new NullAudit(),
+            NullLogger<TenantAdminInvitationsController>.Instance)
+        {
+            ControllerContext = new ControllerContext
+            {
+                HttpContext = new DefaultHttpContext
+                {
+                    User = new ClaimsPrincipal(new ClaimsIdentity(
+                        [new Claim("email", "owner@nexora.app"),
+                         new Claim(PlatformAuthConstants.PlatformRoleClaim, nameof(PlatformRole.Owner))],
+                        "Platform"))
+                }
+            }
+        };
+
+        var action = await controller.Resend(tenant.Id,
+            new ResendTenantAdminInvitationRequest { UserId = admin.Id, Reason = "Customer did not receive it." },
+            CancellationToken.None);
+        var response = Assert.IsType<ResendTenantAdminInvitationResponse>(
+            Assert.IsType<OkObjectResult>(action.Result).Value);
+
+        Assert.Equal(providerAccepts, response.EmailDispatched);
+        Assert.Equal(expectsRecoveryLink, !string.IsNullOrWhiteSpace(response.ActivationUrl));
+        if (response.ActivationUrl is not null)
+            Assert.StartsWith("https://app.nexora.test/activate/", response.ActivationUrl);
     }
 
     // ==== password policy =====================================================================

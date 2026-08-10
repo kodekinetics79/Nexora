@@ -18,9 +18,9 @@ namespace ERP_RFQ_Automation.Platform.Onboarding;
 /// same class of authority as creating one.</para>
 ///
 /// <para><b>What an operator can and cannot do here.</b> They can cause a link to be mailed to
-/// the address on file and they can kill a link. They cannot read one: no response on this
-/// controller carries a token, and no audit record does either. That asymmetry is the whole
-/// improvement over reading a generated password down the phone.</para>
+/// the address on file and they can kill a link. A newly minted link is returned exactly once
+/// only when the configured provider did not transmit it, so an outage cannot strand the
+/// customer. No audit record or later read endpoint carries a token.</para>
 /// </summary>
 [ApiController]
 [Route("api/platform/tenants/{tenantId:long}/admin-invitations")]
@@ -100,7 +100,10 @@ public class TenantAdminInvitationsController : ControllerBase
         {
             Invitation = summary,
             EmailDispatched = dispatched,
-            ActivationUrl = dispatched ? null : issued.ActivationUrl
+            ActivationUrl = !dispatched && User.HasClaim(
+                PlatformAuthConstants.PlatformRoleClaim, nameof(PlatformRole.Owner))
+                ? issued.ActivationUrl
+                : null
         });
     }
 

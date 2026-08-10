@@ -94,6 +94,9 @@ public sealed class ResendTenantAdminInvitationResponse
     /// </summary>
     public bool EmailDispatched { get; set; }
 
-    /// <summary>Present only when delivery failed; single-use and never persisted in cleartext.</summary>
+    /// <summary>
+    /// Present only when delivery failed and the operator is an Owner; single-use and never
+    /// persisted in cleartext. SupportAdmin can reissue mail but cannot take custody of the link.
+    /// </summary>
     public string? ActivationUrl { get; set; }
 }
