@@ -301,7 +301,12 @@ public sealed class AgentSpendCapCurrencyTests
                 CurrencyId = quoteCurrencyId,
                 TotalAmount = 10_000m,
                 CreatedBy = "seed",
-                CreatedDate = Jan1
+                CreatedDate = Jan1,
+                // Stated, not left to the store default. Quotes.QuoteDate carries
+                // HasDefaultValueSql("now()"), so leaving it null makes EF omit the column and
+                // hand the value to the database — which PostgreSQL evaluates and SQLite cannot.
+                // Every other quote-seeding fixture in this suite states it for the same reason.
+                QuoteDate = Jan1
             });
             AgentSeed.Policy(seed, Bu, AgentAutonomyLevel.Act,
                 maxAutoOrderValue: 10_000m, currencyId: Sar, requireApprovalForOrders: false);

@@ -74,7 +74,10 @@ public sealed class MasterDataChangeAuditTests
         // The number the whole finding is about, captured with its value and its classification.
         var landedCost = Assert.Single(changeEvent.Fields.Where(f => f.FieldName == nameof(Product.FinalLandedCost)));
         Assert.Null(landedCost.BeforeValue);
-        Assert.Equal("850", landedCost.AfterValue);
+        // Rendered at the COLUMN's scale — Product.FinalLandedCost is decimal(18,2) — so the trail
+        // reads the same figure whichever engine stored it. "850" was the CLR literal's own scale,
+        // which is not a property of the value and differs after a PostgreSQL round trip.
+        Assert.Equal("850.00", landedCost.AfterValue);
         Assert.Equal(MasterDataSensitivity.Commercial, landedCost.Sensitivity);
 
         // A create records the values it was given, not a blob: every field is its own row.
@@ -198,7 +201,7 @@ public sealed class MasterDataChangeAuditTests
             .SingleAsync(x => x.EntityId == productId && x.ChangeType == MasterDataChangeTypes.Deleted);
         Assert.Equal("MDM-PART-1", changeEvent.EntityLabel);
         var landedCost = Assert.Single(changeEvent.Fields.Where(f => f.FieldName == nameof(Product.FinalLandedCost)));
-        Assert.Equal("640", landedCost.BeforeValue);
+        Assert.Equal("640.00", landedCost.BeforeValue); // decimal(18,2), rendered at column scale
         Assert.Null(landedCost.AfterValue);
     }
 

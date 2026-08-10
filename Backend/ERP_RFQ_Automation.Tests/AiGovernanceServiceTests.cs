@@ -368,6 +368,15 @@ public sealed class AiGovernanceServiceTests
     {
         using var fixture = new Fixture(hardLimit: 100_000,
             externalInputRate: 2m, externalOutputRate: 4m);
+        // The allow-list is a GATE on every external reservation, not merely a ceiling exemption,
+        // so an external call must name a destination the tenant has authorized. This test is
+        // about COST attribution and never intended to assert anything about egress permission;
+        // it predates the gate and was still reserving against the unresolvable provider name
+        // "External", which no configured endpoint matches. Authorizing the resolved destination
+        // and naming it is the fixture catching up with the control, not a relaxation of it —
+        // UnauthorizedExternal_IsDeniedAtReservation_NotMerelyRatioLimited is where the refusal
+        // is pinned.
+        fixture.AuthorizeResolvedEndpoint();
         for (var i = 0; i < 9; i++)
         {
             var local = await fixture.Service.ReserveAsync(fixture.Context($"priced-local-{i}"),
@@ -377,7 +386,7 @@ public sealed class AiGovernanceServiceTests
         }
         var external = await fixture.Service.ReserveAsync(
             fixture.Context("priced-external", AiProviderClass.External),
-            "External", "test", "external", 10, 10, 1, default);
+            "Ollama", "test", "external", 10, 10, 1, default);
         await fixture.Service.CompleteAsync(external, AiCallStatuses.Succeeded,
             1_000, 500, AiTokenSources.ProviderExact, "result", null, default);
 

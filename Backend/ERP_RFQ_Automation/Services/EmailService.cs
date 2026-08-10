@@ -318,19 +318,28 @@ namespace ERP_RFQ_Automation.Services
                     await RecordPollOutcomeAsync(mailboxContext, config, outcome);
                 outcomes.Add(outcome);
 
+                // The mailbox is named from the HANDLE, never from `config`. When the tenant-scope
+                // guard above refuses, `config` is still null — and the failure branch below is
+                // precisely the branch that runs then, so dereferencing `config` there threw a
+                // NullReferenceException out of FetchAndSaveLeadsAsync while REPORTING a refusal.
+                // It replaced the operator's one clear sentence ("tenant scope is mandatory") with
+                // a stack trace and killed the loop before the remaining mailboxes were polled:
+                // an exception raised while logging a refusal hides the refusal. The handle carries
+                // the same address, is non-null on every path, and is the value the guard's own
+                // message already uses.
                 if (outcome.Succeeded)
                 {
                     _logger.LogInformation(
                         "Finished process for configuration: {Email} ({Downloaded} new message(s), "
                         + "{AlreadyIngested} already in the ingestion ledger).",
-                        config.EmailAddress, outcome.MessagesDownloaded, outcome.MessagesAlreadyIngested);
+                        handle.EmailAddress, outcome.MessagesDownloaded, outcome.MessagesAlreadyIngested);
                 }
                 else
                 {
                     _logger.LogError(
                         "Mailbox {Email} could NOT be polled: {Reason} Last successful poll: {LastSuccess}. "
                         + "No message from this mailbox has been ingested since then.",
-                        config.EmailAddress, outcome.FailureReason,
+                        handle.EmailAddress, outcome.FailureReason,
                         outcome.LastSuccessfulPollOn?.ToString("O") ?? "never");
                 }
             }

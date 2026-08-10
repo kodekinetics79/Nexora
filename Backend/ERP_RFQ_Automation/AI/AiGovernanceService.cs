@@ -206,7 +206,10 @@ public sealed class AiGovernanceService : IAiGovernanceService
         if (context.ProviderClass == AiProviderClass.External)
             (externalDestination, externalAuthorization) =
                 await AuthorizeExternalAsync(context, provider, model, ct);
-        var liveCeilingAuthorizationId = externalAuthorization is { Allowed: true } allowed
+        // The authorization that PERMITTED this call, whatever the ratio then says about it. It is
+        // the ledger's answer to "which calls went external, under whose authorization" and it is
+        // recorded on every authorized external reservation — see the linkage below.
+        var liveAuthorizationId = externalAuthorization is { Allowed: true } allowed
             ? allowed.AuthorizationId
             : null;
 
@@ -254,7 +257,6 @@ public sealed class AiGovernanceService : IAiGovernanceService
                 && externalAuthorization is not { Allowed: true })
                 denial = externalAuthorization?.Reason ?? AiExternalProviderTrustReasons.GateUnavailable;
 
-            long? ceilingExemptAuthorizationId = null;
             if (denial is null && context.ProviderClass == AiProviderClass.External)
             {
                 var recentProviderClasses = await db.AiRequests.AsNoTracking()
@@ -286,8 +288,7 @@ public sealed class AiGovernanceService : IAiGovernanceService
                     // reasoning that keeps an RLS policy under an app-layer check — but it
                     // does mean the ratio is no longer the thing standing between a tenant's
                     // line-item data and a third party. The allow-list is.
-                    ceilingExemptAuthorizationId = liveCeilingAuthorizationId;
-                    if (ceilingExemptAuthorizationId is null)
+                    if (liveAuthorizationId is null)
                         denial = "external_dependency_cap";
                 }
             }
@@ -369,13 +370,22 @@ public sealed class AiGovernanceService : IAiGovernanceService
             budget.UpdatedOn = now;
             var request = NewRequest(context, provider, model, input, inputHash, estimatedInput, reserve, now,
                 AiCallStatuses.Reserved, null);
-            if (ceilingExemptAuthorizationId is not null)
+            if (liveAuthorizationId is not null)
             {
-                // Audit linkage: the ledger row records WHICH authorization exempted this
-                // reservation from the ceiling, and the deployment posture at that moment,
-                // so "which calls went external under whose authorization" is answerable
-                // from the ledger alone.
-                request.ExternalAuthorizationId = ceilingExemptAuthorizationId;
+                // Audit linkage: the ledger row records WHICH authorization permitted this
+                // reservation, and the deployment posture at that moment, so "which calls
+                // went external under whose authorization" is answerable from the ledger
+                // alone.
+                //
+                // This used to be written only inside the ceiling-breach branch above, i.e.
+                // only when the authorization ALSO waived the ratio. Under the default 10%
+                // ceiling an external call that happened to land at or under the ratio was
+                // recorded with a null ExternalAuthorizationId — an authorized egress with
+                // no attributable authorization on the row, which is the one question the
+                // column exists to answer. The ceiling is a cost control and its outcome is
+                // not what makes a call attributable; the authorization is. The waiver
+                // itself is still tracked separately by ceilingExemptAuthorizationId.
+                request.ExternalAuthorizationId = liveAuthorizationId;
                 // The posture of the destination THIS call went to, not of whichever endpoint
                 // happens to be the extraction one — the agent's origin is a separate
                 // descriptor and would otherwise be logged under the wrong stance.

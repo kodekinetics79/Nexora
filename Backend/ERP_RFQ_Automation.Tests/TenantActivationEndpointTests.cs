@@ -157,7 +157,20 @@ public sealed class TenantActivationEndpointTests
             .GetCustomAttribute<AllowAnonymousAttribute>(inherit: true));
         Assert.NotNull(typeof(PlatformAuthController).GetMethod(nameof(PlatformAuthController.Login))!
             .GetCustomAttribute<AllowAnonymousAttribute>(inherit: true));
-        Assert.Equal(PlatformPolicies.PlatformScope,
+        // Sign-out sits on Platform.Enrollment, NOT PlatformScope, and that is deliberate.
+        // Sec-D2 added `amr=mfa` to PlatformScope, and Enrollment is the carve-out for the
+        // handful of endpoints a password-only session must still reach: read own MFA status,
+        // begin enrolment, confirm enrolment, and sign out. It is NOT a weaker door in the
+        // sense that matters — it still pins the Platform scheme, still requires an
+        // authenticated principal and still requires `scope=platform`; the only requirement it
+        // drops is the second factor. Logout revokes the caller's own jti and reads nothing, so
+        // refusing it to an unenrolled operator would leave them unable to end the one session
+        // that can do nothing else — a control whose only effect is to make the exposure last
+        // longer. The old expectation of PlatformScope predates that carve-out and, if honoured
+        // today, would strand exactly the sessions that most need ending.
+        Assert.Null(typeof(PlatformAuthController).GetMethod(nameof(PlatformAuthController.Logout))!
+            .GetCustomAttribute<AllowAnonymousAttribute>(inherit: true));
+        Assert.Equal(PlatformPolicies.Enrollment,
             typeof(PlatformAuthController).GetMethod(nameof(PlatformAuthController.Logout))!
                 .GetCustomAttribute<AuthorizeAttribute>(inherit: true)!.Policy);
 

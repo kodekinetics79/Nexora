@@ -124,6 +124,15 @@ public sealed class OrderFromQuoteTaxGateTests
     /// A category that departs from the standard rate without a stated reason is refused on the
     /// order path for the same reason it is refused on the send path — the evidence is the whole
     /// justification for not charging 15%.
+    ///
+    /// <para><b>Why the reason here is whitespace and not null.</b> <c>CK_QuoteItems_TaxCategoryReason</c>
+    /// already refuses a non-standard line whose reason is NULL or <c>''</c>, on both engines, so a
+    /// null-reason row cannot be persisted anywhere and a fixture that builds one is asserting
+    /// against a record the schema makes unrepresentable. The constraint deliberately carries no
+    /// <c>trim()</c> — PostgreSQL's <c>btrim</c> does not exist on the portable lane — so a
+    /// whitespace-only reason is exactly the row the database DOES accept and the application gate
+    /// is the only thing standing between it and an untaxed order. That is the gap this test is
+    /// for: the two layers cover different holes, and this one is the application's.</para>
     /// </summary>
     [Fact]
     public async Task Zero_rated_line_with_no_stated_reason_cannot_become_an_order()
@@ -133,7 +142,9 @@ public sealed class OrderFromQuoteTaxGateTests
         var rfq = SeedCommercialParents(db);
         var quote = SeedQuote(db, rfq, "QT-TAX-NOREASON", taxAmount: 0m, taxRatePercentApplied: 0m,
             headerTotal: 200m, lineTotal: 200m);
-        quote.QuoteItems.Single().TaxCategory = QuoteLineTaxCategories.ZeroRatedExport;
+        var line = quote.QuoteItems.Single();
+        line.TaxCategory = QuoteLineTaxCategories.ZeroRatedExport;
+        line.TaxCategoryReason = "   ";
         await db.SaveChangesAsync();
 
         var error = await Assert.ThrowsAsync<InvalidOperationException>(

@@ -1,5 +1,7 @@
 using System.Net;
 using ERP_RFQ_Automation.CommercialFinance;
+using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Platform.Models;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Hosting;
@@ -41,20 +43,43 @@ public sealed class FinanceOutboxDispatcherTests
         Assert.DoesNotContain("leaseToken", handler.Body, StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// The publish outcome decides the claim's transition: success completes it, failure fails it.
+    ///
+    /// <para><b>Why this needs a real container.</b> The dispatcher is tenant-scoped on BOTH halves
+    /// of its cycle. <c>DispatchAsync</c> pushes the message's business unit as its first statement
+    /// and then calls <c>EnsureScoped</c>, so it resolves <see cref="ITenantScopeAccessor"/> and
+    /// <c>ErpRfqAutomationContext</c> on every message and refuses to transition anything it cannot
+    /// prove is scoped. This test used to hand it a two-registration container holding only a store
+    /// and a publisher; the dispatch therefore threw <c>InvalidOperationException</c> ("no service
+    /// for type ITenantScopeAccessor") inside <c>Parallel.ForEachAsync</c>, the worker's own
+    /// cycle-level catch swallowed it into a backoff, and the only visible symptom was the three
+    /// second wait expiring — which reads exactly like a race and is not one. It is deterministic:
+    /// the fixture was missing the wiring the control needs, so lengthening the timeout would
+    /// have produced a slower red and nothing else.</para>
+    ///
+    /// <para>The store and the publisher stay stubs — what is under test is which transition a
+    /// publish outcome causes, not the SQL — but the tenant plumbing is now the real thing, so the
+    /// scope guard is exercised rather than dodged. One genuine outbox row is seeded because
+    /// tenant enumeration reads the table itself.</para>
+    /// </summary>
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task Dispatcher_TransitionsClaimAfterPublishOutcome(bool publisherFails)
     {
+        const long businessUnitId = 42;
         var envelope = new FinanceOutboxEnvelope(
-            7, 42, Guid.NewGuid(), "CustomerPayment", 101, 1,
+            7, businessUnitId, Guid.NewGuid(), "CustomerPayment", 101, 1,
             "finance.payment.posted", "{}", 1, DateTime.UtcNow, 1,
             Guid.NewGuid(), DateTime.UtcNow.AddMinutes(1));
         var store = new RecordingStore(envelope);
-        var services = new ServiceCollection()
+        using var harness = new TenantWorkGateHarness(configure: services => services
             .AddSingleton<IFinanceOutboxStore>(store)
-            .AddSingleton<IFinanceEventPublisher>(new StubPublisher(publisherFails))
-            .BuildServiceProvider();
+            .AddSingleton<IFinanceEventPublisher>(new StubPublisher(publisherFails)));
+        await harness.SeedTenantAsync(businessUnitId, TenantStatus.Active, "outbox-dispatch");
+        await SeedPendingOutboxRowAsync(harness, businessUnitId);
+
         var options = new StaticOptionsMonitor<FinanceOutboxDispatcherOptions>(new()
         {
             Enabled = true,
@@ -68,15 +93,41 @@ public sealed class FinanceOutboxDispatcherTests
             MaximumRetryDelay = TimeSpan.FromSeconds(1)
         });
         var dispatcher = new FinanceOutboxDispatcherService(
-            services.GetRequiredService<IServiceScopeFactory>(), options,
-            NullLogger<FinanceOutboxDispatcherService>.Instance);
+            harness.ScopeFactory, options,
+            NullLogger<FinanceOutboxDispatcherService>.Instance,
+            harness.TenantScope);
 
         await dispatcher.StartAsync(default);
-        await store.Transitioned.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        await store.Transitioned.Task.WaitAsync(TimeSpan.FromSeconds(30));
         await dispatcher.StopAsync(default);
 
         Assert.Equal(publisherFails ? 0 : 1, store.Completed);
         Assert.Equal(publisherFails ? 1 : 0, store.Failed);
+    }
+
+    /// <summary>
+    /// One claimable row, so <c>ResolvePendingBusinessUnitsAsync</c> — the dispatcher's only
+    /// unscoped query, and the thing that decides which tenants get a scoped claim — returns this
+    /// tenant. The stubbed store is what actually answers the claim.
+    /// </summary>
+    private static async Task SeedPendingOutboxRowAsync(
+        TenantWorkGateHarness harness, long businessUnitId)
+    {
+        await using var db = harness.Context();
+        db.Set<FinanceOutboxMessage>().Add(new FinanceOutboxMessage
+        {
+            BusinessUnitId = businessUnitId,
+            EventId = Guid.NewGuid(),
+            AggregateType = "CustomerPayment",
+            AggregateId = 101,
+            AggregateVersion = 1,
+            EventType = "finance.payment.posted",
+            Payload = "{}",
+            SchemaVersion = 1,
+            OccurredOn = DateTime.UtcNow.AddMinutes(-5),
+            AvailableOn = DateTime.UtcNow.AddMinutes(-5)
+        });
+        await db.SaveChangesAsync();
     }
 
     private sealed class RecordingHandler : HttpMessageHandler

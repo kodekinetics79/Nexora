@@ -6,6 +6,7 @@ using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.ChangeTracking;
 using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.EntityFrameworkCore.Metadata;
 
 namespace ERP_RFQ_Automation.MasterData;
 
@@ -205,22 +206,24 @@ public sealed class MasterDataAuditInterceptor : SaveChangesInterceptor
             string? before = null;
             string? after = null;
 
+            var scale = DecimalScale(property.Metadata);
+
             switch (entry.State)
             {
                 case EntityState.Added:
-                    after = Render(property.CurrentValue);
+                    after = Render(property.CurrentValue, scale);
                     if (after is null) continue;  // a field that was never set did not change.
                     break;
 
                 case EntityState.Deleted:
-                    before = Render(property.OriginalValue);
+                    before = Render(property.OriginalValue, scale);
                     if (before is null) continue;
                     break;
 
                 default:
                     if (!property.IsModified) continue;
-                    before = Render(property.OriginalValue);
-                    after = Render(property.CurrentValue);
+                    before = Render(property.OriginalValue, scale);
+                    after = Render(property.CurrentValue, scale);
                     // EF marks a property modified when it is ASSIGNED, not when it differs. A
                     // controller that re-assigns every field from a request body would otherwise
                     // report twenty-four "changes" per edit and bury the one that mattered.
@@ -241,16 +244,53 @@ public sealed class MasterDataAuditInterceptor : SaveChangesInterceptor
     }
 
     /// <summary>
+    /// The declared scale of a decimal column, or null for anything else.
+    ///
+    /// <para>Read from the model rather than from the value, so it is the same number on every
+    /// provider. <c>HasPrecision(p, s)</c> surfaces through <see cref="RelationalPropertyExtensions"/>
+    /// directly; the columns configured as <c>HasColumnType("decimal(18, 2)")</c> carry it only in
+    /// the type string, which is a relational annotation and therefore identical under Npgsql and
+    /// SQLite.</para>
+    /// </summary>
+    private static int? DecimalScale(IReadOnlyProperty property)
+    {
+        var type = Nullable.GetUnderlyingType(property.ClrType) ?? property.ClrType;
+        if (type != typeof(decimal)) return null;
+        if (property.GetScale() is { } declared) return declared;
+
+        var columnType = property.GetColumnType();
+        if (string.IsNullOrEmpty(columnType)) return null;
+        var open = columnType.IndexOf('(');
+        var comma = columnType.IndexOf(',');
+        var close = columnType.IndexOf(')');
+        if (open < 0 || comma < open || close < comma) return null;
+        return int.TryParse(columnType.AsSpan(comma + 1, close - comma - 1).Trim(),
+            NumberStyles.Integer, CultureInfo.InvariantCulture, out var scale) ? scale : null;
+    }
+
+    /// <summary>
     /// Invariant-culture rendering. Culture matters: a decimal written under an Arabic locale and
     /// read back under an English one would compare unequal and manufacture a change that never
     /// happened.
+    ///
+    /// <para><b>Decimals are rendered at the COLUMN's scale, not at whatever scale the CLR value
+    /// happens to carry.</b> <c>decimal</c> keeps its trailing zeros, and a value's scale after a
+    /// round trip is the provider's choice: PostgreSQL returns <c>numeric(18,2)</c> as
+    /// <c>100.50m</c> while SQLite's text affinity returns the same stored figure as
+    /// <c>100.5m</c>. Rendering the raw value therefore made the audit trail read differently on
+    /// the two engines for one unchanged number, and — worse — made the equality test below
+    /// scale-sensitive, so re-saving a landed cost as <c>100.5m</c> against a stored <c>100.50m</c>
+    /// would have recorded a change that never happened. Both are the same money; the column says
+    /// how much of it is significant, so the column decides how it reads.</para>
     /// </summary>
-    private static string? Render(object? value) => value switch
+    private static string? Render(object? value, int? decimalScale = null) => value switch
     {
         null => null,
         string text => text,
         bool flag => flag ? "true" : "false",
-        decimal number => number.ToString(CultureInfo.InvariantCulture),
+        decimal number => number.ToString(
+            decimalScale is { } scale ? "F" + scale.ToString(CultureInfo.InvariantCulture) : null,
+            CultureInfo.InvariantCulture),
         double number => number.ToString("R", CultureInfo.InvariantCulture),
         float number => number.ToString("R", CultureInfo.InvariantCulture),
         DateTime timestamp => timestamp.ToString("O", CultureInfo.InvariantCulture),
