@@ -37,11 +37,16 @@ public sealed class SupplierQuoteCommercialService(ErpRfqAutomationContext conte
                 throw new SupplierQuoteValidationException("Complete critical field review before comparison.");
 
             // Whether the supplier's tax is a cost at all is a tenant fact, not a line fact:
-            // CommercialMatchingPolicy.SupplierInputTaxRecoverable. Read once per projection so
+            // CommercialMatchingPolicy.SupplierInputTaxRecoverablePercent. Read once per projection so
             // every line of the round is costed on one answer.
-            var inputTaxRecoverable = await context.ResolveSupplierInputTaxRecoverableAsync(
+            var inputTaxRecoverablePercent = await context.ResolveSupplierInputTaxRecoverablePercentAsync(
                 command.BusinessUnitId, cancellationToken);
             var revision = quote.Revisions.Single(x => x.RevisionNumber == quote.CurrentRevisionNumber);
+            // ...and whether we are ENTITLED to that answer is a supplier fact. Excluding the tax
+            // from cost books a reclaim, and a reclaim has to name the supplier's VAT registration
+            // to ZATCA. Refuse the projection before it persists a landed cost we cannot defend.
+            await context.EnsureSupplierInputTaxIsClaimableAsync(command.BusinessUnitId,
+                quote.SupplierId, revision.TaxAmount, inputTaxRecoverablePercent, cancellationToken);
             var correctedByEvidence = revision.ReviewDecisions
                 .GroupBy(x => x.SupplierQuoteFieldEvidenceId)
                 .Select(x => x.OrderByDescending(y => y.ReviewedOn).ThenByDescending(y => y.Id).First())
@@ -69,6 +74,25 @@ public sealed class SupplierQuoteCommercialService(ErpRfqAutomationContext conte
             var effectiveCurrencyId = Corrected(null, "CurrencyId") is { } correctedCurrency
                 ? long.Parse(correctedCurrency, System.Globalization.NumberStyles.Integer,
                     System.Globalization.CultureInfo.InvariantCulture) : revision.CurrencyId;
+            // An accepted header correction has to reach the money. Only ValidUntil and CurrencyId
+            // used to be read here, so a reviewer who spotted missing freight, corrected it, and
+            // was told the correction was accepted had changed nothing: the projection went on
+            // reading revision.FreightAmount raw and the landed cost never moved. A control that
+            // reports success while doing nothing is worse than no control, because it also
+            // convinces the reviewer the number has been checked.
+            decimal EffectiveCharge(string fieldName, decimal original) =>
+                Corrected(null, fieldName) is { } value
+                    ? decimal.Parse(value, System.Globalization.NumberStyles.Number,
+                        System.Globalization.CultureInfo.InvariantCulture) : original;
+            var effectiveFreight = EffectiveCharge("FreightAmount", revision.FreightAmount);
+            var effectiveTax = EffectiveCharge("TaxAmount", revision.TaxAmount);
+            var effectiveDuty = EffectiveCharge("DutyAmount", revision.DutyAmount);
+            var effectiveOther = EffectiveCharge("OtherAmount", revision.OtherAmount);
+            var effectiveDiscount = EffectiveCharge("DiscountAmount", revision.DiscountAmount);
+            if (effectiveFreight < 0m || effectiveTax < 0m || effectiveDuty < 0m ||
+                effectiveOther < 0m || effectiveDiscount < 0m)
+                throw new SupplierQuoteValidationException(
+                    "A corrected Supplier Quote charge cannot be negative.");
             if (effectiveValidUntil is null || effectiveValidUntil <= DateTime.UtcNow)
                 throw new SupplierQuoteValidationException("A current, unexpired Supplier Quote validity date is required.");
             if (revision.Lines.Count == 0)
@@ -117,8 +141,11 @@ public sealed class SupplierQuoteCommercialService(ErpRfqAutomationContext conte
                     var quantity = EffectiveDecimal(line, "Quantity", line.Quantity);
                     var unitPrice = EffectiveDecimal(line, "UnitPrice", line.UnitPrice);
                     var lineValue = LandedCostFormula.LineValue(unitPrice, quantity);
-                    var freight = LandedCostFormula.AllocateByValue(revision.FreightAmount, lineValue, totalCorrectedValue);
-                    var tax = LandedCostFormula.AllocateByValue(revision.TaxAmount, lineValue, totalCorrectedValue);
+                    var freight = LandedCostFormula.AllocateByValue(effectiveFreight, lineValue, totalCorrectedValue);
+                    var tax = LandedCostFormula.AllocateByValue(effectiveTax, lineValue, totalCorrectedValue);
+                    var duty = LandedCostFormula.AllocateByValue(effectiveDuty, lineValue, totalCorrectedValue);
+                    var other = LandedCostFormula.AllocateByValue(effectiveOther, lineValue, totalCorrectedValue);
+                    var discount = LandedCostFormula.AllocateByValue(effectiveDiscount, lineValue, totalCorrectedValue);
                     row.Quantity = quantity;
                     row.UnitPrice = unitPrice;
                     row.CurrencyId = effectiveCurrencyId;
@@ -126,8 +153,11 @@ public sealed class SupplierQuoteCommercialService(ErpRfqAutomationContext conte
                     row.AvailableQuantity = EffectiveNullableDecimal(line, "AvailableQuantity", line.AvailableQuantity);
                     row.FreightCost = freight;
                     row.TaxAmount = tax;
+                    row.DutyCost = duty;
+                    row.OtherCost = other;
+                    row.DiscountAmount = discount;
                     row.LandedUnitCost = LandedCostFormula.UnitCost(unitPrice, quantity, freight, tax,
-                        inputTaxRecoverable);
+                        inputTaxRecoverablePercent, duty, other, discount);
                     row.ValidUntil = effectiveValidUntil;
                     row.RequestHash = Hash(new { RevisionId = revision.Id, LineId = line.Id,
                         CorrectionReviewedOn = latestCorrection.Value });
@@ -183,10 +213,13 @@ public sealed class SupplierQuoteCommercialService(ErpRfqAutomationContext conte
                 var available = EffectiveNullableDecimal(line, "AvailableQuantity", line.AvailableQuantity);
                 var leadTime = EffectiveInt(line, "LeadTimeDays", line.LeadTimeDays);
                 var lineValue = LandedCostFormula.LineValue(unitPrice, quantity);
-                var freight = LandedCostFormula.AllocateByValue(revision.FreightAmount, lineValue, totalLineValue);
-                var tax = LandedCostFormula.AllocateByValue(revision.TaxAmount, lineValue, totalLineValue);
+                var freight = LandedCostFormula.AllocateByValue(effectiveFreight, lineValue, totalLineValue);
+                var tax = LandedCostFormula.AllocateByValue(effectiveTax, lineValue, totalLineValue);
+                var duty = LandedCostFormula.AllocateByValue(effectiveDuty, lineValue, totalLineValue);
+                var other = LandedCostFormula.AllocateByValue(effectiveOther, lineValue, totalLineValue);
+                var discount = LandedCostFormula.AllocateByValue(effectiveDiscount, lineValue, totalLineValue);
                 var landed = LandedCostFormula.UnitCost(unitPrice, quantity, freight, tax,
-                    inputTaxRecoverable);
+                    inputTaxRecoverablePercent, duty, other, discount);
                 var rfqLine = rfqLines[line.RfqItemId];
                 return new SupplierQuotedItem
                 {
@@ -212,13 +245,19 @@ public sealed class SupplierQuoteCommercialService(ErpRfqAutomationContext conte
                     FreightCost = freight,
                     // The supplier's tax is still recorded — it is real evidence, it is what we owe
                     // the supplier, and it is the input VAT the tenant reclaims. It is simply not a
-                    // cost of the goods, so LandedUnitCost above excludes it under the default
-                    // policy. Duty and other stay zero per decision R8: the quoted price is stated,
-                    // not derived, so duty is already inside it.
+                    // cost of the goods, so LandedUnitCost above excludes the recoverable share.
+                    //
+                    // Duty, other and discount used to be hardcoded to zero here, citing decision
+                    // R8. R8 says the ENTERED price is authoritative because duty is already inside
+                    // it — true of a customer price a rep types, false of a supplier quoting FOB or
+                    // EXW, who by definition has not paid KSA duty. R8 forbids DERIVING duty from
+                    // an HS code; it does not forbid recording the amount the buyer already knows.
+                    // At 5% KSA duty and a 20% target margin the hardcoded zero underpriced every
+                    // import by 6.25%, because customer price is landed / (1 - margin).
                     TaxAmount = tax,
-                    DutyCost = 0,
-                    OtherCost = 0,
-                    DiscountAmount = 0,
+                    DutyCost = duty,
+                    OtherCost = other,
+                    DiscountAmount = discount,
                     MinimumOrderQuantity = line.MinimumOrderQuantity,
                     ReliabilitySnapshot = supplier.SuccessRate,
                     LandedUnitCost = landed,
@@ -383,8 +422,28 @@ public sealed class SupplierQuoteCommercialService(ErpRfqAutomationContext conte
                 CorrelationId = Required(command.CorrelationId, nameof(command.CorrelationId))
             };
             quoteItem.UnitPrice = customerUnitPrice;
-            quoteItem.TotalAmount = decimal.Round(quoteItem.Quantity * customerUnitPrice - (quoteItem.Discount ?? 0) +
-                (quoteItem.TaxAmount ?? 0), 2, MidpointRounding.AwayFromZero);
+
+            // R17: the price just moved, so the tax on it must move with it. This line used to
+            // recompute TotalAmount from the STALE quoteItem.TaxAmount — a figure derived, if it
+            // ever was, against a different unit price — so the customer's total carried the tax of
+            // a price that no longer existed. Re-derive against the new price instead.
+            //
+            // A null derivation (the business unit has stated no output tax rate) is left null on
+            // purpose rather than being coerced to zero: the send gate then refuses the quote, which
+            // is the correct outcome for a document that would otherwise be deemed VAT-inclusive.
+            var taxCategory = QuoteLineTaxCategories.Normalize(quoteItem.TaxCategory);
+            quoteItem.TaxCategory = taxCategory;
+            var outputTaxRatePercent = await context.ResolveOutputTaxRatePercentAsync(
+                command.BusinessUnitId, cancellationToken);
+            var taxableBase = OutputTaxFormula.TaxableBase(
+                quoteItem.Quantity * customerUnitPrice, quoteItem.Discount ?? 0m);
+            var derivedTax = OutputTaxFormula.Derive(taxableBase, outputTaxRatePercent, taxCategory);
+            quoteItem.TaxAmount = derivedTax;
+            quoteItem.TaxRatePercentApplied = derivedTax is null
+                ? null
+                : OutputTaxFormula.EffectiveRatePercent(outputTaxRatePercent, taxCategory);
+            quoteItem.TotalAmount = decimal.Round(taxableBase + (derivedTax ?? 0m), 2,
+                MidpointRounding.AwayFromZero);
             quoteItem.ModifiedBy = command.Actor.Trim();
             quoteItem.ModifiedDate = DateTime.UtcNow;
             // FX fix, half 2 of 2: this SumAsync adds every other line of the quote to the line

@@ -42,6 +42,21 @@ namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
         /// <summary>Plain-language reason when <see cref="BlockedPendingPriceAttestation"/>.</summary>
         public string? PriceAttestationReason { get; init; }
 
+        /// <summary>
+        /// R17: true when nothing was sent because a line's OUTPUT TAX was never derived — the
+        /// business unit has no output tax rate configured, or the line has not been priced, or a
+        /// non-standard tax category carries no stated reason.
+        ///
+        /// <para>This fails closed on purpose. A quotation that leaves the building with no VAT
+        /// separately stated is DEEMED VAT-inclusive under KSA law, so the seller silently funds
+        /// 15/115 of it out of margin. There is no version of that which is better than the rep
+        /// seeing an error.</para>
+        /// </summary>
+        public bool BlockedPendingTaxDerivation { get; init; }
+
+        /// <summary>Plain-language reason when <see cref="BlockedPendingTaxDerivation"/>.</summary>
+        public string? TaxDerivationReason { get; init; }
+
         public bool QueuedForDelivery { get; init; }
         public bool Delivered { get; init; }
         public bool Replayed { get; init; }
@@ -66,6 +81,9 @@ namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
 
         public static QuoteSendResult AwaitingPriceAttestation(string reason) =>
             new() { BlockedPendingPriceAttestation = true, PriceAttestationReason = reason };
+
+        public static QuoteSendResult AwaitingTaxDerivation(string reason) =>
+            new() { BlockedPendingTaxDerivation = true, TaxDerivationReason = reason };
     }
 
     /// <summary>What the rep submits when confirming where a quote's prices came from (R5).</summary>

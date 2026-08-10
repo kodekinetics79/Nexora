@@ -5,6 +5,7 @@ using ERP_RFQ_Automation.Models;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Http;
+using ERP_RFQ_Automation.Security;
 
 namespace ERP_RFQ_Automation.Controllers
 {
@@ -69,7 +70,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error retrieving data: {ex.Message}");
+                return this.ServerError(ex, "Error retrieving data.");
             }
         }
 
@@ -90,7 +91,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error retrieving data: {ex.Message}");
+                return this.ServerError(ex, "Error retrieving data.");
             }
         }
 
@@ -127,7 +128,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error creating data: {ex.Message}");
+                return this.ServerError(ex, "Error creating data.");
             }
         }
 
@@ -165,7 +166,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error updating data: {ex.Message}");
+                return this.ServerError(ex, "Error updating data.");
             }
         }
 
@@ -192,7 +193,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error deleting data: {ex.Message}");
+                return this.ServerError(ex, "Error deleting data.");
             }
         }
 

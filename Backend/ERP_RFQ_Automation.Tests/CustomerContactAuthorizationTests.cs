@@ -283,7 +283,9 @@ public sealed class CustomerContactAuthorizationTests
         if (businessUnitClaim is not null)
             claims.Add(new Claim("businessUnitId", businessUnitClaim));
 
-        return new CustomerController(repository, new TestWebHostEnvironment(), fileInspection ?? new ClearingFileInspectionService())
+        return new CustomerController(
+            repository, new TestWebHostEnvironment(), fileInspection ?? new ClearingFileInspectionService(),
+            new StubMasterDataChangeHistoryReader())
         {
             ControllerContext = new ControllerContext
             {

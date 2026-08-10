@@ -20,6 +20,10 @@ import quoteService from '../../../api/services/quoteService';
 import setupService from '../../../api/services/setupService';
 import productService from '../../../api/services/productService';
 import CustomerContextPanel from './CustomerContextPanel';
+import commercialPolicyService from '../../../api/services/commercialPolicyService';
+import {
+  TAX_CATEGORIES, TAX_CATEGORY_STANDARD, taxCategoryLabel, taxCategoryRequiresReason,
+} from '../../../constants/taxCategories';
 import { toast } from 'react-hot-toast';
 
 interface QuoteItem {
@@ -37,7 +41,15 @@ interface QuoteItem {
   discount: number;
   discountTypeId: number | null;
   discountValue: number;
+  // Server-DERIVED (R17). Displayed, never edited: the rate comes from Commercial Policy settings
+  // and anything typed here is discarded on save. taxRatePercentApplied is null when the tax has
+  // never been derived, which is a different state from "derived to zero" and is what blocks the
+  // send — so the grid shows those two differently.
   taxAmount: number;
+  taxRatePercentApplied: number | null;
+  // The user's own statement of how the supply is taxed (R19), and the evidence for it.
+  taxCategory: string;
+  taxCategoryReason: string;
   deliveryLeadTime: number;
   isDeleted?: boolean;
 }
@@ -110,6 +122,9 @@ const EditQuotePage: React.FC = () => {
         discountTypeId: i.discountTypeId || null,
         discountValue: i.discountValue || 0,
         taxAmount: i.taxAmount || 0,
+        taxRatePercentApplied: i.taxRatePercentApplied ?? null,
+        taxCategory: i.taxCategory || TAX_CATEGORY_STANDARD,
+        taxCategoryReason: i.taxCategoryReason || '',
         deliveryLeadTime: i.deliveryLeadTime || 7
       })));
     }
@@ -119,6 +134,15 @@ const EditQuotePage: React.FC = () => {
     queryKey: ['customers-list', businessUnitId],
     queryFn: () => customerService.getAll({ pageSize: 100 }).then(r => r.items),
   });
+
+  // The business unit's output tax rate, so the grid can PREVIEW the tax the server will derive on
+  // save rather than showing a figure that went stale the moment a price was edited. The server
+  // remains the authority — nothing typed or previewed here is persisted as the tax.
+  const { data: commercialPolicy } = useQuery({
+    queryKey: ['commercial-policy'],
+    queryFn: () => commercialPolicyService.getPolicy(),
+  });
+  const outputTaxRatePercent = commercialPolicy?.outputTaxRatePercent ?? null;
 
   // Calculate Totals
   const subtotal = useMemo(() => {
@@ -159,7 +183,11 @@ const EditQuotePage: React.FC = () => {
 
   const handleAddItem = () => {
     setItems([...items, {
-      productId: null, productName: '', itemDescription: '', quantity: 1, unitPrice: 0, totalAmount: 0, discount: 0, discountTypeId: null, discountValue: 0, taxAmount: 0, deliveryLeadTime: 7
+      productId: null, productName: '', itemDescription: '', quantity: 1, unitPrice: 0, totalAmount: 0,
+      discount: 0, discountTypeId: null, discountValue: 0,
+      // A brand-new line has no derived tax until the server computes one on save.
+      taxAmount: 0, taxRatePercentApplied: null, taxCategory: TAX_CATEGORY_STANDARD, taxCategoryReason: '',
+      deliveryLeadTime: 7
     }]);
   };
 
@@ -186,6 +214,19 @@ const EditQuotePage: React.FC = () => {
     item.totalAmount = itemRawTotal - itemDiscount;
     item.discount = itemDiscount;
 
+    // Preview the derivation the server will perform on save, using the same rule: the tenant's
+    // rate on a standard-rated line, zero on any other category, and NOTHING when the line is
+    // standard-rated and the tenant has stated no rate. That last case is why the rate is nullable
+    // — showing zero there would be the defect this whole change exists to remove.
+    const effectiveRate = item.taxCategory === TAX_CATEGORY_STANDARD ? outputTaxRatePercent : 0;
+    const taxableBase = Math.max(0, Math.round((itemRawTotal - itemDiscount) * 100) / 100);
+    item.taxRatePercentApplied = effectiveRate;
+    item.taxAmount = effectiveRate === null
+      ? 0
+      : Math.round(taxableBase * effectiveRate) / 100;
+    // A line that goes back to standard rated carries no reason to state.
+    if (!taxCategoryRequiresReason(item.taxCategory)) item.taxCategoryReason = '';
+
     newItems[index] = item;
     setItems(newItems);
   };
@@ -205,6 +246,15 @@ const EditQuotePage: React.FC = () => {
       toast.error('Please select a customer');
       return;
     }
+    // R19: the server refuses this too, but failing here keeps the rep in the grid where the
+    // offending line is, instead of bouncing them off a save with a sentence about a line number.
+    const missingReason = items.find(i => !i.isDeleted
+      && taxCategoryRequiresReason(i.taxCategory) && !i.taxCategoryReason.trim());
+    if (missingReason) {
+      toast.error(`Line ${missingReason.customerLineRef || missingReason.itemDescription || ''} is `
+        + `${taxCategoryLabel(missingReason.taxCategory)} — say why it is not taxed at the standard rate.`);
+      return;
+    }
     const payload = {
       id: Number(id), quoteNo, customerId, quoteDate, validUntil, headerRemarks,
       discountTypeId, discountValue, statusId,
@@ -215,7 +265,12 @@ const EditQuotePage: React.FC = () => {
         quantity: item.quantity, unitPrice: item.unitPrice, totalAmount: item.totalAmount,
         unitOfMeasure: item.unitOfMeasure || null, customerLineRef: item.customerLineRef || null,
         discountTypeId: item.discountTypeId, discountValue: item.discountValue,
-        taxAmount: item.taxAmount, deliveryLeadTime: item.deliveryLeadTime,
+        // taxAmount is sent for wire compatibility only — the server re-derives it and discards
+        // whatever arrives here. The category and its reason ARE the user's input.
+        taxAmount: item.taxAmount,
+        taxCategory: item.taxCategory,
+        taxCategoryReason: item.taxCategoryReason.trim() || null,
+        deliveryLeadTime: item.deliveryLeadTime,
         isDeleted: item.isDeleted || false
       }))
     };
@@ -313,6 +368,7 @@ const EditQuotePage: React.FC = () => {
                   <TableCell sx={{ fontWeight: 800, width: 60 }} align="center">UOM</TableCell>
                   <TableCell sx={{ fontWeight: 800, width: 110 }} align="center">Price</TableCell>
                   <TableCell sx={{ fontWeight: 800, width: 100 }} align="center">Disc</TableCell>
+                  <TableCell sx={{ fontWeight: 800, width: 190 }} align="center">Tax treatment</TableCell>
                   <TableCell sx={{ fontWeight: 800, width: 100 }} align="center">Total</TableCell>
                   <TableCell sx={{ fontWeight: 800, width: 50 }} align="center"></TableCell>
                 </TableRow>
@@ -366,6 +422,38 @@ const EditQuotePage: React.FC = () => {
                                 value={item.discountValue} onChange={(e) => updateItem(index, { discountValue: Number(e.target.value) })} 
                             />
                         </Stack>
+                    </TableCell>
+                    {/* R17/R19. The category is the rep's decision; the amount beneath it is the
+                        server's derivation and is never editable here. "Not calculated yet" is a
+                        real state, distinct from a derived zero, and it blocks the send. */}
+                    <TableCell align="center">
+                      <Stack spacing={0.25}>
+                        <Select
+                          size="small" variant="standard" sx={{ fontSize: '0.75rem' }}
+                          value={item.taxCategory}
+                          onChange={(e) => updateItem(index, { taxCategory: String(e.target.value) })}
+                        >
+                          {TAX_CATEGORIES.map(option => (
+                            <MenuItem key={option.code} value={option.code}>
+                              <Typography variant="caption">{option.label}</Typography>
+                            </MenuItem>
+                          ))}
+                        </Select>
+                        <Typography variant="caption" color={item.taxRatePercentApplied === null ? 'warning.main' : 'text.secondary'}>
+                          {item.taxRatePercentApplied === null
+                            ? 'Tax not calculated yet'
+                            : `$ ${item.taxAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })} @ ${item.taxRatePercentApplied}%`}
+                        </Typography>
+                        {taxCategoryRequiresReason(item.taxCategory) && (
+                          <TextField
+                            size="small" variant="standard" placeholder="Why not standard rated?"
+                            value={item.taxCategoryReason}
+                            error={!item.taxCategoryReason.trim()}
+                            onChange={(e) => updateItem(index, { taxCategoryReason: e.target.value.slice(0, 500) })}
+                            slotProps={{ htmlInput: { style: { fontSize: '0.75rem' } } }}
+                          />
+                        )}
+                      </Stack>
                     </TableCell>
                     <TableCell align="center">
                       <Typography sx={{ fontWeight: 700, fontSize: '0.875rem' }}>$ {item.totalAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</Typography>

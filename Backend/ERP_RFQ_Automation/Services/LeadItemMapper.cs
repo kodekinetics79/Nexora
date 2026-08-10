@@ -49,7 +49,15 @@ public static class LeadItemMapper
             UnitOfMeasure = Truncate(UomCanonicalizer.CanonicalizeForStorage(source.UnitOfMeasure), 100),
 
             UnitPrice = source.UnitPrice,
-            Quantity = source.Quantity ?? 0,
+
+            // NULL in stays NULL out. The `?? 0` that used to be here was the last step of the
+            // silent-zero path: the extractors already refuse to invent a quantity — the
+            // conversational prompt leaves it null when the sender stated none, the model reader
+            // quarantines a non-positive value to null, and the canonical normalizer now emits
+            // null for "2,500" it could not read — and this one coalesce turned every one of
+            // those back into a real demand for zero units, on the single write path shared by
+            // all four ingestion doors.
+            Quantity = source.Quantity,
             StorageLocation = Truncate(source.StorageLocation, 100),
             ManufacturerName = Truncate(source.ManufacturerName, 200),
             ManufacturerPartNumber = Truncate(source.ManufacturerPartNumber, 100),

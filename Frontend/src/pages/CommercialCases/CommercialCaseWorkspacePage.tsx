@@ -72,6 +72,7 @@ const GAP_HEADLINE: Record<CommercialCaseTraceabilityGap['gapKind'], string> = {
   UnlinkedDocument: 'States no commercial case',
   ConflictingCase: 'States a different commercial case',
   ChainBroken: 'Document chain no longer reaches it',
+  CustomerOriginMissing: 'Names no customer document it was bought for',
 };
 
 /**

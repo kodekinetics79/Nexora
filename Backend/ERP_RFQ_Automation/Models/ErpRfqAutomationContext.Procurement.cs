@@ -97,6 +97,10 @@ public partial class ErpRfqAutomationContext
         ConfigureReceipts(modelBuilder);
         ConfigureEventsAndOutbox(modelBuilder);
         ConfigureProcurementHandoffs(modelBuilder);
+        // Gate 5 / Module 6. Inbound supplier shipments hang off the supplier purchase order
+        // (decision R3), so they are configured as part of the procurement model rather than in a
+        // module of their own. See ErpRfqAutomationContext.InboundLogistics.cs.
+        ConfigureInboundLogisticsModel(modelBuilder);
     }
 
     private void ConfigureProcurementHandoffs(ModelBuilder modelBuilder)

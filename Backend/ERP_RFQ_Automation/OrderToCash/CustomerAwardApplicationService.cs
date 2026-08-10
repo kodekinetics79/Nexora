@@ -301,6 +301,9 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
 
         var purchaseOrders = await query.OrderByDescending(x => x.ReceivedOn).ThenByDescending(x => x.Id)
             .Take(limit).ToListAsync(cancellationToken);
+        // FR-COM-04. One policy read for the whole page, so every row on the inbox counts its
+        // discrepancies against the same tolerances the match screen will show when it is opened.
+        var policy = await _db.ResolveAsync(businessUnitId, cancellationToken);
         var awardIds = purchaseOrders.SelectMany(x => x.Awards)
             .Where(x => x.Status != CustomerAwardStatuses.Cancelled).Select(x => x.Id).ToArray();
         var orders = awardIds.Length == 0
@@ -318,7 +321,7 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
             {
                 var allocation = line.AwardAllocations.FirstOrDefault(x =>
                     x.Award.Status != CustomerAwardStatuses.Cancelled);
-                return LineDifferences(line, allocation, allocation?.QuoteItem).Count > 0;
+                return LineDifferences(line, allocation, allocation?.QuoteItem, policy).Count > 0;
             });
             var outcome = award is null ? "POSSIBLE_MATCH_REVIEW"
                 : purchaseOrder.Status == CustomerPurchaseOrderStatuses.PartiallyAwarded ? "PARTIAL_AWARD"
@@ -353,12 +356,14 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
         var order = award is null ? null : await _db.Orders.AsNoTracking().Where(x =>
                 x.BusinessUnitId == businessUnitId && x.CustomerAwardId == award.Id)
             .Select(x => new { x.Id, x.OrderNo }).SingleOrDefaultAsync(cancellationToken);
+        // FR-COM-04. The tenant's tolerances decide what counts as a difference on this screen.
+        var policy = await _db.ResolveAsync(businessUnitId, cancellationToken);
         var lines = purchaseOrder.Lines.OrderBy(x => x.Id).Select(line =>
         {
             var allocation = line.AwardAllocations.Where(x => x.Award.Status != CustomerAwardStatuses.Cancelled)
                 .OrderByDescending(x => x.Id).FirstOrDefault();
             var quoteLine = allocation?.QuoteItem;
-            var differences = LineDifferences(line, allocation, quoteLine);
+            var differences = LineDifferences(line, allocation, quoteLine, policy);
             var status = allocation is null ? "REVIEW_REQUIRED"
                 : differences.Count == 0 ? "EXACT_MATCH"
                 : differences.Count == 1 && differences[0] == "QUANTITY_DISCREPANCY" ? "PARTIAL_MATCH"
@@ -475,19 +480,31 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
     /// the system against itself and "no discrepancy" becomes structurally unavoidable, which is why
     /// nothing in the capture path may seed them.</para>
     /// </summary>
+    /// <param name="policy">
+    /// The tenant's commercial policy, resolved once per request by the caller. Required, not
+    /// optional: the tolerances were a manager-settable control that nothing read, so every
+    /// sub-halalah rounding difference raised PRICE_DISCREPANCY and trained people to ignore the one
+    /// report standing between a mis-keyed customer PO and a wrong invoice. Passing the policy in
+    /// rather than defaulting it means a new call site cannot silently reinstate exact equality.
+    /// See <see cref="CommercialMatchingTolerance"/> for why the tolerance is symmetric.
+    /// </param>
     private static List<string> LineDifferences(CustomerPurchaseOrderLine line,
-        CustomerAwardLineAllocation? allocation, QuoteItem? quoteLine)
+        CustomerAwardLineAllocation? allocation, QuoteItem? quoteLine, CommercialMatchingPolicy policy)
     {
         var differences = new List<string>();
         if (allocation is null) differences.Add("UNQUOTED_OR_UNMATCHED_LINE");
-        if (allocation is not null && allocation.AwardedQuantity != line.OrderedQuantity)
+        if (allocation is not null && !CommercialMatchingTolerance.QuantityMatches(
+                allocation.AwardedQuantity, line.OrderedQuantity, policy))
             differences.Add("QUANTITY_DISCREPANCY");
+        // NOT tolerance-tested. A partial award is a decision someone made, not rounding: the
+        // remaining quantity stays open on the quotation and must stay visible as such.
         if (quoteLine is not null && allocation is not null && allocation.AwardedQuantity < quoteLine.Quantity)
             differences.Add("PARTIAL_QUOTE_AWARD");
         if (quoteLine is not null && PartIdentityConflicts(line, quoteLine))
             differences.Add("PART_DISCREPANCY");
         if (!line.UnitPrice.HasValue) differences.Add("PO_PRICE_NOT_PROVIDED");
-        else if (quoteLine is not null && line.UnitPrice.Value != quoteLine.UnitPrice)
+        else if (quoteLine is not null && !CommercialMatchingTolerance.PriceMatches(
+                     line.UnitPrice.Value, quoteLine.UnitPrice, policy))
             differences.Add("PRICE_DISCREPANCY");
         return differences;
     }
@@ -833,6 +850,22 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
                 throw new CustomerAwardConflictException("This award has already been converted to an order.");
             if (award.LineAllocations.Any(x => !x.QuoteItem.ProductId.HasValue || x.QuoteItem.ProductId <= 0))
                 throw new CustomerAwardConflictException("Every awarded quote line must have a product before order conversion.");
+
+            // R17 OUTPUT-TAX GATE. The same blocker the quote's PDF and send paths run, on the
+            // awarded lines only, because those are the lines this order will carry.
+            //
+            // Award conversion is THE production route to a sales order now that direct
+            // quote conversion is retired, and it inherits the line's tax through
+            // CustomerAwardLineAllocation.TaxSnapshot — which is computed as `TaxAmount ?? 0m`.
+            // Without this gate a quote line whose tax was never derived becomes a snapshot of
+            // zero, then a sales order stating SAR 0.00 VAT, then an AR invoice pro-rated from it.
+            // Under KSA law a document with no VAT separately stated is deemed VAT-inclusive, so
+            // the seller funds 15/115 ≈ 13.04% of the price out of its own margin.
+            if (ERP_RFQ_Automation.Services.QuoteService.TaxDerivationBlocker(
+                    award.LineAllocations.Select(x => x.QuoteItem),
+                    await _db.ResolveOutputTaxRatePercentAsync(businessUnitId, ct)) is { } taxBlocker)
+                throw new CustomerAwardConflictException(
+                    $"Award {award.AwardNumber} cannot become a sales order yet. {taxBlocker}");
 
             var draftStatus = await ResolveSetupAsync(businessUnitId, "OrderStatus", "DRAFT", ct)
                 ?? throw new CustomerAwardConflictException("No DRAFT OrderStatus is configured for this tenant.");

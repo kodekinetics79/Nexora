@@ -1,4 +1,8 @@
+using ERP_RFQ_Automation.AI;
+using ERP_RFQ_Automation.DTOs.DocumentIntelligence;
+using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.Services.DocumentIntelligence;
+using ERP_RFQ_Automation.Tests.Support;
 
 namespace ERP_RFQ_Automation.Tests;
 
@@ -237,5 +241,97 @@ public sealed class DocxCorpusSweepTests
         // Guards against a parser that "succeeds" by reading one line per document.
         Assert.True(totalLines >= files.Length * 3,
             $"Only {totalLines} lines across {files.Length} documents — suspiciously few.");
+    }
+
+    /// <summary>
+    /// MEASURES the review signal over the same real documents, and prints the before/after
+    /// so the numbers in any report are read off the corpus rather than estimated.
+    ///
+    /// <para>
+    /// "Before" is the rule this replaced, recomputed here from the same parse: a line needed
+    /// a check when any of unit price, currency, manufacturer, part number or lead time was
+    /// blank, and document confidence averaged all four header fields and all seven line
+    /// fields whether or not the document contained them. Both are pure functions of the
+    /// parsed rows, so the comparison is exact rather than remembered.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task TheReviewSignalFiresOnlyWhereSomethingIsActuallyWrong()
+    {
+        var path = CorpusPath();
+        if (path is null) return;   // corpus not present on this machine
+
+        var files = Directory.GetFiles(path, "*.docx").OrderBy(f => f, StringComparer.Ordinal).ToArray();
+        if (files.Length == 0) return;
+
+        var normalizer = new CanonicalRfqNormalizer();
+        var extractor = new ChunkedExtractionService(
+            new StubLlm(AiProviderClass.Local), normalizer, new NoopLogger<ChunkedExtractionService>());
+
+        int totalLines = 0, flaggedNow = 0, flaggedBefore = 0;
+        int docsBelowThresholdNow = 0, docsBelowThresholdBefore = 0;
+        double confidenceSumNow = 0, confidenceSumBefore = 0;
+
+        foreach (var file in files)
+        {
+            var rows = Parser.Parse(File.ReadAllBytes(file), Path.GetFileName(file));
+            var outcome = await extractor.ExtractStructuredAsync(rows, 7, Path.GetFileName(file));
+            var document = Assert.Single(outcome.CanonicalImport!.Documents);
+
+            totalLines += document.LineItems.Count;
+            flaggedNow += document.LineItems.Count(l => l.ValidationStatus != ValidationStatus.Valid);
+            flaggedBefore += document.LineItems.Count(l =>
+                l.UnitPrice.Kind == CanonicalValueKind.Missing
+                || l.Currency.Kind == CanonicalValueKind.Missing
+                || l.ManufacturerName.Kind == CanonicalValueKind.Missing
+                || l.ManufacturerPartNumber.Kind == CanonicalValueKind.Missing
+                || l.LeadTimeDays.Kind == CanonicalValueKind.Missing);
+
+            // OverallConfidence is nullable so "no score was produced" is representable rather
+            // than colliding with a genuine 0.0. Every document in this corpus is scored, so a
+            // null here is itself a defect — assert it instead of coalescing, and note that a
+            // lifted `null < 0.60` would quietly read as "above threshold".
+            var now = outcome.Result!.OverallConfidence;
+            Assert.NotNull(now);
+            var before = LegacyConfidence(document);
+            confidenceSumNow += now.Value;
+            confidenceSumBefore += before;
+            if (now.Value < 0.60) docsBelowThresholdNow++;
+            if (before < 0.60) docsBelowThresholdBefore++;
+        }
+
+        var summary =
+            $"{files.Length} documents, {totalLines} lines. "
+            + $"Lines flagged: {flaggedBefore} before -> {flaggedNow} now. "
+            + $"Documents under the 0.60 confidence threshold: {docsBelowThresholdBefore} before -> "
+            + $"{docsBelowThresholdNow} now. Mean confidence: "
+            + $"{confidenceSumBefore / files.Length:F3} before -> {confidenceSumNow / files.Length:F3} now.";
+
+        // Every document in the sample set is correctly read, and the sample set states no
+        // price, currency, unit, brand or lead time anywhere: nothing may ask for a check,
+        // and nothing may fall under the confidence threshold.
+        Assert.True(flaggedNow == 0 && docsBelowThresholdNow == 0, summary);
+
+        // ...and the comparison must be a real one. If the OLD rule also flagged nothing,
+        // this corpus cannot demonstrate the fix and the numbers mean nothing.
+        Assert.True(flaggedBefore == totalLines, summary);
+    }
+
+    /// <summary>The confidence formula this replaced: the whole schema, present or not.</summary>
+    private static double LegacyConfidence(CanonicalRfqDocument document)
+    {
+        var header = new[]
+        {
+            (double)document.RfqNo.Confidence, (double)document.BuyerName.Confidence,
+            (double)document.ReceivedDate.Confidence, (double)document.BidClosingDate.Confidence
+        }.Average();
+        var items = document.LineItems.Select(l => new[]
+        {
+            (double)l.ProductName.Confidence, (double)l.Quantity.Confidence,
+            (double)l.UnitPrice.Confidence, (double)l.Currency.Confidence,
+            (double)l.ManufacturerName.Confidence, (double)l.ManufacturerPartNumber.Confidence,
+            (double)l.LeadTimeDays.Confidence
+        }.Average()).DefaultIfEmpty(0).Average();
+        return document.LineItems.Count > 0 ? (header * 0.4) + (items * 0.6) : header;
     }
 }

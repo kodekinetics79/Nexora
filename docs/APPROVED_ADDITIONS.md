@@ -110,3 +110,111 @@ customer's ordinary fields, because **E44** already records that the Customer, S
 controllers write no audit events at all. Fixing custom-field auditing alone would produce the odd
 result that a tenant-defined field is better audited than the customer's own credit limit. The
 right fix is E44 as a whole, and it is awaiting a decision.
+
+---
+
+## AA-02 · Platform administration: tenant edit, governed offboarding, invitation recovery
+
+**Approved:** 2026-08-09 by Zack, product owner.
+**Scheduled:** alongside Gate 5/6 remediation; it does not block the RFQ→delivery spine.
+**Status:** in progress.
+
+### What he asked for
+
+Three named gaps in the operator control plane:
+
+1. **Tenant edit capability** — an operator cannot change a tenant's details after provisioning.
+2. **Governed tenant delete / offboarding** — ending a tenant relationship safely, with the
+   statutory-record rules honoured rather than bypassed.
+3. **Tenant activation email and invitation recovery** — an invitation that is never delivered, or
+   expires, currently strands the tenant with no way back in.
+
+### Why this is an approved addition rather than scope creep
+
+The SaaS control plane is recorded as out-of-BRD under **E36** — BRD v3.0 describes the product Tech
+Connect uses, not the platform Nexora runs it on. That does not make the control plane optional:
+without it there is no way to onboard, correct or end a tenant relationship, and the pilot itself is
+a tenant. The product owner asking for it is the written approval E36 requires.
+
+### Constraints carried in from what the reviews already found
+
+Offboarding must not become a way around the retention rules. `Retention/EvidenceRetentionEligibility`
+already hard-codes invoices, purchase orders, customer orders, supplier confirmations and delivery
+documents as statutorily non-purgeable and states plainly that *a tenant may choose how long to keep
+intake artefacts, and may not choose to delete statutory records*. A delete path that ignores that
+would undo one of the better controls in the system.
+
+Invitation recovery must not become an account-takeover path: re-issuing an invitation is a
+credential-bearing action and needs the same attribution, expiry and single-use discipline as the
+original.
+
+### What was already there (2026-08-09 audit)
+
+Most of AA-02 was already built and is genuinely wired, which is worth recording because the brief
+assumed otherwise:
+
+| Item | State found |
+|---|---|
+| Tenant profile edit | **Real.** `PUT /api/platform/tenants/{id}/profile` writes the tenant, its primary business unit and its quote configuration in one transaction, audited before/after, with a UI on the Profile tab. |
+| Offboarding lifecycle | **Real, and the strongest module in the repo.** Suspend→archive→export→schedule→retention clock→purge, plus a separate erasure axis, a legal-hold fence, a fail-closed financial readiness gate, a purge lease with a fencing token, and refusal of a tenant that was brought back to life mid-window. |
+| Invitation re-issue | **Real.** Supersede-then-issue in one transaction, single-use redemption by conditional UPDATE, delivery state (`SendCount`/`LastSentAtUtc`) recorded separately from issue, and a console-provider send honestly reported as *not* transmitted with a one-time recovery link surfaced instead. |
+
+Three gaps were genuine, and all three were the same failure the wiring contract calls **#5, a
+setting with no way to set it** — or its absence-of-control equivalent.
+
+### What was built (2026-08-09)
+
+**Invoicing details became editable.** `BillingContactEmail`, `BillingContactName`,
+`BillingAddress`, `PurchaseOrderReference`, `PaymentTermsDays`, `AccountOwnerEmail` and the contract
+dates were written once at provisioning and never again — while `SubscriptionInvoiceService`
+*refuses to issue an invoice at all* without the recipient, computes the due date from the payment
+terms, and freezes the rest into each invoice's immutable buyer snapshot. A customer who moved
+their accounts-payable mailbox could not be corrected except by direct SQL, and because the
+offboarding readiness gate requires a finalized invoice, a tenant whose contact was wrong could not
+even be ended. Now `PUT /api/platform/billing/tenants/{id}/account-contact`, under the **Billing**
+policy rather than the support one, because where an invoice is sent decides who receives the
+demand for money. Clearing the recipient on a charged tenant is refused outright.
+
+**The contractual data region became correctable.** `DataRegion` was write-once and read by two
+controls: an asset cannot be registered in a different region, and the `data.residency-isolation`
+activation control compares the verified database asset against it. A region mistyped at
+provisioning produced a tenant that could never be activated. Now
+`PUT /api/platform/tenants/{id}/data-region`, **Owner-only**, and — the part that matters — it may
+only be corrected *into agreement with the assets already registered*. The assets are the evidence
+of where the data physically is; the column is only a claim about them, and a claim that disagrees
+is refused with the offending asset named. Otherwise a residency control could be satisfied by
+rewriting the assertion instead of moving the data.
+
+**A purge now needs a second platform Owner.** It was the only privileged destructive operation
+where the maker could also be the checker — billing statement finalize, invoice finalize, tax-rule
+approval, revenue actions, FX rates and, in this same module, legal-hold *release* all already
+require an independent second person. The maker's identity is read from the append-only
+`TenantLifecycleEvent` for the live schedule rather than from the mutable offboarding row, so it
+needs **no new column**. An unattributable scheduling decision is refused rather than waived, the
+way `CurrencyController` treats a rate whose maker was "System"; the remedy — cancel and
+re-schedule — is non-destructive and named in the refusal.
+
+**The operator is now told what was kept.** `TenantPurgeResultDto` already computed the retained
+lifecycle events, retained platform audit records and redacted support tickets on every purge, and
+the console rendered none of it — wiring failure #2 verbatim. The preserved-table list was a
+comma-joined string of names with no reasons, though the reasons exist in `PlatformTenantDataMap`.
+Both are now surfaced, and a new disclosure reconciles this path with
+`EvidenceRetentionEligibility`: statutory records are destroyed here only because the readiness gate
+has already proved a fingerprinted export handed them back, so the obligation moves with the data
+rather than being discharged.
+
+**Schema delta: none.** No new table, no new column, no RLS policy and no GRANT. Every write lands
+on `platform."Tenants"` columns that already exist, on the pipeline role's existing table-level
+`UPDATE`.
+
+### What is still owed
+
+- The purge preview counts rows per table but does **not** separately count the *statutory* rows
+  (invoices, purchase orders, customer orders, supplier confirmations, delivery documents) inside
+  those counts. The operator is told the rule in prose and shown a total; they are not shown "and
+  1,284 of these are statutory records". The export receipt is the control; the number would be
+  the proof.
+- `BillingAddress` is now settable and readable but is still absent from the provisioning wizard's
+  review step.
+- Invitation delivery state is per-invitation; there is no cross-tenant "who has an undelivered
+  invitation" queue, so a silently misconfigured provider is still discovered tenant by tenant.

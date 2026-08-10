@@ -163,6 +163,29 @@ public static class TenantOffboardingDisclosure
         + "history or the billing statements those records support. Run the erasure operation if "
         + "what was asked for is the removal of personal data.";
 
+    /// <summary>
+    /// The one sentence that reconciles this module with <c>EvidenceRetentionEligibility</c>, which
+    /// hard-codes invoices, purchase orders, customer orders, supplier confirmations and delivery
+    /// documents as records a tenant may NOT choose to delete.
+    ///
+    /// <para>Stated because the two rules look contradictory and are not. That rule governs the
+    /// per-document retention sweep INSIDE a live tenant: their own housekeeping may not quietly
+    /// destroy their own statutory books, and their choice is limited to how long intake artefacts
+    /// survive. This path is the end of the relationship, and the obligation moves with the data —
+    /// which is why the readiness gate refuses a purge until a completed, hash-fingerprinted export
+    /// exists dated after the final invoice and its accounting acknowledgement. The customer holds
+    /// their statutory records; the operator stops holding them. A purge with no export receipt is
+    /// refused, and that refusal is what keeps this from being a way around the retention rule.</para>
+    /// </summary>
+    public const string StatutoryRecordsMoveWithTheCustomer =
+        "This tenant's statutory records — invoices, purchase orders, customer orders, supplier "
+        + "confirmations and delivery documents — are destroyed here, and that is permitted only "
+        + "because the offboarding readiness gate has already proved they were handed back: a "
+        + "completed export, fingerprinted with SHA-256, dated after the final invoice and its "
+        + "reconciled accounting receipt. The retention obligation follows the records to the "
+        + "customer; it is not discharged by this purge, and this purge is not a route around it. "
+        + "If no such export receipt exists, the purge is refused rather than allowed to proceed.";
+
     /// <summary>What a purge deliberately leaves standing. The list is the answer to
     /// "so what is left of us afterwards", which every offboarding customer asks.</summary>
     public const string Survives =

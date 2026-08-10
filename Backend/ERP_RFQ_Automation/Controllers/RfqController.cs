@@ -443,6 +443,16 @@ namespace ERP_RFQ_Automation.Controllers
                                             "the price source has not been confirmed.") +
                                            " Open the quote, confirm the price source, and send it from there.";
                         }
+                        // R17: same shape for the tax gate. This auto-send path has no rep in front
+                        // of it, so it stops short of the customer's inbox rather than sending a
+                        // quotation with no VAT stated on it.
+                        else if (sendResult.BlockedPendingTaxDerivation)
+                        {
+                            emailWarning = "Quote generated, but it was not sent: " +
+                                           (sendResult.TaxDerivationReason ??
+                                            "a line's output tax has not been calculated.") +
+                                           " Open the quote, resolve the tax, and send it from there.";
+                        }
                         else if (sendResult.Held)
                         {
                             emailWarning = "Quote generated, but sending is held for approval — pricing is below " +

@@ -16,7 +16,11 @@
         public string? Currency { get; set; }
         public string? UnitOfMeasure { get; set; }
         public decimal? UnitPrice { get; set; }
-        public int Quantity { get; set; }
+        /// <summary>
+        /// Null when the source document stated no readable quantity. Never 0-for-unknown: the
+        /// review screen must show a gap the reviewer has to fill, not a number to approve.
+        /// </summary>
+        public int? Quantity { get; set; }
         public string? StorageLocation { get; set; }
         public string? ManufacturerName { get; set; }
         public string? ManufacturerPartNumber { get; set; }

@@ -243,8 +243,11 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
                         ? r.Matches[0].ProductId
                         : (long?)null);
 
-                // Quantity: corrected value wins; else raw lead quantity; else the
-                // normalized (parsed-from-text) quantity when the raw one is 0.
+                // Quantity: corrected value wins; else the raw lead quantity WHEN THE DOCUMENT
+                // STATED ONE; else the normalized (parsed-from-text) quantity. A lead line whose
+                // quantity is null states none, so it falls through to recovery exactly as a
+                // dirty 0 did — and if recovery finds nothing the conversion is refused rather
+                // than writing a demand for zero units into an RFQ.
                 int quantity;
                 if (choice?.Quantity is int cq)
                 {
@@ -253,9 +256,12 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
                 }
                 else
                 {
-                    quantity = li.Quantity > 0
-                        ? li.Quantity
+                    quantity = li.Quantity is > 0
+                        ? li.Quantity.Value
                         : (int)Math.Ceiling(r.NormalizedQuantity ?? 0m);
+                    if (quantity <= 0)
+                        throw new ArgumentException(
+                            $"Quantity for line {li.Id} is not stated in the source document. Enter it before converting.");
                 }
 
                 // UoM: corrected value wins; both paths standardize against SetUoms.
@@ -377,7 +383,10 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
                 && string.IsNullOrWhiteSpace(line.ManufacturerPartNumber)
                 && string.IsNullOrWhiteSpace(line.ProductShortDescription))
                 blockers.Add($"{label} part number or description");
-            if (quantity <= 0) blockers.Add($"{label} quantity");
+            // `is null or <= 0`, not `<= 0`. With a nullable quantity the bare comparison is
+            // FALSE for null, so an unstated quantity would have stopped being a blocker and the
+            // line would have converted with nothing in it.
+            if (quantity is null or <= 0) blockers.Add($"{label} quantity");
             if (string.IsNullOrWhiteSpace(unitOfMeasure)) blockers.Add($"{label} unit");
             if (string.IsNullOrWhiteSpace(line.Currency)) blockers.Add($"{label} currency");
         }
@@ -458,8 +467,11 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
             var effectiveUom = string.IsNullOrWhiteSpace(choice?.UnitOfMeasure)
                 ? li.UnitOfMeasure
                 : choice!.UnitOfMeasure;
+            // Same reason as above: null is "not stated", which is exactly the condition this
+            // gate exists to hold, so it must be spelled out rather than left to a comparison
+            // that silently answers false.
             var stillBlocked = r.IsBlocked
-                && (effectiveQuantity <= 0 || string.IsNullOrWhiteSpace(effectiveUom));
+                && (effectiveQuantity is null or <= 0 || string.IsNullOrWhiteSpace(effectiveUom));
             if (stillBlocked)
             {
                 blocked.Add($"{Label(li)}: {r.BlockingReason}");
@@ -712,12 +724,14 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
         s.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
 
     /// <summary>
-    /// Quantity is typed int on LeadItem; when it is 0/dirty, try to recover a
-    /// numeric value from the raw UoM ("10 EA") or the item text fields.
+    /// The line's usable quantity. NULL on LeadItem means the document stated none we could
+    /// read; 0 or a dirty value means the same thing in practice. In either case try to recover
+    /// a number from the raw UoM ("10 EA") or the item text fields, and return null — never a
+    /// substituted zero — when there is nothing to recover.
     /// </summary>
     private static decimal? NormalizeQuantity(LeadItem item)
     {
-        if (item.Quantity > 0) return item.Quantity;
+        if (item.Quantity is > 0) return item.Quantity.Value;
         foreach (var source in new[] { item.UnitOfMeasure, item.ItemText, item.MaterialPotext })
         {
             if (string.IsNullOrWhiteSpace(source)) continue;

@@ -15,13 +15,14 @@ import {
   ButtonBase,
   Collapse,
   TextField,
-  InputAdornment,
   FormControlLabel,
   Switch,
   Radio,
   RadioGroup,
   FormControl,
   Chip,
+  MenuItem,
+  InputAdornment,
 } from '@mui/material';
 import {
   History as HistoryIcon,
@@ -34,6 +35,7 @@ import copilotService, {
   type AgentPolicy,
   type AgentAutonomyLevel,
 } from '../../api/services/copilotService';
+import currencyService from '../../api/services/currencyService';
 import { humanizeTool } from './humanize';
 
 // ─── Plain-English decision labels + calm status dots ────────────────────────
@@ -83,7 +85,9 @@ const AUTONOMY_CHOICES: AutonomyChoice[] = [
   {
     value: 'Act',
     title: 'Full autopilot',
-    help: 'I’ll act on my own whenever I can, pausing only for the dollar limits you set below.',
+    // Not "dollar limits" — the caps are denominated in the currency the tenant chooses below,
+    // and quotes in other currencies are converted into it before the limit is applied.
+    help: 'I’ll act on my own whenever I can, pausing only for the spending limits you set below.',
   },
 ];
 
@@ -103,6 +107,16 @@ const AdvancedSettings: React.FC = () => {
   useEffect(() => {
     if (data) setDraft(data);
   }, [data]);
+
+  // The tenant's own active currencies — the only ones the server will accept as a cap
+  // denomination, since AgentPolicy.CurrencyId is a tenant-scoped foreign key.
+  const { data: currencies } = useQuery({
+    queryKey: ['currencies', 'agent-policy-caps'],
+    queryFn: async () => (await currencyService.getAll({ pageNumber: 1, pageSize: 200 })).items,
+    staleTime: 5 * 60 * 1000,
+  });
+  const selectedCurrencyCode =
+    currencies?.find((c) => c.id === draft?.currencyId)?.code ?? null;
 
   const mutation = useMutation({
     mutationFn: (body: AgentPolicy) => copilotService.updatePolicy(body),
@@ -211,29 +225,76 @@ const AdvancedSettings: React.FC = () => {
               <Typography variant="subtitle2" sx={{ fontWeight: 700, mt: 3, mb: 1 }}>
                 Spending limits
               </Typography>
+              {/*
+                The caps now carry a currency (AgentPolicy.CurrencyId) and the guardrail converts
+                each award/order into it with approved, effective-dated FX rates before comparing.
+                So a symbol IS legitimate here — but only the one the tenant actually chose, and
+                only once they have chosen it. While no currency is set the caps denote nothing,
+                the guardrail refuses to auto-approve anything, and the fields are disabled rather
+                than inviting a number with no unit.
+              */}
+              <TextField
+                select
+                fullWidth
+                size="small"
+                label="Limits are in"
+                value={draft.currencyId ?? ''}
+                onChange={(e) => set('currencyId', e.target.value === '' ? null : Number(e.target.value))}
+                helperText={
+                  draft.currencyId
+                    ? 'Awards and orders quoted in other currencies are converted into this one before the limit is applied.'
+                    : 'Choose a currency to switch auto-approval on.'
+                }
+                sx={{ mb: 1.5 }}
+              >
+                {(currencies ?? []).map((c) => (
+                  <MenuItem key={c.id} value={c.id}>
+                    {c.code} — {c.currencyName}
+                  </MenuItem>
+                ))}
+              </TextField>
+
               <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5}>
                 <TextField
                   fullWidth
                   size="small"
                   type="number"
                   label="Auto-approve awards under"
+                  disabled={!draft.currencyId}
                   value={draft.maxAutoAwardValue}
                   onChange={(e) => set('maxAutoAwardValue', Number(e.target.value))}
-                  slotProps={{ input: { startAdornment: <InputAdornment position="start">$</InputAdornment> } }}
+                  slotProps={{ input: { endAdornment: selectedCurrencyCode ? <InputAdornment position="end">{selectedCurrencyCode}</InputAdornment> : undefined } }}
                 />
                 <TextField
                   fullWidth
                   size="small"
                   type="number"
                   label="Auto-approve orders under"
+                  disabled={!draft.currencyId}
                   value={draft.maxAutoOrderValue}
                   onChange={(e) => set('maxAutoOrderValue', Number(e.target.value))}
-                  slotProps={{ input: { startAdornment: <InputAdornment position="start">$</InputAdornment> } }}
+                  slotProps={{ input: { endAdornment: selectedCurrencyCode ? <InputAdornment position="end">{selectedCurrencyCode}</InputAdornment> : undefined } }}
                 />
               </Stack>
               <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.75 }}>
                 Anything above these amounts will always come to you for approval.
               </Typography>
+
+              {draft.currencyId ? (
+                <Alert severity="info" variant="outlined" sx={{ mt: 1 }}>
+                  A supplier quoting in another currency is converted into {selectedCurrencyCode} at
+                  your approved exchange rate before the limit is applied, so the same limit means
+                  the same amount of money whichever currency the quote arrives in. If no approved
+                  rate exists for a pair, I will not guess one — that award comes to you instead.
+                </Alert>
+              ) : (
+                <Alert severity="warning" variant="outlined" sx={{ mt: 1 }}>
+                  <strong>Auto-approval is off until you pick a currency.</strong> A limit with no
+                  currency does not describe an amount of money, so I cannot check anything against
+                  it and every award and order will come to you. Choose the currency these limits
+                  are written in, confirm the amounts are right in it, and save.
+                </Alert>
+              )}
 
               <Typography variant="subtitle2" sx={{ fontWeight: 700, mt: 3, mb: 1 }}>
                 Always check with me first

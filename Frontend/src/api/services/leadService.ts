@@ -132,7 +132,8 @@ export interface LeadItemResponseDTO {
   itemMaterialCode?: string;
   productShortName?: string;
   productShortDescription?: string;
-  quantity?: number;
+  /** Null when the source document stated no readable quantity — render the gap, never a 0. */
+  quantity?: number | null;
   unitOfMeasure?: string;
   currency?: string;
   unitPrice?: number;
@@ -235,7 +236,8 @@ export interface AcceptedLeadItemDTO {
   currency?: string;
   unitOfMeasure?: string;
   unitPrice?: number;
-  quantity: number;
+  /** Null when the source document stated no readable quantity. */
+  quantity: number | null;
   storageLocation?: string;
   manufacturerName?: string;
   manufacturerPartNumber?: string;

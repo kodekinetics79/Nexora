@@ -284,8 +284,15 @@ public partial class ErpRfqAutomationContext
         modelBuilder.ApplyInventoryReservationModel();
         modelBuilder.ApplyCommercialInventoryModel();
         ConfigureProcurementModel(modelBuilder);
+        // Gate 5 / FR-MTR-01..05. Must follow the procurement configuration: material lots hang off
+        // the supplier purchase order, its lines and the goods receipt, and reference their
+        // (BusinessUnitId, Id) alternate keys. See Models/ErpRfqAutomationContext.Traceability.cs.
+        ConfigureMaterialTraceabilityModel(modelBuilder);
         ConfigureCommercialDocumentsModel(modelBuilder);
         ConfigureSupplierGovernanceModel(modelBuilder);
+        // Tax registration numbers on Suppliers and BusinessUnits — the evidence the input-VAT
+        // position rests on. See Models/ErpRfqAutomationContext.TaxRegistration.cs.
+        ConfigureTaxRegistrationModel(modelBuilder);
         ConfigureSupplierQuotesModel(modelBuilder);
         ConfigureCommercialLearningModel(modelBuilder);
         ConfigurePlatformGovernanceModel(modelBuilder);
@@ -297,6 +304,9 @@ public partial class ErpRfqAutomationContext
         // R7 reasoned quote-validity extensions — same ordering constraint, same reason.
         // See Models/ErpRfqAutomationContext.QuoteValidity.cs.
         ConfigureQuoteValidityModel(modelBuilder);
+        // Reasoned, audited quote removal + the tombstone that outlives a discarded draft.
+        // See Models/ErpRfqAutomationContext.QuoteRemoval.cs.
+        ConfigureQuoteRemovalModel(modelBuilder);
         modelBuilder.Entity<ERP_RFQ_Automation.Inventory.StockReservation>()
             .HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<CustomerIdentifier>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
@@ -340,7 +350,8 @@ public partial class ErpRfqAutomationContext
         modelBuilder.Entity<CustomFieldDependency>().HasQueryFilter(e => CurrentTenantId == null || e.Version.Definition.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<CustomFieldRecord>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<CustomFieldValue>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
-        modelBuilder.Entity<CustomFieldValueHistory>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        // CustomFieldValueHistory was removed (FR-MDM-05 / E44) — it was mapped, filtered and
+        // trigger-protected but never written to. See CustomFields/CustomFieldValues.cs.
 
         // PostgreSQL-backed enterprise foundations.
         if (Database.IsNpgsql())
@@ -773,6 +784,13 @@ public partial class ErpRfqAutomationContext
 
         // ==== Platform-owned tenant data-boundary inventory (Platform/DataAssets/) ====
         modelBuilder.ApplyTenantDataAssetModel();
+
+        // ==== Master-data before/after audit (FR-MDM-05, register item E44, MasterData/) ====
+        // Same partial-splice pattern; implementation in
+        // ErpRfqAutomationContext.MasterDataAudit.cs. Declared LAST because MasterDataFieldChanges
+        // takes a composite foreign key onto the MasterDataChangeEvents alternate key, and the
+        // principal must be configured before the dependent.
+        ConfigureMasterDataAuditModel(modelBuilder);
     }
 
     /// <summary>

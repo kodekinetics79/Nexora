@@ -59,6 +59,17 @@ public static class CommercialCaseGapKinds
     /// the timeline; the broken join is reported so the two views can be reconciled.
     /// </summary>
     public const string ChainBroken = "ChainBroken";
+
+    /// <summary>
+    /// FR-COM-07. A supplier purchase order raised against customer demand that names no customer
+    /// document — no client PO, no sales order, no quotation. It IS in the timeline, because it
+    /// declares the case; what is missing is the ability to answer "which customer was this bought
+    /// for?" from the order itself rather than by re-joining through the RFQ.
+    ///
+    /// <para>A STOCK replenishment order never produces this gap: it has no customer, so absent
+    /// keys are the correct answer rather than a defect.</para>
+    /// </summary>
+    public const string CustomerOriginMissing = "CustomerOriginMissing";
 }
 
 /// <summary>

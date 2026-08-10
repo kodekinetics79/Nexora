@@ -23,10 +23,12 @@ namespace ERP_RFQ_Automation.AI;
 ///
 /// <para><b>What it does NOT do.</b> It never bypasses another control. Even an authorized
 /// endpoint must still satisfy <see cref="AiProcessingPolicy.ExternalProcessingAllowed"/>
-/// (re-checked here as well as in the ledger), the purpose/provider/model policy denials,
-/// the reserve/attempt/settle token ledger and its monthly + per-document budgets, the
-/// external-dependency ceiling, PII redaction before egress, the prompt-injection nonce
-/// boundary, strict-JSON-or-fail parsing and line-item count conservation.</para>
+/// (re-checked here as well as in the ledger), <see cref="AiProcessingPolicy.EgressPolicy"/>,
+/// the purpose/provider/model policy denials, the reserve/attempt/settle token ledger and
+/// its monthly + per-document budgets, the external-dependency ceiling, the prompt-injection
+/// nonce boundary, strict-JSON-or-fail parsing and line-item count conservation. It does NOT
+/// redact: nothing in this build does, whatever
+/// <see cref="AiProcessingPolicy.RedactionRequired"/> says.</para>
 /// </summary>
 public sealed class AiExternalProviderTrustService : IAiExternalProviderTrust
 {
@@ -49,9 +51,13 @@ public sealed class AiExternalProviderTrustService : IAiExternalProviderTrust
         _tenantContext = tenantContext;
         _log = log;
         ResolvedProvider = endpointResolver.Current;
+        KnownProviders = endpointResolver.All;
     }
 
     public AiProviderDescriptor ResolvedProvider { get; }
+
+    /// <inheritdoc />
+    public IReadOnlyList<AiProviderDescriptor> KnownProviders { get; }
 
     // ---- enforcement -----------------------------------------------------
 
@@ -62,11 +68,22 @@ public sealed class AiExternalProviderTrustService : IAiExternalProviderTrust
         if (businessUnitId <= 0)
             return AiExternalProviderDecision.Deny(AiExternalProviderTrustReasons.TenantMismatch, provider);
 
-        // A caller may never evaluate another tenant's allow-list. Mirrors
-        // AiGovernanceService.EnsureTenant. A null ambient tenant (background worker
-        // sweep before Push) is still safe: the query below is explicitly predicated on
-        // businessUnitId in addition to the global query filter.
-        if (_tenantContext.BusinessUnitId is { } scoped && scoped != businessUnitId)
+        // A caller may never evaluate another tenant's allow-list, and a caller with NO
+        // ambient tenant may not evaluate one either.
+        //
+        // The null case used to be waved through on the reasoning that the query below is
+        // explicitly predicated on businessUnitId anyway. That reasoning describes the happy
+        // path and skips the one that matters: a null ambient tenant is the background-worker
+        // case, where the EF global query filter is a no-op and the connection is BYPASSRLS.
+        // Both of the isolation mechanisms this gate is layered on top of are switched off in
+        // exactly the situation the check declined to examine, leaving a hand-written
+        // predicate as the only thing standing between one tenant's egress authorization and
+        // another's. AiGovernanceService.EnsureTenant already throws on a null ambient tenant;
+        // this is the same rule, stated the same way. A background worker that legitimately
+        // needs to evaluate a tenant's allow-list pushes that tenant's scope first — as the
+        // extraction path already does — which is cheap, explicit and auditable.
+        var scoped = _tenantContext.BusinessUnitId;
+        if (scoped != businessUnitId)
         {
             _log.LogWarning(
                 "External provider trust evaluation refused: tenant scope {ScopedTenant} does not match requested {RequestedTenant}.",
@@ -127,6 +144,20 @@ public sealed class AiExternalProviderTrustService : IAiExternalProviderTrust
 
         if (unstructuredPayload)
         {
+            // The tenant-level egress policy, which until now was persisted, validated on
+            // write, shown in the Trust Center and read by nothing. It is the tenant's
+            // standing statement about what its data may ever become; the authorization below
+            // is one destination's permission. Both must agree, and an unrecognised value
+            // reads as the strict one.
+            if (!AiEgressPolicies.PermitsWholeDocument(policy.EgressPolicy))
+            {
+                _log.LogWarning(
+                    "Whole-document egress refused for tenant {Tenant}: EgressPolicy={EgressPolicy} does not permit it.",
+                    businessUnitId, policy.EgressPolicy);
+                return AiExternalProviderDecision.Deny(
+                    AiExternalProviderTrustReasons.EgressPolicyForbidsWholeDocuments, provider);
+            }
+
             var unstructured = forPurpose
                 .Where(x => x.UnstructuredDocumentsAllowed)
                 .OrderBy(x => x.Model == AiProviderEndpoint.AnyModel ? 1 : 0)
@@ -340,8 +371,13 @@ public sealed class AiExternalProviderTrustService : IAiExternalProviderTrust
                 $"The endpoint could not be accepted ({reason}). Supply an absolute http/https URL without credentials.");
 
         // Authorizing a loopback origin is meaningless (loopback is already Local and
-        // never gated) and would create a misleading audit record.
-        if (reason == AiProviderEndpointReasons.LoopbackEndpoint)
+        // never gated) and would create a misleading audit record. The test is the RESOLVED
+        // class, not the reason TryNormalize reports: a name that merely looks like loopback
+        // but answers with an off-box address is genuinely External, and refusing to
+        // authorize it would leave the deployment unable to name the destination it is
+        // actually calling.
+        if (AiProviderEndpoint.Describe(provider, endpoint, command.Model).ProviderClass
+            == AiProviderClass.Local)
             throw new PlatformGovernanceValidationException(
                 "Loopback endpoints are local processing and do not require an external-provider authorization.");
 

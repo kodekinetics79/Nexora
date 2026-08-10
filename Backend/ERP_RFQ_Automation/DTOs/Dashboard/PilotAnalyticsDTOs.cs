@@ -65,14 +65,19 @@ public sealed record DeadlineBoardDTO(
 /// <param name="NormalizedKey">The key the grouping was performed on.</param>
 /// <param name="Variants">How many distinct raw spellings collapsed into this group.</param>
 /// <param name="Documents">Distinct source enquiries that asked for this brand — the honest denominator.</param>
-/// <param name="TotalQuantity">Summed line quantities. Units are NOT comparable across lines; see the payload note.</param>
+/// <param name="TotalQuantity">
+/// Summed line quantities, over the lines that STATE one. Null when no line in the group states a
+/// readable quantity — a group of unquantified lines has no total, and reporting 0 for it would
+/// read as "this brand was asked for in no volume" rather than "we do not know". Units are NOT
+/// comparable across lines; see the payload note.
+/// </param>
 public sealed record BrandDemandRowDTO(
     string Manufacturer,
     string NormalizedKey,
     int Variants,
     int Lines,
     int Documents,
-    long TotalQuantity,
+    long? TotalQuantity,
     decimal LineSharePercent);
 
 /// <param name="LinesWithoutManufacturer">

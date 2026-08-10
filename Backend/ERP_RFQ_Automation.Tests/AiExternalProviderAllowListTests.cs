@@ -296,26 +296,71 @@ public sealed class AiExternalProviderAllowListTests
     }
 
     [Fact]
-    public async Task DependencyCeiling_HonoursThePerTenantPolicyValue_ForUnauthorizedExternals()
+    public async Task UnauthorizedExternal_IsDeniedAtReservation_NotMerelyRatioLimited()
     {
-        // Nine local calls + one external is 10%, which the default ceiling permits.
-        // A tenant that tightened its ceiling to 5% must be refused at the same ratio —
-        // this is the assertion the previously hardcoded `.10m` literal could not make.
-        // No authorization exists, so the reservation is exactly the unauthorized
-        // external usage the rescoped ceiling still governs.
+        // Nine local calls + one external is 10%, which the default ceiling permits — and
+        // under the old code that was enough for structured line-item data (part numbers,
+        // quantities, unit prices, customer names) to leave for a third party with no
+        // attributed authorization, no justification, no expiry and no revocation path. A
+        // ratio is a cost control; it was never an authorization.
+        //
+        // The reservation is now refused by the allow-list itself, whatever the ratio says,
+        // and the denied ledger row records WHY. Reverting the gate re-opens the nine-in-ten
+        // window and fails this test.
         using var fixture = new Fixture();
         fixture.SetDependencyCeilingPercent(5m);
         fixture.SeedLocalCallHistory(9);
 
         var denied = await Assert.ThrowsAsync<AiPolicyDeniedException>(() => fixture.Governance.ReserveAsync(
-            new AiCallContext(fixture.TenantId, AiPurposes.RfqExtraction, "ceiling-5pct", "test-v1",
+            new AiCallContext(fixture.TenantId, AiPurposes.RfqExtraction, "unauthorized-structured", "test-v1",
                 ProviderClass: AiProviderClass.External),
             fixture.Descriptor.Provider, fixture.Descriptor.Model, "external", 32, 10, 1, default));
 
-        Assert.Equal("external_dependency_cap", denied.Code);
+        Assert.Equal(AiExternalProviderTrustReasons.NotAuthorized, denied.Code);
         using var db = fixture.Database.ContextFor(null);
-        Assert.Equal("external_dependency_cap", (await db.AiRequests.IgnoreQueryFilters()
-            .SingleAsync(x => x.ProviderClass == AiProviderClass.External)).ErrorCode);
+        var request = await db.AiRequests.IgnoreQueryFilters()
+            .SingleAsync(x => x.ProviderClass == AiProviderClass.External);
+        Assert.Equal(AiExternalProviderTrustReasons.NotAuthorized, request.ErrorCode);
+        Assert.Equal(AiCallStatuses.Denied, request.Status);
+        Assert.Null(request.ExternalAuthorizationId);
+    }
+
+    [Fact]
+    public async Task StructuredExtractionToAnAuthorizedEndpoint_IsStillPermitted()
+    {
+        // The gate is a narrower door, not a wall: the same reservation succeeds once the
+        // tenant has authorized the destination. Without this the fix above would be
+        // indistinguishable from switching external processing off.
+        using var fixture = new Fixture();
+        var granted = await fixture.AuthorizeAsync(unstructuredAllowed: false);
+        fixture.SeedLocalCallHistory(9);
+
+        var reservation = await fixture.Governance.ReserveAsync(
+            new AiCallContext(fixture.TenantId, AiPurposes.RfqExtraction, "authorized-structured", "test-v1",
+                ProviderClass: AiProviderClass.External),
+            fixture.Descriptor.Provider, fixture.Descriptor.Model, "external", 32, 10, 1, default);
+
+        Assert.NotEqual(Guid.Empty, reservation.RequestId);
+        using var db = fixture.Database.ContextFor(null);
+        var request = await db.AiRequests.IgnoreQueryFilters().SingleAsync(x => x.Id == reservation.RequestId);
+        Assert.Equal(AiCallStatuses.Reserved, request.Status);
+        Assert.Equal(granted.Authorization.Id, request.ExternalAuthorizationId);
+    }
+
+    [Fact]
+    public async Task AnExpiredAuthorization_DeniesTheReservationRatherThanLosingAnExemption()
+    {
+        using var fixture = new Fixture();
+        await fixture.AuthorizeAsync(unstructuredAllowed: true);
+        fixture.SeedLocalCallHistory(9);
+        fixture.ExpireAuthorizations();
+
+        var denied = await Assert.ThrowsAsync<AiPolicyDeniedException>(() => fixture.Governance.ReserveAsync(
+            new AiCallContext(fixture.TenantId, AiPurposes.RfqExtraction, "expired-grant", "test-v1",
+                ProviderClass: AiProviderClass.External),
+            fixture.Descriptor.Provider, fixture.Descriptor.Model, "external", 32, 10, 1, default));
+
+        Assert.Equal(AiExternalProviderTrustReasons.Expired, denied.Code);
     }
 
     [Fact]
@@ -437,6 +482,12 @@ public sealed class AiExternalProviderAllowListTests
                     policy.ExternalProcessingAllowed = externalProcessingAllowed;
                     policy.AllowedProvider = "Ollama";
                     policy.AllowedModel = AuthorizedModel;
+                    // EgressPolicy is now enforced (it used to be persisted and read by
+                    // nothing): whole unstructured documents may only egress when the tenant's
+                    // own policy says so, INDEPENDENTLY of what any one destination grant
+                    // allows. These tests are about the destination grant, so the tenant-level
+                    // switch is opened here; AiAndMailEgressGuardTests covers the switch itself.
+                    policy.EgressPolicy = AiEgressPolicies.FullDocument;
                     seed.AiProcessingPolicies.Add(policy);
                 }
                 seed.SaveChanges();
@@ -503,6 +554,16 @@ public sealed class AiExternalProviderAllowListTests
                     CreatedOn = now.AddSeconds(i),
                     CompletedOn = now.AddSeconds(i)
                 });
+            db.SaveChanges();
+        }
+
+        /// <summary>Ages every authorization out, so "live" is genuinely time-bounded.</summary>
+        public void ExpireAuthorizations()
+        {
+            using var db = Database.ContextFor(null);
+            foreach (var row in db.AiExternalProviderAuthorizations.IgnoreQueryFilters()
+                         .Where(x => x.BusinessUnitId == TenantId).ToList())
+                row.ExpiresOn = DateTime.UtcNow.AddMinutes(-1);
             db.SaveChanges();
         }
 

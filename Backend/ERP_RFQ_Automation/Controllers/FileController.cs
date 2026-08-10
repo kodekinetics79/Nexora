@@ -10,6 +10,7 @@ using Microsoft.Extensions.DependencyInjection;
 using ERP_RFQ_Automation.Infrastructure.Storage;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.PlatformGovernance;
+using ERP_RFQ_Automation.Traceability;
 using System;
 using System.IO;
 using System.Linq;
@@ -101,10 +102,13 @@ namespace ERP_RFQ_Automation.Controllers
                     .AsNoTracking()
                     .SingleOrDefaultAsync(a => a.Id == attachmentId, ct);
 
-                // Two parent types are served today. A customer purchase order is source evidence
+                // Two parent types are served here. A customer purchase order is source evidence
                 // in exactly the way an RFQ document is — it is what a price discrepancy is
                 // resolved against — so refusing to serve it would leave the commercial record
-                // pointing at a document nobody can open.
+                // pointing at a document nobody can open. FR-MTR-02 lot certificates are served by
+                // DownloadLotCertificate below rather than here, because this route is gated on
+                // Leads/View and a warehouse or quality user has no business needing lead access to
+                // open a certificate of conformity.
                 var isLead = string.Equals(attachment?.ParentType, "Lead", StringComparison.OrdinalIgnoreCase);
                 var isCustomerPurchaseOrder = string.Equals(
                     attachment?.ParentType, "CustomerPurchaseOrder", StringComparison.OrdinalIgnoreCase);
@@ -196,6 +200,88 @@ namespace ERP_RFQ_Automation.Controllers
             {
                 _logger.LogError(ex, "Error downloading attachment {AttachmentId}.", attachmentId);
                 return StatusCode(500, "An error occurred while retrieving the file.");
+            }
+        }
+
+        /// <summary>
+        /// FR-MTR-02. Serves a material-lot compliance certificate.
+        ///
+        /// <para><b>A separate route, not a third branch on the one above.</b> Two reasons, and
+        /// both are load-bearing. The permission is different — this is gated on <c>Products</c>,
+        /// because requiring <c>Leads</c>/View to open a certificate of conformity would put the
+        /// document out of reach of the warehouse and quality users it exists for. And the storage
+        /// resolution is different: the route above reaches the evidence store only through a lead's
+        /// <c>ExtractionJob</c>, and falls back to a legacy file store that the DI construction path
+        /// never supplies — so any non-lead attachment takes a branch that returns 404. A
+        /// certificate is written straight to content-addressed evidence storage with its digest on
+        /// the attachment row, so it is opened directly and verified against that digest.</para>
+        ///
+        /// <para>Ownership is proved against <c>material_lots</c>, which is tenant-scoped by both an
+        /// EF query filter and a row-level-security policy.</para>
+        /// </summary>
+        [HttpGet("lot-certificate/{attachmentId:long}")]
+        [RequireModulePermission("Products", PermissionAction.View)]
+        public async Task<IActionResult> DownloadLotCertificate(long attachmentId, CancellationToken ct)
+        {
+            var rawBusinessUnitId = User.FindFirst("businessUnitId")?.Value;
+            if (!long.TryParse(rawBusinessUnitId, out var businessUnitId) || businessUnitId <= 0)
+                return BadRequest("Business Unit ID is required.");
+
+            try
+            {
+                var attachment = await _context.Attachments
+                    .AsNoTracking()
+                    .SingleOrDefaultAsync(a => a.Id == attachmentId, ct);
+                if (attachment is null || !string.Equals(
+                        attachment.ParentType,
+                        MaterialLotCertificateService.CertificateParentType,
+                        StringComparison.OrdinalIgnoreCase))
+                    return NotFound();
+
+                // The certificate row is the authority on which lot this document belongs to; the
+                // attachment's parent id agrees with it, and requiring both to match means a
+                // re-parented attachment cannot be served under a lot it was never filed against.
+                var certificate = await _context.MaterialLotCertificates
+                    .AsNoTracking()
+                    .SingleOrDefaultAsync(c => c.BusinessUnitId == businessUnitId
+                                               && c.AttachmentId == attachmentId
+                                               && c.MaterialLotId == attachment.ParentId, ct);
+                if (certificate is null)
+                    return NotFound();
+
+                var owned = await _context.MaterialLots
+                    .AsNoTracking()
+                    .AnyAsync(lot => lot.Id == certificate.MaterialLotId
+                                     && lot.BusinessUnitId == businessUnitId, ct);
+                if (!owned)
+                    return NotFound();
+
+                var stream = await _evidenceStorage.OpenVerifiedReadAsync(
+                    attachment.FilePath, certificate.ContentSha256, ct);
+                var contentType = string.IsNullOrWhiteSpace(attachment.MimeType)
+                    ? "application/octet-stream"
+                    : attachment.MimeType;
+                return await ServeVerifiedAttachmentAsync(stream, attachment, contentType, businessUnitId, ct);
+            }
+            catch (FileNotFoundException)
+            {
+                return NotFound("The certificate was not found in evidence storage.");
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                _logger.LogWarning(ex, "Rejected unsafe storage path for lot certificate {AttachmentId}.", attachmentId);
+                return NotFound();
+            }
+            catch (InvalidDataException ex)
+            {
+                _logger.LogWarning(ex, "Certificate integrity verification failed for attachment {AttachmentId}.", attachmentId);
+                return Problem(statusCode: StatusCodes.Status409Conflict,
+                    title: "The stored certificate failed integrity verification.");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error downloading lot certificate {AttachmentId}.", attachmentId);
+                return StatusCode(500, "An error occurred while retrieving the certificate.");
             }
         }
 

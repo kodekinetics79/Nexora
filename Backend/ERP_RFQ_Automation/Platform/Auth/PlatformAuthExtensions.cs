@@ -112,7 +112,31 @@ public static class PlatformAuthExtensions
     /// </summary>
     public static void AddPlatformPolicies(this AuthorizationOptions options)
     {
+        // Sec-D2: MFA is required by the SCOPE gate, not only by the role sub-policies.
+        //
+        // Before this, `scope=platform` alone reached every endpoint carrying PlatformScope —
+        // and PlatformScope is the class-level gate on the tenant register, the cross-tenant
+        // privileged audit explorer, platform operations, support tickets and tenant
+        // provisioning. All of it runs under BYPASSRLS. Only the role sub-policies (Owner,
+        // TenantAdmin, Billing, Impersonate) added `amr=mfa`, so a stolen or guessed platform
+        // password bought a complete, cross-tenant, read-only view of the platform without ever
+        // touching a second factor. Nothing anywhere forced enrollment, including for the
+        // bootstrap owner, so "never enrolled" was a reachable steady state and not an edge case.
+        //
+        // The enrollment/logout endpoints are carved onto PlatformPolicies.Enrollment below so
+        // that requiring MFA here cannot lock out an operator who has not enrolled yet.
         options.AddPolicy(PlatformPolicies.PlatformScope, p => p
+            .AddAuthenticationSchemes(PlatformAuthConstants.Scheme)
+            .RequireAuthenticatedUser()
+            .RequireClaim(PlatformAuthConstants.ScopeClaim, PlatformAuthConstants.PlatformScopeValue)
+            .RequireClaim(PlatformAuthConstants.AuthenticationMethodClaim,
+                PlatformAuthConstants.MfaAuthenticationMethod));
+
+        // The one policy a password-only session satisfies: enrol, or leave. Deliberately does
+        // NOT require the absence of amr=mfa — an already-enrolled operator reading their own
+        // recovery-code count goes through here too, and a policy that refused them would make
+        // the MFA screen unreachable from a normal session.
+        options.AddPolicy(PlatformPolicies.Enrollment, p => p
             .AddAuthenticationSchemes(PlatformAuthConstants.Scheme)
             .RequireAuthenticatedUser()
             .RequireClaim(PlatformAuthConstants.ScopeClaim, PlatformAuthConstants.PlatformScopeValue));

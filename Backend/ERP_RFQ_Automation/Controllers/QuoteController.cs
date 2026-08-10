@@ -206,9 +206,22 @@ namespace ERP_RFQ_Automation.Controllers
             }
         }
 
+        /// <summary>
+        /// Removes a quotation, with a stated reason.
+        ///
+        /// <para>This route used to hard-delete the row, and with it the quote's R5 price
+        /// attestations and R7 validity extensions, on nothing more than the Quotations Delete
+        /// permission. It is now a reasoned, audited removal: past DRAFT the quote is withdrawn
+        /// rather than destroyed, a tombstone is written in every case, and the evidence tables
+        /// survive by database constraint. See <c>QuoteRepository.RemoveAsync</c>.</para>
+        ///
+        /// <para><paramref name="reason"/> is mandatory. It is the difference between a removal
+        /// that can be explained a year later and one that cannot.</para>
+        /// </summary>
         [HttpDelete("{id}")]
         [RequireModulePermission("Quotations", PermissionAction.Delete)]
-        public async Task<IActionResult> Delete(long id, [FromQuery] long? businessUnitId = null)
+        public async Task<IActionResult> Delete(long id, [FromQuery] string? reason = null,
+            [FromQuery] long? businessUnitId = null)
         {
             try
             {
@@ -217,9 +230,29 @@ namespace ERP_RFQ_Automation.Controllers
 
                 if (targetBUId <= 0)
                     return BadRequest("Business Unit ID is required.");
+                if (string.IsNullOrWhiteSpace(reason))
+                    return BadRequest("A reason is required to remove a quotation.");
 
-                await _repository.DeleteAsync(id, targetBUId);
-                return NoContent();
+                var outcome = await _repository.RemoveAsync(id, targetBUId, reason, ActorEmail());
+                if (outcome == null) return NotFound();
+
+                // 200 with the outcome, not 204: "withdrawn, still on file" and "discarded" are
+                // different things and the caller should be able to tell the user which happened.
+                return Ok(new
+                {
+                    quoteNo = outcome.QuoteNo,
+                    mode = outcome.Mode,
+                    removedOn = outcome.RemovedOn,
+                    deleted = outcome.WasDeleted,
+                    message = outcome.WasDeleted
+                        ? $"Draft {outcome.QuoteNo} was discarded. The removal is on record."
+                        : $"Quote {outcome.QuoteNo} was withdrawn. It stays on file with its price " +
+                          "confirmations and validity history intact."
+                });
+            }
+            catch (QuoteRemovalRefusedException ex)
+            {
+                return Conflict(ex.Message);
             }
             catch (Exception ex)
             {
@@ -363,6 +396,19 @@ namespace ERP_RFQ_Automation.Controllers
                     {
                         priceAttestationRequired = true,
                         message = result.PriceAttestationReason
+                    });
+                }
+
+                // R17: nothing was sent — a line's output tax was never derived. Reported as its
+                // own condition rather than folded into the attestation branch, because the fix is
+                // different: set the output tax rate in Commercial Policy settings, or price the
+                // line, or give the non-standard line its reason.
+                if (result.BlockedPendingTaxDerivation)
+                {
+                    return Conflict(new
+                    {
+                        taxDerivationRequired = true,
+                        message = result.TaxDerivationReason
                     });
                 }
 

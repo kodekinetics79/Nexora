@@ -143,7 +143,10 @@ public sealed class Release02SupplierQuoteInboxServiceTests
     private static CaptureSupplierQuoteCommand Command() => new(
         7, 31, 41, 51, "NX-2026-0001", "SUP-Q-100", 1,
         SupplierQuoteCaptureChannels.Manual, null, "manual-entry-1", new string('A', 64),
-        61, new DateTime(2026, 8, 15, 0, 0, 0, DateTimeKind.Utc), "FCA", 20, 5, "NET 30", null,
+        // Freight 20, tax 5, duty 9, other 3, discount 2. Duty is non-zero on purpose: this is an
+        // FCA round, so the Supplier has not cleared KSA customs and the duty is the buyer's — the
+        // capture contract had no field for it at all until now, and no field means a hard zero.
+        61, new DateTime(2026, 8, 15, 0, 0, 0, DateTimeKind.Utc), "FCA", 20, 5, 9, 3, 2, "NET 30", null,
         [Line()], [], "quote-capture-1", "buyer@example.com", "corr-1");
 
     private static CaptureSupplierQuoteLine Line(

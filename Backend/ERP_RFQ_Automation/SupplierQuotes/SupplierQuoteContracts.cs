@@ -17,6 +17,13 @@ public sealed record CaptureSupplierQuoteCommand(
     string? Incoterms,
     decimal FreightAmount,
     decimal TaxAmount,
+    // Duty, other charges and discount are captured, never derived. R8 forbids an HS-code rate
+    // engine; it does not forbid recording the duty the buyer already knows they will pay. Without
+    // these three the canonical revision could not represent an import at all, and the discount a
+    // supplier granted was dropped on the floor between the workbench and the revision.
+    decimal DutyAmount,
+    decimal OtherAmount,
+    decimal DiscountAmount,
     string? PaymentTerms,
     string? Notes,
     IReadOnlyCollection<CaptureSupplierQuoteLine> Lines,
@@ -99,6 +106,12 @@ public sealed record SupplierQuoteDetail(
     long Version,
     IReadOnlyCollection<SupplierQuoteRevisionDetail> Revisions);
 
+/// <summary>
+/// The revision as a reviewer sees it. The trade term and the round charges are on it because a
+/// reviewer cannot spot missing freight or missing duty on a screen that never showed either: the
+/// detail view used to carry lines and evidence only, so the whole charge block was invisible to
+/// the only person who could challenge it.
+/// </summary>
 public sealed record SupplierQuoteRevisionDetail(
     long RevisionId,
     int RevisionNumber,
@@ -108,7 +121,13 @@ public sealed record SupplierQuoteRevisionDetail(
     bool RequiresReview,
     DateTime CapturedOn,
     IReadOnlyCollection<SupplierQuoteLineDetail> Lines,
-    IReadOnlyCollection<SupplierQuoteEvidenceDetail> Evidence);
+    IReadOnlyCollection<SupplierQuoteEvidenceDetail> Evidence,
+    string? Incoterms = null,
+    decimal FreightAmount = 0m,
+    decimal TaxAmount = 0m,
+    decimal DutyAmount = 0m,
+    decimal OtherAmount = 0m,
+    decimal DiscountAmount = 0m);
 
 public sealed record SupplierQuoteLineDetail(
     long Id,

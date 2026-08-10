@@ -194,6 +194,25 @@ public sealed record TenantOffboardingStatusDto(
     bool CanPurge,
     bool CanErasePersonalData,
 
+    /// <summary>
+    /// True when the operator reading this status is the one who scheduled the deletion, so the
+    /// purge would be refused for want of a second approver.
+    ///
+    /// <para>Resolved server-side and reported separately from <see cref="CanPurge"/> on purpose:
+    /// the tenant IS purgeable, just not by this person. Folding it into <c>CanPurge</c> would make
+    /// the console say "not yet" about a clock that has already run out, and the operator would go
+    /// looking for the wrong problem.</para>
+    /// </summary>
+    bool PurgeRequiresDifferentApprover,
+
+    /// <summary>
+    /// Who scheduled the deletion, as recorded on the append-only lifecycle event rather than on
+    /// the mutable offboarding row. Null when nothing is scheduled, or when the scheduling event
+    /// carries no attributable platform account — in which case the purge is refused outright and
+    /// the schedule has to be re-made.
+    /// </summary>
+    string? DeletionApprovedBy,
+
     /// <summary>The exact string a caller must echo to purge or erase. See
     /// <see cref="ConfirmTenantDestructionRequest"/>.</summary>
     string ConfirmationRequired,

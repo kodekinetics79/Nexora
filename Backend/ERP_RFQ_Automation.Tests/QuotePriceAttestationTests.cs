@@ -1,5 +1,6 @@
 using ERP_RFQ_Automation.Intelligence.Pricing;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.OrderToCash;
 using ERP_RFQ_Automation.QuoteDelivery;
 using ERP_RFQ_Automation.Services;
 using ERP_RFQ_Automation.Services.Interfaces;
@@ -454,19 +455,28 @@ public sealed class QuotePriceAttestationTests
             // Non-draft so the revision test can revise it; the gate itself is status-agnostic.
             StatusId = SentStatusId,
             QuoteDate = DateTime.UtcNow, ValidUntil = DateTime.UtcNow.AddDays(30),
-            TotalAmount = 401m, CreatedBy = "tests", CreatedDate = DateTime.UtcNow,
+            // R17: the lines below now carry the derived output tax the send gate requires, so this
+            // fixture represents a quote that is sendable for every reason EXCEPT the price
+            // provenance these tests are about. Without it every case here would fail on the tax
+            // gate instead, and would stop testing the attestation at all.
+            //   241.00 + 36.15 VAT = 277.15;  160.00 + 24.00 VAT = 184.00;  header 461.15.
+            TotalAmount = 461.15m, CreatedBy = "tests", CreatedDate = DateTime.UtcNow,
             QuoteItems =
             {
                 new QuoteItem
                 {
                     Id = 96_101, ItemDescription = "Ball valve, 2in",
-                    Quantity = 2m, UnitPrice = 120.500000m, TotalAmount = 241m,
+                    Quantity = 2m, UnitPrice = 120.500000m, TotalAmount = 277.15m,
+                    TaxAmount = 36.15m, TaxCategory = QuoteLineTaxCategories.Standard,
+                    TaxRatePercentApplied = 15m,
                     CreatedBy = "tests", CreatedDate = DateTime.UtcNow
                 },
                 new QuoteItem
                 {
                     Id = 96_102, ItemDescription = "Gasket set",
-                    Quantity = 2m, UnitPrice = 80.000000m, TotalAmount = 160m,
+                    Quantity = 2m, UnitPrice = 80.000000m, TotalAmount = 184.00m,
+                    TaxAmount = 24.00m, TaxCategory = QuoteLineTaxCategories.Standard,
+                    TaxRatePercentApplied = 15m,
                     CreatedBy = "tests", CreatedDate = DateTime.UtcNow
                 }
             }

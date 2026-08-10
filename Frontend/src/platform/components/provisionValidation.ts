@@ -152,9 +152,12 @@ export const emptyDraft = (defaults: Partial<ProvisionDraft> = {}): ProvisionDra
   billingContactEmail: '',
   billingAddress: '',
   accountOwnerEmail: '',
-  baseCurrencyCode: 'USD',
+  // KSA-first defaults. A new tenant is far more likely to trade in SAR than USD, and
+  // `en-SA` keeps Latin digits (the UI is English-only, with no RTL support) while using
+  // Saudi regional conventions. Both remain fully editable per tenant.
+  baseCurrencyCode: 'SAR',
   timeZoneId: '',
-  locale: 'en-US',
+  locale: 'en-SA',
   dataRegion: '',
 
   adminFirstName: '',
@@ -396,9 +399,9 @@ export const draftFromRequestBody = (payload: ProvisionTenantRequestBody): Provi
     billingContactEmail: asText(payload.billingContactEmail),
     billingAddress: asText(payload.billingAddress),
     accountOwnerEmail: asText(payload.accountOwnerEmail),
-    baseCurrencyCode: asText(payload.baseCurrencyCode).toUpperCase() || 'USD',
+    baseCurrencyCode: asText(payload.baseCurrencyCode).toUpperCase() || 'SAR',
     timeZoneId: asText(payload.timeZoneId),
-    locale: asText(payload.locale) || 'en-US',
+    locale: asText(payload.locale) || 'en-SA',
     dataRegion: asText(payload.dataRegion),
 
     adminFirstName: asText(payload.adminFirstName),

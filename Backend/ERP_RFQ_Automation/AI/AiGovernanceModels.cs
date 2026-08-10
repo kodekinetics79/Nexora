@@ -60,6 +60,39 @@ public static class AiErrorCodes
     public const string SingleItemExceedsOutputBudget = "single_item_exceeds_output_budget";
 }
 
+/// <summary>
+/// The recognised values of <see cref="AiProcessingPolicy.EgressPolicy"/>.
+///
+/// <para>The column shipped as free text with a default of <c>RedactedFieldsOnly</c>, was
+/// validated on write to be non-blank, and was read by nothing at all — so a tenant whose
+/// policy said "redacted fields only" had whole unstructured documents egress anyway. A knob
+/// that does nothing is worse than no knob, which is the argument
+/// <see cref="AiGovernanceService"/> already makes about the dependency ceiling.</para>
+///
+/// <para>It now decides one thing, precisely: whether whole unstructured document text may
+/// leave for an external provider at all. It is a SECOND lock, independent of
+/// <see cref="AiExternalProviderAuthorization.UnstructuredDocumentsAllowed"/> — the policy
+/// says what this tenant's data may ever become, the authorization says what one named
+/// destination may receive. Both must agree. Anything unrecognised reads as the strict
+/// value: fail closed.</para>
+/// </summary>
+public static class AiEgressPolicies
+{
+    /// <summary>Only reduced field/row payloads may egress. The secure default.</summary>
+    public const string RedactedFieldsOnly = "RedactedFieldsOnly";
+
+    /// <summary>Whole unstructured document text may egress to an authorized destination.</summary>
+    public const string FullDocument = "FullDocument";
+
+    public static bool IsRecognised(string? value) =>
+        PermitsWholeDocument(value)
+        || string.Equals(value?.Trim(), RedactedFieldsOnly, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>True only for the one value that opts in. Unrecognised values do not.</summary>
+    public static bool PermitsWholeDocument(string? value) =>
+        string.Equals(value?.Trim(), FullDocument, StringComparison.OrdinalIgnoreCase);
+}
+
 public static class AiCostStatuses
 {
     public const string LocalUnpriced = "LocalUnpriced";

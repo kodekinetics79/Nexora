@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using ERP_RFQ_Automation.Agent.Models;
 using ERP_RFQ_Automation.HealthChecks;
+using ERP_RFQ_Automation.InboundLogistics;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.MultiTenancy;
 using ERP_RFQ_Automation.Procurement;
@@ -42,6 +43,10 @@ namespace ERP_RFQ_Automation.Sla;
 ///  5. Copilot approvals pending too long -> manager escalation
 ///  6. Supplier orders approaching their committed ship date (FR-SPO-07) -> buyer reminder
 ///  7. Supplier orders sent but never acknowledged (FR-SPO-07) -> supervisor escalation
+///  8. Inbound shipments that have passed the committed ship date without departing (FR-MAS-04)
+///     -> buyer alert
+///  9. Inbound shipments whose derived Material Available Date misses the customer's required
+///     delivery date (FR-MAS-04) -> buyer and sales alert
 ///
 /// Send-once semantics are enforced by the DATABASE: every alert INSERTs its
 /// <see cref="SlaEvent"/> claim BEFORE the email goes out, against the unique
@@ -207,6 +212,8 @@ public sealed class SlaSweepWorker : BackgroundService
         await SweepPendingApprovalsAsync(db, notifications, bu, policy, ct);
         await SweepSupplierShipDatesAsync(db, notifications, bu, policy, ct);
         await SweepSupplierAcknowledgementsAsync(db, notifications, bu, policy, ct);
+        await SweepInboundShipDateBreachesAsync(db, notifications, bu, ct);
+        await SweepInboundDeliveryRiskAsync(db, notifications, bu, ct);
     }
 
     // ---------------- 1. lead deadlines ----------------
@@ -873,6 +880,234 @@ public sealed class SlaSweepWorker : BackgroundService
                 return anyDelivered;
             });
         }
+    }
+
+    // ---------------- 8/9. inbound shipment chasing (FR-MAS-04) ----------------
+    //
+    // Both of these are FACTS, not thresholds, and so neither introduces a new SlaPolicy column.
+    // That is deliberate: the standing lesson from Gate 4 is that a new SLA column backfilled with
+    // zero makes every existing row instantly overdue, and the first sweep after deployment mails
+    // the entire order book into managers' inboxes — after which the channel is filtered and every
+    // real alert is lost with it. "The committed ship date has passed and nothing has left the
+    // factory" and "the derived availability date is after the date the customer asked for" need no
+    // tenant-configured tolerance to be true, so they are asked directly.
+
+    /// <summary>
+    /// FR-MAS-04, breach half. Supplier orders whose committed ship date has ALREADY passed.
+    ///
+    /// <para>The mirror image of <see cref="ShipDateReminderCandidates"/>, which deliberately stops
+    /// at the ship date because it is a heads-up rather than a lateness alert and said so: "claiming
+    /// it would burn the send-once key and silently suppress the real overdue alert when one is
+    /// built". This is that alert, and it claims a different key.</para>
+    ///
+    /// <para>Same exclusions as the reminder — shipped/received/closed/cancelled orders have nothing
+    /// left to chase, and an order the supplier REJECTED is not going to ship, so reminding a buyer
+    /// about a date the supplier has already disowned trains people to ignore the mailbox.</para>
+    /// </summary>
+    internal static IQueryable<SupplierPurchaseOrder> ShipDateBreachCandidates(
+        ErpRfqAutomationContext db, long businessUnitId, DateOnly today)
+        => db.SupplierPurchaseOrders.AsNoTracking()
+            .Where(o => o.BusinessUnitId == businessUnitId
+                        && o.CommittedShipDate != null
+                        && o.CommittedShipDate < today
+                        && !ShipmentSettledStatuses.Contains(o.Status)
+                        && (o.AcknowledgementStatus == null
+                            || o.AcknowledgementStatus != SupplierAcknowledgementStatuses.Rejected));
+
+    private async Task SweepInboundShipDateBreachesAsync(
+        ErpRfqAutomationContext db, ISlaNotifications notifications, long bu, CancellationToken ct)
+    {
+        var today = DateOnly.FromDateTime(DateTime.UtcNow);
+        var orders = await ShipDateBreachCandidates(db, bu, today)
+            .Select(o => new
+            {
+                o.Id, o.PurchaseOrderNumber, o.CommittedShipDate,
+                o.ApprovedByUserId, o.ApprovedBy, o.CreatedBy, o.ModifiedBy
+            })
+            .ToListAsync(ct);
+        if (orders.Count == 0) return;
+
+        var orderIds = orders.Select(o => o.Id).ToList();
+        var orderedByOrder = await db.SupplierPurchaseOrderLines.AsNoTracking()
+            .Where(l => l.BusinessUnitId == bu && orderIds.Contains(l.SupplierPurchaseOrderId))
+            .GroupBy(l => l.SupplierPurchaseOrderId)
+            .Select(g => new { OrderId = g.Key, Quantity = g.Sum(l => l.OrderedQuantity) })
+            .ToDictionaryAsync(x => x.OrderId, x => x.Quantity, ct);
+
+        // What has physically left the factory. A shipment still sitting at READY_AT_FACTORY has
+        // not shipped, whatever its paperwork says, and a cancelled one never will.
+        var departedByOrder = await db.SupplierShipmentLines.AsNoTracking()
+            .Join(db.SupplierShipments.AsNoTracking()
+                    .Where(s => s.BusinessUnitId == bu
+                                && orderIds.Contains(s.SupplierPurchaseOrderId)
+                                && s.Milestone != InboundShipmentMilestones.Cancelled
+                                && s.DepartedOriginOn != null),
+                line => line.SupplierShipmentId, shipment => shipment.Id,
+                (line, shipment) => new { shipment.SupplierPurchaseOrderId, line.ShippedQuantity })
+            .GroupBy(x => x.SupplierPurchaseOrderId)
+            .Select(g => new { OrderId = g.Key, Quantity = g.Sum(x => x.ShippedQuantity) })
+            .ToDictionaryAsync(x => x.OrderId, x => x.Quantity, ct);
+
+        var buUsers = await GetBusinessUnitUsersAsync(db, bu, ct);
+        var unresolved = 0;
+
+        foreach (var order in orders)
+        {
+            var ordered = orderedByOrder.GetValueOrDefault(order.Id);
+            var departed = departedByOrder.GetValueOrDefault(order.Id);
+            // Fully departed by the committed date is the supplier keeping their word, late
+            // milestones notwithstanding. Only a shortfall is a breach.
+            if (ordered > 0m && departed >= ordered) continue;
+
+            var buyer = ResolveBuyer(buUsers, order.ApprovedByUserId, order.ApprovedBy, order.CreatedBy, order.ModifiedBy);
+            if (buyer is null) { unresolved++; continue; }
+
+            var shipDate = order.CommittedShipDate!.Value;
+            // Keyed on the committed date, so a supplier who re-commits to a NEW date earns one
+            // fresh alert if they miss that one too, rather than being silently forgiven.
+            var claim = await TryClaimEventAsync(db, bu, "inbound-shipment-late", order.Id, "overdue",
+                shipDate.ToDateTime(TimeOnly.MinValue), ct);
+            if (claim is null) continue;
+
+            var label = $"Purchase order {order.PurchaseOrderNumber}";
+            var outstanding = ordered - departed;
+            await SendOrReleaseAsync(db, claim, ct, () =>
+                notifications.SendDeadlineAlertAsync(buyer.Email, buyer.FirstName, "overdue", label,
+                    $"Supplier missed the committed ship date — {label}",
+                    $"The supplier committed to ship {label} on {shipDate:dd MMM yyyy}, and "
+                    + (departed <= 0m
+                        ? "nothing has been recorded as having left origin."
+                        : $"{outstanding:0.####} of {ordered:0.####} units are still not recorded as having left origin.")
+                    + " Any customer delivery date resting on this order is now unsupported. Chase the "
+                    + "supplier for a departure date, or re-plan the promise behind it.",
+                    bu, ct));
+        }
+
+        if (unresolved > 0)
+            _log.LogWarning(
+                "BU {Bu}: {Count} supplier order(s) past their committed ship date have no resolvable buyer; alert skipped for those.",
+                bu, unresolved);
+    }
+
+    /// <summary>
+    /// FR-MAS-04, risk half. Shipments still in flight whose derived Material Available Date lands
+    /// AFTER the earliest date a customer asked for on the demand they cover.
+    ///
+    /// <para>A shipment with no derivable date is deliberately NOT alerted on. It is a real problem
+    /// — usually an unset lead-time policy or a missing ETA — but it is a different problem with a
+    /// different fix, and inventing an alert for it here would fire on every shipment in a tenant
+    /// that has not configured its policy yet. The shipment screen states the reason in place of the
+    /// date, which is where someone can act on it.</para>
+    /// </summary>
+    internal static IQueryable<SupplierShipment> DeliveryRiskCandidates(
+        ErpRfqAutomationContext db, long businessUnitId)
+        => db.SupplierShipments.AsNoTracking()
+            .Where(s => s.BusinessUnitId == businessUnitId
+                        && s.MaterialAvailableDate != null
+                        && s.Milestone != InboundShipmentMilestones.Cancelled
+                        && s.Milestone != InboundShipmentMilestones.ReceivedAtWarehouse);
+
+    private async Task SweepInboundDeliveryRiskAsync(
+        ErpRfqAutomationContext db, ISlaNotifications notifications, long bu, CancellationToken ct)
+    {
+        var shipments = await DeliveryRiskCandidates(db, bu)
+            .Select(s => new
+            {
+                s.Id, s.ShipmentNumber, s.SupplierPurchaseOrderId, s.MaterialAvailableDate,
+                s.MaterialAvailableBasisKind, s.Milestone
+            })
+            .ToListAsync(ct);
+        if (shipments.Count == 0) return;
+
+        var shipmentIds = shipments.Select(s => s.Id).ToList();
+
+        // The customer date each shipment is measured against: the EARLIEST required date across the
+        // RFQ lines its purchase order lines were raised to cover. Earliest, not latest — a shipment
+        // is at risk the moment it misses the tightest promise resting on it.
+        var requiredByShipment = await db.SupplierShipmentLines.AsNoTracking()
+            .Where(line => line.BusinessUnitId == bu && shipmentIds.Contains(line.SupplierShipmentId))
+            .Join(db.SupplierPurchaseOrderLines.AsNoTracking().Where(l => l.BusinessUnitId == bu),
+                line => line.SupplierPurchaseOrderLineId, orderLine => orderLine.Id,
+                (line, orderLine) => new { line.SupplierShipmentId, orderLine.RfqItemId })
+            .Join(db.Rfqitems.AsNoTracking().Where(i => i.RequiredDesiredDate != null),
+                x => x.RfqItemId, item => item.Id,
+                (x, item) => new { x.SupplierShipmentId, Required = item.RequiredDesiredDate!.Value })
+            .GroupBy(x => x.SupplierShipmentId)
+            .Select(g => new { ShipmentId = g.Key, Required = g.Min(x => x.Required) })
+            .ToDictionaryAsync(x => x.ShipmentId, x => x.Required, ct);
+        if (requiredByShipment.Count == 0) return;
+
+        var orderNumbers = await db.SupplierPurchaseOrders.AsNoTracking()
+            .Where(o => o.BusinessUnitId == bu
+                        && shipments.Select(s => s.SupplierPurchaseOrderId).Contains(o.Id))
+            .Select(o => new
+            {
+                o.Id, o.PurchaseOrderNumber, o.ApprovedByUserId, o.ApprovedBy, o.CreatedBy, o.ModifiedBy
+            })
+            .ToDictionaryAsync(x => x.Id, ct);
+
+        var buUsers = await GetBusinessUnitUsersAsync(db, bu, ct);
+        List<Recipient>? fallbackRecipients = null;
+        var unresolved = 0;
+
+        foreach (var shipment in shipments)
+        {
+            if (!requiredByShipment.TryGetValue(shipment.Id, out var requiredOn)) continue;
+            var required = DateOnly.FromDateTime(requiredOn);
+            var available = shipment.MaterialAvailableDate!.Value;
+            if (available <= required) continue;
+
+            var order = orderNumbers.GetValueOrDefault(shipment.SupplierPurchaseOrderId);
+            var buyer = order is null
+                ? null
+                : ResolveBuyer(buUsers, order.ApprovedByUserId, order.ApprovedBy, order.CreatedBy, order.ModifiedBy);
+
+            // FR-MAS-04 names BOTH the buyer and sales staff. The buyer can chase the supplier; only
+            // sales can renegotiate the customer date, and a shipment that will land late is useless
+            // information if it reaches nobody who can talk to the customer.
+            var recipients = new List<Recipient>();
+            if (buyer is not null) recipients.Add(new Recipient(buyer.Id, buyer.Email, buyer.FirstName));
+            fallbackRecipients ??= await GetManagersAndAdminsAsync(db, bu, ct);
+            foreach (var manager in fallbackRecipients)
+                if (recipients.All(r => r.Id != manager.Id))
+                    recipients.Add(manager);
+            if (recipients.Count == 0) { unresolved++; continue; }
+
+            // Keyed on the AVAILABLE date: an ETA that slips again produces a new derived date and
+            // therefore one further alert, while a re-run of the sweep against the same date does
+            // not. Without the date in the key a shipment that slipped twice would be silent the
+            // second time, which is the slip that actually loses the order.
+            var claim = await TryClaimEventAsync(db, bu, "inbound-shipment-risk", shipment.Id, "critical",
+                available.ToDateTime(TimeOnly.MinValue), ct);
+            if (claim is null) continue;
+
+            var lateBy = available.DayNumber - required.DayNumber;
+            var label = $"Shipment {shipment.ShipmentNumber}";
+            await SendOrReleaseAsync(db, claim, ct, async () =>
+            {
+                var anyDelivered = false;
+                foreach (var recipient in recipients)
+                {
+                    anyDelivered |= await notifications.SendDeadlineAlertAsync(recipient.Email,
+                        recipient.FirstName, "critical", label,
+                        $"Inbound shipment puts a customer delivery date at risk — {label}",
+                        $"{label} on purchase order {order?.PurchaseOrderNumber ?? "(unknown)"} is currently "
+                        + $"{shipment.Milestone.Replace('_', ' ').ToLowerInvariant()}. Its material available "
+                        + $"date works out at {available:dd MMM yyyy}, which is {lateBy} day(s) after the "
+                        + $"{required:dd MMM yyyy} the customer required. That date is derived from the "
+                        + $"{(shipment.MaterialAvailableBasisKind ?? "ETA").Replace('_', ' ').ToLowerInvariant()} "
+                        + "plus the customs-clearance and putaway lead times set for this business unit. "
+                        + "Chase the shipment, re-plan the customer promise, or cover the line from stock.",
+                        bu, ct);
+                }
+                return anyDelivered;
+            });
+        }
+
+        if (unresolved > 0)
+            _log.LogWarning(
+                "BU {Bu}: {Count} at-risk inbound shipment(s) had no resolvable recipient; alert skipped for those.",
+                bu, unresolved);
     }
 
     /// <summary>Active users of the tenant, for free-text owner matching.</summary>

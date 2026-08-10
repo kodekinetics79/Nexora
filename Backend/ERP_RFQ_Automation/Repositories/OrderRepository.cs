@@ -26,6 +26,10 @@ namespace ERP_RFQ_Automation.Repositories
                 .Include(o => o.Customer)
                 .Include(o => o.Status)
                 .Include(o => o.PaymentStatus)
+                // The list read now carries the denomination too. GetOrderByIdAsync already
+                // Included it; without it here, OrderDto.CurrencyCode would be null on the
+                // Orders grid and every amount would again render without its currency.
+                .Include(o => o.Currency)
                 .Include(o => o.OrderItems)
                 .Include(o => o.Shipments)
                 .OrderByDescending(o => o.CreatedOn)
@@ -82,6 +86,9 @@ namespace ERP_RFQ_Automation.Repositories
             return await _context.Orders
                 .Include(o => o.Customer).ThenInclude(c => c.Contacts)
                 .Include(o => o.Status)
+                // An invoice that states amounts without a currency is not a document anyone
+                // should be sending to a customer.
+                .Include(o => o.Currency)
                 .Include(o => o.OrderItems).ThenInclude(i => i.Product)
                 .Include(o => o.Quote).ThenInclude(q => q.Rfq).ThenInclude(r => r.Lead)
                 .FirstOrDefaultAsync(o => o.Id == id && o.BusinessUnitId == businessUnitId);

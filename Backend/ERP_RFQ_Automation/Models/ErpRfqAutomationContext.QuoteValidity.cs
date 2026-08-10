@@ -50,11 +50,15 @@ public partial class ErpRfqAutomationContext
             e.HasIndex(x => new { x.BusinessUnitId, x.QuoteId, x.ExtendedOn })
                 .HasDatabaseName("IX_QuoteValidityExtensions_BU_Quote_ExtendedOn");
 
+            // RESTRICT, not CASCADE — same reasoning as QuotePriceAttestations. An extension row
+            // is the evidence that someone decided, with a stated reason, to hold a price open
+            // past its stated validity. Cascading it away on quote delete meant the R7 control
+            // could be erased by the person it constrains.
             e.HasOne<Quote>()
                 .WithMany()
                 .HasForeignKey(x => new { x.BusinessUnitId, x.QuoteId })
                 .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id })
-                .OnDelete(DeleteBehavior.Cascade);
+                .OnDelete(DeleteBehavior.Restrict);
 
             e.HasQueryFilter(x => CurrentTenantId == null || x.BusinessUnitId == CurrentTenantId);
         });

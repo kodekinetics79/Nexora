@@ -200,6 +200,14 @@ export interface SupplierQuoteRevision {
   capturedOn: string;
   lines: SupplierQuoteLine[];
   evidence: SupplierQuoteEvidence[];
+  // The charge block. A reviewer cannot spot missing freight or missing duty on a screen that
+  // never showed either, and this detail carried lines and evidence only.
+  incoterms?: string | null;
+  freightAmount?: number;
+  taxAmount?: number;
+  dutyAmount?: number;
+  otherAmount?: number;
+  discountAmount?: number;
 }
 
 export interface SupplierQuoteDetail {
@@ -270,6 +278,16 @@ export interface UploadSupplierQuoteRequest {
   supplierQuoteReference: string;
   revisionNumber: number;
   currencyId: number;
+  // A spreadsheet of part numbers and unit prices does not state the round's freight, and it never
+  // states the duty the buyer will pay at the border. Intake used to send neither — it hardcoded
+  // zero — so an uploaded quote's landed cost was its bare unit price and every price derived from
+  // it was short by the omission divided by (1 - margin).
+  incoterms?: string;
+  freightAmount?: number;
+  taxAmount?: number;
+  dutyAmount?: number;
+  otherAmount?: number;
+  discountAmount?: number;
 }
 
 const headers = (idempotencyKey?: string) => ({
@@ -302,7 +320,12 @@ const supplierQuoteService = {
   },
   upload: async (request: UploadSupplierQuoteRequest) => {
     const form = new FormData();
-    for (const [key, value] of Object.entries(request)) form.append(key, value instanceof File ? value : String(value));
+    // Undefined optional fields are omitted rather than sent as the string "undefined", which the
+    // multipart model binder would reject outright.
+    for (const [key, value] of Object.entries(request)) {
+      if (value === undefined || value === null || value === "") continue;
+      form.append(key, value instanceof File ? value : String(value));
+    }
     const response = await axiosInstance.post("/api/supplier-quote-inbox/documents", form, {
       headers: headers(crypto.randomUUID()),
     });

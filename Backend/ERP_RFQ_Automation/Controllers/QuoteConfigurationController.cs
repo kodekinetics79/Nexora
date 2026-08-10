@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using ERP_RFQ_Automation.Security;
 
 namespace ERP_RFQ_Automation.Controllers
 {
@@ -83,7 +84,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Migration failed: {ex.Message}");
+                return this.ServerError(ex, "Migration failed.");
             }
         }
 
@@ -107,7 +108,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error retrieving data: {ex.Message}");
+                return this.ServerError(ex, "Error retrieving data.");
             }
         }
 
@@ -142,7 +143,10 @@ namespace ERP_RFQ_Automation.Controllers
                     existing.CompanyPhone = request.CompanyPhone;
                     existing.CompanyEmail = request.CompanyEmail;
                     existing.FooterText = request.FooterText;
-                    existing.ModifiedBy = request.CreatedBy;
+                    // RC-7 / Sec-A1: server-derived. ModifiedBy is the ONLY record of who changed
+                    // this tenant's quote branding, terms and footer — there is no IAM audit event
+                    // behind it — so a client-supplied string was the whole audit trail.
+                    existing.ModifiedBy = ActorContext.From(User).Stamp;
                     existing.ModifiedOn = DateTime.UtcNow;
 
                     await _repository.UpdateAsync(existing);
@@ -159,7 +163,7 @@ namespace ERP_RFQ_Automation.Controllers
                     CompanyPhone = request.CompanyPhone,
                     CompanyEmail = request.CompanyEmail,
                     FooterText = request.FooterText,
-                    ModifiedBy = request.CreatedBy,
+                    ModifiedBy = ActorContext.From(User).Stamp,
                     ModifiedOn = DateTime.UtcNow
                 };
 
@@ -168,7 +172,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error saving data: {ex.Message}");
+                return this.ServerError(ex, "Error saving data.");
             }
         }
 

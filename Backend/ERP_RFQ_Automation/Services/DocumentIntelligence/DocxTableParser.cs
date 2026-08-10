@@ -32,16 +32,36 @@ public sealed class DocxTableParser
         [RfqSpreadsheetFields.RfqNo] = new[] { "rfqnumber", "rfqno", "rfq", "enquiryno", "enquirynumber", "inquiryno", "tenderno", "bidno", "reference", "refno" },
         [RfqSpreadsheetFields.BuyerName] = new[] { "customer", "customername", "buyer", "buyername", "client", "clientname", "company" },
         [RfqSpreadsheetFields.ReceivedDate] = new[] { "rfqdate", "date", "datereceived", "receiveddate", "enquirydate" },
-        [RfqSpreadsheetFields.BidClosingDate] = new[] { "closingdate", "bidclosingdate", "duedate", "deadline", "submissiondate", "quotationdue", "responseby" },
+        [RfqSpreadsheetFields.BidClosingDate] = new[] { "bidclosingdate", "closingdate", "bidduedate", "duedate", "deadline", "submissiondate", "submissiondeadline", "quotationdue", "quotedue", "responseby", "offerdue", "tenderclosingdate" },
         // "Requested Delivery" now has a correct home. It is what the BUYER is asking for, so it
         // maps to RequiredDeliveryDate and never to a supplier lead time — that conflation put a
         // lead time of zero, meaning "deliver immediately", on every line of every document.
         // It is frequently prose ("9 weeks") rather than a date; an optional date that cannot be
         // parsed now yields NeedsReview and a null value, so an unreadable one costs nothing.
-        [RfqSpreadsheetFields.RequiredDeliveryDate] = new[] { "requesteddelivery", "deliveryrequired", "requireddelivery", "deliveryby", "requiredby", "neededby" },
+        //
+        // The "…deliverydate" spellings are the SAME ones the column mapper already recognises
+        // (NativeSpreadsheetParser.FieldAliases). They were missing here, so a paragraph reading
+        // "Required Delivery Date: 2026-10-01" matched no delivery label at all and the bare
+        // "date" alias took the value onto ReceivedDate instead.
+        [RfqSpreadsheetFields.RequiredDeliveryDate] = new[] { "requireddeliverydate", "requesteddeliverydate", "deliverydate", "requesteddelivery", "deliveryrequired", "requireddelivery", "deliveryby", "requiredby", "neededby" },
         [RfqSpreadsheetFields.DeliveryLocation] = new[] { "deliverylocation", "deliveryto", "shipto", "destination", "deliveryaddress", "site" },
         [RfqSpreadsheetFields.AgreementReference] = new[] { "agreementreference", "agreementno", "contractno", "contractreference", "framecontract" },
     };
+
+    /// <summary>
+    /// Aliases short and generic enough to be the TAIL of a longer label, which may therefore only
+    /// match as the first word of their label.
+    ///
+    /// <para><b>Why.</b> "date" is a suffix of "Bid Closing Date", "Due Date", "Submission Date"
+    /// and "Required Delivery Date". Matching it inside those swallowed the outer label: the
+    /// closing date of a tender was written into the received-date field, the closing date came
+    /// out missing, and the reviewer was told to supply a date the document stated plainly. A bid
+    /// closed and nobody knew there was a bid. The longest-match scan below already prevents that
+    /// for every label spelling we know; this guard also covers the ones we do not — "Award Date",
+    /// "Validity Date", "Effective Date" — where reading nothing is a visible gap and reading the
+    /// wrong thing is a silent error.</para>
+    /// </summary>
+    private static readonly HashSet<string> FirstWordOnlyAliases = new(StringComparer.Ordinal) { "date" };
 
     private readonly NativeSpreadsheetParser _grid;
 
@@ -65,16 +85,26 @@ public sealed class DocxTableParser
 
         var results = new List<RfqSpreadsheetRow>();
         var tableOrdinal = 0;
-        foreach (var table in body.Descendants<Table>())
+
+        // TOP-LEVEL tables only. Descendants<Table>() also returns every table NESTED inside a
+        // cell of another table, so a layout table wrapping the line grid was read twice and every
+        // line was counted twice — while Lead.NoOfLineItems reported the inflated number as if it
+        // were a conservation guarantee.
+        foreach (var table in body.Elements<Table>())
         {
             tableOrdinal++;
-            var grid = table.Elements<TableRow>()
-                .Select(row => (IReadOnlyList<string?>)row.Elements<TableCell>()
-                    .Select(cell => CellText(cell))
-                    .ToList())
-                .ToList();
+            var grid = BuildGrid(table);
 
             var rows = _grid.ParseGrid(grid, sourceDocumentName, $"Table {tableOrdinal}");
+
+            // A commercial-terms table ("Payment Terms | 30 days", "Incoterms | DDP Dammam") maps
+            // its left column to `description` and nothing else, and the header locator falls back
+            // to row 1 when it recognises too little. Every row of it then became a phantom line
+            // item named "Payment Terms" with no quantity. One mapped column is not a line-item
+            // table; it is a table that happens to contain a word we recognise.
+            if (rows.Count > 0 && rows[0].FieldColumnNumbers.Count < MinimumMappedFieldsForLineItems)
+                continue;
+
             foreach (var row in rows)
             {
                 ApplyHeaderBlock(row, headerBlock);
@@ -83,6 +113,84 @@ public sealed class DocxTableParser
         }
 
         return results;
+    }
+
+    /// <summary>
+    /// Mapped columns a table must recognise before its rows are believed to be line items.
+    /// Matches <c>NativeSpreadsheetParser</c>'s own header-confidence threshold.
+    /// </summary>
+    private const int MinimumMappedFieldsForLineItems = 2;
+
+    /// <summary>
+    /// Flattens a Word table into the positional grid <see cref="NativeSpreadsheetParser.ParseGrid"/>
+    /// indexes by column number.
+    ///
+    /// <para><b>Why this is not just <c>row.Elements&lt;TableCell&gt;()</c>.</b> Word states a
+    /// horizontally merged cell as ONE element carrying <c>w:gridSpan</c>, and a vertically merged
+    /// cell as a full cell followed by EMPTY continuation cells carrying <c>w:vMerge</c>. Reading
+    /// the elements positionally therefore shifted every column to the right of a merge by one or
+    /// more places — a quantity landed in the unit-of-measure column, failed to parse, and (before
+    /// the guard in ChunkedExtractionService) persisted as the number 0 — and a value spanning
+    /// three rows populated the first and was silently null on the other two.</para>
+    /// </summary>
+    private static List<IReadOnlyList<string?>> BuildGrid(Table table)
+    {
+        var grid = new List<IReadOnlyList<string?>>();
+
+        // The effective value of each grid column on the previous row, so a vMerge continuation
+        // can carry its originating cell's value down instead of reading as blank.
+        var carried = new List<string?>();
+
+        foreach (var tableRow in table.Elements<TableRow>())
+        {
+            var cells = new List<string?>();
+
+            foreach (var cell in tableRow.Elements<TableCell>())
+            {
+                var column = cells.Count;
+                var text = IsVerticalMergeContinuation(cell)
+                    ? (column < carried.Count ? carried[column] : null)
+                    : CellText(cell);
+
+                var span = GridSpanOf(cell);
+                for (var offset = 0; offset < span; offset++)
+                {
+                    // The text belongs to the first grid column the merged cell occupies; the
+                    // remainder are padding so every column after it keeps its own index.
+                    cells.Add(offset == 0 ? text : null);
+                }
+            }
+
+            grid.Add(cells);
+
+            carried.Clear();
+            carried.AddRange(cells);
+        }
+
+        return grid;
+    }
+
+    /// <summary>How many grid columns one cell element occupies. Absent or unreadable means one.</summary>
+    private static int GridSpanOf(TableCell cell)
+    {
+        var span = cell.TableCellProperties?.GridSpan?.Val;
+        if (span is null || !span.HasValue) return 1;
+        return span.Value < 1 ? 1 : span.Value;
+    }
+
+    /// <summary>
+    /// True for the empty continuation cells of a vertical merge. Word writes
+    /// <c>&lt;w:vMerge/&gt;</c> with no value, or <c>w:val="continue"</c>; the cell that OWNS the
+    /// value writes <c>w:val="restart"</c>.
+    /// </summary>
+    private static bool IsVerticalMergeContinuation(TableCell cell)
+    {
+        var merge = cell.TableCellProperties?.VerticalMerge;
+        if (merge is null) return false;
+
+        var value = merge.Val;
+        if (value is null || !value.HasValue) return true;
+        return value.Value == MergedCellValues.Continue;
     }
 
     /// <summary>
@@ -140,25 +248,8 @@ public sealed class DocxTableParser
     /// </summary>
     private static IEnumerable<(string Field, string Value)> ExtractPairs(string line)
     {
-        var marks = new List<(int Index, int LabelLength, string Field)>();
+        var marks = FindMarks(line);
 
-        foreach (var (field, aliases) in HeaderBlockAliases)
-        {
-            foreach (var alias in aliases)
-            {
-                var at = IndexOfLabel(line, alias);
-                if (at.Start >= 0)
-                {
-                    marks.Add((at.Start, at.Length, field));
-                    break;
-                }
-            }
-        }
-
-        if (marks.Count == 0)
-            yield break;
-
-        marks.Sort((a, b) => a.Index.CompareTo(b.Index));
         for (var i = 0; i < marks.Count; i++)
         {
             var start = marks[i].Index + marks[i].LabelLength;
@@ -173,53 +264,142 @@ public sealed class DocxTableParser
     }
 
     /// <summary>
-    /// Locates a label followed by a colon, ignoring case, spacing and punctuation inside the
-    /// label itself, so "RFQ Number:", "RFQ No.:" and "rfq_number :" all match.
+    /// Scans the line left to right and records every label it recognises, taking the LONGEST
+    /// label that starts at each position and then resuming after that label's colon.
+    ///
+    /// <para><b>What this replaces, and why it mattered.</b> The previous scan took the FIRST
+    /// alias each field matched ANYWHERE in the line, sorted the results by position, and ended
+    /// each value at the next mark's start — dropping any pair whose value ended before it began.
+    /// On "Bid Closing Date: 2026-06-15" the bare "date" alias matched INSIDE the closing label,
+    /// at a later position, so the inner mark swallowed the outer one: the closing date was
+    /// written into ReceivedDate, BidClosingDate came out missing, and the reviewer was told the
+    /// bid closing date needed review on a document that stated it plainly. A bid closes and
+    /// nobody knew there was a bid.</para>
+    ///
+    /// <para>Longest-match-at-position makes an inner label unreachable, and resuming after the
+    /// colon makes the marks NON-OVERLAPPING, so a value can no longer end before it starts and
+    /// no pair is dropped for that reason.</para>
+    ///
+    /// <para>Marks come back in position order, which is the order they are found.</para>
     /// </summary>
-    private static (int Start, int Length) IndexOfLabel(string line, string normalizedAlias)
+    private static List<(int Index, int LabelLength, string Field)> FindMarks(string line)
     {
-        for (var i = 0; i < line.Length; i++)
+        var marks = new List<(int Index, int LabelLength, string Field)>();
+        var position = 0;
+
+        while (position < line.Length)
         {
-            var compact = 0;
-            var j = i;
-            while (j < line.Length && compact < normalizedAlias.Length)
+            var match = LongestLabelAt(line, position);
+            if (match is null)
             {
-                var c = line[j];
-                if (char.IsLetterOrDigit(c))
-                {
-                    if (char.ToLowerInvariant(c) != normalizedAlias[compact])
-                        break;
-                    compact++;
-                }
-                else if (c != ' ' && c != '_' && c != '.' && c != '-' && c != ' ')
-                {
-                    break;
-                }
-                j++;
+                position++;
+                continue;
             }
 
-            if (compact != normalizedAlias.Length)
-                continue;
-
-            // The label must be followed by a colon, allowing whitespace before it.
-            var k = j;
-            while (k < line.Length && (line[k] == ' ' || line[k] == ' ')) k++;
-            // Deliberately NOT rejecting a label that begins mid-token. These documents run
-            // several labelled values together with no separator at all —
-            // "RFQ Number: RFQ-260011Customer: Omega OilRFQ Date: 2026-05-26" — so "Customer"
-            // follows a digit and "RFQ Date" follows a letter. A preceding-character guard
-            // rejects both of those real labels to avoid a hypothetical "Sub-Customer:", and
-            // costs far more than it saves.
-            if (k < line.Length && line[k] == ':')
-                return (i, k - i + 1);
+            marks.Add((position, match.Value.Length, match.Value.Field));
+            position += match.Value.Length;
         }
 
-        return (-1, 0);
+        return marks;
     }
 
+    /// <summary>
+    /// The longest recognised label starting exactly at <paramref name="index"/>, or null. A tie
+    /// on length is broken on the field's name, so the reading of a document never depends on
+    /// dictionary enumeration order.
+    /// </summary>
+    private static (int Length, string Field)? LongestLabelAt(string line, int index)
+    {
+        (int Length, string Field)? best = null;
+
+        foreach (var (field, aliases) in HeaderBlockAliases)
+        {
+            foreach (var alias in aliases)
+            {
+                if (FirstWordOnlyAliases.Contains(alias) && !StartsItsOwnLabel(line, index))
+                    continue;
+
+                var length = MatchLabelAt(line, index, alias);
+                if (length < 0)
+                    continue;
+
+                if (best is null
+                    || length > best.Value.Length
+                    || (length == best.Value.Length && string.CompareOrdinal(field, best.Value.Field) < 0))
+                {
+                    best = (length, field);
+                }
+            }
+        }
+
+        return best;
+    }
+
+    /// <summary>
+    /// True when the token at <paramref name="index"/> is the FIRST word of its label — nothing
+    /// but the line start, punctuation or a digit run precedes it. See
+    /// <see cref="FirstWordOnlyAliases"/>.
+    /// </summary>
+    private static bool StartsItsOwnLabel(string line, int index)
+    {
+        var back = index - 1;
+        while (back >= 0 && (line[back] == ' ' || line[back] == ' '))
+            back--;
+
+        return back < 0 || !char.IsLetter(line[back]);
+    }
+
+    /// <summary>
+    /// Length of the label starting exactly at <paramref name="index"/>, colon included, or -1.
+    /// Case, spacing and punctuation inside the label are ignored, so "RFQ Number:", "RFQ No.:"
+    /// and "rfq_number :" all match.
+    /// </summary>
+    private static int MatchLabelAt(string line, int index, string normalizedAlias)
+    {
+        var compact = 0;
+        var j = index;
+        while (j < line.Length && compact < normalizedAlias.Length)
+        {
+            var c = line[j];
+            if (char.IsLetterOrDigit(c))
+            {
+                if (char.ToLowerInvariant(c) != normalizedAlias[compact])
+                    return -1;
+                compact++;
+            }
+            else if (c != ' ' && c != '_' && c != '.' && c != '-' && c != ' ')
+            {
+                return -1;
+            }
+            j++;
+        }
+
+        if (compact != normalizedAlias.Length)
+            return -1;
+
+        // The label must be followed by a colon, allowing whitespace before it.
+        var k = j;
+        while (k < line.Length && (line[k] == ' ' || line[k] == ' ')) k++;
+        // Deliberately NOT rejecting a label that begins mid-token. These documents run
+        // several labelled values together with no separator at all —
+        // "RFQ Number: RFQ-260011Customer: Omega OilRFQ Date: 2026-05-26" — so "Customer"
+        // follows a digit and "RFQ Date" follows a letter. A preceding-character guard
+        // rejects both of those real labels to avoid a hypothetical "Sub-Customer:", and
+        // costs far more than it saves. The one alias generic enough to be another label's
+        // TAIL is guarded individually, by FirstWordOnlyAliases.
+        return k < line.Length && line[k] == ':' ? k - index + 1 : -1;
+    }
+
+    /// <summary>
+    /// The cell's OWN text. Paragraphs belonging to a table NESTED inside this cell are excluded:
+    /// flattening them into the outer cell folded a nested table's entire contents into one
+    /// product name, and the nested table's rows are read as their own table anyway.
+    /// </summary>
     private static string? CellText(TableCell cell)
     {
-        var text = string.Join(" ", cell.Descendants<Paragraph>().Select(p => p.InnerText))
+        var text = string.Join(" ", cell.Descendants<Paragraph>()
+                .Where(p => !p.Ancestors<TableCell>().Any(ancestor => ancestor != cell))
+                .Select(p => p.InnerText))
             .Replace(' ', ' ')
             .Trim();
         return text.Length == 0 ? null : text;

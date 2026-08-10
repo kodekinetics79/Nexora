@@ -149,12 +149,13 @@ namespace ERP_RFQ_Automation.Services
                     // gate was inert on this door anyway (RequiresCommercialReview was never
                     // set here). 875 of 2,966 production lines carried quantity 1.
                     //
-                    // Unreadable now stores 0, which every downstream guard already rejects
-                    // (QuoteService line validation, the reviewer's approve check, and the
-                    // new CHECK constraints), AND raises RequiresCommercialReview on the
-                    // parent lead so a human is actually asked. Fractional values are treated
-                    // as unreadable rather than truncated: Quantity is an int column, and
-                    // silently turning 2.5 into 2 is a 20% under-quote.
+                    // Unreadable now stores NULL — the column can finally say "unknown" — and
+                    // raises RequiresCommercialReview on the parent lead so a human is actually
+                    // asked. It stored 0 while the column was NOT NULL, which every downstream
+                    // guard rejected but which still read, on a screen, as a demand for nothing.
+                    // Fractional values are treated as unreadable rather than truncated:
+                    // Quantity is an int column, and silently turning 2.5 into 2 is a 20%
+                    // under-quote.
                     var quantityReading = QuantityParser.Parse(ws.Cells[row, 6].Text, allowFractional: false);
                     if (quantityReading.RequiresReview)
                     {
@@ -167,7 +168,7 @@ namespace ERP_RFQ_Automation.Services
                     var item = new LeadItem
                     {
                         ProductShortName = productName,
-                        Quantity = quantityReading.HasValue ? (int)quantityReading.Value!.Value : 0,
+                        Quantity = quantityReading.HasValue ? (int)quantityReading.Value!.Value : null,
                         UnitPrice = decimal.TryParse(ws.Cells[row, 7].Text, out var price) ? price : null,
                         Currency = ws.Cells[row, 8].Text?.Trim(),
                         ManufacturerName = ws.Cells[row, 9].Text?.Trim(),

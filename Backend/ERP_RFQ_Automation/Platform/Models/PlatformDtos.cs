@@ -23,6 +23,19 @@ public class PlatformLoginResponse
     public bool MfaRequired { get; set; }
     public Guid? MfaChallengeId { get; set; }
     public DateTime? MfaChallengeExpiresAtUtc { get; set; }
+
+    /// <summary>
+    /// Sec-D2: true when this token was issued WITHOUT a second factor because the operator has
+    /// never enrolled. The token is real but satisfies only
+    /// <c>PlatformPolicies.Enrollment</c> — every other platform endpoint answers 403 until
+    /// <c>POST /api/platform/auth/mfa/enrollment/confirm</c> succeeds.
+    ///
+    /// <para>It is on the login response rather than left for the client to infer from a 403,
+    /// because a control the user cannot see is a control they cannot satisfy: without this flag
+    /// the first-run operator's only signal is every screen failing at once, with nothing saying
+    /// which one to open. The client routes on this to the enrollment screen.</para>
+    /// </summary>
+    public bool MfaEnrollmentRequired { get; set; }
     [System.Text.Json.Serialization.JsonIgnore]
     public bool RecoveryCodeUsed { get; set; }
 }
@@ -101,6 +114,55 @@ public class TenantSummaryDto
     public string? BillingContactEmail { get; set; }
     public string? BillingAddress { get; set; }
     public string? AccountOwnerEmail { get; set; }
+}
+
+/// <summary>
+/// Editable customer identity fields. Commercial terms, slug, residency and base currency are
+/// intentionally absent: each has its own governed workflow or becomes immutable commercial
+/// lineage after provisioning. Null/blank optional values clear the corresponding profile field.
+/// </summary>
+public sealed class UpdateTenantProfileRequest
+{
+    [Required, StringLength(256)]
+    public string Name { get; set; } = null!;
+
+    [StringLength(256)] public string? LegalName { get; set; }
+    [StringLength(64)] public string? RegistrationNumber { get; set; }
+    [StringLength(64)] public string? TaxNumber { get; set; }
+    [StringLength(2, MinimumLength = 2)] public string? CountryCode { get; set; }
+    [StringLength(128)] public string? Industry { get; set; }
+    [Url, StringLength(512)] public string? Website { get; set; }
+    [StringLength(256)] public string? AddressLine1 { get; set; }
+    [StringLength(256)] public string? AddressLine2 { get; set; }
+    [StringLength(128)] public string? City { get; set; }
+    [StringLength(128)] public string? StateProvince { get; set; }
+    [StringLength(32)] public string? PostalCode { get; set; }
+    [StringLength(64)] public string? Phone { get; set; }
+    [EmailAddress, StringLength(320)] public string? ContactEmail { get; set; }
+    [Url, StringLength(1024)] public string? LogoUrl { get; set; }
+    [StringLength(128)] public string? TimeZoneId { get; set; }
+    [StringLength(35)] public string? Locale { get; set; }
+
+    [Required, StringLength(1000, MinimumLength = 3)]
+    public string Reason { get; set; } = null!;
+}
+
+/// <summary>
+/// Corrects the contractual data region. Deliberately its OWN request rather than a field on
+/// <see cref="UpdateTenantProfileRequest"/>: the profile form is Owner-or-SupportAdmin and describes
+/// the customer, while this asserts where their data physically is, gates tenant activation, and is
+/// Owner-only. Putting it on the same form would have made a contractual residency claim editable by
+/// whoever was correcting a postcode.
+/// </summary>
+public sealed class UpdateTenantDataRegionRequest
+{
+    /// <summary>The region the tenant's registered data assets are actually in. Null clears it,
+    /// which is only accepted while the tenant is still Provisioning.</summary>
+    [StringLength(32)]
+    public string? DataRegion { get; set; }
+
+    [Required, StringLength(1000, MinimumLength = 15)]
+    public string Reason { get; set; } = null!;
 }
 
 /// <summary>

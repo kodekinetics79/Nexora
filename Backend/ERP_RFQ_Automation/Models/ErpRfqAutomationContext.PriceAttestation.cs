@@ -51,11 +51,20 @@ public partial class ErpRfqAutomationContext
             e.HasIndex(x => new { x.BusinessUnitId, x.QuoteId, x.ConfirmedOn })
                 .HasDatabaseName("IX_QuotePriceAttestations_BU_Quote_ConfirmedOn");
 
+            // RESTRICT, not CASCADE. This used to cascade, which meant the Quotations Delete
+            // permission destroyed the R5 evidence along with the quote — one button, and the
+            // record that a human confirmed those prices was gone with the prices. A control whose
+            // evidence is deleted by the same button that deletes the record is not a control.
+            //
+            // The quote is now withdrawn rather than deleted once it is past DRAFT
+            // (QuoteRepository.RemoveAsync), and a draft that HAS been attested is withdrawn too,
+            // precisely because this constraint refuses to let the attestation go. The database is
+            // the backstop for any path that does not go through that method.
             e.HasOne<Quote>()
                 .WithMany()
                 .HasForeignKey(x => new { x.BusinessUnitId, x.QuoteId })
                 .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id })
-                .OnDelete(DeleteBehavior.Cascade);
+                .OnDelete(DeleteBehavior.Restrict);
 
             e.HasQueryFilter(x => CurrentTenantId == null || x.BusinessUnitId == CurrentTenantId);
         });

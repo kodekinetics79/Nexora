@@ -223,8 +223,7 @@ public sealed class RoleRankAuthorityTests
             SetupType = "role",
             SetupCode = "NEW_ROLE",
             SetupName = "New Role",
-            RoleRank = requestedRank,
-            CreatedBy = "tester"
+            RoleRank = requestedRank
         });
 
         AssertForbidden(result.Result);
@@ -241,8 +240,7 @@ public sealed class RoleRankAuthorityTests
             SetupType = "role",
             SetupCode = "NEW_ROLE",
             SetupName = "New Role",
-            RoleRank = RoleRanks.Admin,
-            CreatedBy = "tester"
+            RoleRank = RoleRanks.Admin
         });
 
         Assert.IsType<CreatedAtActionResult>(result.Result);
@@ -353,8 +351,7 @@ public sealed class RoleRankAuthorityTests
             SetupType = "role",
             SetupCode = "NEW_ROLE",
             SetupName = "New Role",
-            RoleRank = 29,     // just under Owner: the obvious way to sneak past a ">= tier" check
-            CreatedBy = "tester"
+            RoleRank = 29      // just under Owner: the obvious way to sneak past a ">= tier" check
         });
 
         Assert.IsType<BadRequestObjectResult>(result.Result);
@@ -371,8 +368,7 @@ public sealed class RoleRankAuthorityTests
             SetupType = "QuoteStatus",
             SetupCode = "DRAFT",
             SetupName = "Draft",
-            RoleRank = RoleRanks.Admin,
-            CreatedBy = "tester"
+            RoleRank = RoleRanks.Admin
         });
 
         Assert.IsType<BadRequestObjectResult>(result.Result);
@@ -393,7 +389,7 @@ public sealed class RoleRankAuthorityTests
         var result = await controller.Create(new SetupMasterCreateRequestDTO
         {
             SetupType = "role", SetupCode = "X", SetupName = "X",
-            RoleRank = RoleRanks.Manager, CreatedBy = "tester"
+            RoleRank = RoleRanks.Manager
         });
 
         AssertForbidden(result.Result);

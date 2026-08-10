@@ -99,7 +99,8 @@ public class TenantAdminInvitationsController : ControllerBase
         return Ok(new ResendTenantAdminInvitationResponse
         {
             Invitation = summary,
-            EmailDispatched = dispatched
+            EmailDispatched = dispatched,
+            ActivationUrl = dispatched ? null : issued.ActivationUrl
         });
     }
 

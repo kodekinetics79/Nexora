@@ -13,6 +13,15 @@ namespace ERP_RFQ_Automation.Authorization
         public const string UserDeactivated = "USER_DEACTIVATED";
         public const string UserDeleted = "USER_DELETED";
         public const string PasswordChanged = "PASSWORD_CHANGED";
+
+        /// <summary>
+        /// Sec-A2: a password change was refused because the caller could not produce the current
+        /// password. Recorded as its own action rather than left silent: a run of these against
+        /// one account, from a session that is already authenticated AS that account, is what a
+        /// stolen session looks like while it is being probed — and it is invisible in the login
+        /// failure counters, because no login took place.
+        /// </summary>
+        public const string PasswordChangeRejected = "PASSWORD_CHANGE_REJECTED";
         public const string PermissionGranted = "PERMISSION_GRANTED";
         public const string PermissionModified = "PERMISSION_MODIFIED";
         public const string PermissionRevoked = "PERMISSION_REVOKED";
@@ -51,7 +60,7 @@ namespace ERP_RFQ_Automation.Authorization
         public static readonly string[] All =
         {
             UserCreated, UserUpdated, UserRoleChanged, UserDeactivated, UserDeleted,
-            PasswordChanged, PermissionGranted, PermissionModified, PermissionRevoked,
+            PasswordChanged, PasswordChangeRejected, PermissionGranted, PermissionModified, PermissionRevoked,
             PermissionGrantDenied, RoleCreated, RoleRenamed, RoleRankChanged, RoleDeleted,
             MailboxCreated, MailboxUpdated, MailboxDeleted, MailboxCredentialChanged,
             MailboxTested, OutboundMailPaused, TenantDataReset

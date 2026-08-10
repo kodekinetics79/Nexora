@@ -40,7 +40,29 @@ public static class PlatformAuthConstants
 /// </summary>
 public static class PlatformPolicies
 {
+    /// <summary>
+    /// The gate on every platform endpoint that does actual control-plane work. Since Sec-D2 it
+    /// requires <c>amr=mfa</c> as well as <c>scope=platform</c>: a password-only session used to
+    /// satisfy this and therefore reached every tenant's record, the entire cross-tenant
+    /// privileged audit trail, and per-tenant queue and job rows — all executing under BYPASSRLS.
+    /// Mutations always required MFA, so the exposure was disclosure, but it was disclosure of the
+    /// whole platform.
+    /// </summary>
     public const string PlatformScope = "PlatformScope";
+
+    /// <summary>
+    /// The ONLY policy a password-only (not-yet-MFA) platform session satisfies. It exists so that
+    /// tightening <see cref="PlatformScope"/> does not lock an operator out of the very endpoints
+    /// they need to become MFA-authenticated: read own MFA status, start enrollment, confirm
+    /// enrollment, and sign out. It grants nothing else — no tenant data, no audit trail, no
+    /// operations.
+    ///
+    /// <para>An operator who HAS enrolled also satisfies this (it requires no absence of
+    /// <c>amr</c>), which is what makes "show me my recovery-code count" work from an ordinary
+    /// session.</para>
+    /// </summary>
+    public const string Enrollment = "Platform.Enrollment";
+
     public const string Owner = "Platform.Owner";
     public const string TenantAdmin = "Platform.TenantAdmin";   // Owner or SupportAdmin
     public const string Billing = "Platform.Billing";           // Owner or BillingAdmin

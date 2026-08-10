@@ -331,6 +331,12 @@ internal sealed class CustomerAwardTestFixture : IDisposable
     {
         Id = id, ProductId = productId, ItemDescription = $"Quote line {id}", Quantity = quantity,
         UnitPrice = unitPrice, Discount = 10m, TaxAmount = 5m,
+        // R17: the marker that this line's tax was DERIVED rather than left blank. Award conversion
+        // now refuses a quote line carrying null here, because null means "never taxed" and a sales
+        // order stating no VAT on a standard-rated supply is deemed VAT-inclusive. The rate is the
+        // one these long-standing seed numbers imply (5.00 on a 990.00 net base); the gate asserts
+        // that a rate was applied, not that the arithmetic is 15%.
+        TaxRatePercentApplied = 0.5051m,
         TotalAmount = quantity * unitPrice - 10m + 5m, CreatedBy = "tests", CreatedDate = Now
     };
 

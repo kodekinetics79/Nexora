@@ -151,6 +151,18 @@ public sealed class SlaSupplierOrderSweepTests
         Assert.Single(host.Notifications.Sent);
     }
 
+    /// <summary>
+    /// The reminder window has two edges and this pins both. A date beyond the horizon is silent
+    /// because nobody can act on it yet, and a date already in the past is silent HERE because this
+    /// sweep is a heads-up, not a lateness alert.
+    ///
+    /// <para>The past-dated order is no longer silent OVERALL: Gate 5's FR-MAS-04 breach sweep now
+    /// claims it, which is exactly what this sweep's own comment said would happen — "claiming it
+    /// would burn the send-once key and silently suppress the real overdue alert when one is built".
+    /// The two alerts are distinguishable by level (<c>warn</c> versus <c>overdue</c>) and by
+    /// dedup-key entity type (<c>supplier-order-ship</c> versus <c>inbound-shipment-late</c>), so
+    /// neither can suppress the other.</para>
+    /// </summary>
     [Fact]
     public async Task A_ship_date_beyond_the_window_or_already_past_is_not_reminded()
     {
@@ -168,7 +180,14 @@ public sealed class SlaSupplierOrderSweepTests
 
         await host.CreateWorker().SweepOnceAsync(default);
 
-        Assert.Empty(host.Notifications.Sent);
+        Assert.Empty(host.Notifications.Sent.Where(x => x.Level == "warn"));
+
+        var breach = Assert.Single(host.Notifications.Sent);
+        Assert.Equal("overdue", breach.Level);
+        Assert.Equal("Purchase order PO-PAST", breach.EntityLabel);
+        using var verify = host.UnscopedContext();
+        Assert.Equal(0, await verify.Set<SlaEvent>().IgnoreQueryFilters()
+            .CountAsync(e => e.EntityType == "supplier-order-ship"));
     }
 
     [Fact]

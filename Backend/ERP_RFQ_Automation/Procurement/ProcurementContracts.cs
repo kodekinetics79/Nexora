@@ -178,7 +178,13 @@ public sealed record CaptureSupplierQuoteCommand(
     string IdempotencyKey,
     string Actor,
     string CorrelationId,
-    IReadOnlyCollection<CaptureSupplierQuoteLine> Lines);
+    IReadOnlyCollection<CaptureSupplierQuoteLine> Lines,
+    // The trade term the Supplier quoted on. Trailing and optional so existing callers keep
+    // working, but not decorative: the canonical revision this command writes had no Incoterm at
+    // all, so the cost-completeness warning — "this is an EXW quote recording no duty" — could
+    // never fire for anything captured on the buyer workbench. An unrecorded term is recorded as
+    // unrecorded, never guessed.
+    string? Incoterms = null);
 
 public sealed record CaptureSupplierQuoteLine(
     long RfqItemId,
@@ -350,7 +356,20 @@ public sealed record PostGoodsReceiptCommand(
     string Actor,
     string CorrelationId);
 
-public sealed record PostGoodsReceiptLine(long PurchaseOrderLineId, decimal Quantity);
+/// <summary>
+/// FR-MTR-01. <paramref name="Lot"/> is what the operator says about the material on this line —
+/// the supplier's batch number, the serial numbers, the country the goods actually came from.
+///
+/// <para>Optional with a default so every existing construction site keeps compiling, and because
+/// it is genuinely absent for untracked bulk material: the receipt still produces a lot, it is just
+/// identified from the receipt rather than by a number somebody typed. A batch- or serial-tracked
+/// product with no declaration is refused by the recorder rather than quietly given a made-up
+/// identifier.</para>
+/// </summary>
+public sealed record PostGoodsReceiptLine(
+    long PurchaseOrderLineId,
+    decimal Quantity,
+    Traceability.ReceiptLotDeclaration? Lot = null);
 
 public sealed record ProcurementWorkbench(
     long RfqId,
@@ -382,7 +401,12 @@ public sealed record SupplierOfferView(long Id, long SolicitationId, long RfqIte
     string SupplierName, string? QuoteReference, int QuoteRevision, long CurrencyId, string CurrencyCode,
     decimal Quantity, decimal? AvailableQuantity, decimal UnitPrice, decimal FreightCost, decimal DutyCost,
     decimal OtherCost, decimal? LandedUnitCost, int? LeadTimeDays, decimal? ReliabilitySnapshot,
-    DateTime? ValidUntil, bool Eligible, IReadOnlyCollection<string> BlockingReasons, bool Awarded, long Version);
+    DateTime? ValidUntil, bool Eligible, IReadOnlyCollection<string> BlockingReasons, bool Awarded, long Version,
+    // Non-blocking cost-completeness warnings — see QuoteComparisonLine.CostWarnings. Carried on
+    // the offer as well as the comparison because the workbench is where the buyer looks before
+    // deciding, and an incomplete cost build-up that nobody is shown is priced silently.
+    IReadOnlyCollection<string>? CostWarnings = null,
+    string? Incoterm = null);
 public sealed record SourcingAwardView(long Id, long RfqItemId, long SupplierQuotedItemId, long SupplierId,
     string SupplierName, decimal Quantity, decimal LandedUnitCost, long CurrencyId, string CurrencyCode,
     string Status, string? Rationale, long? PurchaseOrderId, long Version);
@@ -447,7 +471,13 @@ public sealed record QuoteComparisonLine(
     decimal? Reliability,
     DateTime? ValidUntil,
     IReadOnlyCollection<string> Blockers,
-    bool Eligible);
+    bool Eligible,
+    // Distinct from Blockers on purpose. A blocker refuses the award; a warning says the cost
+    // build-up looks incomplete and leaves the buyer to judge it. An EXW quote with no duty
+    // recorded is perfectly awardable — it is just probably underpriced, and the buyer is the only
+    // one who can say. Defaulted so a caller that constructs a line without warnings gets an empty
+    // list rather than a null to dereference.
+    IReadOnlyCollection<string>? CostWarnings = null);
 
 public sealed class ProcurementValidationException : InvalidOperationException
 {

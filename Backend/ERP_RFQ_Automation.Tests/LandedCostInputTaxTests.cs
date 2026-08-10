@@ -38,6 +38,18 @@ namespace ERP_RFQ_Automation.Tests;
 /// charged VAT on that too.
 ///
 /// Freight, duty and other captured charges are untouched by all of this — nobody refunds them.
+///
+/// What the finance panel changed afterwards
+/// -----------------------------------------
+/// R17: the "after" column above was aspirational. Nothing derived output VAT at all, so the fix
+/// above removed the input-VAT cushion that had been silently cancelling the missing output leg.
+/// The 172.50 gross line is now produced by the product, not by this test's arithmetic, and
+/// <see cref="OutputTaxDerivationTests"/> covers the sell-side leg on its own terms.
+///
+/// R18: recoverability became a PERCENTAGE. TRUE is 100, FALSE is 0, and the values in between are
+/// the partly-exempt trader a boolean had no way to describe — IAS 2.11 makes the irrecoverable
+/// share a cost of the asset. Every expected number below is unchanged at the two endpoints, which
+/// is the point: the type changed, the arithmetic did not.
 /// </summary>
 public sealed class LandedCostInputTaxTests
 {
@@ -53,7 +65,7 @@ public sealed class LandedCostInputTaxTests
     public void Recoverable_supplier_input_tax_never_reaches_landed_cost()
     {
         var landed = LandedCostFormula.UnitCost(UnitPrice, Quantity, Freight, SupplierVat,
-            supplierInputTaxRecoverable: true);
+            CommercialMatchingPolicy.FullyRecoverablePercent);
 
         // (100 x 10 + 200) / 10. The old formula returned 138.0000 — 1,380 / 10 — because it added
         // the 180 of reclaimable VAT to the cost of the goods.
@@ -63,33 +75,66 @@ public sealed class LandedCostInputTaxTests
         // The tax argument is inert under the default policy: a line that carries VAT costs exactly
         // what the same line costs with no VAT on it at all.
         Assert.Equal(LandedCostFormula.UnitCost(UnitPrice, Quantity, Freight, 0m,
-            supplierInputTaxRecoverable: true), landed);
+            CommercialMatchingPolicy.FullyRecoverablePercent), landed);
     }
 
     [Fact]
     public void Non_recoverable_input_tax_is_a_real_cost_and_stays_in_landed_cost()
     {
         // A business unit that cannot reclaim input tax — not VAT-registered, or trading only in
-        // exempt supplies — really did pay that money to acquire the goods. Flipping the policy is
-        // the whole point of the switch: the old arithmetic is still available, to the tenants for
-        // whom it is the truth.
-        var landed = LandedCostFormula.UnitCost(UnitPrice, Quantity, Freight, SupplierVat,
-            supplierInputTaxRecoverable: false);
+        // exempt supplies — really did pay that money to acquire the goods. Setting the recovery
+        // ratio to 0 is the whole point of the field: the old arithmetic is still available, to
+        // the tenants for whom it is the truth.
+        var landed = LandedCostFormula.UnitCost(UnitPrice, Quantity, Freight, SupplierVat, 0m);
 
         Assert.Equal(138.0000m, landed);
+    }
+
+    [Fact]
+    public void Partial_recovery_puts_only_the_irrecoverable_share_into_cost()
+    {
+        // R18. The case a boolean could not express: a VAT-registered trader making partly exempt
+        // supplies recovers input VAT pro-rata, and IAS 2.11 makes the irrecoverable share a cost
+        // of the asset. At 70% recovery, 30% of the 180 supplier VAT — 54.00 — is cost.
+        //
+        //   (100 x 10 + 200 freight + 54 irrecoverable VAT) / 10 = 125.4000
+        //
+        // Before R18 this tenant had to choose between 120.0000 (understating cost by 5.40/unit,
+        // and therefore under-pricing) and 138.0000 (overstating it by 12.60/unit, and pricing
+        // itself out of the tender). Neither number was true.
+        Assert.Equal(54.0000m, LandedCostFormula.CostBearingTax(SupplierVat, 70m));
+        Assert.Equal(125.4000m, LandedCostFormula.UnitCost(UnitPrice, Quantity, Freight, SupplierVat, 70m));
+
+        // And the two endpoints still behave exactly as the boolean did, so no tenant's numbers
+        // move as a side effect of the type change: TRUE became 100, FALSE became 0.
+        Assert.Equal(120.0000m, LandedCostFormula.UnitCost(UnitPrice, Quantity, Freight, SupplierVat,
+            CommercialMatchingPolicy.FullyRecoverablePercent));
+        Assert.Equal(138.0000m, LandedCostFormula.UnitCost(UnitPrice, Quantity, Freight, SupplierVat, 0m));
+    }
+
+    [Fact]
+    public void An_out_of_range_recovery_ratio_can_never_produce_a_negative_cost()
+    {
+        // The database check constraint forbids these values; this is the defence behind it.
+        // An unclamped 140% would return -72.00 of "cost", quietly REDUCING landed cost and
+        // therefore the customer price derived from it. An unclamped -40% would return 252.00,
+        // more cost than the supplier ever charged in tax.
+        Assert.Equal(0m, LandedCostFormula.CostBearingTax(SupplierVat, 140m));
+        Assert.Equal(SupplierVat, LandedCostFormula.CostBearingTax(SupplierVat, -40m));
     }
 
     [Fact]
     public void Removing_the_tax_does_not_remove_freight()
     {
         // Guard against over-correcting. Freight is a non-recoverable cost of getting the goods to
-        // the warehouse and belongs in landed cost under either policy.
+        // the warehouse and belongs in landed cost at any recovery ratio.
         Assert.Equal(120.0000m, LandedCostFormula.UnitCost(UnitPrice, Quantity, Freight, SupplierVat,
-            supplierInputTaxRecoverable: true));
+            CommercialMatchingPolicy.FullyRecoverablePercent));
         Assert.Equal(100.0000m, LandedCostFormula.UnitCost(UnitPrice, Quantity, 0m, SupplierVat,
-            supplierInputTaxRecoverable: true));
-        Assert.Equal(0m, LandedCostFormula.CostBearingTax(SupplierVat, true));
-        Assert.Equal(SupplierVat, LandedCostFormula.CostBearingTax(SupplierVat, false));
+            CommercialMatchingPolicy.FullyRecoverablePercent));
+        Assert.Equal(0m, LandedCostFormula.CostBearingTax(SupplierVat,
+            CommercialMatchingPolicy.FullyRecoverablePercent));
+        Assert.Equal(SupplierVat, LandedCostFormula.CostBearingTax(SupplierVat, 0m));
     }
 
     // ───────────────────────────────────────────── the switch
@@ -100,26 +145,37 @@ public sealed class LandedCostInputTaxTests
         using var database = new TestDb();
         const long recoverableTenant = 96_501;
         const long exemptTenant = 96_502;
+        const long partlyExemptTenant = 96_503;
 
         await using (var seed = database.ContextFor(null))
         {
             Seed.EnsureBusinessUnit(seed, recoverableTenant);
             Seed.EnsureBusinessUnit(seed, exemptTenant);
-            // Only the exempt tenant has a row. The other tenant has never touched its policy, and
-            // must still be costed correctly rather than falling into some other default.
+            Seed.EnsureBusinessUnit(seed, partlyExemptTenant);
+            // Only the two non-default tenants have a row. The other tenant has never touched its
+            // policy, and must still be costed correctly rather than falling into some other default.
             seed.CommercialMatchingPolicies.Add(new CommercialMatchingPolicy
             {
                 BusinessUnitId = exemptTenant,
-                SupplierInputTaxRecoverable = false,
+                SupplierInputTaxRecoverablePercent = 0m,
+                CreatedOn = DateTime.UtcNow
+            });
+            seed.CommercialMatchingPolicies.Add(new CommercialMatchingPolicy
+            {
+                BusinessUnitId = partlyExemptTenant,
+                SupplierInputTaxRecoverablePercent = 70m,
                 CreatedOn = DateTime.UtcNow
             });
             await seed.SaveChangesAsync();
         }
 
         await using var context = database.ContextFor(null);
-        Assert.True(await context.ResolveSupplierInputTaxRecoverableAsync(recoverableTenant));
-        Assert.False(await context.ResolveSupplierInputTaxRecoverableAsync(exemptTenant));
-        Assert.True(CommercialMatchingPolicy.DefaultFor(recoverableTenant).SupplierInputTaxRecoverable);
+        Assert.Equal(100m, await context.ResolveSupplierInputTaxRecoverablePercentAsync(recoverableTenant));
+        Assert.Equal(0m, await context.ResolveSupplierInputTaxRecoverablePercentAsync(exemptTenant));
+        // The value a boolean had nowhere to put.
+        Assert.Equal(70m, await context.ResolveSupplierInputTaxRecoverablePercentAsync(partlyExemptTenant));
+        Assert.Equal(CommercialMatchingPolicy.FullyRecoverablePercent,
+            CommercialMatchingPolicy.DefaultFor(recoverableTenant).SupplierInputTaxRecoverablePercent);
     }
 
     // ───────────────────────────────────────────── the production paths
@@ -172,7 +228,7 @@ public sealed class LandedCostInputTaxTests
         // Stated as the invariant rather than as a number: the price must be what the tax-free
         // build-up supports, and must not have moved by the VAT at all.
         var taxFreeLanded = LandedCostFormula.UnitCost(UnitPrice, Quantity, Freight, SupplierVat,
-            supplierInputTaxRecoverable: true);
+            CommercialMatchingPolicy.FullyRecoverablePercent);
         Assert.Equal(decimal.Round(taxFreeLanded / (1m - TargetMarginPercent / 100m), 6,
             MidpointRounding.AwayFromZero), priced.CustomerUnitPrice);
         Assert.Equal(SupplierVat / Quantity / (1m - TargetMarginPercent / 100m),
@@ -180,12 +236,16 @@ public sealed class LandedCostInputTaxTests
 
         var quoteItem = await context.QuoteItems.SingleAsync(x => x.Id == quoteItemId);
         Assert.Equal(150.000000m, quoteItem.UnitPrice);
-        // Output VAT is added on top of THIS price by the customer-quote total. With the supplier's
-        // VAT out of the cost base, the customer is charged 15% exactly once: 1,725.00 gross on a
-        // 1,500.00 net line, against 1,983.75 before.
-        var outputVat = decimal.Round(quoteItem.Quantity * quoteItem.UnitPrice * 0.15m, 2);
-        Assert.Equal(225.00m, outputVat);
-        Assert.Equal(1_725.00m, quoteItem.Quantity * quoteItem.UnitPrice + outputVat);
+
+        // R17: output VAT is now DERIVED and PERSISTED by the same call that set the price, rather
+        // than being computed by this test and never by the product. With the supplier's VAT out of
+        // the cost base, the customer is charged 15% exactly once: 1,725.00 gross on a 1,500.00 net
+        // line, against 1,983.75 before R15 — and against 1,500.00 with no VAT at all, which is
+        // what shipping R15 without R17 would have sent to the customer.
+        Assert.Equal(225.00m, quoteItem.TaxAmount);
+        Assert.Equal(1_725.00m, quoteItem.TotalAmount);
+        Assert.Equal(15m, quoteItem.TaxRatePercentApplied);
+        Assert.Equal(QuoteLineTaxCategories.Standard, quoteItem.TaxCategory);
     }
 
     // ───────────────────────────────────────────── fixture plumbing

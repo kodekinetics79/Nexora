@@ -124,7 +124,11 @@ const itemLabels = (value: unknown): string[] => !Array.isArray(value) ? [] : va
   if (typeof item !== 'object' || item === null) return 'Unlabelled line item';
   const row = item as Record<string, unknown>;
   const part = String(row.part || row.description || 'Unlabelled item');
-  const quantity = Number(row.Quantity ?? row.quantity);
+  // Number(null) is 0 and Number.isFinite(0) is true, so an unstated quantity used to render
+  // as "(quantity 0)" — a line the buyer never quantified, reported as an order for none.
+  const raw = row.Quantity ?? row.quantity;
+  if (raw === null || raw === undefined || raw === '') return `${part} (quantity not stated)`;
+  const quantity = Number(raw);
   return Number.isFinite(quantity) ? `${part} (quantity ${quantity})` : part;
 });
 

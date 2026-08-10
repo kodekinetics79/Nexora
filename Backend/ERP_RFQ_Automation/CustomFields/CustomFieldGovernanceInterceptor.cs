@@ -70,9 +70,8 @@ public sealed class CustomFieldGovernanceInterceptor : SaveChangesInterceptor
 
     private static bool IsGovernedEntity(object entity) => entity is
         CustomFieldDefinition or CustomFieldVersion or CustomFieldOption or CustomFieldRule or
-        CustomFieldDependency or CustomFieldRecord or CustomFieldValue or CustomFieldValueHistory;
+        CustomFieldDependency or CustomFieldRecord or CustomFieldValue;
 
     private static bool IsImmutableEntity(object entity) => entity is
-        CustomFieldVersion or CustomFieldOption or CustomFieldRule or
-        CustomFieldDependency or CustomFieldValueHistory;
+        CustomFieldVersion or CustomFieldOption or CustomFieldRule or CustomFieldDependency;
 }

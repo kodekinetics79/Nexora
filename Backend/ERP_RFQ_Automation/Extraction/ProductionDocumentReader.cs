@@ -105,6 +105,14 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
     // Header/context slice size for the unstructured path (mirrors DefaultExtractionDocumentReader).
     private const int HeaderLineCount = 20;
 
+    /// <summary>
+    /// Ceiling on the surrounding prose retained beside a structured table. Generous enough
+    /// for the instruction block every real RFQ carries and small enough that a 4 MB
+    /// materials RFP cannot put a novel through the evidence ledger and onto a review screen.
+    /// The immutable source document remains the complete record either way.
+    /// </summary>
+    private const int MaxRetainedProseChars = 16_000;
+
     // pdfium (Docnet) and the Tesseract native engine are not thread-safe; serialize OCR.
     private static readonly object OcrLock = new();
 
@@ -271,7 +279,7 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
                 _log.LogInformation(
                     "DOCX {Name} was read deterministically from its table: {Rows} line(s), no model involved.",
                     name, tableRows.Count);
-                return Structured(job, name, tableRows.ToList());
+                return Structured(job, name, tableRows.ToList(), ProseOutsideTables(bytes, name));
             }
             // No mappable table — an ordinary prose document. Falls through to the text path
             // below, byte for byte as before: a prose RFQ is not a "layout not recognized"
@@ -309,9 +317,35 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
 
     // ---- input builders --------------------------------------------------
 
-    private static DocumentExtractionInput Structured(ExtractionJob job, string name, List<RfqSpreadsheetRow> rows)
+    /// <summary>
+    /// The document's own words outside its table, retained rather than discarded. Never
+    /// throws and never fails a document: prose is context, and a document that reads
+    /// perfectly must not be lost because its narrative could not be re-read.
+    /// </summary>
+    private string? ProseOutsideTables(byte[] bytes, string name)
+    {
+        try
+        {
+            var prose = ExtractTextFromDocx(bytes, includeTableRows: false);
+            if (string.IsNullOrWhiteSpace(prose)) return null;
+            return prose.Length <= MaxRetainedProseChars
+                ? prose
+                : prose[..MaxRetainedProseChars]
+                  + "\n[Truncated: the document states more text than the reviewer panel retains. "
+                  + "Open the source attachment for the rest.]";
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Surrounding prose could not be retained for {Name}; the table still read.", name);
+            return null;
+        }
+    }
+
+    private static DocumentExtractionInput Structured(
+        ExtractionJob job, string name, List<RfqSpreadsheetRow> rows, string? documentNarrative = null)
         => new()
         {
+            DocumentNarrative = documentNarrative,
             BusinessUnitId = job.BusinessUnitId,
             SourceId = $"job:{job.Id}",
             // The lease attempt scopes every AI idempotency key this pass issues, so a
@@ -395,7 +429,15 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
             "The legacy .doc file passed security inspection but the local binary reader could not parse it; an isolated converter is not configured.");
     }
 
-    private string ExtractTextFromDocx(byte[] bytes)
+    /// <param name="includeTableRows">
+    /// False to emit ONLY the prose the document states outside its tables. Every RFQ in the
+    /// pilot corpus ends with instructions naming the required warranty, validity, country of
+    /// origin, Incoterms and submission method, and none of it reached the lead for any of
+    /// the 120 documents — the structured input was built with an EMPTY header and the
+    /// line-item regions alone. "As per attached specification", a payment term and a
+    /// validity period all live here.
+    /// </param>
+    private string ExtractTextFromDocx(byte[] bytes, bool includeTableRows = true)
     {
         try
         {
@@ -476,7 +518,7 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
                     }
                     else if (reader.ElementType == typeof(TableRow) && cellDepth == 0 && row.Count > 0)
                     {
-                        AddLine(lines, string.Join('\t', row));
+                        if (includeTableRows) AddLine(lines, string.Join('\t', row));
                         row.Clear();
                     }
                 }

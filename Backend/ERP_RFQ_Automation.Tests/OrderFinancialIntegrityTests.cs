@@ -11,8 +11,27 @@ namespace ERP_RFQ_Automation.Tests;
 
 public sealed class OrderFinancialIntegrityTests
 {
+    /// <summary>
+    /// R17 changed this test's numbers, and the change is the point.
+    ///
+    /// <para>It used to submit <c>TaxAmount = 19</c> and assert 219, which certified that the line
+    /// tax a CLIENT typed reaches the persisted totals. That is exactly the defect the finance panel
+    /// found: nothing derived output tax, so whatever arrived on the wire — 19, zero, or nothing at
+    /// all — became the tax on a customer document.</para>
+    ///
+    /// <para>The submitted 19 is now discarded and the tax is derived from the business unit's
+    /// <c>OutputTaxRatePercent</c>, which defaults to the KSA standard 15%:</para>
+    /// <code>
+    ///   base   2 x 100.00        = 200.00
+    ///   tax    200.00 x 15%      =  30.00      (was: 19.00, because someone typed 19)
+    ///   line   200.00 + 30.00    = 230.00      (was: 219.00)
+    /// </code>
+    /// <para>The invariant the test was written to protect — that the line's tax IS included in the
+    /// persisted line and header totals rather than being displayed and dropped — is unchanged and
+    /// still asserted. Only the source of the number moved, from the request to the policy.</para>
+    /// </summary>
     [Fact]
-    public async Task QuoteCalculator_IncludesDisplayedTaxInPersistedTotals()
+    public async Task QuoteCalculator_IncludesDerivedTaxInPersistedTotals()
     {
         using var database = new TestDb();
         await using var db = database.ContextFor(BusinessUnitId);
@@ -35,14 +54,19 @@ public sealed class OrderFinancialIntegrityTests
                     ItemDescription = "Taxed item",
                     Quantity = 2m,
                     UnitPrice = 100m,
+                    // Ignored. Kept in the request precisely to prove it is ignored.
                     TaxAmount = 19m,
                     TotalAmount = 1m
                 }
             ]
         });
 
-        Assert.Equal(219m, quote.TotalAmount);
-        Assert.Equal(219m, Assert.Single(quote.QuoteItems).TotalAmount);
+        Assert.Equal(230m, quote.TotalAmount);
+        var line = Assert.Single(quote.QuoteItems);
+        Assert.Equal(230m, line.TotalAmount);
+        Assert.Equal(30m, line.TaxAmount);
+        Assert.NotEqual(19m, line.TaxAmount);
+        Assert.Equal(15m, line.TaxRatePercentApplied);
         Assert.Equal(2, (await db.Quotes.SingleAsync()).FinancialCalculationVersion);
     }
 
@@ -74,6 +98,12 @@ public sealed class OrderFinancialIntegrityTests
                     UnitPrice = 100m,
                     Discount = 10m,
                     TaxAmount = 19m,
+                    // R17: 19.00 on a 190.00 net base is 10%. The rate is stamped because the order
+                    // gate now refuses a quote whose tax was never DERIVED, and a line carrying a
+                    // hand-written amount with no rate behind it is exactly that. See
+                    // OrderFromQuoteTaxGateTests. The subject of this test — header totals and
+                    // idempotency — is unchanged.
+                    TaxRatePercentApplied = 10m,
                     TotalAmount = 209m,
                     CreatedBy = "test",
                     CreatedDate = DateTime.UtcNow
@@ -128,6 +158,10 @@ public sealed class OrderFinancialIntegrityTests
                     UnitPrice = 100m,
                     Discount = 0m,
                     TaxAmount = 5m,
+                    // R17: 5.00 on a 100.00 base is 5%. Stamped for the same reason as above — the
+                    // order gate refuses an underived line, and this test is about the legacy
+                    // tax-exclusive header arithmetic, not about the gate.
+                    TaxRatePercentApplied = 5m,
                     TotalAmount = 100m,
                     CreatedBy = "test",
                     CreatedDate = DateTime.UtcNow
@@ -181,6 +215,14 @@ public sealed class OrderFinancialIntegrityTests
         var upload = await uploader.UploadTemplateAsync(stream, BusinessUnitId, "test");
         Assert.True(upload.Success, upload.Message);
         var quote = await db.Quotes.Include(q => q.QuoteItems).SingleAsync();
+        // KNOWN GAP, asserted rather than hidden: the template uploader takes the tax column
+        // verbatim and never derives it, so it leaves TaxRatePercentApplied null and the R17 order
+        // gate would refuse this quote. Stamping the rate those numbers imply (5.00 on 100.00 = 5%)
+        // keeps this test on its own subject — no double tax on conversion. When the uploader is
+        // taught to derive, the Assert.Null below fails and these two lines come out.
+        Assert.Null(Assert.Single(quote.QuoteItems).TaxRatePercentApplied);
+        quote.QuoteItems.Single().TaxRatePercentApplied = 5m;
+        await db.SaveChangesAsync();
         var order = await new OrderService(new OrderRepository(db), db)
             .CreateOrderFromQuoteAsync(quote.Id, BusinessUnitId);
 

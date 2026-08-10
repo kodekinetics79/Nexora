@@ -44,6 +44,36 @@ public sealed class CanonicalValue<T>
     public ValidationStatus ValidationStatus { get; set; } = ValidationStatus.Unvalidated;
     public List<SourceEvidence> Evidence { get; set; } = new();
     public List<string> Transformations { get; set; } = new();
+
+    /// <summary>
+    /// FALSE when the SOURCE DOCUMENT does not state this field anywhere — no line of this
+    /// RFQ carries any text for it.
+    ///
+    /// <para>
+    /// This is the difference between <b>"the document does not contain this"</b> and
+    /// <b>"we failed to read this"</b>, and that difference is the entire value of the
+    /// review signal. An inbound RFQ is a REQUEST: unit price, currency and lead time are
+    /// exactly what the buyer is asking the supplier to supply, so their absence is the
+    /// correct state of the document. Treating them as gaps flagged every line of every
+    /// correctly-read document and buried the lines that were genuinely wrong.
+    /// </para>
+    /// <para>
+    /// The test is evidence, not intent-guessing: a field is STATED when at least one line
+    /// of the same document carries source text for it. So a price sheet that prices seven
+    /// of eight lines still flags the eighth — the document asserts the field, and that one
+    /// line is a real gap — while an RFQ that prices none of them flags nothing. A value
+    /// whose source text IS present but could not be parsed is untouched by this: it stays
+    /// Stated, keeps its low confidence and keeps its review flag, because that is a
+    /// reading failure.
+    /// </para>
+    /// <para>
+    /// Confidence measures READING, so an unstated field contributes nothing to the
+    /// average (see ChunkedExtractionService.AverageConfidence). Averaging in fields the
+    /// document was never going to contain is what put every document in the pilot corpus
+    /// at 0.557, below the 0.60 acceptance threshold, with nothing misread.
+    /// </para>
+    /// </summary>
+    public bool StatedInDocument { get; set; } = true;
 }
 
 public sealed class CanonicalRfqLineItem

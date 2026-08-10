@@ -128,8 +128,11 @@ public sealed class LeadDecisionService : ILeadDecisionService
             {
                 pricedLines++;
                 if (!string.IsNullOrWhiteSpace(li.Currency)) pricedLinesWithKnownCurrency++;
-                if (li.Quantity > 0)
-                    estimatedValue += price.Value * li.Quantity;
+                // A line with no stated quantity contributes nothing to the estimate. It is not
+                // worth zero — it is unknown, and the brief says so through pricedLines rather
+                // than by pretending the line has no value.
+                if (li.Quantity is > 0)
+                    estimatedValue += price.Value * li.Quantity.Value;
             }
 
             // Product master costs are not currency-qualified. Margin therefore
@@ -295,7 +298,7 @@ public sealed class LeadDecisionService : ILeadDecisionService
             });
             var coveragePct = Pct(covered, total);
 
-            var pricedItems = lead.Items.Where(i => i.UnitPrice is > 0m && i.Quantity > 0).ToList();
+            var pricedItems = lead.Items.Where(i => i.UnitPrice is > 0m && i.Quantity is > 0).ToList();
             var pricedCurrencies = pricedItems
                 .Select(i => i.Currency?.Trim().ToUpperInvariant())
                 .Where(c => !string.IsNullOrEmpty(c))
@@ -305,7 +308,7 @@ public sealed class LeadDecisionService : ILeadDecisionService
                                     && pricedItems.All(i => !string.IsNullOrWhiteSpace(i.Currency))
                                     && pricedCurrencies.Count == 1;
             decimal? estimatedValue = canAggregateValue
-                ? Round2(pricedItems.Sum(i => i.UnitPrice!.Value * i.Quantity))
+                ? Round2(pricedItems.Sum(i => i.UnitPrice!.Value * i.Quantity!.Value))
                 : null;
 
             var (daysLeft, urgency) = DeadlineBand(lead.BidClosingDate, now);
@@ -341,10 +344,13 @@ public sealed class LeadDecisionService : ILeadDecisionService
 
     // ================================================================ catalog matching
 
+    // Quantity is nullable because LeadItem.Quantity is: null means the document stated no
+    // readable quantity, and the value guard (`Quantity > 0`) already excludes such a line from
+    // every value estimate — a null is false there exactly as a 0 was, so no total changes.
     private sealed record ItemRow(
         long Id, string? ItemMaterialCode, string? ManufacturerPartNumber,
         string? ProductShortName, string? ProductShortDescription,
-        int Quantity, decimal? UnitPrice, string? Currency);
+        int? Quantity, decimal? UnitPrice, string? Currency);
 
     // Product.QtyOnHand is deliberately NOT projected here: stock for the brief comes from the
     // Inventory rows via AvailableToPromiseByProductAsync, never from the product master.

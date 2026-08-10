@@ -54,12 +54,17 @@ public static class AgentSeed
         bool requireApprovalForAwards = true,
         bool requireApprovalForOrders = true,
         bool requireApprovalForSupplierEmails = true,
-        string? perToolOverrides = null)
+        string? perToolOverrides = null,
+        long? currencyId = null)
     {
         var policy = new AgentPolicy
         {
             BusinessUnitId = businessUnitId,
             AutonomyLevel = level,
+            // Defaults to null — an unconfigured cap currency — because that is what every row
+            // that predates the currency column looks like, and tests should meet the fail-closed
+            // path unless they deliberately opt out of it.
+            CurrencyId = currencyId,
             MaxAutoAwardValue = maxAutoAwardValue,
             MaxAutoOrderValue = maxAutoOrderValue,
             RequireApprovalForAwards = requireApprovalForAwards,

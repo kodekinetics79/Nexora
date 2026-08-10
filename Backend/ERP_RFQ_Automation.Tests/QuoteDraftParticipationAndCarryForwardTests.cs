@@ -62,7 +62,12 @@ public sealed class QuoteDraftParticipationAndCarryForwardTests
                 LineItemNo = line.LineItemNo,
                 ItemMaterialCode = line.ItemMaterialCode,
                 ProductShortDescription = line.ProductShortDescription,
-                Quantity = line.Quantity,
+                // LeadItem.Quantity is nullable so an unread quantity is distinguishable from a
+                // real zero; Rfqitem.Quantity is NOT NULL and positive-checked. Production
+                // (LeadRepository.CreateRfqFromLeadAsync) refuses an unquantified line rather than
+                // coalescing it, so the fixture refuses too instead of silently seeding a 0.
+                Quantity = line.Quantity ?? throw new InvalidOperationException(
+                    $"Fixture lead line '{line.LineItemNo}' states no quantity; an RFQ line cannot be built from it."),
                 UnitOfMeasure = line.UnitOfMeasure,
                 ManufacturerName = "GOULDS PUMPS",
                 ManufacturerPartNumber = "P/N#HTGD337039P0002",

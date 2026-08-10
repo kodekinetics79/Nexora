@@ -17,6 +17,7 @@ using ERP_RFQ_Automation.Sla;
 using ERP_RFQ_Automation.QuoteDelivery;
 using ERP_RFQ_Automation.Inventory.Commercial;
 using ERP_RFQ_Automation.CommercialLearning;
+using ERP_RFQ_Automation.OrderToCash;
 
 namespace ERP_RFQ_Automation.Services
 {
@@ -168,9 +169,10 @@ namespace ERP_RFQ_Automation.Services
                 quoteNo = await GenerateNextQuoteNumber(request.BusinessUnitId);
             }
 
-            // FIN-12: reject non-positive quantity/price and negative tax up front.
+            // FIN-12: reject non-positive quantity/price up front. R19: and an unusable tax category.
             foreach (var itemDto in request.QuoteItems)
-                ValidateQuoteItemFinancials(itemDto.Quantity, itemDto.UnitPrice, itemDto.TaxAmount);
+                ValidateQuoteItemFinancials(itemDto.Quantity, itemDto.UnitPrice,
+                    itemDto.TaxCategory, itemDto.TaxCategoryReason);
 
             var quote = new Quote
             {
@@ -201,7 +203,10 @@ namespace ERP_RFQ_Automation.Services
                     // TotalAmount calculated later
                     DiscountTypeId = i.DiscountTypeId,
                     DiscountValue = i.DiscountValue, // Using DiscountValue column for input
-                    TaxAmount = i.TaxAmount,
+                    // R17: TaxAmount is NOT copied from the request. CalculateQuoteTotals below
+                    // derives it from the tenant's rate and the category the caller stated.
+                    TaxCategory = QuoteLineTaxCategories.Normalize(i.TaxCategory),
+                    TaxCategoryReason = i.TaxCategoryReason?.Trim(),
                     DeliveryLeadTime = i.DeliveryLeadTime,
                     CreatedBy = request.CreatedBy,
                     CreatedDate = DateTime.UtcNow
@@ -349,7 +354,13 @@ namespace ERP_RFQ_Automation.Services
                         CustomerLineRef = item.LineItemNo,
                         UnitPrice = 0m,
                         TotalAmount = 0m,
+                        // R17/R19: an unpriced draft line has nothing to derive tax FROM, so both
+                        // the amount and the applied rate stay null and the send gate refuses the
+                        // quote until it has been priced. The treatment defaults to a domestic
+                        // standard-rated sale; the rep changes it on the lines that are not.
                         TaxAmount = null,
+                        TaxCategory = QuoteLineTaxCategories.Standard,
+                        TaxRatePercentApplied = null,
                         DeliveryLeadTime = null,
                         CreatedBy = actor.Trim(),
                         CreatedDate = now
@@ -463,7 +474,8 @@ namespace ERP_RFQ_Automation.Services
             {
                 // FIN-12: validate financial inputs for any item that will remain on the quote.
                 if (!itemDto.IsDeleted)
-                    ValidateQuoteItemFinancials(itemDto.Quantity, itemDto.UnitPrice, itemDto.TaxAmount);
+                    ValidateQuoteItemFinancials(itemDto.Quantity, itemDto.UnitPrice,
+                        itemDto.TaxCategory, itemDto.TaxCategoryReason);
 
                 if (itemDto.Id.HasValue && itemDto.Id.Value > 0)
                 {
@@ -488,7 +500,16 @@ namespace ERP_RFQ_Automation.Services
                             existingItem.UnitPrice = itemDto.UnitPrice;
                             existingItem.DiscountTypeId = itemDto.DiscountTypeId;
                             existingItem.DiscountValue = itemDto.DiscountValue;
-                            existingItem.TaxAmount = itemDto.TaxAmount;
+                            // R17: the submitted TaxAmount is discarded — CalculateQuoteTotals
+                            // re-derives it below from the price this edit just set. R19: the
+                            // category is the caller's to state, preserved when not supplied so an
+                            // older client cannot silently reset an export back to standard-rated.
+                            existingItem.TaxCategory = itemDto.TaxCategory is null
+                                ? existingItem.TaxCategory
+                                : QuoteLineTaxCategories.Normalize(itemDto.TaxCategory);
+                            existingItem.TaxCategoryReason = itemDto.TaxCategory is null
+                                ? existingItem.TaxCategoryReason
+                                : itemDto.TaxCategoryReason?.Trim();
                             existingItem.DeliveryLeadTime = itemDto.DeliveryLeadTime;
                             existingItem.ModifiedBy = request.ModifiedBy;
                             existingItem.ModifiedDate = DateTime.UtcNow;
@@ -508,7 +529,9 @@ namespace ERP_RFQ_Automation.Services
                         UnitPrice = itemDto.UnitPrice,
                         DiscountTypeId = itemDto.DiscountTypeId,
                         DiscountValue = itemDto.DiscountValue,
-                        TaxAmount = itemDto.TaxAmount,
+                        // R17: derived below, never submitted.
+                        TaxCategory = QuoteLineTaxCategories.Normalize(itemDto.TaxCategory),
+                        TaxCategoryReason = itemDto.TaxCategoryReason?.Trim(),
                         DeliveryLeadTime = itemDto.DeliveryLeadTime,
                         CreatedBy = request.ModifiedBy,
                         CreatedDate = DateTime.UtcNow
@@ -523,8 +546,28 @@ namespace ERP_RFQ_Automation.Services
             return await GetQuoteByIdAsync(quote.Id);
         }
 
+        /// <summary>
+        /// Recomputes every line total, every line's OUTPUT TAX, and the quote total.
+        ///
+        /// <para>R17: this is the one place a customer quote line's tax is set. It is derived —
+        /// <c>taxable base x the tenant's OutputTaxRatePercent</c>, or zero when the user marked the
+        /// line as anything other than standard-rated — and never read from the request. Deriving it
+        /// HERE rather than at each call site is deliberate: the taxable base is the line net
+        /// AFTER the line discount is resolved, and this method is the only code that knows whether
+        /// a discount was a percentage or a fixed amount. Any other placement would tax the wrong
+        /// base the first time someone discounts a line.</para>
+        ///
+        /// <para>When the tenant has no output tax rate configured, a standard-rated line's tax is
+        /// left UNDERIVED — <c>TaxRatePercentApplied</c> stays null — and the send gate refuses the
+        /// quote. Writing zero instead would be the original defect wearing a new hat.</para>
+        /// </summary>
         private async Task CalculateQuoteTotals(Quote quote)
         {
+            // One policy read per recalculation, so every line of one quote is taxed on one answer.
+            // Absence of a policy row means the entity's defaults (see CommercialMatchingPolicy),
+            // which for the KSA home jurisdiction is the 15% standard rate.
+            var outputTaxRatePercent = await _context.ResolveOutputTaxRatePercentAsync(quote.BusinessUnitId);
+
             // Load setup for discounts if needed
             // We need to know if DiscountType is Percentage or Fixed.
             // Assuming we can load them.
@@ -575,9 +618,24 @@ namespace ERP_RFQ_Automation.Services
                 // QuoteItem has 'Discount' (decimal) and now 'DiscountValue' (decimal).
                 // 'Discount' was likely the amount. 'DiscountValue' is the input value (e.g. 10 for 10%).
                 // YES.
+
+                // R17/R19: derive the line's output tax from the net consideration the customer
+                // actually pays for this line. The category is normalised first so a null on a
+                // pre-R19 row is read as STANDARD rather than dropping through as "unknown".
+                var taxCategory = QuoteLineTaxCategories.Normalize(item.TaxCategory);
+                item.TaxCategory = taxCategory;
+                var taxableBase = OutputTaxFormula.TaxableBase(itemTotal, itemDiscountAmount);
+                var derivedTax = OutputTaxFormula.Derive(taxableBase, outputTaxRatePercent, taxCategory);
+                item.TaxAmount = derivedTax;
+                // Null here — and only here — means "never derived", which is what the send gate
+                // refuses on. A zero-rated line records the 0 it was actually taxed at.
+                item.TaxRatePercentApplied = derivedTax is null
+                    ? null
+                    : OutputTaxFormula.EffectiveRatePercent(outputTaxRatePercent, taxCategory);
+
                 // FIN-09: round each line net to currency scale before summing so the printed
                 // line totals reconcile with the printed grand total.
-                item.TotalAmount = RoundCurrency(itemTotal - itemDiscountAmount + (item.TaxAmount ?? 0m));
+                item.TotalAmount = RoundCurrency(taxableBase + (derivedTax ?? 0m));
                 quoteSubTotal += item.TotalAmount;
             }
 
@@ -632,15 +690,71 @@ namespace ERP_RFQ_Automation.Services
             !outcomeOn.HasValue
             && LifecyclePolicy.Canonicalize("Quote", statusCode, statusValue) == "SENT";
 
-        // FIN-12: server-side guard rejecting non-positive quantities/prices and negative tax.
-        private static void ValidateQuoteItemFinancials(decimal quantity, decimal unitPrice, decimal? taxAmount)
+        // FIN-12: server-side guard rejecting non-positive quantities/prices.
+        //
+        // R17: the client's TaxAmount is NOT validated here, because it is no longer used at all.
+        // Validating it was the whole defect — the check rejected only negative amounts, so null
+        // and zero passed and no tax was ever computed. The line's tax is derived in
+        // CalculateQuoteTotals from the tenant's policy rate and the category below.
+        //
+        // R19: what the client DOES get to state is the tax CATEGORY, and a category that departs
+        // from the standard rate must say why.
+        private static void ValidateQuoteItemFinancials(decimal quantity, decimal unitPrice,
+            string? taxCategory, string? taxCategoryReason)
         {
             if (quantity <= 0)
                 throw new ArgumentException($"Invalid line quantity ({quantity}). Quantity must be greater than zero.");
             if (unitPrice <= 0)
                 throw new ArgumentException($"Invalid unit price ({unitPrice}). Unit price must be greater than zero.");
-            if (taxAmount.HasValue && taxAmount.Value < 0)
-                throw new ArgumentException($"Invalid tax amount ({taxAmount}). Tax cannot be negative.");
+            if (!QuoteLineTaxCategories.IsKnown(taxCategory))
+                throw new ArgumentException($"Invalid tax category '{taxCategory}'. Use one of: " +
+                    $"{string.Join(", ", QuoteLineTaxCategories.All)}.");
+            if (QuoteLineTaxCategories.RequiresReason(taxCategory) && string.IsNullOrWhiteSpace(taxCategoryReason))
+                throw new ArgumentException(
+                    $"A line taxed as {QuoteLineTaxCategories.Normalize(taxCategory)} must state why it departs " +
+                    "from the standard rate.");
+            if (taxCategoryReason is { Length: > 500 })
+                throw new ArgumentException("The tax category reason must not exceed 500 characters.");
+        }
+
+        /// <summary>
+        /// R17: why this quote's output tax is not fit to leave the building, or null when it is.
+        ///
+        /// <para>Shared by the send gate and the PDF gate so the email path and the document path
+        /// cannot disagree about what "taxed" means, and so a rep who is refused a send gets the
+        /// same sentence when they try to download the PDF instead.</para>
+        /// </summary>
+        private async Task<string?> EvaluateTaxDerivationAsync(long quoteId, long businessUnitId,
+            CancellationToken ct)
+        {
+            var lines = await _context.QuoteItems.AsNoTracking()
+                .Where(item => item.QuoteId == quoteId && item.Quote.BusinessUnitId == businessUnitId)
+                .ToListAsync(ct);
+            return TaxDerivationBlocker(lines,
+                await _context.ResolveOutputTaxRatePercentAsync(businessUnitId, ct));
+        }
+
+        /// <summary>
+        /// The pure half of the tax gate: the first line that has no derived tax, phrased for the
+        /// person who has to fix it. Lines are named by the buyer's own reference where there is
+        /// one, because "line 3" means nothing to a rep looking at a bid list numbered 00010,
+        /// 00020, 00030.
+        /// </summary>
+        internal static string? TaxDerivationBlocker(IEnumerable<QuoteItem> items, decimal? outputTaxRatePercent)
+        {
+            var ordered = OrderQuoteLines(items);
+            if (ordered.Count == 0) return null;
+            for (var index = 0; index < ordered.Count; index++)
+            {
+                var item = ordered[index];
+                var label = string.IsNullOrWhiteSpace(item.CustomerLineRef)
+                    ? (index + 1).ToString()
+                    : item.CustomerLineRef!;
+                if (OutputTaxFormula.DerivationBlocker(label, outputTaxRatePercent, item.TaxCategory,
+                        item.TaxCategoryReason, item.TaxRatePercentApplied) is { } blocker)
+                    return blocker;
+            }
+            return null;
         }
 
         // FIN-05: determines whether a quote is still an editable DRAFT. Resolves the DRAFT
@@ -768,6 +882,9 @@ namespace ERP_RFQ_Automation.Services
                     DiscountValue = i.DiscountValue, // Input Value
                     DiscountTypeName = i.DiscountTypeId.HasValue && itemDiscountTypes.ContainsKey(i.DiscountTypeId.Value) ? itemDiscountTypes[i.DiscountTypeId.Value] : null,
                     TaxAmount = i.TaxAmount,
+                    TaxCategory = i.TaxCategory,
+                    TaxCategoryReason = i.TaxCategoryReason,
+                    TaxRatePercentApplied = i.TaxRatePercentApplied,
                     DeliveryLeadTime = i.DeliveryLeadTime,
                     // Read through the existing RfqitemId link — never copied onto QuoteItem.
                     // See QuoteItemResponseDTO for why these are projected rather than stored.
@@ -853,6 +970,15 @@ namespace ERP_RFQ_Automation.Services
             // more actionable message rather than being told to confirm prices that do not
             // exist yet.
             await EnsureAttestedPricesAsync(quoteId, businessUnitId, quote.QuoteNo, boundAttestationFingerprint, ct);
+
+            // R17: same gate the send path applies, because the PDF *is* the commercial document —
+            // once it exists it can be downloaded, forwarded and relied on, and a quotation with no
+            // VAT separately stated is deemed VAT-inclusive under KSA law. Gating only the email
+            // would leave the download as an unguarded way to hand a customer that document.
+            if (TaxDerivationBlocker(quote.QuoteItems,
+                    await _context.ResolveOutputTaxRatePercentAsync(businessUnitId, ct)) is { } taxBlocker)
+                throw new InvalidOperationException(
+                    $"Quote '{quote.QuoteNo}' cannot be issued as a document yet. {taxBlocker}");
 
             // Fetch dynamic configurations from the new QuoteConfiguration table
             var config = await _quoteConfigRepository.GetByBusinessUnitIdAsync(quote.BusinessUnitId);
@@ -1164,6 +1290,18 @@ namespace ERP_RFQ_Automation.Services
             if (!attestation.Satisfied)
                 return QuoteSendResult.AwaitingPriceAttestation(attestation.Reason!);
 
+            // R17 OUTPUT-TAX GATE. Every line must carry a tax the server derived. A line whose
+            // TaxRatePercentApplied is null was never taxed at all — the business unit has no output
+            // tax rate configured, or the line has never been priced — and a quotation with no VAT
+            // separately stated on it is deemed VAT-INCLUSIVE under KSA law, so the seller funds
+            // 15/115 ≈ 13.04% of that line out of its own margin. Refusing is not conservatism; a
+            // 20% target margin becomes about 8% the moment that document is honoured.
+            //
+            // Placed after the price-provenance gate and before anything is queued, because the
+            // derived tax is only meaningful against prices the attestation has already covered.
+            if (await EvaluateTaxDerivationAsync(quoteId, businessUnitId, CancellationToken.None) is { } taxBlocker)
+                return QuoteSendResult.AwaitingTaxDerivation(taxBlocker);
+
             // WP-B3 below-floor gate: recompute floors for the quote's RFQ and hold
             // the ENTIRE send when any current line price is under its floor. The
             // approve_below_floor_quote tool re-enters here with BypassFloorHold=true
@@ -1398,7 +1536,11 @@ namespace ERP_RFQ_Automation.Services
                     UnitPrice = i.UnitPrice,
                     DiscountTypeId = i.DiscountTypeId,
                     DiscountValue = i.DiscountValue,
-                    TaxAmount = i.TaxAmount,
+                    // The revision re-derives its own tax through CalculateQuoteTotals below; only
+                    // the user's stated TREATMENT carries forward, because that is a commercial
+                    // decision about the supply and not a number.
+                    TaxCategory = i.TaxCategory,
+                    TaxCategoryReason = i.TaxCategoryReason,
                     DeliveryLeadTime = i.DeliveryLeadTime,
                     CreatedBy = actor,
                     CreatedDate = now

@@ -138,6 +138,22 @@ public static class TenantLifecycleHarness
             new Claim("email", email)
         ], "Platform"));
 
+    /// <summary>
+    /// A DIFFERENT platform Owner from <see cref="Operator()"/>, for the destructive verbs.
+    ///
+    /// <para>A purge is refused when the operator running it is the one who scheduled the deletion:
+    /// destroying a customer's records is the one act no later reviewer can correct, and every other
+    /// control on the path is a single person satisfying a rule. Every test that expects a purge to
+    /// get PAST that check therefore has to purge as somebody else — which is also what the
+    /// production flow looks like, so a test using one actor for both was quietly exercising a path
+    /// no real offboarding can take.</para>
+    ///
+    /// <para>Named rather than inlined so the intent is legible at the call site and so a future
+    /// change to the rule has one place to land, exactly as
+    /// <c>Operator("legal-checker@nexora.test", 18)</c> already does for legal-hold release.</para>
+    /// </summary>
+    public static ClaimsPrincipal SecondApprover() => Operator("second-owner@example.test", 23);
+
     public static Tenant NewTenant(string slug, TenantStatus status, long? primaryBusinessUnitId = null) => new()
     {
         Name = $"Offboarding {slug}",

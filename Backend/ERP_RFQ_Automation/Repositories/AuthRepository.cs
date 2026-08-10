@@ -152,11 +152,25 @@ namespace ERP_RFQ_Automation.Repositories
 
             // Tenant-status enforcement (P0): a PastDue/Suspended/Archived platform Tenant must
             // never receive a token, even with valid credentials. Runs AFTER password
-            // verification so nothing about tenant existence leaks to guessers, and
-            // fails OPEN for legacy business units without a platform Tenant row.
+            // verification so nothing about tenant existence leaks to guessers, and admits
+            // legacy business units without a platform Tenant row (resolved, no tenant).
+            //
+            // Sec-D1: an UNRESOLVABLE platform plane no longer mints a token either. A token
+            // issued here outlives the outage that let it out — it stays valid for its whole
+            // lifetime and the status guard will not re-check it until it expires — so this is
+            // the one gate where failing open leaves a durable hole rather than a momentary one.
             if (_tenantAccess is not null && user.Buid is { } tenantBusinessUnitId)
             {
                 var access = await _tenantAccess.GetAccessAsync(tenantBusinessUnitId);
+                if (access.IsUnresolvable)
+                {
+                    _logger.LogError(
+                        "Login refused for email {Email}: the platform plane could not be read for "
+                        + "business unit {BusinessUnitId}, so no token was issued.",
+                        request.Email, tenantBusinessUnitId);
+                    throw new TenantAccessUnresolvableException(tenantBusinessUnitId, access.UnresolvedReason);
+                }
+
                 if (access.IsAccessDenied)
                 {
                     _logger.LogWarning(

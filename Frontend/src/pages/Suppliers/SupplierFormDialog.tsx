@@ -18,7 +18,26 @@ interface Props {
 const empty = {
   name: '', contactEmail: '', paymentTerms: '', addressLine1: '', addressLine2: '',
   postalCode: '', tags: '', comments: '', cityId: '', countryId: '', currencyId: '',
-  concurrencyToken: '',
+  taxRegistrationNumber: '', concurrencyToken: '',
+};
+
+/**
+ * Mirrors ERP_RFQ_Automation.Tax.TaxRegistrationNumbers so the rep is told before the round trip.
+ * Separators are stripped, then: a value that CLAIMS to be Saudi — all digits, leading 3 — must be
+ * a well-formed 15-digit KSA VAT number (3…3). Anything else is accepted as a foreign
+ * registration, because a supplier in Germany or China will never have a Saudi TRN.
+ */
+const canonicalTrn = (value: string) => value.replace(/[\s\-–—]/g, '').toUpperCase();
+
+const trnError = (value: string): string | undefined => {
+  const trn = canonicalTrn(value);
+  if (trn.length === 0) return undefined;
+  if (trn.length > 50) return 'Tax registration number is longer than 50 characters.';
+  if (trn.length < 5) return 'Tax registration number is too short to be a registration number.';
+  if (!/^[A-Z0-9./]+$/.test(trn)) return "Use only letters, digits, '.' and '/'.";
+  if (/^3\d*$/.test(trn) && !/^3\d{13}3$/.test(trn))
+    return 'A KSA VAT number is exactly 15 digits, beginning with 3 and ending with 3. For a non-Saudi registration, include its country prefix.';
+  return undefined;
 };
 
 const SectionLabel = ({ label }: { label: string }) => (
@@ -40,6 +59,7 @@ const SupplierFormDialog: React.FC<Props> = ({ open, onClose, supplierId }) => {
   const normalizedEmail = form.contactEmail.trim();
   const emailInvalid = normalizedEmail.length > 0 && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail);
   const nameInvalid = form.name.trim().length === 0;
+  const taxRegistrationError = trnError(form.taxRegistrationNumber);
 
   const { data: editData } = useQuery({
     queryKey: ['supplier-detail', supplierId],
@@ -61,6 +81,7 @@ const SupplierFormDialog: React.FC<Props> = ({ open, onClose, supplierId }) => {
         cityId: editData.cityId ? String(editData.cityId) : '',
         countryId: editData.countryId ? String(editData.countryId) : '',
         currencyId: editData.currencyId ? String(editData.currencyId) : '',
+        taxRegistrationNumber: editData.taxRegistrationNumber ?? '',
         concurrencyToken: editData.concurrencyToken ?? '',
       });
     }
@@ -84,7 +105,7 @@ const SupplierFormDialog: React.FC<Props> = ({ open, onClose, supplierId }) => {
   const handleClose = () => { setForm(empty); onClose(); };
 
   const handleSave = () => {
-    if (nameInvalid || emailInvalid) return;
+    if (nameInvalid || emailInvalid || taxRegistrationError) return;
     const fd = new FormData();
     Object.entries(form).forEach(([k, v]) => {
       if (v !== '' && v !== null && v !== undefined) fd.append(k, String(v));
@@ -119,6 +140,20 @@ const SupplierFormDialog: React.FC<Props> = ({ open, onClose, supplierId }) => {
             <TextField fullWidth multiline rows={2} label="Comments" value={form.comments} onChange={f('comments')} />
           </Grid>
 
+          <SectionLabel label="Tax" />
+          <Grid size={{ xs: 12, sm: 6 }}>
+            <TextField
+              fullWidth
+              label="Tax Registration Number"
+              value={form.taxRegistrationNumber}
+              onChange={f('taxRegistrationNumber')}
+              error={!!taxRegistrationError}
+              placeholder="KSA VAT: 15 digits, 3…3"
+              helperText={taxRegistrationError
+                ?? 'Required before this supplier’s input VAT can be treated as recoverable. Leave blank for an unregistered supplier — its tax will be costed instead.'}
+            />
+          </Grid>
+
           <SectionLabel label="Address" />
           <Grid size={{ xs: 12, sm: 6 }}>
             <TextField fullWidth label="Address Line 1" value={form.addressLine1} onChange={f('addressLine1')} />
@@ -134,7 +169,7 @@ const SupplierFormDialog: React.FC<Props> = ({ open, onClose, supplierId }) => {
       </DialogContent>
       <DialogActions sx={{ p: 2 }}>
         <Button onClick={handleClose} color="inherit">Cancel</Button>
-        <Button variant="contained" onClick={handleSave} disabled={saveMutation.isPending || nameInvalid || emailInvalid} disableElevation sx={{ px: 4, fontWeight: 700 }}>
+        <Button variant="contained" onClick={handleSave} disabled={saveMutation.isPending || nameInvalid || emailInvalid || !!taxRegistrationError} disableElevation sx={{ px: 4, fontWeight: 700 }}>
           {saveMutation.isPending ? <CircularProgress size={22} /> : (isEdit ? 'Update Supplier' : 'Create Supplier')}
         </Button>
       </DialogActions>

@@ -44,7 +44,29 @@ public enum IngestionOutcomeState
     MALWARE_DETECTED,
     UNSUPPORTED_FORMAT,
     SOURCE_OBJECT_UNAVAILABLE,
-    EVIDENCE_INTEGRITY_FAILURE
+    EVIDENCE_INTEGRITY_FAILURE,
+
+    /// <summary>
+    /// The document could be read, but processing it needed an AI provider this tenant has
+    /// not authorized, so nothing was sent and nothing was extracted.
+    ///
+    /// <para>
+    /// This is a REFUSAL, not a failure: the allow-list in
+    /// <c>AI/AiExternalProviderTrustService.cs</c> is seeded FALSE for every tenant on
+    /// purpose and stays that way. What was missing was any way to say so. Malware and an
+    /// unsupported format each had a first-class state here; the single most likely
+    /// first-day outcome on a stock deploy — every PDF, every email body, every scan —
+    /// had none, and surfaced as a generic extraction failure indistinguishable from a
+    /// model timeout.
+    /// </para>
+    /// <para>
+    /// SCHEMA: <c>source_document_occurrences.outcome_state</c> is a varchar(48) with a
+    /// closed CHECK constraint (<c>ck_source_document_occurrences_outcome_state</c>). This
+    /// value must be added to that constraint before the code that writes it is deployed —
+    /// see the migration delta in the change report. No existing row is reclassified.
+    /// </para>
+    /// </summary>
+    AI_NOT_AUTHORIZED
 }
 
 public enum DocumentProcessingStatus

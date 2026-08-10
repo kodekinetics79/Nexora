@@ -41,7 +41,14 @@ import type { ClientSelection } from '../Leads/ResolveClientDialog';
 import { useAuth } from '../../context/AuthContext';
 import { openAuthenticatedFile } from '../../utils/authenticatedFile';
 import FieldEvidencePopover from './FieldEvidencePopover';
-import { checkLine, summariseChecks, checkHeadline, type CheckableLine } from './needsCheck';
+import {
+  checkLine,
+  summariseChecks,
+  checkHeadline,
+  documentAssertions,
+  type CheckableLine,
+  type FieldCheckSignal,
+} from './needsCheck';
 
 // Local editable representation of a line item. `id` doubles as the DataGrid
 // row id; new rows added during review use negative ids and set `isNew` so the
@@ -387,13 +394,17 @@ const ExtractionReviewDetailPage: React.FC = () => {
   // statuses that feed the needs-check verdict.
   const { evidenceByKey, flaggedByLine, documentUnmapped } = useMemo(() => {
     const byKey = new Map<string, LeadFieldEvidenceEntry>();
-    const flagged = new Map<number, Map<string, string>>();
+    const flagged = new Map<number, Map<string, FieldCheckSignal>>();
     const entries = fieldEvidence.data?.entries ?? [];
     for (const entry of entries) {
       byKey.set(fieldEvidenceKey(entry.lineItemId, entry.fieldName), entry);
       if (entry.lineItemId != null && entry.validationStatus) {
-        const forLine = flagged.get(entry.lineItemId) ?? new Map<string, string>();
-        forLine.set(entry.fieldName, entry.validationStatus);
+        const forLine = flagged.get(entry.lineItemId) ?? new Map<string, FieldCheckSignal>();
+        // The recorded RAW text travels with the status. Without it a ledger
+        // warning for "the buyer left this for the supplier to price" is
+        // indistinguishable from "there was text here we could not read", and
+        // the screen flagged both.
+        forLine.set(entry.fieldName, { status: entry.validationStatus, rawValue: entry.rawValue });
         flagged.set(entry.lineItemId, forLine);
       }
     }
@@ -401,7 +412,15 @@ const ExtractionReviewDetailPage: React.FC = () => {
     return { evidenceByKey: byKey, flaggedByLine: flagged, documentUnmapped: !mapped };
   }, [fieldEvidence.data]);
 
-  const summary = useMemo(() => summariseChecks(items, flaggedByLine), [items, flaggedByLine]);
+  const documentNarrative = (fieldEvidence.data?.documentNarrative ?? '').trim() || null;
+
+  // What this document states at all. A unit of measure no line carries is a
+  // unit the buyer never wrote, not a value we failed to read.
+  const assertions = useMemo(() => documentAssertions(items), [items]);
+  const summary = useMemo(
+    () => summariseChecks(items, flaggedByLine),
+    [items, flaggedByLine],
+  );
 
   const hasAuthoritativeSource = (lead?.attachments?.length ?? 0) > 0
     || (processingEvidence.data?.occurrences.some((occurrence) => occurrence.sourceDocumentId != null) ?? false);
@@ -582,7 +601,7 @@ const ExtractionReviewDetailPage: React.FC = () => {
       align: 'center',
       headerAlign: 'center',
       renderCell: (p) => {
-        const result = checkLine(p.row as ReviewLineItem, flaggedByLine.get(p.row.id));
+        const result = checkLine(p.row as ReviewLineItem, flaggedByLine.get(p.row.id), assertions);
         const needsCheck = result.state === 'needs-check';
         const title = needsCheck
           ? result.reasons.join(' · ')
@@ -636,7 +655,7 @@ const ExtractionReviewDetailPage: React.FC = () => {
         />,
       ],
     } as GridColDef] : []),
-  ], [canEditLeads, flaggedByLine]);
+  ], [canEditLeads, flaggedByLine, assertions]);
 
   const columnLabel = useCallback(
     (field: string) => columns.find((column) => column.field === field)?.headerName ?? field,
@@ -990,7 +1009,7 @@ const ExtractionReviewDetailPage: React.FC = () => {
                 onPaginationModelChange={setPaginationModel}
                 getRowClassName={(params) => {
                   const classes: string[] = [];
-                  if (checkLine(params.row as ReviewLineItem, flaggedByLine.get(params.row.id)).state === 'needs-check') {
+                  if (checkLine(params.row as ReviewLineItem, flaggedByLine.get(params.row.id), assertions).state === 'needs-check') {
                     classes.push('needs-check-row');
                   }
                   if (params.row.id === focusedLineId) classes.push('focused-check-row');
@@ -1027,6 +1046,31 @@ const ExtractionReviewDetailPage: React.FC = () => {
                       </Box>
                     ))}
                 </Stack>
+              </Paper>
+            )}
+            {documentNarrative && (
+              /* What the document says AROUND its table. The structured input was
+                 built with an empty header and the line regions alone, so this text
+                 was read and thrown away for every document on this path — and it is
+                 where the required warranty, the validity period, the country of
+                 origin, the Incoterms, the submission method and "as per attached
+                 specification" live. It is shown verbatim and parsed into nothing:
+                 a specification reference is not a value, and inventing fields from
+                 prose is how it becomes a wrong commercial fact. */
+              <Paper elevation={0} sx={{ mt: 2, p: 2, borderRadius: 3, border: '1px solid', borderColor: 'divider' }}>
+                <Typography variant="caption" sx={{ fontWeight: 800, color: 'text.disabled', textTransform: 'uppercase', display: 'block', mb: 1, fontSize: '0.65rem' }}>
+                  What the document says around the table (verbatim, not extracted)
+                </Typography>
+                <Typography
+                  component="pre"
+                  sx={{ m: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontFamily: 'inherit', fontSize: '0.8rem', color: 'text.secondary', maxHeight: 260, overflowY: 'auto' }}
+                >
+                  {documentNarrative}
+                </Typography>
+                <Typography variant="caption" sx={{ color: 'text.disabled', display: 'block', mt: 1 }}>
+                  Terms stated here — warranty, validity, country of origin, Incoterms, delivery
+                  and submission instructions — are not extracted into fields. Read them before approving.
+                </Typography>
               </Paper>
             )}
           </Box>

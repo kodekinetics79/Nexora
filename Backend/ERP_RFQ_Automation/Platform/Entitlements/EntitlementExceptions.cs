@@ -12,6 +12,7 @@ public static class NexoraProblems
     public const string Base = "https://nexora.invalid/problems/";
 
     public const string TenantSuspended = Base + "tenant-suspended";
+    public const string TenantAccessUnresolvable = Base + "tenant-access-unresolvable";
     public const string TenantNotActivated = Base + "tenant-not-activated";
     public const string FeatureNotEntitled = Base + "feature-not-entitled";
     public const string DocumentQuotaExceeded = Base + "document-quota-exceeded";
@@ -19,6 +20,14 @@ public static class NexoraProblems
     public const string ReadOnlyImpersonation = Base + "read-only-impersonation";
     public const string ImpersonationSessionRevoked = Base + "impersonation-session-revoked";
     public const string ImpersonationExportDenied = Base + "impersonation-export-denied";
+
+    /// <summary>
+    /// Sec-D3: a read refused because the route is not on the impersonation allow-list. Replaces
+    /// <see cref="ImpersonationExportDenied"/> as the answer for every refused impersonated read —
+    /// the old type named exports specifically, and the refusal is now much broader than exports,
+    /// so reusing it would misdescribe the denial to whoever is reading the response.
+    /// </summary>
+    public const string ImpersonationReadDenied = Base + "impersonation-read-denied";
 }
 
 /// <summary>
@@ -87,6 +96,32 @@ public sealed class TenantAccessDeniedException : EntitlementDeniedException
     public long BusinessUnitId { get; }
 
     public TenantStatus? Status { get; }
+}
+
+/// <summary>
+/// Sec-D1: the platform control plane could not be read, so this business unit's tenant status
+/// and plan are UNKNOWN and the request is refused.
+///
+/// <para>503 rather than 403, deliberately. 403 would tell an operator "this customer is
+/// suspended", which is a claim we cannot make — nothing was read. 503 says what is true: the
+/// service cannot answer right now. It is also the only status that makes the outage visible as
+/// an outage on the caller's side and in every uptime monitor, which is what a whole-deployment
+/// missing grant deserves. <c>Retry-After</c> is the tenant-access failure cache TTL, because that
+/// is exactly how long the refusal will be remembered before the plane is tried again.</para>
+/// </summary>
+public sealed class TenantAccessUnresolvableException : EntitlementDeniedException
+{
+    public const string Type = NexoraProblems.TenantAccessUnresolvable;
+
+    public TenantAccessUnresolvableException(long businessUnitId, string? reason = null)
+        : base(reason ?? "This organization's subscription status could not be confirmed. Please try again shortly.",
+            StatusCodes.Status503ServiceUnavailable, Type)
+        => BusinessUnitId = businessUnitId;
+
+    public long BusinessUnitId { get; }
+
+    /// <summary>Seconds a caller should wait — the same window the refusal is cached for.</summary>
+    public static int RetryAfterSeconds => (int)Math.Ceiling(TenantAccessService.FailureCacheTtl.TotalSeconds);
 }
 
 /// <summary>Document enqueue denied because the plan's monthly document quota is exhausted.</summary>

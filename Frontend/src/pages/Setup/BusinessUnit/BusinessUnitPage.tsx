@@ -46,8 +46,22 @@ const BusinessUnitPage: React.FC = () => {
     businessUnitCode: '',
     businessUnitName: '',
     description: '',
+    taxRegistrationNumber: '',
     isActive: true,
   });
+
+  // Mirrors ERP_RFQ_Automation.Tax.TaxRegistrationNumbers: a value that CLAIMS to be Saudi (all
+  // digits, leading 3) must be a well-formed 15-digit KSA VAT number; other formats are accepted.
+  const taxRegistrationError = ((value?: string) => {
+    const trn = (value ?? '').replace(/[\s\-–—]/g, '').toUpperCase();
+    if (trn.length === 0) return undefined;
+    if (trn.length > 50) return 'Tax registration number is longer than 50 characters.';
+    if (trn.length < 5) return 'Tax registration number is too short to be a registration number.';
+    if (!/^[A-Z0-9./]+$/.test(trn)) return "Use only letters, digits, '.' and '/'.";
+    if (/^3\d*$/.test(trn) && !/^3\d{13}3$/.test(trn))
+      return 'A KSA VAT number is exactly 15 digits, beginning with 3 and ending with 3.';
+    return undefined;
+  })(formData.taxRegistrationNumber);
 
   const { data, isLoading } = useQuery({
     queryKey: ['businessUnits', paginationModel, search],
@@ -68,11 +82,16 @@ const BusinessUnitPage: React.FC = () => {
     onError: (error: any) => handleApiError(error),
   });
 
+  // The ONLY field of an existing business unit a tenant identity may change. Code, name,
+  // description and activation state are control-plane facts and PUT /api/BusinessUnit/{id}
+  // forbids tenant callers outright, so the edit dialog shows them read-only rather than
+  // pretending to save them.
   const updateMutation = useMutation({
-    mutationFn: ({ id, updateData }: { id: number; updateData: any }) => businessUnitService.update(id, updateData),
+    mutationFn: ({ id, taxRegistrationNumber }: { id: number; taxRegistrationNumber: string | null }) =>
+      businessUnitService.updateTaxRegistration(id, taxRegistrationNumber),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['businessUnits'] });
-      enqueueSnackbar('Business Unit updated successfully', { variant: 'success' });
+      enqueueSnackbar('Tax registration number updated', { variant: 'success' });
       setIsModalOpen(false);
     },
     onError: (error: any) => handleApiError(error),
@@ -84,6 +103,7 @@ const BusinessUnitPage: React.FC = () => {
       businessUnitCode: record.businessUnitCode,
       businessUnitName: record.businessUnitName,
       description: record.description,
+      taxRegistrationNumber: record.taxRegistrationNumber ?? '',
       isActive: record.isActive,
     });
     setIsModalOpen(true);
@@ -95,20 +115,22 @@ const BusinessUnitPage: React.FC = () => {
       businessUnitCode: '',
       businessUnitName: '',
       description: '',
+      taxRegistrationNumber: '',
       isActive: true,
     });
     setIsModalOpen(true);
   };
 
   const handleSave = () => {
-    const payload = {
-      ...formData,
-    };
+    if (taxRegistrationError) return;
 
     if (selectedRecord) {
-      updateMutation.mutate({ id: selectedRecord.id, updateData: payload });
+      updateMutation.mutate({
+        id: selectedRecord.id,
+        taxRegistrationNumber: (formData.taxRegistrationNumber ?? '').trim() || null,
+      });
     } else {
-      createMutation.mutate(payload);
+      createMutation.mutate({ ...formData });
     }
   };
 
@@ -116,6 +138,15 @@ const BusinessUnitPage: React.FC = () => {
     { field: 'businessUnitCode', headerName: 'Code', flex: 0.8, minWidth: 100 },
     { field: 'businessUnitName', headerName: 'Name', flex: 1.5, minWidth: 200 },
     { field: 'description', headerName: 'Description', flex: 2, minWidth: 250 },
+    {
+      field: 'taxRegistrationNumber',
+      headerName: 'VAT Registration',
+      flex: 1.2,
+      minWidth: 170,
+      renderCell: (params) => params.value
+        ? <span>{params.value}</span>
+        : <Chip label="Not set" color="warning" size="small" variant="outlined" />,
+    },
     {
       field: 'isActive',
       headerName: t('status'),
@@ -178,37 +209,55 @@ const BusinessUnitPage: React.FC = () => {
         <DialogContent dividers sx={{ p: 3 }}>
           <Grid container spacing={3}>
             <Grid size={{ xs: 12, sm: 4 }}>
-              <TextField 
-                fullWidth 
-                label="BU Code" 
-                value={formData.businessUnitCode} 
-                onChange={(e) => setFormData({ ...formData, businessUnitCode: e.target.value })} 
-                required 
+              <TextField
+                fullWidth
+                label="BU Code"
+                value={formData.businessUnitCode}
+                onChange={(e) => setFormData({ ...formData, businessUnitCode: e.target.value })}
+                required
+                disabled={!!selectedRecord}
               />
             </Grid>
             <Grid size={{ xs: 12, sm: 8 }}>
-              <TextField 
-                fullWidth 
-                label="BU Name" 
-                value={formData.businessUnitName} 
-                onChange={(e) => setFormData({ ...formData, businessUnitName: e.target.value })} 
-                required 
+              <TextField
+                fullWidth
+                label="BU Name"
+                value={formData.businessUnitName}
+                onChange={(e) => setFormData({ ...formData, businessUnitName: e.target.value })}
+                required
+                disabled={!!selectedRecord}
               />
             </Grid>
             <Grid size={{ xs: 12 }}>
-              <TextField 
-                fullWidth 
-                label="Description" 
-                multiline 
-                rows={3} 
-                value={formData.description} 
-                onChange={(e) => setFormData({ ...formData, description: e.target.value })} 
+              <TextField
+                fullWidth
+                label="Description"
+                multiline
+                rows={3}
+                value={formData.description}
+                onChange={(e) => setFormData({ ...formData, description: e.target.value })}
+                disabled={!!selectedRecord}
+                helperText={selectedRecord
+                  ? 'Code, name, description and status are managed by the platform control plane.'
+                  : undefined}
               />
             </Grid>
             <Grid size={{ xs: 12 }}>
-              <FormControlLabel 
-                control={<Switch checked={formData.isActive} onChange={(e) => setFormData({ ...formData, isActive: e.target.checked })} />} 
-                label="Active Status" 
+              <TextField
+                fullWidth
+                label="VAT / Tax Registration Number"
+                value={formData.taxRegistrationNumber ?? ''}
+                onChange={(e) => setFormData({ ...formData, taxRegistrationNumber: e.target.value })}
+                error={!!taxRegistrationError}
+                placeholder="KSA VAT: 15 digits, 3…3"
+                helperText={taxRegistrationError
+                  ?? 'This entity’s own VAT number — the claimant on input-tax reclaims and the seller VAT number on its tax invoices.'}
+              />
+            </Grid>
+            <Grid size={{ xs: 12 }}>
+              <FormControlLabel
+                control={<Switch checked={formData.isActive} onChange={(e) => setFormData({ ...formData, isActive: e.target.checked })} disabled={!!selectedRecord} />}
+                label="Active Status"
               />
             </Grid>
           </Grid>
@@ -218,7 +267,7 @@ const BusinessUnitPage: React.FC = () => {
           <Button 
             variant="contained" 
             onClick={handleSave} 
-            disabled={createMutation.isPending || updateMutation.isPending}
+            disabled={createMutation.isPending || updateMutation.isPending || !!taxRegistrationError}
             sx={{ px: 4 }}
           >
             {(createMutation.isPending || updateMutation.isPending) ? <CircularProgress size={24} /> : 'Save'}

@@ -1,5 +1,18 @@
 import axiosInstance from '../axiosInstance';
 
+/**
+ * What the server did when asked to remove a quotation. `deleted` is false for the normal case —
+ * anything past DRAFT is withdrawn and kept, because the customer holds a document with those
+ * numbers on it and the price attestations behind it are evidence, not clutter.
+ */
+export interface QuoteRemovalResult {
+  quoteNo: string;
+  mode: 'DRAFT_DISCARDED' | 'WITHDRAWN';
+  removedOn: string;
+  deleted: boolean;
+  message: string;
+}
+
 export interface QuoteDTO {
   id: number;
   quoteNo: string;
@@ -74,6 +87,13 @@ export interface QuoteSendOutcome {
    * it was last confirmed. The rep must confirm again before the quote can go out.
    */
   priceAttestationRequired?: boolean;
+  /**
+   * R17: nothing was sent because a line's output tax was never calculated — this business unit has
+   * no output tax rate configured, the line has not been priced, or a non-standard tax treatment
+   * carries no stated reason. A quotation with no VAT shown on it is treated as tax-inclusive, so
+   * the difference would come out of the seller's margin.
+   */
+  taxDerivationRequired?: boolean;
 }
 
 // ==== Price-provenance attestation (Decision Register R5) ====
@@ -180,9 +200,24 @@ const quoteService = {
     return data;
   },
 
-  delete: async (id: number, businessUnitId?: number): Promise<void> => {
-    const params = businessUnitId ? { businessUnitId } : {};
-    await axiosInstance.delete(`/api/Quote/${id}`, { params });
+  /**
+   * Removes a quotation. `reason` is mandatory and the server refuses without it (400).
+   *
+   * A quote past DRAFT is WITHDRAWN, not deleted: the row stays on file with its R5 price
+   * attestations and R7 validity extensions, and drops out of the quote list and the pipeline
+   * stats. Only a clean draft — never attested, never extended, no order — is actually deleted,
+   * and a tombstone is written either way. The response says which happened, so surface
+   * `message` rather than assuming the record is gone.
+   */
+  removeQuote: async (
+    id: number,
+    reason: string,
+    businessUnitId?: number,
+  ): Promise<QuoteRemovalResult> => {
+    const params: Record<string, string | number> = { reason };
+    if (businessUnitId) params.businessUnitId = businessUnitId;
+    const { data } = await axiosInstance.delete<QuoteRemovalResult>(`/api/Quote/${id}`, { params });
+    return data;
   },
   
   /**
@@ -212,10 +247,11 @@ const quoteService = {
   },
 
   /**
-   * Sends the quote email. Two 409s mean "nothing was sent", not "it failed":
+   * Sends the quote email. Three 409s mean "nothing was sent", not "it failed":
    *  - WP-B3 `queuedForApproval` — parked in the Approvals inbox (below-floor pricing);
-   *  - R5 `priceAttestationRequired` — the price source needs confirming (again).
-   * Both are surfaced as outcomes rather than thrown errors.
+   *  - R5 `priceAttestationRequired` — the price source needs confirming (again);
+   *  - R17 `taxDerivationRequired` — a line's output tax has not been calculated.
+   * All three are surfaced as outcomes rather than thrown errors.
    */
   sendEmail: async (id: number, recipientEmail: string): Promise<QuoteSendOutcome> => {
     try {
@@ -230,6 +266,9 @@ const quoteService = {
 
       if (error?.response?.status === 409 && data?.priceAttestationRequired) {
         return { held: false, priceAttestationRequired: true, message: asText(data.message) };
+      }
+      if (error?.response?.status === 409 && data?.taxDerivationRequired) {
+        return { held: false, taxDerivationRequired: true, message: asText(data.message) };
       }
       if (error?.response?.status === 409 && data?.queuedForApproval) {
         return { held: true, message: asText(data.summary, data.message), approvalId: data.approvalId };

@@ -12,17 +12,26 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace ERP_RFQ_Automation.Tests;
 
 /// <summary>
-/// Worker-level regression for the live production dead-letter bug: an .xls whose
-/// layout the deterministic mapper does not recognize must ride the unstructured path,
-/// and when the tenant has no authorized external provider the allow-list gate must
-/// fail-close into a RETRYABLE hold (queue.FailAsync with a legible reason) — the job
-/// must never be dead-lettered via FailPermanentlyAsync on attempt 1. Recognized
-/// layouts must still complete deterministically without any LLM involvement.
+/// Worker-level regression for the live production dead-letter bug: an .xls whose layout
+/// the deterministic mapper does not recognize must ride the unstructured path, and when
+/// the tenant has no authorized external provider the allow-list gate must fail closed.
+/// Recognized layouts must still complete deterministically without any LLM involvement.
+///
+/// <para>
+/// The DISPOSITION of that refusal changed. It used to be a retryable hold, on the
+/// reasoning that a document should never dead-letter on attempt 1. But the gate is a
+/// decision, not a condition: it is seeded FALSE for every tenant and cannot change
+/// between attempts, so the job re-asked the same closed gate five times on exponential
+/// backoff — about an hour — and arrived at the same dead-letter with a reason nobody could
+/// act on. It is now permanent on the first attempt and carries a named, actionable
+/// category. Nothing about the gate itself is weakened: zero bytes still leave the
+/// boundary, and it still refuses by default.
+/// </para>
 /// </summary>
 public sealed class ExtractionWorkerSpreadsheetFallbackTests
 {
     [Fact]
-    public async Task UnrecognizedXls_UnauthorizedExternalProvider_IsHeldRetryable_NeverDeadLettered()
+    public async Task UnrecognizedXls_UnauthorizedExternalProvider_DeadLettersImmediately_WithAnActionableReason()
     {
         // Headers with no commercial meaning, so the deterministic parser genuinely maps no
         // column. Ordinary RFQ spellings — and title blocks above the header — are now read
@@ -37,17 +46,29 @@ public sealed class ExtractionWorkerSpreadsheetFallbackTests
         await worker.StartAsync(CancellationToken.None);
         try
         {
-            var recordedError = await queue.RetryableFailure.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            var recordedError = await queue.PermanentFailure.Task.WaitAsync(TimeSpan.FromSeconds(15));
 
-            // Terminal state contract: retryable hold, NEVER a first-attempt dead-letter.
-            Assert.False(queue.PermanentFailure.Task.IsCompleted);
+            // Terminal state contract: no retry against a deterministically closed gate.
+            // Reverting this puts the job back on five attempts of exponential backoff.
+            Assert.False(queue.RetryableFailure.Task.IsCompleted);
 
             // The recorded reason is honest and specific: the spreadsheet was read, the
-            // layout was not recognized, and the fail-closed hold explains what is next.
+            // layout was not recognized, and the fail-closed refusal explains what is next.
             Assert.Contains("The XLSX spreadsheet was read successfully", recordedError);
             Assert.Contains("column layout was not recognized", recordedError);
             Assert.Contains("blocked for unstructured documents", recordedError);
             Assert.Contains("human review", recordedError);
+
+            // ...and it is CLASSIFIABLE. Without the marker the tenant-facing category
+            // function matches none of its rules and the single most common real-world
+            // failure surfaces as generic EXTRACTION_FAILURE, indistinguishable from a
+            // model timeout.
+            Assert.Contains(ChunkedExtractionService.AiNotAuthorizedCode, recordedError);
+            Assert.Equal(ExtractionDeadLetterService.AiNotAuthorizedCategory,
+                ExtractionDeadLetterService.ClassifyFailure(recordedError));
+            Assert.Contains("AI trust centre",
+                ExtractionDeadLetterService.OperatorAction(
+                    ExtractionDeadLetterService.AiNotAuthorizedCategory)!);
 
             // Fail-closed means zero bytes of document content left the boundary.
             Assert.Equal(0, llm.CallCount);
@@ -228,6 +249,40 @@ public sealed class ExtractionWorkerSpreadsheetFallbackTests
                 line.LeadTimeDays.Kind));
 
             Assert.Equal(8, outcome.ExtractedItemCount);
+
+            // Every line of this document is correctly read, so NO line may ask for a check.
+            // The document states no unit price, no currency, no unit of measure, no brand and
+            // no lead time anywhere — it is a REQUEST for them, and its own closing paragraph
+            // says so in words. Marking their absence a defect flagged all 641 lines of the
+            // 120-document sample set and buried the lines that were genuinely wrong.
+            Assert.All(document.LineItems, line => Assert.Equal(
+                ERP_RFQ_Automation.DTOs.DocumentIntelligence.ValidationStatus.Valid,
+                line.ValidationStatus));
+            Assert.False(first.UnitPrice.StatedInDocument);
+            Assert.False(first.Currency.StatedInDocument);
+            Assert.False(first.LeadTimeDays.StatedInDocument);
+            Assert.False(first.UnitOfMeasure.StatedInDocument);
+            Assert.True(first.ProductName.StatedInDocument);
+            Assert.True(first.Quantity.StatedInDocument);
+
+            // ...and confidence, computed over the fields the document actually asserts, is
+            // above the 0.60 acceptance threshold. Averaging in the five solicited fields put
+            // every document in the sample set at 0.557 with nothing misread.
+            Assert.True(outcome.Result!.OverallConfidence >= 0.60,
+                $"document confidence is {outcome.Result.OverallConfidence:F3}; "
+                + "the fields the document never states must not be averaged in");
+
+            // The prose AROUND the table is retained. This is where the required warranty,
+            // validity, country of origin, Incoterms and submission method live, and it
+            // reached the lead for none of the 120 documents.
+            Assert.NotNull(outcome.DocumentNarrative);
+            Assert.Contains("country of origin", outcome.DocumentNarrative!, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("warranty", outcome.DocumentNarrative!, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("validity (30 days)", outcome.DocumentNarrative!, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("Incoterms", outcome.DocumentNarrative!, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("Submit quotation by email", outcome.DocumentNarrative!, StringComparison.OrdinalIgnoreCase);
+            // The table's own rows are NOT duplicated into it — this is the surrounding prose.
+            Assert.DoesNotContain("SKU-2244", outcome.DocumentNarrative!);
         }
         finally
         {

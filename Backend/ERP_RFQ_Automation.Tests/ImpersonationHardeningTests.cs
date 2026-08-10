@@ -205,7 +205,11 @@ public sealed class ImpersonationHardeningTests
         Assert.Equal(StatusCodes.Status200OK, await InvokeMiddleware(db, jti, cache: cache));
     }
 
-    // ---- Sec8: file-download / export deny-list for impersonated sessions --------
+    // ---- Sec8 / Sec-D3: what an impersonated GET may reach -----------------------
+    // These were written against the Sec8 DENY-list. The assertions still hold under the Sec-D3
+    // allow-list — every path below is still 403 — but the refusal now comes from not being
+    // admitted rather than from being named, which is the stronger property: a download route
+    // added tomorrow is refused without anybody having to remember to list it.
 
     [Theory]
     [InlineData("/api/File/attachment/17")]
@@ -224,13 +228,27 @@ public sealed class ImpersonationHardeningTests
     }
 
     [Fact]
-    public async Task Impersonated_get_on_ordinary_read_routes_still_passes()
+    public async Task Impersonated_get_reaches_tenant_configuration_and_not_tenant_records()
     {
+        // This replaces an assertion that a live impersonated session could GET /api/Lead.
+        //
+        // That expectation is genuinely obsolete, not merely inconvenient: under the deny-list it
+        // was describing the model correctly, and under Sec-D3 it describes the exact hole the
+        // inversion was made to close. /api/Lead carries no [RequireModulePermission], so it was
+        // one of the endpoints an impersonation token could actually reach, and it is the tenant's
+        // commercial pipeline — customers, values, who they are quoting.
+        //
+        // What was worth keeping is the other half: the guard must not have become an outage. So
+        // the positive case moves to a route that IS configuration, and the /api/Lead case is
+        // retained as the refusal it now has to be.
         using var db = new TestDb();
         var jti = Guid.NewGuid().ToString();
         await SeedSession(db, jti, tenantId: 5);
 
-        Assert.Equal(StatusCodes.Status200OK, await InvokeMiddleware(db, jti, path: "/api/Lead"));
+        Assert.Equal(StatusCodes.Status200OK,
+            await InvokeMiddleware(db, jti, path: "/api/sla/policy"));
+        Assert.Equal(StatusCodes.Status403Forbidden,
+            await InvokeMiddleware(db, jti, path: "/api/Lead"));
     }
 
     [Fact]
@@ -284,8 +302,23 @@ public sealed class ImpersonationHardeningTests
         Assert.Equal(StatusCodes.Status403Forbidden, await InvokeMiddleware(db, jti, method: "POST"));
     }
 
+    /// <summary>
+    /// The route the session-ledger tests exercise, and the reason it is not <c>/api/Lead</c> any more.
+    ///
+    /// <para>Sec-D3 turned guard 2 into an allow-list and put it BEFORE the session lookup, so
+    /// <c>/api/Lead</c> — the tenant's commercial pipeline — is now refused with 403 before the
+    /// revocation ledger is ever consulted. Every test below that is about the LEDGER (revoked,
+    /// expired, unknown jti, cache TTL) was therefore passing or failing on the wrong guard.
+    /// None of their assertions changed: a live session is still 200, a revoked or expired one is
+    /// still 401. Only the route did, to one the allow-list admits, so that each test measures the
+    /// thing its name claims. The allow-list has its own tests in
+    /// <c>ImpersonationReadAllowListTests</c>.</para>
+    /// </summary>
+    private const string AllowListedReadPath = "/api/sla/policy";
+
     private static async Task<int> InvokeMiddleware(
-        TestDb db, string? jti, string method = "GET", IMemoryCache? cache = null, string path = "/api/Lead")
+        TestDb db, string? jti, string method = "GET", IMemoryCache? cache = null,
+        string path = AllowListedReadPath)
     {
         var reachedNext = false;
         var middleware = new ReadOnlyImpersonationMiddleware(_ =>

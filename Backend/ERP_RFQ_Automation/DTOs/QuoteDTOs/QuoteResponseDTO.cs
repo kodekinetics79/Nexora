@@ -94,7 +94,22 @@ namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
         public decimal UnitPrice { get; set; }
         public decimal TotalAmount { get; set; }
         public decimal? Discount { get; set; }
+
+        /// <summary>Server-derived output tax (R17). Read-only to clients: what is submitted is ignored.</summary>
         public decimal? TaxAmount { get; set; }
+
+        /// <summary>STANDARD / ZERO_RATED_EXPORT / EXEMPT / OUT_OF_SCOPE_RCM (R19).</summary>
+        public string? TaxCategory { get; set; }
+
+        /// <summary>Why the line departs from the standard rate; null on a standard-rated line.</summary>
+        public string? TaxCategoryReason { get; set; }
+
+        /// <summary>
+        /// The rate the derivation actually applied. Null means the tax was never derived, which is
+        /// what blocks the send — the UI uses it to show the line as untaxed rather than zero-taxed.
+        /// </summary>
+        public decimal? TaxRatePercentApplied { get; set; }
+
         public int? DeliveryLeadTime { get; set; }
         public long? DiscountTypeId { get; set; }
         public string? DiscountTypeName { get; set; }
@@ -195,8 +210,22 @@ namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
         [Required]
         public decimal TotalAmount { get; set; }
         public decimal? Discount { get; set; }
+
+        /// <summary>
+        /// Accepted for wire compatibility and IGNORED (R17). Output tax is derived server-side from
+        /// the business unit's rate and <see cref="TaxCategory"/>; a client-supplied amount is
+        /// exactly what let quotes go out with no VAT on them at all.
+        /// </summary>
         [Range(0, double.MaxValue, ErrorMessage = "Tax cannot be negative.")]
         public decimal? TaxAmount { get; set; }
+
+        /// <summary>STANDARD (default), ZERO_RATED_EXPORT, EXEMPT or OUT_OF_SCOPE_RCM (R19).</summary>
+        public string? TaxCategory { get; set; }
+
+        /// <summary>Required when <see cref="TaxCategory"/> is not STANDARD.</summary>
+        [StringLength(500)]
+        public string? TaxCategoryReason { get; set; }
+
         public int? DeliveryLeadTime { get; set; }
         public long? DiscountTypeId { get; set; }
         public decimal? DiscountValue { get; set; }
@@ -239,7 +268,24 @@ namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
         public decimal UnitPrice { get; set; }
         public decimal TotalAmount { get; set; }
         public decimal? Discount { get; set; }
+
+        /// <summary>
+        /// Accepted for wire compatibility and IGNORED (R17) — see QuoteItemCreateRequestDTO.
+        /// UpdateQuoteAsync re-derives the line's tax from the price this request sets.
+        /// </summary>
         public decimal? TaxAmount { get; set; }
+
+        /// <summary>
+        /// STANDARD / ZERO_RATED_EXPORT / EXEMPT / OUT_OF_SCOPE_RCM (R19). Null means "not supplied"
+        /// and PRESERVES the stored category, so an older client cannot silently reset a zero-rated
+        /// export back to standard-rated by omitting the field.
+        /// </summary>
+        public string? TaxCategory { get; set; }
+
+        /// <summary>Required when <see cref="TaxCategory"/> is supplied and is not STANDARD.</summary>
+        [StringLength(500)]
+        public string? TaxCategoryReason { get; set; }
+
         public int? DeliveryLeadTime { get; set; }
         public bool IsDeleted { get; set; } = false; // Flag to delete item
         public long? DiscountTypeId { get; set; }

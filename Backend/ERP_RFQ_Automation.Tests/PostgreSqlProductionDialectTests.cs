@@ -577,6 +577,22 @@ public sealed class PostgreSqlProductionDialectTests
         var applied = await context.Database.GetAppliedMigrationsAsync();
 
         Assert.Empty(pending);
+
+        // Model-versus-migration drift, which GetPendingMigrationsAsync cannot see. That call
+        // compares migrations *authored* against migrations *applied*, so a table that exists only
+        // in the C# model — mapped in OnModelCreating and never migrated — passes it cleanly.
+        //
+        // The two lanes build their schema from different sources and therefore disagree silently:
+        // the portable lane calls EnsureCreated(), which derives the schema from the model, so an
+        // unmigrated table exists there and every test is green. Production and this lane run the
+        // migrations, where the table simply is not there and every query against it raises 42P01.
+        //
+        // That is how an entire gate's schema — seven tables across inbound logistics and
+        // traceability — reached a green build while goods receipt was dead on PostgreSQL. This
+        // assertion is the guard that makes the drift fail here instead of in production.
+        Assert.False(context.Database.HasPendingModelChanges(),
+            "The EF model has changes no migration reflects. Author the migration before merging: "
+            + "the portable lane builds its schema from the model and will not catch this.");
         Assert.Contains("20260723120000_CompleteTenantRlsCoverage", applied);
         Assert.Contains("20260723130000_GovernExtractionReview", applied);
         Assert.Contains("20260723140000_AddAiGovernanceLedger", applied);
@@ -700,6 +716,38 @@ public sealed class PostgreSqlProductionDialectTests
                   OR has_table_privilege('nexora_tenant_app', table_definition.oid, 'DELETE'));
             """;
         Assert.Null((await privilegeCommand.ExecuteScalarAsync()) as string);
+
+        // The inverse assertion, and the one that was missing. Everything above proves a table
+        // WITHOUT row-level security holds no grant. Nothing proved that a table WITH row-level
+        // security holds one — and a policy without a grant is not a tighter boundary, it is a
+        // table nobody can read: PostgreSQL raises 42501 on the grant check before it ever
+        // evaluates a row predicate.
+        //
+        // That gap is not hypothetical. Three tenant tables shipped in one gate with a correct
+        // nexora_tenant_isolation policy and no GRANT, and every test passed, because the RLS
+        // assertions look for the policy and the privilege assertions only look in the negative
+        // direction. It surfaced when a pricing path finally read one of them and every request
+        // returned 500 — including price attestation, which would have failed the first time a
+        // tenant attested a price in production.
+        //
+        // The schema is deny-by-default: CompleteTenantRlsCoverage revoked the schema default
+        // privileges deliberately, so every new tenant table needs an explicit grant and this
+        // assertion is what makes forgetting one fail here instead of in front of a customer.
+        await using var rlsWithoutGrantCommand = connection.CreateCommand();
+        rlsWithoutGrantCommand.CommandText = """
+            SELECT string_agg(table_definition.relname, ', ' ORDER BY table_definition.relname)
+            FROM pg_class table_definition
+            JOIN pg_namespace schema_definition ON schema_definition.oid = table_definition.relnamespace
+            WHERE schema_definition.nspname = 'public'
+              AND table_definition.relkind IN ('r', 'p')
+              AND table_definition.relrowsecurity
+              AND NOT has_table_privilege('nexora_tenant_app', table_definition.oid, 'SELECT');
+            """;
+        var rlsWithoutGrant = (await rlsWithoutGrantCommand.ExecuteScalarAsync()) as string;
+        Assert.True(rlsWithoutGrant is null,
+            "These tables have row-level security and no SELECT grant to nexora_tenant_app, so every "
+            + "query against them raises 42501 before any row predicate runs. Add the GRANT in the "
+            + $"same migration that creates the table: {rlsWithoutGrant}");
 
         await using var modulePrivilegeCommand = connection.CreateCommand();
         modulePrivilegeCommand.CommandText = """
@@ -1224,8 +1272,12 @@ public sealed class PostgreSqlProductionDialectTests
         return result;
     }
 
+    // SEC-ING-02: the tenant context is mandatory. Every context passed here is built with a null
+    // tenant (the cross-tenant worker view), so the queue gets the matching null-tenant StubTenant
+    // and takes the deliberate nexora_pipeline_app role — the same pairing the explicit
+    // ExtractionQueue construction in the runtime-role test above uses.
     private static ExtractionQueue NewQueue(ERP_RFQ_Automation.Models.ErpRfqAutomationContext context)
-        => new(context, new NoopLogger<ExtractionQueue>());
+        => new(context, new NoopLogger<ExtractionQueue>(), new StubTenant(null));
 
     private sealed class QueryingQuoteLifecycle(ErpRfqAutomationContext context) : ILifecycleApplicationService
     {

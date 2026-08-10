@@ -210,6 +210,14 @@ has no `Pending`/`Leased`/`Extracting`/`Persisting` rows. `DeadLetter` rows and 
   per-tenant concurrency cap in the claim SQL, weighted-fair ordering by `SchedulerTag`.
 - **Poison-doc isolation** — per-job try/catch → `FailAsync` reschedules with exponential backoff,
   dead-letters after `MaxAttempts`; the batch never fails as a unit and no slow doc blocks others.
+- **Refusal ≠ failure** — a failure caused by a DECISION rather than a condition sets
+  `ChunkedExtractionOutcome.PermanentFailure` and goes to `FailPermanentlyAsync` on attempt 1.
+  Today that is exactly one case: an external AI provider the tenant has not authorized. The gate
+  is seeded FALSE for every tenant and cannot change between attempts, so retrying it bought an
+  hour of backoff and no new information. It carries the `EXTRACTION_AI_NOT_AUTHORIZED` marker,
+  classifies as the `AI_NOT_AUTHORIZED` dead-letter category with an operator action naming what
+  to switch on, and marks the intake occurrence `IngestionOutcomeState.AI_NOT_AUTHORIZED`. Nothing
+  about the gate itself is weakened — zero bytes still leave the boundary.
 - **Structured bypass** — `IsStructured` docs route to `ICanonicalRfqNormalizer` (deterministic,
   no LLM), the biggest throughput/cost lever.
 ```

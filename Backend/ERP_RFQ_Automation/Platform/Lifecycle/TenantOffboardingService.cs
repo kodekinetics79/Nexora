@@ -79,7 +79,15 @@ public sealed class TenantOffboardingService(
 
     // ---------------------------------------------------------------------------------- read
 
-    public async Task<TenantOffboardingStatusDto> GetStatusAsync(long tenantId, CancellationToken ct)
+    /// <param name="viewer">
+    /// The operator asking. Optional, and null only for callers that have no principal to offer:
+    /// the separation-of-duties verdict is a fact about a PERSON, so a status read with no person
+    /// reports <c>PurgeRequiresDifferentApprover = false</c> rather than guessing. Nothing depends
+    /// on that flag for safety — <see cref="PurgeAsync"/> re-checks independently — it exists so the
+    /// console stops offering a button the server is going to refuse.
+    /// </param>
+    public async Task<TenantOffboardingStatusDto> GetStatusAsync(
+        long tenantId, CancellationToken ct, ClaimsPrincipal? viewer = null)
     {
         var tenant = await LoadTenantAsync(tenantId, tracked: false, ct);
         var record = await LoadRecordAsync(tenantId, tracked: false, ct);
@@ -100,7 +108,27 @@ public sealed class TenantOffboardingService(
                 r.ContentSha256, r.Format, r.Sections))
             .ToListAsync(ct);
 
-        return ToStatusDto(tenant, record, history, exports);
+        // Read from the append-only event, not from TenantOffboarding.DeletionScheduledBy — the same
+        // source PurgeAsync consults, so the console's verdict and the server's cannot disagree.
+        var scheduledOn = record?.DeletionScheduledOn;
+        var scheduler = record?.Stage != TenantOffboardingStage.PendingDeletion
+            ? null
+            : await context.Set<TenantLifecycleEvent>().AsNoTracking()
+                .Where(e => e.TenantId == tenantId
+                            && e.Action == TenantLifecycleActions.ScheduleDeletion
+                            && (scheduledOn == null || e.OccurredOn >= scheduledOn))
+                .OrderByDescending(e => e.OccurredOn).ThenByDescending(e => e.Id)
+                .Select(e => new { e.ActorPlatformUserId, e.ActorEmail })
+                .FirstOrDefaultAsync(ct);
+
+        var viewerId = viewer is null ? 0 : ActorId(viewer);
+        var sameHand = scheduler is not null && viewerId > 0
+                       && scheduler.ActorPlatformUserId == viewerId;
+
+        return ToStatusDto(
+            tenant, record, history, exports,
+            sameHand,
+            scheduler?.ActorPlatformUserId > 0 ? scheduler.ActorEmail : null);
     }
 
     /// <summary>
@@ -280,7 +308,7 @@ public sealed class TenantOffboardingService(
             "Tenant {TenantId} ('{Slug}') is scheduled for deletion; purge becomes possible after "
             + "{RetentionDays} day(s).", tenant.Id, tenant.Slug, retentionDays);
 
-        return await GetStatusAsync(tenantId, ct);
+        return await GetStatusAsync(tenantId, ct, actor);
     }
 
     public async Task<TenantOffboardingStatusDto> CancelDeletionAsync(
@@ -328,7 +356,7 @@ public sealed class TenantOffboardingService(
                 actAsTenantId: tenant.Id, httpContext: httpContext, ct: ct);
         }, ct);
 
-        return await GetStatusAsync(tenantId, ct);
+        return await GetStatusAsync(tenantId, ct, actor);
     }
 
     // --------------------------------------------------------------------------------- purge
@@ -433,6 +461,22 @@ public sealed class TenantOffboardingService(
                     + "Cancel the scheduled deletion and schedule a new one; that starts a fresh "
                     + "window and records the decision.");
         }
+
+        // Separation of duties — LAST, and deliberately so.
+        //
+        // Every other control on this path is one person satisfying a rule: the Owner policy, the
+        // typed name, the reason, the clock, the hold, the readiness evidence. None of them is a
+        // second opinion, and the purge is the one act in this system that no later reviewer can
+        // correct. The platform already requires an independent checker to finalize a billing
+        // statement, to finalize an invoice, to approve a tax rule, to void or refund an invoice, to
+        // approve an exchange rate — and, in this very module, to RELEASE a legal hold. Destroying
+        // the customer was the only one left where the maker could also be the checker.
+        //
+        // It runs last because "fetch a second Owner" is only useful advice once nothing else is
+        // outstanding. Refusing on this while the retention window still has twenty days to run
+        // would send somebody to find a colleague for a purge that was going to be refused anyway,
+        // and the operator would learn about the clock on the second attempt.
+        await RequireIndependentPurgeApproverAsync(tenant, record, actor, ct);
 
         var purgeAttemptId = Guid.NewGuid();
         TenantPurgeOutcome? outcome = null;
@@ -639,6 +683,7 @@ public sealed class TenantOffboardingService(
             + $"tenant '{tenant.Slug}'. {lifecycleEvents:N0} lifecycle event(s) and {auditRecords:N0} "
             + "platform audit record(s) were retained.",
             [TenantOffboardingDisclosure.Irreversible, TenantOffboardingDisclosure.Survives,
+             TenantOffboardingDisclosure.StatutoryRecordsMoveWithTheCustomer,
              TenantOffboardingDisclosure.DeletionIsNotErasure]);
     }
 
@@ -725,6 +770,62 @@ public sealed class TenantOffboardingService(
     }
 
     // ------------------------------------------------------------------------------- helpers
+
+    /// <summary>
+    /// Refuses a purge executed by the same platform user who scheduled the deletion.
+    ///
+    /// <para><b>Where the maker's identity comes from, and why not from the offboarding record.</b>
+    /// <see cref="TenantOffboarding.DeletionScheduledBy"/> holds an email, and an email is a label
+    /// that can be reassigned to a different person. The append-only
+    /// <see cref="TenantLifecycleEvent"/> written by <c>ScheduleDeletionAsync</c> already carries
+    /// <see cref="TenantLifecycleEvent.ActorPlatformUserId"/> — the account, not the label — and it
+    /// cannot be edited afterwards. Reading the maker from the evidence rather than from the mutable
+    /// working row is the same choice <c>TenantLegalHoldService</c> makes, and it needs no new
+    /// column, so this control is live on the schema that exists today rather than after a
+    /// migration.</para>
+    ///
+    /// <para><b>Unattributable is refused, not waived.</b> An offboarding record whose scheduling
+    /// event is missing, or whose actor id is the reserved system id, cannot be shown to have had
+    /// two people behind it. <c>CurrencyController</c> reaches the same conclusion about an
+    /// exchange rate created by "System": segregation of duties that cannot be verified has not been
+    /// observed. The remedy is stated in the refusal and is not destructive — cancel and re-schedule,
+    /// which writes a fresh attributable event and restarts the window.</para>
+    /// </summary>
+    private async Task RequireIndependentPurgeApproverAsync(
+        Tenant tenant, TenantOffboarding record, ClaimsPrincipal actor, CancellationToken ct)
+    {
+        var approverId = ActorId(actor);
+        if (approverId <= 0)
+            throw TenantOffboardingRefusedException.Conflict(
+                "The purging operator carries no platform account identifier, so it cannot be shown "
+                + "that a second person authorised this destruction. Sign in again and retry.");
+
+        // The scheduling event for THIS schedule, not an older cancelled one: a tenant can be
+        // scheduled, cancelled and re-scheduled, and only the live decision has an approver.
+        var scheduledOn = record.DeletionScheduledOn;
+        var scheduler = await context.Set<TenantLifecycleEvent>().AsNoTracking()
+            .Where(e => e.TenantId == tenant.Id
+                        && e.Action == TenantLifecycleActions.ScheduleDeletion
+                        && (scheduledOn == null || e.OccurredOn >= scheduledOn))
+            .OrderByDescending(e => e.OccurredOn).ThenByDescending(e => e.Id)
+            .Select(e => new { e.ActorPlatformUserId, e.ActorEmail, e.OccurredOn })
+            .FirstOrDefaultAsync(ct);
+
+        if (scheduler is null || scheduler.ActorPlatformUserId <= 0)
+            throw TenantOffboardingRefusedException.Conflict(
+                "This tenant's scheduled deletion carries no attributable platform account for the "
+                + "operator who scheduled it, so segregation of duties cannot be verified and the "
+                + "purge is refused. Cancel the scheduled deletion and schedule it again; that "
+                + "records an attributable decision and starts a fresh retention window.");
+
+        if (scheduler.ActorPlatformUserId == approverId)
+            throw TenantOffboardingRefusedException.Conflict(
+                $"The deletion of tenant {tenant.Id} was scheduled by this same operator "
+                + $"({scheduler.ActorEmail}) on {scheduler.OccurredOn:yyyy-MM-dd HH:mm} UTC. Destroying "
+                + "a customer's records requires a second platform Owner: the person who decided it "
+                + "must not also be the person who carries it out. Have another Owner run the purge, "
+                + "or cancel the deletion if the decision has changed.");
+    }
 
     private async Task RequireReadinessAsync(
         Tenant tenant, TenantOffboardingReadinessPhase phase, CancellationToken ct)
@@ -857,7 +958,8 @@ public sealed class TenantOffboardingService(
 
     private TenantOffboardingStatusDto ToStatusDto(
         Tenant tenant, TenantOffboarding? record,
-        IReadOnlyList<TenantLifecycleEventDto> history, IReadOnlyList<TenantExportReceiptDto> exports)
+        IReadOnlyList<TenantLifecycleEventDto> history, IReadOnlyList<TenantExportReceiptDto> exports,
+        bool purgeRequiresDifferentApprover, string? deletionApprovedBy)
     {
         var now = UtcNow;
         var stage = record?.Stage ?? TenantOffboardingStage.NotScheduled;
@@ -883,6 +985,9 @@ public sealed class TenantOffboardingService(
             CanErasePersonalData: TenantLifecycleGraph.CanErase(stage)
                                   && TenantLifecycleGraph.ErasureAllowedFrom(tenant.Status),
 
+            PurgeRequiresDifferentApprover: purgeRequiresDifferentApprover,
+            DeletionApprovedBy: deletionApprovedBy,
+
             ConfirmationRequired: tenant.Name,
             History: history,
             Exports: exports,
@@ -890,6 +995,7 @@ public sealed class TenantOffboardingService(
             [
                 TenantOffboardingDisclosure.Irreversible,
                 TenantOffboardingDisclosure.Survives,
+                TenantOffboardingDisclosure.StatutoryRecordsMoveWithTheCustomer,
                 TenantOffboardingDisclosure.ErasureIsNotDeletion,
                 TenantOffboardingDisclosure.DeletionIsNotErasure
             ]);

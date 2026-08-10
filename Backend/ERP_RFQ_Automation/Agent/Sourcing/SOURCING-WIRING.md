@@ -51,6 +51,12 @@ win outright):
 - `award_rfq` → respects `RequireApprovalForAwards`; else value-cap check against
   `MaxAutoAwardValue` using the **award total**. Total = explicit `totalValue`/`amount` hint if
   present, else `sum(unitPrice × (quantity ?? 1))` over `awards[]` (`ResolveAwardTotal`).
+  The total's **currency** is read from the persisted `SupplierQuotedItem` rows the
+  `awards[].supplierQuotedItemId` values name — never from the tool input, because the caller is
+  a language model and letting it declare the currency of its own spend reopens the defect from
+  the other side. The total is then converted into `AgentPolicy.CurrencyId` via `AgentSpendCap`
+  before the comparison. Unknown currency, disagreeing lines, a line this tenant cannot see, or
+  no approved FX rate → `RequireApproval`, never `Allow`.
 - `capture_supplier_quote` → data entry: no category flag / no cap; allowed at Act. Approval at
   Suggest and denial at Observe come from the existing autonomy gate; a per-tool override can
   still force approval/deny.

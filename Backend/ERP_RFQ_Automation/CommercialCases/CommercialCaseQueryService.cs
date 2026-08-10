@@ -247,6 +247,19 @@ public sealed class CommercialCaseQueryService : ICommercialCaseQueryService
                 CommercialCaseLinkStates.DeclaredOnly))
             .ToListAsync(cancellationToken);
 
+        // FR-COM-07. The customer-origin keys a supplier purchase order should carry, read as a
+        // question rather than as decoration: on a CUSTOMER_DEMAND order, all three absent means the
+        // order cannot say which customer it was bought for without re-joining through the RFQ —
+        // which is the de-facto spine those columns exist to replace. STOCK orders are excluded
+        // because absent keys on them are correct, and a report that flags correct rows is a report
+        // reviewers learn to ignore.
+        var supplierPurchaseOrdersWithoutCustomerOrigin = await _db.SupplierPurchaseOrders.AsNoTracking()
+            .Where(po => po.BusinessUnitId == businessUnitId && po.CommercialCaseId == caseId
+                && po.DemandSource != SupplierPurchaseOrderDemandSources.Stock
+                && po.CustomerPurchaseOrderId == null && po.CustomerOrderId == null && po.QuoteId == null)
+            .Select(po => new { po.Id, po.PurchaseOrderNumber })
+            .ToListAsync(cancellationToken);
+
         var procurementHandoffs = await _db.ProcurementHandoffs.AsNoTracking()
             .Where(h => h.BusinessUnitId == businessUnitId && h.NexoraSerial == serial)
             .Select(h => new CommercialCaseDocument(
@@ -346,6 +359,15 @@ public sealed class CommercialCaseQueryService : ICommercialCaseQueryService
         documents.AddRange(Reconcile(DocumentTypes.SupplierPo, supplierPurchaseOrders, chainSupplierPurchaseOrders, caseId, serial, gaps));
         documents.AddRange(Reconcile(DocumentTypes.ProcurementHandoff, procurementHandoffs, chainProcurementHandoffs, caseId, serial, gaps));
         documents.AddRange(Reconcile(DocumentTypes.Shipment, shipments, chainShipments, caseId, serial, gaps));
+
+        foreach (var order in supplierPurchaseOrdersWithoutCustomerOrigin)
+            gaps.Add(new CommercialCaseTraceabilityGap(
+                DocumentTypes.SupplierPo, order.Id, order.PurchaseOrderNumber,
+                CommercialCaseGapKinds.CustomerOriginMissing, caseId,
+                "Raised against customer demand but names no client purchase order, sales order or "
+                + "quotation, so the customer it was bought for can only be inferred by re-joining "
+                + "through the RFQ. The sourcing awards on it are not linked to a customer quote "
+                + "line, or the customer award had not been raised when the order was placed."));
 
         var history = await ReadStatusHistoryAsync(businessUnitId, caseId, cancellationToken);
 

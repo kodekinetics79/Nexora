@@ -3,6 +3,7 @@ using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.DTOs.LookupDTOs;
 using ERP_RFQ_Automation.DTOs.ProductDTOs;
 using ERP_RFQ_Automation.Interfaces;
+using ERP_RFQ_Automation.MasterData;
 using ERP_RFQ_Automation.Models;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -20,11 +21,16 @@ namespace ERP_RFQ_Automation.Controllers
     {
         private readonly IProductRepository _repository;
         private readonly ErpRfqAutomationContext _context;
+        private readonly IMasterDataChangeHistoryReader _changeHistory;
 
-        public ProductController(IProductRepository repository, ErpRfqAutomationContext context)
+        public ProductController(
+            IProductRepository repository,
+            ErpRfqAutomationContext context,
+            IMasterDataChangeHistoryReader changeHistory)
         {
             _repository = repository;
             _context = context;
+            _changeHistory = changeHistory;
         }
 
         private bool TryGetTenantId(out long businessUnitId) =>
@@ -551,6 +557,33 @@ namespace ERP_RFQ_Automation.Controllers
             {
                 return Problem(statusCode: StatusCodes.Status500InternalServerError,
                     title: "Stock details could not be loaded.");
+            }
+        }
+
+        /// <summary>
+        /// FR-MDM-05 — the before/after trail for one product, newest first.
+        ///
+        /// <para>This is the endpoint that makes <c>FinalLandedCost</c> answerable. That column is
+        /// the cost basis reported margin is computed from, it is hand-editable on the product
+        /// screen and through column 28 of the import sheet, and before register item E44 was
+        /// closed nothing anywhere recorded who moved it or from what.</para>
+        /// </summary>
+        [HttpGet("{id}/change-history")]
+        [RequireModulePermission("Products", PermissionAction.View)]
+        public async Task<ActionResult<IReadOnlyList<MasterDataChangeEventDto>>> GetChangeHistory(
+            long id, [FromQuery] int limit = 50)
+        {
+            if (!TryGetTenantId(out var targetBUId)) return Forbid();
+
+            try
+            {
+                return Ok(await _changeHistory.ReadAsync(
+                    MasterDataEntityTypes.Product, id, targetBUId, limit, HttpContext.RequestAborted));
+            }
+            catch (Exception)
+            {
+                return Problem(statusCode: StatusCodes.Status500InternalServerError,
+                    title: "The product change history could not be loaded.");
             }
         }
 

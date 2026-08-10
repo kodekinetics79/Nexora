@@ -60,6 +60,23 @@ const confidenceLabel = (confidence: number | null) =>
 const displayDate = (value?: string | null) =>
   value ? new Date(value).toLocaleDateString() : "Not stated";
 
+/// Header fields a reviewer may correct at any time, not only while the field is flagged for
+/// review. These are the round's cost build-up: they are what landed cost is made of, and a
+/// captured zero is never flagged because a zero is usually correct.
+const CORRECTABLE_HEADER_FIELDS = new Set([
+  "FreightAmount", "TaxAmount", "DutyAmount", "OtherAmount", "DiscountAmount", "Incoterms",
+]);
+
+/// The D group delivers after import clearance, so the Supplier has paid the duty and it is inside
+/// the price. Anything else and the duty is the buyer's — a zero there is a gap, not a fact. An
+/// absent Incoterm is not flagged: domestic supply carries none and owes no duty, and warning on
+/// all of it would teach reviewers to ignore the warning that matters.
+const DELIVERED_INCOTERMS = new Set(["DAP", "DPU", "DDP"]);
+const isDutyGap = (revision: { incoterms?: string | null; dutyAmount?: number }) => {
+  const code = revision.incoterms?.trim().toUpperCase();
+  return !!code && !DELIVERED_INCOTERMS.has(code) && (revision.dutyAmount ?? 0) === 0;
+};
+
 export default function SupplierQuoteReviewPage() {
   const id = Number(useParams().supplierQuoteId);
   const navigate = useNavigate();
@@ -422,6 +439,26 @@ export default function SupplierQuoteReviewPage() {
               {revision.captureChannel.replaceAll("_", " ")} · {new Date(revision.capturedOn).toLocaleString()}
             </Typography>
           </Stack>
+          {/* The charge block. Landed cost is built from these, and until now the review screen
+              showed lines and evidence only — so the reviewer asked to confirm a Supplier response
+              could not see the freight, and could not see that the duty was zero on an EXW round. */}
+          <Typography sx={{ fontWeight: 700, mb: 1 }}>Round charges</Typography>
+          <Stack direction="row" sx={{ flexWrap: "wrap", gap: 1, mb: 1 }}>
+            <Chip size="small" variant="outlined" label={`Incoterm ${revision.incoterms ?? "not stated"}`} />
+            <Chip size="small" variant="outlined" label={`Freight ${(revision.freightAmount ?? 0).toLocaleString()}`} />
+            <Chip size="small" variant="outlined" label={`Supplier tax ${(revision.taxAmount ?? 0).toLocaleString()}`} />
+            <Chip size="small" variant="outlined" color={isDutyGap(revision) ? "warning" : "default"}
+              label={`Duty ${(revision.dutyAmount ?? 0).toLocaleString()}`} />
+            <Chip size="small" variant="outlined" label={`Other ${(revision.otherAmount ?? 0).toLocaleString()}`} />
+            <Chip size="small" variant="outlined" label={`Discount ${(revision.discountAmount ?? 0).toLocaleString()}`} />
+          </Stack>
+          {isDutyGap(revision) && (
+            <Alert severity="warning" sx={{ mb: 2 }}>
+              {revision.incoterms} is not a delivered term, so the Supplier has not cleared KSA customs and
+              the duty is not inside this price — but this round records no duty. Correct the DutyAmount
+              below if the buyer knows it; landed cost, and every price derived from it, is understated until then.
+            </Alert>
+          )}
           <Typography sx={{ fontWeight: 700, mb: 1 }}>Commercial lines</Typography>
           <TableContainer>
             <Table size="small">
@@ -458,7 +495,13 @@ export default function SupplierQuoteReviewPage() {
                     <TableCell>{evidence.method.replaceAll("_", " ")}</TableCell>
                     <TableCell><Chip size="small" color={evidence.latestReviewStatus ? "success" : evidence.reviewRequired ? "warning" : "default"} label={evidence.latestReviewStatus ?? (evidence.reviewRequired ? "REVIEW REQUIRED" : "NO REVIEW")} /></TableCell>
                     <TableCell align="right">
-                      {canReview && evidence.reviewRequired && !evidence.latestReviewStatus && (
+                      {/* Round charges stay correctable after they have been decided once. A
+                          captured charge is never "review required" — a zero freight is usually the
+                          truth — but it is the field most often wrong, and gating correction on
+                          reviewRequired left the only control over it unreachable from the screen
+                          that shows it. */}
+                      {canReview && (CORRECTABLE_HEADER_FIELDS.has(evidence.fieldName)
+                        || (evidence.reviewRequired && !evidence.latestReviewStatus)) && (
                         <Button size="small" startIcon={<FactCheck />} onClick={() => setSelected({ revisionId: revision.revisionId, evidence })}>Review</Button>
                       )}
                     </TableCell>

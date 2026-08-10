@@ -253,6 +253,38 @@ namespace ERP_RFQ_Automation.Repositories
             await _context.SaveChangesAsync();
         }
 
+        public async Task<bool> VerifyPasswordAsync(long id, long businessUnitId, string candidatePassword)
+        {
+            if (string.IsNullOrEmpty(candidatePassword) || id <= 0 || businessUnitId <= 0)
+                return false;
+
+            // Scoped by business unit here as well as by the caller, for the same reason
+            // ChangePasswordAsync re-derives its own boundary: this method answers a security
+            // question, and a security answer should not depend on its caller having asked
+            // correctly. Deliberately stricter than the Users query filter, which treats a NULL
+            // Buid as master data visible to every tenant.
+            var user = await _context.Users.AsNoTracking()
+                .Where(u => u.Id == id && u.Buid == businessUnitId && u.IsActive == true)
+                .Select(u => new { u.PasswordHash })
+                .FirstOrDefaultAsync();
+
+            if (user is null || string.IsNullOrWhiteSpace(user.PasswordHash))
+                return false;
+
+            try
+            {
+                return BCrypt.Net.BCrypt.Verify(candidatePassword, user.PasswordHash);
+            }
+            catch (BCrypt.Net.SaltParseException)
+            {
+                // A hash this library cannot parse (a legacy or hand-written row) must not be
+                // treated as a match, and must not crash the request into a 500 either — a 500
+                // would read to the caller as "the server is broken" rather than "that password
+                // is wrong", and would leave the account permanently unable to rotate.
+                return false;
+            }
+        }
+
         public async Task ChangePasswordAsync(long id, string newPassword)
         {
             // This method rewrites a credential, and IUserRepository gives it no tenant argument,

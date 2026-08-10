@@ -55,7 +55,7 @@ public sealed class EntitlementClaimPostgreSqlTests : IAsyncLifetime
     public async Task Claim_UsesPlanConcurrencyCap_AndConfigFallbackWithoutPlan()
     {
         await using var ctx = Context();
-        var queue = new ExtractionQueue(ctx, new NoopLogger<ExtractionQueue>());
+        var queue = new ExtractionQueue(ctx, new NoopLogger<ExtractionQueue>(), new StubTenant(null));
 
         var plan = new Plan
         {

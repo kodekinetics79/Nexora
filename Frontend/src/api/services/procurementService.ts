@@ -73,6 +73,8 @@ export interface SupplierOffer {
   blockingReasons: string[];
   awarded: boolean;
   version: number;
+  costWarnings?: string[] | null;
+  incoterm?: string | null;
 }
 
 export interface QuoteComparisonLine {
@@ -88,6 +90,10 @@ export interface QuoteComparisonLine {
   validUntil?: string | null;
   blockers: string[];
   eligible: boolean;
+  // Non-blocking: the offer can be awarded, but its landed cost looks incomplete — an EXW or FOB
+  // quote recording no import duty, for instance. Kept apart from blockers so a warning can never
+  // be mistaken for a refusal, or a refusal softened into a warning.
+  costWarnings?: string[] | null;
 }
 
 export interface QuoteComparisonResult {

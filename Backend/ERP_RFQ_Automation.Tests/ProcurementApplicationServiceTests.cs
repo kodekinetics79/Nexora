@@ -543,7 +543,7 @@ public sealed class ProcurementApplicationServiceTests
         var deliveredOn = DateTime.UtcNow;
         var issueCommand = fixture.Issue(result.Id, "issue-po", approved.Version, deliveredOn);
         var issued = await fixture.Execute(service => service.IssuePurchaseOrderAsync(issueCommand));
-        Assert.Equal(SupplierPurchaseOrderStatuses.Issued, issued.Status);
+        Assert.Equal(SupplierPurchaseOrderStatuses.Sent, issued.Status);
         Assert.True((await fixture.Execute(service => service.IssuePurchaseOrderAsync(issueCommand))).Replayed);
         await Assert.ThrowsAsync<ProcurementConflictException>(() => fixture.Execute(service =>
             service.IssuePurchaseOrderAsync(issueCommand with
@@ -645,7 +645,7 @@ public sealed class ProcurementApplicationServiceTests
 
         Assert.Equal(purchaseOrder.Id, Assert.Single(byNumber).Id);
         Assert.Equal(purchaseOrder.Id, Assert.Single(bySupplier).Id);
-        Assert.Equal(SupplierPurchaseOrderStatuses.Issued, Assert.Single(byNumber).Status);
+        Assert.Equal(SupplierPurchaseOrderStatuses.Sent, Assert.Single(byNumber).Status);
         Assert.Equal(8m, Assert.Single(byNumber).OpenQuantity);
     }
 

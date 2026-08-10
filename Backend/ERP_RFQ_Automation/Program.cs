@@ -31,6 +31,7 @@ using ERP_RFQ_Automation.Intelligence.Decision;
 using ERP_RFQ_Automation.Boq;
 using ERP_RFQ_Automation.Infrastructure;
 using ERP_RFQ_Automation.Infrastructure.Storage;
+using ERP_RFQ_Automation.MasterData;
 using ERP_RFQ_Automation.MultiTenancy;
 using ERP_RFQ_Automation.CommercialCases;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
@@ -273,10 +274,25 @@ builder.Services.Configure<ERP_RFQ_Automation.Procurement.ProcurementApprovalOpt
 builder.Services.AddScoped<IProcurementApplicationService, ProcurementApplicationService>();
 builder.Services.AddScoped<IProcurementHandoffService, ProcurementHandoffService>();
 builder.Services.AddScoped<IProcurementIntegrationService, ProcurementIntegrationService>();
+// Gate 5 / Module 6 (FR-MAS-01..05). Inbound supplier shipments, the Saudi entry-point master and
+// the per-BU lead times the Material Available Date is derived from. Keyed to the supplier PO
+// (decision R3); the outbound Models.Shipment is untouched.
+builder.Services
+    .AddScoped<ERP_RFQ_Automation.InboundLogistics.IInboundShipmentApplicationService,
+        ERP_RFQ_Automation.InboundLogistics.InboundShipmentApplicationService>();
+// The Gate 4/Gate 5 seam. Injected into ProcurementApplicationService so a goods receipt settles
+// the inbound shipment that carried the material inside the receipt's own transaction, rather than
+// leaving a shipment reading as in flight after its stock has already landed.
+builder.Services
+    .AddScoped<ERP_RFQ_Automation.InboundLogistics.IInboundShipmentReceiptSettlement,
+        ERP_RFQ_Automation.InboundLogistics.InboundShipmentReceiptSettlement>();
 builder.Services.AddSingleton<IProcurementDeliveryConfiguration, ProcurementDeliveryConfiguration>();
 builder.Services.AddScoped<SupplierQuoteInboxService>();
 builder.Services.AddScoped<SupplierNegotiationService>();
 builder.Services.AddScoped<SupplierQuoteCommercialService>();
+// The write path for the per-tenant commercial policy (input-tax recoverability, output tax rate,
+// PO tolerances). The read path is an extension method on the DbContext and needs no registration.
+builder.Services.AddScoped<ERP_RFQ_Automation.OrderToCash.CommercialMatchingPolicyService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.CommercialLearning.CommercialLearningService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.CommercialLearning.LearningGovernanceService>();
 builder.Services.AddScoped<SupplierQuoteDocumentIntakeService>();
@@ -322,6 +338,17 @@ builder.Services.AddScoped<ERP_RFQ_Automation.CommercialIntelligence.Exceptions.
 builder.Services.AddScoped<ERP_RFQ_Automation.CommercialIntelligence.Opportunity.IOpportunityPriorityApplicationService, ERP_RFQ_Automation.CommercialIntelligence.Opportunity.OpportunityPriorityApplicationService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.CommercialIntelligence.Growth.GrowthIntelligenceService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.Inventory.IOrderStockReservationService, ERP_RFQ_Automation.Inventory.OrderStockReservationService>();
+// Gate 5 / FR-MTR-01..05. The recorder is registered so ProcurementApplicationService receives it
+// by injection rather than falling back to its default construction, which keeps one instance per
+// request and one place to substitute it in tests.
+builder.Services.AddScoped<ERP_RFQ_Automation.Traceability.IMaterialLotRecorder, ERP_RFQ_Automation.Traceability.MaterialLotRecorder>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Traceability.IMaterialTraceabilityService, ERP_RFQ_Automation.Traceability.MaterialTraceabilityService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Traceability.IMaterialLotCertificateService, ERP_RFQ_Automation.Traceability.MaterialLotCertificateService>();
+// Gate 6 / FR-INV-03. The seam that makes a goods issue declare the lots it moved. Registered
+// unconditionally: NullLotFulfilmentDeclarer exists only so a caller cannot be written against a
+// null reference, and if it were ever reached here, lot consumption would silently stop being
+// declared and where-used trace would go quietly incomplete.
+builder.Services.AddScoped<ERP_RFQ_Automation.Inventory.ILotFulfilmentDeclarer, ERP_RFQ_Automation.Traceability.MaterialLotFulfilmentDeclarer>();
 builder.Services.AddSingleton<ERP_RFQ_Automation.Inventory.Commercial.IProductIdentityResolver, ERP_RFQ_Automation.Inventory.Commercial.ProductIdentityResolver>();
 builder.Services.AddSingleton<ERP_RFQ_Automation.Inventory.Commercial.IFulfilmentRouteService, ERP_RFQ_Automation.Inventory.Commercial.FulfilmentRouteService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.ProductIntelligence.IProductResolutionCatalog, ERP_RFQ_Automation.ProductIntelligence.EfProductResolutionCatalog>();
@@ -367,6 +394,12 @@ builder.Services.AddScoped<IRoleGate, RoleGate>();
 // repositories use — that shared instance is what makes an audit event commit or roll back with
 // the mutation it describes, rather than being a best-effort log line beside it.
 builder.Services.AddScoped<IIamAuditWriter, IamAuditWriter>();
+// FR-MDM-05 / E44: the READ side of the master-data before/after trail. The WRITE side needs no
+// registration at all — it is invoked from ErpRfqAutomationContext.SaveChanges, which is the point
+// no write path (controller, repository, worker or spreadsheet uploader) can go around.
+builder.Services.AddScoped<
+    ERP_RFQ_Automation.MasterData.IMasterDataChangeHistoryReader,
+    ERP_RFQ_Automation.MasterData.MasterDataChangeHistoryReader>();
 builder.Services.AddSingleton<TenantSmtpConcurrencyGate>();
 builder.Services.AddSingleton<IOutboundSmtpTransport, MailKitOutboundSmtpTransport>();
 // Stateless — every call carries its own settings — so a singleton is correct.
@@ -454,7 +487,18 @@ builder.Services.AddHttpClient<OllamaLlmService>(client =>
     client.BaseAddress = new Uri(string.IsNullOrWhiteSpace(ollamaBaseUrl)
         ? "http://localhost:11434/"
         : ollamaBaseUrl);
-});
+})
+    // The endpoint classification is decided once, from configuration. Without this the
+    // client would happily follow a 307 off the loopback service — re-sending the method and
+    // the document body to an arbitrary host — and would dial whatever address the name
+    // resolved to at request time, which need not be the address that was classified.
+    // AiEgressGuard refuses redirects outright and re-validates every connection against the
+    // class this endpoint was classified as. (AI/AiEgressGuard.cs)
+    .ConfigurePrimaryHttpMessageHandler(services =>
+    {
+        var endpointResolver = services.GetRequiredService<IAiProviderEndpointResolver>();
+        return AiEgressGuard.CreateHandler(() => endpointResolver.Current.ProviderClass);
+    });
 
 // CORS restricted to configured frontend origins (SEC-13). AllowAnyOrigin is
 // unsafe for a system with authenticated, tenant-scoped data. Always include
@@ -660,6 +704,18 @@ builder.Services.AddScoped<ERP_RFQ_Automation.Sla.IQuoteOutcomeService, ERP_RFQ_
 builder.Services.AddScoped<ERP_RFQ_Automation.Sla.ILeadOutcomeReasons, ERP_RFQ_Automation.Sla.LeadOutcomeReasons>();
 builder.Services.AddSingleton<ERP_RFQ_Automation.Sla.ISlaNotifications, ERP_RFQ_Automation.Sla.SlaNotifications>();
 builder.Services.AddHostedService<ERP_RFQ_Automation.Sla.SlaSweepWorker>();
+
+// ==== Gate 8: dashboards, scheduled reporting (Reporting/) ====
+builder.Services.AddScoped<ERP_RFQ_Automation.Reporting.IGrossMarginService,
+                           ERP_RFQ_Automation.Reporting.GrossMarginService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Reporting.IReportRenderer,
+                           ERP_RFQ_Automation.Reporting.ReportRenderer>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Reporting.IReportSubscriptionService,
+                           ERP_RFQ_Automation.Reporting.ReportSubscriptionService>();
+builder.Services.AddSingleton<ERP_RFQ_Automation.Reporting.IReportDelivery,
+                              ERP_RFQ_Automation.Reporting.ReportDelivery>();
+builder.Services.AddHostedService<ERP_RFQ_Automation.Reporting.ScheduledReportWorker>();
+
 builder.Services.AddScoped<ERP_RFQ_Automation.PlatformGovernance.PlatformGovernanceService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.PlatformGovernance.HumanActionService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.PlatformGovernance.AiTrustCenterService>();
@@ -762,6 +818,15 @@ await SyncFinanceProviderSecretsAsync(
 
 if (app.Environment.IsProduction())
     await ValidateRuntimeDatabaseRoleAsync(connectionString);
+
+// Sec-D1: prove the tenant plane can actually READ the columns that tenant-status enforcement
+// and plan limits are resolved from, before serving a request. Runs in every environment that
+// has the execution roles (it no-ops where they do not exist), because the failure it catches —
+// a deployment cut between the grant-narrowing migration and the migration that granted the
+// column a later query started projecting — is a release-ordering accident, not a
+// production-only one. Throws, and is deliberately not caught: a process that cannot enforce
+// suspension or plan limits must not serve traffic.
+await TenantAccessGrantContract.AssertReadableAsync(connectionString, app.Logger);
 
 static string ResolveDirectMigrationConnection(string runtimeConnection)
     => runtimeConnection.Replace("-pooler.", ".", StringComparison.OrdinalIgnoreCase);
@@ -874,6 +939,10 @@ app.UseAuthentication();
 app.UseReadOnlyImpersonationGuard();
 // Tenant + correlation-id logging scope — AFTER auth so the businessUnitId claim exists.
 app.UsePlatformObservability();
+// FR-MDM-05 / E44: publishes the authenticated caller as the ambient actor for master-data audit
+// rows. AFTER UseAuthentication for the same reason as the line above — before it, User carries no
+// claims and every audit row would be attributed to "system".
+app.UseMasterDataAuditActor();
 // Authenticated tenant routes fail closed when a token has no valid tenant claim.
 app.UseTenantClaimGuard();
 app.UseTenantStatusGuard();

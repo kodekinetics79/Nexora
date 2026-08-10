@@ -87,7 +87,12 @@ public sealed class CoverageItem
 {
     public long LeadItemId { get; set; }
     public string? Description { get; set; }
-    public int Quantity { get; set; }
+
+    /// <summary>
+    /// Null when the source document stated no readable quantity. Rendered as an explicit gap,
+    /// never as 0 — a coverage line reading "0" tells a rep the buyer wants nothing.
+    /// </summary>
+    public int? Quantity { get; set; }
     public bool Matched { get; set; }
 
     /// <summary>"code" | "mpn" - how the exact catalog match was made (null when unmatched).</summary>

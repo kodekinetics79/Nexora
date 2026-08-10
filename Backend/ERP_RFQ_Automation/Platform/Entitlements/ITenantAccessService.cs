@@ -24,11 +24,41 @@ public sealed record PlanSnapshot(
     string Features = "{}");
 
 /// <summary>
+/// Whether the platform plane actually ANSWERED the question, as distinct from what it answered.
+///
+/// <para>These are not two shades of the same thing. <see cref="Resolved"/> with a null
+/// <see cref="TenantAccessSnapshot.TenantId"/> is a fact: the platform plane was read and this
+/// BusinessUnit has no Tenant row (a legacy BU), so there is no status to enforce and no plan to
+/// limit. <see cref="Unresolvable"/> is the ABSENCE of a fact: the read failed — a missing
+/// column grant, a dropped connection, a reduced model — and NOTHING is known about this
+/// tenant's status or plan.</para>
+///
+/// <para>Sec-D1: the two used to be the same value. A <c>catch (Exception)</c> answered every
+/// failure with the legacy-BU snapshot, so a single <c>42501</c> on the platform read — exactly
+/// what a deployment sitting between 20260805105320 (which narrowed the tenant plane to
+/// column-level SELECT) and 20260808163605 (which granted <c>Plans."Features"</c>, projected by
+/// <c>CoreQuery</c>) answers on every request — read as "no suspension, no plan limits" for every
+/// tenant, re-decided every 10 seconds, invisible to a SQLite test lane that has neither roles
+/// nor column privileges. An unknown is now a denial (503), not a permission.</para>
+/// </summary>
+public enum TenantAccessResolution
+{
+    /// <summary>The platform plane answered. The snapshot's fields are the answer.</summary>
+    Resolved,
+
+    /// <summary>The platform plane could not be read. Nothing in the snapshot is known.</summary>
+    Unresolvable
+}
+
+/// <summary>
 /// The resolved platform-plane view of one BusinessUnit: the owning
 /// <see cref="Tenant"/> (matched via <c>PrimaryBusinessUnitId</c>), its lifecycle
 /// status and its plan. <see cref="TenantId"/> is null for a legacy BusinessUnit
-/// without a platform Tenant row — the contracted fail-open case (no status
-/// enforcement, no plan limits).
+/// without a platform Tenant row — resolved, but with no tenant to enforce against.
+///
+/// <para>A snapshot whose <see cref="Resolution"/> is
+/// <see cref="TenantAccessResolution.Unresolvable"/> carries NO facts at all and denies
+/// (see <see cref="IsAccessDenied"/> and <see cref="IsUnresolvable"/>).</para>
 /// </summary>
 public sealed record TenantAccessSnapshot(
     long BusinessUnitId,
@@ -39,11 +69,45 @@ public sealed record TenantAccessSnapshot(
     public bool HasTenant => TenantId.HasValue;
 
     /// <summary>
+    /// Whether the platform plane answered at all. Defaults to
+    /// <see cref="TenantAccessResolution.Resolved"/> so every existing construction — including
+    /// the legacy-BU one and every test double — keeps meaning exactly what it meant; only
+    /// <see cref="Unresolved"/> produces the other value.
+    /// </summary>
+    public TenantAccessResolution Resolution { get; init; } = TenantAccessResolution.Resolved;
+
+    /// <summary>Why the platform plane could not be read. Null unless <see cref="IsUnresolvable"/>.
+    /// Operator-facing text only — never the underlying exception, which stays in the log.</summary>
+    public string? UnresolvedReason { get; init; }
+
+    public bool IsUnresolvable => Resolution == TenantAccessResolution.Unresolvable;
+
+    /// <summary>
+    /// The snapshot for "the platform plane could not be read". Every field stays null because
+    /// none of them is known; <see cref="IsAccessDenied"/> is true, so every caller that already
+    /// asks that question denies without needing to learn a new one.
+    /// </summary>
+    public static TenantAccessSnapshot Unresolved(long businessUnitId, string reason)
+        => new(businessUnitId, null, null, null)
+        {
+            Resolution = TenantAccessResolution.Unresolvable,
+            UnresolvedReason = reason
+        };
+
+    /// <summary>
     /// Provisioning tenants have not passed the authoritative activation policy and therefore
     /// cannot receive a tenant token, call tenant APIs, or consume worker resources. Past-due,
     /// Suspended and Archived tenants are likewise restricted.
+    ///
+    /// <para>An UNRESOLVABLE snapshot denies too, and it is deliberately folded into this same
+    /// predicate rather than added as a second question every caller has to remember to ask: the
+    /// eight call sites that already gate on <c>IsAccessDenied</c> — the status guard middleware,
+    /// login, the background work gate — become fail-closed by that fact alone. Callers that need
+    /// to tell an unknown apart from a suspension (to answer 503 rather than 403) read
+    /// <see cref="IsUnresolvable"/>.</para>
     /// </summary>
-    public bool IsAccessDenied => Status is TenantStatus.Provisioning or TenantStatus.PastDue
+    public bool IsAccessDenied => IsUnresolvable
+        || Status is TenantStatus.Provisioning or TenantStatus.PastDue
         or TenantStatus.Suspended or TenantStatus.Archived;
 
     /// <summary>
@@ -107,10 +171,14 @@ public sealed record TenantAccessSnapshot(
 /// <summary>
 /// Resolves (and memory-caches for ~60s) the platform Tenant + Plan that owns a
 /// BusinessUnit. Contracted fail modes (LEDGER):
-/// - legacy BU without a platform Tenant row → fail OPEN (no tenant, no limits);
-/// - resolution infrastructure failure (missing grant/table on a reduced model) →
-///   fail OPEN, logged, briefly cached;
-/// - PastDue/Suspended/Archived tenant → callers must deny.
+/// - legacy BU without a platform Tenant row → RESOLVED with no tenant: no status to
+///   enforce and no plan to limit, which is a fact about the row and not an error.
+///   This is the one remaining allowance and it is bounded by the platform's own
+///   provisioning path, which creates a Tenant row for every BU it makes;
+/// - resolution infrastructure failure (missing grant/table/connection) → UNRESOLVABLE:
+///   fail CLOSED, logged, counted, briefly cached so a broken plane is not hammered and
+///   so recovery needs no restart. Callers deny with 503;
+/// - PastDue/Suspended/Archived tenant → callers must deny (403).
 /// </summary>
 public interface ITenantAccessService
 {

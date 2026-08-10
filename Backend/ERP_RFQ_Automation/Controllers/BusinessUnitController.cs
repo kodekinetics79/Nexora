@@ -122,6 +122,53 @@ namespace ERP_RFQ_Automation.Controllers
             await Task.CompletedTask;
             return Forbid();
         }
+
+        /// <summary>
+        /// Sets (or clears) this business unit's own VAT/tax registration number.
+        ///
+        /// <para>The narrow exception to "tenant identities cannot edit business units" above, and
+        /// deliberately its own route rather than a relaxation of <see cref="Update"/>: the code,
+        /// name and activation state of a business unit remain control-plane facts. A VAT
+        /// registration is a statutory identifier of the trading entity, and the entity is the
+        /// only party that can state it. Without it, the business unit deducting recoverable input
+        /// tax from landed cost cannot name itself as the claimant.</para>
+        ///
+        /// <para>Scoped to the caller's own business unit: the id must match the
+        /// <c>businessUnitId</c> claim, exactly as <see cref="GetById"/> requires.</para>
+        /// </summary>
+        [HttpPut("{id}/tax-registration")]
+        [RequireModulePermission("Business Units", PermissionAction.Edit)]
+        public async Task<ActionResult<BusinessUnitResponseDTO>> UpdateTaxRegistration(
+            long id, [FromBody] BusinessUnitTaxRegistrationRequestDTO request)
+        {
+            try
+            {
+                if (!ModelState.IsValid) return BadRequest(ModelState);
+
+                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+                if (claimBUId <= 0 || id != claimBUId) return Forbid();
+
+                var businessUnit = await _repository.GetByIdAsync(id);
+                businessUnit.TaxRegistrationNumber = ERP_RFQ_Automation.Tax.TaxRegistrationNumbers
+                    .Normalize(request.TaxRegistrationNumber);
+                businessUnit.ModifiedBy = User.FindFirst(System.Security.Claims.ClaimTypes.Email)?.Value
+                    ?? User.FindFirst("email")?.Value
+                    ?? User.Identity?.Name
+                    ?? "System";
+                businessUnit.ModifiedOn = DateTime.UtcNow;
+                await _repository.UpdateAsync(businessUnit);
+
+                return Ok(MapToResponse(businessUnit));
+            }
+            catch (KeyNotFoundException ex)
+            {
+                return NotFound(ex.Message);
+            }
+            catch (ArgumentException ex)
+            {
+                return BadRequest(ex.Message);
+            }
+        }
         // DELETE: api/BusinessUnit/5
         [HttpDelete("{id}")]
         [RequireModulePermission("Business Units", PermissionAction.Delete)]
@@ -138,6 +185,7 @@ namespace ERP_RFQ_Automation.Controllers
                 BusinessUnitCode = businessUnit.BusinessUnitCode,
                 BusinessUnitName = businessUnit.BusinessUnitName,
                 Description = businessUnit.Description,
+                TaxRegistrationNumber = businessUnit.TaxRegistrationNumber,
                 IsActive = businessUnit.IsActive,
                 CreatedBy = businessUnit.CreatedBy,
                 CreatedOn = businessUnit.CreatedOn,

@@ -88,6 +88,7 @@ const UsersPage: React.FC = () => {
   });
   const [selectedImage, setSelectedImage] = useState<File | null>(null);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [createPassword, setCreatePassword] = useState('');
 
@@ -156,6 +157,7 @@ const UsersPage: React.FC = () => {
     onSuccess: () => {
       enqueueSnackbar(t('password_changed') || 'Password changed successfully', { variant: 'success' });
       setIsPasswordModalOpen(false);
+      setCurrentPassword('');
       setNewPassword('');
     },
     onError: (error: any) => handleApiError(error),
@@ -543,11 +545,18 @@ const UsersPage: React.FC = () => {
         <DialogTitle sx={{ fontWeight: 800 }}>{t('change_password') || 'Change Password'}</DialogTitle>
         <DialogContent dividers sx={{ p: 3 }}>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>{t('changing_password_for') || 'Changing password for'} <strong>{selectedRecord?.firstName} {selectedRecord?.lastName}</strong></Typography>
+          {/*
+            Sec-A2: the server re-authenticates before rewriting the credential, so this field is
+            required, not a courtesy. Without it a borrowed session becomes permanent ownership of
+            the account — the thief sets a password the owner does not know and the owner is never
+            signed out to notice.
+          */}
+          <TextField fullWidth type="password" sx={{ mb: 2 }} label={t('current_password') || 'Current Password'} value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} />
           <TextField fullWidth type="password" label={t('new_password') || 'New Password'} value={newPassword} onChange={(e) => setNewPassword(e.target.value)} />
         </DialogContent>
         <DialogActions sx={{ p: 3 }}>
           <Button onClick={() => setIsPasswordModalOpen(false)}>{t('cancel') || 'Cancel'}</Button>
-          <Button variant="contained" color="secondary" onClick={() => passwordMutation.mutate({ newPassword })} disabled={passwordMutation.isPending || !newPassword}>
+          <Button variant="contained" color="secondary" onClick={() => passwordMutation.mutate({ currentPassword, newPassword })} disabled={passwordMutation.isPending || !currentPassword || !newPassword}>
             {passwordMutation.isPending ? <CircularProgress size={24} /> : (t('update_password') || 'Update Password')}
           </Button>
         </DialogActions>

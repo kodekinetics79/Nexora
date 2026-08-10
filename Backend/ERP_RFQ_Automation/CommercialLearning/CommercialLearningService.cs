@@ -437,10 +437,15 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
                 inventoryIds.Contains(x.InventoryId) && x.Status == StockReservationStatus.Active)
             .GroupBy(x => x.InventoryId).Select(x => new { x.Key, Quantity = x.Sum(y => y.Quantity) })
             .ToDictionaryAsync(x => x.Key, x => x.Quantity, cancellationToken);
+        // Canonical ATP (InventoryQuantityMath). This drives what the learning surface tells a
+        // salesperson is sellable, so it has to be the same number the order allocator will
+        // actually be able to hold — a second hand-written copy of the formula is one edit away
+        // from promising stock the warehouse has already written off.
         var availableByProduct = inventory.GroupBy(x => x.ProductId!.Value).ToDictionary(x => x.Key,
-            x => x.Sum(stock => Math.Max(0m, stock.QtyOnHand - reservations.GetValueOrDefault(stock.Id) -
-                stock.AllocatedQuantity - stock.QuarantineQuantity - stock.DamagedQuantity -
-                stock.ExpiredQuantity - stock.SafetyStockQuantity)));
+            x => x.Sum(stock => InventoryQuantityMath.AvailableToPromise(
+                stock.QtyOnHand, reservations.GetValueOrDefault(stock.Id), stock.AllocatedQuantity,
+                stock.QuarantineQuantity, stock.DamagedQuantity, stock.ExpiredQuantity,
+                stock.SafetyStockQuantity)));
         var offers = await context.SupplierQuotedItems.AsNoTracking().Where(x => x.BusinessUnitId == businessUnitId &&
             x.RfqId == rfqId && x.RfqItemId.HasValue && lineIds.Contains(x.RfqItemId.Value) && x.IsActive)
             .ToArrayAsync(cancellationToken);
@@ -568,7 +573,7 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
             BuildDigitalTwin(lineResults, requiredDates,
                 offers, suppliers, revisions, quoteStates, pricingDecisions, predictivePricing, evidence,
                 currencyCodes,
-                await context.ResolveSupplierInputTaxRecoverableAsync(businessUnitId, cancellationToken)));
+                await context.ResolveSupplierInputTaxRecoverablePercentAsync(businessUnitId, cancellationToken)));
     }
 
     public async Task<LearningStudioSummary> GetStudioAsync(long businessUnitId,
@@ -750,7 +755,7 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
         IReadOnlyCollection<PredictivePriceLine> predictivePricing,
         IReadOnlyCollection<CommercialEvidenceLink> rfqEvidence,
         IReadOnlyDictionary<long, string> currencyCodes,
-        bool supplierInputTaxRecoverable)
+        decimal supplierInputTaxRecoverablePercent)
     {
         var scenarios = new List<OpportunityScenario>();
         var stockOnly = lines.Count > 0 && lines.All(x => x.StockQuantity >= x.RequestedQuantity);
@@ -862,9 +867,12 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
                     selected.Any(x => x.Offer.DutyCost > 0m || x.Offer.OtherCost > 0m)
                         ? "Landed cost includes freight and the duty and other charges captured on these offers."
                         : "Landed cost includes freight; no duty or other charge is captured on these offers.",
-                    supplierInputTaxRecoverable
-                        ? "Recoverable Supplier input tax is excluded from landed cost; output VAT is added on the Customer Quote."
-                        : "Supplier input tax is not recoverable for this business unit, so it is included in landed cost."],
+                    supplierInputTaxRecoverablePercent >= 100m
+                        ? "Recoverable Supplier input tax is excluded from landed cost; output VAT is derived on the Customer Quote."
+                        : supplierInputTaxRecoverablePercent <= 0m
+                            ? "Supplier input tax is not recoverable for this business unit, so it is included in landed cost."
+                            : $"Supplier input tax is {supplierInputTaxRecoverablePercent:0.##}% recoverable for this business " +
+                              "unit, so the irrecoverable balance is included in landed cost."],
                 margin.HasValue ? ["Authorized margin exists; final Quote approval policy still applies."] :
                     ["Select and approve the final fulfilment route.", "Confirm margin before Customer Quote approval."],
                 selected.Select(x => new CommercialEvidenceLink("SupplierQuotedItem", x.Offer.Id,
@@ -917,7 +925,7 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
                 // supplier price the target can bear by the whole VAT amount.
                 var adjustments = decimal.Round(
                     (offer!.FreightCost + offer.DutyCost + offer.OtherCost +
-                        LandedCostFormula.CostBearingTax(offer.TaxAmount ?? 0m, supplierInputTaxRecoverable) -
+                        LandedCostFormula.CostBearingTax(offer.TaxAmount ?? 0m, supplierInputTaxRecoverablePercent) -
                         (offer.DiscountAmount ?? 0m)) / offer.Quantity, 6);
                 var maximumSupplier = decimal.Round(maximumLanded - adjustments, 6);
                 return new CustomerTargetBridge(decision.RfqItemId,
@@ -925,9 +933,12 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
                     decision.CustomerUnitPrice, decision.TargetMarginPercent, maximumLanded, adjustments,
                     maximumSupplier, decision.CurrencyId,
                     "max landed = target price x (1 - gross margin); max supplier = max landed - per-unit freight, " +
-                    "duty and other captured cost, plus discount" + (supplierInputTaxRecoverable
+                    "duty and other captured cost, plus discount" + (supplierInputTaxRecoverablePercent >= 100m
                         ? "; recoverable Supplier input tax is not a cost and is excluded"
-                        : "; Supplier input tax is not recoverable here, so it is deducted as a cost"),
+                        : supplierInputTaxRecoverablePercent <= 0m
+                            ? "; Supplier input tax is not recoverable here, so it is deducted as a cost"
+                            : $"; Supplier input tax is {supplierInputTaxRecoverablePercent:0.##}% recoverable here, so only " +
+                              "the irrecoverable balance is deducted as a cost"),
                     evidence);
             }).ToArray();
         var holdouts = predictivePricing.Where(x => x.BacktestHoldoutCount > 0 &&

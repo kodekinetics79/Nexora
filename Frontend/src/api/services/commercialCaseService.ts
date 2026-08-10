@@ -26,7 +26,17 @@ export interface CommercialCaseSearchResult {
  */
 export type CommercialCaseLinkState = 'Reconciled' | 'ChainBroken' | 'DeclaredOnly';
 
-export type CommercialCaseGapKind = 'UnlinkedDocument' | 'ConflictingCase' | 'ChainBroken';
+/**
+ * `CustomerOriginMissing` is not a case-linkage gap like the other three: the document states this
+ * case correctly. It is a supplier purchase order raised against customer demand that names no
+ * client PO, sales order or quotation, so the customer behind it can only be inferred by re-joining
+ * through the RFQ. STOCK replenishment orders never raise it — they have no customer.
+ */
+export type CommercialCaseGapKind =
+  | 'UnlinkedDocument'
+  | 'ConflictingCase'
+  | 'ChainBroken'
+  | 'CustomerOriginMissing';
 
 export interface CommercialCaseDocument {
   documentType: 'Lead' | 'RFQ' | 'Quote' | 'Order' | 'Shipment' | string;

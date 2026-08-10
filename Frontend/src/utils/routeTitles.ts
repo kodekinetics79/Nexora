@@ -86,6 +86,7 @@ const STATIC_ROUTE_TITLES: Readonly<Record<string, string>> = {
   '/setup/business-unit': 'Business Units',
   '/setup/price-structure': 'Price Structure',
   '/setup/sla': 'Deadlines & Alerts',
+  '/setup/commercial-policy': 'Commercial Policy',
   '/setup/routing-rules': 'RFQ Routing Rules',
 
   // Security
@@ -101,6 +102,8 @@ const STATIC_ROUTE_TITLES: Readonly<Record<string, string>> = {
   '/inventory/movements': 'Stock Movements',
   '/inventory/demand': 'Inventory Demand',
   '/inventory/resources': 'Related Resources',
+  '/inventory/lots': 'Material Lots and Traceability',
+  '/inventory/order-trace': 'Where-Used Trace',
   '/inventory/products': 'Products',
   '/inventory/categories': 'Product Categories',
   '/inventory/sub-categories': 'Product Sub-Categories',
@@ -135,12 +138,13 @@ const STATIC_ROUTE_TITLES: Readonly<Record<string, string>> = {
 
 /** Parameterised paths, tried in order after the static lookup misses. */
 const DYNAMIC_ROUTE_TITLES: ReadonlyArray<readonly [string, string]> = [
+  ['/inventory/lots/:lotId', 'Lot Traceability'],
+  ['/inventory/order-trace/:orderId', 'Where-Used Trace'],
   ['/services/boq/:id', 'BOQ Editor'],
   ['/sales/reps/:userId', 'Sales Rep Profile'],
   ['/sales/quotes/view/:id', 'View Quote'],
   ['/sales/quotes/edit/:id', 'Edit Quote'],
   ['/sales/client-pos/:clientPoId', 'Client PO Review'],
-  ['/sales/orders/invoice/:id', 'Order Invoice'],
   ['/sales/orders/edit/:id', 'Edit Order'],
   ['/sales/orders/:id', 'Order Details'],
   ['/sales/shipments/invoice/:id', 'Shipment Invoice'],

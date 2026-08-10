@@ -415,10 +415,15 @@ public sealed class NativeSpreadsheetParser
         [RfqSpreadsheetFields.Currency] = new[] { "currency", "curr", "ccy" },
         [RfqSpreadsheetFields.ManufacturerName] = new[] { "manufacturername", "manufacturer", "make", "brand", "mfr", "mfg" },
         [RfqSpreadsheetFields.ManufacturerPartNumber] = new[] { "manufacturerpartnumber", "mpn", "partnumber", "partno", "partcode", "modelno", "modelnumber", "materialcode", "itemcode" },
-        [RfqSpreadsheetFields.LeadTimeDays] = new[] { "leadtimedays", "leadtime", "delivery", "deliverytime", "deliveryperiod" },
+        // "delivery" is deliberately NOT here. A column headed exactly "Delivery" holds a date far
+        // more often than a number of days; under LeadTimeDays it failed the integer parse and was
+        // dropped, while RequiredDeliveryDate stayed null — the buyer's stated delivery date lost
+        // with no diagnostic. It now maps to the buyer's requirement, where prose ("4 weeks")
+        // yields NeedsReview and a null rather than a supplier lead time of zero.
+        [RfqSpreadsheetFields.LeadTimeDays] = new[] { "leadtimedays", "leadtime", "deliverytime", "deliveryperiod", "deliveryleadtime" },
         [RfqSpreadsheetFields.ItemText] = new[] { "notes", "note", "remarks", "remark", "comments", "comment", "itemtext", "specification", "spec" },
         [RfqSpreadsheetFields.DeliveryLocation] = new[] { "deliverylocation", "deliveryto", "shipto", "destination", "deliveryaddress", "deliverypoint", "site", "plant" },
-        [RfqSpreadsheetFields.RequiredDeliveryDate] = new[] { "requireddeliverydate", "requesteddeliverydate", "deliverydate", "requiredby", "neededby", "wanteddate" },
+        [RfqSpreadsheetFields.RequiredDeliveryDate] = new[] { "requireddeliverydate", "requesteddeliverydate", "deliverydate", "delivery", "requiredby", "neededby", "wanteddate" },
         [RfqSpreadsheetFields.AgreementReference] = new[] { "agreementreference", "agreementno", "contractno", "contractreference", "framecontract", "agreement" },
     };
 

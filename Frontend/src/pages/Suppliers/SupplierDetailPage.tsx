@@ -182,6 +182,15 @@ const SupplierDetailPage: React.FC = () => {
             <Section title="Contact" icon={<EmailIcon sx={{ fontSize: 16 }} />}>
               <InfoRow label="Email" value={supplier.contactEmail} />
               <InfoRow label="Payment Terms" value={supplier.paymentTerms} />
+              {/* Absence is the load-bearing case: without a registration number this supplier's
+                  input VAT cannot be treated as recoverable, and capturing its quotes will be
+                  refused while the tenant recovers input tax. Say so here rather than let it
+                  surface first as an error mid-capture. */}
+              <InfoRow label="VAT Registration" value={supplier.taxRegistrationNumber
+                ? supplier.taxRegistrationNumber
+                : <Typography sx={{ fontSize: '0.875rem', color: 'warning.main', fontWeight: 600 }}>
+                    Not captured — input VAT cannot be reclaimed against this supplier
+                  </Typography>} />
             </Section>
 
             <Section title="Tags & Notes" icon={<TagIcon sx={{ fontSize: 16 }} />}>

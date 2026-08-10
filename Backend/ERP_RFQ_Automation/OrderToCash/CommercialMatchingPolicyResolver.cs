@@ -20,11 +20,21 @@ public static class CommercialMatchingPolicyResolver
            ?? CommercialMatchingPolicy.DefaultFor(businessUnitId);
 
     /// <summary>
-    /// The single question the landed-cost formula asks of policy: does the tax the supplier
-    /// charged us belong in the cost of the goods?
+    /// The single question the landed-cost formula asks of policy: how much of the tax the supplier
+    /// charged us belongs in the cost of the goods? 100 means none of it does.
     /// </summary>
-    public static async Task<bool> ResolveSupplierInputTaxRecoverableAsync(
+    public static async Task<decimal> ResolveSupplierInputTaxRecoverablePercentAsync(
         this ErpRfqAutomationContext context, long businessUnitId,
         CancellationToken cancellationToken = default)
-        => (await context.ResolveAsync(businessUnitId, cancellationToken)).SupplierInputTaxRecoverable;
+        => (await context.ResolveAsync(businessUnitId, cancellationToken)).SupplierInputTaxRecoverablePercent;
+
+    /// <summary>
+    /// The single question the sell side asks of policy: at what rate is output tax derived on a
+    /// standard-rated line? Null means the tenant has not stated one, and a null rate derives no
+    /// tax at all rather than deriving zero — see <c>CommercialMatchingPolicy.OutputTaxRatePercent</c>.
+    /// </summary>
+    public static async Task<decimal?> ResolveOutputTaxRatePercentAsync(
+        this ErpRfqAutomationContext context, long businessUnitId,
+        CancellationToken cancellationToken = default)
+        => (await context.ResolveAsync(businessUnitId, cancellationToken)).OutputTaxRatePercent;
 }

@@ -68,3 +68,23 @@ public sealed class StubRoleGate : IRoleGate
         return Task.FromResult(DefaultCanManageRole);
     }
 }
+
+/// <summary>
+/// Minimal <see cref="ERP_RFQ_Automation.MasterData.IMasterDataChangeHistoryReader"/> double for
+/// tests that construct a master-data controller to exercise some OTHER action. It returns an empty
+/// history and records the arguments it was handed, so a test that accidentally routes through the
+/// change-history endpoint can see it rather than getting a null-reference surprise.
+/// </summary>
+public sealed class StubMasterDataChangeHistoryReader
+    : ERP_RFQ_Automation.MasterData.IMasterDataChangeHistoryReader
+{
+    public List<(string EntityType, long EntityId, long BusinessUnitId, int Limit)> Reads { get; } = new();
+
+    public Task<IReadOnlyList<ERP_RFQ_Automation.MasterData.MasterDataChangeEventDto>> ReadAsync(
+        string entityType, long entityId, long businessUnitId, int limit,
+        CancellationToken cancellationToken = default)
+    {
+        Reads.Add((entityType, entityId, businessUnitId, limit));
+        return Task.FromResult<IReadOnlyList<ERP_RFQ_Automation.MasterData.MasterDataChangeEventDto>>([]);
+    }
+}

@@ -1,3 +1,5 @@
+using System.ComponentModel.DataAnnotations.Schema;
+
 namespace ERP_RFQ_Automation.Procurement;
 
 public static class SourcingCaseStatuses
@@ -129,7 +131,26 @@ public static class SupplierPurchaseOrderStatuses
     public const string Issued = "ISSUED";
 
     /// <summary>
+    /// The one fact "this order has left us and is with the supplier", spelled two ways.
+    ///
+    /// <para>SENT is what release writes now. ISSUED is the same fact under the old vocabulary,
+    /// which conflated Approved with Sent; existing rows carry it and rewriting history to fit the
+    /// new word would be worse than mapping it, so the two coexist and every guard must treat them
+    /// identically. This set is the single place that equivalence is stated — a guard that spells
+    /// one of them without the other is the defect, not a variation.</para>
+    /// </summary>
+    public static readonly IReadOnlySet<string> WithSupplier = new HashSet<string>(StringComparer.Ordinal)
+    {
+        Sent, Issued
+    };
+
+    /// <summary>
     /// Dispatched and not yet settled — the states in which a goods receipt is meaningful.
+    ///
+    /// <para>SENT and ISSUED are both here, and must stay together: SENT is what release writes and
+    /// ISSUED is what rows raised before the split carry. Omitting SENT would mean goods could not
+    /// be received against any order dispatched after this gate — the same regression ACKNOWLEDGED
+    /// already caused once.</para>
     ///
     /// <para>ACKNOWLEDGED is in this set because a supplier accepting an order moves it forward.
     /// Leaving it out would make the supplier's acceptance the very act that blocks receiving the
@@ -137,7 +158,36 @@ public static class SupplierPurchaseOrderStatuses
     /// </summary>
     public static readonly IReadOnlySet<string> OpenForReceipt = new HashSet<string>(StringComparer.Ordinal)
     {
-        Issued, Acknowledged, InProduction, Shipped, PartiallyReceived
+        Sent, Issued, Acknowledged, InProduction, Shipped, PartiallyReceived
+    };
+
+    /// <summary>
+    /// Placed with a supplier and still expected to arrive — the states in which the un-received
+    /// quantity on an order is real committed supply and nets off the demand it was raised against.
+    ///
+    /// <para>This answers a different question from <see cref="OpenForReceipt"/> ("may I book a
+    /// receipt against this?") even though the two coincide today. They are kept apart because a
+    /// future state could easily belong to one and not the other, and one set answering two
+    /// questions is how a change to one of them silently answers the other.</para>
+    ///
+    /// <para><b>Why every one of these is here.</b> DRAFT and APPROVED are excluded: an order the
+    /// supplier has never seen is an internal intention, and counting it as supply is what left a
+    /// draft with lapsed quotes suppressing its RFQ line forever. SENT and ISSUED are the same
+    /// dispatched fact spelled two ways (<see cref="WithSupplier"/>). ACKNOWLEDGED is here because
+    /// leaving it out made the supplier's acceptance the act that erased the coverage — the RFQ line
+    /// reopened, a second sourcing case was raised, and the same material was bought twice on the
+    /// ordinary happy path. IN_PRODUCTION and SHIPPED are here for that reason in advance: no code
+    /// writes them yet, but they are the strongest commitments on the ladder, and if they were
+    /// omitted the double-buy would return the day inbound logistics starts writing them.</para>
+    ///
+    /// <para>RECEIVED, CLOSED and CANCELLED are excluded. Nothing is still expected to arrive
+    /// against them. For the first two that is arithmetically free — the outstanding quantity is
+    /// already zero — but listing them would state something untrue about what the set means, and
+    /// CANCELLED must be out for the coverage to reopen when a buyer withdraws an order.</para>
+    /// </summary>
+    public static readonly IReadOnlySet<string> CommittedSupply = new HashSet<string>(StringComparer.Ordinal)
+    {
+        Sent, Issued, Acknowledged, InProduction, Shipped, PartiallyReceived
     };
 
     /// <summary>
@@ -175,6 +225,32 @@ public static class Incoterms
     {
         "EXW", "FCA", "FAS", "FOB", "CFR", "CIF", "CPT", "CIP", "DAP", "DPU", "DDP"
     };
+
+    /// <summary>
+    /// The D group — the terms under which the seller delivers to a named place in the buyer's
+    /// country. Everything outside it (EXW, F-group, C-group) hands the goods over before import,
+    /// so the BUYER pays the customs duty and it is not inside the quoted price.
+    ///
+    /// <para>Used to warn, never to compute. Decision R8 rules out deriving a duty cost from the
+    /// Incoterm or an HS code, and this set does no arithmetic: it only lets the offer say "this is
+    /// an EXW quote with no duty recorded" instead of pricing that silently.</para>
+    /// </summary>
+    public static readonly IReadOnlySet<string> DeliveredCodes = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "DAP", "DPU", "DDP"
+    };
+
+    /// <summary>
+    /// True when the term is recorded, valid, and hands the goods over before import clearance —
+    /// the case in which a zero duty is a gap rather than a fact. An absent Incoterm returns false:
+    /// most domestic KSA supply carries no Incoterm and genuinely owes no duty, and warning on
+    /// every one of those would teach buyers to ignore the warning that matters.
+    /// </summary>
+    public static bool IsNonDelivered(string? incoterm)
+    {
+        var code = incoterm?.Trim().ToUpperInvariant();
+        return !string.IsNullOrEmpty(code) && Codes.Contains(code) && !DeliveredCodes.Contains(code);
+    }
 }
 
 public static class SupplierAcknowledgementStatuses
@@ -358,6 +434,61 @@ public sealed class SupplierPurchaseOrder
         CommercialCaseId = commercialCaseId;
         NexoraSerial = nexoraSerial;
     }
+
+    /// <summary>
+    /// FR-COM-07. Records the customer documents this order was raised to satisfy, resolved from the
+    /// governed bridge between the sourcing awards on it and the customer quote line they cover.
+    ///
+    /// <para>This is where the asymmetry described on <see cref="DemandSource"/> stops being a
+    /// comment and becomes an invariant. On a STOCK order any customer key at all is a
+    /// contradiction and is refused outright — replenishment has no customer, so a key here could
+    /// only have come from a mis-wired caller. On a CUSTOMER_DEMAND order the keys are whatever the
+    /// chain can prove: a key the chain cannot supply stays null and is reported as a gap by
+    /// <c>CommercialCaseQueryService</c>, because a manufactured link would be quoted back at us as
+    /// though it were real.</para>
+    ///
+    /// <para>The tenant of the reads that produced the keys is passed back in and checked. These are
+    /// tenant-owned keys, and a supplier purchase order naming another business unit's customer PO
+    /// would leak one tenant's commercial chain into another's paperwork.</para>
+    ///
+    /// <para>The origin is written once. Replacing it later would silently re-point a committed
+    /// document at a different customer, so a differing value is refused rather than applied.</para>
+    /// </summary>
+    public void AttachCustomerOrigin(long sourceBusinessUnitId, long? customerPurchaseOrderId,
+        long? customerOrderId, long? quoteId)
+    {
+        if (sourceBusinessUnitId != BusinessUnitId)
+            throw new InvalidOperationException(
+                "A customer origin cannot be carried across business units.");
+
+        if (DemandSource == SupplierPurchaseOrderDemandSources.Stock)
+        {
+            if (customerPurchaseOrderId.HasValue || customerOrderId.HasValue || quoteId.HasValue)
+                throw new InvalidOperationException(
+                    "A STOCK replenishment purchase order has no customer behind it and cannot carry "
+                    + "a customer purchase order, sales order or quotation key.");
+            return;
+        }
+
+        if ((CustomerPurchaseOrderId.HasValue && CustomerPurchaseOrderId != customerPurchaseOrderId)
+            || (CustomerOrderId.HasValue && CustomerOrderId != customerOrderId)
+            || (QuoteId.HasValue && QuoteId != quoteId))
+            throw new InvalidOperationException(
+                "A supplier purchase order customer origin cannot be replaced.");
+
+        CustomerPurchaseOrderId = customerPurchaseOrderId;
+        CustomerOrderId = customerOrderId;
+        QuoteId = quoteId;
+    }
+
+    /// <summary>
+    /// True when the order names at least one customer document it was bought for. Absent on a
+    /// STOCK order by definition; absent on a CUSTOMER_DEMAND order it is a reportable gap, never a
+    /// blank to be read past.
+    /// </summary>
+    [NotMapped]
+    public bool StatesCustomerOrigin =>
+        CustomerPurchaseOrderId.HasValue || CustomerOrderId.HasValue || QuoteId.HasValue;
 }
 
 public sealed class SupplierPurchaseOrderLine
@@ -375,6 +506,28 @@ public sealed class SupplierPurchaseOrderLine
     public long? IncomingInventoryId { get; set; }
     public decimal OrderedQuantity { get; set; }
     public decimal ReceivedQuantity { get; set; }
+
+    /// <summary>
+    /// FR-MAS-05. Running total of this line's quantity placed on inbound supplier shipments that
+    /// have not been cancelled.
+    ///
+    /// <para>Partial shipment is the normal case — one line for 500 units routinely arrives as
+    /// 200 + 300 weeks apart — so the reconciliation invariant "the sum shipped can never exceed the
+    /// quantity ordered" needs somewhere to live that a second code path cannot bypass. It lives
+    /// here, maintained by <c>InboundShipmentApplicationService</c> inside the same serializable
+    /// transaction that writes the shipment line, and guarded by
+    /// <c>CK_supplier_purchase_order_lines_ShippedQuantity</c>. A validator alone is a rule that
+    /// holds only until the next writer.</para>
+    ///
+    /// <para>Cancelling a shipment releases its quantity back here, otherwise a line abandoned in
+    /// transit could never be re-shipped.</para>
+    ///
+    /// <para>Deliberately NOT bounded by <see cref="ReceivedQuantity"/>: a goods receipt can be
+    /// posted for material that was never recorded on a shipment (a local supplier delivering by
+    /// van), and forcing the two to agree would refuse a legitimate receipt.</para>
+    /// </summary>
+    public decimal ShippedQuantity { get; set; }
+
     public decimal UnitCost { get; set; }
     public decimal LandedUnitCost { get; set; }
 

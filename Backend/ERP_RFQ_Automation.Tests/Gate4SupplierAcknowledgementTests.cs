@@ -88,14 +88,14 @@ public sealed class Gate4SupplierAcknowledgementTests
         // A counter is the supplier asking for different terms. It is an ANSWER, which is why it
         // stops the escalation, but it is not AGREEMENT, so the order must not read as acknowledged
         // to anyone glancing at the status column.
-        Assert.Equal(SupplierPurchaseOrderStatuses.Issued, result.Status);
+        Assert.Equal(SupplierPurchaseOrderStatuses.Sent, result.Status);
         Assert.Equal(SupplierAcknowledgementStatuses.Countered, result.AcknowledgementStatus);
         Assert.Equal(45, result.RevisedLeadTimeDays);
         Assert.Equal(shipDate, result.CommittedShipDate);
 
         await using var verify = fixture.Context();
         var row = await verify.SupplierPurchaseOrders.SingleAsync(x => x.Id == dispatched.Id);
-        Assert.Equal(SupplierPurchaseOrderStatuses.Issued, row.Status);
+        Assert.Equal(SupplierPurchaseOrderStatuses.Sent, row.Status);
         Assert.Equal(SupplierAcknowledgementStatuses.Countered, row.AcknowledgementStatus);
         Assert.NotNull(row.AcknowledgedOn);
         Assert.Equal(45, row.RevisedLeadTimeDays);
@@ -115,12 +115,12 @@ public sealed class Gate4SupplierAcknowledgementTests
             Ack(fixture, dispatched.Id, "ack-reject-cmd", SupplierAcknowledgementStatuses.Rejected,
                 dispatched.Version, note: "Material discontinued; cannot supply.")));
 
-        Assert.Equal(SupplierPurchaseOrderStatuses.Issued, result.Status);
+        Assert.Equal(SupplierPurchaseOrderStatuses.Sent, result.Status);
         Assert.Equal(SupplierAcknowledgementStatuses.Rejected, result.AcknowledgementStatus);
 
         await using var verify = fixture.Context();
         var row = await verify.SupplierPurchaseOrders.SingleAsync(x => x.Id == dispatched.Id);
-        Assert.Equal(SupplierPurchaseOrderStatuses.Issued, row.Status);
+        Assert.Equal(SupplierPurchaseOrderStatuses.Sent, row.Status);
         Assert.Equal(SupplierAcknowledgementStatuses.Rejected, row.AcknowledgementStatus);
         Assert.Equal("Material discontinued; cannot supply.", row.AcknowledgementNote);
         Assert.NotNull(row.AcknowledgedOn);

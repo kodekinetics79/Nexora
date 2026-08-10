@@ -68,6 +68,28 @@ public sealed class SupplierQuoteRevision
     public string? Incoterms { get; set; }
     public decimal FreightAmount { get; set; }
     public decimal TaxAmount { get; set; }
+
+    /// <summary>
+    /// Import duty the buyer will pay to bring this round in, as the buyer already knows it.
+    ///
+    /// <para>Decision R8 rules out DERIVING duty from an HS code — no rate engine, no Incoterm cost
+    /// derivation. It does not rule out RECORDING the amount. R8's reasoning ("duty is already
+    /// inside the price") holds for a customer price a rep types; it is false for a supplier
+    /// quoting FOB or EXW, who by definition has not paid KSA duty and has not put it in the price.
+    /// With this column at a hard zero, a 5% duty at a 20% target margin underpriced every import
+    /// by 6.25% — <c>1 / (1 - 0.2) - 1</c> applied to the missing 5%.</para>
+    /// </summary>
+    public decimal DutyAmount { get; set; }
+
+    /// <summary>Clearance, handling, inspection and the like: irrecoverable, and cost of the goods.</summary>
+    public decimal OtherAmount { get; set; }
+
+    /// <summary>
+    /// A round-level discount the supplier granted. Subtracted from landed cost, because it is
+    /// money the goods did not cost. It used to be dropped entirely on the way into the canonical
+    /// revision, so a re-projection silently priced without it.
+    /// </summary>
+    public decimal DiscountAmount { get; set; }
     public string? PaymentTerms { get; set; }
     public string? Notes { get; set; }
     public bool RequiresReview { get; set; }

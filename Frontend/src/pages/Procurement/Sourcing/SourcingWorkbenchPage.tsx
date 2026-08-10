@@ -44,6 +44,7 @@ import {
   ShoppingCartCheckout,
   PriceCheck,
   Insights,
+  WarningAmber,
 } from "@mui/icons-material";
 import { toast } from "react-hot-toast";
 import procurementService, {
@@ -64,6 +65,7 @@ import warehouseService, {
 } from "../../../api/services/warehouseService";
 import { useAuth } from "../../../context/AuthContext";
 import commercialLearningService from "../../../api/services/commercialLearningService";
+import InboundShipmentsPanel from "./InboundShipmentsPanel";
 
 const commandKey = (prefix: string) => `${prefix}:${crypto.randomUUID()}`;
 const number = (value: unknown) => Number(value || 0);
@@ -798,6 +800,23 @@ function SourcingWorkbenchPage() {
                     ) : (
                       <Chip size="small" color="success" label="Complete" />
                     )}
+                    {/* Cost-completeness warnings are separate from blockers: the offer is
+                        awardable, but its landed cost looks incomplete — an EXW or FOB quote
+                        recording no customs duty, for example. Rendered here rather than hidden
+                        behind a tooltip, because an underpriced offer wins the comparison on
+                        landed cost and nothing else on this screen would say why. */}
+                    {(authoritativeOffer?.costWarnings ?? []).map((warning) => (
+                      <Tooltip key={warning} title={warning}>
+                        <Chip
+                          size="small"
+                          color="warning"
+                          variant="outlined"
+                          icon={<WarningAmber />}
+                          label="Cost may be incomplete"
+                          sx={{ mr: 0.5, mb: 0.5 }}
+                        />
+                      </Tooltip>
+                    ))}
                   </TableCell>
                   <TableCell align="right">
                     {remainingRequirement(offer.rfqItemId)}
@@ -1014,8 +1033,11 @@ function SourcingWorkbenchPage() {
                         !canReceive ||
                         // Mirrors SupplierPurchaseOrderStatuses.OpenForReceipt. ACKNOWLEDGED and
                         // the states beyond it were missing, so a supplier accepting the order was
-                        // the very act that hid the receipt button for it.
+                        // the very act that hid the receipt button for it. SENT is here for the
+                        // same reason: release writes SENT, ISSUED is the legacy word for the same
+                        // fact, and omitting either hides the button for a real dispatched order.
                         ![
+                          "SENT",
                           "ISSUED",
                           "ACKNOWLEDGED",
                           "IN_PRODUCTION",
@@ -1090,6 +1112,23 @@ function SourcingWorkbenchPage() {
                     </TableBody>
                   </Table>
                 </Box>
+                {/*
+                  FR-MAS-01..05. Inbound supplier shipments hang off the supplier PO (decision R3),
+                  so they belong on the order card rather than on a screen of their own. The panel
+                  owns its own queries and dialogs — this page is already long enough.
+                */}
+                <InboundShipmentsPanel
+                  purchaseOrderId={order.id}
+                  purchaseOrderNumber={order.purchaseOrderNumber}
+                  lines={order.lines.map((line) => ({
+                    id: line.id,
+                    description: line.description,
+                    orderedQuantity: line.orderedQuantity,
+                    receivedQuantity: line.receivedQuantity,
+                  }))}
+                  canEdit={canIssuePo}
+                  canManagePorts={hasPermission("Products", "create")}
+                />
               </Paper>
             ))
           )}

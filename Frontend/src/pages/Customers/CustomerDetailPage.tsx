@@ -24,6 +24,7 @@ import contactService from '../../api/services/contactService';
 import intelligenceService from '../../api/services/intelligenceService';
 import commercialLearningService from '../../api/services/commercialLearningService';
 import commercialIntelligenceService from '../../api/services/commercialIntelligenceService';
+import ChangeHistoryPanel from '../../components/common/ChangeHistoryPanel';
 import { useAuth } from '../../context/AuthContext';
 
 const healthWindow = () => {
@@ -333,6 +334,21 @@ const CustomerDetailPage: React.FC = () => {
             <InfoRow label="State" value={customer.shippingState} />
             <InfoRow label="Country" value={customer.shippingCountry} />
             <InfoRow label="Postal Code" value={customer.shippingPostalCode} />
+          </Section>
+        </Grid>
+
+        {/* FR-MDM-05 · the record's own before/after trail. Placed after the addresses it audits,
+            because a changed billing address is the most common master-data edit on this screen
+            and "when did that change, and who changed it" is the question it raises. */}
+        <Grid size={{ xs: 12 }}>
+          <Section title="Change history" icon={<HistoryIcon sx={{ fontSize: 16 }} />}>
+            {!canViewCustomers
+              ? <Alert severity="info">Customer view permission is required.</Alert>
+              : <ChangeHistoryPanel
+                  entityType="Customer"
+                  entityId={Number(id)}
+                  emptyMessage="No changes have been recorded for this customer since audit capture began."
+                />}
           </Section>
         </Grid>
       </Grid>

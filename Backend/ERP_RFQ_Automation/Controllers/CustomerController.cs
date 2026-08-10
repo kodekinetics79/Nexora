@@ -2,6 +2,7 @@ using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.CommercialRouting;
 using ERP_RFQ_Automation.DTOs.CustomerDTOs;
 using ERP_RFQ_Automation.Interfaces;
+using ERP_RFQ_Automation.MasterData;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Security.DocumentInspection;
 using Microsoft.AspNetCore.Authorization;
@@ -21,16 +22,19 @@ namespace ERP_RFQ_Automation.Controllers
         private readonly ICustomerRepository _repository;
         private readonly IWebHostEnvironment _environment;
         private readonly IFileInspectionService _fileInspection;
+        private readonly IMasterDataChangeHistoryReader _changeHistory;
         private static readonly int[] AllowedPageSizes = { 5, 10, 25, 50, 100, 1000 };
 
         public CustomerController(
             ICustomerRepository repository,
             IWebHostEnvironment environment,
-            IFileInspectionService fileInspection)
+            IFileInspectionService fileInspection,
+            IMasterDataChangeHistoryReader changeHistory)
         {
             _repository = repository;
             _environment = environment;
             _fileInspection = fileInspection;
+            _changeHistory = changeHistory;
         }
 
         // GET: api/Customer?pageNumber=1&pageSize=10&id=1&name=abc&contactEmail=abc@example.com&isActive=true&docId=CU00000001
@@ -270,6 +274,34 @@ namespace ERP_RFQ_Automation.Controllers
             catch (Exception)
             {
                 return StatusCode(StatusCodes.Status500InternalServerError, "Unable to deactivate the customer.");
+            }
+        }
+
+        /// <summary>
+        /// FR-MDM-05 — the before/after trail for one customer, newest first.
+        ///
+        /// <para>Gated by the Customers module's own View permission rather than by a separate
+        /// audit right: the trail discloses nothing a caller who can open the record cannot
+        /// already read from the record itself, and putting it behind a right nobody has been
+        /// granted is how an audit trail ends up unread.</para>
+        /// </summary>
+        [HttpGet("{id}/change-history")]
+        [RequireModulePermission("Customers", PermissionAction.View)]
+        public async Task<ActionResult<IReadOnlyList<MasterDataChangeEventDto>>> GetChangeHistory(
+            long id, [FromQuery] int limit = 50)
+        {
+            if (!TryGetAuthenticatedBusinessUnitId(out var targetBUId))
+                return BadRequest("Business Unit ID is required.");
+
+            try
+            {
+                return Ok(await _changeHistory.ReadAsync(
+                    MasterDataEntityTypes.Customer, id, targetBUId, limit, HttpContext.RequestAborted));
+            }
+            catch (Exception)
+            {
+                return StatusCode(StatusCodes.Status500InternalServerError,
+                    "Unable to retrieve the customer change history.");
             }
         }
 

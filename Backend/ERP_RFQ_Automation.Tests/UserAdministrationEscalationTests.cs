@@ -154,6 +154,7 @@ public sealed class UserAdministrationEscalationTests
         public Task<IEnumerable<DTOs.BusinessUnit.BusinessUnitResponseDTO>> GetBusinessUnitsAsync() => throw new NotSupportedException();
         public Task<IEnumerable<DTOs.UserGroup.UserGroupResponseDTO>> GetUserGroupsAsync(long businessUnitId) => throw new NotSupportedException();
         public Task ChangePasswordAsync(long id, string newPassword) => throw new NotSupportedException();
+        public Task<bool> VerifyPasswordAsync(long id, long businessUnitId, string candidatePassword) => throw new NotSupportedException();
     }
 
     private sealed class StubWebHostEnvironment : IWebHostEnvironment

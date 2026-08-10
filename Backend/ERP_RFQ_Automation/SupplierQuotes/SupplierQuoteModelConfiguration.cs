@@ -54,12 +54,23 @@ public static class SupplierQuoteModelConfiguration
             entity.Property(x => x.Notes).HasMaxLength(4000);
             entity.Property(x => x.FreightAmount).HasPrecision(18, 4);
             entity.Property(x => x.TaxAmount).HasPrecision(18, 4);
+            // Configured exactly like FreightAmount and TaxAmount above — numeric(18,4), NOT NULL,
+            // no store default. HasDefaultValue would give these three ValueGenerated.OnAdd and
+            // make them behave differently from their siblings for no gain; the ADD COLUMN in the
+            // migration carries defaultValue: 0m to backfill existing rows.
+            entity.Property(x => x.DutyAmount).HasPrecision(18, 4);
+            entity.Property(x => x.OtherAmount).HasPrecision(18, 4);
+            entity.Property(x => x.DiscountAmount).HasPrecision(18, 4);
             entity.Property(x => x.IdempotencyKey).HasMaxLength(160).IsRequired();
             entity.Property(x => x.RequestHash).HasMaxLength(64).IsRequired();
             entity.Property(x => x.CapturedBy).HasMaxLength(255).IsRequired();
             entity.Property(x => x.CorrelationId).HasMaxLength(160).IsRequired();
+            // Duty, other and discount are non-negative for the same reason freight and tax are: a
+            // negative charge would reduce landed cost and therefore the customer price, and no
+            // supplier bills a negative duty. A refund is a new revision, not a negative charge.
             entity.HasCheckConstraint("CK_supplier_quote_revisions_Values",
-                "\"RevisionNumber\" > 0 AND \"FreightAmount\" >= 0 AND \"TaxAmount\" >= 0");
+                "\"RevisionNumber\" > 0 AND \"FreightAmount\" >= 0 AND \"TaxAmount\" >= 0 " +
+                "AND \"DutyAmount\" >= 0 AND \"OtherAmount\" >= 0 AND \"DiscountAmount\" >= 0");
             entity.HasIndex(x => new { x.BusinessUnitId, x.SupplierQuoteId, x.RevisionNumber }).IsUnique();
             entity.HasIndex(x => new { x.BusinessUnitId, x.IdempotencyKey }).IsUnique();
             entity.HasOne(x => x.SupplierQuote).WithMany(x => x.Revisions)

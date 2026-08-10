@@ -74,7 +74,7 @@ public sealed class Gate4SupplierPurchaseOrderApprovalTests
 
         var released = await fixture.Execute(service => service.IssuePurchaseOrderAsync(
             fixture.Issue(draft.Id, "approve-records-issue", approval.Version)));
-        Assert.Equal(SupplierPurchaseOrderStatuses.Issued, released.Status);
+        Assert.Equal(SupplierPurchaseOrderStatuses.Sent, released.Status);
     }
 
     [Fact]

@@ -133,6 +133,13 @@ public sealed record InventorySnapshot
     public decimal SafetyStock { get; init; }
     public DateTime AsOf { get; init; }
 
+    /// <summary>
+    /// Available-to-promise. The negative-quantity guard stays here — a snapshot built from
+    /// corrupt inputs must fail loudly rather than be clamped into a plausible-looking zero — but
+    /// the arithmetic itself delegates to <see cref="InventoryQuantityMath.AvailableToPromise"/>.
+    /// It used to be spelled out again in this getter, which is how the two copies would have
+    /// diverged the first time a bucket was added on one side only.
+    /// </summary>
     public decimal AvailableToPromise
     {
         get
@@ -140,8 +147,8 @@ public sealed record InventorySnapshot
             if (OnHand < 0m || Reserved < 0m || Allocated < 0m || Quarantine < 0m
                 || Damaged < 0m || Expired < 0m || SafetyStock < 0m)
                 throw new InvalidOperationException("Inventory snapshot quantities cannot be negative.");
-            return Math.Max(0m,
-                OnHand - Reserved - Allocated - Quarantine - Damaged - Expired - SafetyStock);
+            return InventoryQuantityMath.AvailableToPromise(
+                OnHand, Reserved, Allocated, Quarantine, Damaged, Expired, SafetyStock);
         }
     }
 }

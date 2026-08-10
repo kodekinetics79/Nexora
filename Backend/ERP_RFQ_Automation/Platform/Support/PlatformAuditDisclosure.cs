@@ -90,6 +90,11 @@ public static class PlatformAuditDisclosure
             ["billing.invoice.payment"] = PlatformPolicies.Billing,
             ["billing.tenant.rate-card"] = PlatformPolicies.Billing,
             ["billing.tenant.commercial-terms"] = PlatformPolicies.Billing,
+            // Where a customer's invoice is SENT and when it falls due — same writer, same class
+            // gate, so the same reader. Registered explicitly rather than left to the fail-closed
+            // default, which would hide a BillingAdmin's own change from the BillingAdmin who made
+            // it: the one reader who certainly needs to check it.
+            ["billing.tenant.account-contact"] = PlatformPolicies.Billing,
 
             // Platform/Controllers/TenantsController.ChangePlan — Sec9 puts plan assignment on the
             // BILLING policy precisely so support cannot change what a customer is charged. Reading
@@ -135,6 +140,10 @@ public static class PlatformAuditDisclosure
             ["tenant.resume"] = PlatformPolicies.TenantAdmin,
             ["tenant.archive"] = PlatformPolicies.TenantAdmin,
             ["tenant.restore"] = PlatformPolicies.TenantAdmin,
+            // Owner, matching its writer. The payload is a contractual residency assertion and the
+            // evidence it was checked against, which is an auditor's document rather than a
+            // support one.
+            ["tenant.data-region.update"] = PlatformPolicies.Owner,
             ["tenant.ai-policy.update"] = PlatformPolicies.Owner,
             ["tenant.ai-provider.authorize"] = PlatformPolicies.Owner,
             ["tenant.ai-provider.revoke"] = PlatformPolicies.Owner,

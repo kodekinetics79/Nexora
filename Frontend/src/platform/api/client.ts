@@ -48,6 +48,7 @@ import type {
   RateCard,
   RevenueRiskReport,
   SavePlatformEmailSettingsInput,
+  SetAccountContactInput,
   SetCommercialTermsInput,
   SlugAvailability,
   SubmitProvisioningResult,
@@ -64,6 +65,7 @@ import type {
   TenantActivationDecision,
   ActivationControlEvidenceReceipt,
   Tenant,
+  TenantAdminInvitation,
   TenantDataAsset,
   TenantDataRecoveryEvidence,
   TenantDeletionCertificationDecision,
@@ -84,6 +86,9 @@ import type {
   TestOutboundEmailResult,
   UpdateRateCardInput,
   UpdateTenantAiPolicyInput,
+  UpdateTenantDataRegionInput,
+  UpdateTenantProfileInput,
+  ResendTenantAdminInvitationResult,
   UsageRatingCorrection,
   RegisterTenantDataAssetInput,
   VerifyTenantDataAssetInput,
@@ -148,6 +153,13 @@ export interface PlatformApi {
   getOverview(): Promise<OverviewMetrics>;
   listTenants(): Promise<Tenant[]>;
   getTenant(id: string): Promise<Tenant>;
+  updateTenantProfile(id: string, input: UpdateTenantProfileInput): Promise<Tenant>;
+  updateTenantDataRegion(id: string, input: UpdateTenantDataRegionInput): Promise<Tenant>;
+  listTenantAdminInvitations(id: string): Promise<TenantAdminInvitation[]>;
+  resendTenantAdminInvitation(
+    id: string,
+    input: { userId?: string | null; reason: string },
+  ): Promise<ResendTenantAdminInvitationResult>;
   markTenantPastDue(id: string, reason: string): Promise<Tenant>;
   resolveTenantPastDue(id: string, reason: string): Promise<Tenant>;
   listTenantDataAssets(tenantId: string): Promise<TenantDataAsset[]>;
@@ -292,6 +304,7 @@ export interface PlatformApi {
     body: { rateCardId: string | null; reason: string },
   ): Promise<TenantBillingProfile>;
   setTenantCommercialTerms(tenantId: string, body: SetCommercialTermsInput): Promise<TenantBillingProfile>;
+  setTenantAccountContact(tenantId: string, body: SetAccountContactInput): Promise<TenantBillingProfile>;
   getStatement(id: string): Promise<BillingStatement>;
 
   // --- support desk ---
@@ -867,6 +880,30 @@ const httpPlatformApi: PlatformApi = {
     (await platformHttp.get<BackendTenant[]>('/api/platform/tenants')).data.map(normalizeTenant),
   getTenant: async (id) =>
     normalizeTenant((await platformHttp.get<BackendTenant>(`/api/platform/tenants/${id}`)).data),
+  updateTenantProfile: async (id, input) =>
+    normalizeTenant((await platformHttp.put<BackendTenant>(`/api/platform/tenants/${id}/profile`, input)).data),
+  updateTenantDataRegion: async (id, input) =>
+    normalizeTenant(
+      (await platformHttp.put<BackendTenant>(`/api/platform/tenants/${id}/data-region`, input)).data,
+    ),
+  listTenantAdminInvitations: async (id) =>
+    (await platformHttp.get<TenantAdminInvitation[]>(`/api/platform/tenants/${id}/admin-invitations`)).data
+      .map((item) => ({ ...item, id: String(item.id), userId: String(item.userId) })),
+  resendTenantAdminInvitation: async (id, input) => {
+    const body = { ...input, userId: input.userId == null ? null : Number(input.userId) };
+    const result = (await platformHttp.post<ResendTenantAdminInvitationResult>(
+      `/api/platform/tenants/${id}/admin-invitations/resend`, body,
+    )).data;
+    return {
+      ...result,
+      activationUrl: result.activationUrl ?? null,
+      invitation: {
+        ...result.invitation,
+        id: String(result.invitation.id),
+        userId: String(result.invitation.userId),
+      },
+    };
+  },
   markTenantPastDue: async (id, reason) =>
     normalizeTenant((await platformHttp.post<BackendTenant>(`/api/platform/tenants/${id}/mark-past-due`, { reason })).data),
   resolveTenantPastDue: async (id, reason) =>
@@ -1351,6 +1388,13 @@ const httpPlatformApi: PlatformApi = {
     normalizeBillingProfile(
       (await platformHttp.put<WireRecord>(
         `/api/platform/billing/tenants/${tenantId}/commercial-terms`,
+        body,
+      )).data,
+    ),
+  setTenantAccountContact: async (tenantId, body) =>
+    normalizeBillingProfile(
+      (await platformHttp.put<WireRecord>(
+        `/api/platform/billing/tenants/${tenantId}/account-contact`,
         body,
       )).data,
     ),

@@ -1,3 +1,4 @@
+using ERP_RFQ_Automation.AI;
 using ERP_RFQ_Automation.Agent.Guardrails;
 using ERP_RFQ_Automation.Agent.Llm;
 using ERP_RFQ_Automation.Agent.Tools;
@@ -19,9 +20,24 @@ public static class AgentServiceCollectionExtensions
         // ---- LLM: real Claude when a key is present, deterministic mock otherwise ----
         var apiKey = configuration["Agent:Anthropic:ApiKey"];
         if (!string.IsNullOrWhiteSpace(apiKey))
-            services.AddHttpClient<IAgentLlm, AnthropicAgentLlm>(c => c.Timeout = TimeSpan.FromSeconds(120));
+        {
+            // The agent posts the whole conversation to this origin, so it is classified by
+            // the same rules as every other AI destination and its socket is opened through
+            // the same guard: no redirects (a 307 would re-send the conversation to whatever
+            // host it named), and the resolved address must match the classification at
+            // connect time, not merely at startup.
+            var anthropic = AiProviderEndpoint.Describe(
+                AnthropicProviderDefaults.Provider,
+                AnthropicProviderDefaults.BaseUrl(configuration),
+                AnthropicProviderDefaults.Model(configuration));
+            services.AddHttpClient<IAgentLlm, AnthropicAgentLlm>(c => c.Timeout = TimeSpan.FromSeconds(120))
+                .ConfigurePrimaryHttpMessageHandler(() =>
+                    AiEgressGuard.CreateHandler(() => anthropic.ProviderClass));
+        }
         else
+        {
             services.AddSingleton<IAgentLlm, MockAgentLlm>();
+        }
 
         // ---- Tools (registered as IAgentTool; discovered by the registry) ----
         services.AddScoped<IAgentTool, SearchRfqsTool>();

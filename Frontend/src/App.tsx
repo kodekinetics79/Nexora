@@ -30,6 +30,10 @@ const IncomingPage = lazy(() => import('./pages/Inventory/Commercial/IncomingPag
 const MovementsPage = lazy(() => import('./pages/Inventory/Commercial/MovementsPage'));
 const DemandPage = lazy(() => import('./pages/Inventory/Commercial/DemandPage'));
 const RelatedResourcesPage = lazy(() => import('./pages/Inventory/Commercial/RelatedResourcesPage'));
+// Gate 5 / FR-MTR-01..05 — material lots, certificates, quarantine and where-used trace.
+const LotsPage = lazy(() => import('./pages/Inventory/Traceability/LotsPage'));
+const LotDetailPage = lazy(() => import('./pages/Inventory/Traceability/LotDetailPage'));
+const OrderTracePage = lazy(() => import('./pages/Inventory/Traceability/OrderTracePage'));
 const SuppliersPage = lazy(() => import('./pages/Suppliers/SuppliersPage'));
 const SupplierDetailPage = lazy(() => import('./pages/Suppliers/SupplierDetailPage'));
 const QuotedItemsPage = lazy(() => import('./pages/Suppliers/QuotedItemsPage'));
@@ -73,7 +77,6 @@ const ClientPurchaseOrderReviewPage = lazy(() => import('./pages/Sales/ClientPur
 const OrderListPage = lazy(() => import('./pages/Sales/Orders/OrderListPage'));
 const CreateOrderPage = lazy(() => import('./pages/Sales/Orders/CreateOrderPage'));
 const OrderViewPage = lazy(() => import('./pages/Sales/Orders/OrderViewPage'));
-const OrderInvoicePage = lazy(() => import('./pages/Sales/Shipments/OrderInvoicePage'));
 const AccountsReceivablePage = lazy(() => import('./pages/Sales/Finance/AccountsReceivablePage'));
 const ShipmentListPage = lazy(() => import('./pages/Sales/Shipments/ShipmentListPage'));
 const CreateShipmentPage = lazy(() => import('./pages/Sales/Shipments/CreateShipmentPage'));
@@ -81,6 +84,7 @@ const ShipmentViewPage = lazy(() => import('./pages/Sales/Shipments/ShipmentView
 const ShipmentInvoicePage = lazy(() => import('./pages/Sales/Shipments/ShipmentInvoicePage'));
 const PriceStructurePage = lazy(() => import('./pages/Setup/PriceStructure/PriceStructurePage'));
 const SlaSettingsPage = lazy(() => import('./pages/Setup/Sla/SlaSettingsPage'));
+const CommercialPolicyPage = lazy(() => import('./pages/Setup/CommercialPolicy/CommercialPolicyPage'));
 const MailboxPage = lazy(() => import('./pages/Setup/Mailbox/MailboxPage'));
 const RoutingRulesPage = lazy(() => import('./pages/Setup/RoutingRules/RoutingRulesPage'));
 const CustomFieldsPage = lazy(() => import('./pages/Setup/CustomFields/CustomFieldsPage'));
@@ -227,7 +231,9 @@ function App() {
       <Route path="/sales/shipments/:id" element={<MainLayout><PermissionGuard moduleName="Shipments"><ShipmentViewPage /></PermissionGuard></MainLayout>} />
       
       {/* Sales Invoices/Documents */}
-      <Route path="/sales/orders/invoice/:id" element={<PermissionGuard moduleName="Orders"><OrderInvoicePage /></PermissionGuard>} />
+      {/* No order-level tax-invoice route: the governed AR document is issued by the finance
+          subsystem and is reached via /sales/finance. A page that renders an order as an
+          "invoice" is not the issued document and must not exist before the ZATCA gate. */}
       <Route path="/sales/shipments/invoice/:id" element={<PermissionGuard moduleName="Shipments"><ShipmentInvoicePage /></PermissionGuard>} />
       
       <Route path="/orders" element={<Navigate to="/sales/orders" replace />} />
@@ -264,6 +270,7 @@ function App() {
       {/* SLA & alert policy (WP-A2). Guarded by the generic setup module ("UOM"),
           matching /setup/master and /setup/price-structure. */}
       <Route path="/setup/sla" element={<MainLayout><PermissionGuard moduleName="UOM"><SlaSettingsPage /></PermissionGuard></MainLayout>} />
+      <Route path="/setup/commercial-policy" element={<MainLayout><PermissionGuard moduleName="UOM"><CommercialPolicyPage /></PermissionGuard></MainLayout>} />
       {/* Mailbox administration. Guarded by "Email & SMTP" — the module the supplier-email
           screen already uses — rather than the generic setup module, because these rows hold
           stored credentials and decide where customer-facing mail is sent from. */}
@@ -290,6 +297,10 @@ function App() {
       <Route path="/inventory/movements" element={<MainLayout><PermissionGuard moduleName="Products"><MovementsPage /></PermissionGuard></MainLayout>} />
       <Route path="/inventory/demand" element={<MainLayout><PermissionGuard moduleName="Products"><DemandPage /></PermissionGuard></MainLayout>} />
       <Route path="/inventory/resources" element={<MainLayout><PermissionGuard moduleName="Products"><RelatedResourcesPage /></PermissionGuard></MainLayout>} />
+      <Route path="/inventory/lots" element={<MainLayout><PermissionGuard moduleName="Products"><LotsPage /></PermissionGuard></MainLayout>} />
+      <Route path="/inventory/lots/:lotId" element={<MainLayout><PermissionGuard moduleName="Products"><LotDetailPage /></PermissionGuard></MainLayout>} />
+      <Route path="/inventory/order-trace" element={<MainLayout><PermissionGuard moduleName="Products"><PermissionGuard moduleName="Orders"><OrderTracePage /></PermissionGuard></PermissionGuard></MainLayout>} />
+      <Route path="/inventory/order-trace/:orderId" element={<MainLayout><PermissionGuard moduleName="Products"><PermissionGuard moduleName="Orders"><OrderTracePage /></PermissionGuard></PermissionGuard></MainLayout>} />
       <Route path="/inventory/products" element={<MainLayout><PermissionGuard moduleName="Products"><ProductsPage /></PermissionGuard></MainLayout>} />
       <Route path="/inventory/products/:id" element={<MainLayout><PermissionGuard moduleName="Products"><ProductDetailPage /></PermissionGuard></MainLayout>} />
       <Route path="/inventory/categories" element={<MainLayout><PermissionGuard moduleName="Product Categories"><ProductCategoryPage /></PermissionGuard></MainLayout>} />

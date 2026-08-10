@@ -64,3 +64,49 @@ describe('platform cross-tab session bridge', () => {
     expect(bridge.messages).toHaveLength(before);
   });
 });
+
+/**
+ * Sec-D2. The console must route a password-only operator to enrollment rather than into a
+ * console where every screen answers 403 with nothing saying which one to open.
+ *
+ * This reads the `amr` claim off the SAME token the server reads, so the client's idea of
+ * "MFA-authenticated" cannot drift away from `PlatformPolicies.PlatformScope`.
+ */
+describe('platform MFA-authenticated snapshot', () => {
+  // A JWT is three dot-separated base64url segments; only the payload is read here, and no
+  // signature is involved because this is a routing hint, never a control.
+  const tokenWith = (payload: Record<string, unknown>) =>
+    ['e30', btoa(JSON.stringify(payload)).replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_'), 'sig'].join('.');
+
+  const farFuture = Math.floor(Date.now() / 1000) + 3600;
+
+  beforeEach(() => {
+    vi.resetModules();
+    sessionStorage.clear();
+    vi.stubGlobal('BroadcastChannel', FakeBroadcastChannel);
+  });
+
+  it('is false for a password-only session', async () => {
+    const session = await import('./platformSession');
+    session.setPlatformSession(
+      tokenWith({ scope: 'platform', exp: farFuture }), { email: 'owner@example.test' });
+
+    expect(session.getPlatformAuthedSnapshot()).toBe(true);
+    expect(session.getPlatformMfaAuthenticatedSnapshot()).toBe(false);
+  });
+
+  it('is true once the token carries amr=mfa', async () => {
+    const session = await import('./platformSession');
+    session.setPlatformSession(
+      tokenWith({ scope: 'platform', amr: 'mfa', exp: farFuture }), { email: 'owner@example.test' });
+
+    expect(session.getPlatformMfaAuthenticatedSnapshot()).toBe(true);
+  });
+
+  it('is false for an unreadable token rather than defaulting to the console', async () => {
+    const session = await import('./platformSession');
+    session.setPlatformSession('not-a-jwt', { email: 'owner@example.test' });
+
+    expect(session.getPlatformMfaAuthenticatedSnapshot()).toBe(false);
+  });
+});

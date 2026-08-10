@@ -146,6 +146,18 @@ const QuotesPage: React.FC = () => {
         queryClient.invalidateQueries({ queryKey: ['quote-price-attestation', variables.id] });
         return;
       }
+      // R17: nothing was sent because a line's output tax was never calculated. Re-confirming the
+      // price source would not fix it, so the dialog closes and the server's sentence is shown.
+      if (result.taxDerivationRequired) {
+        setPriceConfirmTarget(null);
+        setSnackbar({
+          open: true,
+          message: result.message
+            || 'A line has no calculated tax. Set the output tax rate in Commercial Policy settings.',
+          severity: 'error',
+        });
+        return;
+      }
       setPriceConfirmTarget(null);
       if (result.held) {
         // Not a failure and not a success: the send is parked in Approvals (WP-B3).

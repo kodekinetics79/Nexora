@@ -38,7 +38,10 @@ public sealed class TenantOffboardingController(
     // GET /api/platform/tenants/{tenantId}/offboarding
     [HttpGet("{tenantId:long}/offboarding")]
     public Task<ActionResult<TenantOffboardingStatusDto>> Get(long tenantId, CancellationToken ct) =>
-        Execute(() => offboarding.GetStatusAsync(tenantId, ct));
+        // The signed-in operator is passed so the separation-of-duties verdict is computed about a
+        // real person. Without it the console would offer a purge button to the very Owner whose
+        // own scheduling decision makes the purge refusable.
+        Execute(() => offboarding.GetStatusAsync(tenantId, ct, User));
 
     /// <summary>Every tenant whose retention clock is running, soonest first.</summary>
     // GET /api/platform/tenants/offboarding/pending

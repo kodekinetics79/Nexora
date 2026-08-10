@@ -13,6 +13,27 @@
 // fields the downstream flow depends on are present, and whether the evidence
 // ledger flagged the value it extracted. A count of those lines is denser
 // information than a percentage, and it is actionable.
+//
+// ---------------------------------------------------------------------------
+// ABSENT FROM THE DOCUMENT vs. FAILED TO READ
+//
+// A signal that fires on every document carries no information. This one used
+// to: it demanded a unit of measure on every line, and an inbound RFQ is a
+// REQUEST — the buyer states a quantity and asks the supplier for the unit
+// price, the currency and the lead time. Every line of every correctly-read
+// document was flagged, and the genuinely broken lines were buried among them.
+//
+// The two cases are separated here by evidence, never by guesswork:
+//
+//   ABSENT   The document states the field NOWHERE — no line of it carries a
+//            value, and the ledger recorded no source text. Nothing was misread,
+//            so nothing is flagged.
+//   MISREAD  The document states the field on some other line but not this one,
+//            or the ledger holds source text for it that did not yield a value.
+//            Both still flag, because both are gaps a human must close.
+//
+// So a price sheet that prices seven of eight lines still flags the eighth, and
+// an RFQ that prices none of them flags nothing.
 // ---------------------------------------------------------------------------
 
 export type LineCheckState = 'needs-check' | 'verified';
@@ -34,36 +55,93 @@ export interface LineCheckResult {
   reasons: string[];
 }
 
-/** Validation outcomes from the evidence ledger that a human must resolve. */
-const BLOCKING_VALIDATION_STATUSES = new Set(['warning', 'invalid']);
+/**
+ * One field's outcome in the evidence ledger, as the review screen receives it.
+ *
+ * `rawValue` is what separates a ledger warning that means "the document said
+ * something here we could not interpret" from one that means "there was nothing
+ * here". Both arrive as `Warning`; only the first is a reading failure.
+ */
+export interface FieldCheckSignal {
+  status?: string | null;
+  rawValue?: string | null;
+}
 
 const isBlank = (value: string | null | undefined): boolean => (value ?? '').trim().length === 0;
 
 /**
- * Fields the quote-to-cash flow cannot proceed without. Deliberately short:
- * every entry here is a field the pilot's own data shows is normally present,
- * so a gap is a real signal and not noise.
+ * Whether a ledger outcome is a human's problem.
+ *
+ * `Invalid` always is — the ledger positively rejected a value. `Warning` is
+ * where the judgement lives: it is written for an optional field that produced
+ * no value, which covers BOTH "the buyer left it for the supplier to fill in"
+ * and "there was text here we could not parse". The recorded raw text tells the
+ * two apart, so we ask it rather than treating every warning as a defect.
  */
-export const requiredLineFields = (line: CheckableLine): string[] => {
+export const isBlockingSignal = (signal: FieldCheckSignal | string | null | undefined): boolean => {
+  const resolved: FieldCheckSignal = typeof signal === 'string' ? { status: signal } : (signal ?? {});
+  const status = (resolved.status ?? '').toLowerCase();
+  if (status === 'invalid') return true;
+  if (status !== 'warning') return false;
+  return !isBlank(resolved.rawValue);
+};
+
+/**
+ * Which optional fields THIS document states, read off the document's own lines.
+ * A field no line carries is a field the document does not contain, and a value
+ * the buyer never stated is not a reading failure.
+ */
+export interface DocumentAssertions {
+  unitOfMeasure: boolean;
+  partNumber: boolean;
+}
+
+export const documentAssertions = (lines: readonly CheckableLine[]): DocumentAssertions => ({
+  unitOfMeasure: lines.some((line) => !isBlank(line.unitOfMeasure)),
+  partNumber: lines.some((line) => !isBlank(line.manufacturerPartNumber) || !isBlank(line.itemMaterialCode)),
+});
+
+/** A document with no lines asserts nothing; used when no context is supplied. */
+const NOTHING_ASSERTED: DocumentAssertions = { unitOfMeasure: false, partNumber: false };
+
+/**
+ * Fields the quote-to-cash flow cannot proceed without.
+ *
+ * Description and quantity are unconditional: a line without them is not a line.
+ * Unit of measure and part number are conditional on the document stating them
+ * somewhere, because the buyer decides whether to state them at all — the pilot
+ * corpus's Word tables carry `Item | Description | Qty | Notes` and no unit
+ * column, and inventing a gap there flagged all 641 of its lines.
+ */
+export const requiredLineFields = (
+  line: CheckableLine,
+  assertions: DocumentAssertions = NOTHING_ASSERTED,
+): string[] => {
   const missing: string[] = [];
   if (isBlank(line.productShortDescription) && isBlank(line.productShortName)) missing.push('Description');
   if (line.quantity == null || !Number.isFinite(line.quantity)) missing.push('Quantity');
-  if (isBlank(line.unitOfMeasure)) missing.push('Unit of measure');
-  if (isBlank(line.manufacturerPartNumber) && isBlank(line.itemMaterialCode)) missing.push('Part number');
+  if (assertions.unitOfMeasure && isBlank(line.unitOfMeasure)) missing.push('Unit of measure');
+  if (assertions.partNumber && isBlank(line.manufacturerPartNumber) && isBlank(line.itemMaterialCode)) {
+    missing.push('Part number');
+  }
   return missing;
 };
 
 /**
  * Decides whether one line still needs a human look.
  *
- * @param flaggedFields validation statuses the evidence ledger recorded for
- *   this line, keyed by field name. Absent for documents whose path never wrote
- *   a ledger — the result then rests on completeness alone, which is stated
- *   rather than hidden.
+ * @param flaggedFields validation outcomes the evidence ledger recorded for this
+ *   line, keyed by field name. Absent for documents whose path never wrote a
+ *   ledger — the result then rests on completeness alone, which is stated rather
+ *   than hidden. A plain status string is accepted for callers that hold nothing
+ *   else, and is then treated as having no recorded raw text.
+ * @param assertions what the whole document states. Defaults to "nothing", so a
+ *   caller that does not supply it can only ever flag FEWER lines, never more.
  */
 export const checkLine = (
   line: CheckableLine,
-  flaggedFields?: ReadonlyMap<string, string>,
+  flaggedFields?: ReadonlyMap<string, FieldCheckSignal | string>,
+  assertions: DocumentAssertions = NOTHING_ASSERTED,
 ): LineCheckResult => {
   const reasons: string[] = [];
 
@@ -71,13 +149,13 @@ export const checkLine = (
     reasons.push('Added during this review — not present in the source document');
   }
 
-  const missing = requiredLineFields(line);
+  const missing = requiredLineFields(line, assertions);
   if (missing.length === 1) reasons.push(`${missing[0]} is blank`);
   else if (missing.length > 1) reasons.push(`${missing.slice(0, -1).join(', ')} and ${missing[missing.length - 1]} are blank`);
 
   if (flaggedFields) {
-    for (const [field, status] of flaggedFields) {
-      if (BLOCKING_VALIDATION_STATUSES.has((status ?? '').toLowerCase())) {
+    for (const [field, signal] of flaggedFields) {
+      if (isBlockingSignal(signal)) {
         reasons.push(`Source check flagged ${field}`);
       }
     }
@@ -95,11 +173,12 @@ export interface CheckSummary {
 
 export const summariseChecks = (
   lines: readonly CheckableLine[],
-  flaggedByLine?: ReadonlyMap<number, ReadonlyMap<string, string>>,
+  flaggedByLine?: ReadonlyMap<number, ReadonlyMap<string, FieldCheckSignal | string>>,
 ): CheckSummary => {
+  const assertions = documentAssertions(lines);
   const needsCheckIds: number[] = [];
   for (const line of lines) {
-    if (checkLine(line, flaggedByLine?.get(line.id)).state === 'needs-check') {
+    if (checkLine(line, flaggedByLine?.get(line.id), assertions).state === 'needs-check') {
       needsCheckIds.push(line.id);
     }
   }

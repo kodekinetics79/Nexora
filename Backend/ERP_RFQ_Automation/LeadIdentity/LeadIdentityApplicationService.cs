@@ -1138,7 +1138,11 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         foreach (var item in source.LeadItems) target.LeadItems.Add(CloneCurrentItem(item));
     }
     public static string Fingerprint(Lead lead) => Hash(JsonSerializer.Serialize(Snapshot(lead)));
-    private sealed record ItemFingerprintSnapshot(string? line, string? part, string? description, int Quantity, string? uom, string? date);
+    // Quantity is nullable because LeadItem.Quantity is. A line whose quantity was never
+    // stated now serialises as null instead of 0, so it hashes differently from a line that
+    // really does say 0 — which is the point: two documents that differ in whether they state
+    // a quantity are not the same document, and dedup must not treat them as one.
+    private sealed record ItemFingerprintSnapshot(string? line, string? part, string? description, int? Quantity, string? uom, string? date);
     private static object Snapshot(Lead x) => new { rfq = Normalize(x.Rfqno), buyer = Normalize(x.BuyersName), closing = x.BidClosingDate?.ToUniversalTime().ToString("O"),
         items = x.LeadItems.Select(ItemSnapshot).OrderBy(i => i.part).ThenBy(i => i.line).ToArray() };
     private static ItemFingerprintSnapshot ItemSnapshot(LeadItem x) => new(Normalize(x.LineItemNo), Normalize(x.ManufacturerPartNumber ?? x.ItemMaterialCode),

@@ -133,23 +133,9 @@ public static class CustomFieldModelBuilderExtensions
                 .OnDelete(DeleteBehavior.Restrict);
         });
 
-        modelBuilder.Entity<CustomFieldValueHistory>(entity =>
-        {
-            entity.ToTable("custom_field_value_history");
-            entity.HasKey(x => x.Id);
-            entity.Property(x => x.ChangeType).HasMaxLength(30).IsRequired();
-            entity.Property(x => x.ChangedBy).HasMaxLength(200).IsRequired();
-            entity.Property(x => x.CorrelationId).HasMaxLength(100).IsRequired();
-            entity.Property(x => x.IdempotencyKey).HasMaxLength(160).IsRequired();
-            entity.Property(x => x.RequestHash).HasMaxLength(64).IsRequired();
-            entity.Property(x => x.Reason).HasMaxLength(1000);
-            entity.HasIndex(x => new { x.BusinessUnitId, x.CustomFieldValueId, x.ChangedOn });
-            entity.HasIndex(x => new { x.BusinessUnitId, x.IdempotencyKey }).IsUnique();
-            entity.HasOne<CustomFieldValue>().WithMany()
-                .HasForeignKey(x => new { x.BusinessUnitId, x.CustomFieldValueId })
-                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id })
-                .OnDelete(DeleteBehavior.Restrict);
-        });
+        // custom_field_value_history is no longer mapped. It was a history facility that was never
+        // written to and could never hold a row; see the note where the entity was removed in
+        // CustomFieldValues.cs for why it was deleted rather than wired.
 
         return modelBuilder;
     }

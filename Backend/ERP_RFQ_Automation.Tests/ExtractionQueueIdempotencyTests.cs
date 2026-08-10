@@ -19,7 +19,7 @@ namespace ERP_RFQ_Automation.Tests;
 public class ExtractionQueueIdempotencyTests
 {
     private static ExtractionQueue NewQueue(ErpRfqAutomationContext ctx)
-        => new(ctx, new NoopLogger<ExtractionQueue>());
+        => new(ctx, new NoopLogger<ExtractionQueue>(), new StubTenant(null));
 
     private static EnqueueExtractionRequest Request(long bu, byte[]? content = null, string? hash = null, string path = "blob://f")
         => new()

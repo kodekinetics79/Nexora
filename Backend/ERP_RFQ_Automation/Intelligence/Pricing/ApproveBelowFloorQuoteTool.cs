@@ -160,6 +160,13 @@ public sealed class ApproveBelowFloorQuoteTool : IAgentTool
             return AgentToolResult.Fail(result.PriceAttestationReason
                 ?? "The price source has not been confirmed for this quote, so it was not sent.");
 
+        // R17: the manager's approval releases the below-floor hold and nothing else. A quote whose
+        // output tax was never derived is still refused, because a price with no VAT stated on it
+        // is deemed VAT-inclusive and the seller funds the difference.
+        if (result.BlockedPendingTaxDerivation)
+            return AgentToolResult.Fail(result.TaxDerivationReason
+                ?? "A line's output tax has not been calculated, so the quote was not sent.");
+
         return AgentToolResult.Ok(new
         {
             holdType = "send_quote",

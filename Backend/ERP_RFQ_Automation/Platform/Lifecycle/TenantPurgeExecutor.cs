@@ -6,12 +6,27 @@ namespace ERP_RFQ_Automation.Platform.Lifecycle;
 
 public sealed record TenantPurgeTableCount(string Table, string TenantColumn, long Rows);
 
+/// <summary>One table a purge deliberately leaves standing, and the reason it does.</summary>
+/// <param name="Table">Qualified <c>schema.table</c>, as the preview reports every other table.</param>
+/// <param name="Reason">
+/// Copied from <see cref="PlatformTenantDataMap"/> rather than restated, so the sentence an
+/// operator reads at the confirmation dialog is the same sentence the next engineer reads when
+/// they add a table and have to make the same call.
+/// </param>
+public sealed record TenantPurgePreservedTable(string Table, string Reason);
+
 public sealed record TenantPurgePreview(
     long TenantId,
     long BusinessUnitId,
     IReadOnlyList<TenantPurgeTableCount> Tables,
     long TotalRows,
-    IReadOnlyList<string> Preserved);
+    IReadOnlyList<string> Preserved,
+    /// <summary>
+    /// The same set as <paramref name="Preserved"/> with the reason attached. Added because a bare
+    /// list of table names answers "what survives" and not "why", and "why" is the half an operator
+    /// has to be able to repeat to the customer who is asking what we still hold on them.
+    /// </summary>
+    IReadOnlyList<TenantPurgePreservedTable> PreservedDetail);
 
 public sealed record TenantPurgeOutcome(
     long TenantId,
@@ -85,6 +100,25 @@ public sealed class TenantPurgeExecutor(IConfiguration configuration, ILogger<Te
             .Append("public.__EFMigrationsHistory")
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// The preserved set with the reason each entry survives, in the same order as
+    /// <see cref="PreservedTables"/>.
+    ///
+    /// <para><c>__EFMigrationsHistory</c> is present in <see cref="PreservedTables"/> but is not a
+    /// tenant table and carries no entry in the map, so it is described here rather than left to
+    /// appear as a nameless survivor on the operator's screen.</para>
+    /// </summary>
+    public static readonly IReadOnlyList<TenantPurgePreservedTable> PreservedWithReasons =
+        PlatformTenantDataMap.Preserved
+            .Select(t => new TenantPurgePreservedTable(
+                $"{PlatformTenantDataMap.Schema}.{t.Table}", t.Reason))
+            .Append(new TenantPurgePreservedTable(
+                "public.__EFMigrationsHistory",
+                "The database's own schema ledger. Not the customer's data and not a record of "
+                + "them; deleting from it would break the database rather than a tenant."))
+            .OrderBy(t => t.Table, StringComparer.Ordinal)
+            .ToList();
+
     /// <summary>The business unit's own row, whose tenant column is its primary key rather than a
     /// <c>BusinessUnitId</c>, so the catalogue sweep below cannot find it.</summary>
     private const string BusinessUnitTable = "public.\"BusinessUnits\"";
@@ -141,7 +175,8 @@ public sealed class TenantPurgeExecutor(IConfiguration configuration, ILogger<Te
             tenantId, businessUnitId,
             counts.OrderByDescending(c => c.Rows).ToList(),
             counts.Sum(c => c.Rows),
-            PreservedTables.OrderBy(x => x, StringComparer.Ordinal).ToList());
+            PreservedTables.OrderBy(x => x, StringComparer.Ordinal).ToList(),
+            PreservedWithReasons);
     }
 
     /// <summary>

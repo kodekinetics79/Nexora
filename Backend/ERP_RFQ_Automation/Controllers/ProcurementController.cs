@@ -106,7 +106,8 @@ public sealed class ProcurementController(
         {
             var result = await service.CaptureSupplierQuoteAsync(new CaptureSupplierQuoteCommand(
                 TenantId(), request.SolicitationId, request.SupplierQuoteReference, request.Revision,
-                request.ValidUntil, IdempotencyKey(), Actor(), CorrelationId(), request.Lines), RequestAborted);
+                request.ValidUntil, IdempotencyKey(), Actor(), CorrelationId(), request.Lines,
+                request.Incoterms), RequestAborted);
             return Created("/api/procurement/supplier-quotes", result);
         });
 
@@ -352,7 +353,8 @@ public sealed record CaptureSupplierQuoteRequest(
     string SupplierQuoteReference,
     int Revision,
     DateTime ValidUntil,
-    IReadOnlyCollection<CaptureSupplierQuoteLine> Lines);
+    IReadOnlyCollection<CaptureSupplierQuoteLine> Lines,
+    string? Incoterms = null);
 
 public sealed record ApproveAwardRequest(
     long SupplierQuotedItemId,

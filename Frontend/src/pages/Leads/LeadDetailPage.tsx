@@ -445,7 +445,10 @@ const LeadDetailPage: React.FC = () => {
                         <Typography sx={{ fontSize: '0.7rem', color: 'text.secondary', fontFamily: 'monospace' }}>{item.manufacturerPartNumber}</Typography>
                       </TableCell>
                       <TableCell align="right" sx={{ width: '10%', py: 2 }}>
-                        <Typography sx={{ fontWeight: 800, fontSize: '0.85rem' }}>{item.quantity}</Typography>
+                        {/* A quantity the document never stated is shown as a gap, like the
+                            price beside it. Rendering null gave a blank cell that read as a
+                            loading state; rendering 0 would read as a demand for nothing. */}
+                        <Typography sx={{ fontWeight: 800, fontSize: '0.85rem' }}>{item.quantity ?? 'Not stated'}</Typography>
                         <Typography variant="caption" color="text.disabled" sx={{ fontSize: '0.65rem' }}>{item.unitOfMeasure}</Typography>
                       </TableCell>
                       <TableCell align="right" sx={{ width: '10%', py: 2 }}>

@@ -19,6 +19,16 @@ namespace ERP_RFQ_Automation.DTOs
         public string? LabelUrl { get; set; }
         public string? ShippingAddress { get; set; }
         public string? Notes { get; set; }
+
+        /// <summary>
+        /// FR-MTR-02. The despatch supervisor's written acceptance of a lapsed certificate on
+        /// material going out on this note. Required only when a lot being issued holds an expired
+        /// certificate; supplying one when every lot is in date is refused, so it cannot become a
+        /// field the UI fills in by habit. The reason and the actor are kept on the lot
+        /// declaration permanently and show on both traces.
+        /// </summary>
+        public string? ComplianceOverrideReason { get; set; }
+
         public List<CreateShipmentItemDto> Items { get; set; } = new List<CreateShipmentItemDto>();
     }
 

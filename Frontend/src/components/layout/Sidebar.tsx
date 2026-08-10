@@ -229,6 +229,8 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
           { key: 'inventory-movements', label: 'Movements', path: '/inventory/movements', moduleName: 'Products' },
           { key: 'inventory-demand', label: 'Demand', path: '/inventory/demand', moduleName: 'Products' },
           { key: 'inventory-resources', label: 'Related Resources', path: '/inventory/resources', moduleName: 'Products' },
+          { key: 'inventory-lots', label: 'Lots & Traceability', path: '/inventory/lots', moduleName: 'Products', activePrefixes: ['/inventory/lots/'] },
+          { key: 'inventory-order-trace', label: 'Where-Used Trace', path: '/inventory/order-trace', moduleName: 'Products', activePrefixes: ['/inventory/order-trace/'] },
           { key: 'products', label: t('products'), path: '/inventory/products', moduleName: 'Products', activePrefixes: ['/inventory/products/'] },
           { key: 'categories', label: t('categories'), path: '/inventory/categories', moduleName: 'Product Categories' },
           { key: 'sub-categories', label: t('sub_categories'), path: '/inventory/sub-categories', moduleName: 'Product Categories' },
@@ -275,6 +277,8 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
           { key: 'quote-format', label: t('quote_format'), path: '/setup/quote-format', moduleName: 'Quote Configuration' },
           { key: 'price-structure', label: 'Price Structure', path: '/setup/price-structure', moduleName: 'UOM' },
           { key: 'sla', label: 'Deadlines & Alerts', path: '/setup/sla', moduleName: 'UOM' },
+          // The tax and tolerance numbers behind every landed cost and every customer price.
+          { key: 'commercial-policy', label: 'Commercial Policy', path: '/setup/commercial-policy', moduleName: 'UOM' },
           { key: 'routing-rules', label: 'RFQ Routing Rules', path: '/setup/routing-rules', moduleName: 'Customers' },
           // AA-01: discoverable next to the other master-data screens, not buried.
           { key: 'custom-fields', label: 'Custom Fields', path: '/setup/custom-fields', moduleName: 'UOM' },

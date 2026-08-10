@@ -114,6 +114,7 @@ public sealed class TenantLifecyclePlatformTableClassificationTests(PostgreSqlTe
     }
 
     [Fact]
+    [Trait("Category", "PostgreSQL")]
     public void A_table_reached_through_a_parent_is_deleted_before_that_parent()
     {
         // Ordering is the second way to re-create the orphaned-steps defect. A child is selected
@@ -130,6 +131,7 @@ public sealed class TenantLifecyclePlatformTableClassificationTests(PostgreSqlTe
     }
 
     [Fact]
+    [Trait("Category", "PostgreSQL")]
     public void The_preserved_list_the_purge_uses_is_exactly_what_the_map_declares()
     {
         // One source of truth. The preserve list used to be its own hand-kept set, which is how

@@ -35,6 +35,7 @@ import customerService from '../../../api/services/customerService';
 import supplierService from '../../../api/services/supplierService';
 import { useAuth } from '../../../context/AuthContext';
 import { presentableErrorMessage, toPresentableError } from '../../../utils/apiErrors';
+import { parseMoneyInput } from '../../../utils/currency';
 import { toast } from 'react-hot-toast';
 import supplierQuotedItemService from '../../../api/services/supplierQuotedItemService';
 import { useTranslation } from 'react-i18next';
@@ -259,8 +260,14 @@ const ItemRow: React.FC<ItemRowProps> = React.memo(({ item, index, onUpdate, onR
     onUpdate(index, { quantity: Number(e.target.value) });
   }, [index, onUpdate]);
 
+  // The field no longer embeds a currency symbol in its editable value, so parsing no longer
+  // depends on stripping one. `parseMoneyInput` still tolerates a pasted symbol or grouped
+  // figure and returns null rather than NaN, so an unparseable entry leaves the previous price
+  // untouched instead of writing a corrupt number to the line.
   const handlePriceChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    onUpdate(index, { unitPrice: Number(e.target.value.replace('$ ', '')) });
+    const parsed = parseMoneyInput(e.target.value);
+    if (parsed === null) return;
+    onUpdate(index, { unitPrice: parsed });
   }, [index, onUpdate]);
 
   const handleRemove = useCallback(() => onRemove(index), [index, onRemove]);
@@ -499,11 +506,23 @@ const ItemRow: React.FC<ItemRowProps> = React.memo(({ item, index, onUpdate, onR
 
       {/* Price */}
       <TableCell align="center">
+        {/*
+          The currency is shown as a read-only adornment sourced from the line, never baked into
+          the editable value. When the line carries no currency the number stands alone rather
+          than borrowing a symbol.
+        */}
         <TextField
           size="small"
-          value={`$ ${(item.unitPrice ?? 0).toFixed(2)}`}
+          type="number"
+          value={item.unitPrice ?? 0}
           onChange={handlePriceChange}
-          sx={{ width: 100, '& .MuiInputBase-root': { height: 32, fontSize: '0.75rem', fontWeight: 700 } }}
+          slotProps={{
+            input: item.currency
+              ? { startAdornment: <InputAdornment position="start"><Typography variant="caption" sx={{ fontWeight: 700 }}>{item.currency}</Typography></InputAdornment> }
+              : undefined,
+            htmlInput: { min: 0, step: 0.01, 'aria-label': `Unit price for ${item.productShortName || 'item'}${item.currency ? ` in ${item.currency}` : ''}` },
+          }}
+          sx={{ width: 130, '& .MuiInputBase-root': { height: 32, fontSize: '0.75rem', fontWeight: 700 } }}
         />
       </TableCell>
 

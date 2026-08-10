@@ -64,7 +64,7 @@ public sealed class NexoraMetrics : IDisposable
     private readonly Counter<double> _llmCost;
 
     // --- Platform enforcement instruments ---------------------------------
-    private readonly Counter<long> _tenantAccessFailOpen;
+    private readonly Counter<long> _tenantAccessUnresolvable;
 
     /// <param name="queueSnapshots">
     /// Optional. When present the golden-signal ObservableGauges below are published;
@@ -150,13 +150,17 @@ public sealed class NexoraMetrics : IDisposable
                 + "ledger. Only emitted when the tenant policy carries a pricing version; an "
                 + "unpriced call reports tokens and no cost rather than a fabricated zero.");
 
-        _tenantAccessFailOpen = _meter.CreateCounter<long>(
-            "nexora.platform.tenant_access.fail_open",
+        // Renamed from nexora.platform.tenant_access.fail_open when Sec-D1 made this path
+        // fail CLOSED. The old name is deliberately not kept as an alias: a dashboard still
+        // alerting on "fail_open" would sit at zero forever and read as "enforcement is fine",
+        // which is the exact false assurance the rename exists to prevent.
+        _tenantAccessUnresolvable = _meter.CreateCounter<long>(
+            "nexora.platform.tenant_access.unresolvable",
             unit: "{resolution}",
-            description: "Tenant/plan resolutions that failed and fell back to the contracted "
-                + "fail-open snapshot (no status enforcement, no plan limits). A sustained "
-                + "non-zero rate means the platform plane is unreadable (missing grant/outage) "
-                + "and enforcement is silently disabled — alert on it. (Sec2)");
+            description: "Tenant/plan resolutions that could not read the platform plane and "
+                + "therefore DENIED the business unit (503). A sustained non-zero rate means the "
+                + "platform plane is unreadable (missing grant/outage) and those tenants are being "
+                + "refused service — alert on it. (Sec2, Sec-D1)");
 
         // ---- golden-signal gauges -------------------------------------------------
         // ALL of these read the cached snapshot. There is deliberately no database access
@@ -231,11 +235,11 @@ public sealed class NexoraMetrics : IDisposable
     // ---- counters --------------------------------------------------------
 
     /// <summary>
-    /// Sec2: record that a tenant-access resolution failed and the contracted
-    /// fail-open path was taken for the given BusinessUnit.
+    /// Sec2 / Sec-D1: record that a tenant-access resolution could not read the platform
+    /// plane and the given BusinessUnit was therefore DENIED.
     /// </summary>
-    public void TenantAccessFailOpen(long? businessUnitId = null) =>
-        _tenantAccessFailOpen.Add(1, Tenant(businessUnitId));
+    public void TenantAccessUnresolvable(long? businessUnitId = null) =>
+        _tenantAccessUnresolvable.Add(1, Tenant(businessUnitId));
 
     /// <summary>Record that a job was enqueued (optionally tagged with the tenant).</summary>
     public void JobEnqueued(long? businessUnitId = null) =>

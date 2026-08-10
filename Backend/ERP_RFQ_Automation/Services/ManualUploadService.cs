@@ -203,21 +203,27 @@ namespace ERP_RFQ_Automation.Services
                 return ServiceResult<long>.CreateFailure("The uploaded documents do not appear to be RFQ-related. Please upload a valid Request for Quotation.");
             }
 
+            // SEC-ING-01: THIS BUSINESS UNIT'S mailbox or nothing. The fallback that used to sit
+            // here took the first active configuration on the PLATFORM when the tenant had none,
+            // and EmailIngest has no tenant column — its tenancy is derived through
+            // EmailConfigurationId, in the EF filter and in the table's RLS policy alike. So a
+            // tenant with no mailbox configured filed its manual upload under ANOTHER tenant's
+            // mailbox, which made the ingest row (and the /api/email-triage view of it) that
+            // tenant's row. Under the HTTP tenant role the fallback query already returned nothing,
+            // so this was latent rather than live — but "latent because a different layer stopped
+            // it" is not a reason to keep a cross-tenant write in the code.
             var defaultConfig = await _context.EmailConfigurations
                 .AsNoTracking()
                 .FirstOrDefaultAsync(e => e.IsActive && e.BusinessUnitId == businessUnitId);
 
             if (defaultConfig == null)
             {
-                defaultConfig = await _context.EmailConfigurations
-                    .AsNoTracking()
-                    .FirstOrDefaultAsync(e => e.IsActive);
-            }
-
-            if (defaultConfig == null)
-            {
-                _logger.LogError("No active email configuration found for manual upload.");
-                return ServiceResult<long>.CreateFailure("System configuration error: No active email configuration found.");
+                _logger.LogError(
+                    "No active email configuration found for business unit {BusinessUnitId}; a manual "
+                    + "upload cannot be filed under another business unit's mailbox.",
+                    businessUnitId);
+                return ServiceResult<long>.CreateFailure(
+                    "No active email configuration was found for this business unit. Configure a mailbox for it before uploading documents.");
             }
 
             var dummyIngest = new EmailIngest
@@ -276,14 +282,25 @@ namespace ERP_RFQ_Automation.Services
                 }
 
                 // --- DUPLICATE DETECTION ---
+                //
+                // SEC-ING-01: the same missing tenant predicate as the email door, in the same
+                // shape, written by the same hand. It is LATENT here and not a live leak: this
+                // runs on an authenticated HTTP request, so the EF global query filter has a
+                // tenant and PostgreSQL executes it as nexora_tenant_app under RLS — both layers
+                // are on. The identical code on the mailbox poller ran with a null tenant under
+                // the BYPASSRLS pipeline role, where both layers were off, and there it read every
+                // tenant's leads. Identical code, two paths, one cross-tenant read: which is
+                // exactly why the predicate is stated here too rather than left to the ambient
+                // scope. Duplicate detection is a per-business-unit question.
                 bool isDuplicate = false;
 
                 if (!string.IsNullOrWhiteSpace(ai.Rfqno))
                 {
-                    // Strict check: Same RFQ No and Buyer
+                    // Strict check: Same RFQ No and Buyer, within this business unit
                     isDuplicate = await _context.Leads
                         .AsNoTracking()
                         .AnyAsync(l =>
+                            l.BusinessUnitId == businessUnitId &&
                             l.Rfqno == ai.Rfqno &&
                             l.BuyersName == ai.BuyersName);
                 }
@@ -296,6 +313,7 @@ namespace ERP_RFQ_Automation.Services
                         isDuplicate = await _context.Leads
                             .AsNoTracking()
                             .AnyAsync(l =>
+                                l.BusinessUnitId == businessUnitId &&
                                 l.BuyersName == ai.BuyersName &&
                                 l.NoOfLineItems == ai.Items.Count &&
                                 l.LeadItems.Any(li =>

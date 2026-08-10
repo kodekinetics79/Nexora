@@ -16,7 +16,6 @@ namespace ERP_RFQ_Automation.Agent.Llm;
 /// </summary>
 public sealed class AnthropicAgentLlm : IAgentLlm
 {
-    private const string Endpoint = "https://api.anthropic.com/v1/messages";
     private const string AnthropicVersion = "2023-06-01";
 
     private readonly HttpClient _http;
@@ -25,6 +24,20 @@ public sealed class AnthropicAgentLlm : IAgentLlm
     private readonly string _model;
     private readonly int _maxTokens;
     private readonly IAiGovernanceService _governance;
+    private readonly string _endpoint;
+
+    /// <summary>
+    /// The destination this client posts to, as the governance model names it.
+    ///
+    /// <para>The origin used to be a private const here and nowhere else, which is precisely
+    /// why the agent's egress sat outside the endpoint model: an origin no descriptor names
+    /// can never appear in an allow-list row, so it could never be authorized, expired or
+    /// revoked, and the only remaining control was a free-text provider-NAME match. Deriving
+    /// both the descriptor and the request URI from
+    /// <see cref="AnthropicProviderDefaults"/> means the row an operator authorizes is
+    /// provably the origin this client dials.</para>
+    /// </summary>
+    public AiProviderDescriptor ProviderDescriptor { get; }
 
     public AnthropicAgentLlm(
         HttpClient http, IConfiguration config, ILogger<AnthropicAgentLlm> log,
@@ -33,12 +46,13 @@ public sealed class AnthropicAgentLlm : IAgentLlm
         _http = http;
         _log = log;
         _apiKey = config["Agent:Anthropic:ApiKey"] ?? string.Empty;
-        _model = string.IsNullOrWhiteSpace(config["Agent:Anthropic:Model"])
-            ? "claude-sonnet-5"
-            : config["Agent:Anthropic:Model"]!;
+        _model = AnthropicProviderDefaults.Model(config);
         _maxTokens = int.TryParse(config["Agent:Anthropic:MaxTokens"], out var mt) && mt > 0
             ? Math.Min(mt, 8192) : 2048;
         _governance = governance;
+        _endpoint = AnthropicProviderDefaults.MessagesUrl(config);
+        ProviderDescriptor = AiProviderEndpoint.Describe(
+            AnthropicProviderDefaults.Provider, AnthropicProviderDefaults.BaseUrl(config), _model);
     }
 
     public async Task<AgentLlmTurnResult> RunTurnAsync(
@@ -49,14 +63,19 @@ public sealed class AnthropicAgentLlm : IAgentLlm
         CancellationToken ct)
     {
         var body = BuildRequestBody(systemPrompt, history, tools);
+        // The reservation carries the destination's real class, so an agent turn is governed
+        // as the egress it is. It was previously left at the AiCallContext default, which was
+        // correct only by coincidence.
         var reservation = await _governance.ReserveAsync(
-            callContext, "Anthropic", _model, body, Encoding.UTF8.GetByteCount(body), _maxTokens, 1, ct);
+            callContext with { ProviderClass = ProviderDescriptor.ProviderClass },
+            AnthropicProviderDefaults.Provider, _model, body,
+            Encoding.UTF8.GetByteCount(body), _maxTokens, 1, ct);
         var started = DateTime.UtcNow;
         var stopwatch = Stopwatch.StartNew();
         var providerResponseReceived = false;
         try
         {
-            using var req = new HttpRequestMessage(HttpMethod.Post, Endpoint)
+            using var req = new HttpRequestMessage(HttpMethod.Post, _endpoint)
             {
                 Content = new StringContent(body, Encoding.UTF8, "application/json")
             };

@@ -19,6 +19,15 @@ namespace ERP_RFQ_Automation.Interfaces
         Task<IEnumerable<TeamResponseDTO>> GetTeamsAsync(long businessUnitId);
         Task<IEnumerable<BusinessUnitResponseDTO>> GetBusinessUnitsAsync();
         Task<IEnumerable<UserGroupResponseDTO>> GetUserGroupsAsync(long businessUnitId);
+        /// <summary>
+        /// Sec-A2: whether <paramref name="candidatePassword"/> is the CURRENT password of user
+        /// <paramref name="id"/> within <paramref name="businessUnitId"/>. False for an unknown
+        /// user, a user outside that business unit, an inactive user, a stored hash that is
+        /// missing or unusable, and an empty candidate — every unknown is a refusal, because this
+        /// answer is the gate in front of a credential rewrite.
+        /// </summary>
+        Task<bool> VerifyPasswordAsync(long id, long businessUnitId, string candidatePassword);
+
         Task ChangePasswordAsync(long id, string newPassword);
     }
 }

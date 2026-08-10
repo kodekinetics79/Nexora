@@ -90,7 +90,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error retrieving data: {ex.Message}");
+                return this.ServerError(ex, "Error retrieving data.");
             }
         }
 
@@ -116,7 +116,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error retrieving data: {ex.Message}");
+                return this.ServerError(ex, "Error retrieving data.");
             }
         }
 
@@ -190,7 +190,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error retrieving permissions: {ex.Message}");
+                return this.ServerError(ex, "Error retrieving permissions.");
             }
         }
 
@@ -316,7 +316,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error creating data: {ex.Message}");
+                return this.ServerError(ex, "Error creating data.");
             }
         }
 
@@ -457,7 +457,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error updating data: {ex.Message}");
+                return this.ServerError(ex, "Error updating data.");
             }
         }
 
@@ -486,6 +486,22 @@ namespace ERP_RFQ_Automation.Controllers
                 // Ensure the target user exists within the caller's business unit.
                 var target = await _repository.GetByIdAsync(id, claimBUId);
 
+                // Sec-A2: re-authenticate before rewriting the credential. The self-only check
+                // above proves the session belongs to this account; it proves nothing about
+                // whether the person at the keyboard is its owner. Without this, a session picked
+                // up for thirty seconds becomes permanent ownership — the thief sets a password
+                // the owner does not know, and the owner is not signed out to notice.
+                //
+                // The failure is audited as an explicit event and answers 401, not 403: 403 would
+                // read as "you may not change this password", which is untrue and would send the
+                // user to an administrator instead of back to their own keyboard.
+                if (!await _repository.VerifyPasswordAsync(id, claimBUId, request.CurrentPassword))
+                {
+                    _audit?.Enlist(User, new IamAuditEntry(
+                        IamAuditActions.PasswordChangeRejected, IamAuditTargets.User, id, target.Email));
+                    return Unauthorized(new { error = "The current password is incorrect." });
+                }
+
                 _audit?.Enlist(User, new IamAuditEntry(
                     IamAuditActions.PasswordChanged, IamAuditTargets.User, id, target.Email));
 
@@ -502,7 +518,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error changing password: {ex.Message}");
+                return this.ServerError(ex, "Error changing password.");
             }
         }
 
@@ -545,7 +561,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error deleting data: {ex.Message}");
+                return this.ServerError(ex, "Error deleting data.");
             }
         }
 
@@ -563,7 +579,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error retrieving roles: {ex.Message}");
+                return this.ServerError(ex, "Error retrieving roles.");
             }
         }
 
@@ -585,7 +601,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error retrieving teams: {ex.Message}");
+                return this.ServerError(ex, "Error retrieving teams.");
             }
         }
 
@@ -603,7 +619,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error retrieving business units: {ex.Message}");
+                return this.ServerError(ex, "Error retrieving business units.");
             }
         }
 
@@ -626,7 +642,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error retrieving user groups: {ex.Message}");
+                return this.ServerError(ex, "Error retrieving user groups.");
             }
         }
 

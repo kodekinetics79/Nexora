@@ -35,7 +35,20 @@ public partial class LeadItem
 
     public decimal? UnitPrice { get; set; }
 
-    public int Quantity { get; set; }
+    /// <summary>
+    /// The demand quantity the document stated, or NULL when it stated none we could read.
+    ///
+    /// <para><b>Why this is nullable.</b> It was <c>int</c>, and every door wrote
+    /// <c>source.Quantity ?? 0</c> — so "the document says 2,500 and we could not read it" and
+    /// "the document says 0" were stored as the same number. Zero is a value, not an absence: it
+    /// reads as a real demand of nothing, passes review looking plausible, and is quoted. Null is
+    /// the only representation of "unknown" that a reviewer, a guard or a screen can tell apart
+    /// from a stated zero, and every consumer below now has to decide which it is looking at.</para>
+    ///
+    /// <para>Nothing downstream may coalesce this to 0. A line whose quantity is unknown is a line
+    /// that cannot be quoted until a human supplies it.</para>
+    /// </summary>
+    public int? Quantity { get; set; }
 
     public string? StorageLocation { get; set; }
 

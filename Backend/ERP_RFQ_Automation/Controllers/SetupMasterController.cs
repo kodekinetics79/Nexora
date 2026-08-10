@@ -13,6 +13,7 @@ using System.Security.Claims;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using ERP_RFQ_Automation.Security;
 
 namespace ERP_RFQ_Automation.Controllers
 {
@@ -103,7 +104,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error retrieving data: {ex.Message}");
+                return this.ServerError(ex, "Error retrieving data.");
             }
         }
 
@@ -122,7 +123,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error retrieving data: {ex.Message}");
+                return this.ServerError(ex, "Error retrieving data.");
             }
         }
 
@@ -180,7 +181,11 @@ namespace ERP_RFQ_Automation.Controllers
                     // Server-derived: validated above and clamped to Member for non-role rows.
                     RoleRank = SetupTypes.IsRole(request.SetupType) ? requestedRank : RoleRanks.Member,
                     IsActive = request.IsActive,
-                    CreatedBy = request.CreatedBy,
+                    // RC-7 / Sec-A1: server-derived. This is a ROLE row (Setup_Master carries
+                    // RoleRank), and Update twelve lines below already stamped the actor from the
+                    // token while Create trusted the body — so the one write that mints authority
+                    // was the one that let the caller name its author. request.CreatedBy is never read.
+                    CreatedBy = ActorContext.From(User).Stamp,
                     CreatedOn = DateTime.UtcNow
                 };
 
@@ -204,7 +209,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error creating data: {ex.Message}");
+                return this.ServerError(ex, "Error creating data.");
             }
         }
 
@@ -337,7 +342,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error updating data: {ex.Message}");
+                return this.ServerError(ex, "Error updating data.");
             }
         }
 
@@ -395,7 +400,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(StatusCodes.Status500InternalServerError, $"Error deleting data: {ex.Message}");
+                return this.ServerError(ex, "Error deleting data.");
             }
         }
 

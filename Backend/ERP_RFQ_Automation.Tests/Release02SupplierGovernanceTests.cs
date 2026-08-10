@@ -282,7 +282,7 @@ public sealed class Release02SupplierGovernanceTests
         string? tenantClaim,
         string actor = "test-user")
     {
-        return new SupplierController(repository)
+        return new SupplierController(repository, new StubMasterDataChangeHistoryReader())
         {
             ControllerContext = ControllerContext(tenantClaim, actor)
         };

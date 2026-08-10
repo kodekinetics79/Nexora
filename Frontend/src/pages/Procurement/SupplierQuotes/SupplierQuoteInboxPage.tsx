@@ -12,6 +12,7 @@ import { useAuth } from "../../../context/AuthContext";
 import supplierQuoteService, {
   type CaptureSupplierQuoteRequest, type SupplierQuoteInboxStatus, type UploadSupplierQuoteRequest,
 } from "../../../api/services/supplierQuoteService";
+import { INCOTERMS_2020 } from "../../../api/services/procurementService";
 
 const number = (value: string) => Number(value);
 const sha256 = async (value: string) => Array.from(
@@ -94,14 +95,24 @@ function UploadDialog({ open, onClose }: { open: boolean; onClose: () => void })
   const client = useQueryClient();
   const [file, setFile] = useState<File | null>(null);
   const [form, setForm] = useState({ supplierId: "", supplierSolicitationId: "", sourcingCaseId: "",
-    nexoraSerial: "", supplierQuoteReference: "", revisionNumber: "1", currencyId: "" });
+    nexoraSerial: "", supplierQuoteReference: "", revisionNumber: "1", currencyId: "",
+    // Default to "0", which is a stated zero rather than an absent value. The operator has to look
+    // at each one to leave it there, and an EXW upload left at zero duty is flagged on the offer.
+    freightAmount: "0", taxAmount: "0", dutyAmount: "0", otherAmount: "0", discountAmount: "0" });
+  // Held outside `form` because every field in `form` is required for the dialog to submit, and a
+  // domestic quote legitimately has no Incoterm.
+  const [incoterms, setIncoterms] = useState("");
   const set = (key: keyof typeof form) => (event: React.ChangeEvent<HTMLInputElement>) =>
     setForm((current) => ({ ...current, [key]: event.target.value }));
   const mutation = useMutation({
     mutationFn: () => supplierQuoteService.upload({ file: file!, supplierId: number(form.supplierId),
       supplierSolicitationId: number(form.supplierSolicitationId), sourcingCaseId: number(form.sourcingCaseId),
       nexoraSerial: form.nexoraSerial.trim(), supplierQuoteReference: form.supplierQuoteReference.trim(),
-      revisionNumber: number(form.revisionNumber), currencyId: number(form.currencyId) } satisfies UploadSupplierQuoteRequest),
+      revisionNumber: number(form.revisionNumber), currencyId: number(form.currencyId),
+      incoterms: incoterms.trim() || undefined,
+      freightAmount: number(form.freightAmount), taxAmount: number(form.taxAmount),
+      dutyAmount: number(form.dutyAmount), otherAmount: number(form.otherAmount),
+      discountAmount: number(form.discountAmount) } satisfies UploadSupplierQuoteRequest),
     onSuccess: (result) => { toast.success(result.supplierQuoteId ? "Supplier Quote extracted for review" : "Document accepted into commercial review"); void client.invalidateQueries({ queryKey: ["supplier-quote-inbox"] }); onClose(); },
   });
   const valid = file && Object.values(form).every((value) => value.trim());
@@ -115,6 +126,16 @@ function UploadDialog({ open, onClose }: { open: boolean; onClose: () => void })
     <TextField required label="Supplier Quote reference" value={form.supplierQuoteReference} onChange={set("supplierQuoteReference")} />
     <TextField required label="Revision" type="number" value={form.revisionNumber} onChange={set("revisionNumber")} />
     <TextField required label="Currency ID" type="number" value={form.currencyId} onChange={set("currencyId")} />
+    <Alert severity="warning">The file states the lines. It does not state the round&apos;s charges — enter them here. On a non-delivered Incoterm (EXW, FOB, CFR, CIF and the rest outside DAP/DPU/DDP) the Supplier has not cleared KSA customs, so the duty is yours and is not inside the quoted price.</Alert>
+    <TextField select label="Incoterm" value={incoterms} onChange={(event) => setIncoterms(event.target.value)} helperText="Leave blank for a domestic supply with no trade term.">
+      <MenuItem value="">Not stated</MenuItem>
+      {INCOTERMS_2020.map((code) => <MenuItem key={code} value={code}>{code}</MenuItem>)}
+    </TextField>
+    <TextField required label="Freight" type="number" value={form.freightAmount} onChange={set("freightAmount")} />
+    <TextField required label="Supplier tax" type="number" value={form.taxAmount} onChange={set("taxAmount")} />
+    <TextField required label="Customs duty" type="number" value={form.dutyAmount} onChange={set("dutyAmount")} />
+    <TextField required label="Other charges" type="number" value={form.otherAmount} onChange={set("otherAmount")} />
+    <TextField required label="Discount" type="number" value={form.discountAmount} onChange={set("discountAmount")} />
     {mutation.isError && <Alert severity="error">{(mutation.error as any)?.response?.data?.detail ?? "Supplier Quote upload failed."}</Alert>}
   </Stack></DialogContent><DialogActions><Button onClick={onClose}>Cancel</Button><Button variant="contained" disabled={!valid || mutation.isPending} onClick={() => mutation.mutate()}>{mutation.isPending ? "Uploading..." : "Upload and extract"}</Button></DialogActions></Dialog>;
 }

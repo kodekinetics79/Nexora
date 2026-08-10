@@ -9,8 +9,8 @@ is reported short, with the missing layer named.
 | FR-SPO-01 · auto-draft from awards, approval before release | MISSING | **PARTIAL** | Approval gate closed with segregation of duties; the draft is still raised by a human pressing a button |
 | FR-SPO-02 · one-supplier and split-supplier POs | PARTIAL | **PARTIAL** | Structurally supported but not proven — see below |
 | FR-SPO-03 · acknowledgement accept/reject/counter | MISSING | **CLOSED** | — |
-| FR-SPO-04 · full status ladder | PARTIAL | **PARTIAL** | Four of the eight BRD statuses are unreachable — see below |
-| FR-SPO-05 · link to customer PO and Sales Order | PARTIAL | **PARTIAL** | Keys are populated in-transaction; the case-timeline reader is being moved onto them |
+| FR-SPO-04 · full status ladder | PARTIAL | **PARTIAL** | `SENT` is now written at dispatch; `IN_PRODUCTION`, `SHIPPED` and `CLOSED` remain unreachable and are owed by later gates — see below |
+| FR-SPO-05 · link to customer PO and Sales Order | PARTIAL | **PARTIAL** | Keys are now written at construction from the governed award→customer-quote bridge; the sales-order key is null until the award is converted, and that gap is reported rather than filled — see below |
 | FR-SPO-06 · Incoterm, ports, HS code, country of origin | MISSING | **CLOSED** | — |
 | FR-SPO-07 · ship-date reminders and acknowledgement escalation | MISSING | **CLOSED** | — |
 
@@ -126,22 +126,148 @@ rather than by the column. The migration was left alone deliberately — regener
 work was mid-flight would have swept unrelated half-finished model changes into it. The next
 migration should tighten both columns.
 
-## FR-SPO-04 — four of the eight BRD statuses are unreachable
+## FR-SPO-04 — `SENT` is now written; three statuses remain owed by later gates
 
 The BRD names Draft, Approved, Sent, Acknowledged, In Production, Shipped, Received and Closed.
 
-Reachable today: `DRAFT` on creation, `APPROVED` on approval, `ACKNOWLEDGED` on supplier
-acceptance, `ISSUED` on dispatch, `PARTIALLY_RECEIVED` and `RECEIVED` on goods receipt, and
+Reachable today: `DRAFT` on creation, `APPROVED` on approval, **`SENT` on dispatch**,
+`ACKNOWLEDGED` on supplier acceptance, `PARTIALLY_RECEIVED` and `RECEIVED` on goods receipt, and
 `CANCELLED`.
 
-Never assigned by any code path: **`SENT`, `IN_PRODUCTION`, `SHIPPED`, `CLOSED`.**
+**`SENT` and `ISSUED` coexist deliberately.** `IssuePurchaseOrderAsync` now writes `SENT`, so the
+split of the conflated `ISSUED` into `APPROVED` + `SENT` exists in data and not only in the constant
+list. `ISSUED` is not retired: rows raised before the split carry it, and rewriting history to fit a
+new vocabulary is worse than keeping the old word and mapping it. The equivalence is stated once, in
+`SupplierPurchaseOrderStatuses.WithSupplier`, and every guard admits both:
 
-`SENT` matters most. It is the status the BRD intends for dispatch, but dispatch writes the legacy
-`ISSUED` — a value the constant's own documentation describes as having "conflated Approved and
-Sent". So the ladder has a documented legacy rung still carrying live traffic while the correct
-rung is unreachable. `IN_PRODUCTION` and `SHIPPED` belong to supplier progress tracking, and
-`CLOSED` to settlement; both are downstream gate work, but they should not be presented as
-implemented.
+| Guard | Both admitted? |
+|---|---|
+| `OpenForReceipt` (goods receipt) | Yes — `SENT` added with the writer, in the same change |
+| `Cancellable` (buyer withdrawal) | Yes — already |
+| Acknowledgement precondition | Yes — already |
+| Committed-supply predicate behind `GetNetSourcingRequirementAsync` | Yes — `SENT` added with the writer |
+| `InboundShipmentApplicationService.ShippableOrderStatuses` | Yes — already |
+| `SlaSweepWorker.WithSupplierStatuses` (acknowledgement escalation) | Yes — already |
+| `SlaSweepWorker.ShipmentSettledStatuses` | Correctly excludes both — a dispatched order is still worth chasing |
+| Frontend receipt-button gate (`SourcingWorkbenchPage`) | Yes — `SENT` added; it mirrored `OpenForReceipt` and had the same hole |
+
+The `OpenForReceipt` hole was the trap: it did not contain `SENT`, so adding the writer alone would
+have broken goods receipt for every dispatched-but-unacknowledged order — the same regression
+`ACKNOWLEDGED` caused once already. `Gate4SupplierPurchaseOrderDispatchTests` fails if either half
+is reverted.
+
+Still never assigned by any code path: **`IN_PRODUCTION`, `SHIPPED`, `CLOSED`.** These are owed,
+not forgotten, and no writer was invented for them here:
+
+- **`IN_PRODUCTION` and `SHIPPED` are owed by Gate 5** (shipment and material traceability).
+  `InboundShipmentApplicationService` already records the milestones they correspond to —
+  `READY_AT_FACTORY` and `DEPARTED_ORIGIN` — and already reads the purchase order's status, but it
+  never writes it back. The projection from milestone to order status is the missing link.
+- **`CLOSED` — "received and settled" — is owed by the invoice/settlement boundary, Gate 7.** It
+  cannot be written by anyone today: there is no supplier-invoice or three-way-match entity in the
+  codebase, so nothing knows when an order is settled.
+
+Until those writers exist, the four guard sets that already list `IN_PRODUCTION`, `SHIPPED` and
+`CLOSED` are reading states no row can hold.
+
+## Committed supply — the screen and the command path now ask one question
+
+Two defects in the same concept, pointing in opposite directions, both found in this sweep.
+
+**A supplier acknowledging an order made Nexora buy it twice.**
+`GetNetSourcingRequirementAsync` filtered committed supply with a hand-written
+`ISSUED or PARTIALLY_RECEIVED` list. `OpenForReceipt` was correctly widened when `ACKNOWLEDGED`
+arrived; this list was not. So: order for 100 issued, shortfall 0; supplier accepts, status becomes
+`ACKNOWLEDGED`; the order matches neither branch and 100 units vanish from `incomingByItem`; the
+shortfall reads 100 again, the "fully covered" refusal does not fire, the sourcing-case dedupe key
+differs because the quantity changed, and a second sourcing case, a second award and a second
+purchase order are raised for material already on order. One user, no concurrency, ordinary happy
+path. `PrepareSupplierRfqAsync` and `QueuePreparedSupplierRfqAsync` read the same function, so
+supplier outreach was re-prepared too.
+
+**The workbench counted DRAFT and CANCELLED purchase orders as incoming.**
+`GetWorkbenchAsync` loaded every purchase order on the RFQ with no status predicate and summed
+`OrderedQuantity - ReceivedQuantity` across all of them. `CancelPurchaseOrderAsync` reverts the
+awards precisely so the line goes back to sourcing — but the screen still showed shortfall 0, so
+nobody re-sourced it. The screen over-counted while the command path under-counted, and a buyer
+could see "covered" on a line the API said still needed buying.
+
+Both now read one shared set, `SupplierPurchaseOrderStatuses.CommittedSupply`, declared beside
+`OpenForReceipt` and `Cancellable`:
+
+`SENT`, `ISSUED`, `ACKNOWLEDGED`, `IN_PRODUCTION`, `SHIPPED`, `PARTIALLY_RECEIVED`.
+
+`DRAFT` and `APPROVED` are out — an order the supplier has never seen is an intention, not supply,
+and counting a draft is what left one with lapsed quotes suppressing its RFQ line forever.
+`RECEIVED`, `CLOSED` and `CANCELLED` are out — nothing is still expected to arrive against them.
+
+**`IN_PRODUCTION` and `SHIPPED` are in the set deliberately, ahead of their writers.** Nothing
+assigns them today. They are the strongest commitments on the ladder, and if they were left out
+the day Gate 5 starts writing them, an order in production would silently stop covering its demand
+and the double-buy would return one status further along — which is exactly how `ACKNOWLEDGED`
+caused it the first time. Adding a state to the ladder without adding it here is the defect.
+
+The set is the single source; `ProcurementApplicationService` derives its SQL `IN` list from it
+(`CommittedSupplyStatuses`) rather than restating it, because EF cannot translate
+`IReadOnlySet.Contains` and a second hand-written list is precisely what went wrong.
+
+### Every hand-written supplier-PO status comparison in the backend
+
+| Site | Kind | Disposition |
+|---|---|---|
+| `ProcurementApplicationService` create `:1349` | writes `DRAFT` | unchanged |
+| approve `:1490`, `:1492`, writes `:1519` | `== APPROVED`, `!= DRAFT` | unchanged — only a draft is approvable |
+| trade-terms amend `:1639` | `is not (DRAFT or APPROVED)` | unchanged — terms stop at dispatch, by design |
+| acknowledge `:1777`, writes `:1793` | `is not (SENT or ISSUED)` | unchanged — already admits both spellings |
+| release `:1858`, `:1861`, writes `:1884` | `== DRAFT`, `!= APPROVED` | writer changed `ISSUED` → `SENT`; guards unchanged |
+| cancel `:1984`, `:1995`, writes `:2002` | `== CANCELLED`, `Cancellable` set | unchanged |
+| goods receipt `:2084` | `OpenForReceipt` set | set gained `SENT`; the call site is another owner's region and was not touched |
+| goods receipt writes `:2170` | `RECEIVED` / `PARTIALLY_RECEIVED` | unchanged, another owner's region |
+| supplier-history evidence `:2236` | `!= CANCELLED` | unchanged — "have we bought from this supplier before?" is a history question, and a draft or cancelled order is still evidence of a relationship |
+| net sourcing requirement `:2641` | hand-written list | **changed** — now `CommittedSupply` |
+| workbench `:634` | no predicate at all | **changed** — now `CommittedSupply` |
+| `SlaSweepWorker.ShipmentSettledStatuses` `:682` | array | unchanged — correctly excludes `SENT`/`ISSUED`; a dispatched order is still worth chasing |
+| `SlaSweepWorker.WithSupplierStatuses` `:695` | array | unchanged — already both spellings. Left as a `string[]` because it is used inside an EF query |
+| `InboundShipmentApplicationService.ShippableOrderStatuses` `:63` | set | unchanged — already both spellings and both unwritten states |
+| Frontend `SourcingWorkbenchPage` receipt gate | inline list mirroring `OpenForReceipt` | **changed** — was missing `SENT` |
+| Frontend `PurchaseOrdersPage` | `["SENT","ISSUED"]`, twice | unchanged — already correct |
+
+## FR-SPO-05 / FR-COM-07 — the customer keys now have a writer
+
+`CustomerPurchaseOrderId`, `CustomerOrderId` and `QuoteId` were declared on `SupplierPurchaseOrder`,
+added to the schema, and read by `ResolveCustomerChainCaseAsync` — and **nothing ever wrote them**.
+The single construction site set none of the three, so the reader was unreachable and the RFQ
+remained the de-facto spine, the inverse of what FR-COM-07 requires. Deleting all three columns
+would have broken nothing.
+
+They are now resolved and written inside the same serializable transaction that inserts the order,
+from the governed bridge only: `CustomerQuoteSourcingDecision` links the approved sourcing award to
+one customer quote line; the customer award allocation names the client PO; the sales order names
+the award. Nothing is derived from the RFQ — an RFQ can carry lines for several quotations, and
+"the customer PO that shares this RFQ" is a guess dressed as a key.
+
+**The `DemandSource` asymmetry is enforced, not described.** On a `STOCK` order any customer key is
+refused outright by `SupplierPurchaseOrder.AttachCustomerOrigin`, so replenishment cannot acquire a
+customer through a mis-wired caller. On a `CUSTOMER_DEMAND` order every key the chain can prove is
+written, each key only when the chain resolves to exactly one document; ambiguity, an unbuilt link
+and an order raised outside the customer flow all leave the key null **with a stated reason** —
+recorded in the `SUPPLIER_PO_CREATED` payload and surfaced on the case timeline as a
+`CustomerOriginMissing` traceability gap, following the same "report it, never hide it" rule as the
+rest of `CommercialCaseQueryService`.
+
+**Known and deliberate:** `CustomerOrderId` is frequently null at creation, because the sales order
+is often raised *after* the supplier order. Back-stamping the supplier order when the customer award
+is converted belongs to the Order-to-Cash write path and is not done here. Until it is, the gap is
+visible rather than silent.
+
+**Schema delta owed to the migration owner** (reported, not authored — no migration was created or
+edited): the three columns have no foreign key and no index, unlike `CommercialCaseId` which has
+both; `DemandSource` is unbounded `text` with a database default of `''` that contradicts the C#
+default of `CUSTOMER_DEMAND` and has no `CHECK`; and the `STOCK` half of the asymmetry deserves a
+`CHECK` in PostgreSQL. The SQLite lane runs `PRAGMA ignore_check_constraints = ON`, so any such
+constraint is unenforced there and its certifying test belongs in the PostgreSQL lane. The
+`Orders` table has no `(BusinessUnitId, Id)` alternate key, so a tenant-scoped FK on
+`CustomerOrderId` needs that added first.
 
 ## FR-SPO-02 is structurally supported but unproven
 

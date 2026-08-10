@@ -26,6 +26,7 @@ import EmailPromptDialog from '../../../components/common/EmailPromptDialog';
 import { CustomerAwardDialog, type CustomerAwardQuote } from './customer-awards';
 import { useAuth } from '../../../context/AuthContext';
 import { presentableErrorMessage } from '../../../utils/apiErrors';
+import { formatMoney } from '../../../utils/currency';
 import dayjs from 'dayjs';
 import { toast } from 'react-hot-toast';
 import CommercialLineIntelligence from '../../../components/common/CommercialLineIntelligence';
@@ -114,6 +115,16 @@ const QuoteViewPage: React.FC = () => {
         toast.error(result.message || 'The prices changed. Confirm the price source again before sending.', { duration: 8000 });
         queryClient.invalidateQueries({ queryKey: ['quote-price-attestation', Number(id)] });
         setPriceConfirmOpen(true);
+        return;
+      }
+      // R17: nothing was sent because a line's output tax was never calculated. Confirming the
+      // price source again would not help, so the confirm dialog is closed and the server's
+      // sentence — which names the line and the fix — is shown as-is.
+      if (result.taxDerivationRequired) {
+        toast.error(result.message
+          || 'A line has no calculated tax. Set the output tax rate in Commercial Policy settings.',
+          { duration: 10000 });
+        setPriceConfirmOpen(false);
         return;
       }
       setPriceConfirmOpen(false);
@@ -498,17 +509,17 @@ const QuoteViewPage: React.FC = () => {
                         </Stack>;
                       })()}
                     </TableCell>
-                    <TableCell align="right">{Number(item.unitPrice || 0) === 0 ? <Chip size="small" label="Pricing Pending" color="warning" variant="outlined" /> : `$ ${item.unitPrice?.toLocaleString()}`}</TableCell>
+                    <TableCell align="right">{Number(item.unitPrice || 0) === 0 ? <Chip size="small" label="Pricing Pending" color="warning" variant="outlined" /> : formatMoney(item.unitPrice, quote.currencyCode)}</TableCell>
                     <TableCell align="right">
                       {item.discount > 0 ? (
                         <Typography variant="caption" color="error.main" sx={{ fontWeight: 700 }}>
-                          - $ {item.discount.toLocaleString()}
+                          - {formatMoney(item.discount, quote.currencyCode)}
                           <br />
                           ({item.discountTypeName})
                         </Typography>
                       ) : '-'}
                     </TableCell>
-                    <TableCell align="right" sx={{ fontWeight: 700 }}>{isUnpricedDraft ? 'Pricing Pending' : `$ ${item.totalAmount?.toLocaleString()}`}</TableCell>
+                    <TableCell align="right" sx={{ fontWeight: 700 }}>{isUnpricedDraft ? 'Pricing Pending' : formatMoney(item.totalAmount, quote.currencyCode)}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -521,11 +532,11 @@ const QuoteViewPage: React.FC = () => {
             <CardContent sx={{ p: 3 }}>
               <Typography variant="h6" sx={{ fontWeight: 800, mb: 3 }}>Financial Summary</Typography>
               <Stack spacing={2}>
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}><Typography color="text.secondary">Gross Subtotal</Typography><Typography sx={{ fontWeight: 700 }}>{isUnpricedDraft ? 'Pricing Pending' : `$ ${itemsSubtotal.toLocaleString()}`}</Typography></Box>
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}><Typography color="text.secondary">Item Discounts</Typography><Typography sx={{ fontWeight: 700, color: 'error.main' }}>{isUnpricedDraft ? 'Pending' : `- $ ${itemsDiscounts.toLocaleString()}`}</Typography></Box>
-                {headerDiscount > 0 && <Box sx={{ display: 'flex', justifyContent: 'space-between' }}><Typography color="text.secondary">Header Discount</Typography><Typography sx={{ fontWeight: 700, color: 'error.main' }}>- $ {headerDiscount.toLocaleString()}</Typography></Box>}
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}><Typography color="text.secondary">Gross Subtotal</Typography><Typography sx={{ fontWeight: 700 }}>{isUnpricedDraft ? 'Pricing Pending' : formatMoney(itemsSubtotal, quote.currencyCode)}</Typography></Box>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}><Typography color="text.secondary">Item Discounts</Typography><Typography sx={{ fontWeight: 700, color: 'error.main' }}>{isUnpricedDraft ? 'Pending' : `- ${formatMoney(itemsDiscounts, quote.currencyCode)}`}</Typography></Box>
+                {headerDiscount > 0 && <Box sx={{ display: 'flex', justifyContent: 'space-between' }}><Typography color="text.secondary">Header Discount</Typography><Typography sx={{ fontWeight: 700, color: 'error.main' }}>- {formatMoney(headerDiscount, quote.currencyCode)}</Typography></Box>}
                 <Divider />
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}><Typography variant="h5" sx={{ fontWeight: 900 }}>Grand Total</Typography><Typography variant="h5" sx={{ fontWeight: 900, color: isUnpricedDraft ? 'warning.main' : 'primary.main' }}>{isUnpricedDraft ? 'Pricing Pending' : `$ ${quote.totalAmount?.toLocaleString()}`}</Typography></Box>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}><Typography variant="h5" sx={{ fontWeight: 900 }}>Grand Total</Typography><Typography variant="h5" sx={{ fontWeight: 900, color: isUnpricedDraft ? 'warning.main' : 'primary.main' }}>{isUnpricedDraft ? 'Pricing Pending' : formatMoney(quote.totalAmount, quote.currencyCode)}</Typography></Box>
               </Stack>
             </CardContent>
           </Card>

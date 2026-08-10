@@ -140,6 +140,36 @@ export interface Tenant extends TenantCompanyProfile, TenantCommercialTerms {
   createdAt: string | null; // ISO
 }
 
+export interface UpdateTenantProfileInput extends TenantCompanyProfile {
+  name: string;
+  timeZoneId: string | null;
+  locale: string | null;
+  reason: string;
+}
+
+export interface TenantAdminInvitation {
+  id: string;
+  userId: string;
+  email: string;
+  status: string;
+  issuedAtUtc: string;
+  expiresAtUtc: string;
+  redeemedAtUtc: string | null;
+  revokedAtUtc: string | null;
+  revokedBy: string | null;
+  revocationReason: string | null;
+  lastSentAtUtc: string | null;
+  sendCount: number;
+  issuedBy: string;
+}
+
+export interface ResendTenantAdminInvitationResult {
+  invitation: TenantAdminInvitation;
+  emailDispatched: boolean;
+  /** Returned exactly once when the outbound provider did not transmit the message. */
+  activationUrl: string | null;
+}
+
 export interface BillingMeterCatalogEntry {
   eventType: string;
   billingMeterKey: string;
@@ -1150,6 +1180,17 @@ export interface TenantOffboardingStatus {
   canPurge: boolean;
   canErasePersonalData: boolean;
 
+  /**
+   * The signed-in operator is the one who scheduled this deletion, so the server will refuse
+   * their purge for want of a second approver. Reported separately from `canPurge` on purpose:
+   * the tenant IS purgeable, just not by this person, and folding the two together would have the
+   * console blame a retention clock that has already run out.
+   */
+  purgeRequiresDifferentApprover: boolean;
+
+  /** Who scheduled the deletion, from the append-only lifecycle event. */
+  deletionApprovedBy: string | null;
+
   /** The exact string the operator must type to purge or erase — the tenant's name. */
   confirmationRequired: string;
 
@@ -1183,6 +1224,13 @@ export interface TenantPurgePreview {
   totalRows: number;
   /** What the purge deliberately leaves standing. */
   preserved: string[];
+  /** The same set with the reason each entry survives, so the operator can repeat it. */
+  preservedDetail: TenantPurgePreservedTable[];
+}
+
+export interface TenantPurgePreservedTable {
+  table: string;
+  reason: string;
 }
 
 export interface TenantPurgeResult {
@@ -1309,6 +1357,7 @@ export interface TenantBillingProfile {
   purchaseOrderReference: string | null;
   billingContactName: string | null;
   billingContactEmail: string | null;
+  billingAddress: string | null;
   accountOwnerEmail: string | null;
   revenueRisk: TenantRevenueRisk;
   statements: BillingStatementSummary[];
@@ -1319,6 +1368,31 @@ export interface SetCommercialTermsInput {
   billingModeReason: string | null;
   trialEndsOn: string | null;
   billingStartsOn: string | null;
+}
+
+/**
+ * Who is invoiced, where, on what terms, under which contract, and who owns the account here.
+ *
+ * Every field is sent every time — the server treats an omitted value as a clear, because on a
+ * set where clearing one field stops the customer being invoiced, "left blank" and "meant to be
+ * empty" must not look the same.
+ */
+export interface SetAccountContactInput {
+  billingContactName: string | null;
+  billingContactEmail: string | null;
+  billingAddress: string | null;
+  purchaseOrderReference: string | null;
+  paymentTermsDays: number | null;
+  accountOwnerEmail: string | null;
+  contractStartOn: string | null;
+  contractEndOn: string | null;
+  reason: string;
+}
+
+/** A governed correction to the tenant's contractual data region. Owner-only. */
+export interface UpdateTenantDataRegionInput {
+  dataRegion: string | null;
+  reason: string;
 }
 
 // --- Support desk -----------------------------------------------------------

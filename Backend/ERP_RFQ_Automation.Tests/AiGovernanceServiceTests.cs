@@ -171,40 +171,49 @@ public sealed class AiGovernanceServiceTests
     }
 
     [Fact]
-    public async Task External_dependency_is_reserved_only_at_or_below_ten_percent()
+    public async Task External_reservations_require_an_authorization_whatever_the_ratio_says()
     {
+        // This test used to assert that nine local calls bought one external call of
+        // headroom. That is what the defect looked like from the inside: absence of an
+        // authorization was not a refusal, it merely left the call subject to a ratio — and
+        // the ratio was drainable, because every local call bought more external headroom.
+        //
+        // Nine settled local calls now buy nothing. The FIRST unauthorized external
+        // reservation is refused by the allow-list, and the ledger says which control did it.
         using var fixture = new Fixture(hardLimit: 100_000);
         for (var i = 0; i < 9; i++)
         {
             var local = await fixture.Service.ReserveAsync(fixture.Context($"local-{i}"), "Ollama", "test", "local", 10, 10, 1, default);
             await fixture.Service.CompleteAsync(local, AiCallStatuses.Succeeded, 1, 1, AiTokenSources.Estimated, null, null, default);
         }
-        var external = await fixture.Service.ReserveAsync(fixture.Context("external-one", AiProviderClass.External), "Ollama", "test", "external", 10, 10, 1, default);
-        await fixture.Service.CompleteAsync(external, AiCallStatuses.Succeeded, 1, 1, AiTokenSources.Estimated, null, null, default);
+
         var denied = await Assert.ThrowsAsync<AiPolicyDeniedException>(() => fixture.Service.ReserveAsync(
-            fixture.Context("external-two", AiProviderClass.External), "Ollama", "test", "external", 10, 10, 1, default));
-        Assert.Equal("external_dependency_cap", denied.Code);
+            fixture.Context("external-one", AiProviderClass.External), "Ollama", "test", "external", 10, 10, 1, default));
+        Assert.Equal(AiExternalProviderTrustReasons.NotAuthorized, denied.Code);
+
+        // …and the same reservation succeeds the moment the tenant authorizes the endpoint,
+        // so this is a gate and not a switch-off.
+        fixture.AuthorizeResolvedEndpoint();
+        var reservation = await fixture.Service.ReserveAsync(
+            fixture.Context("external-two", AiProviderClass.External), "Ollama", "test", "external", 10, 10, 1, default);
+        Assert.NotEqual(Guid.Empty, reservation.RequestId);
     }
 
     [Fact]
-    public async Task Pending_external_request_counts_toward_dependency_cap()
+    public async Task An_endpoint_this_process_cannot_even_name_is_refused()
     {
+        // A provider/model pair matching no descriptor is a destination the governance model
+        // cannot identify — so it cannot be authorized, and it fails closed rather than
+        // falling back to a ratio. This is what kept the agent's Anthropic origin ungoverned:
+        // it had no descriptor at all.
         using var fixture = new Fixture(hardLimit: 100_000);
-        for (var i = 0; i < 9; i++)
-        {
-            var local = await fixture.Service.ReserveAsync(fixture.Context($"pending-local-{i}"),
-                "Ollama", "test", "local", 10, 10, 1, default);
-            await fixture.Service.CompleteAsync(local, AiCallStatuses.Succeeded,
-                1, 1, AiTokenSources.Estimated, null, null, default);
-        }
+        fixture.AuthorizeResolvedEndpoint();
 
-        await fixture.Service.ReserveAsync(fixture.Context("pending-external-one", AiProviderClass.External),
-            "External", "test", "external", 10, 10, 1, default);
         var denied = await Assert.ThrowsAsync<AiPolicyDeniedException>(() => fixture.Service.ReserveAsync(
-            fixture.Context("pending-external-two", AiProviderClass.External),
-            "External", "test", "external", 10, 10, 1, default));
+            fixture.Context("unnameable-endpoint", AiProviderClass.External),
+            "SomeOtherProvider", "test", "external", 10, 10, 1, default));
 
-        Assert.Equal("external_dependency_cap", denied.Code);
+        Assert.Equal(AiExternalProviderTrustReasons.EndpointUnresolved, denied.Code);
     }
 
     [Fact]
@@ -232,18 +241,18 @@ public sealed class AiGovernanceServiceTests
     }
 
     [Fact]
-    public async Task Unauthorized_external_above_the_ceiling_is_still_denied()
+    public async Task Unauthorized_external_is_denied_and_the_ledger_records_no_authorization()
     {
-        // No authorization row: the ceiling applies unchanged. At 100% external ratio the
-        // reservation is denied with the original code, and the denied ledger row carries
-        // no authorization linkage.
+        // No authorization row: the reservation is refused outright, and the denied ledger
+        // row carries no authorization linkage — so "which calls went external under whose
+        // authorization" stays answerable from the ledger alone.
         using var fixture = new Fixture(hardLimit: 100_000);
 
         var denied = await Assert.ThrowsAsync<AiPolicyDeniedException>(() => fixture.Service.ReserveAsync(
             fixture.Context("unauthorized-full-ratio", AiProviderClass.External),
             "Ollama", "test", "external", 10, 10, 1, default));
 
-        Assert.Equal("external_dependency_cap", denied.Code);
+        Assert.Equal(AiExternalProviderTrustReasons.NotAuthorized, denied.Code);
         await using var db = fixture.Database.ContextFor(null);
         var request = await db.AiRequests.IgnoreQueryFilters().SingleAsync();
         Assert.Null(request.ExternalAuthorizationId);
@@ -251,10 +260,10 @@ public sealed class AiGovernanceServiceTests
     }
 
     [Fact]
-    public async Task Authorization_for_a_different_model_does_not_exempt_the_ceiling()
+    public async Task Authorization_for_a_different_model_does_not_authorize_this_call()
     {
-        // The exemption matches the exact resolved destination. A grant for another model
-        // at the same endpoint is not this destination — mismatch fails closed.
+        // A grant is for one destination, not "external in general". A grant for another
+        // model at the same endpoint is not this destination — mismatch fails closed.
         using var fixture = new Fixture(hardLimit: 100_000);
         fixture.AuthorizeResolvedEndpoint(model: "some-other-model");
 
@@ -262,11 +271,11 @@ public sealed class AiGovernanceServiceTests
             fixture.Context("wrong-model-authorized", AiProviderClass.External),
             "Ollama", "test", "external", 10, 10, 1, default));
 
-        Assert.Equal("external_dependency_cap", denied.Code);
+        Assert.Equal(AiExternalProviderTrustReasons.NotAuthorized, denied.Code);
     }
 
     [Fact]
-    public async Task Another_tenants_authorization_does_not_exempt_this_tenant()
+    public async Task Another_tenants_authorization_does_not_authorize_this_tenant()
     {
         using var fixture = new Fixture(hardLimit: 100_000);
         fixture.AuthorizeResolvedEndpoint(businessUnitId: Fixture.OtherBusinessUnitId);
@@ -275,7 +284,33 @@ public sealed class AiGovernanceServiceTests
             fixture.Context("other-tenants-grant", AiProviderClass.External),
             "Ollama", "test", "external", 10, 10, 1, default));
 
-        Assert.Equal("external_dependency_cap", denied.Code);
+        Assert.Equal(AiExternalProviderTrustReasons.NotAuthorized, denied.Code);
+    }
+
+    [Fact]
+    public async Task The_agents_anthropic_destination_is_governed_like_every_other_endpoint()
+    {
+        // Before the Anthropic origin had a descriptor it could never appear in an allow-list
+        // row, so it could never be authorized, expired or revoked — the only surviving
+        // control was a free-text provider-name match. Now it is refused without a grant and
+        // permitted with one, exactly like the extraction endpoint.
+        using var fixture = new Fixture(hardLimit: 100_000);
+        var anthropic = fixture.AnthropicDestination;
+
+        var denied = await Assert.ThrowsAsync<AiPolicyDeniedException>(() => fixture.Service.ReserveAsync(
+            fixture.Context("agent-unauthorized", AiProviderClass.External),
+            anthropic.Provider, anthropic.Model, "conversation", 32, 10, 1, default));
+        Assert.Equal(AiExternalProviderTrustReasons.NotAuthorized, denied.Code);
+
+        fixture.AuthorizeDestination(anthropic);
+        var reservation = await fixture.Service.ReserveAsync(
+            fixture.Context("agent-authorized", AiProviderClass.External),
+            anthropic.Provider, anthropic.Model, "conversation", 32, 10, 1, default);
+
+        await using var db = fixture.Database.ContextFor(null);
+        var request = await db.AiRequests.IgnoreQueryFilters().SingleAsync(x => x.Id == reservation.RequestId);
+        Assert.Equal(anthropic.Provider, request.Provider);
+        Assert.NotNull(request.ExternalAuthorizationId);
     }
 
     [Fact]
@@ -431,6 +466,7 @@ public sealed class AiGovernanceServiceTests
                     ["Ollama:Model"] = ResolvedModel
                 }).Build(),
                 new NoopLogger<AiProviderEndpointResolver>());
+            AnthropicDestination = resolver.Anthropic;
             _trustDb = Database.ContextFor(BusinessUnitId);
             var trust = new AiExternalProviderTrustService(
                 _trustDb, tenantContext, resolver, new NoopLogger<AiExternalProviderTrustService>());
@@ -442,12 +478,36 @@ public sealed class AiGovernanceServiceTests
                 trust);
         }
 
+        /// <summary>The agent's Claude destination, as the resolver names it.</summary>
+        public AiProviderDescriptor AnthropicDestination { get; } = null!;
+
         public AiCallContext Context(
             string key,
             AiProviderClass providerClass = AiProviderClass.Local,
             long? extractionJobId = null) =>
             new(BusinessUnitId, AiPurposes.RfqExtraction, key, "test-v1",
                 ProviderClass: providerClass, ExtractionJobId: extractionJobId);
+
+        /// <summary>Authorizes an arbitrary resolved destination for this tenant.</summary>
+        public void AuthorizeDestination(AiProviderDescriptor destination)
+        {
+            using var db = Database.ContextFor(null);
+            db.AiExternalProviderAuthorizations.Add(new AiExternalProviderAuthorization
+            {
+                BusinessUnitId = BusinessUnitId,
+                Provider = destination.Provider,
+                Endpoint = destination.Endpoint,
+                Model = destination.Model,
+                AllowedPurposes = AiPurposes.RfqExtraction,
+                UnstructuredDocumentsAllowed = false,
+                Justification = "DPA-2026-14 signed.",
+                AuthorizedByUserId = 4242,
+                AuthorizedBy = "user:4242",
+                AuthorizedOn = DateTime.UtcNow,
+                UpdatedOn = DateTime.UtcNow
+            });
+            db.SaveChanges();
+        }
 
         /// <summary>
         /// Inserts a live allow-list authorization row directly (the attributed admin

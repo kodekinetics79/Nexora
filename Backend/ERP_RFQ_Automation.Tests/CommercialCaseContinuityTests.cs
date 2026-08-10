@@ -54,7 +54,7 @@ public sealed class CommercialCaseContinuityTests
 
         await using var verify = fixture.Context();
         var purchaseOrder = await verify.SupplierPurchaseOrders.SingleAsync(x => x.Id == issued.Id);
-        Assert.Equal(SupplierPurchaseOrderStatuses.Issued, purchaseOrder.Status);
+        Assert.Equal(SupplierPurchaseOrderStatuses.Sent, purchaseOrder.Status);
         Assert.Equal(caseId, purchaseOrder.CommercialCaseId);
         Assert.Equal(serial, purchaseOrder.NexoraSerial);
     }
