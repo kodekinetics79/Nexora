@@ -52,25 +52,21 @@ public static partial class RoutingScopeKeys
         "lead carries no shipping or billing region. Nothing is inferred from unrelated data.";
 
     /// <summary>
-    /// KeyAccountTeam has NO source in the current model, and saying so is the only honest
-    /// answer available.
+    /// Why a KeyAccountTeam key is unavailable for a particular RFQ, now that the scope is
+    /// derivable in principle.
     ///
-    /// <para>Nothing links a customer or a lead to a team: <c>Customer</c> has no team or
-    /// account-manager column, <c>Lead</c> has none either (and routing only runs while
-    /// <c>Lead.AssignTo</c> is null), and <c>Team</c> carries no key-account marker.
-    /// <c>SalesTeamMembership</c> maps USERS to teams, not customers — so the only path from an
-    /// RFQ to a team would run customer to ownership to user to team, which is circular: it
-    /// would use the ownership rows to choose between the ownership rows.</para>
-    ///
-    /// <para>Deriving a key anyway would mean inventing one, and an invented key that happened
-    /// to equal a rule's ScopeKey would hand that rule every RFQ for the customer. The scope
-    /// therefore stays underived until a real customer-to-team link exists in the schema.</para>
+    /// <para>This constant used to read UNDERIVABLE and explain that NOTHING in the model linked a
+    /// customer to a team: <c>SalesTeamMembership</c> maps users to teams, so the only path from an
+    /// RFQ to a team ran customer → ownership → user → team, which is circular — it would use the
+    /// ownership rows to choose between the ownership rows. <c>Customer.AccountTeamId</c>
+    /// (FR-CST-02) supplies the missing customers-to-teams edge, so the scope now derives from the
+    /// customer recorded on the lead. It is UNAVAILABLE, per RFQ, only when this RFQ names no
+    /// customer or that customer has been put in no account team.</para>
     /// </summary>
-    public const string KeyAccountTeamUnderivable =
-        "UNDERIVABLE: no customer-to-team or lead-to-team link exists in the tenant model. " +
-        "SalesTeamMembership maps users to teams, not customers, so the only path from an RFQ " +
-        "to a team runs through the ownership rows this scope is meant to select between. " +
-        "A KeyAccountTeam rule cannot match until that link exists.";
+    public const string KeyAccountTeamUnavailable =
+        "UNAVAILABLE: this RFQ names no customer, or the customer recorded on the lead has no " +
+        "account team assigned. Nothing is inferred from ownership rows — this scope exists to " +
+        "select between them.";
 
     /// <summary>The branch is the routing tenant's own business unit code.</summary>
     public static ScopeKeyDerivation Branch(string? businessUnitCode)
@@ -137,9 +133,23 @@ public static partial class RoutingScopeKeys
         return new(OwnershipScope.Territory, null, TerritoryUnavailable);
     }
 
-    /// <summary>Always underived. See <see cref="KeyAccountTeamUnderivable"/> for why.</summary>
-    public static ScopeKeyDerivation KeyAccountTeam() =>
-        new(OwnershipScope.KeyAccountTeam, null, KeyAccountTeamUnderivable);
+    /// <summary>
+    /// The account team of the customer recorded on this RFQ's lead, by NAME — because an
+    /// ownership rule's <c>ScopeKey</c> is the wording a person typed when they wrote the rule, and
+    /// every other scope in this type is keyed the same way (a branch code, a commodity, a region
+    /// name). Keying it by team id would make the rules unwritable without a lookup.
+    ///
+    /// <para>A blank or absent team name yields a NULL key, and
+    /// <c>DeterministicRoutingEngine.ScopeMatches</c> refuses a blank key on either side — so an
+    /// unassigned customer matches NO KeyAccountTeam rule rather than matching every one of them.</para>
+    /// </summary>
+    public static ScopeKeyDerivation KeyAccountTeam(string? accountTeamName)
+    {
+        var team = CollapseWhitespace(accountTeamName);
+        return new(OwnershipScope.KeyAccountTeam, Blank(team), team.Length > 0
+            ? "customers.AccountTeamId -> Teams.TeamName"
+            : KeyAccountTeamUnavailable);
+    }
 
     /// <summary>
     /// Wraps keys a caller supplied explicitly, so an operator-driven route carries the same

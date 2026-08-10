@@ -32,15 +32,16 @@ public sealed class DashboardRelease01Tests
     }
 
     [Theory]
-    [InlineData(true, "tenant", null)]
-    [InlineData(false, "assigned_to_me", 77L)]
+    [InlineData(AccountScopeTier.Tenant, "tenant", null)]
+    [InlineData(AccountScopeTier.ManagedScope, "managed_scope", 77L)]
+    [InlineData(AccountScopeTier.AssignedAccounts, "assigned_accounts", 77L)]
     public async Task Release01Endpoint_DerivesRoleScopeAndTenantOnlyFromClaims(
-        bool manager, string expectedScope, long? expectedOwner)
+        AccountScopeTier tier, string expectedScope, long? expectedOwner)
     {
         var repository = new CapturingDashboardRepository();
         var endpointTo = DateTime.UtcNow.AddMinutes(-1);
         var endpointFrom = endpointTo.AddDays(-30);
-        var controller = new DashboardController(repository, new StubRoleGate(manager))
+        var controller = new DashboardController(repository, new StubScopeResolver(tier))
         {
             ControllerContext = new ControllerContext
             {
@@ -64,7 +65,8 @@ public sealed class DashboardRelease01Tests
     [Fact]
     public async Task Release01Endpoint_RejectsMissingAuthenticatedScopeClaims()
     {
-        var controller = new DashboardController(new CapturingDashboardRepository(), new StubRoleGate(true))
+        var controller = new DashboardController(
+            new CapturingDashboardRepository(), new StubScopeResolver(AccountScopeTier.Tenant))
         {
             ControllerContext = new ControllerContext
             {
@@ -86,7 +88,7 @@ public sealed class DashboardRelease01Tests
     {
         var repository = new CapturingDashboardRepository();
         var today = DateTime.UtcNow.Date;
-        var controller = new DashboardController(repository, new StubRoleGate(true))
+        var controller = new DashboardController(repository, new StubScopeResolver(AccountScopeTier.Tenant))
         {
             ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext
             {
@@ -115,12 +117,12 @@ public sealed class DashboardRelease01Tests
         var repository = new DashboardRepository(context);
 
         var result = await repository.GetRelease01Async(
-            BusinessUnitId, 77, "assigned_to_me", From, To, GeneratedAt);
+            BusinessUnitId, Scope(77), From, To, GeneratedAt);
 
         Assert.Equal(GeneratedAt, result.GeneratedAt);
         Assert.Equal(From, result.Filter.From);
         Assert.Equal(To, result.Filter.To);
-        Assert.Equal("assigned_to_me", result.RoleScope.Scope);
+        Assert.Equal("assigned_accounts", result.RoleScope.Scope);
         Assert.Equal(77, result.RoleScope.OwnerUserId);
 
         var received = Kpi(result, "leads_received");
@@ -159,7 +161,7 @@ public sealed class DashboardRelease01Tests
         await context.SaveChangesAsync();
 
         var result = await new DashboardRepository(context).GetRelease01Async(
-            BusinessUnitId, null, "tenant", From, To, GeneratedAt);
+            BusinessUnitId, AccountTeamScope.TenantWide(0), From, To, GeneratedAt);
 
         var rate = Kpi(result, "qualification_rate");
         Assert.Equal(50m, rate.Value);
@@ -186,7 +188,7 @@ public sealed class DashboardRelease01Tests
         await context.SaveChangesAsync();
 
         var result = await new DashboardRepository(context).GetRelease01Async(
-            BusinessUnitId, null, "tenant", From, To, GeneratedAt);
+            BusinessUnitId, AccountTeamScope.TenantWide(0), From, To, GeneratedAt);
 
         Assert.Equal(100m, Kpi(result, "qualification_rate").Value);
         Assert.Equal(10m, Kpi(result, "median_time_to_qualify").Value);
@@ -201,7 +203,7 @@ public sealed class DashboardRelease01Tests
         await context.SaveChangesAsync();
 
         var result = await new DashboardRepository(context).GetRelease01Async(
-            BusinessUnitId, null, "tenant", From, To, GeneratedAt);
+            BusinessUnitId, AccountTeamScope.TenantWide(0), From, To, GeneratedAt);
 
         var received = Kpi(result, "leads_received");
         Assert.Equal(DashboardRelease01Contract.InsufficientData, received.State);
@@ -316,15 +318,24 @@ public sealed class DashboardRelease01Tests
             new Claim(ClaimTypes.NameIdentifier, userId.ToString())
         ], "test"));
 
-    private sealed class StubRoleGate(bool manager) : IRoleGate
+
+    /// <summary>
+    /// The controller's job is to resolve the caller's scope and pass it through UNCHANGED. The
+    /// tier logic itself is certified by Gate8AccountTeamScopeTests against the real resolver and
+    /// real membership rows; stubbing it here would otherwise let the controller test pass while
+    /// the middle tier did not exist, which is exactly the state this gate found.
+    /// </summary>
+    private sealed class StubScopeResolver(AccountScopeTier tier) : IAccountTeamScopeResolver
     {
-        public Task<bool> IsSuperAdminAsync(long roleId, long businessUnitId) => Task.FromResult(false);
-        public Task<short> GetRoleRankAsync(long roleId, long businessUnitId) =>
-            Task.FromResult(manager ? RoleRanks.Manager : RoleRanks.Member);
-        public Task<bool> IsManagerOrAdminAsync(long roleId, long businessUnitId) => Task.FromResult(manager);
-        public Task<bool> CanManageRoleAsync(long callerRoleId, long? targetRoleId, long businessUnitId) =>
-            Task.FromResult(false);
+        public Task<AccountTeamScope> ResolveAsync(
+            long userId, long roleId, long businessUnitId, DateTime asOfUtc, CancellationToken ct = default)
+            => Task.FromResult(tier == AccountScopeTier.Tenant
+                ? AccountTeamScope.TenantWide(userId)
+                : new AccountTeamScope(tier, userId, [910L], [userId]));
     }
+
+    private static AccountTeamScope Scope(long userId) =>
+        new(AccountScopeTier.AssignedAccounts, userId, [], [userId]);
 
     private sealed class CapturingDashboardRepository : IDashboardRepository
     {
@@ -336,16 +347,15 @@ public sealed class DashboardRelease01Tests
 
         public Task<DashboardRelease01DTO> GetRelease01Async(
             long businessUnitId,
-            long? ownerUserId,
-            string roleScope,
+            AccountTeamScope scope,
             DateTime from,
             DateTime to,
             DateTime generatedAt,
             CancellationToken cancellationToken = default)
         {
             BusinessUnitId = businessUnitId;
-            OwnerUserId = ownerUserId;
-            RoleScope = roleScope;
+            OwnerUserId = scope.IsTenantWide ? null : scope.UserId;
+            RoleScope = scope.ScopeName;
             From = from;
             To = to;
             return Task.FromResult(new DashboardRelease01DTO());

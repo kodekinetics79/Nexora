@@ -228,6 +228,10 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
           { key: 'inventory-incoming', label: 'Incoming', path: '/inventory/incoming', moduleName: 'Products' },
           { key: 'inventory-movements', label: 'Movements', path: '/inventory/movements', moduleName: 'Products' },
           { key: 'inventory-demand', label: 'Demand', path: '/inventory/demand', moduleName: 'Products' },
+          { key: 'inventory-levels', label: 'Stock Levels', path: '/inventory/levels', moduleName: 'Products' },
+          { key: 'inventory-reorder-alerts', label: 'Reorder Alerts', path: '/inventory/reorder-alerts', moduleName: 'Products' },
+          { key: 'inventory-count-variance', label: 'Count Variance', path: '/inventory/count-variance', moduleName: 'Products' },
+          { key: 'inventory-ageing', label: 'Stock Ageing', path: '/inventory/ageing', moduleName: 'Products' },
           { key: 'inventory-resources', label: 'Related Resources', path: '/inventory/resources', moduleName: 'Products' },
           { key: 'inventory-lots', label: 'Lots & Traceability', path: '/inventory/lots', moduleName: 'Products', activePrefixes: ['/inventory/lots/'] },
           { key: 'inventory-order-trace', label: 'Where-Used Trace', path: '/inventory/order-trace', moduleName: 'Products', activePrefixes: ['/inventory/order-trace/'] },
@@ -277,6 +281,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
           { key: 'quote-format', label: t('quote_format'), path: '/setup/quote-format', moduleName: 'Quote Configuration' },
           { key: 'price-structure', label: 'Price Structure', path: '/setup/price-structure', moduleName: 'UOM' },
           { key: 'sla', label: 'Deadlines & Alerts', path: '/setup/sla', moduleName: 'UOM' },
+          { key: 'scheduled-reports', label: 'Scheduled Reports', path: '/setup/scheduled-reports', moduleName: 'Dashboard' },
           // The tax and tolerance numbers behind every landed cost and every customer price.
           { key: 'commercial-policy', label: 'Commercial Policy', path: '/setup/commercial-policy', moduleName: 'UOM' },
           { key: 'routing-rules', label: 'RFQ Routing Rules', path: '/setup/routing-rules', moduleName: 'Customers' },

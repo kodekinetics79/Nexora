@@ -87,6 +87,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
             var replay = await _db.SourcingCases.Include(x => x.Candidates).SingleOrDefaultAsync(x =>
                 x.BusinessUnitId == command.BusinessUnitId
@@ -244,6 +245,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
             var sourcingCase = await _db.SourcingCases.Include(x => x.Candidates).SingleOrDefaultAsync(x =>
                 x.BusinessUnitId == command.BusinessUnitId && x.Id == command.SourcingCaseId, ct)
@@ -313,6 +315,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
             var sourcingCase = await _db.SourcingCases.Include(x => x.Candidates).SingleOrDefaultAsync(x =>
                 x.BusinessUnitId == command.BusinessUnitId && x.Id == command.SourcingCaseId, ct)
@@ -468,6 +471,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
             var replay = await _db.ProcurementEvents.AsNoTracking().SingleOrDefaultAsync(x =>
                 x.BusinessUnitId == command.BusinessUnitId
@@ -788,6 +792,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
             var existing = await _db.Set<SupplierSolicitation>()
                 .SingleOrDefaultAsync(x => x.BusinessUnitId == command.BusinessUnitId && x.IdempotencyKey == command.IdempotencyKey.Trim(), ct);
@@ -969,6 +974,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
             var existingEvent = await _db.ProcurementEvents.AsNoTracking().FirstOrDefaultAsync(x =>
                 x.BusinessUnitId == command.BusinessUnitId && x.EventType == "SUPPLIER_SOLICITATION_RETRY_QUEUED"
@@ -1022,6 +1028,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
             var responseKeyPrefix = $"{command.IdempotencyKey.Trim()}:";
             var replay = await _db.SupplierQuotedItems.Where(x => x.BusinessUnitId == command.BusinessUnitId
@@ -1226,6 +1233,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
             var replay = await _db.Set<SourcingAward>().SingleOrDefaultAsync(x => x.BusinessUnitId == command.BusinessUnitId
                 && x.IdempotencyKey == command.IdempotencyKey.Trim(), ct);
@@ -1328,6 +1336,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
             var replay = await _db.SupplierPurchaseOrders.SingleOrDefaultAsync(x => x.BusinessUnitId == command.BusinessUnitId
                 && x.IdempotencyKey == command.IdempotencyKey.Trim(), ct);
@@ -1508,6 +1517,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
             var replayEvent = await _db.ProcurementEvents.AsNoTracking().SingleOrDefaultAsync(x =>
                 x.BusinessUnitId == command.BusinessUnitId && x.EventType == "SUPPLIER_PO_APPROVED"
@@ -1660,6 +1670,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
             var replayEvent = await _db.ProcurementEvents.AsNoTracking().SingleOrDefaultAsync(x =>
                 x.BusinessUnitId == command.BusinessUnitId && x.EventType == "SUPPLIER_PO_TRADE_TERMS_AMENDED"
@@ -1791,6 +1802,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
             var replayEvent = await _db.ProcurementEvents.AsNoTracking().SingleOrDefaultAsync(x =>
                 x.BusinessUnitId == command.BusinessUnitId && x.EventType == "SUPPLIER_PO_ACKNOWLEDGED"
@@ -1876,6 +1888,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
             var replayEvent = await _db.ProcurementEvents.AsNoTracking().SingleOrDefaultAsync(x =>
                 x.BusinessUnitId == command.BusinessUnitId && x.EventType == "SUPPLIER_PO_ISSUED"
@@ -2005,6 +2018,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
             var replayEvent = await _db.ProcurementEvents.AsNoTracking().SingleOrDefaultAsync(x =>
                 x.BusinessUnitId == command.BusinessUnitId && x.EventType == "SUPPLIER_PO_CANCELLED"
@@ -2099,6 +2113,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         {
             return await strategy.ExecuteAsync(async () =>
             {
+                _db.ChangeTracker.Clear();
             await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
             var replay = await _db.GoodsReceipts.SingleOrDefaultAsync(x => x.BusinessUnitId == command.BusinessUnitId
                 && x.IdempotencyKey == command.IdempotencyKey.Trim(), ct);

@@ -26,6 +26,28 @@ export interface CustomerDTO {
   modifiedBy?: string;
   modifiedOn?: string;
   concurrencyToken: string;
+
+  // ── FR-CST-01 customer master ──────────────────────────────────────────────
+  // Every one of these is optional on the wire and `undefined`/`null` means NOT CAPTURED.
+  // The screens render a stated gap for each ("Not captured", "Not classified",
+  // "No account team") rather than an empty cell — a blank in a register reads as a loading
+  // state, and a register that looks complete when it is not is why this module was reported
+  // as unmet in the first place.
+
+  /** KSA commercial registration (10 digits), or a foreign registration with its country prefix. */
+  commercialRegistrationNumber?: string | null;
+  /** VAT registration number, validated server-side by the same rule as suppliers. */
+  taxRegistrationNumber?: string | null;
+  /** Stored CODE, not a label: 'GOVERNMENT' | 'SEMI_GOVERNMENT' | 'PRIVATE'. */
+  sector?: string | null;
+  /** Key into the tenant's governed region master (SetState), not a typed string. */
+  regionStateId?: number | null;
+  /** Resolved region name for display. A projection of regionStateId, never a substitute. */
+  regionName?: string | null;
+  /** FR-CST-02 — the account team that owns this customer. */
+  accountTeamId?: number | null;
+  accountTeamName?: string | null;
+
   /**
    * AA-01 · raw jsonb bag of tenant-defined custom field values, keyed by stable key.
    * Read through `readCustomFieldValue` — never parsed inline, because the column is open

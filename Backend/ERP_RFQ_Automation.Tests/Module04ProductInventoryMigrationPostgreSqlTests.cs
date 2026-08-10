@@ -29,12 +29,14 @@ public sealed class Module04ProductInventoryMigrationPostgreSqlTests(PostgreSqlT
 
             // Pinned to the rehearsal era (see Seed.HistoricalLead).
             var lead = Seed.HistoricalLead(context, 98_401, 98_400, "Module 04 migration");
-            context.Products.Add(new Product
-            {
-                Id = 98_410, Buid = 98_400, PartNo = "M04-PART", ProductName = "Migration part",
-                IsActive = true, CreatedBy = "tests", CreatedOn = DateTime.UtcNow,
-            });
-            await context.SaveChangesAsync();
+            // Raw SQL, same reason as the rows below: saving a Product through EF fires the
+            // master-data audit interceptor, whose MasterDataChangeEvents table does not exist at
+            // PreviousMigration. Relaxing the interceptor instead would let an audit write be
+            // skipped silently, which is worse than a red test.
+            await context.Database.ExecuteSqlAsync($"""
+                INSERT INTO public."Products" ("ID", "BUID", "PartNo", "ProductName", "IsActive", "QtyOnHand", "ReorderPoint", "CreatedBy", "CreatedOn")
+                VALUES (98410, 98400, 'M04-PART', 'Migration part', true, 0, 0, 'tests', now())
+                """);
             // Batch and occurrence are inserted with raw SQL naming only the columns that exist
             // at PreviousMigration — same reason as the RFQ line below. Writing them through the
             // EF model emits every column the CURRENT model knows about, so adding any column to
@@ -135,13 +137,19 @@ public sealed class Module04ProductInventoryMigrationPostgreSqlTests(PostgreSqlT
                     """));
             Assert.Equal("P0001", immutableUpdate.SqlState);
 
-            Seed.EnsureBusinessUnit(context, 98_499);
-            context.Products.Add(new Product
-            {
-                Id = 98_419, Buid = 98_499, PartNo = "OTHER-TENANT", ProductName = "Other tenant part",
-                CreatedBy = "tests", CreatedOn = DateTime.UtcNow,
-            });
-            await context.SaveChangesAsync();
+            // Raw-SQL seed: pinned-era database, see Seed.HistoricalBusinessUnit.
+            Seed.HistoricalBusinessUnit(context, 98_499);
+            // Raw SQL rather than context.Products.Add: saving master data through EF fires the
+            // master-data audit interceptor, which writes to MasterDataChangeEvents — a table that
+            // does not exist at this pinned migration, so the save dies with 42P01. Making the
+            // interceptor tolerate a missing table would be the wrong fix: silently skipping an
+            // audit write is precisely the false assurance this build has spent two days removing.
+            // Note "ID" and "BUID" upper-case here; Products maps them that way and Inventory does
+            // not, and PostgreSQL quoted identifiers are case-sensitive.
+            await context.Database.ExecuteSqlAsync($"""
+                INSERT INTO public."Products" ("ID", "BUID", "PartNo", "ProductName", "QtyOnHand", "ReorderPoint", "CreatedBy", "CreatedOn")
+                VALUES (98419, 98499, 'OTHER-TENANT', 'Other tenant part', 0, 0, 'tests', now())
+                """);
             var crossTenantProduct = await Assert.ThrowsAsync<PostgresException>(() =>
                 context.Database.ExecuteSqlRawAsync("""
                     INSERT INTO public.lead_line_commercial_resolutions

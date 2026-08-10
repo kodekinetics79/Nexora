@@ -16,6 +16,7 @@ public sealed class UsageMeteringService(ErpRfqAutomationContext db)
             var strategy = db.Database.CreateExecutionStrategy();
             return await strategy.ExecuteAsync(async () =>
             {
+                db.ChangeTracker.Clear();
                 await using var transaction = await db.Database.BeginTransactionAsync(ct);
                 var result = await RecordAsync(request, ct);
                 await transaction.CommitAsync(ct);

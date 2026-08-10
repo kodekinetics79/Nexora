@@ -1,4 +1,5 @@
 using ERP_RFQ_Automation.Authorization;
+using ERP_RFQ_Automation.Delivery;
 using ERP_RFQ_Automation.DTOs;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
@@ -122,9 +123,17 @@ namespace ERP_RFQ_Automation.Controllers
             //
             // Cumulative across shipments, exactly as the invoice check is cumulative across
             // invoices — a per-request check would let three shipments of 50 past an order for 100.
+            //
+            // FR-DLM-05: the ceiling counts DESPATCHED shipments only. A cancelled despatch put
+            // nothing on a lorry, and leaving it in the total would permanently consume the order
+            // line's remaining quantity with goods that never left — wiring-contract failure #9,
+            // a new state that every hand-written guard has to be told about. The set lives in
+            // DeliveryStatuses.Despatched so the next status added is a visible decision in one
+            // file rather than a clause somebody forgets in one method out of three.
             var alreadyShipped = await _context.ShipmentItems.AsNoTracking()
                 .Where(si => si.IsActive && si.Shipment.OrderId == dto.OrderId
-                             && si.Shipment.BusinessUnitId == targetBUId && si.Shipment.IsActive)
+                             && si.Shipment.BusinessUnitId == targetBUId && si.Shipment.IsActive
+                             && DeliveryStatuses.DespatchedForQuery.Contains(si.Shipment.DeliveryStatus))
                 .GroupBy(si => si.OrderItemId)
                 .Select(g => new { OrderItemId = g.Key, Quantity = g.Sum(x => x.Quantity) })
                 .ToDictionaryAsync(x => x.OrderItemId, x => x.Quantity);
@@ -134,9 +143,13 @@ namespace ERP_RFQ_Automation.Controllers
                 .Where(line => declaredByLine.ContainsKey(line.Id)
                                && alreadyShipped.GetValueOrDefault(line.Id) + declaredByLine[line.Id] > line.Quantity)
                 .OrderBy(line => line.Id)
-                .Select(line => $"line {line.Id}: {line.Quantity} ordered, "
-                                + $"{alreadyShipped.GetValueOrDefault(line.Id)} already shipped, "
-                                + $"{declaredByLine[line.Id]} declared now")
+                // Quantities are normalised before they are written into the sentence. A SUM read
+                // back through the portable lane carries the column's scale, so the same figure
+                // rendered as "100" on one side of the message and "100.0000" on the other — the
+                // operator is being asked to compare three numbers and they have to look alike.
+                .Select(line => $"line {line.Id}: {Units(line.Quantity)} ordered, "
+                                + $"{Units(alreadyShipped.GetValueOrDefault(line.Id))} already shipped, "
+                                + $"{Units(declaredByLine[line.Id])} declared now")
                 .ToList();
             if (overShipped.Count > 0)
                 return Conflict(new
@@ -155,6 +168,7 @@ namespace ERP_RFQ_Automation.Controllers
                 var strategy = _context.Database.CreateExecutionStrategy();
                 var created = await strategy.ExecuteAsync(async () =>
                 {
+                    _context.ChangeTracker.Clear();
                     await using var transaction = await _context.Database.BeginTransactionAsync();
 
                     // Read inside the transaction, and inside the tenant predicate, so the master
@@ -178,10 +192,21 @@ namespace ERP_RFQ_Automation.Controllers
                         ShippingCost = dto.ShippingCost,
                         LabelUrl = dto.LabelUrl,
                         ShippingAddress = dto.ShippingAddress,
+                        DeliveryCityId = dto.DeliveryCityId,
                         Notes = dto.Notes,
                         CreatedBy = User.Identity?.Name ?? "system",
                         CreatedOn = DateTime.Now,
-                        IsActive = true
+                        IsActive = true,
+                        // FR-DLM-05. The governed lifecycle, alongside the tenant's own picklist
+                        // label in StatusId. DISPATCHED and not SCHEDULED, because this call
+                        // ISSUES THE STOCK a few lines below: the goods leave in the same
+                        // transaction, so recording them as still in the warehouse would make the
+                        // governed status disagree with the inventory ledger from the first row.
+                        // A shipment that is planned but not yet gone is a scheduling feature and
+                        // is out of scope under R22.
+                        DeliveryStatus = DeliveryStatuses.Dispatched,
+                        DeliveryStatusChangedBy = User.Identity?.Name ?? "system",
+                        DeliveryStatusChangedOn = DateTime.UtcNow
                     };
 
                     // FR-DLM-01: the delivery note carries the case rather than re-deriving it.
@@ -314,7 +339,8 @@ namespace ERP_RFQ_Automation.Controllers
             //
             // A shipment is one physical event: if any line could not issue what it declared, the
             // whole shipment fails and the transaction rolls the despatch note back with it.
-            if (issue.IsShort) throw new IncompleteGoodsIssueException(orderId, issue.ShortLines);
+            if (issue.IsShort)
+                throw new ERP_RFQ_Automation.Inventory.IncompleteGoodsIssueException(orderId, issue.ShortLines);
         }
 
         /// <summary>
@@ -337,7 +363,8 @@ namespace ERP_RFQ_Automation.Controllers
 
             var shipped = await _context.ShipmentItems.AsNoTracking()
                 .Where(si => si.IsActive && si.Shipment.OrderId == orderId
-                             && si.Shipment.BusinessUnitId == businessUnitId && si.Shipment.IsActive)
+                             && si.Shipment.BusinessUnitId == businessUnitId && si.Shipment.IsActive
+                             && DeliveryStatuses.DespatchedForQuery.Contains(si.Shipment.DeliveryStatus))
                 .GroupBy(si => si.OrderItemId)
                 .Select(g => new { OrderItemId = g.Key, Quantity = g.Sum(x => x.Quantity) })
                 .ToDictionaryAsync(x => x.OrderItemId, x => x.Quantity);
@@ -429,6 +456,13 @@ namespace ERP_RFQ_Automation.Controllers
             }
         }
 
+        /// <summary>
+        /// A quantity as an operator reads it: no trailing scale zeros, invariant separators.
+        /// Used only in messages, never in arithmetic.
+        /// </summary>
+        private static string Units(decimal quantity)
+            => quantity.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture);
+
         private ShipmentDto MapToDto(Shipment shipment)
         {
             return new ShipmentDto
@@ -449,6 +483,14 @@ namespace ERP_RFQ_Automation.Controllers
                 ShippingCost = shipment.ShippingCost,
                 LabelUrl = shipment.LabelUrl,
                 ShippingAddress = shipment.ShippingAddress,
+                // FR-DLM-05 / FR-DLM-01. The governed state and the governed region reach the API
+                // contract and the client type, not just the table.
+                DeliveryStatus = shipment.DeliveryStatus,
+                DeliveryStatusChangedOn = shipment.DeliveryStatusChangedOn,
+                DeliveryStatusChangedBy = shipment.DeliveryStatusChangedBy,
+                DeliveryCityId = shipment.DeliveryCityId,
+                DeliveryCityName = shipment.DeliveryCity?.CityName,
+                DeliveryRegionName = shipment.DeliveryCity?.State?.StateName,
                 Notes = shipment.Notes,
                 Items = shipment.ShipmentItems.Select(si => new ShipmentItemDto
                 {

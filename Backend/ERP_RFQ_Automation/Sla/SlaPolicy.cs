@@ -78,6 +78,21 @@ public sealed class SlaPolicy
     /// </summary>
     public int SupplierAckEscalationHours { get; set; } = 48;
 
+    /// <summary>
+    /// FR-SBF-01 — WORKING days before an RFQ's bid closing date at which lines still carrying
+    /// <c>ParticipationDecision = Pending</c> are chased. Default 3, matching
+    /// <see cref="WarnDaysBeforeClose"/>: the same lead time the deadline alert already uses, so a
+    /// tenant does not have to reason about two different notions of "soon".
+    ///
+    /// <para>Non-positive means NOT CONFIGURED (register R12), not "chase immediately". The backfill
+    /// for this column is <c>DEFAULT 3</c> — the SAME value as the code default above, stated here
+    /// because a backfill that disagrees with the initializer is failure #10 in the wiring contract
+    /// and the reason a whole order book once became instantly overdue.</para>
+    ///
+    /// <para>NEW COLUMN — needs a migration (owned by the lead), see SLA-WIRING.md §2.</para>
+    /// </summary>
+    public int QuoteDecisionReminderDays { get; set; } = 3;
+
     public DateTime CreatedOn { get; set; }
     public DateTime UpdatedOn { get; set; }
 
@@ -94,6 +109,7 @@ public sealed class SlaPolicy
         ApprovalEscalationHours = 4,
         DeadlineBufferHours = 12,
         SupplierShipDateReminderDays = 3,
-        SupplierAckEscalationHours = 48
+        SupplierAckEscalationHours = 48,
+        QuoteDecisionReminderDays = 3
     };
 }

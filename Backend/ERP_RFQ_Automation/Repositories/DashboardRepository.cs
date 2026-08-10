@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.DTOs.Dashboard;
 using ERP_RFQ_Automation.DTOs.CurrencyDTOs;
@@ -761,20 +762,46 @@ namespace ERP_RFQ_Automation.Repositories
 
         public async Task<DashboardRelease01DTO> GetRelease01Async(
             long businessUnitId,
-            long? ownerUserId,
-            string roleScope,
+            AccountTeamScope scope,
             DateTime from,
             DateTime to,
             DateTime generatedAt,
             CancellationToken cancellationToken = default)
         {
             if (businessUnitId <= 0) throw new ArgumentOutOfRangeException(nameof(businessUnitId));
+            ArgumentNullException.ThrowIfNull(scope);
             if (from >= to) throw new ArgumentException("The dashboard reporting window is invalid.");
             if (generatedAt < to) throw new ArgumentException("The generated-at boundary cannot precede the reporting window.");
 
+            // FR-DSH-05, three tiers rather than the previous boolean.
+            //
+            //   tenant             - no owner or account predicate at all.
+            //   managed_scope      - the supervisor's own work, their team members' work, AND the
+            //                        accounts their teams hold. The third clause is what makes this
+            //                        a real middle tier: a lead on a team account that has not been
+            //                        assigned to anybody yet is precisely the work a supervisor is
+            //                        there to see, and a pure "assigned to one of my people" filter
+            //                        would hide it.
+            //   assigned_accounts  - the rep's own work and the accounts of the teams they are on.
+            //
+            // The account clause reads Customer.AccountTeamId through the SAME predicate the
+            // customer list and the quick search use (AccountTeamReadFilter), so the three surfaces
+            // cannot drift apart. Delete AccountTeamId and this query stops compiling.
+            var accountCustomerIds = AccountTeamReadFilter.CustomerIdsInScope(
+                _context, businessUnitId, scope, generatedAt);
+            var scopeUserIds = scope.UserIds;
+
             var scopedLeads = _context.Leads.AsNoTracking()
-                .Where(lead => lead.BusinessUnitId == businessUnitId
-                    && (!ownerUserId.HasValue || lead.AssignTo == ownerUserId.Value));
+                .Where(lead => lead.BusinessUnitId == businessUnitId);
+
+            // The branch is taken in C#, not inside the expression tree: a null check on a
+            // subquery cannot be translated to SQL, and leaving it in the predicate makes the
+            // whole query fall back to client evaluation — which on a lead table means loading
+            // the tenant into memory to decide who may see it.
+            if (accountCustomerIds is not null)
+                scopedLeads = scopedLeads.Where(lead =>
+                    (lead.AssignTo != null && scopeUserIds.Contains(lead.AssignTo.Value))
+                    || (lead.CustomerId != null && accountCustomerIds.Contains(lead.CustomerId.Value)));
 
             var leadRows = await scopedLeads
                 .Where(lead => lead.CreatedDate < to)
@@ -863,8 +890,10 @@ namespace ERP_RFQ_Automation.Repositories
                 Filter = new DashboardRelease01FilterDTO { From = from, To = to },
                 RoleScope = new DashboardRelease01RoleScopeDTO
                 {
-                    Scope = roleScope,
-                    OwnerUserId = ownerUserId
+                    Scope = scope.ScopeName,
+                    OwnerUserId = scope.IsTenantWide ? null : scope.UserId,
+                    AccountTeamIds = scope.TeamIds.ToList(),
+                    ScopedUserIds = scope.IsTenantWide ? new List<long>() : scope.UserIds.ToList()
                 },
                 Kpis = kpis
             };

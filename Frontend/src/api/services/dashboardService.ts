@@ -111,7 +111,21 @@ export interface Release01DashboardDTO {
   definitionVersion: 'release-01';
   generatedAt: string;
   filter: { from: string; to: string; boundary: '[from,to)' };
-  roleScope: { scope: string; ownerUserId?: number | null };
+  /**
+   * FR-DSH-05 — three tiers, not two. `scope` is 'tenant' | 'managed_scope' | 'assigned_accounts';
+   * the middle value is new and did not previously exist on this contract, so a supervisor was
+   * served either the whole tenant or one person's work.
+   *
+   * `accountTeamIds` is empty on the tenant tier because that tier is not scoped by team at all —
+   * which is a different fact from a caller who is on no team, and the two are told apart by
+   * `scope`, never by the length of the list.
+   */
+  roleScope: {
+    scope: 'tenant' | 'managed_scope' | 'assigned_accounts' | string;
+    ownerUserId?: number | null;
+    accountTeamIds?: number[];
+    scopedUserIds?: number[];
+  };
   kpis: Release01KpiDTO[];
 }
 
@@ -198,27 +212,65 @@ export interface PipelineStageDTO {
   key: 'leads' | 'accepted' | 'quoted' | 'won';
   label: string;
   count: number;
-  value: number;
+  /** Null when the stage spans currencies with no approved rate — never a partial sum. */
+  value: number | null;
+  valueCurrency: string | null;
+  valueUnavailableReason: string | null;
 }
 
 export interface PipelineLossReasonDTO {
   reason: string;
   count: number;
-  value: number;
+  value: number | null;
+  valueCurrency: string | null;
+  valueUnavailableReason: string | null;
 }
 
 export interface PipelineAnalyticsDTO {
   funnel: PipelineStageDTO[];
   lossReasons: PipelineLossReasonDTO[];
-  weightedForecast: number;
+  weightedForecast: number | null;
+  forecastCurrency: string | null;
+  forecastUnavailableReason: string | null;
   awaitingResponseQuotes: number;
-  awaitingResponseValue: number;
+  awaitingResponseValue: number | null;
   respondedQuotes: number;
-  respondedValue: number;
-  /** Null when no quote line has floor (cost) data. */
-  avgMarginPct: number | null;
-  marginSampleLines: number;
-  totalQuoteLines: number;
+  respondedValue: number | null;
+  /** 'all_time' — this funnel has never been date-filtered, and now says so. */
+  funnelScope: string;
+  generatedAt: string;
+}
+
+// ─── GET /api/dashboard/gross-margin ────────────────────────────────────────
+// Replaces PipelineAnalyticsDTO.avgMarginPct, which was an unweighted mean of per-line
+// percentages taken against a product-card cost that is not a landed cost, over every quote
+// line ever written. It is gone rather than deprecated: leaving it would have kept a wrong
+// number on a live contract.
+
+export interface GrossMarginDTO {
+  status: 'available' | 'unavailable';
+  /** Null unless status is 'available'. Never a placeholder. */
+  marginPercent: number | null;
+  revenueTotal: number | null;
+  costTotal: number | null;
+  /** ISO code both totals are expressed in. Pass to formatMoney; never assume a symbol. */
+  currencyCode: string | null;
+  sampleLines: number;
+  sampleQuotes: number;
+  acceptedQuoteLines: number;
+  linesWithoutSourcingEvidence: number;
+  quotesExcludedForMissingAcceptanceDate: number;
+  /** Why the figure is unavailable, in words fit to show a user. */
+  reason: string | null;
+  costBasisChangedOn: string | null;
+  linesOnPriorCostBasis: number;
+  linesOnCurrentCostBasis: number;
+  marginPercentCurrentBasisOnly: number | null;
+  costBasisNote: string | null;
+  periodFrom: string;
+  periodTo: string;
+  periodBoundary: string;
+  acceptedDefinition: string;
   generatedAt: string;
 }
 
@@ -304,9 +356,21 @@ const dashboardService = {
     return r.data;
   },
 
-  /** WP-B2: stage funnel, loss reasons, weighted forecast and margin proxy. */
+  /** WP-B2: stage funnel, loss reasons and weighted forecast. */
   getPipelineAnalytics: async (): Promise<PipelineAnalyticsDTO> => {
     const r = await axiosInstance.get<PipelineAnalyticsDTO>('/api/dashboard/pipeline-analytics');
+    return r.data;
+  },
+
+  /**
+   * FR-DSH-02: value-weighted gross margin over accepted quotes in a window.
+   *
+   * Always returns a payload. `status: 'unavailable'` with a `reason` is a valid answer, not an
+   * error — the endpoint deliberately does not 4xx when a figure cannot be evidenced, so the screen
+   * can show the explanation instead of a failure state.
+   */
+  getGrossMargin: async (params: { from?: string; to?: string } = {}): Promise<GrossMarginDTO> => {
+    const r = await axiosInstance.get<GrossMarginDTO>('/api/dashboard/gross-margin', { params });
     return r.data;
   },
 
@@ -317,7 +381,11 @@ const dashboardService = {
    */
   getBrandDemand: async (params: BrandDemandParams = {}): Promise<BrandDemandDTO | null> => {
     try {
-      const r = await axiosInstance.get<BrandDemandDTO>('/api/analytics/brand-demand', { params });
+      // The route is /api/brand-demand (BrandDemandController). It was called as
+      // '/api/analytics/brand-demand', which no controller serves and no proxy rewrites, so every
+      // request 404'd — and because this catch maps 404 to null, the page rendered its "not
+      // available yet" empty state permanently instead of showing the error.
+      const r = await axiosInstance.get<BrandDemandDTO>('/api/brand-demand', { params });
       if (r.status === 204 || !r.data) return null;
       return { ...r.data, rows: r.data.rows ?? [] };
     } catch (error: unknown) {

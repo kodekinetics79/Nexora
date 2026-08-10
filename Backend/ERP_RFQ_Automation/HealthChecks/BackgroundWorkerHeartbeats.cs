@@ -12,6 +12,13 @@ namespace ERP_RFQ_Automation.HealthChecks;
 public static class BackgroundWorkerNames
 {
     public const string SlaSweep = "sla-sweep";
+
+    /// <summary>
+    /// FR-INV-04. The reorder/overstock sweep. A faulted reorder loop is silent by construction —
+    /// the failure mode is an alert that never arrives about stock that is quietly running out, and
+    /// nobody reports the absence of a warning.
+    /// </summary>
+    public const string ReorderAlertSweep = "reorder-alert-sweep";
     public const string RoutingReconciliation = "routing-reconciliation";
     public const string EmailPoller = "email-poller";
     public const string AiReservationReconciliation = "ai-reservation-reconciliation";
@@ -22,6 +29,13 @@ public static class BackgroundWorkerNames
     /// is only discovered when somebody asks why the month invoiced nothing.
     /// </summary>
     public const string BillingRun = "billing-run";
+
+    /// <summary>
+    /// FR-DSH-06 scheduled report delivery. A faulted reporting loop is silent by construction —
+    /// the failure mode is an email that does not arrive, and nobody reports the absence of a report
+    /// for weeks.
+    /// </summary>
+    public const string ScheduledReports = "scheduled-reports";
 }
 
 public sealed record BackgroundWorkerHeartbeatStatus(

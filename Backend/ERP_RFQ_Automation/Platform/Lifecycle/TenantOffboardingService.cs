@@ -462,7 +462,7 @@ public sealed class TenantOffboardingService(
                     + "window and records the decision.");
         }
 
-        // Separation of duties — LAST, and deliberately so.
+        // Separation of duties — LAST among the decision guards, and deliberately so.
         //
         // Every other control on this path is one person satisfying a rule: the Owner policy, the
         // typed name, the reason, the clock, the hold, the readiness evidence. None of them is a
@@ -476,7 +476,15 @@ public sealed class TenantOffboardingService(
         // outstanding. Refusing on this while the retention window still has twenty days to run
         // would send somebody to find a colleague for a purge that was going to be refused anyway,
         // and the operator would learn about the clock on the second attempt.
-        await RequireIndependentPurgeApproverAsync(tenant, record, actor, ct);
+        //
+        // It is SKIPPED when a previous attempt already committed the destructive transaction (see
+        // the recovery branch below). At that point the rows are gone and the only thing left to do
+        // is write down that they are gone. This rule governs the decision to destroy, not the
+        // bookkeeping that follows one; applying it here would strand a tenant in the "executed but
+        // not finalized" state — the one state this module calls tolerable precisely because it
+        // self-heals — until somebody with the right identity happened to retry.
+        if (record.PurgeExecutedOn is null)
+            await RequireIndependentPurgeApproverAsync(tenant, record, actor, ct);
 
         var purgeAttemptId = Guid.NewGuid();
         TenantPurgeOutcome? outcome = null;

@@ -78,10 +78,30 @@ public static class DeliveryStatuses
         Scheduled, Dispatched, InTransit, Delivered, DeliveryException, Cancelled
     };
 
-    /// <summary>Nothing leaves these. Both are outcomes, not waypoints.</summary>
+    /// <summary>
+    /// Nothing leaves these. All three are outcomes, not waypoints.
+    ///
+    /// <para><see cref="DeliveryException"/> is terminal for the same reason
+    /// <see cref="Delivered"/> is: the customer has taken receipt and a POD has been captured
+    /// against the consignment. What happens next about the shortfall is a <i>commercial
+    /// decision</i> — re-supply or credit — recorded on the shortfall itself, not a further
+    /// movement of this shipment. Re-supply raises a new shipment against the outstanding
+    /// quantity, which is the honest record: two despatches happened.</para>
+    /// </summary>
     public static readonly IReadOnlySet<string> Terminal = new HashSet<string>(StringComparer.Ordinal)
     {
-        Delivered, Cancelled
+        Delivered, DeliveryException, Cancelled
+    };
+
+    /// <summary>
+    /// States in which the customer has taken receipt and a proof of delivery exists. This is the
+    /// set <b>accepted</b> quantity accrues from — see
+    /// <c>DeliveredQuantityLedger</c> — and it is deliberately NOT the same set as
+    /// <see cref="Despatched"/>. See that ledger for why the two numbers are different numbers.
+    /// </summary>
+    public static readonly IReadOnlySet<string> Confirmed = new HashSet<string>(StringComparer.Ordinal)
+    {
+        Delivered, DeliveryException
     };
 
     /// <summary>
@@ -98,6 +118,20 @@ public static class DeliveryStatuses
     {
         Dispatched, InTransit, Delivered, DeliveryException
     };
+
+    /// <summary>
+    /// <see cref="Despatched"/> for use inside a LINQ-to-Entities predicate.
+    ///
+    /// <para>EF Core cannot translate <c>IReadOnlySet&lt;string&gt;.Contains</c> — it throws at
+    /// query-compile time rather than falling back to client evaluation, so a query written
+    /// against the set above fails on first execution rather than merely running slowly. An array
+    /// translates to <c>IN (...)</c>.</para>
+    ///
+    /// <para><b>Derived, never restated.</b> Two literal lists for one fact is the failure the
+    /// comment above is about; this one cannot drift because it is projected from the set it
+    /// mirrors.</para>
+    /// </summary>
+    public static readonly string[] DespatchedForQuery = [.. Despatched];
 
     /// <summary>
     /// States a delivery confirmation may be recorded against. A SCHEDULED shipment cannot be
@@ -144,10 +178,6 @@ public static class DeliveryStatuses
 
         if (string.Equals(next, Cancelled, StringComparison.Ordinal))
             return Cancellable.Contains(current);
-
-        // An exception shipment is already confirmed; the only forward move is a re-confirmation,
-        // which the confirmation path handles rather than this ladder.
-        if (string.Equals(current, DeliveryException, StringComparison.Ordinal)) return false;
 
         if (string.Equals(next, Delivered, StringComparison.Ordinal)
             || string.Equals(next, DeliveryException, StringComparison.Ordinal))
@@ -273,4 +303,139 @@ public sealed class DeliveryProof
     /// from "a fix at the equator", which <c>0,0</c> would otherwise conflate.
     /// </summary>
     public bool HasGpsFix => GpsLatitude.HasValue && GpsLongitude.HasValue;
+}
+
+/// <summary>
+/// FR-DLM-02 and FR-DLM-07. What the customer actually accepted, line by line, on one delivery.
+///
+/// <para><b>This row is the reason the gate exists.</b> Register item E50 recorded that nothing in
+/// the backend held a delivered quantity: <c>ShipmentItem</c> carried only what was loaded, and
+/// every downstream consumer — the invoice ceiling, the delivery note, the order's fulfilment
+/// state — had to treat "left the warehouse" and "the customer has it" as the same fact. They are
+/// not the same fact, and the difference is precisely where a receivable becomes a dispute.</para>
+///
+/// <para>Written in the same transaction as the <see cref="DeliveryProof"/> it hangs from, one row
+/// per shipment line, and never updated afterwards. <see cref="DespatchedQuantity"/> is a SNAPSHOT
+/// of the shipment line at the moment of signature rather than a join to it — the signed document
+/// has to keep saying what it said when it was signed, even if the shipment line is later
+/// corrected.</para>
+/// </summary>
+public sealed class DeliveryProofLine
+{
+    public long Id { get; set; }
+
+    public long BusinessUnitId { get; set; }
+
+    public long DeliveryProofId { get; set; }
+
+    public long ShipmentId { get; set; }
+
+    public long ShipmentItemId { get; set; }
+
+    /// <summary>
+    /// Carried so the ledger can group by order line without joining through the shipment item,
+    /// and so a mis-parented proof line is impossible rather than merely detectable.
+    /// </summary>
+    public long OrderItemId { get; set; }
+
+    public long OrderId { get; set; }
+
+    /// <summary>What the note declared. Snapshot, see the class remarks.</summary>
+    public decimal DespatchedQuantity { get; set; }
+
+    /// <summary>
+    /// What the customer took. Zero is a legitimate value — a whole pallet refused at the door —
+    /// and it is a different fact from "no confirmation was recorded", which is the absence of the
+    /// row entirely.
+    /// </summary>
+    public decimal AcceptedQuantity { get; set; }
+
+    /// <summary>
+    /// Never stored: a stored difference is a third number that can disagree with the two it is
+    /// derived from. FR-DLM-07's short-shipment figure is this subtraction and nothing else.
+    /// </summary>
+    public decimal RefusedQuantity => DespatchedQuantity - AcceptedQuantity;
+
+    public bool IsShort => AcceptedQuantity < DespatchedQuantity;
+
+    /// <summary>
+    /// One of <see cref="DeliveryExceptionReasons"/>. Required exactly when the line is short and
+    /// forbidden when it is not — enforced by a CHECK constraint as well as by the service, because
+    /// a shortfall with no reason is a number nobody can act on.
+    /// </summary>
+    public string? ExceptionReasonCode { get; set; }
+
+    /// <summary>The operator's own words. The code says which queue; this says what happened.</summary>
+    public string? ExceptionNote { get; set; }
+
+    public string? Notes { get; set; }
+}
+
+/// <summary>
+/// FR-DLM-07, and only the commercial half of it.
+///
+/// <para><b>What this is not.</b> It is not a claim against the carrier, an insurance recovery, a
+/// liability finding or a corrective-action investigation. Tech Connect is a trader; when a pallet
+/// is dropped, the carrier's own process handles the carrier's own problem, outside this system.
+/// What this system owes the business is the commercial consequence: the customer is short, so
+/// somebody has to decide whether to send more goods or to give the money back, and until they
+/// decide, the order line is neither fulfilled nor closed.</para>
+///
+/// <para>So the record carries exactly two things the shortfall itself does not: which decision was
+/// taken, and who took it. There is no assignee, no due date, no stage and no root cause, because
+/// none of those is a fact this system is the book of record for.</para>
+///
+/// <para>Append-only and one per shortfall line: a decision that can be edited is not a decision,
+/// it is a draft, and the exception centre resolves the case off the existence of this row.</para>
+/// </summary>
+public sealed class DeliveryShortfallDecision
+{
+    public long Id { get; set; }
+
+    public long BusinessUnitId { get; set; }
+
+    public long DeliveryProofLineId { get; set; }
+
+    public long ShipmentId { get; set; }
+
+    /// <summary>One of <see cref="DeliveryShortfallDecisions"/>.</summary>
+    public string Decision { get; set; } = null!;
+
+    /// <summary>
+    /// Why. Mandatory — "we credited it" with no sentence behind it tells the next person reading
+    /// the case nothing, and this is the field the commercial case shows when the shortfall is
+    /// reported as lost value.
+    /// </summary>
+    public string Reason { get; set; } = null!;
+
+    public string DecidedBy { get; set; } = null!;
+
+    public DateTime DecidedOn { get; set; }
+}
+
+/// <summary>
+/// The two answers a shortfall can have. Deliberately two, and deliberately not a workflow.
+/// </summary>
+public static class DeliveryShortfallDecisions
+{
+    /// <summary>
+    /// Send the balance. The order line stays outstanding, so it still appears as unfulfilled and
+    /// a further shipment can be raised against it — which is the correct record: two despatches
+    /// happened, and both are evidenced.
+    /// </summary>
+    public const string Resupply = "RESUPPLY";
+
+    /// <summary>
+    /// Give the money back rather than the goods. The unaccepted quantity was never invoiceable in
+    /// the first place — the ceiling in <c>CommercialFinanceApplicationService</c> sees accepted,
+    /// not despatched — so "credit" here means the shortfall is written off commercially and the
+    /// line will not be re-supplied. Where an invoice was already issued against a quantity that
+    /// was subsequently refused, the instrument is a <c>CreditNote</c>, which exists.
+    /// </summary>
+    public const string Credit = "CREDIT";
+
+    public static readonly IReadOnlySet<string> All = new HashSet<string>(StringComparer.Ordinal)
+    {
+        Resupply, Credit
+    };
 }

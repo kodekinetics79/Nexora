@@ -221,7 +221,7 @@ public sealed class CommercialCaseContinuityTests
             await using var context = Database.ContextFor(Tenant);
             var controller = new ShipmentController(
                 new ShipmentRepository(context), context,
-                new OrderStockReservationService(context, new InventoryAvailabilityService(context)))
+                InventoryServices.OrderStock(context))
             {
                 ControllerContext = new ControllerContext
                 {

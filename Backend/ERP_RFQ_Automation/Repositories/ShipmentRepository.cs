@@ -23,6 +23,9 @@ namespace ERP_RFQ_Automation.Repositories
                 .Where(s => s.BusinessUnitId == businessUnitId && s.IsActive)
                 .Include(s => s.Order)
                 .Include(s => s.Status)
+                // FR-DLM-01. The governed region travels with the shipment so the list and the
+                // note read the same mapping rather than each deriving one.
+                .Include(s => s.DeliveryCity).ThenInclude(c => c!.State)
                 .OrderByDescending(s => s.CreatedOn)
                 .ToListAsync();
         }
@@ -39,6 +42,7 @@ namespace ERP_RFQ_Automation.Repositories
                 .Include(s => s.ShipmentItems)
                     .ThenInclude(si => si.OrderItem)
                         .ThenInclude(oi => oi.Product)
+                .Include(s => s.DeliveryCity).ThenInclude(c => c!.State)
                 .FirstOrDefaultAsync(s => s.Id == id && s.BusinessUnitId == businessUnitId && s.IsActive);
         }
 

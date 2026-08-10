@@ -344,6 +344,14 @@ builder.Services.AddScoped<ERP_RFQ_Automation.Inventory.IOrderStockReservationSe
 builder.Services.AddScoped<ERP_RFQ_Automation.Traceability.IMaterialLotRecorder, ERP_RFQ_Automation.Traceability.MaterialLotRecorder>();
 builder.Services.AddScoped<ERP_RFQ_Automation.Traceability.IMaterialTraceabilityService, ERP_RFQ_Automation.Traceability.MaterialTraceabilityService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.Traceability.IMaterialLotCertificateService, ERP_RFQ_Automation.Traceability.MaterialLotCertificateService>();
+// Gate 7 / FR-DLM-01..07. The delivered-quantity ledger is the single definition of "delivered" in
+// the product: the invoice ceiling, the delivery note and the order screens all read it, so it is
+// registered once and injected rather than reconstructed, and there is exactly one place to change
+// what the word means.
+builder.Services.AddScoped<ERP_RFQ_Automation.Delivery.IDeliveredQuantityLedger, ERP_RFQ_Automation.Delivery.DeliveredQuantityLedger>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Delivery.IDeliveryConfirmationService, ERP_RFQ_Automation.Delivery.DeliveryConfirmationService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Delivery.IDeliveryProofEvidenceService, ERP_RFQ_Automation.Delivery.DeliveryProofEvidenceService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Delivery.IDeliveryNoteReadService, ERP_RFQ_Automation.Delivery.DeliveryNoteReadService>();
 // Gate 6 / FR-INV-03. The seam that makes a goods issue declare the lots it moved. Registered
 // unconditionally: NullLotFulfilmentDeclarer exists only so a caller cannot be written against a
 // null reference, and if it were ever reached here, lot consumption would silently stop being
@@ -390,6 +398,15 @@ builder.Services.AddScoped<IAuthorizationHandler, PermissionHandler>();
 // body that leaks no module names.
 builder.Services.AddMemoryCache();
 builder.Services.AddScoped<IRoleGate, RoleGate>();
+// FR-CST-02 / FR-DSH-05: the account-team scope every customer, dashboard and search read is
+// filtered by. Scoped because it reads team membership through the request-scoped DbContext, and
+// because the answer is a property of the CALLER — a singleton would have to be keyed by user and
+// would then be a cache of authorization decisions with no invalidation.
+builder.Services.AddScoped<IAccountTeamScopeResolver, AccountTeamScopeResolver>();
+// FR-DSH-04: the cross-entity quick search behind the top bar. Scoped for the same reason —
+// its permission and account-scope decisions are the caller's, not the process's.
+builder.Services.AddScoped<ERP_RFQ_Automation.Search.IGlobalSearchService,
+    ERP_RFQ_Automation.Search.GlobalSearchService>();
 // RC-7: IAM audit trail. Scoped because it writes through the SAME request-scoped DbContext the
 // repositories use — that shared instance is what makes an audit event commit or roll back with
 // the mutation it describes, rather than being a best-effort log line beside it.
@@ -705,11 +722,23 @@ builder.Services.AddScoped<ERP_RFQ_Automation.Sla.ILeadOutcomeReasons, ERP_RFQ_A
 builder.Services.AddSingleton<ERP_RFQ_Automation.Sla.ISlaNotifications, ERP_RFQ_Automation.Sla.SlaNotifications>();
 builder.Services.AddHostedService<ERP_RFQ_Automation.Sla.SlaSweepWorker>();
 
+// ==== Gate 6 / FR-INV-04: minimum, maximum and reorder alerts (Inventory/) ====
+// After the SLA registrations above: the reorder sweep reuses ISlaNotifications as its delivery
+// channel and SlaSweepWorker's claim primitives as its send-once ledger, so the two engines cannot
+// drift apart on whether a message can be sent twice.
+builder.Services.AddScoped<ERP_RFQ_Automation.Inventory.IStockLedgerService,
+                           ERP_RFQ_Automation.Inventory.StockLedgerService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Inventory.IReorderAlertService,
+                           ERP_RFQ_Automation.Inventory.ReorderAlertService>();
+builder.Services.AddHostedService<ERP_RFQ_Automation.Inventory.ReorderAlertSweepWorker>();
+
 // ==== Gate 8: dashboards, scheduled reporting (Reporting/) ====
 builder.Services.AddScoped<ERP_RFQ_Automation.Reporting.IGrossMarginService,
                            ERP_RFQ_Automation.Reporting.GrossMarginService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.Reporting.IReportRenderer,
                            ERP_RFQ_Automation.Reporting.ReportRenderer>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Reporting.IReportBuilder,
+                           ERP_RFQ_Automation.Reporting.ReportBuilder>();
 builder.Services.AddScoped<ERP_RFQ_Automation.Reporting.IReportSubscriptionService,
                            ERP_RFQ_Automation.Reporting.ReportSubscriptionService>();
 builder.Services.AddSingleton<ERP_RFQ_Automation.Reporting.IReportDelivery,

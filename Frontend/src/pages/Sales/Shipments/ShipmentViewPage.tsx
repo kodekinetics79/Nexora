@@ -17,6 +17,8 @@ import {
 } from '@mui/icons-material';
 import { useAuth } from '../../../context/AuthContext';
 import shipmentService from '../../../api/services/shipmentService';
+import { DELIVERY_STATUS_LABEL } from '../../../api/services/deliveryService';
+import DeliveryConfirmationPanel from './DeliveryConfirmationPanel';
 import orderService from '../../../api/services/orderService';
 import dayjs from 'dayjs';
 
@@ -66,7 +68,25 @@ const ShipmentViewPage: React.FC = () => {
           <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center' }}>
             <ShippingIcon color="primary" />
             <Typography variant="h5" sx={{ fontWeight: 900 }}>Shipment {shipment.shipmentNo}</Typography>
+            {/*
+              Two chips, because there are two facts. The first is the tenant's own picklist label
+              (SetupMaster / 'ShipmentStatus'), which nothing constrains — hence the fall-through to
+              grey. The second is the GOVERNED delivery status (FR-DLM-05), which every guard,
+              ledger and document in the product actually depends on. Showing only the first is what
+              made "delivered" mean whatever an operator had typed.
+            */}
             <Chip label={shipment.status} size="small" color={getStatusColor(shipment.status) as any} sx={{ fontWeight: 700 }} />
+            <Chip
+              label={DELIVERY_STATUS_LABEL[shipment.deliveryStatus] ?? shipment.deliveryStatus}
+              size="small"
+              variant="outlined"
+              color={
+                shipment.deliveryStatus === 'DELIVERED' ? 'success'
+                  : shipment.deliveryStatus === 'DELIVERY_EXCEPTION' ? 'warning'
+                    : shipment.deliveryStatus === 'CANCELLED' ? 'default' : 'primary'
+              }
+              sx={{ fontWeight: 700 }}
+            />
           </Stack>
         </Box>
         <Stack direction="row" spacing={1.5}>
@@ -82,6 +102,14 @@ const ShipmentViewPage: React.FC = () => {
 
       <Grid container spacing={2}>
         <Grid size={{ xs: 12, lg: 8 }}>
+          {/* FR-DLM-03, FR-DLM-05, FR-DLM-07 — the delivery ladder, the POD and the shortfall. */}
+          <DeliveryConfirmationPanel
+            shipmentId={shipment.id}
+            orderId={shipment.orderId}
+            deliveryStatus={shipment.deliveryStatus}
+            items={shipment.items}
+          />
+
           {/* General Information */}
           <Paper sx={{ p: 3, borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none', mb: 2 }}>
             <Typography variant="subtitle2" sx={{ fontWeight: 800, mb: 3, color: 'primary.main', display: 'flex', alignItems: 'center', gap: 1 }}>
@@ -217,8 +245,17 @@ const ShipmentViewPage: React.FC = () => {
           <Card sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
             <CardContent>
               <Typography variant="subtitle2" sx={{ fontWeight: 800, mb: 2 }}>SHIPPING DESTINATION</Typography>
-              <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', color: 'text.secondary', mb: 2 }}>
+              <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', color: 'text.secondary', mb: 1 }}>
                 {shipment.shippingAddress || 'No address specified'}
+              </Typography>
+              {/* FR-DLM-01. The governed region, or a visible statement that there is none. */}
+              <Typography variant="body2" sx={{ mb: 2 }}>
+                <strong>Region:</strong>{' '}
+                {shipment.deliveryRegionName
+                  ? [shipment.deliveryCityName, shipment.deliveryRegionName].filter(Boolean).join(', ')
+                  : <Box component="span" sx={{ fontStyle: 'italic', color: 'text.disabled' }}>
+                      Not mapped to a governed region
+                    </Box>}
               </Typography>
               
               <Divider sx={{ my: 2 }} />

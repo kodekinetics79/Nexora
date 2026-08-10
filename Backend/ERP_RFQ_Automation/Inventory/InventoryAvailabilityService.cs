@@ -273,6 +273,7 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             // PostgreSQL's transaction-scoped advisory lock is the serialization boundary.
             // READ COMMITTED refreshes the snapshot after a waiter acquires that lock.
             var isolation = _db.Database.IsNpgsql() ? IsolationLevel.ReadCommitted : IsolationLevel.Serializable;
@@ -370,6 +371,7 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             var isolation = _db.Database.IsNpgsql() ? IsolationLevel.ReadCommitted : IsolationLevel.Serializable;
             await using var transaction = await _db.Database.BeginTransactionAsync(isolation, ct);
             var count = await ReleaseWithinTransactionAsync(businessUnitId, orderId, actor, ct);
@@ -387,6 +389,7 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
         var strategy = _db.Database.CreateExecutionStrategy();
         await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             var isolation = _db.Database.IsNpgsql() ? IsolationLevel.ReadCommitted : IsolationLevel.Serializable;
             await using var transaction = await _db.Database.BeginTransactionAsync(isolation, ct);
             await LockAsync(ReservationLock(businessUnitId, reservationId), ct);
@@ -490,6 +493,7 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             var isolation = _db.Database.IsNpgsql() ? IsolationLevel.ReadCommitted : IsolationLevel.Serializable;
             await using var transaction = await _db.Database.BeginTransactionAsync(isolation, ct);
             var released = await ReleaseAsync();
@@ -570,6 +574,7 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             var isolation = _db.Database.IsNpgsql() ? IsolationLevel.ReadCommitted : IsolationLevel.Serializable;
             await using var transaction = await _db.Database.BeginTransactionAsync(isolation, ct);
             var released = await ReleaseAsync();
@@ -603,6 +608,7 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
         var strategy = _db.Database.CreateExecutionStrategy();
         await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             var isolation = _db.Database.IsNpgsql() ? IsolationLevel.ReadCommitted : IsolationLevel.Serializable;
             await using var transaction = await _db.Database.BeginTransactionAsync(isolation, ct);
             await ConsumeWithinTransactionAsync(businessUnitId, reservationId, actor, ct);
@@ -622,6 +628,7 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             var isolation = _db.Database.IsNpgsql() ? IsolationLevel.ReadCommitted : IsolationLevel.Serializable;
             await using var transaction = await _db.Database.BeginTransactionAsync(isolation, ct);
             var child = await SplitWithinTransactionAsync(businessUnitId, reservationId, quantity, actor, ct);
@@ -690,6 +697,7 @@ public sealed class InventoryAvailabilityService(ErpRfqAutomationContext db) : I
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             var isolation = _db.Database.IsNpgsql() ? IsolationLevel.ReadCommitted : IsolationLevel.Serializable;
             await using var transaction = await _db.Database.BeginTransactionAsync(isolation, ct);
 

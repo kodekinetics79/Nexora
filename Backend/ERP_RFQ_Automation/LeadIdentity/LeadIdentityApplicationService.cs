@@ -761,8 +761,12 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
     {
         if (_db.Database.CurrentTransaction is not null || !_db.Database.IsRelational())
             return DecideMatchCoreAsync(bu, occurrenceId, request, actorId, ct);
-        return _db.Database.CreateExecutionStrategy().ExecuteAsync(
-            () => DecideMatchCoreAsync(bu, occurrenceId, request, actorId, ct));
+        return _db.Database.CreateExecutionStrategy().ExecuteAsync(() =>
+        {
+            // Only on THIS branch — see EstablishBaselineRevisionAsync.
+            _db.ChangeTracker.Clear();
+            return DecideMatchCoreAsync(bu, occurrenceId, request, actorId, ct);
+        });
     }
 
     private async Task<LeadReconciliationResult> DecideMatchCoreAsync(long bu, long occurrenceId,
@@ -912,8 +916,15 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         ArgumentNullException.ThrowIfNull(request);
         if (_db.Database.CurrentTransaction is not null || !_db.Database.IsRelational())
             return EstablishBaselineCoreAsync(businessUnitId, leadId, request, ct);
-        return _db.Database.CreateExecutionStrategy().ExecuteAsync(
-            () => EstablishBaselineCoreAsync(businessUnitId, leadId, request, ct));
+        return _db.Database.CreateExecutionStrategy().ExecuteAsync(() =>
+        {
+            // Only on THIS branch: the guard above hands an ambient transaction straight to the
+            // core, and clearing there would discard the caller's uncommitted unit of work.
+            // Here the strategy owns the attempt and may re-run the delegate on this same
+            // DbContext, so attempt 1's mutations must not be visible to attempt 2.
+            _db.ChangeTracker.Clear();
+            return EstablishBaselineCoreAsync(businessUnitId, leadId, request, ct);
+        });
     }
 
     private async Task<LeadReconciliationResult> EstablishBaselineCoreAsync(

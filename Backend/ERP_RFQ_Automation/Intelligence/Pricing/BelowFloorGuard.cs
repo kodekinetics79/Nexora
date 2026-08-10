@@ -409,12 +409,12 @@ public sealed class BelowFloorGuard : IBelowFloorGuard
                 $"{bidClosing.Value:dd MMM yyyy HH:mm} UTC — already inside the {policy.DeadlineBufferHours}-hour " +
                 "internal safety buffer. Please approve or reject it right away so the quote can still go out in time.";
 
-            var notified = false;
+            var outcomes = new List<SlaSendResult>();
             if (requester is not null && !string.IsNullOrWhiteSpace(requester.Email))
             {
-                notified |= await _notifications.SendDeadlineAlertAsync(
+                outcomes.Add(await _notifications.SendDeadlineAlertAsync(
                     requester.Email, requester.FirstName, "escalated", label,
-                    $"Below-floor approval is blocking {label} — deadline imminent", detail, businessUnitId, ct);
+                    $"Below-floor approval is blocking {label} — deadline imminent", detail, businessUnitId, ct));
 
                 if (requester.ManagerId.HasValue)
                 {
@@ -425,30 +425,42 @@ public sealed class BelowFloorGuard : IBelowFloorGuard
                         .FirstOrDefaultAsync(ct);
                     if (manager is not null && !string.IsNullOrWhiteSpace(manager.Email))
                     {
-                        notified |= await _notifications.SendDeadlineAlertAsync(
+                        outcomes.Add(await _notifications.SendDeadlineAlertAsync(
                             manager.Email, manager.FirstName, "escalated", label,
-                            $"Below-floor approval is blocking {label} — deadline imminent", detail, businessUnitId, ct);
+                            $"Below-floor approval is blocking {label} — deadline imminent", detail, businessUnitId, ct));
                     }
                 }
             }
 
+            // Stamp whenever the provider MAY already hold a copy, not only on a proven send.
+            // Withholding the stamp because the outcome was uncertain hands the 5-minute sweep
+            // permission to escalate the same approval again — the duplicate this ledger exists
+            // to prevent. An outcome of NotSent is the one case where nothing left the building,
+            // and there the sweep SHOULD pick it up.
+            var accepted = outcomes.FirstOrDefault(x => x.Outcome == SlaSendOutcome.Sent);
+            var notified = outcomes.Any(x => x.Outcome != SlaSendOutcome.NotSent);
             if (notified)
             {
                 // Same (BU, "approval", guid-derived key, "escalated") dedup row the
                 // sweep checks before escalating — one escalation per approval, ever.
                 //
-                // THE DEDUP KEY IS NOT OPTIONAL. SlaEvent.DedupKey carries an UNFILTERED
-                // UNIQUE index (UX_SlaEvents_BU_DedupKey) and SlaSweepWorker.TryClaimEventAsync
-                // matches on that column ALONE — not on EntityType/EntityId/Level. A row
-                // written with the default empty string is therefore invisible to the sweep,
-                // which re-sent this exact escalation to the requester's manager on its next
-                // 5-minute tick; and because every such row shared the key '', the SECOND
-                // below-floor deadline-buffer hold in a tenant collided on 23505 and left a
-                // poisoned Added entity on this request-scoped DbContext.
+                // THE DEDUP KEY IS NOT OPTIONAL. SlaEvent.DedupKey carries the UNIQUE index
+                // (UX_SlaEvents_BU_DedupKey) and SlaSweepWorker.TryClaimEventAsync matches on
+                // that column ALONE — not on EntityType/EntityId/Level. A row written with the
+                // default empty string is therefore invisible to the sweep, which re-sent this
+                // exact escalation to the requester's manager on its next 5-minute tick; and
+                // because every such row shared the key '', the SECOND below-floor
+                // deadline-buffer hold in a tenant collided on 23505 and left a poisoned Added
+                // entity on this request-scoped DbContext.
                 //
                 // Routed through the sweep's own claim insert so the key is built in exactly
                 // one place and a genuine collision reads as "already escalated" (detached,
                 // null) instead of poisoning the context.
+                //
+                // The RECIPIENT-LESS key is deliberate here: this path mails the requester and
+                // their manager together, and the sweep suppresses on this legacy form as well
+                // as on its own recipient-scoped keys, so the two paths still never
+                // double-notify (see SlaSweepWorker.TryClaimEventAsync).
                 var entityKey = BitConverter.ToInt64(approval.Id.ToByteArray(), 0);
                 var claim = await SlaSweepWorker.InsertClaimAsync(
                     _db, businessUnitId, "approval", entityKey, "escalated",
@@ -458,6 +470,15 @@ public sealed class BelowFloorGuard : IBelowFloorGuard
                     _log.LogDebug(
                         "Below-floor hold {ApprovalId}: escalation was already stamped for BU {Bu}; not re-claimed.",
                         approval.Id, businessUnitId);
+                else
+                    // The stamp is written AFTER the send here, so it records an outcome rather
+                    // than claiming one. Accepted evidence when there is any; UNCERTAIN when the
+                    // provider may hold a copy it never acknowledged — either way the key is
+                    // occupied and the sweep will not send it again.
+                    await SlaSweepWorker.SettleClaimAsync(_db, claim,
+                        accepted is not null ? SlaEventStatuses.Sent : SlaEventStatuses.Uncertain,
+                        accepted is not null ? null : "ACCEPTANCE_EVIDENCE_MISSING",
+                        accepted?.Provider, accepted?.AcceptanceReference, ct);
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

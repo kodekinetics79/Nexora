@@ -226,18 +226,18 @@ public sealed class BelowFloorGuardEscalationTests
     {
         public List<SentAlert> Sent { get; } = [];
 
-        public Task<bool> SendDeadlineAlertAsync(
+        public Task<SlaSendResult> SendDeadlineAlertAsync(
             string toEmail, string? toName, string level, string entityLabel,
             string headline, string detail, long businessUnitId, CancellationToken ct = default)
         {
             Sent.Add(new SentAlert(toEmail, level, businessUnitId));
-            return Task.FromResult(true);
+            return Task.FromResult(new SlaSendResult(SlaSendOutcome.Sent, "test-transport", "accepted"));
         }
 
-        public Task<bool> SendStaleQuotesDigestAsync(
+        public Task<SlaSendResult> SendStaleQuotesDigestAsync(
             string toEmail, string? toName, IReadOnlyList<StaleQuoteDigestLine> lines,
             long businessUnitId, CancellationToken ct = default)
-            => Task.FromResult(true);
+            => Task.FromResult(new SlaSendResult(SlaSendOutcome.Sent, "test-transport", "accepted"));
     }
 
     /// <summary>The hold path never prices anything — the check is already computed.</summary>

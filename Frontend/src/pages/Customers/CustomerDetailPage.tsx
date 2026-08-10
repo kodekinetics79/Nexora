@@ -47,6 +47,20 @@ const InfoRow: React.FC<{ label: string; value: React.ReactNode }> = ({ label, v
   </Box>
 );
 
+/** A value that has not been captured, rendered as a stated gap rather than a blank. */
+const Gap: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+  <Typography component="span" sx={{ color: 'text.disabled', fontSize: '0.875rem', fontWeight: 500 }}>
+    {children}
+  </Typography>
+);
+
+/** Stored sector CODE to label. The code is what is stored; a renamed label cannot orphan rows. */
+const SECTOR_LABELS: Record<string, string> = {
+  GOVERNMENT: 'Government',
+  SEMI_GOVERNMENT: 'Semi-Government',
+  PRIVATE: 'Private',
+};
+
 const Section: React.FC<{ title: string; icon: React.ReactNode; children: React.ReactNode }> = ({ title, icon, children }) => (
   <Box>
     <Typography variant="caption" sx={{ fontWeight: 800, color: 'text.secondary', textTransform: 'uppercase', letterSpacing: '0.08em', display: 'block', mb: 1.5 }}>
@@ -312,6 +326,33 @@ const CustomerDetailPage: React.FC = () => {
             {!canViewCommercialContext ? <Alert severity="info">RFQ, quotation, and order view permissions are required.</Alert> : context.isLoading ? <CircularProgress size={20} /> : context.isError ? <Alert severity="error" action={<Button color="inherit" onClick={() => void context.refetch()}>Retry</Button>}>Demand evidence could not be loaded.</Alert> : context.data?.demandProfile.length ? <TableContainer sx={{ maxWidth: '100%' }}><Table size="small" aria-label="Customer demand profile"><TableHead><TableRow><TableCell>Part</TableCell><TableCell>Description</TableCell><TableCell>RFQs</TableCell><TableCell>Requested quantity</TableCell></TableRow></TableHead><TableBody>
               {context.data.demandProfile.map((line, index) => <TableRow hover key={`${line.productId ?? 'unknown'}-${line.partNumber ?? 'unresolved'}-${index}`}><TableCell>{line.partNumber ?? (line.productId ? `Product ${line.productId}` : 'Part not resolved')}</TableCell><TableCell>{line.description ?? 'Description not recorded'}</TableCell><TableCell>{line.inquiryCount}</TableCell><TableCell>{line.requestedQuantity.toLocaleString()}</TableCell></TableRow>)}
             </TableBody></Table></TableContainer> : <Typography color="text.secondary" variant="body2">No RFQ demand history recorded.</Typography>}
+          </Section>
+        </Grid>
+
+        {/* FR-CST-01 · the identifiers a KSA counterparty is verified against, and the account team
+            that owns the relationship. Each absent value states WHAT is absent rather than showing
+            the generic em dash, because "not captured" and "not applicable" are different facts and
+            only one of them is somebody's job to fix. */}
+        <Grid size={{ xs: 12, md: 6 }}>
+          <Section title="Registration &amp; account" icon={<BillingIcon sx={{ fontSize: 16 }} />}>
+            <InfoRow
+              label="CR number"
+              value={customer.commercialRegistrationNumber ?? <Gap>Not captured</Gap>}
+            />
+            <InfoRow
+              label="VAT registration number"
+              value={customer.taxRegistrationNumber ?? <Gap>Not captured</Gap>}
+            />
+            <InfoRow label="Sector" value={SECTOR_LABELS[customer.sector ?? ''] ?? <Gap>Not classified</Gap>} />
+            <InfoRow label="Region" value={customer.regionName ?? <Gap>Not stated</Gap>} />
+            <InfoRow
+              label="Account team"
+              value={customer.accountTeamName ?? (
+                <Typography component="span" sx={{ color: 'warning.main', fontSize: '0.875rem', fontWeight: 700 }}>
+                  No account team — readable tenant-wide
+                </Typography>
+              )}
+            />
           </Section>
         </Grid>
 

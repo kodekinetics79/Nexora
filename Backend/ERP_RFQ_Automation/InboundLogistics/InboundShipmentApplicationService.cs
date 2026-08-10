@@ -106,6 +106,7 @@ public sealed class InboundShipmentApplicationService(ErpRfqAutomationContext db
 
         var shipmentId = await db.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
         {
+            db.ChangeTracker.Clear();
             await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
             if (await ReplayedAggregateIdAsync(command.BusinessUnitId, ShipmentCreatedEvent,
                     command.IdempotencyKey, hash, ct) is { } replayed)
@@ -241,6 +242,7 @@ public sealed class InboundShipmentApplicationService(ErpRfqAutomationContext db
 
         var shipmentId = await db.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
         {
+            db.ChangeTracker.Clear();
             await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
             if (await ReplayedAggregateIdAsync(command.BusinessUnitId, MilestoneRecordedEvent,
                     command.IdempotencyKey, hash, ct) is { } replayed)
@@ -370,6 +372,7 @@ public sealed class InboundShipmentApplicationService(ErpRfqAutomationContext db
 
         var shipmentId = await db.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
         {
+            db.ChangeTracker.Clear();
             await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
             if (await ReplayedAggregateIdAsync(command.BusinessUnitId, TrackingUpdatedEvent,
                     command.IdempotencyKey, hash, ct) is { } replayed)
@@ -489,6 +492,7 @@ public sealed class InboundShipmentApplicationService(ErpRfqAutomationContext db
         var hash = Hash(new { code, name, kind, country, city });
         var portId = await db.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
         {
+            db.ChangeTracker.Clear();
             await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
             if (await ReplayedAggregateIdAsync(command.BusinessUnitId, PortCreatedEvent,
                     command.IdempotencyKey, hash, ct) is { } replayed)
@@ -536,6 +540,7 @@ public sealed class InboundShipmentApplicationService(ErpRfqAutomationContext db
 
         await db.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
         {
+            db.ChangeTracker.Clear();
             await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
             if (await ReplayedAggregateIdAsync(command.BusinessUnitId, PortActivationEvent,
                     command.IdempotencyKey, hash, ct) is not null)
@@ -580,6 +585,7 @@ public sealed class InboundShipmentApplicationService(ErpRfqAutomationContext db
 
         await db.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
         {
+            db.ChangeTracker.Clear();
             await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
             if (await ReplayedAggregateIdAsync(command.BusinessUnitId, PortCatalogueImportedEvent,
                     command.IdempotencyKey, hash, ct) is not null)
@@ -659,6 +665,7 @@ public sealed class InboundShipmentApplicationService(ErpRfqAutomationContext db
 
         await db.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
         {
+            db.ChangeTracker.Clear();
             await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
             if (await ReplayedAggregateIdAsync(command.BusinessUnitId, PolicyUpdatedEvent,
                     command.IdempotencyKey, hash, ct) is not null)

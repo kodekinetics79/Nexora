@@ -27,8 +27,7 @@ namespace ERP_RFQ_Automation.Interfaces
         /// </summary>
         Task<DashboardRelease01DTO> GetRelease01Async(
             long businessUnitId,
-            long? ownerUserId,
-            string roleScope,
+            ERP_RFQ_Automation.Authorization.AccountTeamScope scope,
             DateTime from,
             DateTime to,
             DateTime generatedAt,

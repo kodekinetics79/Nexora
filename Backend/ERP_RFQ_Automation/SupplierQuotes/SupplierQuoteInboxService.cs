@@ -150,6 +150,7 @@ public sealed class EfSupplierQuoteStore(ErpRfqAutomationContext context) : ISup
         var strategy = context.Database.CreateExecutionStrategy();
         await strategy.ExecuteAsync(async () =>
         {
+            context.ChangeTracker.Clear();
             await using var transaction = await context.Database.BeginTransactionAsync(cancellationToken);
             var quote = await context.Set<SupplierQuote>().SingleOrDefaultAsync(x =>
                 x.BusinessUnitId == command.BusinessUnitId && x.Id == command.SupplierQuoteId, cancellationToken)

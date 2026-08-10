@@ -51,8 +51,19 @@ namespace ERP_RFQ_Automation.Sla;
 /// Send-once semantics are enforced by the DATABASE: every alert INSERTs its
 /// <see cref="SlaEvent"/> claim BEFORE the email goes out, against the unique
 /// (BusinessUnitId, DedupKey) index. On a scaled-out deployment the losing instance
-/// takes a 23505 and skips the send instead of mailing the customer twice. A claim
-/// whose send then fails is released so the next sweep retries it.
+/// takes a 23505 and skips the send instead of mailing the customer twice.
+///
+/// <para>ONE CLAIM PER RECIPIENT, and RELEASE ONLY WHEN NOTHING WAS SENT. The claim used to
+/// cover a whole audience and to be DELETED whenever the send did not report success — where
+/// success only meant "nothing threw". SMTP that took the message body and then dropped the
+/// connection before its 250 therefore deleted the claim, and five minutes later the next
+/// sweep mailed the supervisor the same escalation again with no record of the first attempt;
+/// a provider that returned nothing at all was read as delivered, so the claim was kept
+/// forever and the alert was never sent. Both are fixed here: the recipient is part of the
+/// dedup key, "delivered" requires a receipt naming a provider AND an acceptance reference,
+/// an ambiguous failure settles the claim UNCERTAIN and is never re-sent, and releasing is a
+/// status transition that leaves the audit row behind
+/// (<see cref="SlaEventStatuses"/>, <see cref="SendOnceAsync"/>).</para>
 /// </summary>
 public sealed class SlaSweepWorker : BackgroundService
 {
@@ -214,6 +225,8 @@ public sealed class SlaSweepWorker : BackgroundService
         await SweepSupplierAcknowledgementsAsync(db, notifications, bu, policy, ct);
         await SweepInboundShipDateBreachesAsync(db, notifications, bu, ct);
         await SweepInboundDeliveryRiskAsync(db, notifications, bu, ct);
+        await SweepUndecidedRfqLinesAsync(db, notifications, bu, policy, ct);
+        await SweepSupplierResponseOverdueAsync(db, notifications, bu, ct);
     }
 
     // ---------------- 1. lead deadlines ----------------
@@ -258,10 +271,6 @@ public sealed class SlaSweepWorker : BackgroundService
             var assignee = users.FirstOrDefault(u => u.Id == lead.AssignTo.Value);
             if (assignee is null || string.IsNullOrWhiteSpace(assignee.Email)) continue;
 
-            // Claim BEFORE sending: on a scaled-out deployment only one instance wins.
-            var claim = await TryClaimEventAsync(db, bu, "lead", lead.Id, level, null, ct);
-            if (claim is null) continue;
-
             var label = string.IsNullOrWhiteSpace(lead.Rfqno) ? $"Lead #{lead.Id}" : $"RFQ {lead.Rfqno}";
             var daysLeft = (int)Math.Ceiling((close - now).TotalDays);
             var (headline, detail) = level switch
@@ -274,8 +283,9 @@ public sealed class SlaSweepWorker : BackgroundService
                     $"A heads-up that the bid for {label} closes in about {daysLeft} day(s). Make sure the response is on track.")
             };
 
-            var delivered = await SendOrReleaseAsync(db, claim, ct, () =>
-                notifications.SendDeadlineAlertAsync(
+            // Claim BEFORE sending: on a scaled-out deployment only one instance wins.
+            var delivered = await SendOnceAsync(db, bu, "lead", lead.Id, level, null, assignee.Email, ct,
+                () => notifications.SendDeadlineAlertAsync(
                     assignee.Email, assignee.FirstName, level, label, headline, detail, bu, ct));
             if (!delivered) continue;
 
@@ -284,10 +294,15 @@ public sealed class SlaSweepWorker : BackgroundService
                 var manager = managers.FirstOrDefault(m => m.Id == assignee.ManagerId.Value);
                 if (manager is not null && !string.IsNullOrWhiteSpace(manager.Email))
                 {
-                    await notifications.SendDeadlineAlertAsync(manager.Email, manager.FirstName, level, label,
-                        $"Bid deadline missed by {assignee.FirstName} — {label}",
-                        $"The bid for {label}, assigned to {assignee.FirstName} ({assignee.Email}), closed on {close:dd MMM yyyy} without a recorded submission.",
-                        bu, ct);
+                    // The manager copy used to have NO claim and its result was discarded, so a
+                    // sweep five minutes later mailed it again, and again, for as long as the lead
+                    // stayed overdue. It is the same (lead, level) alert addressed to a different
+                    // person, which the recipient-scoped key now expresses directly.
+                    await SendOnceAsync(db, bu, "lead", lead.Id, level, null, manager.Email, ct,
+                        () => notifications.SendDeadlineAlertAsync(manager.Email, manager.FirstName, level, label,
+                            $"Bid deadline missed by {assignee.FirstName} — {label}",
+                            $"The bid for {label}, assigned to {assignee.FirstName} ({assignee.Email}), closed on {close:dd MMM yyyy} without a recorded submission.",
+                            bu, ct));
                 }
             }
         }
@@ -334,24 +349,14 @@ public sealed class SlaSweepWorker : BackgroundService
 
         foreach (var lead in leads)
         {
-            // Once per lead ever; distinct EntityType keeps this separate from the
+            // Once per lead per recipient; distinct EntityType keeps this separate from the
             // deadline "warn" for the same lead (documented in SLA-WIRING.md).
-            var claim = await TryClaimEventAsync(db, bu, "lead-unassigned", lead.Id, "warn", null, ct);
-            if (claim is null) continue;
-
             var label = string.IsNullOrWhiteSpace(lead.Rfqno) ? $"Lead #{lead.Id}" : $"RFQ {lead.Rfqno}";
-            await SendOrReleaseAsync(db, claim, ct, async () =>
-            {
-                var anyDelivered = false;
-                foreach (var r in recipients)
-                {
-                    anyDelivered |= await notifications.SendDeadlineAlertAsync(r.Email, r.FirstName, "warn", label,
-                        $"Lead waiting for an owner — {label}",
-                        $"{label} was accepted more than {policy.UnassignedHours} hour(s) ago but nobody has been assigned to it yet. Please assign an owner so it doesn't slip.",
-                        bu, ct);
-                }
-                return anyDelivered;
-            });
+            await SendOnceToEachAsync(db, bu, "lead-unassigned", lead.Id, "warn", null, recipients, ct,
+                r => notifications.SendDeadlineAlertAsync(r.Email, r.FirstName, "warn", label,
+                    $"Lead waiting for an owner — {label}",
+                    $"{label} was accepted more than {policy.UnassignedHours} hour(s) ago but nobody has been assigned to it yet. Please assign an owner so it doesn't slip.",
+                    bu, ct));
         }
     }
 
@@ -496,12 +501,6 @@ public sealed class SlaSweepWorker : BackgroundService
         {
             var owner = buUsers.First(u => u.Id == group.Key);
 
-            // Daily dedup: one digest per (owner, UTC day). The day is part of the
-            // unique DedupKey, so the claim itself is the dedup — no read-then-write race.
-            var claim = await TryClaimEventAsync(
-                db, bu, "quote-stale-digest", owner.Id, "stale", todayUtc, ct);
-            if (claim is null) continue;
-
             var lines = group.Select(x => new StaleQuoteDigestLine
             {
                 QuoteNo = x.Quote.QuoteNo,
@@ -510,8 +509,10 @@ public sealed class SlaSweepWorker : BackgroundService
                 DaysWaiting = SlaComputed.DaysSinceSent(x.Quote.SentOn, now) ?? 0
             }).OrderByDescending(l => l.DaysWaiting).ToList();
 
-            await SendOrReleaseAsync(db, claim, ct, () =>
-                notifications.SendStaleQuotesDigestAsync(owner.Email, owner.FirstName, lines, bu, ct));
+            // Daily dedup: one digest per (owner, UTC day). The day is part of the
+            // unique DedupKey, so the claim itself is the dedup — no read-then-write race.
+            await SendOnceAsync(db, bu, "quote-stale-digest", owner.Id, "stale", todayUtc, owner.Email, ct,
+                () => notifications.SendStaleQuotesDigestAsync(owner.Email, owner.FirstName, lines, bu, ct));
         }
 
         var unresolved = stale.Count(q => !buUsers.Any(u =>
@@ -575,27 +576,17 @@ public sealed class SlaSweepWorker : BackgroundService
             }
             if (recipients.Count == 0) continue; // nobody to tell — retry next sweep
 
-            var claim = await TryClaimEventAsync(db, bu, "approval", entityKey, "escalated", null, ct);
-            if (claim is null) continue;
-
             var label = $"Copilot approval: {approval.ToolName}";
             var deadlineNote = deadline.HasValue
                 ? $" The linked RFQ's bid closes on {deadline.Value:dd MMM yyyy HH:mm} UTC, inside the {policy.DeadlineBufferHours}-hour safety buffer."
                 : $" It has been pending for more than {policy.ApprovalEscalationHours} hour(s).";
 
-            await SendOrReleaseAsync(db, claim, ct, async () =>
-            {
-                var anyDelivered = false;
-                foreach (var r in recipients)
-                {
-                    anyDelivered |= await notifications.SendDeadlineAlertAsync(r.Email, r.FirstName, "escalated", label,
-                        "A copilot action has been waiting for approval",
-                        $"\"{approval.Summary ?? approval.ToolName}\" (requested by {approval.RequestedBy ?? "unknown"}) has been pending since " +
-                        $"{approval.CreatedOn:dd MMM yyyy HH:mm} UTC.{deadlineNote} Please approve or reject it.",
-                        bu, ct);
-                }
-                return anyDelivered;
-            });
+            await SendOnceToEachAsync(db, bu, "approval", entityKey, "escalated", null, recipients, ct,
+                r => notifications.SendDeadlineAlertAsync(r.Email, r.FirstName, "escalated", label,
+                    "A copilot action has been waiting for approval",
+                    $"\"{approval.Summary ?? approval.ToolName}\" (requested by {approval.RequestedBy ?? "unknown"}) has been pending since " +
+                    $"{approval.CreatedOn:dd MMM yyyy HH:mm} UTC.{deadlineNote} Please approve or reject it.",
+                    bu, ct));
         }
     }
 
@@ -761,18 +752,15 @@ public sealed class SlaSweepWorker : BackgroundService
             // unique (BusinessUnitId, DedupKey) index, but a supplier who counters with a NEW
             // date produces a new key and therefore a fresh reminder — which is the whole
             // point, since the date the buyer was warned about no longer holds.
-            var claim = await TryClaimEventAsync(db, bu, "supplier-order-ship", order.Id, "warn",
-                shipDate.ToDateTime(TimeOnly.MinValue), ct);
-            if (claim is null) continue;
-
             var label = $"Purchase order {order.PurchaseOrderNumber}";
             var workingDays = BusinessCalendar.BusinessDaysUntil(today, shipDate);
             var whenPhrase = workingDays == 0
                 ? "today"
                 : $"in {workingDays} working day{(workingDays == 1 ? "" : "s")}";
 
-            await SendOrReleaseAsync(db, claim, ct, () =>
-                notifications.SendDeadlineAlertAsync(buyer.Email, buyer.FirstName, "warn", label,
+            await SendOnceAsync(db, bu, "supplier-order-ship", order.Id, "warn",
+                shipDate.ToDateTime(TimeOnly.MinValue), buyer.Email, ct,
+                () => notifications.SendDeadlineAlertAsync(buyer.Email, buyer.FirstName, "warn", label,
                     $"Supplier ships on {shipDate:dd MMM yyyy} — {label}",
                     $"The supplier committed to ship {label} on {shipDate:dd MMM yyyy}, which is {whenPhrase} " +
                     "(weekends excluded). Confirm the shipment is on track, or chase the supplier now while there is " +
@@ -860,25 +848,15 @@ public sealed class SlaSweepWorker : BackgroundService
             }
             if (recipients.Count == 0) continue; // nobody to tell — retry next sweep
 
-            var claim = await TryClaimEventAsync(db, bu, "supplier-order-ack", order.Id, "escalated", null, ct);
-            if (claim is null) continue;
-
             var label = $"Purchase order {order.PurchaseOrderNumber}";
-            await SendOrReleaseAsync(db, claim, ct, async () =>
-            {
-                var anyDelivered = false;
-                foreach (var r in recipients)
-                {
-                    anyDelivered |= await notifications.SendDeadlineAlertAsync(r.Email, r.FirstName, "escalated", label,
-                        $"Supplier has not acknowledged an order — {label}",
-                        $"{label} went to the supplier on {sentOn:dd MMM yyyy HH:mm} UTC and there is still no " +
-                        $"acknowledgement after {policy.SupplierAckEscalationHours} working hour(s) (weekends excluded). " +
-                        "Nothing confirms the supplier has accepted this order, so neither the ship date nor the customer " +
-                        "promise behind it can be relied on. Please chase the supplier or reassign the order.",
-                        bu, ct);
-                }
-                return anyDelivered;
-            });
+            await SendOnceToEachAsync(db, bu, "supplier-order-ack", order.Id, "escalated", null, recipients, ct,
+                r => notifications.SendDeadlineAlertAsync(r.Email, r.FirstName, "escalated", label,
+                    $"Supplier has not acknowledged an order — {label}",
+                    $"{label} went to the supplier on {sentOn:dd MMM yyyy HH:mm} UTC and there is still no " +
+                    $"acknowledgement after {policy.SupplierAckEscalationHours} working hour(s) (weekends excluded). " +
+                    "Nothing confirms the supplier has accepted this order, so neither the ship date nor the customer " +
+                    "promise behind it can be relied on. Please chase the supplier or reassign the order.",
+                    bu, ct));
         }
     }
 
@@ -965,14 +943,11 @@ public sealed class SlaSweepWorker : BackgroundService
             var shipDate = order.CommittedShipDate!.Value;
             // Keyed on the committed date, so a supplier who re-commits to a NEW date earns one
             // fresh alert if they miss that one too, rather than being silently forgiven.
-            var claim = await TryClaimEventAsync(db, bu, "inbound-shipment-late", order.Id, "overdue",
-                shipDate.ToDateTime(TimeOnly.MinValue), ct);
-            if (claim is null) continue;
-
             var label = $"Purchase order {order.PurchaseOrderNumber}";
             var outstanding = ordered - departed;
-            await SendOrReleaseAsync(db, claim, ct, () =>
-                notifications.SendDeadlineAlertAsync(buyer.Email, buyer.FirstName, "overdue", label,
+            await SendOnceAsync(db, bu, "inbound-shipment-late", order.Id, "overdue",
+                shipDate.ToDateTime(TimeOnly.MinValue), buyer.Email, ct,
+                () => notifications.SendDeadlineAlertAsync(buyer.Email, buyer.FirstName, "overdue", label,
                     $"Supplier missed the committed ship date — {label}",
                     $"The supplier committed to ship {label} on {shipDate:dd MMM yyyy}, and "
                     + (departed <= 0m
@@ -1077,36 +1052,237 @@ public sealed class SlaSweepWorker : BackgroundService
             // therefore one further alert, while a re-run of the sweep against the same date does
             // not. Without the date in the key a shipment that slipped twice would be silent the
             // second time, which is the slip that actually loses the order.
-            var claim = await TryClaimEventAsync(db, bu, "inbound-shipment-risk", shipment.Id, "critical",
-                available.ToDateTime(TimeOnly.MinValue), ct);
-            if (claim is null) continue;
-
             var lateBy = available.DayNumber - required.DayNumber;
             var label = $"Shipment {shipment.ShipmentNumber}";
-            await SendOrReleaseAsync(db, claim, ct, async () =>
-            {
-                var anyDelivered = false;
-                foreach (var recipient in recipients)
-                {
-                    anyDelivered |= await notifications.SendDeadlineAlertAsync(recipient.Email,
-                        recipient.FirstName, "critical", label,
-                        $"Inbound shipment puts a customer delivery date at risk — {label}",
-                        $"{label} on purchase order {order?.PurchaseOrderNumber ?? "(unknown)"} is currently "
-                        + $"{shipment.Milestone.Replace('_', ' ').ToLowerInvariant()}. Its material available "
-                        + $"date works out at {available:dd MMM yyyy}, which is {lateBy} day(s) after the "
-                        + $"{required:dd MMM yyyy} the customer required. That date is derived from the "
-                        + $"{(shipment.MaterialAvailableBasisKind ?? "ETA").Replace('_', ' ').ToLowerInvariant()} "
-                        + "plus the customs-clearance and putaway lead times set for this business unit. "
-                        + "Chase the shipment, re-plan the customer promise, or cover the line from stock.",
-                        bu, ct);
-                }
-                return anyDelivered;
-            });
+            await SendOnceToEachAsync(db, bu, "inbound-shipment-risk", shipment.Id, "critical",
+                available.ToDateTime(TimeOnly.MinValue), recipients, ct,
+                recipient => notifications.SendDeadlineAlertAsync(recipient.Email,
+                    recipient.FirstName, "critical", label,
+                    $"Inbound shipment puts a customer delivery date at risk — {label}",
+                    $"{label} on purchase order {order?.PurchaseOrderNumber ?? "(unknown)"} is currently "
+                    + $"{shipment.Milestone.Replace('_', ' ').ToLowerInvariant()}. Its material available "
+                    + $"date works out at {available:dd MMM yyyy}, which is {lateBy} day(s) after the "
+                    + $"{required:dd MMM yyyy} the customer required. That date is derived from the "
+                    + $"{(shipment.MaterialAvailableBasisKind ?? "ETA").Replace('_', ' ').ToLowerInvariant()} "
+                    + "plus the customs-clearance and putaway lead times set for this business unit. "
+                    + "Chase the shipment, re-plan the customer promise, or cover the line from stock.",
+                    bu, ct));
         }
 
         if (unresolved > 0)
             _log.LogWarning(
                 "BU {Bu}: {Count} at-risk inbound shipment(s) had no resolvable recipient; alert skipped for those.",
+                bu, unresolved);
+    }
+
+    // ---------------- 10. undecided RFQ lines near close (FR-SBF-01 a + b) ----------------
+
+    /// <summary>
+    /// FR-SBF-01 reminder candidates: RFQs whose bid closing date falls in [today, horizon] and
+    /// that still carry at least one line with <c>ParticipationDecision = Pending</c>.
+    ///
+    /// <para><b>Why this is decision-aware and the lead-deadline sweep is not.</b> Sweep 1 chases a
+    /// LEAD whose bid closes soon, whatever state its lines are in — it cannot tell an RFQ that has
+    /// been fully worked from one nobody has opened. FR-SBF-01 asks for two different things: a
+    /// reminder for pending Quote/No-Quote decisions, and a reminder for RFQs approaching closure
+    /// WITHOUT a decision. Both are the same fact — an undecided line running out of time — and
+    /// this is the query that can see it, because <c>Rfqitem.ParticipationDecision</c> is where the
+    /// decision actually lives.</para>
+    ///
+    /// <para><b>Why it does not fire on everything.</b> An RFQ where every line has been decided is
+    /// excluded even though its deadline is just as close, which is the whole point: the alert
+    /// carries the information "there is work outstanding here", and an alert that fired on every
+    /// RFQ near close would carry none. Sentinel dates (year &lt; 2000, the extraction pipeline's
+    /// "unknown" convention) are excluded for the same reason they are in
+    /// <see cref="OpenLeadDeadlineCandidates"/>.</para>
+    /// </summary>
+    internal static IQueryable<Rfq> UndecidedRfqCandidates(
+        ErpRfqAutomationContext db, long businessUnitId, DateTime today, DateTime horizon)
+        => db.Rfqs.AsNoTracking()
+            .Where(rfq => rfq.BusinessUnitId == businessUnitId
+                          && rfq.BidClosingDate != null
+                          && rfq.BidClosingDate >= EarliestCommercialDeadline
+                          && rfq.BidClosingDate >= today
+                          && rfq.BidClosingDate <= horizon
+                          // Rfqitem carries NO tenant column of its own — it is scoped through its
+                          // parent RFQ, which is why the certification test lists RFQItems among the
+                          // parent-derived child tables. The predicate on rfq above is therefore the
+                          // tenant boundary for this subquery.
+                          && db.Rfqitems.Any(line => line.Rfqid == rfq.Id
+                                                     && line.ParticipationDecision == Rfqitem.ParticipationPending));
+
+    private async Task SweepUndecidedRfqLinesAsync(
+        ErpRfqAutomationContext db, ISlaNotifications notifications, long bu, SlaPolicy policy, CancellationToken ct)
+    {
+        // Non-positive means the tenant has not configured this reminder (register R12).
+        if (policy.QuoteDecisionReminderDays <= 0) return;
+
+        var now = DateTime.UtcNow;
+        var today = now.Date;
+        var horizon = BusinessCalendar
+            .AddBusinessDays(DateOnly.FromDateTime(today), policy.QuoteDecisionReminderDays)
+            .ToDateTime(TimeOnly.MaxValue);
+
+        var rfqs = await UndecidedRfqCandidates(db, bu, today, horizon)
+            .Select(rfq => new { rfq.Id, rfq.Rfqno, rfq.BidClosingDate, rfq.LeadId, rfq.CreatedBy, rfq.ModifiedBy })
+            .ToListAsync(ct);
+        if (rfqs.Count == 0) return;
+
+        var rfqIds = rfqs.Select(r => r.Id).ToList();
+        var pendingByRfq = await db.Rfqitems.AsNoTracking()
+            // rfqIds came from a BU-scoped query, and Rfqitem has no tenant column to test; the
+            // re-assertion on the parent keeps the boundary explicit anyway.
+            .Where(line => rfqIds.Contains(line.Rfqid)
+                           && line.Rfq.BusinessUnitId == bu
+                           && line.ParticipationDecision == Rfqitem.ParticipationPending)
+            .GroupBy(line => line.Rfqid)
+            .Select(g => new { RfqId = g.Key, Pending = g.Count() })
+            .ToDictionaryAsync(x => x.RfqId, x => x.Pending, ct);
+
+        // Owner resolution: the originating lead's assignee is the exact key when there is one;
+        // otherwise the RFQ's free-text creator/editor, matched the same way every other sweep in
+        // this worker matches them. Never a guessed recipient.
+        var leadIds = rfqs.Where(r => r.LeadId.HasValue).Select(r => r.LeadId!.Value).Distinct().ToList();
+        var assigneeByLead = leadIds.Count == 0
+            ? new Dictionary<long, long?>()
+            : await db.Leads.AsNoTracking()
+                .Where(l => l.BusinessUnitId == bu && leadIds.Contains(l.Id))
+                .Select(l => new { l.Id, l.AssignTo })
+                .ToDictionaryAsync(x => x.Id, x => x.AssignTo, ct);
+
+        var buUsers = await GetBusinessUnitUsersAsync(db, bu, ct);
+        var unresolved = 0;
+
+        foreach (var rfq in rfqs)
+        {
+            var pending = pendingByRfq.GetValueOrDefault(rfq.Id);
+            if (pending == 0) continue;
+
+            long? assignee = rfq.LeadId.HasValue ? assigneeByLead.GetValueOrDefault(rfq.LeadId.Value) : null;
+            var owner = ResolveBuyer(buUsers, assignee, rfq.CreatedBy, rfq.ModifiedBy);
+            if (owner is null) { unresolved++; continue; }
+
+            var closing = rfq.BidClosingDate!.Value;
+
+            // Keyed on the CLOSING DATE, not just the RFQ: a buyer who extends the deadline earns
+            // one fresh reminder against the new date, and a re-sweep against the same date does not.
+            var label = string.IsNullOrWhiteSpace(rfq.Rfqno) ? $"RFQ #{rfq.Id}" : $"RFQ {rfq.Rfqno}";
+            var workingDays = BusinessCalendar.BusinessDaysUntil(
+                DateOnly.FromDateTime(now.Date), DateOnly.FromDateTime(closing.Date));
+            var whenPhrase = workingDays == 0
+                ? "today"
+                : $"in {workingDays} working day{(workingDays == 1 ? "" : "s")}";
+
+            await SendOnceAsync(db, bu, "rfq-undecided-lines", rfq.Id, "warn", closing.Date, owner.Email, ct,
+                () => notifications.SendDeadlineAlertAsync(owner.Email, owner.FirstName, "warn", label,
+                    $"{pending} line(s) still undecided — {label}",
+                    $"{label} closes on {closing:dd MMM yyyy}, which is {whenPhrase} (weekends excluded), and "
+                    + $"{pending} line(s) still carry no Quote or No-Quote decision. An undecided line is not "
+                    + "quoted and is not declined — it simply goes unanswered, and the buyer sees a partial "
+                    + "response. Decide each line, or record the reason it is being declined.",
+                    bu, ct));
+        }
+
+        if (unresolved > 0)
+            _log.LogWarning(
+                "BU {Bu}: {Count} RFQ(s) with undecided lines near close have no resolvable owner; reminder skipped for those.",
+                bu, unresolved);
+    }
+
+    // ---------------- 11. supplier RFQ response overdue (FR-SBF-01 c) ----------------
+
+    /// <summary>
+    /// FR-SBF-01 escalation candidates: supplier solicitations that were dispatched, carry a
+    /// response deadline the buyer committed to, and have passed it with no response.
+    ///
+    /// <para><b>No new policy column, deliberately.</b> "The buyer told this supplier to respond by
+    /// a date, and that date has gone" is a FACT, not a tolerance — the same reasoning as the two
+    /// FR-MAS-04 sweeps above, and the same reason there is no column here to backfill wrongly. A
+    /// solicitation with no <c>DueOn</c> is silent: the buyer set no deadline, so there is nothing
+    /// to be late against, and inventing one would fire this alert on every supplier RFQ in a tenant
+    /// that does not use deadlines.</para>
+    ///
+    /// <para>Responded, declined and expired solicitations are excluded — the supplier has answered,
+    /// or the record has already been resolved. Chasing those trains people to ignore the mailbox.</para>
+    /// </summary>
+    internal static IQueryable<SupplierSolicitation> SupplierResponseOverdueCandidates(
+        ErpRfqAutomationContext db, long businessUnitId, DateTime now)
+        => db.Set<SupplierSolicitation>().AsNoTracking()
+            .Where(s => s.BusinessUnitId == businessUnitId
+                        && s.Status == SolicitationStatus.Sent
+                        && s.RespondedOn == null
+                        && s.DueOn != null
+                        && s.DueOn >= EarliestCommercialDeadline
+                        && s.DueOn < now);
+
+    private async Task SweepSupplierResponseOverdueAsync(
+        ErpRfqAutomationContext db, ISlaNotifications notifications, long bu, CancellationToken ct)
+    {
+        var now = DateTime.UtcNow;
+
+        var solicitations = await SupplierResponseOverdueCandidates(db, bu, now)
+            .Select(s => new { s.Id, s.RfqId, s.SupplierId, s.SupplierRfqNumber, s.DueOn, s.SentOn })
+            .ToListAsync(ct);
+        if (solicitations.Count == 0) return;
+
+        var rfqIds = solicitations.Select(s => s.RfqId).Distinct().ToList();
+        var rfqs = await db.Rfqs.AsNoTracking()
+            .Where(r => r.BusinessUnitId == bu && rfqIds.Contains(r.Id))
+            .Select(r => new { r.Id, r.Rfqno, r.LeadId, r.CreatedBy, r.ModifiedBy, r.BidClosingDate })
+            .ToDictionaryAsync(x => x.Id, ct);
+
+        var supplierIds = solicitations.Select(s => s.SupplierId).Distinct().ToList();
+        var supplierNames = await db.Suppliers.AsNoTracking()
+            .Where(s => (s.Buid == null || s.Buid == bu) && supplierIds.Contains(s.Id))
+            .Select(s => new { s.Id, s.Name })
+            .ToDictionaryAsync(x => x.Id, x => x.Name, ct);
+
+        var leadIds = rfqs.Values.Where(r => r.LeadId.HasValue).Select(r => r.LeadId!.Value).Distinct().ToList();
+        var assigneeByLead = leadIds.Count == 0
+            ? new Dictionary<long, long?>()
+            : await db.Leads.AsNoTracking()
+                .Where(l => l.BusinessUnitId == bu && leadIds.Contains(l.Id))
+                .Select(l => new { l.Id, l.AssignTo })
+                .ToDictionaryAsync(x => x.Id, x => x.AssignTo, ct);
+
+        var buUsers = await GetBusinessUnitUsersAsync(db, bu, ct);
+        var unresolved = 0;
+
+        foreach (var solicitation in solicitations)
+        {
+            if (!rfqs.TryGetValue(solicitation.RfqId, out var rfq)) continue;
+
+            long? assignee = rfq.LeadId.HasValue ? assigneeByLead.GetValueOrDefault(rfq.LeadId.Value) : null;
+            var owner = ResolveBuyer(buUsers, assignee, rfq.CreatedBy, rfq.ModifiedBy);
+            if (owner is null) { unresolved++; continue; }
+
+            var dueOn = solicitation.DueOn!.Value;
+
+            // Keyed on the due date, so a buyer who re-issues with a later deadline earns one
+            // further alert if that one is missed too.
+            var supplierName = supplierNames.GetValueOrDefault(solicitation.SupplierId) ?? "the supplier";
+            var rfqLabel = string.IsNullOrWhiteSpace(rfq.Rfqno) ? $"RFQ #{rfq.Id}" : $"RFQ {rfq.Rfqno}";
+            var label = string.IsNullOrWhiteSpace(solicitation.SupplierRfqNumber)
+                ? $"{rfqLabel} — {supplierName}"
+                : $"Supplier RFQ {solicitation.SupplierRfqNumber}";
+
+            var bidNote = rfq.BidClosingDate is { } closing && closing >= EarliestCommercialDeadline
+                ? $" The customer's bid for {rfqLabel} closes on {closing:dd MMM yyyy}."
+                : string.Empty;
+
+            await SendOnceAsync(db, bu, "supplier-response-overdue", solicitation.Id, "overdue",
+                dueOn.Date, owner.Email, ct,
+                () => notifications.SendDeadlineAlertAsync(owner.Email, owner.FirstName, "overdue", label,
+                    $"Supplier quote is overdue — {label}",
+                    $"{supplierName} was asked to respond to {rfqLabel} by {dueOn:dd MMM yyyy} and nothing has "
+                    + $"been received. The request went out on {solicitation.SentOn:dd MMM yyyy}.{bidNote} "
+                    + "Chase the supplier, or source the line elsewhere while there is still time to price it.",
+                    bu, ct));
+        }
+
+        if (unresolved > 0)
+            _log.LogWarning(
+                "BU {Bu}: {Count} overdue supplier solicitation(s) have no resolvable owner; alert skipped for those.",
                 bu, unresolved);
     }
 
@@ -1202,13 +1378,44 @@ public sealed class SlaSweepWorker : BackgroundService
     internal static async Task<SlaEvent?> TryClaimEventAsync(
         ErpRfqAutomationContext db, long bu, string entityType, long entityId, string level,
         DateTime? dayUtc, CancellationToken ct)
+        => await TryClaimEventAsync(db, bu, entityType, entityId, level, dayUtc, recipient: null, ct);
+
+    /// <summary>
+    /// The recipient-scoped claim. <paramref name="recipient"/> becomes part of the dedup key,
+    /// so an escalation to three people is three claims that succeed or fail independently:
+    /// the second recipient's transport failure can no longer keep a claim that silences the
+    /// third, and one recipient's success can no longer release a claim that mails the first
+    /// person again on the next sweep. Pass null only for a claim that gates a non-email
+    /// action (the quote auto-expiry).
+    ///
+    /// <para>MIGRATION WINDOW. Rows written before the recipient joined the key carry the
+    /// bare <c>{EntityType}:{EntityId}:{Level}</c> form, and the recipient they were mailed to
+    /// was never recorded, so it cannot be reconstructed by any backfill. The legacy key is
+    /// therefore ALSO consulted as a suppression: an alert that already went out under the old
+    /// semantics is not re-sent to anybody. It suppresses in one direction only — it can cost a
+    /// copy to a second recipient of a pre-existing alert, never produce a duplicate — and it
+    /// decays on its own, because nothing writes the legacy form after this deploy.</para>
+    /// </summary>
+    internal static async Task<SlaEvent?> TryClaimEventAsync(
+        ErpRfqAutomationContext db, long bu, string entityType, long entityId, string level,
+        DateTime? dayUtc, string? recipient, CancellationToken ct)
     {
-        var dedupKey = SlaEvent.BuildDedupKey(entityType, entityId, level, dayUtc);
+        var normalizedRecipient = SlaEvent.NormalizeRecipient(recipient);
+        var dedupKey = SlaEvent.BuildDedupKey(entityType, entityId, level, dayUtc, normalizedRecipient);
+        var legacyKey = normalizedRecipient is null
+            ? dedupKey
+            : SlaEvent.BuildDedupKey(entityType, entityId, level, dayUtc);
+
+        // Released claims do not count: RELEASED means "definitely not sent", which is exactly
+        // the state a later sweep is supposed to retry. This mirrors the partial unique index,
+        // which is the enforcement.
         var alreadyClaimed = await db.Set<SlaEvent>().AsNoTracking()
-            .AnyAsync(e => e.BusinessUnitId == bu && e.DedupKey == dedupKey, ct);
+            .AnyAsync(e => e.BusinessUnitId == bu
+                           && (e.DedupKey == dedupKey || e.DedupKey == legacyKey)
+                           && e.Status != SlaEventStatuses.Released, ct);
         if (alreadyClaimed) return null;
 
-        return await InsertClaimAsync(db, bu, entityType, entityId, level, dedupKey, ct);
+        return await InsertClaimAsync(db, bu, entityType, entityId, level, dedupKey, normalizedRecipient, ct);
     }
 
     /// <summary>
@@ -1217,9 +1424,14 @@ public sealed class SlaSweepWorker : BackgroundService
     /// true interleaving — two instances that BOTH found nothing and both insert — is
     /// directly reachable and testable.
     /// </summary>
-    internal static async Task<SlaEvent?> InsertClaimAsync(
+    internal static Task<SlaEvent?> InsertClaimAsync(
         ErpRfqAutomationContext db, long bu, string entityType, long entityId, string level,
         string dedupKey, CancellationToken ct)
+        => InsertClaimAsync(db, bu, entityType, entityId, level, dedupKey, recipient: null, ct);
+
+    internal static async Task<SlaEvent?> InsertClaimAsync(
+        ErpRfqAutomationContext db, long bu, string entityType, long entityId, string level,
+        string dedupKey, string? recipient, CancellationToken ct)
     {
         var entity = new SlaEvent
         {
@@ -1228,6 +1440,8 @@ public sealed class SlaSweepWorker : BackgroundService
             EntityId = entityId,
             Level = level,
             DedupKey = dedupKey,
+            Recipient = SlaEvent.NormalizeRecipient(recipient),
+            Status = SlaEventStatuses.Claimed,
             CreatedOn = DateTime.UtcNow
         };
 
@@ -1246,40 +1460,128 @@ public sealed class SlaSweepWorker : BackgroundService
     }
 
     /// <summary>
-    /// Gives the claim back so a later sweep can retry. Uses ExecuteDelete so it never
-    /// flushes unrelated tracked work sitting in the shared DbContext.
+    /// Gives the claim back so a later sweep can retry — for an outcome that is DEFINITELY
+    /// NOT SENT. It is a status transition, never a delete: the row is the audit trail as
+    /// well as the dedup ledger, and deleting it destroyed the only evidence that an attempt
+    /// was made at all. The partial unique index excludes RELEASED, so the key is free again.
+    ///
+    /// <para>Uses ExecuteUpdate so it never flushes unrelated tracked work sitting in the
+    /// shared DbContext, and detaches the claim first so the tracked copy cannot write the
+    /// pre-release values back over it in a later SaveChanges.</para>
     /// </summary>
-    internal static async Task ReleaseEventClaimAsync(
+    internal static Task ReleaseEventClaimAsync(
         ErpRfqAutomationContext db, SlaEvent claim, CancellationToken ct)
+        => SettleClaimAsync(db, claim, SlaEventStatuses.Released, "NOT_SENT", null, null, ct);
+
+    /// <summary>
+    /// Records how a claim ended. UNCERTAIN and SENT both KEEP the key, so neither is ever
+    /// sent again; only RELEASED frees it.
+    /// </summary>
+    internal static async Task SettleClaimAsync(
+        ErpRfqAutomationContext db, SlaEvent claim, string status, string? reason,
+        string? provider, string? acceptanceReference, CancellationToken ct)
     {
+        var settledOn = DateTime.UtcNow;
         db.Entry(claim).State = EntityState.Detached;
-        await db.Set<SlaEvent>().Where(e => e.Id == claim.Id).ExecuteDeleteAsync(ct);
+        await db.Set<SlaEvent>().Where(e => e.Id == claim.Id)
+            .ExecuteUpdateAsync(set => set
+                .SetProperty(e => e.Status, status)
+                .SetProperty(e => e.OutcomeReason, reason)
+                .SetProperty(e => e.Provider, provider)
+                .SetProperty(e => e.AcceptanceReference, acceptanceReference)
+                .SetProperty(e => e.SettledOn, settledOn), ct);
+
+        // Keep the caller's copy honest — the sweep logs off it after this returns.
+        claim.Status = status;
+        claim.OutcomeReason = reason;
+        claim.Provider = provider;
+        claim.AcceptanceReference = acceptanceReference;
+        claim.SettledOn = settledOn;
     }
 
-    /// <summary>Runs the send; releases the claim when nothing was delivered so the next
-    /// sweep retries instead of silently swallowing the alert.</summary>
-    private async Task<bool> SendOrReleaseAsync(
-        ErpRfqAutomationContext db, SlaEvent claim, CancellationToken ct, Func<Task<bool>> send)
+    /// <summary>
+    /// Claims ONE recipient's copy of an alert and sends it, then records what the transport
+    /// said. Returns true only when the provider produced acceptance evidence.
+    ///
+    /// <para>The three outcomes are not "success and failure". <b>NotSent</b> releases the
+    /// claim, because the provider demonstrably never had the message. <b>Sent</b> keeps it
+    /// with the acceptance evidence. <b>Uncertain</b> also keeps it: the provider may already
+    /// have the message, and re-sending an escalation that a supervisor has already read —
+    /// possibly now saying something different — is the one failure this path must never
+    /// produce. A missed escalation is recoverable from the ledger; a duplicate is not
+    /// recoverable from the supervisor's inbox.</para>
+    ///
+    /// <para>An exception ESCAPING the send is uncertain for the same reason, including a
+    /// cancellation on shutdown: the transport was entered and we cannot see how far it got.
+    /// (<see cref="ISlaNotifications"/> does not throw, so this is the belt to its braces.)</para>
+    /// </summary>
+    private async Task<bool> SendOnceAsync(
+        ErpRfqAutomationContext db, long bu, string entityType, long entityId, string level,
+        DateTime? dayUtc, string? recipientEmail, CancellationToken ct, Func<Task<SlaSendResult>> send)
     {
-        bool delivered;
+        if (string.IsNullOrWhiteSpace(recipientEmail)) return false;
+
+        var claim = await TryClaimEventAsync(db, bu, entityType, entityId, level, dayUtc, recipientEmail, ct);
+        if (claim is null) return false;
+
+        SlaSendResult result;
         try
         {
-            delivered = await send();
+            result = await send();
         }
-        catch
+        catch (Exception ex)
         {
-            await ReleaseEventClaimAsync(db, claim, ct);
+            await SettleClaimAsync(db, claim, SlaEventStatuses.Uncertain,
+                $"SEND_THREW:{ex.GetType().Name}", null, null, ct);
+            _log.LogError(ex,
+                "SLA alert {EntityType}/{EntityId}/{Level} to {Recipient} for BU {Bu} threw inside the transport; "
+                + "delivery is UNCERTAIN and it will NOT be re-sent.",
+                entityType, entityId, level, recipientEmail, bu);
             throw;
         }
 
-        if (!delivered)
+        switch (result.Outcome)
         {
-            await ReleaseEventClaimAsync(db, claim, ct);
-            _log.LogWarning(
-                "SLA alert {EntityType}/{EntityId}/{Level} for BU {Bu} was not delivered; claim released for retry.",
-                claim.EntityType, claim.EntityId, claim.Level, claim.BusinessUnitId);
+            case SlaSendOutcome.Sent:
+                await SettleClaimAsync(db, claim, SlaEventStatuses.Sent, null,
+                    result.Provider, result.AcceptanceReference, ct);
+                return true;
+
+            case SlaSendOutcome.Uncertain:
+                await SettleClaimAsync(db, claim, SlaEventStatuses.Uncertain, result.Reason, null, null, ct);
+                _log.LogError(
+                    "SLA alert {EntityType}/{EntityId}/{Level} to {Recipient} for BU {Bu} has an UNCERTAIN outcome "
+                    + "({Reason}); the claim is kept so it is never re-sent. Check the provider before resending by hand.",
+                    entityType, entityId, level, recipientEmail, bu, result.Reason);
+                return false;
+
+            default:
+                await SettleClaimAsync(db, claim, SlaEventStatuses.Released, result.Reason, null, null, ct);
+                _log.LogWarning(
+                    "SLA alert {EntityType}/{EntityId}/{Level} to {Recipient} for BU {Bu} was definitely not sent "
+                    + "({Reason}); claim released for retry.",
+                    entityType, entityId, level, recipientEmail, bu, result.Reason);
+                return false;
         }
-        return delivered;
+    }
+
+    /// <summary>
+    /// One claim PER RECIPIENT for an alert with an audience. Returns true when at least one
+    /// copy was accepted, but every recipient's claim is settled on its own evidence — which
+    /// is the point: `anyDelivered |= ...` under a single shared claim meant one failure
+    /// either silenced the people who had not been told yet, or released a claim that mailed
+    /// the person who HAD been told a second time.
+    /// </summary>
+    private async Task<bool> SendOnceToEachAsync(
+        ErpRfqAutomationContext db, long bu, string entityType, long entityId, string level,
+        DateTime? dayUtc, IEnumerable<Recipient> recipients, CancellationToken ct,
+        Func<Recipient, Task<SlaSendResult>> send)
+    {
+        var anyDelivered = false;
+        foreach (var recipient in recipients)
+            anyDelivered |= await SendOnceAsync(db, bu, entityType, entityId, level, dayUtc,
+                recipient.Email, ct, () => send(recipient));
+        return anyDelivered;
     }
 
     /// <summary>

@@ -82,17 +82,33 @@ public sealed class CrossModuleStockIntegrityTests
     }
 
     [Fact]
-    public async Task Reshipping_the_same_order_does_not_decrement_stock_twice()
+    public async Task Reshipping_the_same_order_is_refused_rather_than_silently_moving_no_stock()
     {
         using var database = NewDatabase();
 
-        await CreateShipmentAsync(database, Tenant, OrderId, OrderItemId, quantity: 4m);
-        await CreateShipmentAsync(database, Tenant, OrderId, OrderItemId, quantity: 4m);
+        Assert.IsType<CreatedAtActionResult>(
+            await CreateShipmentAsync(database, Tenant, OrderId, OrderItemId, quantity: 4m));
+
+        // GATE 6. The line was ordered 4 and 4 have shipped, so a second despatch for 4 is
+        // over-shipment and the server now refuses it.
+        //
+        // This assertion USED to be `Assert.Equal(2, Shipments.Count)`: the duplicate despatch note
+        // was accepted and written, and the test settled for proving that it moved no stock a
+        // second time. That is the weaker half of the guarantee. A delivery note for goods that
+        // cannot leave — because they have already left — is a document the warehouse acts on and
+        // finance cannot invoice, since the invoice ceiling was already cumulative while this one
+        // was not. Refusing it outright is the behaviour the order line's quantity was always
+        // meant to have.
+        var second = Assert.IsType<ConflictObjectResult>(
+            await CreateShipmentAsync(database, Tenant, OrderId, OrderItemId, quantity: 4m));
+        Assert.Contains("exceeds the remaining quantity",
+            second.Value?.GetType().GetProperty("message")?.GetValue(second.Value)?.ToString() ?? "");
 
         await using var verify = database.ContextFor(Tenant);
+        // The original guarantee still holds: stock moved exactly once.
         Assert.Equal(6m, await verify.Set<Models.Inventory>().Where(x => x.Id == InventoryRow)
             .Select(x => x.QtyOnHand).SingleAsync());
-        Assert.Equal(2, await verify.Shipments.CountAsync());
+        Assert.Equal(1, await verify.Shipments.CountAsync());
     }
 
     [Fact]
@@ -157,7 +173,7 @@ public sealed class CrossModuleStockIntegrityTests
 
         await using (var release = database.ContextFor(Tenant))
         {
-            await new OrderStockReservationService(release, new InventoryAvailabilityService(release))
+            await InventoryServices.OrderStock(release)
                 .ReleaseOrderAsync(Tenant, OrderId, "order-cancelled");
         }
 
@@ -217,7 +233,7 @@ public sealed class CrossModuleStockIntegrityTests
         // the shipment row had already been committed by an earlier SaveChanges.
         await using (var setup = database.ContextFor(Tenant))
         {
-            await new OrderStockReservationService(setup, new InventoryAvailabilityService(setup))
+            await InventoryServices.OrderStock(setup)
                 .ReserveOrderAsync(Tenant, OrderId, "rep@acme");
         }
         await using (var damage = database.ContextFor(Tenant))
@@ -244,7 +260,7 @@ public sealed class CrossModuleStockIntegrityTests
         using var database = NewDatabase();
         await using (var allocate = database.ContextFor(Tenant))
         {
-            await new OrderStockReservationService(allocate, new InventoryAvailabilityService(allocate))
+            await InventoryServices.OrderStock(allocate)
                 .ReserveOrderAsync(Tenant, OrderId, "rep@acme");
         }
         await AssertAvailableAsync(database, 6m);
@@ -269,7 +285,7 @@ public sealed class CrossModuleStockIntegrityTests
         using var database = NewDatabase();
         await using (var allocate = database.ContextFor(Tenant))
         {
-            await new OrderStockReservationService(allocate, new InventoryAvailabilityService(allocate))
+            await InventoryServices.OrderStock(allocate)
                 .ReserveOrderAsync(Tenant, OrderId, "rep@acme");
         }
 
@@ -288,7 +304,7 @@ public sealed class CrossModuleStockIntegrityTests
         using var database = NewDatabase();
         await using (var allocate = database.ContextFor(Tenant))
         {
-            await new OrderStockReservationService(allocate, new InventoryAvailabilityService(allocate))
+            await InventoryServices.OrderStock(allocate)
                 .ReserveOrderAsync(Tenant, OrderId, "rep@acme");
         }
 
@@ -304,7 +320,7 @@ public sealed class CrossModuleStockIntegrityTests
         await using var verify = database.ContextFor(Tenant);
         Assert.Equal(StockReservationStatus.Released,
             Assert.Single(await verify.StockReservations.ToListAsync()).Status);
-        Assert.Equal(0, await new OrderStockReservationService(verify, new InventoryAvailabilityService(verify))
+        Assert.Equal(0, await InventoryServices.OrderStock(verify)
             .ReleaseOrphanedAsync(Tenant, "sweeper"));
     }
 
@@ -608,7 +624,7 @@ public sealed class CrossModuleStockIntegrityTests
         await using var context = database.ContextFor(tenant);
         var controller = new ShipmentController(
             new ShipmentRepository(context), context,
-            new OrderStockReservationService(context, new InventoryAvailabilityService(context)))
+            InventoryServices.OrderStock(context))
         {
             ControllerContext = new ControllerContext
             {

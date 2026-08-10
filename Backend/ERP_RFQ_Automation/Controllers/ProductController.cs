@@ -348,6 +348,36 @@ namespace ERP_RFQ_Automation.Controllers
 
             await _repository.UpdateAsync(product, request.Buid, request.Attachments);
 
+            // FR-INV-04. Push the reorder point down to the stock rows that actually drive the
+            // alert.
+            //
+            // Inventory.ReorderPoint is copied from the product ONCE, when the stock row is first
+            // created (StockLedgerService.ResolveInventoryAsync), and was never re-synced. Every
+            // exception surface — the overview's BelowReorderPoint list, the warehouse exception
+            // counts, the demand/buying list — reads Inventory.ReorderPoint, while this screen
+            // writes Product.ReorderPoint. So raising a reorder point on a product that already
+            // held stock changed nothing anybody could see: the setting existed, the field saved,
+            // the alert kept using the old number, and the only symptom was an alert that never
+            // fired.
+            //
+            // Per warehouse rather than per product, because that is the grain the alert is
+            // evaluated at; the item master supplies the default for every location that has not
+            // been given its own.
+            var stockRows = await _context.Set<Models.Inventory>()
+                .Where(x => x.Buid == request.Buid && x.ProductId == id
+                            && x.ReorderPoint != product.ReorderPoint)
+                .ToListAsync();
+            if (stockRows.Count > 0)
+            {
+                foreach (var row in stockRows)
+                {
+                    row.ReorderPoint = product.ReorderPoint;
+                    row.ModifiedBy = Actor();
+                    row.ModifiedOn = DateTime.UtcNow;
+                }
+                await _context.SaveChangesAsync();
+            }
+
             // Reload the product to include attachments
             var savedProduct = await _repository.GetByIdAsync(id, request.Buid);
 

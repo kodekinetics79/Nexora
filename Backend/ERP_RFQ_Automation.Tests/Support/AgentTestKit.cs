@@ -121,6 +121,12 @@ public static class AgentSeed
             ImageUrl = "n/a",
             Buid = buid,
             IsActive = true,
+            // SYNTHETIC, and structurally valid only so the fixture clears the input-tax evidence
+            // guard: a business unit that treats supplier tax as recoverable is asserting a
+            // reclaim, and a reclaim has to name the supplier's registration to the authority.
+            // Without this every seeded supplier now fails that check, which is the guard doing its
+            // job rather than a defect. Not a real registration and not derived from one.
+            TaxRegistrationNumber = "300000000000003",
             CreatedBy = "seed",
             CreatedOn = Now
         };

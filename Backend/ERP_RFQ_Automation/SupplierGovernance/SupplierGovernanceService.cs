@@ -54,6 +54,7 @@ public sealed class SupplierGovernanceService(ErpRfqAutomationContext db)
         var strategy = db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            db.ChangeTracker.Clear();
             await using var transaction = await db.Database.BeginTransactionAsync(
                 IsolationLevel.Serializable, cancellationToken);
             var replay = await db.ProcurementEvents.AsNoTracking().SingleOrDefaultAsync(x =>

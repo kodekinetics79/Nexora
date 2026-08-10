@@ -22,6 +22,7 @@ public sealed class SupplierQuoteCommercialService(ErpRfqAutomationContext conte
         var strategy = context.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            context.ChangeTracker.Clear();
             await using var transaction = await context.Database.BeginTransactionAsync(
                 IsolationLevel.Serializable, cancellationToken);
             var quote = await context.SupplierQuotes
@@ -304,6 +305,7 @@ public sealed class SupplierQuoteCommercialService(ErpRfqAutomationContext conte
         var strategy = context.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            context.ChangeTracker.Clear();
             await using var transaction = await context.Database.BeginTransactionAsync(
                 IsolationLevel.Serializable, cancellationToken);
             var existing = await context.CustomerQuoteSourcingDecisions.AsNoTracking().SingleOrDefaultAsync(x =>

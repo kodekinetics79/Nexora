@@ -286,6 +286,91 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         /// <summary>
+        /// FR-DLM-03. Serves proof-of-delivery evidence — the signature, the stamp, or the
+        /// photograph of the goods at handover.
+        ///
+        /// <para><b>Its own route, for the reasons the lot-certificate route has its own.</b> The
+        /// permission is different: this is gated on <c>Shipments</c>, because a despatch clerk
+        /// reviewing a delivery dispute has no business needing <c>Leads</c>/View to open the
+        /// signature. And the storage resolution is different: <see cref="DownloadAttachment"/>
+        /// reaches the evidence store only through a lead's <c>ExtractionJob</c> and otherwise falls
+        /// through to a legacy provider the DI construction path never supplies (recorded as E54),
+        /// so any non-lead attachment on that route returns 404. POD evidence is written straight to
+        /// content-addressed evidence storage with its digest on the attachment row, so it is opened
+        /// directly and verified against that digest.</para>
+        ///
+        /// <para>Ownership is proved against <c>Shipments</c>, which is tenant-scoped by an EF query
+        /// filter and by an explicit business-unit predicate here. The attachment's parent type must
+        /// also match, so a re-parented attachment cannot be served as a POD it was never filed
+        /// against.</para>
+        /// </summary>
+        [HttpGet("delivery-proof/{attachmentId:long}")]
+        [RequireModulePermission("Shipments", PermissionAction.View)]
+        public async Task<IActionResult> DownloadDeliveryProofEvidence(long attachmentId, CancellationToken ct)
+        {
+            var rawBusinessUnitId = User.FindFirst("businessUnitId")?.Value;
+            if (!long.TryParse(rawBusinessUnitId, out var businessUnitId) || businessUnitId <= 0)
+                return BadRequest("Business Unit ID is required.");
+
+            try
+            {
+                var attachment = await _context.Attachments
+                    .AsNoTracking()
+                    .SingleOrDefaultAsync(a => a.Id == attachmentId, ct);
+                if (attachment is null || !string.Equals(
+                        attachment.ParentType,
+                        ERP_RFQ_Automation.Delivery.DeliveryProofEvidenceService.EvidenceParentType,
+                        StringComparison.OrdinalIgnoreCase))
+                    return NotFound();
+
+                var owned = await _context.Shipments
+                    .AsNoTracking()
+                    .AnyAsync(s => s.Id == attachment.ParentId && s.BusinessUnitId == businessUnitId, ct);
+                if (!owned)
+                    return NotFound();
+
+                if (string.IsNullOrWhiteSpace(attachment.ContentSha256))
+                {
+                    // POD evidence is only ever written through DeliveryProofEvidenceService, which
+                    // always records a digest. A row without one did not come from that path, and
+                    // evidence of unknown provenance is not served on the route a dispute reads.
+                    _logger.LogWarning(
+                        "Delivery proof attachment {AttachmentId} (tenant {BusinessUnitId}) has no "
+                        + "recorded digest and was refused.", attachmentId, businessUnitId);
+                    return Problem(statusCode: StatusCodes.Status409Conflict,
+                        title: "The evidence object failed integrity verification.");
+                }
+
+                var stream = await _evidenceStorage.OpenVerifiedReadAsync(
+                    attachment.FilePath, attachment.ContentSha256, ct);
+                var contentType = string.IsNullOrWhiteSpace(attachment.MimeType)
+                    ? "application/octet-stream"
+                    : attachment.MimeType;
+                return await ServeVerifiedAttachmentAsync(stream, attachment, contentType, businessUnitId, ct);
+            }
+            catch (FileNotFoundException)
+            {
+                return NotFound("The delivery proof evidence was not found in evidence storage.");
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                _logger.LogWarning(ex, "Rejected unsafe storage path for delivery proof {AttachmentId}.", attachmentId);
+                return NotFound();
+            }
+            catch (InvalidDataException ex)
+            {
+                _logger.LogWarning(ex, "Delivery proof integrity verification failed for {AttachmentId}.", attachmentId);
+                return Problem(statusCode: StatusCodes.Status409Conflict,
+                    title: "The stored evidence failed integrity verification.");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error downloading delivery proof {AttachmentId}.", attachmentId);
+                return StatusCode(500, "An error occurred while retrieving the evidence.");
+            }
+        }
+
+        /// <summary>
         /// FR-RFQ-08 enforcement point. Recording a digest at capture only proves what the bytes
         /// WERE; this is where a reader proves what they still ARE, on the one route that hands
         /// attachment bytes to a user.

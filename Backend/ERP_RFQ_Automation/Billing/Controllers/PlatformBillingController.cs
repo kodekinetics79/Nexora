@@ -41,6 +41,22 @@ public class PlatformBillingController : ControllerBase
     /// </summary>
     internal const int MinimumBillingModeReasonLength = 15;
 
+    /// <summary>
+    /// Same floor as a billing exemption. "Redirected the invoice" is not a reason; the person
+    /// reading this in a dispute needs to know on whose instruction it was redirected.
+    /// </summary>
+    internal const int MinimumAccountContactReasonLength = 15;
+
+    /// <summary>
+    /// The longest payment terms this accepts. Not a guess: <c>SubscriptionInvoiceService</c>
+    /// computes <c>DueAtUtc = IssuedAtUtc.AddDays(PaymentTermsDays ?? 30)</c>, so a mistyped 3650
+    /// produces an invoice that falls due in ten years and silently leaves the AR balance out of
+    /// every collections view for the rest of the company's life. Zero is allowed and means "due on
+    /// receipt", which is a real commercial term; negative is not a term, it is a typo that back-dates
+    /// the due date before the issue date.
+    /// </summary>
+    internal const int MaximumPaymentTermsDays = 365;
+
     private readonly ErpRfqAutomationContext _context;
     private readonly IBillingStatementService _billing;
     private readonly IPlatformAuditService _audit;
@@ -761,22 +777,6 @@ public class PlatformBillingController : ControllerBase
 
         return updated ?? await GetTenantBillingProfile(tenantId, ct);
     }
-
-    /// <summary>
-    /// Same floor as a billing exemption. "Redirected the invoice" is not a reason; the person
-    /// reading this in a dispute needs to know on whose instruction it was redirected.
-    /// </summary>
-    internal const int MinimumAccountContactReasonLength = 15;
-
-    /// <summary>
-    /// The longest payment terms this accepts. Not a guess: <c>SubscriptionInvoiceService</c>
-    /// computes <c>DueAtUtc = IssuedAtUtc.AddDays(PaymentTermsDays ?? 30)</c>, so a mistyped 3650
-    /// produces an invoice that falls due in ten years and silently leaves the AR balance out of
-    /// every collections view for the rest of the company's life. Zero is allowed and means "due on
-    /// receipt", which is a real commercial term; negative is not a term, it is a typo that back-dates
-    /// the due date before the issue date.
-    /// </summary>
-    internal const int MaximumPaymentTermsDays = 365;
 
     /// <summary>
     /// Rejects the WRONG values, not merely the impossible ones — every rule here has a named

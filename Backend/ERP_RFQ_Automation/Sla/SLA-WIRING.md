@@ -51,18 +51,32 @@ splice: `ConfigureSlaModel(modelBuilder);` was added to
 | DeadlineBufferHours | integer | default 12 (reserved, not yet consumed by the sweep) |
 | SupplierShipDateReminderDays | integer | default 3 — FR-SPO-07 WORKING days before a supplier order's committed ship date at which the buyer is reminded (**new column; migration owned by the lead**) |
 | SupplierAckEscalationHours | integer | default 48 — FR-SPO-07 WORKING hours an order may sit with the supplier unacknowledged before a supervisor is told (**new column; migration owned by the lead**) |
+| QuoteDecisionReminderDays | integer | default 3 — FR-SBF-01 WORKING days before a bid closes at which RFQ lines still carrying `ParticipationDecision = Pending` are chased (**new column; migration owned by the lead**) |
+| CreatedOn | timestamp | server default `now()` |
+| UpdatedOn | timestamp | server default `now()` |
 
-The two FR-SPO-07 columns the lead's migration must add:
+The two FR-SPO-07 columns and the one FR-SBF-01 column the lead's migration must add:
 
 ```sql
 ALTER TABLE "SlaPolicies" ADD COLUMN "SupplierShipDateReminderDays" integer NOT NULL DEFAULT 3;
 ALTER TABLE "SlaPolicies" ADD COLUMN "SupplierAckEscalationHours"  integer NOT NULL DEFAULT 48;
+ALTER TABLE "SlaPolicies" ADD COLUMN "QuoteDecisionReminderDays"   integer NOT NULL DEFAULT 3;
 ```
 
-Both are exposed on `PUT /api/sla/policy` (`supplierShipDateReminderDays` clamped 0–90,
-`supplierAckEscalationHours` clamped 1–720) and returned by `GET /api/sla/policy`.
-| CreatedOn | timestamp | server default `now()` |
-| UpdatedOn | timestamp | server default `now()` |
+**Backfill semantics, stated side by side** (wiring-contract failure #10). The code default in
+`SlaPolicy.QuoteDecisionReminderDays` is `3`; the backfill default above is `3`. They mean the same
+thing. A backfill of `0` would ALSO be safe here — the sweep reads a non-positive value as "not
+configured" (register R12) and sends nothing — but it would ship the feature dark, so `3` is chosen
+deliberately to match the initializer and the existing FR-SPO-07 precedent. What must never be
+chosen is a backfill the code would read as a *tighter* deadline than the initializer.
+
+`QuoteDecisionReminderDays` is exposed on `PUT /api/sla/policy` (clamped 0–90) and returned by
+`GET /api/sla/policy`; the Setup screen renders it under "Bid decisions". The same commit also
+surfaced `SupplierShipDateReminderDays` and `SupplierAckEscalationHours` on that screen — both were
+already on the API contract and had no way to be set through the interface.
+
+The FR-SPO-07 pair is exposed on `PUT /api/sla/policy` (`supplierShipDateReminderDays` clamped
+0–90, `supplierAckEscalationHours` clamped 1–720) and returned by `GET /api/sla/policy`.
 
 Defaults are applied in code via `SlaPolicy.Default(bu)` when no row exists
 (AgentPolicy pattern) — the integer defaults above are initializer values, not
@@ -73,9 +87,9 @@ DB defaults.
 |---|---|---|
 | Id | bigint identity | PK |
 | BusinessUnitId | bigint | tenant filter |
-| EntityType | varchar(40) | `lead` \| `lead-unassigned` \| `quote` \| `quote-stale-digest` \| `approval` \| `supplier-order-ship` \| `supplier-order-ack` |
+| EntityType | varchar(40) | `lead` \| `lead-unassigned` \| `quote` \| `quote-stale-digest` \| `approval` \| `supplier-order-ship` \| `supplier-order-ack` \| `inbound-shipment-late` \| `inbound-shipment-risk` \| `rfq-undecided-lines` \| `supplier-response-overdue` \| `scheduled-report` |
 | EntityId | bigint | lead/quote id; owner user id for digests; first 8 bytes of the approval Guid for approvals; supplier purchase order id for the two FR-SPO-07 sweeps |
-| Level | varchar(20) | `warn` \| `critical` \| `overdue` \| `stale` \| `expired` \| `escalated` |
+| Level | varchar(20) | `warn` \| `critical` \| `overdue` \| `stale` \| `expired` \| `escalated` \| `sent` |
 | CreatedOn | timestamp | server default `now()` |
 
 Non-unique index `IX_SlaEvents_BU_Entity_Level` on
@@ -194,6 +208,16 @@ no-ops; every query is explicitly BU-scoped with `IgnoreQueryFilters()`.
    `AgentApproval`s older than the threshold → manager/admin alert once per
    approval. *Choice:* SlaEvent.EntityId is bigint while approval ids are Guids,
    so the dedup key is the Guid's first 8 bytes (never used for reverse lookup).
+
+### New EntityType values — NO schema change required
+
+`SlaEvents.EntityType` is `varchar(40)` with **no CHECK constraint** (see
+`ConfigureSlaModel` — only `HasMaxLength(40)`), so the four values added since the original
+list need no DDL. This is worth stating explicitly because the equivalent addition on
+`source_document_occurrences.outcome_state` DOES carry a CHECK constraint and raises `23514`
+on PostgreSQL while passing silently on the SQLite lane, which is recorded in the wiring
+contract's schema-debt table. Longest new value is `supplier-response-overdue` at 25
+characters.
 
 ## 6. Email templates
 

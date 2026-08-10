@@ -529,6 +529,7 @@ public sealed class CustomFieldApplicationService : ICustomFieldApplicationServi
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             await using var transaction = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
             var result = await operation();
             await transaction.CommitAsync(ct);

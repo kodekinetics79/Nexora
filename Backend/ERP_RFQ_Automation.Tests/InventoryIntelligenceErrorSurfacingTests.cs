@@ -35,7 +35,7 @@ public sealed class InventoryIntelligenceErrorSurfacingTests
     {
         var controller = new InventoryIntelligenceController(
             db: null!, lineResolution: new ThrowingLineResolution(failure),
-            inventoryAvailability: null!, orderStock: null!);
+            inventoryAvailability: null!, orderStock: null!, ledger: null!, reorderAlerts: null!);
         var httpContext = new DefaultHttpContext
         {
             User = new ClaimsPrincipal(new ClaimsIdentity([new Claim("businessUnitId", "1")], "test")),

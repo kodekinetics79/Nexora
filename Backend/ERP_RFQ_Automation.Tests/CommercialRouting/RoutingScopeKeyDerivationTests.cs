@@ -129,17 +129,37 @@ public sealed class RoutingScopeKeyDerivationTests
         Assert.Equal("Eastern Province", derivation.Key);
     }
 
-    // ── KeyAccountTeam has no source at all ─────────────────────────────────
+    // ── KeyAccountTeam now has a source: Customer.AccountTeamId (FR-CST-02) ──
 
+    /// <summary>
+    /// This scope used to be structurally underivable, because nothing in the model linked a
+    /// customer to a team. <c>Customer.AccountTeamId</c> is that link, and this test is the reason
+    /// the column cannot be deleted: remove it and the routing service has no team name to pass.
+    /// </summary>
     [Fact]
-    public void KeyAccountTeam_reports_itself_underivable_rather_than_inventing_a_key()
+    public void KeyAccountTeam_derives_from_the_customers_account_team()
     {
-        var derivation = RoutingScopeKeys.KeyAccountTeam();
+        var derivation = RoutingScopeKeys.KeyAccountTeam("Strategic Accounts");
+
+        Assert.True(derivation.IsDerived);
+        Assert.Equal("Strategic Accounts", derivation.Key);
+        Assert.Contains("customers.AccountTeamId", derivation.Source);
+    }
+
+    /// <summary>
+    /// A customer in no account team yields a NULL key, not an invented one. The engine refuses a
+    /// blank key on either side, so an unassigned customer matches NO KeyAccountTeam rule — the
+    /// alternative, an empty key matching an empty ScopeKey, would hand one rule every RFQ.
+    /// </summary>
+    [Fact]
+    public void KeyAccountTeam_reports_unavailable_when_the_customer_is_in_no_account_team()
+    {
+        var derivation = RoutingScopeKeys.KeyAccountTeam(null);
 
         Assert.False(derivation.IsDerived);
         Assert.Null(derivation.Key);
-        Assert.StartsWith("UNDERIVABLE", derivation.Source);
-        Assert.Contains("customer-to-team", derivation.Source);
+        Assert.StartsWith("UNAVAILABLE", derivation.Source);
+        Assert.Contains("account team", derivation.Source);
     }
 
     // ── Engine matching ─────────────────────────────────────────────────────
@@ -321,7 +341,7 @@ public sealed class RoutingScopeKeyDerivationTests
     }
 
     [Fact]
-    public async Task Route_records_the_key_account_team_scope_as_underivable_on_every_decision()
+    public async Task Route_records_the_key_account_team_scope_as_unavailable_when_the_customer_has_no_team()
     {
         using var db = new TestDb();
         await SeedAsync(db, deliveryLocation: "Riyadh", territoryRuleKey: "Riyadh");
@@ -333,7 +353,7 @@ public sealed class RoutingScopeKeyDerivationTests
         var team = Scope(decision, OwnershipScope.KeyAccountTeam);
         Assert.False(team.GetProperty("derived").GetBoolean());
         Assert.Equal(JsonValueKind.Null, team.GetProperty("key").ValueKind);
-        Assert.StartsWith("UNDERIVABLE", team.GetProperty("source").GetString());
+        Assert.StartsWith("UNAVAILABLE", team.GetProperty("source").GetString());
 
         // Every ranked scope is accounted for — a silent omission would be indistinguishable
         // from the defect this fixes.

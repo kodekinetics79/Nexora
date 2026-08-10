@@ -836,9 +836,11 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
     /// <para>This used to return Branch and ProductCategory only. Territory and KeyAccountTeam
     /// rules were therefore unmatchable by construction — the engine looks the scope up in this
     /// dictionary, found nothing, and skipped the rule — so half of FR-RFQ-07's "customer,
-    /// product-category or region" was dead. Territory now derives; KeyAccountTeam reports that
-    /// it cannot (see <see cref="RoutingScopeKeys.KeyAccountTeamUnderivable"/>) rather than
-    /// inventing a key.</para>
+    /// product-category or region" was dead. Territory derives from the delivery location and the
+    /// region masters; KeyAccountTeam now derives from <c>Customer.AccountTeamId</c> (FR-CST-02),
+    /// which is the customers-to-teams edge that did not exist when this method was written, and
+    /// reports <see cref="RoutingScopeKeys.KeyAccountTeamUnavailable"/> per RFQ when the lead names
+    /// no customer or that customer is in no account team.</para>
     ///
     /// <para>Tenant isolation: every read below is filtered on <paramref name="businessUnitId"/>
     /// explicitly, on top of the context's query filters, so a territory can never be derived
@@ -854,13 +856,25 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
         // The customer RECORDED on the lead — never one of the routing candidates, which are
         // still unproven at this point. Reading a candidate's address would let a guess the
         // engine has not yet accepted (and may reject as ambiguous) choose the territory.
-        var customer = lead.CustomerId is long customerId
+        var customerRow = lead.CustomerId is long customerId
             ? await _db.Customers.AsNoTracking()
                 .Where(c => c.Id == customerId && c.Buid == businessUnitId)
-                .Select(c => new CustomerRegionEvidence(
-                    c.ShippingState, c.ShippingCity, c.BillingState, c.BillingCity))
+                .Select(c => new
+                {
+                    Region = new CustomerRegionEvidence(
+                        c.ShippingState, c.ShippingCity, c.BillingState, c.BillingCity),
+                    // FR-CST-02's account team, read under the same tenant predicate as the region.
+                    // The join is restated on BusinessUnitId rather than trusted to the foreign key:
+                    // Customer.AccountTeamId is a single-column key and cannot itself express that
+                    // the team belongs to this tenant.
+                    AccountTeamName = _db.Teams
+                        .Where(t => t.Id == c.AccountTeamId && t.BusinessUnitId == businessUnitId)
+                        .Select(t => t.TeamName)
+                        .FirstOrDefault()
+                })
                 .SingleOrDefaultAsync(ct)
             : null;
+        var customer = customerRow?.Region;
 
         var states = await _db.SetStates.AsNoTracking()
             .Where(s => s.Buid == businessUnitId && s.IsActive)
@@ -895,7 +909,7 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
             RoutingScopeKeys.Branch(branch),
             RoutingScopeKeys.ProductCategory(category),
             RoutingScopeKeys.Territory(lead.DeliveryLocation, customer, stateAliases, cityAliases),
-            RoutingScopeKeys.KeyAccountTeam()
+            RoutingScopeKeys.KeyAccountTeam(customerRow?.AccountTeamName)
         ];
     }
 
@@ -1018,6 +1032,7 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             await using var transaction = await _db.Database.BeginTransactionAsync(isolationLevel, ct);
             var result = await operation();
             await transaction.CommitAsync(ct);

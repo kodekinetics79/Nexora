@@ -283,11 +283,21 @@ public partial class ErpRfqAutomationContext
         // Stock reservation ledger (portable relational model; enabled for the SQLite suite).
         modelBuilder.ApplyInventoryReservationModel();
         modelBuilder.ApplyCommercialInventoryModel();
+        // FR-INV-04. Must follow both of the above: it adds two columns and a CHECK to the Inventory
+        // table those configure, and its alert table hangs off Inventory's (Buid, Id) alternate key,
+        // which ApplyCommercialInventoryModel declares.
+        modelBuilder.ApplyReorderAlertModel(
+            e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         ConfigureProcurementModel(modelBuilder);
         // Gate 5 / FR-MTR-01..05. Must follow the procurement configuration: material lots hang off
         // the supplier purchase order, its lines and the goods receipt, and reference their
         // (BusinessUnitId, Id) alternate keys. See Models/ErpRfqAutomationContext.Traceability.cs.
         ConfigureMaterialTraceabilityModel(modelBuilder);
+        // Gate 7 / FR-DLM-01..07. Must follow traceability: the proof of delivery hangs off the
+        // shipment's (BusinessUnitId, Id) alternate key, which the traceability configuration
+        // declares because the despatch note is a target of the forward lot link.
+        // See Models/ErpRfqAutomationContext.Delivery.cs.
+        ConfigureDeliveryModel(modelBuilder);
         ConfigureCommercialDocumentsModel(modelBuilder);
         ConfigureSupplierGovernanceModel(modelBuilder);
         // Tax registration numbers on Suppliers and BusinessUnits — the evidence the input-VAT
@@ -758,6 +768,14 @@ public partial class ErpRfqAutomationContext
         // ==== SLA / deadline engine + quote outcome capture (Sla/) ====
         // Same partial-splice pattern; implementation in ErpRfqAutomationContext.Sla.cs.
         ConfigureSlaModel(modelBuilder);
+
+        // ==== Gate 8 scheduled reporting (Reporting/) ====
+        modelBuilder.ApplyReportingModel(
+            e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+
+        // ==== Gate 8 customer master + account team (FR-CST-01/02) ====
+        // Columns on the EXISTING Customers table, which already carries its RLS policy and grant.
+        modelBuilder.ApplyCustomerMasterModel(Database.IsNpgsql());
 
         // ==== Passive AI metrics + quote revisions (WP-B4, Metrics/) ====
         // Same partial-splice pattern; implementation in ErpRfqAutomationContext.Metrics.cs.

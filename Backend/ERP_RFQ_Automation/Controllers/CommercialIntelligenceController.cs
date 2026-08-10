@@ -275,6 +275,7 @@ public sealed class CommercialIntelligenceController(
         {
             outcome = await strategy.ExecuteAsync(async () =>
             {
+                db.ChangeTracker.Clear();
                 await using var transaction = await db.Database.BeginTransactionAsync(ct);
                 if (db.Database.IsNpgsql())
                     await db.Database.ExecuteSqlInterpolatedAsync(

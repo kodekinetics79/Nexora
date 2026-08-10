@@ -1337,6 +1337,7 @@ namespace ERP_RFQ_Automation.Services
             var strategy = _context.Database.CreateExecutionStrategy();
             return await strategy.ExecuteAsync(async () =>
             {
+                _context.ChangeTracker.Clear();
                 var ownsTransaction = _context.Database.CurrentTransaction is null;
                 await using var transaction = ownsTransaction
                     ? await _context.Database.BeginTransactionAsync(IsolationLevel.Serializable)
@@ -1410,6 +1411,7 @@ namespace ERP_RFQ_Automation.Services
             var strategy = _context.Database.CreateExecutionStrategy();
             await strategy.ExecuteAsync(async () =>
             {
+                _context.ChangeTracker.Clear();
                 await using var transaction = await _context.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
                 var quote = await _context.Quotes
                     .Include(q => q.Rfq).ThenInclude(r => r.Lead)

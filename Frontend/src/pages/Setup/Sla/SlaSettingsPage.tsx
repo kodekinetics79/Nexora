@@ -41,6 +41,34 @@ const FIELDS: { section: string; items: FieldSpec[] }[] = [
     ],
   },
   {
+    section: 'Bid decisions',
+    items: [
+      {
+        key: 'quoteDecisionReminderDays',
+        label: 'Chase lines with no Quote / No-Quote decision',
+        help: 'Working days before a bid closes at which the owner is reminded about lines nobody has decided yet. Weekends (Friday and Saturday) are excluded. Set to 0 to switch this reminder off.',
+        unit: 'days',
+      },
+    ],
+  },
+  {
+    section: 'Supplier orders',
+    items: [
+      {
+        key: 'supplierShipDateReminderDays',
+        label: 'Remind me before a supplier ships',
+        help: 'Working days before the committed ship date at which the buyer is reminded. Set to 0 to switch this reminder off.',
+        unit: 'days',
+      },
+      {
+        key: 'supplierAckEscalationHours',
+        label: 'Escalate unacknowledged supplier orders',
+        help: 'Working hours an order may sit with the supplier with no acknowledgement before a supervisor is told. Weekends are not counted.',
+        unit: 'hours',
+      },
+    ],
+  },
+  {
     section: 'Copilot approvals',
     items: [
       { key: 'approvalEscalationHours', label: 'Escalate approvals waiting too long', help: 'If a copilot action waits for approval longer than this, managers are alerted.', unit: 'hours' },

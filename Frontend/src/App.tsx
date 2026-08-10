@@ -30,6 +30,10 @@ const IncomingPage = lazy(() => import('./pages/Inventory/Commercial/IncomingPag
 const MovementsPage = lazy(() => import('./pages/Inventory/Commercial/MovementsPage'));
 const DemandPage = lazy(() => import('./pages/Inventory/Commercial/DemandPage'));
 const RelatedResourcesPage = lazy(() => import('./pages/Inventory/Commercial/RelatedResourcesPage'));
+const StockLevelsPage = lazy(() => import('./pages/Inventory/Commercial/StockLevelsPage'));
+const ReorderAlertsPage = lazy(() => import('./pages/Inventory/Commercial/ReorderAlertsPage'));
+const CountVariancePage = lazy(() => import('./pages/Inventory/Commercial/CountVariancePage'));
+const StockAgeingPage = lazy(() => import('./pages/Inventory/Commercial/StockAgeingPage'));
 // Gate 5 / FR-MTR-01..05 — material lots, certificates, quarantine and where-used trace.
 const LotsPage = lazy(() => import('./pages/Inventory/Traceability/LotsPage'));
 const LotDetailPage = lazy(() => import('./pages/Inventory/Traceability/LotDetailPage'));
@@ -84,6 +88,7 @@ const ShipmentViewPage = lazy(() => import('./pages/Sales/Shipments/ShipmentView
 const ShipmentInvoicePage = lazy(() => import('./pages/Sales/Shipments/ShipmentInvoicePage'));
 const PriceStructurePage = lazy(() => import('./pages/Setup/PriceStructure/PriceStructurePage'));
 const SlaSettingsPage = lazy(() => import('./pages/Setup/Sla/SlaSettingsPage'));
+const ScheduledReportsPage = lazy(() => import('./pages/Setup/Reporting/ScheduledReportsPage'));
 const CommercialPolicyPage = lazy(() => import('./pages/Setup/CommercialPolicy/CommercialPolicyPage'));
 const MailboxPage = lazy(() => import('./pages/Setup/Mailbox/MailboxPage'));
 const RoutingRulesPage = lazy(() => import('./pages/Setup/RoutingRules/RoutingRulesPage'));
@@ -270,6 +275,10 @@ function App() {
       {/* SLA & alert policy (WP-A2). Guarded by the generic setup module ("UOM"),
           matching /setup/master and /setup/price-structure. */}
       <Route path="/setup/sla" element={<MainLayout><PermissionGuard moduleName="UOM"><SlaSettingsPage /></PermissionGuard></MainLayout>} />
+      {/* FR-DSH-06 scheduled report delivery. Guarded by "Dashboard" because that is the module
+          the reporting endpoints check, and because the reports carry dashboard content — the
+          write side additionally requires a manager role at the API. */}
+      <Route path="/setup/scheduled-reports" element={<MainLayout><PermissionGuard moduleName="Dashboard"><ScheduledReportsPage /></PermissionGuard></MainLayout>} />
       <Route path="/setup/commercial-policy" element={<MainLayout><PermissionGuard moduleName="UOM"><CommercialPolicyPage /></PermissionGuard></MainLayout>} />
       {/* Mailbox administration. Guarded by "Email & SMTP" — the module the supplier-email
           screen already uses — rather than the generic setup module, because these rows hold
@@ -297,6 +306,12 @@ function App() {
       <Route path="/inventory/movements" element={<MainLayout><PermissionGuard moduleName="Products"><MovementsPage /></PermissionGuard></MainLayout>} />
       <Route path="/inventory/demand" element={<MainLayout><PermissionGuard moduleName="Products"><DemandPage /></PermissionGuard></MainLayout>} />
       <Route path="/inventory/resources" element={<MainLayout><PermissionGuard moduleName="Products"><RelatedResourcesPage /></PermissionGuard></MainLayout>} />
+      {/* FR-INV-04/05/06. Four screens that had no interface at all: minimum/maximum levels and the
+          reorder alert ledger, and the two reports whose endpoints were complete and unreachable. */}
+      <Route path="/inventory/levels" element={<MainLayout><PermissionGuard moduleName="Products"><StockLevelsPage /></PermissionGuard></MainLayout>} />
+      <Route path="/inventory/reorder-alerts" element={<MainLayout><PermissionGuard moduleName="Products"><ReorderAlertsPage /></PermissionGuard></MainLayout>} />
+      <Route path="/inventory/count-variance" element={<MainLayout><PermissionGuard moduleName="Products"><CountVariancePage /></PermissionGuard></MainLayout>} />
+      <Route path="/inventory/ageing" element={<MainLayout><PermissionGuard moduleName="Products"><StockAgeingPage /></PermissionGuard></MainLayout>} />
       <Route path="/inventory/lots" element={<MainLayout><PermissionGuard moduleName="Products"><LotsPage /></PermissionGuard></MainLayout>} />
       <Route path="/inventory/lots/:lotId" element={<MainLayout><PermissionGuard moduleName="Products"><LotDetailPage /></PermissionGuard></MainLayout>} />
       <Route path="/inventory/order-trace" element={<MainLayout><PermissionGuard moduleName="Products"><PermissionGuard moduleName="Orders"><OrderTracePage /></PermissionGuard></PermissionGuard></MainLayout>} />

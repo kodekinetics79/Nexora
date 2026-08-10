@@ -53,15 +53,34 @@ public partial class ErpRfqAutomationContext
             e.Property(x => x.EntityType).HasMaxLength(40).IsRequired();
             e.Property(x => x.Level).HasMaxLength(20).IsRequired();
             e.Property(x => x.DedupKey).HasMaxLength(120).IsRequired();
+            e.Property(x => x.Recipient).HasMaxLength(320);
+            e.Property(x => x.Status).HasMaxLength(16).IsRequired();
+            e.Property(x => x.Provider).HasMaxLength(64);
+            e.Property(x => x.AcceptanceReference).HasMaxLength(200);
+            e.Property(x => x.OutcomeReason).HasMaxLength(120);
             e.Property(x => x.CreatedOn).HasDefaultValueSql("now()");
             e.HasIndex(x => new { x.BusinessUnitId, x.EntityType, x.EntityId, x.Level })
                 .HasDatabaseName("IX_SlaEvents_BU_Entity_Level");
             // SCALE-OUT: the send-once guarantee is enforced by the DATABASE, not by a
             // lookup-before-insert race. Two SlaSweepWorker instances both INSERT their
             // claim; exactly one wins and sends, the loser gets 23505 and skips.
-            // The digest's DedupKey carries the UTC day so it still repeats daily.
+            // The digest's DedupKey carries the UTC day so it still repeats daily, and an
+            // email claim carries a recipient discriminator so one person's failed copy can
+            // never suppress another's.
+            //
+            // PARTIAL, on purpose. Releasing a claim used to DELETE the row, which destroyed
+            // the audit record of the attempt; it is now a status transition, so the released
+            // row is still there and would otherwise hold the key forever and silence the
+            // alert permanently. RELEASED means "definitely not sent", and only that status is
+            // excluded — CLAIMED, SENT and UNCERTAIN all still occupy the key, so an alert
+            // whose delivery is merely unprovable is never sent a second time.
+            //
+            // The filter is written in SQL both providers accept (PostgreSQL in production,
+            // SQLite via EnsureCreated on the portable lane), so the boundary is the same in
+            // both lanes rather than being enforced in only one of them.
             e.HasIndex(x => new { x.BusinessUnitId, x.DedupKey })
                 .IsUnique()
+                .HasFilter($"\"Status\" <> '{SlaEventStatuses.Released}'")
                 .HasDatabaseName("UX_SlaEvents_BU_DedupKey");
             e.HasQueryFilter(x => CurrentTenantId == null || x.BusinessUnitId == CurrentTenantId);
         });

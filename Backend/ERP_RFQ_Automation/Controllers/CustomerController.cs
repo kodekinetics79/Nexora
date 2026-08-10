@@ -23,18 +23,21 @@ namespace ERP_RFQ_Automation.Controllers
         private readonly IWebHostEnvironment _environment;
         private readonly IFileInspectionService _fileInspection;
         private readonly IMasterDataChangeHistoryReader _changeHistory;
+        private readonly IAccountTeamScopeResolver _accountScope;
         private static readonly int[] AllowedPageSizes = { 5, 10, 25, 50, 100, 1000 };
 
         public CustomerController(
             ICustomerRepository repository,
             IWebHostEnvironment environment,
             IFileInspectionService fileInspection,
-            IMasterDataChangeHistoryReader changeHistory)
+            IMasterDataChangeHistoryReader changeHistory,
+            IAccountTeamScopeResolver accountScope)
         {
             _repository = repository;
             _environment = environment;
             _fileInspection = fileInspection;
             _changeHistory = changeHistory;
+            _accountScope = accountScope;
         }
 
         // GET: api/Customer?pageNumber=1&pageSize=10&id=1&name=abc&contactEmail=abc@example.com&isActive=true&docId=CU00000001
@@ -61,7 +64,11 @@ namespace ERP_RFQ_Automation.Controllers
                 if (pageSize < 1 || pageSize > 1000)
                      return BadRequest("Page size must be between 1 and 1000.");
 
-                var (customers, totalCount) = await _repository.GetAllAsync(pageNumber, pageSize, id, name, contactEmail, isActive, docId, targetBUId);
+                var scope = await ResolveAccountScopeAsync(targetBUId);
+                if (scope is null) return Forbid();
+
+                var (customers, totalCount) = await _repository.GetAllAsync(
+                    pageNumber, pageSize, id, name, contactEmail, isActive, docId, targetBUId, scope);
 
                 var response = new DTOs.CustomerDTOs.PaginatedResponseDTO<CustomerResponseDTO>
                 {
@@ -89,7 +96,10 @@ namespace ERP_RFQ_Automation.Controllers
                 if (!TryGetAuthenticatedBusinessUnitId(out var targetBUId))
                     return BadRequest("Business Unit ID is required.");
 
-                var customer = await _repository.GetByIdAsync(id, targetBUId);
+                var scope = await ResolveAccountScopeAsync(targetBUId);
+                if (scope is null) return Forbid();
+
+                var customer = await _repository.GetByIdAsync(id, targetBUId, scope);
                 return Ok(MapToResponse(customer));
             }
             catch (KeyNotFoundException)
@@ -111,7 +121,10 @@ namespace ERP_RFQ_Automation.Controllers
                 if (!long.TryParse(User.FindFirst("businessUnitId")?.Value, out var businessUnitId) || businessUnitId <= 0)
                     return BadRequest("Business Unit ID is required.");
 
-                var customer = await _repository.GetByEmailAsync(email, businessUnitId);
+                var scope = await ResolveAccountScopeAsync(businessUnitId);
+                if (scope is null) return Forbid();
+
+                var customer = await _repository.GetByEmailAsync(email, businessUnitId, scope);
                 if (customer == null) return Ok(null);
                 return Ok(MapToResponse(customer));
             }
@@ -155,7 +168,12 @@ namespace ERP_RFQ_Automation.Controllers
                     ShippingState = request.ShippingState,
                     ShippingCountry = request.ShippingCountry,
                     ShippingPostalCode = request.ShippingPostalCode,
-                    IsActive = request.IsActive ?? true
+                    IsActive = request.IsActive ?? true,
+                    CommercialRegistrationNumber = request.CommercialRegistrationNumber,
+                    TaxRegistrationNumber = request.TaxRegistrationNumber,
+                    Sector = request.Sector,
+                    RegionStateId = request.RegionStateId,
+                    AccountTeamId = request.AccountTeamId
                 };
 
                 await _repository.AddAsync(customer, businessUnitId, AuthenticatedActor());
@@ -196,7 +214,10 @@ namespace ERP_RFQ_Automation.Controllers
                 if (!request.ConcurrencyToken.HasValue || request.ConcurrencyToken == Guid.Empty)
                     return BadRequest("A concurrency token is required.");
 
-                var existing = await _repository.GetByIdAsync(id, targetBUId);
+                var scope = await ResolveAccountScopeAsync(targetBUId);
+                if (scope is null) return Forbid();
+
+                var existing = await _repository.GetByIdAsync(id, targetBUId, scope);
 
                 string? imagePath = existing.ImageUrl;
                 if (request.ImageFile != null)
@@ -217,6 +238,11 @@ namespace ERP_RFQ_Automation.Controllers
                 existing.ShippingState = request.ShippingState;
                 existing.ShippingCountry = request.ShippingCountry;
                 existing.ShippingPostalCode = request.ShippingPostalCode;
+                existing.CommercialRegistrationNumber = request.CommercialRegistrationNumber;
+                existing.TaxRegistrationNumber = request.TaxRegistrationNumber;
+                existing.Sector = request.Sector;
+                existing.RegionStateId = request.RegionStateId;
+                existing.AccountTeamId = request.AccountTeamId;
                 await _repository.UpdateAsync(
                     existing, targetBUId, AuthenticatedActor(), request.ConcurrencyToken.Value);
 
@@ -305,6 +331,25 @@ namespace ERP_RFQ_Automation.Controllers
             }
         }
 
+        /// <summary>
+        /// FR-CST-02 — the caller's account scope, or null when the token carries no usable user or
+        /// role. Null is a REFUSAL, not a widening: a request that cannot be scoped is forbidden
+        /// rather than served tenant-wide.
+        /// </summary>
+        private async Task<AccountTeamScope?> ResolveAccountScopeAsync(long businessUnitId)
+        {
+            var userId = ClaimId(ClaimTypes.NameIdentifier);
+            if (userId <= 0) userId = ClaimId("sub");
+            var roleId = ClaimId("roleId");
+            if (userId <= 0 || roleId <= 0) return null;
+
+            return await _accountScope.ResolveAsync(
+                userId, roleId, businessUnitId, DateTime.UtcNow, HttpContext.RequestAborted);
+        }
+
+        private long ClaimId(string claimType) =>
+            long.TryParse(User.FindFirst(claimType)?.Value, out var id) ? id : 0;
+
         private bool TryGetAuthenticatedBusinessUnitId(out long businessUnitId) =>
             long.TryParse(User.FindFirst("businessUnitId")?.Value, out businessUnitId) && businessUnitId > 0;
 
@@ -370,6 +415,13 @@ namespace ERP_RFQ_Automation.Controllers
                 ModifiedBy = customer.ModifiedBy,
                 ModifiedOn = customer.ModifiedOn,
                 ConcurrencyToken = customer.ConcurrencyToken,
+                CommercialRegistrationNumber = customer.CommercialRegistrationNumber,
+                TaxRegistrationNumber = customer.TaxRegistrationNumber,
+                Sector = customer.Sector,
+                RegionStateId = customer.RegionStateId,
+                RegionName = customer.RegionState?.StateName,
+                AccountTeamId = customer.AccountTeamId,
+                AccountTeamName = customer.AccountTeam?.TeamName,
                 // AA-01: tenant-defined custom field values, as stored jsonb.
                 CustomFields = customer.CustomFieldsJson
             };

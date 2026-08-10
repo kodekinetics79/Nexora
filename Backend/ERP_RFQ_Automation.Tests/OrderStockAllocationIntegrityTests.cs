@@ -86,7 +86,7 @@ public class OrderStockAllocationIntegrityTests
     private static OrderStockReservationService Service(TestDb db, long tenant = Bu)
     {
         var ctx = db.ContextFor(tenant);
-        return new OrderStockReservationService(ctx, new InventoryAvailabilityService(ctx));
+        return InventoryServices.OrderStock(ctx);
     }
 
     [Fact]

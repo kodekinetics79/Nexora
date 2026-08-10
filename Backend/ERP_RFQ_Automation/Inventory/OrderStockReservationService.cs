@@ -204,6 +204,7 @@ public sealed class OrderStockReservationService(
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             var isolation = _db.Database.IsNpgsql() ? IsolationLevel.ReadCommitted : IsolationLevel.Serializable;
             await using var transaction = await _db.Database.BeginTransactionAsync(isolation, ct);
             var result = await AllocateAllAsync();
@@ -414,6 +415,7 @@ public sealed class OrderStockReservationService(
         var strategy = _db.Database.CreateExecutionStrategy();
         await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             var isolation = _db.Database.IsNpgsql() ? IsolationLevel.ReadCommitted : IsolationLevel.Serializable;
             await using var transaction = await _db.Database.BeginTransactionAsync(isolation, ct);
             await ConsumeAllAsync();
@@ -480,6 +482,7 @@ public sealed class OrderStockReservationService(
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             var isolation = _db.Database.IsNpgsql() ? IsolationLevel.ReadCommitted : IsolationLevel.Serializable;
             await using var transaction = await _db.Database.BeginTransactionAsync(isolation, ct);
             var result = await IssueAllAsync();

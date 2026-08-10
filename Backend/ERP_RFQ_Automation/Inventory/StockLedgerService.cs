@@ -25,7 +25,12 @@ public sealed record StockLedgerResult(
     decimal SafetyStock,
     long? MovementId,
     decimal? BookQuantity = null,
-    decimal? CountedQuantity = null)
+    decimal? CountedQuantity = null,
+    /// <summary>FR-INV-04. The configured minimum for this item and warehouse. Null is
+    /// "not configured" and is rendered as such — never as a blank that reads like zero.</summary>
+    decimal? MinimumLevel = null,
+    /// <summary>FR-INV-04. The configured maximum. Null is "not configured".</summary>
+    decimal? MaximumLevel = null)
 {
     /// <summary>
     /// FR-INV-05. Counted minus book: positive means more stock was found than the system knew
@@ -159,6 +164,18 @@ public interface IStockLedgerService
     /// <summary>Sets the protected safety-stock buffer. A policy value, so it posts no movement.</summary>
     Task<StockLedgerResult> SetSafetyStockAsync(long businessUnitId, long productId, long warehouseId,
         decimal safetyStock, string actor, CancellationToken ct = default);
+
+    /// <summary>
+    /// FR-INV-04. Sets the minimum and maximum stock levels for one item in one warehouse. A policy
+    /// value, so it posts no movement.
+    ///
+    /// <para><b>Null means "not configured" and is a settable value, not an omission.</b> A caller
+    /// clearing a level passes null and the level is removed; there is no way to express "leave this
+    /// one alone" through this method, because a partial update that silently kept a stale maximum
+    /// would be indistinguishable on screen from one that cleared it.</para>
+    /// </summary>
+    Task<StockLedgerResult> SetStockLevelsAsync(long businessUnitId, long productId, long warehouseId,
+        decimal? minimumLevel, decimal? maximumLevel, string actor, CancellationToken ct = default);
 
     /// <summary>
     /// Moves physical stock between two warehouses of the same tenant as one atomic pair of
@@ -320,10 +337,50 @@ public sealed class StockLedgerService(ErpRfqAutomationContext db) : IStockLedge
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             await using var tx = await _db.Database.BeginTransactionAsync(Isolation(), ct);
             var inventory = await ResolveInventoryAsync(businessUnitId, productId, warehouseId, actor, ct);
             await LockAsync(InventoryAvailabilityService.InventoryLock(businessUnitId, inventory.Id), ct);
             inventory.SafetyStockQuantity = safetyStock;
+            Touch(inventory, actor);
+            await _db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
+            return Snapshot(inventory, null);
+        });
+    }
+
+    public async Task<StockLedgerResult> SetStockLevelsAsync(long businessUnitId, long productId,
+        long warehouseId, decimal? minimumLevel, decimal? maximumLevel, string actor,
+        CancellationToken ct = default)
+    {
+        // These three refusals are the SERVICE-LEVEL copy of CK_Inventory_StockLevels. The
+        // constraint is the authority on PostgreSQL, but the portable lane runs SQLite with
+        // PRAGMA ignore_check_constraints = ON, so a constraint alone would be unenforced there and
+        // the invariant would only be tested in one of the two lanes.
+        if (minimumLevel is < 0m)
+            throw new ArgumentOutOfRangeException(nameof(minimumLevel),
+                "A minimum stock level cannot be negative. Clear it to leave the item unmonitored.");
+        if (maximumLevel is < 0m)
+            throw new ArgumentOutOfRangeException(nameof(maximumLevel),
+                "A maximum stock level cannot be negative. Clear it to leave the item unmonitored.");
+        // A maximum below the minimum is a policy nothing can satisfy: every quantity in the world
+        // is simultaneously too little and too much, so the row would carry both a shortage alert
+        // and an overstock alert permanently.
+        if (minimumLevel is { } min && maximumLevel is { } max && max < min)
+            throw new StockLedgerException(
+                $"The maximum level ({max}) cannot be below the minimum level ({min}): no quantity would "
+                + "satisfy both, so the item would be reported short and overstocked at the same time.");
+
+        RequireActor(actor);
+        var strategy = _db.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(async () =>
+        {
+            _db.ChangeTracker.Clear();
+            await using var tx = await _db.Database.BeginTransactionAsync(Isolation(), ct);
+            var inventory = await ResolveInventoryAsync(businessUnitId, productId, warehouseId, actor, ct);
+            await LockAsync(InventoryAvailabilityService.InventoryLock(businessUnitId, inventory.Id), ct);
+            inventory.MinimumLevel = minimumLevel;
+            inventory.MaximumLevel = maximumLevel;
             Touch(inventory, actor);
             await _db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
@@ -345,6 +402,7 @@ public sealed class StockLedgerService(ErpRfqAutomationContext db) : IStockLedge
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             await using var tx = await _db.Database.BeginTransactionAsync(Isolation(), ct);
 
             var source = await ResolveInventoryAsync(businessUnitId, productId, fromWarehouseId, actor, ct);
@@ -389,6 +447,11 @@ public sealed class StockLedgerService(ErpRfqAutomationContext db) : IStockLedge
     {
         if (businessUnitId <= 0) throw new ArgumentOutOfRangeException(nameof(businessUnitId));
 
+        // `from` is a query-expression keyword, so the window bounds are bound to locals before
+        // the comprehension rather than referenced by parameter name inside it.
+        var since = from;
+        var until = to;
+
         var rows = await (
             from movement in _db.InventoryMovements.AsNoTracking()
             join inventory in _db.Set<Models.Inventory>().AsNoTracking()
@@ -399,8 +462,8 @@ public sealed class StockLedgerService(ErpRfqAutomationContext db) : IStockLedge
             from warehouse in warehouses.DefaultIfEmpty()
             where movement.BusinessUnitId == businessUnitId && inventory.Buid == businessUnitId
                   && movement.SourceType == CountSourceType
-                  && (from == null || movement.OccurredOn >= from)
-                  && (to == null || movement.OccurredOn <= to)
+                  && (since == null || movement.OccurredOn >= since)
+                  && (until == null || movement.OccurredOn <= until)
             orderby movement.OccurredOn descending, movement.Id descending
             select new
             {
@@ -588,6 +651,7 @@ public sealed class StockLedgerService(ErpRfqAutomationContext db) : IStockLedge
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             await using var tx = await _db.Database.BeginTransactionAsync(Isolation(), ct);
             var result = await ApplyAsync();
             await tx.CommitAsync(ct);
@@ -698,7 +762,8 @@ public sealed class StockLedgerService(ErpRfqAutomationContext db) : IStockLedge
     private static StockLedgerResult Snapshot(Models.Inventory inventory, long? movementId)
         => new(inventory.Id, inventory.ProductId ?? 0, inventory.WarehouseId ?? 0, inventory.QtyOnHand,
             inventory.QuarantineQuantity, inventory.DamagedQuantity, inventory.ExpiredQuantity,
-            inventory.SafetyStockQuantity, movementId);
+            inventory.SafetyStockQuantity, movementId,
+            MinimumLevel: inventory.MinimumLevel, MaximumLevel: inventory.MaximumLevel);
 
     private static void Touch(Models.Inventory inventory, string actor)
     {

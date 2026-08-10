@@ -44,6 +44,32 @@ public sealed class EntitlementClaimPostgreSqlTests : IAsyncLifetime
             .Options;
         await using var context = Context();
         await context.Database.EnsureCreatedAsync();
+
+        // EnsureCreated builds the schema from the model and runs no migrations, so the execution
+        // roles that ConfigureDatabaseExecutionRoles creates do not exist here. The RLS command
+        // interceptor issues SET LOCAL ROLE on every command, and a missing role is 22023 — the
+        // test fails on infrastructure it deliberately opted out of, not on the behaviour it
+        // asserts. Created NOLOGIN and NOSUPERUSER to match the real definitions; this container is
+        // this class's own and is destroyed with it.
+        await context.Database.ExecuteSqlRawAsync("""
+            DO $roles$
+            BEGIN
+                IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexora_tenant_app') THEN
+                    CREATE ROLE nexora_tenant_app NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexora_pipeline_app') THEN
+                    CREATE ROLE nexora_pipeline_app NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT BYPASSRLS;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexora_identity_app') THEN
+                    CREATE ROLE nexora_identity_app NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT BYPASSRLS;
+                END IF;
+            END
+            $roles$;
+            GRANT USAGE ON SCHEMA public, platform TO nexora_tenant_app, nexora_pipeline_app, nexora_identity_app;
+            GRANT ALL ON ALL TABLES IN SCHEMA public, platform TO nexora_tenant_app, nexora_pipeline_app, nexora_identity_app;
+            GRANT ALL ON ALL SEQUENCES IN SCHEMA public, platform TO nexora_tenant_app, nexora_pipeline_app, nexora_identity_app;
+            GRANT nexora_tenant_app, nexora_pipeline_app, nexora_identity_app TO CURRENT_USER;
+            """);
     }
 
     public Task DisposeAsync() => _container.DisposeAsync().AsTask();

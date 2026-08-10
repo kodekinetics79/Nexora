@@ -564,6 +564,7 @@ namespace ERP_RFQ_Automation.Services
             var strategy = _context.Database.CreateExecutionStrategy();
             await strategy.ExecuteAsync(async () =>
             {
+                _context.ChangeTracker.Clear();
                 await using var transaction = await _context.Database.BeginTransactionAsync();
                 await work();
                 await transaction.CommitAsync();

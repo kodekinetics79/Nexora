@@ -462,6 +462,57 @@ public sealed class PlatformTenantEditAndApprovalTests
         Assert.Contains("schedule it again", refusal.Message, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task Finalizing_a_destruction_that_already_committed_is_not_blocked_by_the_approver_rule()
+    {
+        // The rule governs the DECISION to destroy, not the bookkeeping that follows one. A
+        // previous attempt can commit the destructive owner transaction and die before writing the
+        // completion — the module calls that state tolerable precisely because re-running heals it.
+        // Applying separation of duties there would strand the tenant in it: the rows are already
+        // gone, and the only act left is writing down that they are gone.
+        using var db = new TenantLifecycleTestDb();
+        var tenant = await TenantLifecycleHarness.SeedTenantAsync(
+            db, "recover-finalize", TenantStatus.Archived, 9_107);
+        await using var context = db.ContextFor(null);
+        var clock = new TenantLifecycleHarness.MutableTimeProvider();
+        var service = TenantLifecycleHarness.Service(context, timeProvider: clock);
+        var maker = TenantLifecycleHarness.Operator();
+
+        await service.ScheduleDeletionAsync(tenant.Id,
+            new ScheduleTenantDeletionRequest { Reason = GoodReason }, maker, null, CancellationToken.None);
+        TenantLifecycleHarness.ElapseRetentionWindow(clock);
+
+        // A committed destructive transaction whose completion was never written.
+        var attempt = Guid.NewGuid();
+        await using (var crashed = db.ContextFor(null))
+        {
+            var record = await crashed.Set<TenantOffboarding>().SingleAsync();
+            record.PurgeStartedOn = clock.GetUtcNow().UtcDateTime;
+            record.PurgeAttemptId = attempt;
+            record.PurgeExecutedOn = clock.GetUtcNow().UtcDateTime;
+            record.PurgeExecutedRowCount = 128;
+            record.PurgeExecutionDetail = "[]";
+            record.PurgeReason = GoodReason;
+            await crashed.SaveChangesAsync();
+        }
+
+        // The retry arrives on a FRESH context, as it does in production: the process that
+        // committed the deletes is gone, and this is a new request picking the record back up.
+        await using var recovery = db.ContextFor(null);
+
+        // The same operator who scheduled it finishes the bookkeeping, and is not refused.
+        var result = await TenantLifecycleHarness.Service(recovery, timeProvider: clock)
+            .PurgeAsync(tenant.Id,
+                new ConfirmTenantDestructionRequest { Reason = GoodReason, Confirmation = tenant.Name },
+                maker, null, CancellationToken.None);
+
+        Assert.Equal(128, result.RowsDeleted);
+
+        await using var verify = db.ContextFor(null);
+        Assert.Equal(TenantOffboardingStage.Purged,
+            (await verify.Set<TenantOffboarding>().SingleAsync()).Stage);
+    }
+
     // ============================================ 4. the operator is told what was kept, and why
 
     [Fact]

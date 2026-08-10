@@ -741,6 +741,14 @@ public sealed class PostgreSqlProductionDialectTests
             WHERE schema_definition.nspname = 'public'
               AND table_definition.relkind IN ('r', 'p')
               AND table_definition.relrowsecurity
+              -- Deliberately denied to the tenant role, not accidentally ungranted. This table has
+              -- no EF entity and no query filter; it is written and read only by a privileged role,
+              -- and CompleteLedgerKernelControls explicitly REVOKEs it from nexora_tenant_app. A
+              -- table can legitimately carry row-level security AND be unreachable by the tenant
+              -- role — the defect this assertion hunts is the opposite: a table the application
+              -- genuinely reads, whose policy makes it look isolated while the missing grant makes
+              -- it unreadable. Anything added here must carry that same explicit REVOKE.
+              AND table_definition.relname <> 'LedgerActorNonces'
               AND NOT has_table_privilege('nexora_tenant_app', table_definition.oid, 'SELECT');
             """;
         var rlsWithoutGrant = (await rlsWithoutGrantCommand.ExecuteScalarAsync()) as string;

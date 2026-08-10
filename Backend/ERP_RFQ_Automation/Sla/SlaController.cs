@@ -52,6 +52,9 @@ public sealed class SlaController : ControllerBase
 
         /// <summary>FR-SPO-07: working hours without a supplier acknowledgement before escalating.</summary>
         public int? SupplierAckEscalationHours { get; set; }
+
+        /// <summary>FR-SBF-01: working days before a bid closes to chase lines still undecided.</summary>
+        public int? QuoteDecisionReminderDays { get; set; }
     }
 
     // -------- GET /api/sla/policy --------
@@ -106,6 +109,11 @@ public sealed class SlaController : ControllerBase
             policy.SupplierShipDateReminderDays = Clamp(dto.SupplierShipDateReminderDays.Value, 0, 90);
         if (dto.SupplierAckEscalationHours.HasValue)
             policy.SupplierAckEscalationHours = Clamp(dto.SupplierAckEscalationHours.Value, 1, 24 * 30);
+        // FR-SBF-01. Floor of 0 so a tenant can switch the undecided-line chase off deliberately —
+        // a non-positive value means "not configured" in the sweep (register R12), which is the
+        // only honest way to express "we do not want this reminder".
+        if (dto.QuoteDecisionReminderDays.HasValue)
+            policy.QuoteDecisionReminderDays = Clamp(dto.QuoteDecisionReminderDays.Value, 0, 90);
 
         if (policy.CriticalDaysBeforeClose > policy.WarnDaysBeforeClose)
             return BadRequest("The critical alert must be at or after the first warning (critical days <= warn days).");
@@ -133,7 +141,8 @@ public sealed class SlaController : ControllerBase
         approvalEscalationHours = p.ApprovalEscalationHours,
         deadlineBufferHours = p.DeadlineBufferHours,
         supplierShipDateReminderDays = p.SupplierShipDateReminderDays,
-        supplierAckEscalationHours = p.SupplierAckEscalationHours
+        supplierAckEscalationHours = p.SupplierAckEscalationHours,
+        quoteDecisionReminderDays = p.QuoteDecisionReminderDays
     };
 
     private long? ResolveBusinessUnit()

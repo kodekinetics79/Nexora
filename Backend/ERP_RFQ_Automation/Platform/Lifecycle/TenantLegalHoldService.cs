@@ -138,6 +138,7 @@ public sealed class TenantLegalHoldService(
         var strategy = context.Database.CreateExecutionStrategy();
         await strategy.ExecuteAsync(async () =>
         {
+            context.ChangeTracker.Clear();
             await using var transaction = await context.Database.BeginTransactionAsync(ct);
             await work();
             await transaction.CommitAsync(ct);

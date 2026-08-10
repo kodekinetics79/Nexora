@@ -863,6 +863,7 @@ public sealed class MaterialTraceabilityService(
         var strategy = _db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             var isolation = _db.Database.IsNpgsql() ? IsolationLevel.ReadCommitted : IsolationLevel.Serializable;
             await using var transaction = await _db.Database.BeginTransactionAsync(isolation, ct);
             var result = await action();
