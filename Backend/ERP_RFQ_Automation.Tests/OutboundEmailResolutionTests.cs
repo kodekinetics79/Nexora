@@ -401,6 +401,29 @@ public class OutboundEmailResolutionTests
     }
 
     [Fact]
+    public void A_server_that_drops_the_connection_on_a_bad_password_is_not_called_a_tls_problem()
+    {
+        // The exact message GoDaddy returned in live verification. It answers a wrong password by
+        // dropping the connection rather than with a 535, so MailKit raises a PROTOCOL exception —
+        // and reading that as TLS sent an operator with a bad password to go and check their port.
+        var failure = OutboundEmailFailureClassifier.Classify(
+            new MailKit.Net.Smtp.SmtpProtocolException(
+                "The SMTP server has unexpectedly disconnected: Authentication Failed for info@example.com"));
+
+        Assert.Equal(OutboundEmailFailureKind.AuthenticationFailed, failure.Kind);
+    }
+
+    [Fact]
+    public void A_protocol_failure_that_states_nothing_still_falls_back_to_the_tls_reading()
+    {
+        // With no text to read, the remaining cause is speaking plaintext at an implicit-TLS port.
+        Assert.Equal(
+            OutboundEmailFailureKind.TlsFailure,
+            OutboundEmailFailureClassifier.Classify(
+                new MailKit.Net.Smtp.SmtpProtocolException("Unexpected response from server.")).Kind);
+    }
+
+    [Fact]
     public void A_mailkit_tls_handshake_failure_names_the_port_and_tls_disagreement()
         => Assert.Equal(
             OutboundEmailFailureKind.TlsFailure,

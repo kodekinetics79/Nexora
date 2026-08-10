@@ -156,15 +156,34 @@ namespace ERP_RFQ_Automation.Notifications
 
                 // MailKit raises the handshake exception both for a certificate it will not accept
                 // and for a TLS mode that disagrees with the port; the operator's next action —
-                // reconcile the port and the encryption switch — is the same either way. The
-                // protocol exception joins it because its dominant real cause is speaking plaintext
-                // at an implicit-TLS port, where the server's TLS hello parses as a protocol error.
+                // reconcile the port and the encryption switch — is the same either way.
                 case MailKit.Security.SslHandshakeException:
-                case MailKit.Net.Smtp.SmtpProtocolException:
                     return new OutboundEmailFailure(
                         OutboundEmailFailureKind.TlsFailure,
                         Describe(OutboundEmailFailureKind.TlsFailure),
                         null);
+
+                // The protocol exception is NOT reliably a TLS problem, and assuming it was cost an
+                // operator the right answer. Verified against GoDaddy: a wrong password is answered
+                // by dropping the connection, and MailKit surfaces that as
+                //   SmtpProtocolException: "The SMTP server has unexpectedly disconnected:
+                //                           Authentication Failed for <mailbox>"
+                // Mapped straight to TlsFailure, that told someone with a bad password to go and
+                // check their port and encryption setting — a whole afternoon spent on the one
+                // thing that was already correct. The server usually says what happened, so read
+                // the text first and fall back to the TLS reading only when it says nothing: the
+                // remaining cause is speaking plaintext at an implicit-TLS port, where the server's
+                // TLS hello parses as a protocol error and there is no text to read.
+                case MailKit.Net.Smtp.SmtpProtocolException protocol:
+                {
+                    var stated = ClassifyResponse(0, protocol.Message);
+                    return stated.Kind == OutboundEmailFailureKind.Unknown
+                        ? new OutboundEmailFailure(
+                            OutboundEmailFailureKind.TlsFailure,
+                            Describe(OutboundEmailFailureKind.TlsFailure),
+                            null)
+                        : stated;
+                }
 
                 case MailKit.Net.Smtp.SmtpCommandException command:
                     return ClassifyResponse((int)command.StatusCode, command.Message);
