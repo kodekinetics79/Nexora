@@ -244,6 +244,45 @@ describe('platform email settings', () => {
     );
   });
 
+  it('says why Save is unavailable instead of just disabling it', async () => {
+    renderPage();
+    await screen.findByLabelText(/^host$/i);
+
+    // THE reported defect. The audit reason has always been mandatory, but the only evidence
+    // was a button that did not respond — no asterisk, no error, no tooltip. An operator who
+    // filled in the whole form, clicked, and saw nothing happen could only conclude that the
+    // screen does not save. The precondition has to be readable without hovering anything.
+    const save = screen.getByRole('button', { name: /save email settings/i });
+    expect(save).toBeDisabled();
+    expect(screen.getByText(/enter why you are changing this before saving/i)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/why are you changing this/i), {
+      target: { value: 'Rotating the mailbox password' },
+    });
+
+    await waitFor(() => expect(save).toBeEnabled());
+    expect(screen.queryByText(/enter why you are changing this before saving/i)).not.toBeInTheDocument();
+  });
+
+  it('blocks a port outside the range the server accepts, and names it', async () => {
+    renderPage();
+    const port = await screen.findByLabelText(/^port$/i);
+
+    fireEvent.change(screen.getByLabelText(/why are you changing this/i), {
+      target: { value: 'Correcting the port' },
+    });
+
+    // `Number('')` is 0, which the server refuses with a raw [Range(1,65535)] message. Clearing
+    // the box to retype it is an ordinary act and must not produce an opaque "Save failed".
+    fireEvent.change(port, { target: { value: '' } });
+
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /save email settings/i })).toBeDisabled(),
+    );
+    expect(screen.getByText(/must be between 1 and 65535/i)).toBeInTheDocument();
+    expect(saveEmailSettings).not.toHaveBeenCalled();
+  });
+
   it('tests the connection with the stored credential when no password is typed', async () => {
     renderPage();
     await screen.findByLabelText(/^host$/i);

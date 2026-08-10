@@ -4,6 +4,9 @@ using System.Net.Sockets;
 using System.Security.Authentication;
 using ERP_RFQ_Automation.Mailbox;
 using ERP_RFQ_Automation.Security;
+// Deliberately NOT `using MailKit.Security`: it would make the bare `AuthenticationException` in
+// the HTTPS handshake path below ambiguous, and the arm that resolves it today is the SslStream
+// one (System.Security.Authentication). SecureSocketOptions is qualified instead.
 
 namespace ERP_RFQ_Automation.Email;
 
@@ -148,7 +151,11 @@ public sealed class MailConnectionTester(
 
         var probeResult = await probe.ProbeAsync(
             new MailboxProbeRequest(
-                protocol, host, request.Port, request.Username, request.Secret, UseSslFor(request.Transport, request.Tls)),
+                protocol, host, request.Port, request.Username, request.Secret,
+                UseSslFor(request.Transport, request.Tls),
+                // The caller already decided the mode; passing it through stops the probe
+                // re-deriving one from a bool that cannot carry the distinction. See below.
+                SecurityFor(request.Tls)),
             cancellationToken);
 
         return new MailConnectionTestResult(
@@ -182,6 +189,30 @@ public sealed class MailConnectionTester(
     {
         MailTransport.Smtp => tls == MailTlsMode.Implicit,
         _ => tls != MailTlsMode.None
+    };
+
+    /// <summary>
+    /// The requested TLS mode, honoured exactly.
+    ///
+    /// <para><b>Why this is now stated rather than inferred.</b> <see cref="UseSslFor"/> collapses
+    /// three modes onto a bool, and for SMTP it maps BOTH <c>None</c> and <c>StartTls</c> onto
+    /// <c>false</c> — which the probe then re-expanded to STARTTLS. So the platform email screen,
+    /// with the "Encrypted" switch OFF, ran a connection test that negotiated TLS and passed, while
+    /// <c>SmtpEmailSender</c> would afterwards speak plaintext SMTP and put the password on the
+    /// wire in the clear. A green test over a channel that behaves differently is worse than no
+    /// test: it is the console vouching for the one configuration it did not exercise.</para>
+    ///
+    /// <para>No caller changes behaviour. <c>MailboxController</c> already encodes the tenant
+    /// runtime's semantics in the mode it asks for — SMTP with <c>UseSsl=false</c> arrives here as
+    /// <c>StartTls</c>, IMAP as <c>None</c> — so honouring the request reproduces exactly what
+    /// inference produced for every tenant case, and only stops discarding the one distinction the
+    /// platform screen depends on.</para>
+    /// </summary>
+    internal static MailKit.Security.SecureSocketOptions SecurityFor(MailTlsMode tls) => tls switch
+    {
+        MailTlsMode.Implicit => MailKit.Security.SecureSocketOptions.SslOnConnect,
+        MailTlsMode.StartTls => MailKit.Security.SecureSocketOptions.StartTls,
+        _ => MailKit.Security.SecureSocketOptions.None
     };
 
     /// <summary>

@@ -130,6 +130,45 @@ namespace ERP_RFQ_Automation.Notifications
                         blocked.Message,
                         null);
 
+                // ---- MailKit --------------------------------------------------------------
+                // SmtpEmailSender sends through MailKit, and MailKit's exceptions share no base
+                // type with System.Net.Mail's — verified against MailKit 4.x:
+                //   MailKit.Security.AuthenticationException  : Exception
+                //   MailKit.Security.SslHandshakeException    : Exception
+                //   MailKit.Net.Smtp.SmtpCommandException     : MailKit.CommandException : Exception
+                //   MailKit.Net.Smtp.SmtpProtocolException    : MailKit.ProtocolException : Exception
+                //   MailKit.ServiceNotAuthenticatedException  : InvalidOperationException
+                // So before these arms EVERY real SMTP failure fell past the whole switch to
+                // Unknown, and the console answered a wrong password with "we could not classify"
+                // — the one sentence in Describe() that names no next action. The remedy text for
+                // each kind below was written and then unreachable on the only transport we ship.
+                //
+                // These sit ABOVE the System.Net.Mail arms deliberately:
+                // ServiceNotAuthenticatedException is an InvalidOperationException and would
+                // otherwise be read by the LooksUnconfigured arm at the bottom of this switch.
+
+                case MailKit.Security.AuthenticationException:
+                case MailKit.ServiceNotAuthenticatedException:
+                    return new OutboundEmailFailure(
+                        OutboundEmailFailureKind.AuthenticationFailed,
+                        Describe(OutboundEmailFailureKind.AuthenticationFailed),
+                        null);
+
+                // MailKit raises the handshake exception both for a certificate it will not accept
+                // and for a TLS mode that disagrees with the port; the operator's next action —
+                // reconcile the port and the encryption switch — is the same either way. The
+                // protocol exception joins it because its dominant real cause is speaking plaintext
+                // at an implicit-TLS port, where the server's TLS hello parses as a protocol error.
+                case MailKit.Security.SslHandshakeException:
+                case MailKit.Net.Smtp.SmtpProtocolException:
+                    return new OutboundEmailFailure(
+                        OutboundEmailFailureKind.TlsFailure,
+                        Describe(OutboundEmailFailureKind.TlsFailure),
+                        null);
+
+                case MailKit.Net.Smtp.SmtpCommandException command:
+                    return ClassifyResponse((int)command.StatusCode, command.Message);
+
                 case SmtpFailedRecipientsException recipients:
                     return new OutboundEmailFailure(
                         OutboundEmailFailureKind.RecipientRejected,
@@ -176,6 +215,17 @@ namespace ERP_RFQ_Automation.Notifications
                     return new OutboundEmailFailure(
                         OutboundEmailFailureKind.TlsFailure, Describe(OutboundEmailFailureKind.TlsFailure), null);
 
+                // The SSRF refusal gets its own sentence. Routing it to the generic NotConfigured
+                // text would tell an operator to "set the SMTP host" when the host is set and is
+                // precisely the problem — the single most expensive kind of wrong advice.
+                case InvalidOperationException prohibited when LooksProhibitedHost(prohibited.Message):
+                    return new OutboundEmailFailure(
+                        OutboundEmailFailureKind.NotConfigured,
+                        "The SMTP host resolves to a private, loopback or link-local address, and this " +
+                        "server refuses to open mail connections to those. Use a host that resolves to a " +
+                        "public address, or place the internal relay behind one.",
+                        null);
+
                 case InvalidOperationException invalid when LooksUnconfigured(invalid.Message):
                     return new OutboundEmailFailure(
                         OutboundEmailFailureKind.NotConfigured,
@@ -213,14 +263,37 @@ namespace ERP_RFQ_Automation.Notifications
 
         private static OutboundEmailFailure ClassifySmtp(SmtpException smtp)
         {
-            var text = smtp.Message ?? string.Empty;
-            var status = StatusOf(smtp.StatusCode);
+            var classified = ClassifyResponse(
+                smtp.StatusCode == SmtpStatusCode.GeneralFailure ? 0 : (int)smtp.StatusCode,
+                smtp.Message);
+
+            if (classified.Kind == OutboundEmailFailureKind.Unknown &&
+                smtp.InnerException is SocketException socket)
+                return Classify(socket);
+
+            return classified;
+        }
+
+        /// <summary>
+        /// The half of SMTP classification that depends only on the response code and the response
+        /// text. Shared by the System.Net.Mail and MailKit arms so the two libraries cannot drift
+        /// into giving an operator different advice for the same server response — the drift that
+        /// let the MailKit path go unclassified while the tests pinned the System.Net.Mail one.
+        ///
+        /// <para><paramref name="statusCode"/> is the numeric SMTP reply code, or 0 when the
+        /// library did not report one. Both libraries' status enums carry the wire value, so the
+        /// numbers below are the protocol's, not either library's.</para>
+        /// </summary>
+        private static OutboundEmailFailure ClassifyResponse(int statusCode, string? message)
+        {
+            var text = message ?? string.Empty;
+            var status = statusCode == 0 ? null : $"SMTP {statusCode}";
 
             // A recognised protocol code outranks any reading of the prose. 530 in particular
             // arrives with the framework's own sentence "requires a secure connection or the client
             // was not authenticated", which mentions authentication and is NOT an authentication
             // failure — the server is refusing to talk before STARTTLS.
-            if (smtp.StatusCode == SmtpStatusCode.MustIssueStartTlsFirst)
+            if (statusCode == 530)
                 return new OutboundEmailFailure(OutboundEmailFailureKind.TlsFailure, Describe(OutboundEmailFailureKind.TlsFailure), status);
 
             // Then the enhanced status codes (RFC 3463) inside the response text: machine-defined
@@ -240,26 +313,35 @@ namespace ERP_RFQ_Automation.Notifications
                 text.Contains("TLS", StringComparison.Ordinal))
                 return new OutboundEmailFailure(OutboundEmailFailureKind.TlsFailure, Describe(OutboundEmailFailureKind.TlsFailure), status);
 
-            var kind = smtp.StatusCode switch
+            var kind = statusCode switch
             {
-                SmtpStatusCode.ClientNotPermitted => OutboundEmailFailureKind.AuthenticationFailed,
-                SmtpStatusCode.MailboxUnavailable or SmtpStatusCode.MailboxNameNotAllowed
-                    => OutboundEmailFailureKind.RecipientRejected,
-                SmtpStatusCode.MailboxBusy or SmtpStatusCode.InsufficientStorage
-                    or SmtpStatusCode.ExceededStorageAllocation => OutboundEmailFailureKind.RateLimited,
-                SmtpStatusCode.ServiceNotAvailable => OutboundEmailFailureKind.HostUnreachable,
-                SmtpStatusCode.TransactionFailed => OutboundEmailFailureKind.ProviderRejected,
+                454 or 534 or 535 => OutboundEmailFailureKind.AuthenticationFailed, // ClientNotPermitted / weak mechanism / bad credentials
+                550 or 551 or 553 => OutboundEmailFailureKind.RecipientRejected,
+                450 or 451 or 452 or 552 => OutboundEmailFailureKind.RateLimited,
+                421 => OutboundEmailFailureKind.HostUnreachable,
+                554 => OutboundEmailFailureKind.ProviderRejected,
                 _ => OutboundEmailFailureKind.Unknown
             };
-
-            if (kind == OutboundEmailFailureKind.Unknown && smtp.InnerException is SocketException socket)
-                return Classify(socket);
 
             return new OutboundEmailFailure(kind, Describe(kind), status);
         }
 
+        /// <summary>
+        /// Messages that mean "this channel was never set up", as opposed to "the server said no".
+        /// </summary>
         private static bool LooksUnconfigured(string? message) =>
             message is not null && message.Contains("is not configured", StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// The SSRF refusal, which <see cref="Security.MailEndpointPolicy"/> raises as a plain
+        /// <see cref="InvalidOperationException"/> when the host resolves to a private, loopback or
+        /// link-local address. Matched separately from <see cref="LooksUnconfigured"/> because the
+        /// two need opposite advice: one says "set the host", the other "the host you set is the
+        /// problem". Before this it was neither, and reached the operator as Unknown — for a
+        /// refusal this product issued itself and can name exactly.
+        /// </summary>
+        private static bool LooksProhibitedHost(string? message) =>
+            message is not null && message.Contains("prohibited address", StringComparison.OrdinalIgnoreCase);
 
         private static string? StatusOf(SmtpStatusCode code) =>
             code == SmtpStatusCode.GeneralFailure ? null : $"SMTP {(int)code}";

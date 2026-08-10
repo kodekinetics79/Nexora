@@ -82,11 +82,21 @@ namespace ERP_RFQ_Automation.Notifications.Runtime
         /// no send at all, and everything upstream still reports success.</summary>
         public bool TransmitsMail => NormalizedProvider is "smtp" or "sendgrid";
 
-        /// <summary>True when the selected provider has the credentials it needs. Distinguishes
-        /// "configured and broken" from "never configured", which are different operator tasks.</summary>
+        /// <summary>
+        /// True when the selected provider has the credentials it needs. Distinguishes "configured
+        /// and broken" from "never configured", which are different operator tasks.
+        ///
+        /// <para>A host alone was enough to call SMTP credentialed, so the "selected but has no
+        /// credentials, so every send fails" warning could never fire for the one provider most
+        /// likely to be half-filled — a username typed without its password read as fully
+        /// configured, and the first evidence otherwise was the server rejecting the login. An
+        /// absent username is NOT half-filled: an anonymous internal smarthost is legitimate and
+        /// SmtpEmailSender deliberately skips AUTH for it.</para>
+        /// </summary>
         public bool HasProviderCredentials => NormalizedProvider switch
         {
-            "smtp" => !string.IsNullOrWhiteSpace(SmtpHost),
+            "smtp" => !string.IsNullOrWhiteSpace(SmtpHost) &&
+                      (string.IsNullOrWhiteSpace(SmtpUsername) || !string.IsNullOrWhiteSpace(SmtpPassword)),
             "sendgrid" => !string.IsNullOrWhiteSpace(SendGridApiKey),
             _ => true
         };

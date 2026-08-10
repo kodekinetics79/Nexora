@@ -2,6 +2,7 @@ using System.Reflection;
 using System.Text.Json;
 using ERP_RFQ_Automation.Email;
 using ERP_RFQ_Automation.Mailbox;
+using MailKit.Security;
 
 namespace ERP_RFQ_Automation.Tests;
 
@@ -124,6 +125,38 @@ public sealed class EmailConnectionTesterTests
     public void The_TLS_mode_maps_onto_the_runtimes_own_UseSsl_interpretation(
         MailTransport transport, MailTlsMode tls, bool expected)
         => Assert.Equal(expected, MailConnectionTester.UseSslFor(transport, tls));
+
+    [Theory]
+    // The distinction the UseSsl bool above cannot carry, and the reason the probe is now told the
+    // mode instead of re-deriving it. "Encrypted off" on the platform email screen produced
+    // MailTlsMode.None, which collapsed to UseSsl=false, which the probe re-expanded to STARTTLS:
+    // the test negotiated TLS and passed, and SmtpEmailSender then sent the password in the clear.
+    [InlineData(MailTlsMode.None, SecureSocketOptions.None)]
+    [InlineData(MailTlsMode.StartTls, SecureSocketOptions.StartTls)]
+    [InlineData(MailTlsMode.Implicit, SecureSocketOptions.SslOnConnect)]
+    public void The_requested_TLS_mode_is_probed_exactly_as_asked(
+        MailTlsMode tls, SecureSocketOptions expected)
+        => Assert.Equal(expected, MailConnectionTester.SecurityFor(tls));
+
+    [Fact]
+    public void No_tenant_mailbox_case_changes_when_the_mode_is_honoured_rather_than_inferred()
+    {
+        // MailboxController encodes the tenant runtime's own semantics in the mode it asks for, so
+        // honouring the request must reproduce exactly what inference produced — otherwise this
+        // fix would have moved the tenant mailbox probe as a side effect.
+        foreach (var (protocol, useSsl, requested) in new (string, bool, MailTlsMode)[]
+                 {
+                     (MailboxConnectionProbe.Smtp, true, MailTlsMode.Implicit),
+                     (MailboxConnectionProbe.Smtp, false, MailTlsMode.StartTls),
+                     (MailboxConnectionProbe.Imap, true, MailTlsMode.Implicit),
+                     (MailboxConnectionProbe.Imap, false, MailTlsMode.None),
+                 })
+        {
+            Assert.Equal(
+                MailboxConnectionProbe.SecurityFor(protocol, useSsl),
+                MailConnectionTester.SecurityFor(requested));
+        }
+    }
 
     [Fact]
     public void Every_catalogue_preset_round_trips_through_the_translation_unchanged()

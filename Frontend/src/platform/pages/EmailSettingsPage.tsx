@@ -31,7 +31,7 @@ import {
 } from '@mui/icons-material';
 import { useSnackbar } from 'notistack';
 import { platformApi } from '../api/client';
-import { platformErrorMessage } from '../api/apiError';
+import { platformErrorMessage, platformErrorStatus } from '../api/apiError';
 import { platformKeys } from '../api/queryKeys';
 import PageHeader from '../components/PageHeader';
 import RoleGate from '../components/RoleGate';
@@ -229,7 +229,22 @@ export default function EmailSettingsPage() {
       queryClient.setQueryData(platformKeys.emailSettings(), saved);
       queryClient.invalidateQueries({ queryKey: platformKeys.emailStatus() });
     },
-    onError: (error) => enqueueSnackbar(platformErrorMessage(error, 'Save failed'), { variant: 'error' }),
+    onError: (error) => {
+      enqueueSnackbar(platformErrorMessage(error, 'Save failed'), { variant: 'error' });
+
+      // A 409 means the stored Version has moved past the one this form is echoing back, and
+      // `expectedVersion` is read from `settings` — which only changes on SUCCESS. Without this,
+      // the first conflict made every later save conflict too, forever, and the only way out was
+      // a manual page reload the screen never suggested. Dropping the form back to null makes the
+      // load-once effect re-seed it from a fresh read.
+      if (platformErrorStatus(error) === 409) {
+        setForm(null);
+        void queryClient.invalidateQueries({ queryKey: platformKeys.emailSettings() });
+        enqueueSnackbar('Reloaded the current settings. Reapply your change and save again.', {
+          variant: 'info',
+        });
+      }
+    },
   });
 
   const connectionMutation = useMutation({
@@ -330,6 +345,38 @@ export default function EmailSettingsPage() {
   const isSmtp = form.provider === 'smtp';
   const isSendGrid = form.provider === 'sendgrid';
   const tls = effectiveTls(form.smtpPort, form.smtpEnableSsl);
+
+  // Mirrors the server's [Range] attributes on SavePlatformEmailSettingsRequest.
+  const portInRange = Number.isFinite(form.smtpPort) && form.smtpPort >= 1 && form.smtpPort <= 65535;
+  const timeoutInRange =
+    Number.isFinite(form.smtpTimeoutMs) && form.smtpTimeoutMs >= 1000 && form.smtpTimeoutMs <= 300000;
+
+  /**
+   * Why Save is unavailable, in the operator's words, or null when it is available.
+   *
+   * <b>This exists because a disabled button is indistinguishable from a broken one.</b> The
+   * audit reason has always been mandatory, but the only evidence of that was the button
+   * refusing to respond: no asterisk, no error, no tooltip. An operator who filled in the whole
+   * form, clicked, and saw nothing happen had no way to reach any other conclusion than "this
+   * screen does not save". Every precondition is now named on screen before it is enforced.
+   */
+  const saveBlockedBecause =
+    reason.trim().length === 0
+      ? 'Enter why you are changing this before saving — the reason is recorded in the audit log.'
+      : reason.trim().length < 3
+        ? 'The reason must be at least 3 characters.'
+        : isSmtp && !form.smtpHost.trim()
+          ? 'SMTP is selected, so an SMTP host is required.'
+          : !form.appBaseUrl.trim()
+            ? 'An application base URL is required — activation links are built from it.'
+            : // `Number('')` is 0, so clearing the port box to retype it used to reach the server
+              // as port 0 and come back as a raw [Range(1,65535)] refusal. Caught here instead,
+              // where the field can be marked and named.
+              !portInRange
+              ? 'The SMTP port must be between 1 and 65535.'
+              : !timeoutInRange
+                ? 'The timeout must be between 1000 and 300000 ms.'
+                : null;
 
   return (
     <Box>
@@ -498,6 +545,8 @@ export default function EmailSettingsPage() {
                 type="number"
                 label="Port"
                 value={form.smtpPort}
+                error={!portInRange}
+                helperText={portInRange ? undefined : '1–65535'}
                 onChange={(event) => patch({ smtpPort: Number(event.target.value) })}
               />
             </Grid>
@@ -604,13 +653,15 @@ export default function EmailSettingsPage() {
                 type="number"
                 label="Timeout (ms)"
                 value={form.smtpTimeoutMs}
+                error={!timeoutInRange}
+                helperText={timeoutInRange ? undefined : '1000–300000'}
                 onChange={(event) => patch({ smtpTimeoutMs: Number(event.target.value) })}
               />
             </Grid>
           </Grid>
 
           <Stack direction="row" spacing={1.5} sx={{ mt: 2, flexWrap: 'wrap', gap: 1.5 }}>
-            <RoleGate allowed={permissions.isOwner} requirement={REQUIRED_ROLE_COPY.owner}>
+            <RoleGate allowed={permissions.isOwner} requirement={REQUIRED_ROLE_COPY.platformEmail}>
               {(disabled) => (
                 <Button
                   variant="outlined"
@@ -747,12 +798,18 @@ export default function EmailSettingsPage() {
       {/* ---- save ---------------------------------------------------------- */}
       <Paper sx={{ p: 3, borderRadius: 3, mb: 2.5 }}>
         <TextField
+          required
           fullWidth
           size="small"
           label="Why are you changing this?"
           value={reason}
           onChange={(event) => setReason(event.target.value)}
-          helperText="Recorded in the audit log. Changing the product's sending identity is a privileged act."
+          error={reason.length > 0 && reason.trim().length < 3}
+          helperText={
+            reason.length > 0 && reason.trim().length < 3
+              ? 'At least 3 characters. Save stays unavailable until this is filled in.'
+              : 'Required. Recorded in the audit log — changing the product’s sending identity is a privileged act.'
+          }
         />
         {settings?.updatedAtUtc && (
           <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
@@ -762,18 +819,30 @@ export default function EmailSettingsPage() {
           </Typography>
         )}
         <Box sx={{ mt: 2 }}>
-          <RoleGate allowed={permissions.isOwner} requirement={REQUIRED_ROLE_COPY.owner}>
-            {(disabled) => (
-              <Button
-                variant="contained"
-                startIcon={<SaveIcon />}
-                disabled={disabled || saveMutation.isPending || reason.trim().length < 3}
-                onClick={() => saveMutation.mutate()}
-              >
-                {saveMutation.isPending ? 'Saving…' : 'Save email settings'}
-              </Button>
+          <RoleGate allowed={permissions.isOwner} requirement={REQUIRED_ROLE_COPY.platformEmail}>
+            {(roleBlocked) => (
+              <Tooltip title={!roleBlocked && saveBlockedBecause ? saveBlockedBecause : ''}>
+                <Box component="span" sx={{ display: 'inline-flex' }}>
+                  <Button
+                    variant="contained"
+                    startIcon={<SaveIcon />}
+                    disabled={roleBlocked || saveMutation.isPending || saveBlockedBecause !== null}
+                    onClick={() => saveMutation.mutate()}
+                  >
+                    {saveMutation.isPending ? 'Saving…' : 'Save email settings'}
+                  </Button>
+                </Box>
+              </Tooltip>
             )}
           </RoleGate>
+          {/* On screen, not only on hover. A tooltip an operator never thinks to hover over is
+              the same as no explanation at all, and this is the exact spot where the previous
+              build looked broken. */}
+          {permissions.isOwner && saveBlockedBecause && (
+            <Typography variant="caption" color="error" sx={{ display: 'block', mt: 1 }}>
+              {saveBlockedBecause}
+            </Typography>
+          )}
         </Box>
       </Paper>
 
@@ -785,9 +854,28 @@ export default function EmailSettingsPage() {
           Send a test message
         </Typography>
         <Typography variant="caption" color="text.secondary">
-          Sends one real message using what is typed above, saved or not. The only proof that mail
-          reaches an inbox rather than merely leaving the building.
+          Sends one real message using the transport typed above, saved or not. The only proof that
+          mail reaches an inbox rather than merely leaving the building.
         </Typography>
+
+        {/*
+          The outbound guard is the one thing a test send does NOT take from this form. Candidate
+          settings carry the transport only, so the guard applied is whichever one is SAVED — and a
+          saved DraftOnly silently transmits nothing while the dropdown above reads Live. The
+          result banner then says "Nothing was transmitted" and the operator has no way to connect
+          that to a field they already changed. Stating it before the click is the whole fix.
+        */}
+        {status && status.outboundGuardMode !== form.outboundGuardMode && (
+          <Alert severity="warning" sx={{ mt: 2, borderRadius: 2 }}>
+            <AlertTitle sx={{ fontWeight: 800 }}>The saved outbound guard applies to this test</AlertTitle>
+            You have changed the guard to <strong>{form.outboundGuardMode}</strong> above, but that
+            is not saved yet. This test will run under the saved guard,{' '}
+            <strong>{status.outboundGuardMode}</strong>
+            {status.outboundGuardMode === 'DraftOnly'
+              ? ' — which transmits nothing at all, so the test cannot prove delivery. Save first.'
+              : '. Save first if you meant to test the new setting.'}
+          </Alert>
+        )}
 
         <Stack direction="row" spacing={1.5} sx={{ mt: 2, flexWrap: 'wrap', gap: 1.5 }}>
           <TextField
@@ -797,7 +885,7 @@ export default function EmailSettingsPage() {
             onChange={(event) => setTestRecipient(event.target.value)}
             sx={{ minWidth: 320 }}
           />
-          <RoleGate allowed={permissions.isOwner} requirement={REQUIRED_ROLE_COPY.owner}>
+          <RoleGate allowed={permissions.isOwner} requirement={REQUIRED_ROLE_COPY.platformEmail}>
             {(disabled) => (
               <Button
                 variant="outlined"

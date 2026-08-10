@@ -1,7 +1,9 @@
 using System.Security.Claims;
+using System.Security.Cryptography;
 using ERP_RFQ_Automation.Notifications;
 using ERP_RFQ_Automation.Notifications.Runtime;
 using ERP_RFQ_Automation.Platform.Services;
+using ERP_RFQ_Automation.Security;
 using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.Platform.Notifications;
@@ -264,9 +266,47 @@ public sealed class PlatformEmailSettingsService : IPlatformEmailSettingsService
         row.UpdateReason = request.Reason.Trim();
         row.Version = isNew ? 1 : row.Version + 1;
 
+        // ONE batch, therefore one transaction: the configuration change and the record of it
+        // commit together or neither does. PlatformAuditService adds to this same scoped context
+        // and flushes it, so enlisting the audit row here — before any flush of our own — is what
+        // makes that true.
+        //
+        // The previous order was the opposite, and it cost the operator the screen. The settings
+        // were flushed first and the audit ran on a SECOND SaveChanges afterwards; PlatformAuditService
+        // rethrows on failure, so an audit problem returned 500 for a save that HAD already
+        // committed. Version had moved past the one the console was echoing back in
+        // `expectedVersion`, so every retry then came back 409 "changed by someone else" — for a
+        // change the operator had made themselves, with no way out but a page reload. A save
+        // reported as a failure is worse than a save that did not happen.
+        //
+        // Booleans, never values. A secret in audit metadata would defeat the encryption at rest by
+        // copying the credential into a table that is deliberately readable for a very long time.
         try
         {
-            await _db.SaveChangesAsync(ct);
+            await _audit.WriteAsync(actor, ConfigureAction, "PlatformEmailSettings", row.Id.ToString(),
+                new
+                {
+                    reason = row.UpdateReason,
+                    provider = row.Provider,
+                    fromAddress = row.FromAddress,
+                    replyToAddress = row.ReplyToAddress,
+                    appBaseUrl = row.AppBaseUrl,
+                    smtpHost = row.SmtpHost,
+                    smtpPort = row.SmtpPort,
+                    smtpUsername = row.SmtpUsername,
+                    smtpEnableSsl = row.SmtpEnableSsl,
+                    outboundGuardMode = row.OutboundGuardMode,
+                    outboundGuardRedirectTo = row.OutboundGuardRedirectTo,
+                    smtpPasswordSet = !string.IsNullOrEmpty(row.SmtpPassword),
+                    sendGridApiKeySet = !string.IsNullOrEmpty(row.SendGridApiKey),
+                    credentialsChanged = secretsChanged,
+                    version = row.Version
+                },
+                actAsTenantId: null, httpContext, ct);
+
+            // Anything the audit write left unflushed — and nothing, on the ordinary path, because
+            // it flushes the whole tracker. Kept so the method does not depend on that being true.
+            if (_db.ChangeTracker.HasChanges()) await _db.SaveChangesAsync(ct);
         }
         catch (DbUpdateConcurrencyException)
         {
@@ -276,31 +316,10 @@ public sealed class PlatformEmailSettingsService : IPlatformEmailSettingsService
         }
 
         // Take effect now, in this process. Other instances converge on the resolver's revalidation
-        // interval — bounded, stated, and the reason Version is cheap to read.
+        // interval — bounded, stated, and the reason Version is cheap to read. AFTER the commit:
+        // invalidating a cache for a write that then rolled back would publish a configuration
+        // nobody stored.
         _resolver.Invalidate();
-
-        // Booleans, never values. A secret in audit metadata would defeat the encryption at rest by
-        // copying the credential into a table that is deliberately readable for a very long time.
-        await _audit.WriteAsync(actor, ConfigureAction, "PlatformEmailSettings", row.Id.ToString(),
-            new
-            {
-                reason = row.UpdateReason,
-                provider = row.Provider,
-                fromAddress = row.FromAddress,
-                replyToAddress = row.ReplyToAddress,
-                appBaseUrl = row.AppBaseUrl,
-                smtpHost = row.SmtpHost,
-                smtpPort = row.SmtpPort,
-                smtpUsername = row.SmtpUsername,
-                smtpEnableSsl = row.SmtpEnableSsl,
-                outboundGuardMode = row.OutboundGuardMode,
-                outboundGuardRedirectTo = row.OutboundGuardRedirectTo,
-                smtpPasswordSet = !string.IsNullOrEmpty(row.SmtpPassword),
-                sendGridApiKeySet = !string.IsNullOrEmpty(row.SendGridApiKey),
-                credentialsChanged = secretsChanged,
-                version = row.Version
-            },
-            actAsTenantId: null, httpContext, ct);
 
         _log.LogWarning(
             "[Notifications] Platform outbound email configuration changed by {Actor} to provider {Provider} " +
@@ -413,13 +432,70 @@ public sealed class PlatformEmailSettingsService : IPlatformEmailSettingsService
     /// an operator who cannot act on it.</summary>
     private bool IsMapped => _db.Model.FindEntityType(typeof(PlatformEmailSettings)) is not null;
 
-    private Task<PlatformEmailSettings?> LoadAsync(bool track, CancellationToken ct)
+    private async Task<PlatformEmailSettings?> LoadAsync(bool track, CancellationToken ct)
     {
-        if (!IsMapped) return Task.FromResult<PlatformEmailSettings?>(null);
+        if (!IsMapped) return null;
 
+        try
+        {
+            return await QueryAsync(track, ct);
+        }
+        catch (CryptographicException)
+        {
+            // The stored credential cannot be decrypted with the key this process holds. The two
+            // ways to get here are a rotated Security:SecretProtectionKey and the ephemeral
+            // development key, which is regenerated on every restart — so in Development this is
+            // the NORMAL state one restart after an operator saves a password.
+            //
+            // The converter sits at the persistence boundary, so this throws while MATERIALISING
+            // the row: every read is affected, not just the credential. Left alone it takes down
+            // GET /settings and GET /status as well, and the screen an operator would use to
+            // re-enter the password is the screen that will not open — the settings become
+            // permanently unreachable, which reads to the operator as "it stopped saving".
+            //
+            // An undecryptable secret has no value: it cannot be shown, and it cannot be sent to a
+            // mail server. Clearing it loses nothing that was still usable, and it is the only
+            // action that returns the operator to a screen they can act on. Fail-closed is
+            // preserved — the row now honestly has no credential, HasProviderCredentials goes
+            // false, and the status banner says so.
+            _log.LogError(
+                "[Notifications] The stored platform email credentials could not be decrypted with the " +
+                "current {KeyPath} and have been cleared. Re-enter the SMTP password (or SendGrid API " +
+                "key) on the platform email screen. If the key was rotated, this is expected once; if " +
+                "this recurs on every restart, the process is running on an ephemeral development key.",
+                SecretProtection.KeyConfigurationPath);
+
+            await ClearUndecryptableSecretsAsync(ct);
+            return await QueryAsync(track, ct);
+        }
+    }
+
+    private Task<PlatformEmailSettings?> QueryAsync(bool track, CancellationToken ct)
+    {
         var query = _db.Set<PlatformEmailSettings>().AsQueryable();
         if (!track) query = query.AsNoTracking();
         return query.FirstOrDefaultAsync(x => x.Id == PlatformEmailSettings.SingletonId, ct);
+    }
+
+    /// <summary>
+    /// Nulls the two protected columns with SQL rather than through the model, because writing them
+    /// through the model would run the same converter that just failed. Table and schema come from
+    /// the model so this stays correct on both the PostgreSQL runtime and the SQLite test lane.
+    /// </summary>
+    private async Task ClearUndecryptableSecretsAsync(CancellationToken ct)
+    {
+        var entity = _db.Model.FindEntityType(typeof(PlatformEmailSettings))!;
+        var schema = entity.GetSchema();
+        var table = entity.GetTableName();
+        var qualified = string.IsNullOrEmpty(schema) ? $"\"{table}\"" : $"\"{schema}\".\"{table}\"";
+
+        // The change tracker may hold the half-materialised entity from the failed read.
+        _db.ChangeTracker.Clear();
+
+        await _db.Database.ExecuteSqlRawAsync(
+            $"UPDATE {qualified} SET \"SmtpPassword\" = NULL, \"SendGridApiKey\" = NULL " +
+            $"WHERE \"Id\" = {PlatformEmailSettings.SingletonId};",
+            ct);
     }
 
     /// <summary>Candidate over stored, field by field. A null field means "keep what is saved",
@@ -459,6 +535,16 @@ public sealed class PlatformEmailSettingsService : IPlatformEmailSettingsService
     {
         if (provider == "smtp" && string.IsNullOrWhiteSpace(request.SmtpHost))
             return "Provider 'smtp' requires an SMTP host.";
+
+        // The SSRF policy already refuses these hosts at SEND time (SmtpEmailSender) and at
+        // CONNECTION-TEST time (PlatformEmailConnectionController) — but not here, so a save of
+        // "localhost", "mailhog" or any RFC 1918 address returned "Email settings saved", turned
+        // the status banner green, and then dropped every message the product tried to send. The
+        // screen asserted a configuration it knows cannot work. Refusing at the point of entry is
+        // the only place the operator can still act on it.
+        if (provider == "smtp" && !MailEndpointPolicy.IsAllowedEndpoint(request.SmtpHost, request.SmtpPort))
+            return "That SMTP host cannot be used: this server refuses mail connections to loopback, " +
+                   "private and link-local addresses. Use a host that resolves to a public address.";
 
         if (provider == "sendgrid" && string.IsNullOrWhiteSpace(sendGridApiKey))
             return "Provider 'sendgrid' requires an API key.";

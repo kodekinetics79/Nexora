@@ -66,7 +66,20 @@ public sealed record MailboxProbeRequest(
     int Port,
     string Username,
     string Password,
-    bool UseSsl);
+    bool UseSsl,
+    /// <summary>
+    /// The exact TLS mode to probe with, when the caller knows it rather than inferring it from
+    /// <paramref name="UseSsl" />. Null keeps the historic behaviour: <see cref="UseSsl"/> read
+    /// through <c>SecurityFor</c>.
+    ///
+    /// <para>It exists because <c>UseSsl == false</c> does NOT mean one thing. The tenant outbound
+    /// transport reads it as STARTTLS; the platform's own <c>SmtpEmailSender</c> reads it as no
+    /// encryption at all. A probe that picks either interpretation lies to one of them — and it was
+    /// lying to the platform screen, testing over STARTTLS a channel that would then send in the
+    /// clear, and passing. A caller that knows which sender will run states the mode instead of
+    /// re-deriving it.</para>
+    /// </summary>
+    SecureSocketOptions? Security = null);
 
 public interface IMailboxConnectionProbe
 {
@@ -139,7 +152,7 @@ public sealed class MailboxConnectionProbe(ILogger<MailboxConnectionProbe>? logg
         var steps = new List<MailboxProbeStep>();
         var protocol = IsImap(request.Protocol) ? Imap : Smtp;
         var host = string.IsNullOrWhiteSpace(request.Host) ? string.Empty : MailEndpointPolicy.Normalize(request.Host);
-        var security = SecurityFor(protocol, request.UseSsl);
+        var security = request.Security ?? SecurityFor(protocol, request.UseSsl);
         var clear = security == SecureSocketOptions.None;
 
         MailboxProbeResult Abort(string summary) => new(

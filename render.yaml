@@ -122,6 +122,36 @@ services:
         sync: false
       - key: Ollama__ApiKey
         sync: false
+      # ---------------------------------------------------------------------
+      # OUTBOUND EMAIL IS DELIBERATELY NOT CONFIGURED HERE.
+      #
+      # A fresh deploy starts on the `console` provider from appsettings.json,
+      # which writes every message to the log and DISCARDS it. That is a real
+      # state, not a placeholder: until somebody configures a transport, tenant
+      # activation links, quotes and invoice notices reach nobody. The API says
+      # so at boot (OutboundEmailSettingsWarmup logs an error), /health reports
+      # Degraded, and the platform email screen leads with "No mail is leaving
+      # this system".
+      #
+      # It is configured at Platform Admin -> Email, NOT with Notifications__*
+      # variables here, and that is the decision rather than an omission:
+      #
+      #   * The stored row overrides this file at runtime, so a variable set
+      #     here would be silently outranked the moment an operator saves —
+      #     two sources of truth, one of them invisible from the console.
+      #   * The SMTP password would have to be a `sync: false` entry, which
+      #     renders in the Render dashboard as a configured-looking key that is
+      #     in fact empty. A half-set transport fails at SEND time, long after
+      #     the deploy went green.
+      #   * The screen encrypts the credential at rest under
+      #     Security__SecretProtectionKey above, audits who changed it and why,
+      #     and can prove delivery with a real test send. A blueprint variable
+      #     does none of that.
+      #
+      # If a future deployment genuinely needs mail working before an operator
+      # can sign in, seed the platform.PlatformEmailSettings row at provision
+      # time — do not reintroduce these variables.
+      # ---------------------------------------------------------------------
       - key: Cors__AllowedOrigins__0
         value: https://nexora1-ai.vercel.app
       # WEB-TESTING POSTURE. Platform JWT, MFA and live-session validation remain mandatory,
