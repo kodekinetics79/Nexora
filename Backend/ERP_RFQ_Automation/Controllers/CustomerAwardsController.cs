@@ -57,6 +57,30 @@ public sealed class CustomerAwardsController(ICustomerAwardApplicationService se
             return Created($"/api/customer-awards/purchase-orders/{result.Id}", result);
         });
 
+    /// <summary>
+    /// FR-COM-02. Withdraws a captured customer PO. A reason is mandatory — it is stored on the
+    /// record, not merely logged, and the database refuses a cancelled PO without one.
+    /// </summary>
+    [HttpPost("purchase-orders/{purchaseOrderId:long}/cancel")]
+    [RequireModulePermission("Customer Awards", PermissionAction.Edit)]
+    public Task<IActionResult> CancelPurchaseOrder(long purchaseOrderId,
+        [FromBody] CancelCustomerPurchaseOrderCommand command)
+        => ExecuteAsync(async () => Ok(await service.CancelPurchaseOrderAsync(TenantId(), purchaseOrderId,
+            IdempotencyKey(), CorrelationId(), command, Actor(), HttpContext.RequestAborted)));
+
+    /// <summary>
+    /// FR-COM-04. Records a named person accepting one award's price, part or unit differences
+    /// against the quotation, which is the only way past the gate in convert-to-order. A command on
+    /// the purchase order, because that is the document the reviewer is deciding about and because
+    /// a confirmed award stays immutable.
+    /// </summary>
+    [HttpPost("purchase-orders/{purchaseOrderId:long}/accept-differences")]
+    [RequireModulePermission("Customer Awards", PermissionAction.Edit)]
+    public Task<IActionResult> AcceptDifferences(long purchaseOrderId,
+        [FromBody] AcceptCustomerPoDifferencesCommand command)
+        => ExecuteAsync(async () => Ok(await service.AcceptPurchaseOrderDifferencesAsync(TenantId(),
+            purchaseOrderId, IdempotencyKey(), CorrelationId(), command, Actor(), HttpContext.RequestAborted)));
+
     [HttpPost]
     [RequireModulePermission("Customer Awards", PermissionAction.Create)]
     public Task<IActionResult> CreateAward([FromBody] CreateCustomerAwardCommand command)

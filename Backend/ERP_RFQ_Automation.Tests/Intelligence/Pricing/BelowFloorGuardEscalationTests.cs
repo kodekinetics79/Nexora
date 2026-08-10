@@ -37,6 +37,12 @@ public sealed class BelowFloorGuardEscalationTests
     private const string ManagerEmail = "boss@acme.test";
     private const string OtherRequesterEmail = "rep@other.test";
 
+    /// <summary>The awarded supplier's landed unit cost, in the seeded tenant currency.</summary>
+    private const decimal LandedCost = 100m;
+
+    /// <summary>What the rep put on the quote — 20% under the cost of the goods.</summary>
+    private const decimal QuotedPrice = 80m;
+
     [Fact]
     public async Task An_immediate_escalation_stamps_a_real_dedup_key_the_sweep_can_see()
     {
@@ -110,13 +116,14 @@ public sealed class BelowFloorGuardEscalationTests
         var notifications = new CapturingNotifications();
 
         await using var context = database.ContextFor(Tenant);
+        var check = await DetectAsync(database, Tenant, RfqId);
         var guard = new BelowFloorGuard(context, new StubPricingEngine(), notifications,
             NullLogger<BelowFloorGuard>.Instance);
 
         // Same approval id escalated twice on ONE context: the collision must read as "already
         // escalated" (detached, no throw), not poison the DbContext for everything that follows.
         var approval = await guard.CreateApplyPricingHoldAsync(
-            RfqId, Tenant, Check(), RequesterId, RequesterEmail, default);
+            RfqId, Tenant, check, RequesterId, RequesterEmail, default);
         context.Set<SlaEvent>().Remove(await context.Set<SlaEvent>().SingleAsync());
         await context.SaveChangesAsync();
         var replay = await SlaSweepWorker.InsertClaimAsync(context, Tenant, "approval",
@@ -132,7 +139,7 @@ public sealed class BelowFloorGuardEscalationTests
 
         Assert.Null(loser);
         // The context still works: a poisoned Added entity would fail this save.
-        var next = await guard.CreateApplyPricingHoldAsync(RfqId, Tenant, Check(), RequesterId, RequesterEmail, default);
+        var next = await guard.CreateApplyPricingHoldAsync(RfqId, Tenant, check, RequesterId, RequesterEmail, default);
         Assert.NotEqual(Guid.Empty, next.Id);
     }
 
@@ -159,22 +166,59 @@ public sealed class BelowFloorGuardEscalationTests
         TestDb database, CapturingNotifications notifications, long tenant, long rfqId,
         long? requesterId = null, string? requesterEmail = null)
     {
+        var check = await DetectAsync(database, tenant, rfqId);
         await using var context = database.ContextFor(tenant);
         var guard = new BelowFloorGuard(context, new StubPricingEngine(), notifications,
             NullLogger<BelowFloorGuard>.Instance);
-        return await guard.CreateApplyPricingHoldAsync(rfqId, tenant, Check(),
+        return await guard.CreateApplyPricingHoldAsync(rfqId, tenant, check,
             requesterId ?? RequesterId, requesterEmail ?? RequesterEmail, default);
     }
 
-    private static BelowFloorCheck Check() => new()
+    /// <summary>
+    /// The check these tests escalate is produced by the REAL detector against the REAL pricing
+    /// engine, not hand-built.
+    ///
+    /// <para>It used to be <c>new BelowFloorCheck { Lines = [new BelowFloorLine(1, 80m, 100m, 20m)] }</c>,
+    /// which meant every test in this class passed while <c>PricingEngine</c> never assigned a
+    /// floor at all and <c>CheckQuoteSendAsync</c> could not return a single line in production.
+    /// The escalation machinery was exercised over a breach the system was structurally incapable
+    /// of finding. Cut the floor assignment in <c>PricingEngine</c> and the assertion below fires
+    /// before any escalation is ever attempted.</para>
+    ///
+    /// <para>The hold itself is still created through <see cref="StubPricingEngine"/>, because
+    /// re-pricing on the hold path would be a second, different defect.</para>
+    /// </summary>
+    private static async Task<BelowFloorCheck> DetectAsync(TestDb database, long tenant, long rfqId)
     {
-        Lines = [new BelowFloorLine(1, UnitPrice: 80m, FloorUnitPrice: 100m, Delta: 20m)]
-    };
+        await using var context = database.ContextFor(tenant);
+        var guard = new BelowFloorGuard(context, new PricingEngine(context, NullLogger<PricingEngine>.Instance),
+            new CapturingNotifications(), NullLogger<BelowFloorGuard>.Instance);
+
+        var check = await guard.CheckQuoteSendAsync(QuoteId(rfqId), tenant, default);
+
+        Assert.True(check.IsBelowFloor, "the detector found no below-floor line to escalate");
+        var line = Assert.Single(check.Lines);
+        Assert.Equal(QuotedPrice, line.UnitPrice);
+        Assert.Equal(LandedCost, line.FloorUnitPrice);
+        return check;
+    }
+
+    // Ids for the priced graph, derived from the RFQ so the two seeded tenants never collide.
+    private static long CurrencyId(long rfqId) => rfqId + 1;
+    private static long RfqItemId(long rfqId) => rfqId + 2;
+    private static long QuoteId(long rfqId) => rfqId + 3;
+    private static long QuoteItemId(long rfqId) => rfqId + 4;
+    private static long DecisionId(long rfqId) => rfqId + 5;
 
     private static TestDb NewDatabase()
     {
         var database = new TestDb();
         using var seed = database.ContextFor(null);
+        // CustomerQuoteSourcingDecision carries seven composite foreign keys into the sourcing
+        // aggregate. Standing that chain up would make this class about the sourcing fixture
+        // rather than about the escalation, so referential enforcement is stood down for the
+        // seed exactly as Gate8GrossMarginTests does.
+        seed.Database.ExecuteSqlRaw("PRAGMA foreign_keys = OFF");
         SeedTenant(seed, Tenant, RfqId, RequesterId, ManagerId, RequesterEmail, ManagerEmail);
         // Users.Email is globally unique, so the second tenant needs its own addresses.
         SeedTenant(seed, OtherTenant, RfqId + 1, RequesterId + 100, ManagerId + 100,
@@ -203,6 +247,47 @@ public sealed class BelowFloorGuardEscalationTests
         context.Users.AddRange(
             User(managerId, tenant, managerEmail, "Boss", null),
             User(requesterId, tenant, requesterEmail, "Rep", managerId));
+
+        // A real priced graph for the detector to find a breach in: one RFQ line, one Customer
+        // Quote line priced at 80, and the governed award that says the goods cost 100.
+        context.Currencies.Add(new Currency
+        {
+            Id = CurrencyId(rfqId), BusinessUnitId = tenant, Code = "SAR", CurrencyName = "Saudi Riyal",
+            ExchangeRate = 1m, IsBaseCurrency = true, IsActive = true,
+            CreatedBy = "qa", CreatedOn = DateTime.UtcNow
+        });
+        context.Rfqitems.Add(new Rfqitem
+        {
+            Id = RfqItemId(rfqId), Rfqid = rfqId, ProductShortName = "Awarded item", Quantity = 10,
+            CurrencyId = CurrencyId(rfqId), CreatedBy = "qa", CreatedDate = DateTime.UtcNow
+        });
+        var quote = new Quote
+        {
+            Id = QuoteId(rfqId), QuoteNo = $"Q-{rfqId}", BusinessUnitId = tenant, Rfqid = rfqId,
+            CurrencyId = CurrencyId(rfqId), QuoteDate = DateTime.UtcNow,
+            ValidUntil = DateTime.UtcNow.AddDays(30), TotalAmount = QuotedPrice * 10m,
+            CreatedBy = "qa", CreatedDate = DateTime.UtcNow
+        };
+        quote.QuoteItems.Add(new QuoteItem
+        {
+            Id = QuoteItemId(rfqId), RfqitemId = RfqItemId(rfqId), ItemDescription = "Awarded item",
+            Quantity = 10m, UnitPrice = QuotedPrice, TotalAmount = QuotedPrice * 10m,
+            CreatedBy = "qa", CreatedDate = DateTime.UtcNow
+        });
+        context.Quotes.Add(quote);
+        context.Set<ERP_RFQ_Automation.SupplierQuotes.CustomerQuoteSourcingDecision>().Add(
+            new ERP_RFQ_Automation.SupplierQuotes.CustomerQuoteSourcingDecision
+            {
+                Id = DecisionId(rfqId), BusinessUnitId = tenant, QuoteId = QuoteId(rfqId),
+                QuoteItemId = QuoteItemId(rfqId), RfqId = rfqId, RfqItemId = RfqItemId(rfqId),
+                CommercialDemandLineId = 0, SourcingCaseId = 0, SourcingAwardId = 0,
+                SupplierQuotedItemId = 0, SupplierQuoteId = 0, SupplierQuoteRevisionId = 0,
+                SupplierQuoteLineId = 0, NexoraSerial = $"NXR-QA-{rfqId}", Quantity = 10m,
+                SupplierLandedUnitCost = LandedCost, TargetMarginPercent = 20m, CustomerUnitPrice = 125m,
+                CurrencyId = CurrencyId(rfqId), IdempotencyKey = $"qa:floor:{rfqId}",
+                RequestHash = new string('0', 64), Rationale = "qa", CreatedOn = DateTime.UtcNow,
+                CreatedBy = "qa", CorrelationId = $"corr-{rfqId}"
+            });
     }
 
     private static User User(long id, long tenant, string email, string firstName, long? managerId) => new()

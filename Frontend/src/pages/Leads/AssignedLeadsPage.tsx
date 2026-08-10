@@ -204,15 +204,23 @@ const AssignedLeadsPage: React.FC = () => {
       )
     },
     {
+      // FR-RFQ-04. TWO dates, labelled, in one cell: when the bid must be back and when the
+      // buyer wants the goods. The second used to be captured and shown to nobody, which is
+      // how a trader commits a lead time against the wrong date. "Not stated" is printed
+      // when the document gave none, so an absent requirement never reads as no requirement.
       field: 'bidClosingDate',
       headerName: 'Deadline',
-      width: 120,
+      width: 150,
       renderCell: (p) => (
         <Box sx={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', height: '100%' }}>
           <Typography sx={{ fontSize: '0.85rem', fontWeight: 900, color: getUrgencyColor(p.row.bidClosingDate) }}>
             {formatDate(p.row.bidClosingDate)}
           </Typography>
           <Typography variant="caption" sx={{ fontSize: '0.65rem', fontWeight: 800, color: 'text.disabled', textTransform: 'uppercase' }}>Submission</Typography>
+          <Typography sx={{ fontSize: '0.8rem', fontWeight: 700, color: p.row.requiredDeliveryDate ? 'text.primary' : 'text.disabled' }}>
+            {p.row.requiredDeliveryDate ? formatDate(p.row.requiredDeliveryDate) : 'Not stated'}
+          </Typography>
+          <Typography variant="caption" sx={{ fontSize: '0.65rem', fontWeight: 800, color: 'text.disabled', textTransform: 'uppercase' }}>Buyer delivery</Typography>
         </Box>
       )
     },

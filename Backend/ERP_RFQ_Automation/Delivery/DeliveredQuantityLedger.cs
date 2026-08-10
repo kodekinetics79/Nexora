@@ -127,11 +127,21 @@ public interface IDeliveredQuantityLedger
 ///
 /// <para><b>Cancelled and inactive shipments net off, and they do so by construction.</b> A
 /// cancelled shipment is not in <see cref="DeliveryStatuses.Despatched"/>, so it contributes no
-/// despatched quantity, and cancellation is unreachable from a confirmed state
-/// (<see cref="DeliveryStatuses.Cancellable"/>), so it can never have contributed an accepted
-/// quantity to subtract. Soft-deleted rows (<c>IsActive = false</c>) are excluded on both sides.
-/// There is no draft shipment in this product: a shipment row exists because someone raised a
+/// despatched quantity, and cancellation is reachable only from SCHEDULED
+/// (<see cref="DeliveryStatuses.Cancellable"/>) — a state in which nothing has left and no proof of
+/// delivery can exist — so it can never have contributed an accepted quantity to subtract either.
+/// There is no draft shipment in this product today: a shipment row exists because someone raised a
 /// despatch, and the pre-despatch state is SCHEDULED, which accrues nothing.</para>
+///
+/// <para><b>Soft-deleted rows are excluded on BOTH sides, and this sentence used to be false.</b>
+/// The despatched side filtered <c>Shipment.IsActive</c>; the accepted side, which reads
+/// <see cref="DeliveryProofLine"/> and never touches the shipment row, did not. A soft-deleted
+/// shipment therefore lost its despatched quantity and kept its accepted quantity — and accepted is
+/// the number that caps an invoice, so the one figure that survived deletion was the one that
+/// authorises money. <c>ShipmentRepository.DeleteShipmentAsync</c> now refuses to withdraw anything
+/// despatched or proved, so that state is unreachable going forward; the predicate is here anyway,
+/// because a ledger that is only correct while a guard upstream holds is a ledger with a
+/// dependency nobody wrote down.</para>
 ///
 /// <para><b>Derived, never stored.</b> There is no <c>OrderItem.DeliveredQuantity</c> column. A
 /// denormalised total is a fourth writer for a fact three tables already state, and the wiring
@@ -173,8 +183,13 @@ public sealed class DeliveredQuantityLedger(ErpRfqAutomationContext db) : IDeliv
             .ToDictionaryAsync(x => x.OrderItemId, x => x.Quantity, cancellationToken);
 
         // Accepted and refused: what a POD says the customer took, and did not take.
+        //
+        // The EXISTS on the shipment is the other half of the despatched side's IsActive filter.
+        // Without it a withdrawn shipment dropped off the despatched total and stayed on the
+        // accepted one — the asymmetry the class remarks describe.
         var confirmed = await _db.DeliveryProofLines.AsNoTracking()
-            .Where(l => l.BusinessUnitId == businessUnitId && l.OrderId == orderId)
+            .Where(l => l.BusinessUnitId == businessUnitId && l.OrderId == orderId
+                        && _db.Shipments.Any(s => s.Id == l.ShipmentId && s.IsActive))
             .GroupBy(l => l.OrderItemId)
             .Select(g => new
             {
@@ -212,8 +227,12 @@ public sealed class DeliveredQuantityLedger(ErpRfqAutomationContext db) : IDeliv
             return new Dictionary<long, decimal>();
 
         var ids = orderItemIds.Distinct().ToArray();
+        // Withdrawn shipments are excluded here for the same reason the despatched side excludes
+        // them, and this is the call the invoice ceiling makes: without the EXISTS, a soft-deleted
+        // shipment's accepted quantity would still authorise an invoice line.
         return await _db.DeliveryProofLines.AsNoTracking()
-            .Where(l => l.BusinessUnitId == businessUnitId && ids.Contains(l.OrderItemId))
+            .Where(l => l.BusinessUnitId == businessUnitId && ids.Contains(l.OrderItemId)
+                        && _db.Shipments.Any(s => s.Id == l.ShipmentId && s.IsActive))
             .GroupBy(l => l.OrderItemId)
             .Select(g => new { OrderItemId = g.Key, Accepted = g.Sum(x => x.AcceptedQuantity) })
             .ToDictionaryAsync(x => x.OrderItemId, x => x.Accepted, cancellationToken);

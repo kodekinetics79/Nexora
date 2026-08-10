@@ -388,6 +388,59 @@ const LeadsPage: React.FC = () => {
       },
     },
     {
+      // FR-RFQ-04. The buyer's own required delivery date, beside the bid deadline and
+      // never merged with it: one says when the bid is due back, the other says when the
+      // goods are wanted. A missing value is an explicit "Not stated", not a blank cell
+      // that reads like a loading state.
+      field: 'requiredDeliveryDate',
+      headerName: 'Required delivery',
+      width: 150,
+      renderCell: (p) => {
+        const value = p.row.requiredDeliveryDate;
+        return value ? (
+          <Tooltip title="Delivery date requested by the buyer — not the bid deadline">
+            <Typography variant="body2" sx={{ fontSize: '0.8rem' }}>
+              {formatDateSafe(value)}
+            </Typography>
+          </Tooltip>
+        ) : (
+          <Typography variant="body2" sx={{ fontSize: '0.8rem', color: 'text.disabled', fontStyle: 'italic' }}>
+            Not stated
+          </Typography>
+        );
+      },
+    },
+    {
+      // FR-RFQ-04. Hidden by default (see the server catalog); a Saudi tender publishes
+      // its closing date in Hijri and this is the cross-check against the Gregorian one.
+      field: 'bidClosingDateHijri',
+      headerName: 'Deadline (Hijri)',
+      width: 140,
+      renderCell: (p) => (
+        <Typography
+          variant="body2"
+          sx={{ fontSize: '0.8rem', fontFamily: 'monospace', color: p.row.bidClosingDateHijri ? 'text.primary' : 'text.disabled' }}
+        >
+          {p.row.bidClosingDateHijri || 'Not stated'}
+        </Typography>
+      ),
+    },
+    {
+      // FR-RFQ-03. The standing agreement this inquiry is called off against — not the
+      // inquiry's own reference, which is the RFQ # column.
+      field: 'agreementReference',
+      headerName: 'Agreement reference',
+      width: 170,
+      renderCell: (p) => (
+        <Typography
+          variant="body2"
+          sx={{ fontSize: '0.8rem', color: p.row.agreementReference ? 'text.primary' : 'text.disabled' }}
+        >
+          {p.row.agreementReference || 'None'}
+        </Typography>
+      ),
+    },
+    {
       field: 'itemCount',
       headerName: 'Items',
       width: 80,

@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations.Schema;
+using System.Linq.Expressions;
 
 namespace ERP_RFQ_Automation.Procurement;
 
@@ -189,6 +190,48 @@ public static class SupplierPurchaseOrderStatuses
     {
         Sent, Issued, Acknowledged, InProduction, Shipped, PartiallyReceived
     };
+
+    /// <summary>
+    /// Whether an order still represents material that is genuinely coming, expressed as one
+    /// predicate because status alone cannot answer it — decision register R31.
+    ///
+    /// <para>A supplier who REJECTS an order does not move it off SENT. Nothing in the
+    /// acknowledgement path changes <see cref="SupplierPurchaseOrder.Status"/> except an ACCEPTED
+    /// answer, so a rejected order stays inside <see cref="CommittedSupply"/> and keeps netting its
+    /// full quantity off the RFQ line. Meanwhile both SLA sweeps deliberately skip a rejected order,
+    /// because chasing a supplier who has already said no is noise. The combination is the
+    /// dangerous part: three alarms go quiet, the line still reports itself covered,
+    /// <c>CreateSolicitationAsync</c> still refuses to re-source it as "already fully covered" —
+    /// and the material is never bought. Nothing anywhere says so.</para>
+    ///
+    /// <para>Before the acknowledgement feature existed a rejection could not be recorded at all and
+    /// the escalation kept chasing: noisy, but correct. The feature closed a double-buy and opened
+    /// an un-buy, which is worse, because a duplicate order is discovered when it arrives and a
+    /// missing one is discovered when the customer asks where their goods are.</para>
+    ///
+    /// <para>Written as an <see cref="Expression"/> so the EF query and the in-memory workbench
+    /// projection share one definition rather than each restating it — the two disagreeing is
+    /// exactly how the original double-buy got in. Use <c>.Where(IsCommittedSupply)</c> against
+    /// <c>IQueryable</c> and <see cref="IsCommittedSupplyPredicate"/> against a materialised list.
+    /// A COUNTERED order stays committed: the supplier is still supplying, on revised terms.</para>
+    /// </summary>
+    /// <summary>
+    /// <see cref="CommittedSupply"/> flattened for SQL, and it must stay an array. EF translates
+    /// <c>Contains</c> on an array into an <c>IN</c> list; it cannot translate
+    /// <c>IReadOnlySet&lt;string&gt;.Contains</c>, which is an interface method rather than
+    /// <c>Enumerable.Contains</c>, so writing the set directly into the expression below compiles
+    /// cleanly and then throws at query time — on PostgreSQL only. Derived from the set rather than
+    /// restated beside it, so a status added to one is added to both.
+    /// </summary>
+    private static readonly string[] CommittedSupplyForSql = CommittedSupply.ToArray();
+
+    public static readonly Expression<Func<SupplierPurchaseOrder, bool>> IsCommittedSupply =
+        order => CommittedSupplyForSql.Contains(order.Status)
+            && order.AcknowledgementStatus != SupplierAcknowledgementStatuses.Rejected;
+
+    /// <summary>Compiled form of <see cref="IsCommittedSupply"/>, for already-materialised orders.</summary>
+    public static readonly Func<SupplierPurchaseOrder, bool> IsCommittedSupplyPredicate =
+        IsCommittedSupply.Compile();
 
     /// <summary>
     /// States in which the buyer can still withdraw the order unilaterally. IN_PRODUCTION and

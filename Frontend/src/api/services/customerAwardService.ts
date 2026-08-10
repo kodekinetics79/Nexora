@@ -106,6 +106,16 @@ export interface ClientPurchaseOrderMatchLine {
   acceptedQuantity?: number | null;
   matchStatus: string;
   differences: string[];
+  /**
+   * FR-COM-04. The unit each side of the comparison is measured in. Null means that document
+   * stated no unit — a visible gap on the screen, never a blank the reader fills in from the
+   * other column. A quantity shown without its unit is how "10 boxes" and "10 each" came to read
+   * as an exact match.
+   */
+  purchaseOrderUomId?: number | null;
+  purchaseOrderUomCode?: string | null;
+  quotedUomId?: number | null;
+  quotedUomCode?: string | null;
   customerItemCode?: string | null;
   manufacturerName?: string | null;
   manufacturerPartNumber?: string | null;
@@ -164,11 +174,24 @@ export interface ClientPurchaseOrderMatch {
   currencyId: number;
   currencyCode: string;
   poDate: string;
+  /** The PO's expected version for the cancel command. */
   version: number;
   awardId?: number | null;
   awardNumber?: string | null;
   awardStatus?: string | null;
   lines: ClientPurchaseOrderMatchLine[];
+  /** The award's expected version for the accept-differences and convert commands. */
+  awardVersion?: number | null;
+  /**
+   * FR-COM-04. `"{lineId}:{CODE}"` pairs that currently REFUSE order conversion. Not decoration:
+   * this is the same set the server recomputes in convert-to-order, shown here so the reviewer
+   * meets the gate before pressing the button instead of as a 409 afterwards.
+   */
+  blockingDifferences?: string[] | null;
+  /** What a named person has already taken responsibility for, with a reason, in the audit ledger. */
+  acceptedDifferences?: string[] | null;
+  /** Why this purchase order was withdrawn. Null unless the status is CANCELLED. */
+  cancellationReason?: string | null;
 }
 
 export interface QuoteAwardBalanceLine {
@@ -282,6 +305,36 @@ export interface CancelCustomerAwardCommand extends VersionedCustomerAwardComman
   reason: string;
 }
 
+/** FR-COM-02. Withdrawing a captured customer PO. The reason is stored, not merely logged. */
+export interface CancelCustomerPurchaseOrderCommand {
+  expectedVersion: number;
+  reason: string;
+}
+
+/**
+ * FR-COM-04. A named person taking responsibility for one award's price, part or unit differences.
+ *
+ * A command on the PURCHASE ORDER — `expectedVersion` is the purchase order's — because that is the
+ * document the reviewer is deciding about, and because a confirmed award is immutable in the
+ * database apart from becoming ORDERED or CANCELLED.
+ */
+export interface AcceptCustomerPoDifferencesCommand {
+  expectedVersion: number;
+  customerAwardId: number;
+  reason: string;
+}
+
+export interface CustomerPoDifferenceAcceptance {
+  customerPurchaseOrderId: number;
+  customerAwardId: number;
+  version: number;
+  /** `"{awardId}:{lineId}:{CODE}"` — bound to the award and the buyer line it was given for. */
+  acceptedDifferences: string[];
+  reason: string;
+  acceptedBy: string;
+  acceptedOn: string;
+}
+
 export interface CommandIdentity {
   idempotencyKey: string;
   correlationId: string;
@@ -375,6 +428,38 @@ const customerAwardService = {
       { headers: { 'Content-Type': 'multipart/form-data' } },
     )).data;
   },
+
+  /**
+   * FR-COM-02. Withdraws a captured customer PO. Refused by the server while any award on it is
+   * still live, because an award is a commitment to the customer with its own reason and its own
+   * quantity ledger, and withdrawing the paperwork must not silently release it.
+   */
+  cancelPurchaseOrder: async (
+    purchaseOrderId: number,
+    command: CancelCustomerPurchaseOrderCommand,
+    identity: CommandIdentity,
+  ): Promise<CustomerPurchaseOrder> =>
+    (await axiosInstance.post<CustomerPurchaseOrder>(
+      `/api/customer-awards/purchase-orders/${purchaseOrderId}/cancel`,
+      command,
+      commandConfig(identity),
+    )).data,
+
+  /**
+   * FR-COM-04. Records that a named person accepts this award's price, part or unit differences
+   * against the quotation. It is the only way past the gate in convert-to-order, and it costs a
+   * reason that lands in the governance ledger.
+   */
+  acceptPurchaseOrderDifferences: async (
+    purchaseOrderId: number,
+    command: AcceptCustomerPoDifferencesCommand,
+    identity: CommandIdentity,
+  ): Promise<CustomerPoDifferenceAcceptance> =>
+    (await axiosInstance.post<CustomerPoDifferenceAcceptance>(
+      `/api/customer-awards/purchase-orders/${purchaseOrderId}/accept-differences`,
+      command,
+      commandConfig(identity),
+    )).data,
 
   createAward: async (
     command: CreateCustomerAwardCommand,

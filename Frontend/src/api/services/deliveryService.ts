@@ -35,15 +35,33 @@ export const DELIVERY_STATUS_LABEL: Record<string, string> = {
  * purpose — they are outcomes of what the customer accepted, applied by the confirmation, and the
  * server refuses them here too. This list exists so the UI cannot offer a button the server will
  * reject; it is not the authority.
+ *
+ * CANCELLED is reachable from SCHEDULED and from nowhere else. It used to be offered on DISPATCHED
+ * and IN_TRANSIT as a "Mark Cancelled" button, and pressing it changed a status and wrote a note:
+ * the stock was issued and the material lots were consumed when the shipment was raised, and
+ * nothing reversed either, so one click freed the quantity back onto the order line while the
+ * goods were on a lorry. The server refuses it now; this list stops the button being drawn, and
+ * `CANNOT_CANCEL_REASON` below says why in the operator's place.
  */
 export const OPERATOR_TRANSITIONS: Record<string, DeliveryStatus[]> = {
   SCHEDULED: ['DISPATCHED', 'CANCELLED'],
-  DISPATCHED: ['IN_TRANSIT', 'CANCELLED'],
-  IN_TRANSIT: ['CANCELLED'],
+  DISPATCHED: ['IN_TRANSIT'],
+  IN_TRANSIT: [],
   DELIVERED: [],
   DELIVERY_EXCEPTION: [],
   CANCELLED: [],
 };
+
+/**
+ * Shown where the cancel button used to be. A control that silently stops appearing reads as a
+ * bug; the reason it is gone is the thing the operator needs.
+ */
+export const CANNOT_CANCEL_REASON =
+  'This consignment has left the warehouse, so it can no longer be cancelled — the stock was '
+  + 'issued and the material lots were consumed against this delivery note, and there is no '
+  + 'goods-return path to reverse them. If the customer refused the whole load, record the proof '
+  + 'of delivery with zero accepted on every line and a reason of "Rejected": the full quantity '
+  + 'stays outstanding on the order line for a re-supply or credit decision.';
 
 /** FR-DLM-07. Why a receiving bay took fewer units than the note declared. */
 export const DELIVERY_EXCEPTION_REASONS = [

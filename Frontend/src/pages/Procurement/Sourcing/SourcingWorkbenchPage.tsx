@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -96,6 +96,97 @@ const receiptTimestamp = (calendarDate: string, now = new Date()) =>
   calendarDate === localCalendarDate(now)
     ? now.toISOString()
     : new Date(`${calendarDate}T23:59:59.999Z`).toISOString();
+
+/**
+ * What a goods receipt has to be able to say about the material it is booking in.
+ *
+ * Product.batchTracking and Product.serialTracking are two switches in the product dialog, and
+ * before this existed either one made every goods receipt for that product throw inside the receipt
+ * transaction — the refusal named a field no screen offered. The guard was right; the screen was
+ * missing. `serials` is held as free text so an operator can paste a column from a packing list.
+ */
+type LotDraft = {
+  lotNumber: string;
+  serials: string;
+  countryOfOrigin: string;
+  supplierBatchReference: string;
+  expiryDate: string;
+};
+
+const emptyLotDraft = (): LotDraft => ({
+  lotNumber: "",
+  serials: "",
+  countryOfOrigin: "",
+  supplierBatchReference: "",
+  expiryDate: "",
+});
+
+const parseSerials = (raw: string | undefined) =>
+  (raw ?? "")
+    .split(/[\n,;]+/)
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+
+const MaxLotIdentifierLength = 80;
+
+/**
+ * The same rules Traceability/MaterialLotRecorder.cs enforces, checked before the operator presses
+ * Post. The server stays the authority — its message is what gets shown when it refuses — but a
+ * receipt that is certain to be rejected should not cost a round trip and a scary error toast.
+ */
+const lotProblem = (
+  line: any,
+  quantity: number,
+  draft: LotDraft | undefined,
+): string | null => {
+  if (quantity <= 0) return null;
+  if (line.trackingMode === "LOT") {
+    const lotNumber = (draft?.lotNumber ?? "").trim();
+    if (!lotNumber)
+      return "This line is batch-tracked; the supplier's lot or batch number is required.";
+    if (lotNumber.length > MaxLotIdentifierLength)
+      return "A lot number must be 80 characters or fewer.";
+    return null;
+  }
+  if (line.trackingMode === "SERIAL") {
+    const serials = parseSerials(draft?.serials);
+    if (serials.length === 0)
+      return "This line is serial-tracked; one serial number per received unit is required.";
+    if (serials.some((value) => value.length > MaxLotIdentifierLength))
+      return "A serial number must be 80 characters or fewer.";
+    const seen = new Set(serials.map((value) => value.toLowerCase()));
+    if (seen.size !== serials.length)
+      return "The same serial number is declared twice.";
+    if (serials.length !== quantity)
+      return `Receiving ${quantity} unit(s) but ${serials.length} serial number(s) were declared.`;
+    return null;
+  }
+  return null;
+};
+
+/**
+ * Only what the operator actually stated. A blank origin is left off entirely so the server applies
+ * the ordered origin itself — sending the ordered value back as if it had been observed would make
+ * "what arrived came from somewhere else" unsayable, and the customs origin-mismatch check would be
+ * structurally incapable of firing.
+ */
+const lotPayload = (line: any, draft: LotDraft | undefined) => {
+  if (line.trackingMode === "UNTRACKED") return undefined;
+  const lotNumber = (draft?.lotNumber ?? "").trim();
+  const serials = parseSerials(draft?.serials);
+  const countryOfOrigin = (draft?.countryOfOrigin ?? "").trim();
+  const supplierBatchReference = (draft?.supplierBatchReference ?? "").trim();
+  const expiryDate = (draft?.expiryDate ?? "").trim();
+  return {
+    ...(line.trackingMode === "LOT" && lotNumber ? { lotNumber } : {}),
+    ...(line.trackingMode === "SERIAL" && serials.length > 0
+      ? { serialNumbers: serials }
+      : {}),
+    ...(countryOfOrigin ? { countryOfOrigin } : {}),
+    ...(supplierBatchReference ? { supplierBatchReference } : {}),
+    ...(expiryDate ? { expiryDate } : {}),
+  };
+};
 const localDateTimeInput = (value: Date) =>
   new Date(value.getTime() - value.getTimezoneOffset() * 60_000)
     .toISOString()
@@ -2591,6 +2682,29 @@ function ReceiptDialog({
       order.lines.map((line: any) => [line.id, line.openQuantity]),
     ),
   );
+  // The traceability declaration, per line. Country of origin starts EMPTY rather than
+  // pre-filled from the ordered origin: the server falls back to the ordered value on its own,
+  // and pre-filling it would make "what arrived differs from what was ordered" impossible to
+  // state, which is the whole point of capturing it.
+  const [lots, setLots] = useState<Record<number, LotDraft>>(
+    Object.fromEntries(
+      order.lines.map((line: any) => [line.id, emptyLotDraft()]),
+    ),
+  );
+  const setLotField = (lineId: number, field: keyof LotDraft, value: string) =>
+    setLots((current) => ({
+      ...current,
+      [lineId]: { ...(current[lineId] ?? emptyLotDraft()), [field]: value },
+    }));
+  // Mirrors Traceability/MaterialLotRecorder.cs. The server is still the authority and its
+  // refusals are shown verbatim; this only stops the operator from posting a receipt that is
+  // already known to be refused.
+  const lotProblems: Record<number, string | null> = Object.fromEntries(
+    order.lines.map((line: any) => [
+      line.id,
+      lotProblem(line, number(quantities[line.id]), lots[line.id]),
+    ]),
+  );
   const mutation = useMutation({
     mutationFn: () =>
       procurementService.postReceipt(order.id, {
@@ -2601,10 +2715,14 @@ function ReceiptDialog({
         idempotencyKey,
         lines: order.lines
           .filter((line: any) => number(quantities[line.id]) > 0)
-          .map((line: any) => ({
-            purchaseOrderLineId: line.id,
-            quantity: number(quantities[line.id]),
-          })),
+          .map((line: any) => {
+            const lot = lotPayload(line, lots[line.id]);
+            return {
+              purchaseOrderLineId: line.id,
+              quantity: number(quantities[line.id]),
+              ...(lot ? { lot } : {}),
+            };
+          }),
       }),
     onSuccess: () => {
       toast.success("Receipt posted and inventory movement recorded");
@@ -2613,11 +2731,12 @@ function ReceiptDialog({
     onError: (error) =>
       toast.error(errorMessage(error, "Could not post the receipt")),
   });
-  const invalid = order.lines.some(
-    (line: any) =>
-      number(quantities[line.id]) < 0 ||
-      number(quantities[line.id]) > line.openQuantity,
-  );
+  const invalid =
+    order.lines.some(
+      (line: any) =>
+        number(quantities[line.id]) < 0 ||
+        number(quantities[line.id]) > line.openQuantity,
+    ) || Object.values(lotProblems).some((problem) => problem !== null);
   return (
     <Dialog open onClose={onClose} fullWidth maxWidth="md">
       <DialogTitle>Record receipt · {order.purchaseOrderNumber}</DialogTitle>
@@ -2679,25 +2798,145 @@ function ReceiptDialog({
             </TableHead>
             <TableBody>
               {order.lines.map((line: any) => (
-                <TableRow key={line.id}>
-                  <TableCell>{line.description}</TableCell>
-                  <TableCell align="right">{line.openQuantity}</TableCell>
-                  <TableCell align="right">
-                    <TextField
-                      size="small"
-                      type="number"
-                      value={quantities[line.id] ?? 0}
-                      onChange={(e) =>
-                        setQuantities((current) => ({
-                          ...current,
-                          [line.id]: number(e.target.value),
-                        }))
-                      }
-                      error={number(quantities[line.id]) > line.openQuantity}
-                      sx={{ width: 130 }}
-                    />
-                  </TableCell>
-                </TableRow>
+                <Fragment key={line.id}>
+                  <TableRow>
+                    <TableCell>
+                      <Stack spacing={0.5}>
+                        <span>{line.description}</span>
+                        {line.trackingMode === "LOT" && (
+                          <Chip
+                            size="small"
+                            color="info"
+                            variant="outlined"
+                            label="Batch tracked"
+                            sx={{ alignSelf: "flex-start" }}
+                          />
+                        )}
+                        {line.trackingMode === "SERIAL" && (
+                          <Chip
+                            size="small"
+                            color="info"
+                            variant="outlined"
+                            label="Serial tracked"
+                            sx={{ alignSelf: "flex-start" }}
+                          />
+                        )}
+                      </Stack>
+                    </TableCell>
+                    <TableCell align="right">{line.openQuantity}</TableCell>
+                    <TableCell align="right">
+                      <TextField
+                        size="small"
+                        type="number"
+                        value={quantities[line.id] ?? 0}
+                        onChange={(e) =>
+                          setQuantities((current) => ({
+                            ...current,
+                            [line.id]: number(e.target.value),
+                          }))
+                        }
+                        error={number(quantities[line.id]) > line.openQuantity}
+                        sx={{ width: 130 }}
+                      />
+                    </TableCell>
+                  </TableRow>
+                  {line.trackingMode !== "UNTRACKED" &&
+                    number(quantities[line.id]) > 0 && (
+                      <TableRow>
+                        <TableCell colSpan={3} sx={{ pt: 0 }}>
+                          <Stack spacing={1.5} sx={{ pb: 1 }}>
+                            {line.trackingMode === "LOT" ? (
+                              <TextField
+                                size="small"
+                                required
+                                fullWidth
+                                label="Supplier lot / batch number"
+                                value={lots[line.id]?.lotNumber ?? ""}
+                                onChange={(e) =>
+                                  setLotField(line.id, "lotNumber", e.target.value)
+                                }
+                                error={Boolean(lotProblems[line.id])}
+                                helperText="As printed on the supplier's packing list or label."
+                              />
+                            ) : (
+                              <TextField
+                                size="small"
+                                required
+                                fullWidth
+                                multiline
+                                minRows={2}
+                                label={`Serial numbers · one per received unit (${
+                                  parseSerials(lots[line.id]?.serials).length
+                                } of ${number(quantities[line.id])})`}
+                                value={lots[line.id]?.serials ?? ""}
+                                onChange={(e) =>
+                                  setLotField(line.id, "serials", e.target.value)
+                                }
+                                error={Boolean(lotProblems[line.id])}
+                                helperText="One per line, or separated by commas."
+                              />
+                            )}
+                            <Stack
+                              direction={{ xs: "column", sm: "row" }}
+                              spacing={1.5}
+                            >
+                              <TextField
+                                size="small"
+                                fullWidth
+                                label="Country of origin as received"
+                                value={lots[line.id]?.countryOfOrigin ?? ""}
+                                onChange={(e) =>
+                                  setLotField(
+                                    line.id,
+                                    "countryOfOrigin",
+                                    e.target.value,
+                                  )
+                                }
+                                helperText={
+                                  line.countryOfOrigin
+                                    ? `Ordered as ${line.countryOfOrigin}. Leave blank if it matches.`
+                                    : "No origin was stated on the order line."
+                                }
+                              />
+                              <TextField
+                                size="small"
+                                fullWidth
+                                type="date"
+                                label="Expiry date"
+                                value={lots[line.id]?.expiryDate ?? ""}
+                                onChange={(e) =>
+                                  setLotField(line.id, "expiryDate", e.target.value)
+                                }
+                                slotProps={{ inputLabel: { shrink: true } }}
+                                helperText="Drives first-expiring-first-out picking. Leave blank if the material does not expire."
+                              />
+                              <TextField
+                                size="small"
+                                fullWidth
+                                label="Supplier batch reference"
+                                value={
+                                  lots[line.id]?.supplierBatchReference ?? ""
+                                }
+                                onChange={(e) =>
+                                  setLotField(
+                                    line.id,
+                                    "supplierBatchReference",
+                                    e.target.value,
+                                  )
+                                }
+                                helperText="The supplier's own reference, when it differs from the lot number."
+                              />
+                            </Stack>
+                            {lotProblems[line.id] && (
+                              <Alert severity="warning">
+                                {lotProblems[line.id]}
+                              </Alert>
+                            )}
+                          </Stack>
+                        </TableCell>
+                      </TableRow>
+                    )}
+                </Fragment>
               ))}
             </TableBody>
           </Table>

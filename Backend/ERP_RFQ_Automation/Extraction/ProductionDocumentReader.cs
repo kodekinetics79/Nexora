@@ -62,8 +62,13 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
     // header-location rules, so one set of buyer spellings serves both formats.
     private readonly DocxTableParser _docxTableParser;
 
-    // An image (one page by definition) that yields fewer than this many non-whitespace
-    // characters is treated as having produced nothing.
+    /// <summary>
+    /// Absolute floor: text below this many non-whitespace characters is nothing at all,
+    /// whatever produced it and however many pages it came from.
+    ///
+    /// <para>This is the ONLY thing 20 is still fit to decide. It is no longer the test for
+    /// whether an OCR pass succeeded — see <see cref="MinimumOcrCharactersPerPage"/>.</para>
+    /// </summary>
     private const int NearEmptyThreshold = 20;
 
     /// <summary>
@@ -101,6 +106,47 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
 
     /// <summary>Absolute floor for a PDF whose page count could not be established.</summary>
     internal const int MinimumNativeCharacters = 20;
+
+    /// <summary>
+    /// Characters per page an OCR pass must recover before its output is reported as the
+    /// document's content. Below this line the read is reported <c>Failed</c>.
+    ///
+    /// <para>
+    /// The PDF text-layer test was tightened to 100 characters per page for reasons that
+    /// apply with more force to OCR output, and images and multi-page TIFFs were left on a
+    /// flat 20-character whole-document test. Twenty characters is roughly three words. A
+    /// scanned page that produced three words did not produce a document, and reporting it
+    /// <c>Completed</c> asserts the opposite: it tells every downstream surface that Nexora
+    /// read this file successfully, so the extraction that follows is quietly working from
+    /// noise instead of stopping.
+    /// </para>
+    ///
+    /// <para>
+    /// It bites hardest on the case Nexora is actually built for. Only <c>eng.traineddata</c>
+    /// is installed and every engine here is constructed with <c>"eng"</c>, so a scanned
+    /// ARABIC tender — an ordinary document in this market — comes back as transliterated
+    /// noise. Twenty characters of that cleared the old bar. Arabic recognition is Gate 9 and
+    /// needs language data nobody has installed; until then the honest outcome for an
+    /// unreadable scan is "unreadable", and confident nonsense is the worse of the two
+    /// failures because only one of them stops.
+    /// </para>
+    ///
+    /// <para>
+    /// The figure is 100 for the same reason the native threshold is: real tender prose runs
+    /// 1,500–3,000 characters per page, an order of magnitude above the line, while artefacts
+    /// and recognition noise run well below it, so neither population lands near the boundary.
+    /// A DENSITY and not a total, because a whole-document total gets easier to clear the
+    /// longer the scan is — exactly backwards.
+    /// </para>
+    ///
+    /// <para>
+    /// Unlike the native threshold, being below this line IS the verdict — there is no
+    /// further fallback after OCR. That is why <see cref="OcrTextThreshold"/> measures only
+    /// the pages OCR actually READ: frames that threw are already counted as failures and
+    /// must not also be counted as pages that should have carried text.
+    /// </para>
+    /// </summary>
+    internal const int MinimumOcrCharactersPerPage = 100;
 
     // Header/context slice size for the unstructured path (mirrors DefaultExtractionDocumentReader).
     private const int HeaderLineCount = 20;
@@ -859,6 +905,25 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         ? MinimumNativeCharacters
         : Math.Max(MinimumNativeCharacters, pageCount * MinimumNativeCharactersPerPage);
 
+    /// <summary>
+    /// Non-whitespace characters an OCR pass must recover before its output counts as the
+    /// document's content. Per-PAGE by design — see <see cref="MinimumOcrCharactersPerPage"/>.
+    /// </summary>
+    /// <param name="pagesRead">
+    /// Pages OCR actually processed. Zero or negative means the page count could not be
+    /// established, and the absolute <see cref="NearEmptyThreshold"/> floor is all that is left
+    /// to apply.
+    /// </param>
+    internal static int OcrTextThreshold(int pagesRead) => pagesRead <= 0
+        ? NearEmptyThreshold
+        : Math.Max(NearEmptyThreshold, pagesRead * MinimumOcrCharactersPerPage);
+
+    /// <summary>
+    /// True when an OCR pass recovered too little to be reported as the document's content.
+    /// </summary>
+    private static bool IsOcrTooSparse(string? text, int pagesRead)
+        => CountNonWhitespace(text) < OcrTextThreshold(pagesRead);
+
     /// <summary>Rasterizes a scanned PDF with Docnet and OCRs each page with Tesseract.</summary>
     private OcrReadResult TryOcrScannedPdf(byte[] pdfBytes)
     {
@@ -928,8 +993,18 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
                 using var img = Pix.LoadFromMemory(bytes);
                 using var page = engine.Process(img);
                 var text = page.GetText();
+                // An image is one page by definition, so this is the per-page threshold
+                // applied to a single page. It used to be a flat 20 characters: three words
+                // of recognition noise off an unreadable scan reported Completed, which is a
+                // positive assertion that Nexora read the file.
+                var tooSparse = IsOcrTooSparse(text, 1);
+                if (tooSparse)
+                    _log.LogWarning(
+                        "Image OCR recovered {Characters} non-whitespace character(s), below the "
+                        + "{Threshold} required for one page; reporting the scan as unreadable.",
+                        CountNonWhitespace(text), OcrTextThreshold(1));
                 return new DocumentReadResult(text ?? string.Empty, ExtractionProcessingPath.LocalOcr,
-                    IsNearEmpty(text) ? ExtractionOcrStatus.Failed : ExtractionOcrStatus.Completed, 1, false)
+                    tooSparse ? ExtractionOcrStatus.Failed : ExtractionOcrStatus.Completed, 1, false)
                     { PageCount = 1, PageCountAuthoritative = true };
             }
         }
@@ -1018,7 +1093,12 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         int failedPageCount)
     {
         var value = string.Join('\n', frameTexts.Where(text => !string.IsNullOrWhiteSpace(text)));
-        var status = IsNearEmpty(value)
+        // Measured against the frames OCR actually READ, not against every frame in the file:
+        // a frame that threw is already counted in failedPageCount, and charging it a
+        // hundred-character quota as well would report a mostly-successful read as a failure.
+        // A file whose every frame threw has pagesRead 0 and falls back to the absolute floor.
+        var pagesRead = Math.Max(0, pageCount - failedPageCount);
+        var status = IsOcrTooSparse(value, pagesRead)
             ? ExtractionOcrStatus.Failed
             : failedPageCount > 0
                 ? ExtractionOcrStatus.Partial

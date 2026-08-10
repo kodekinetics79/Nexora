@@ -9751,7 +9751,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                             t.HasCheckConstraint("ck_source_document_occurrences_original", "original_occurrence_id IS NULL OR original_occurrence_id <> id");
 
-                            t.HasCheckConstraint("ck_source_document_occurrences_outcome_state", "outcome_state IN ('NONE','EXACT_DUPLICATE_PENDING_SECURITY','EXACT_DUPLICATE_CONFIRMED','BUSINESS_DUPLICATE_CONFIRMED','DUPLICATE_RESCAN_REQUIRED','REVISION','POSSIBLE_MATCH','SECURITY_SCAN_BLOCKED','MALWARE_DETECTED','UNSUPPORTED_FORMAT','SOURCE_OBJECT_UNAVAILABLE','EVIDENCE_INTEGRITY_FAILURE')");
+                            t.HasCheckConstraint("ck_source_document_occurrences_outcome_state", "outcome_state IN ('NONE','EXACT_DUPLICATE_PENDING_SECURITY','EXACT_DUPLICATE_CONFIRMED','BUSINESS_DUPLICATE_CONFIRMED','DUPLICATE_RESCAN_REQUIRED','REVISION','POSSIBLE_MATCH','SECURITY_SCAN_BLOCKED','MALWARE_DETECTED','UNSUPPORTED_FORMAT','SOURCE_OBJECT_UNAVAILABLE','EVIDENCE_INTEGRITY_FAILURE','AI_NOT_AUTHORIZED')");
 
                             t.HasCheckConstraint("ck_source_document_occurrences_resource_costs", "local_compute_cost >= 0 AND external_processing_cost >= 0 AND total_actual_cost >= 0 AND estimated_processing_avoided >= 0 AND length(cost_status) > 0");
 
@@ -13001,7 +13001,7 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<int>("PollingInterval")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("integer")
-                        .HasDefaultValue(300);
+                        .HasDefaultValue(5);
 
                     b.Property<int>("Port")
                         .HasColumnType("integer");

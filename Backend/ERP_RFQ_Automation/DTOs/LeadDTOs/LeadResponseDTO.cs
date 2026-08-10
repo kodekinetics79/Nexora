@@ -42,6 +42,36 @@ namespace ERP_RFQ_Automation.DTOs.Lead
         public string? BuyersName { get; set; }
         public DateTime RecDate { get; set; }
         public DateTime? BidClosingDate { get; set; }
+
+        // ── FR-RFQ-03 / FR-RFQ-04 intake fields ─────────────────────────────
+        // These three were captured by extraction and read by nothing: no DTO, no
+        // projection, no screen. A trader quoting a lead time could not see the date
+        // the buyer asked for, and the Hijri closing date a Saudi tender publishes was
+        // stored where no cross-check could reach it.
+
+        /// <summary>
+        /// FR-RFQ-04. The delivery date the BUYER asked for. Deliberately distinct from
+        /// <see cref="BidClosingDate"/> (when the bid must be submitted) and from any
+        /// supplier lead time (what we can promise). Null means the document did not
+        /// state one — rendered as a visible gap, never as a blank.
+        /// </summary>
+        public DateTime? RequiredDeliveryDate { get; set; }
+
+        /// <summary>
+        /// FR-RFQ-04. <see cref="BidClosingDate"/> rendered in the Umm al-Qura calendar,
+        /// alongside the Gregorian date rather than instead of it. A Hijri deadline read
+        /// as a Gregorian one loses the bid, which is why this is a data-correctness
+        /// cross-check rather than part of the deferred Arabic interface (decision R6).
+        /// </summary>
+        public string? BidClosingDateHijri { get; set; }
+
+        /// <summary>
+        /// FR-RFQ-03. The standing agreement / frame contract this inquiry is called off
+        /// against. Distinct from <see cref="Rfqno"/> (the inquiry's own reference) and
+        /// from <see cref="DurationAgreement"/> (free-text description, not an identifier).
+        /// </summary>
+        public string? AgreementReference { get; set; }
+
         public string? BiddingDecision { get; set; }
         public DateTime? AcknowledgmentDate { get; set; }
         public DateTime? SubDate { get; set; }

@@ -346,7 +346,17 @@ public partial class ErpRfqAutomationContext : DbContext
             entity.Property(e => e.Password)
                 .HasMaxLength(ProtectedSecretConverter.ProtectedColumnMaxLength)
                 .HasConversion(new ProtectedSecretConverter());
-            entity.Property(e => e.PollingInterval).HasDefaultValue(300);
+            // MINUTES. 300 was the seconds-era default and read as a five-hour poll once the
+            // unit changed — failure #10, a default that inverts its own meaning. Paid by
+            // 20260810133238, which moves the column default to 5 and deliberately does NOT
+            // touch a single row: 300 is a legal operator setting meaning five hours both
+            // before and after the unit change, so a blanket `WHERE PollingInterval = 300`
+            // would silently rewrite the settings of any tenant who had chosen it. Every
+            // stored value keeps its number and changes meaning from seconds to minutes,
+            // which can only ever slow a mailbox down — the transition cannot create the
+            // hazard it removes. The default is unreachable through the product anyway; both
+            // the create and the update path always write PollingInterval explicitly.
+            entity.Property(e => e.PollingInterval).HasDefaultValue(5);
             entity.Property(e => e.Protocol).HasMaxLength(50);
             entity.Property(e => e.UseSsl)
                 .HasDefaultValue(true)

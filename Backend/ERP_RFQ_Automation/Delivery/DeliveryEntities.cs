@@ -59,8 +59,20 @@ public static class DeliveryStatuses
     public const string DeliveryException = "DELIVERY_EXCEPTION";
 
     /// <summary>
-    /// Abandoned. Reverses whatever it accrued, which is why it cannot be reached from
-    /// <see cref="Delivered"/> or <see cref="DeliveryException"/> — see <see cref="CanTransition"/>.
+    /// Abandoned <b>before anything left the building</b>. Reachable only from
+    /// <see cref="Scheduled"/> — see <see cref="Cancellable"/> — because that is the only state
+    /// this shipment has accrued nothing from.
+    ///
+    /// <para><b>It reverses nothing, because nothing was accrued.</b> This comment used to say
+    /// cancellation "reverses whatever it accrued", and it was false: the goods issue and the lot
+    /// consumption are written at shipment creation
+    /// (<c>ShipmentController.IssueOrderStockAsync</c>), and the cancellation path is a status
+    /// change and a note — there is no code anywhere in this system that puts issued stock back or
+    /// un-declares a <c>MaterialLotConsumption</c>. Cancelling a despatched shipment therefore
+    /// removed its quantity from the over-shipment ceiling and from the delivered ledger while the
+    /// material was on a lorry, leaving the order line fully re-shippable against stock that had
+    /// already gone. The state is now unreachable from anything in <see cref="Despatched"/> rather
+    /// than the comment being made to describe a reversal nobody wrote.</para>
     /// </summary>
     public const string Cancelled = "CANCELLED";
 
@@ -143,16 +155,65 @@ public static class DeliveryStatuses
     };
 
     /// <summary>
-    /// States a shipment may still be cancelled from. Deliberately excludes both confirmed
-    /// outcomes: once a customer has signed for goods, "cancellation" is a return or a credit
-    /// note, which is a commercial transaction with its own evidence — not a status change that
-    /// silently un-accrues delivered quantity from an order line an invoice may already reference.
-    /// Gate 5 rejected the identical shortcut inbound.
+    /// States a shipment may be cancelled from. <b>Exactly one</b>: the state in which nothing has
+    /// left the warehouse.
+    ///
+    /// <para><b>Why DISPATCHED and IN_TRANSIT were removed.</b> They were here, and the button was
+    /// on the shipment screen. Cancelling from either of them changed a status and wrote a note —
+    /// and nothing else. The goods issue and the lot consumption are made at shipment creation
+    /// (<c>ShipmentController.IssueOrderStockAsync</c>), <c>DeliveryConfirmationService</c> holds no
+    /// stock dependency at all, and CANCELLED sits outside <see cref="Despatched"/>. So one click
+    /// removed the quantity from the over-shipment ceiling in <c>ShipmentController</c> and from
+    /// <c>DeliveredQuantityLedger</c> at once, and the order line became fully re-shippable while
+    /// the material was already out of the building — with the cancelled run's lot consumptions
+    /// still on the traceability record naming a delivery note that claimed to have been abandoned.
+    /// </para>
+    ///
+    /// <para><b>Why refusal rather than reversal.</b> Reversal would be the better answer if it
+    /// could be told truthfully — goods that come back are a real event and deserve a real record.
+    /// They are not this record. There is no goods-return receipt anywhere in this codebase:
+    /// <c>StockLedgerService</c> can post a Receipt or an Adjustment but nothing can say a
+    /// particular despatch came back, into which warehouse, in what condition, on whose word;
+    /// <c>MaterialLotConsumption</c> is append-only evidence of what left on a delivery note and
+    /// has no un-declare path, and a recall trace that can lose rows is not a recall trace. A
+    /// cancellation carries no return date, no receiving bay, no condition and no evidence, so
+    /// putting the stock back would be the system asserting a physical event nobody witnessed —
+    /// wiring-contract failure #7 wearing a ledger entry. Building the return would mean new
+    /// tables, and that is a migration-owner decision, not a defect fix.</para>
+    ///
+    /// <para><b>What an operator does instead.</b> A consignment the customer would not take is not
+    /// a cancellation, it is a delivery outcome: confirm it with zero accepted on every line and a
+    /// reason of <c>REJECTED</c>, and the whole quantity stays outstanding on the order line for a
+    /// re-supply or credit decision (<see cref="DeliveryShortfallDecisions"/>). That is the same
+    /// call Gate 5 made inbound, and it is the record the previous behaviour was pretending to
+    /// keep.</para>
     /// </summary>
     public static readonly IReadOnlySet<string> Cancellable = new HashSet<string>(StringComparer.Ordinal)
     {
-        Scheduled, Dispatched, InTransit
+        Scheduled
     };
+
+    /// <summary>
+    /// States a shipment row may be soft-deleted (withdrawn) from: the complement of
+    /// <see cref="Despatched"/>, and <b>derived from it</b> rather than restated.
+    ///
+    /// <para>Wiring-contract failure #9, observed here: <c>ShipmentRepository.DeleteShipmentAsync</c>
+    /// set <c>IsActive = false</c> with no status check, no proof-of-delivery check, no reason and
+    /// no attribution, on a <c>Shipments:Delete</c> permission. <see cref="Cancellable"/> existed
+    /// precisely to state that a confirmed shipment must not be reversed and the delete path had
+    /// never been told. Deriving this set means the next status added to <see cref="Despatched"/>
+    /// closes the delete door on itself instead of waiting for somebody to remember a second list.
+    /// </para>
+    ///
+    /// <para>What survives is the draft: a <see cref="Scheduled"/> shipment put nothing on a lorry,
+    /// and a <see cref="Cancelled"/> one is by construction a shipment that never left
+    /// <see cref="Scheduled"/>. Removing either destroys no evidence. A despatched row is the only
+    /// account of a goods issue that really happened, and a shipment carrying a proof of delivery is
+    /// a signed document — which is why the repository checks for a POD independently of this set
+    /// rather than trusting a status column to be the only witness.</para>
+    /// </summary>
+    public static readonly IReadOnlySet<string> Withdrawable =
+        new HashSet<string>(All.Where(s => !Despatched.Contains(s)), StringComparer.Ordinal);
 
     public static int Rank(string status)
     {
@@ -162,7 +223,11 @@ public static class DeliveryStatuses
     }
 
     /// <summary>
-    /// Forward-only along the ladder, plus cancellation from anything still in flight.
+    /// Forward-only along the ladder, plus cancellation from <see cref="Scheduled"/> — and from
+    /// nowhere else. See <see cref="Cancellable"/> for why "anything still in flight" was wrong:
+    /// once the goods are out of the warehouse there is nothing in this system that can put them
+    /// back, so a cancellation from there was a status change that freed a quantity the warehouse
+    /// no longer had.
     ///
     /// <para><see cref="Delivered"/> and <see cref="DeliveryException"/> are absent as explicit
     /// targets on purpose: they are outcomes of recording what the customer accepted, and are

@@ -46,6 +46,11 @@ export interface ReviewHeaderPayload {
   rfqno?: string;
   buyersName?: string;
   bidClosingDate?: string;
+  /**
+   * FR-RFQ-04. The delivery date the BUYER asked for — never a supplier lead time.
+   * Correctable here because extraction is the only thing that has ever written it.
+   */
+  requiredDeliveryDate?: string;
   opportunityNo?: string;
   headerRemarks?: string;
   /**

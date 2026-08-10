@@ -243,6 +243,16 @@ internal sealed class CustomerAwardTestFixture : IDisposable
     private const long QuoteItemTwoId = 880_013;
     private static readonly DateTime Now = new(2026, 7, 23, 12, 0, 0, DateTimeKind.Utc);
 
+    /// <summary>
+    /// FR-COM-04. The tenant's units, so a customer PO line can state the unit the BUYER ordered in
+    /// and the comparison against our quotation is a comparison of measured quantities rather than
+    /// of bare numbers. <see cref="EachUomId"/> is what the quoted product is sold in;
+    /// <see cref="BoxUomId"/> is the buyer ordering in something else entirely.
+    /// </summary>
+    public const int EachUomId = 880_020;
+
+    public const int BoxUomId = 880_021;
+
     public CustomerAwardTestFixture(bool twoQuoteLines = false, TestDb? database = null, long businessUnitId = 880_001)
     {
         Database = database ?? new TestDb();
@@ -261,14 +271,21 @@ internal sealed class CustomerAwardTestFixture : IDisposable
     public ErpRfqAutomationContext Context { get; }
     public CustomerAwardApplicationService Service { get; }
 
-    public CreateCustomerPurchaseOrderCommand PurchaseOrderCommand(string externalNumber, decimal quantity) => new(
+    /// <param name="uomId">
+    /// The unit the BUYER ordered in. Null is the honest default — a purchase order that states no
+    /// unit — and is never our own quoted unit, which is the substitution the discrepancy engine
+    /// exists to catch.
+    /// </param>
+    public CreateCustomerPurchaseOrderCommand PurchaseOrderCommand(string externalNumber, decimal quantity,
+        int? uomId = null) => new(
         QuoteId, Context.Leads.IgnoreQueryFilters().Single(x => x.Id == LeadId).CommercialCaseId,
         CustomerId, CurrencyId, externalNumber, Now.Date, Now.Date, 0,
-        [new("1", ProductOneId, "Awarded widget", quantity, null, 100m, quantity * 100m)]);
+        [new("1", ProductOneId, "Awarded widget", quantity, uomId, 100m, quantity * 100m)]);
 
-    public Task<CustomerPurchaseOrderView> CreatePurchaseOrderAsync(string key, decimal quantity) =>
+    public Task<CustomerPurchaseOrderView> CreatePurchaseOrderAsync(string key, decimal quantity,
+        int? uomId = null) =>
         Service.CreatePurchaseOrderAsync(BusinessUnitId, key, $"corr-{key}",
-            PurchaseOrderCommand($"PO-{key}" , quantity), "tests");
+            PurchaseOrderCommand($"PO-{key}" , quantity, uomId), "tests");
 
     public Task<CustomerAwardView> CreateAwardAsync(CustomerPurchaseOrderView purchaseOrder, string key, decimal quantity)
         => Service.CreateAwardAsync(BusinessUnitId, key, $"corr-{key}", new(
@@ -288,6 +305,9 @@ internal sealed class CustomerAwardTestFixture : IDisposable
             Id = CurrencyId, BusinessUnitId = businessUnitId, Code = "USD", CurrencyName = "US Dollar",
             ExchangeRate = 1m, IsActive = true, CreatedBy = "tests", CreatedOn = Now
         });
+        context.SetUoms.AddRange(
+            NewUom(EachUomId, businessUnitId, "EA", "Each"),
+            NewUom(BoxUomId, businessUnitId, "BOX", "Box"));
         context.Products.AddRange(
             NewProduct(ProductOneId, businessUnitId, "Award Widget 1"),
             NewProduct(ProductTwoId, businessUnitId, "Award Widget 2"));
@@ -315,10 +335,18 @@ internal sealed class CustomerAwardTestFixture : IDisposable
         context.SaveChanges();
     }
 
+    private static SetUom NewUom(int uomId, long businessUnitId, string code, string name) => new()
+    {
+        UomId = uomId, BusinessUnitId = businessUnitId, UomCode = code, UomName = name,
+        IsActive = true, CreatedBy = "tests", CreatedDate = Now
+    };
+
+    // The unit we quote this product in. A QuoteItem carries no unit of its own, so the quoted unit
+    // is the RFQ line's or — as here — the catalogue product's.
     private static Product NewProduct(long id, long businessUnitId, string name) => new()
     {
         Id = id, Buid = businessUnitId, ProductName = name, PartNo = $"PART-{id}", QtyOnHand = 100m,
-        ReorderPoint = 1m, IsActive = true, CreatedBy = "tests", CreatedOn = Now
+        ReorderPoint = 1m, UomId = EachUomId, IsActive = true, CreatedBy = "tests", CreatedOn = Now
     };
 
     private static SetupMaster Setup(long id, long businessUnitId, string type, string code) => new()

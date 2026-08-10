@@ -144,6 +144,34 @@ public sealed class SlaQuoteExpiryTests
         Assert.Equal(new long[] { 1 }, await CandidateIdsAsync(db, policy));
     }
 
+    [Fact]
+    public async Task A_zero_no_response_window_disables_trigger_two_instead_of_expiring_everything()
+    {
+        // The defect this pins: 20260809163319 added QuoteNoResponseExpiryDays as
+        // NOT NULL DEFAULT 0 while the code default is 90. Trigger 2 reads
+        // SentOn.AddDays(noResponseDays) < now, so zero collapses it to SentOn < now — true of
+        // every quote ever sent. Any tenant who had saved SLA settings would have had their whole
+        // open quote book stamped EXPIRED on the first tick after deploy, with no reopen path.
+        //
+        // No test could see it: every existing assertion here builds SlaPolicy in C#, where the
+        // default is 90, so the backfilled value never appeared. The migration corrects the stored
+        // rows; this asserts the structural half — a window the domain does not admit (the
+        // controller clamps writes to 1-365) disables the trigger rather than firing it on
+        // everything, which is the same fail-safe the two supplier sweeps already apply.
+        using var db = new TestDb();
+        await SeedAsync(db,
+            Quote(1, validUntil: Now.AddYears(1), sentOn: Now.AddDays(-200)),
+            Quote(2, validUntil: null, sentOn: Now.AddDays(-3650)),
+            Quote(3, validUntil: Now.AddDays(-1), sentOn: Now.AddDays(-10)));
+
+        var policy = SlaPolicy.Default(Bu);
+        policy.QuoteNoResponseExpiryDays = 0;
+
+        // Only quote 3 — and it expires on trigger 1, whose validity date genuinely passed.
+        // Quotes 1 and 2 are untouched despite being ten years silent.
+        Assert.Equal(new long[] { 3 }, await CandidateIdsAsync(db, policy));
+    }
+
     // ------------------------------- R7: a reasoned extension holds the 90-day rule off
 
     [Fact]

@@ -20,21 +20,6 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
     private readonly ProcurementApprovalOptions _approvalOptions;
 
     /// <summary>
-    /// <see cref="SupplierPurchaseOrderStatuses.CommittedSupply"/> flattened for SQL. EF translates
-    /// <c>Contains</c> on an array into an <c>IN</c> list; it cannot translate
-    /// <c>IReadOnlySet&lt;string&gt;.Contains</c>, which is an interface method and not
-    /// <c>Enumerable.Contains</c>.
-    ///
-    /// <para>Derived from the set rather than restated beside it. A status added to or removed from
-    /// the set changes this array with it, which is the entire point — the in-memory screen
-    /// projection and the SQL command path must never be able to drift apart. That drift is what
-    /// let the workbench show an RFQ line as covered by a cancelled purchase order while the
-    /// command path said the same line still needed sourcing.</para>
-    /// </summary>
-    private static readonly string[] CommittedSupplyStatuses =
-        SupplierPurchaseOrderStatuses.CommittedSupply.ToArray();
-
-    /// <summary>
     /// FR-MTR-01. Turns each received line into material lots inside this service's own receipt
     /// transaction. Optional in the same sense as the approval policy above — absent means the
     /// default recorder, never "no lots". A receipt that committed stock without committing the lot
@@ -658,6 +643,18 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var outbox = await _db.ProcurementOutboxMessages.AsNoTracking()
             .Where(x => x.BusinessUnitId == businessUnitId && solicitations.Select(s => s.Id).Contains(x.SupplierSolicitationId))
             .ToDictionaryAsync(x => x.SupplierSolicitationId, ct);
+        // Which of these lines will the lot recorder demand a declaration for? The receipt screen
+        // cannot ask for a batch number or a serial list unless it is told, and a product whose row
+        // cannot be read is UNTRACKED here for exactly the same reason it would be at receipt time —
+        // the recorder refuses an unknown product outright, so this never invents a permissive mode.
+        var purchaseOrderProductIds = purchaseOrders.SelectMany(x => x.Lines).Select(x => x.ProductId)
+            .Distinct().ToArray();
+        var trackingByProduct = (await _db.Products.AsNoTracking()
+                .Where(x => (x.Buid == null || x.Buid == businessUnitId) && purchaseOrderProductIds.Contains(x.Id))
+                .Select(x => new { x.Id, x.SerialTracking, x.BatchTracking })
+                .ToListAsync(ct))
+            .ToDictionary(x => x.Id,
+                x => Traceability.MaterialLotTrackingModes.FromProduct(x.SerialTracking, x.BatchTracking));
         var poByAward = purchaseOrders.SelectMany(x => x.Lines.Select(line => new { line.SourcingAwardId, PurchaseOrderId = x.Id }))
             .ToDictionary(x => x.SourcingAwardId, x => x.PurchaseOrderId);
         var awardQuoteIds = awards.Where(x => x.SupplierQuotedItemId.HasValue).Select(x => x.SupplierQuotedItemId!.Value).ToHashSet();
@@ -671,7 +668,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         // the cancelled order because the screen said there was nothing to do. Same set as
         // GetNetSourcingRequirementAsync, deliberately.
         var incomingByItem = purchaseOrders
-            .Where(x => SupplierPurchaseOrderStatuses.CommittedSupply.Contains(x.Status))
+            .Where(SupplierPurchaseOrderStatuses.IsCommittedSupplyPredicate)
             .SelectMany(x => x.Lines)
             .GroupBy(x => x.RfqItemId)
             .ToDictionary(x => x.Key, x => x.Sum(line => Math.Max(0m, line.OrderedQuantity - line.ReceivedQuantity)));
@@ -757,6 +754,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 items.Single(x => x.Id == line.RfqItemId).ProductShortDescription ?? $"RFQ line {line.RfqItemId}",
                 line.OrderedQuantity, line.ReceivedQuantity, Math.Max(0m, line.OrderedQuantity - line.ReceivedQuantity),
                 line.UnitCost, line.LandedUnitCost, line.WarehouseId,
+                trackingByProduct.GetValueOrDefault(line.ProductId, Traceability.MaterialLotTrackingModes.Untracked),
                 line.HsCode, line.CountryOfOrigin)).ToArray(),
             po.ApprovedBy, po.ApprovedOn,
             po.AcknowledgementStatus, po.AcknowledgedBy, po.AcknowledgedOn,
@@ -2723,7 +2721,8 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         // GetWorkbenchAsync reads the same set, so the screen a buyer decides from and the command
         // path that enforces the decision cannot disagree.
         var activePurchaseOrderIds = _db.SupplierPurchaseOrders.AsNoTracking()
-            .Where(x => x.BusinessUnitId == businessUnitId && CommittedSupplyStatuses.Contains(x.Status))
+            .Where(x => x.BusinessUnitId == businessUnitId)
+            .Where(SupplierPurchaseOrderStatuses.IsCommittedSupply)
             .Select(x => x.Id);
         var incomingByItem = await _db.SupplierPurchaseOrderLines.AsNoTracking()
             .Where(x => x.BusinessUnitId == businessUnitId && siblingIds.Contains(x.RfqItemId)

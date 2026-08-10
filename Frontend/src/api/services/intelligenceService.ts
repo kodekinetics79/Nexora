@@ -95,7 +95,17 @@ export interface PricePreviewLine {
   quantity: number | null;
   currency: string | null;
   recommendedUnitPrice: number | null;
+  /**
+   * The awarded supplier's landed unit cost, denominated in `floorCurrency` — NOT necessarily in
+   * this line's `currency`. null means NO FLOOR IS ESTABLISHED (no supplier award recorded), which
+   * must be shown as a gap and must never be rendered or defaulted to 0.
+   */
   floorUnitPrice: number | null;
+  /** Currency of `floorUnitPrice`. Never compare a price to the floor without checking this. */
+  floorCurrency: string | null;
+  /** Plain-language provenance of the floor; null exactly when there is no floor. */
+  floorBasis: string | null;
+  /** Margin of the recommendation over the floor as a PERCENT — 20 means 20%, not 0.2. */
   marginPct: number | null;
   /** 0..1 — never shown raw in the UI. */
   confidence: number | null;

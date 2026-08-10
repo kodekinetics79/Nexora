@@ -1,6 +1,7 @@
 using ERP_RFQ_Automation.CommercialFinance;
 using ERP_RFQ_Automation.Delivery;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Repositories;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -56,12 +57,171 @@ public sealed class Gate7DeliveryConfirmationTests
         using var db = NewDatabase();
         await ConfirmAsync(db, accepted: 4m);
 
-        // Cancellation reverses accruals. Once a customer has signed, "cancellation" is a return or
-        // a credit note — a commercial transaction with its own evidence — not a status change that
-        // silently un-accrues a quantity an invoice may already reference.
+        // Once a customer has signed, "cancellation" is a return or a credit note — a commercial
+        // transaction with its own evidence — not a status change that silently un-accrues a
+        // quantity an invoice may already reference.
         var failure = await Assert.ThrowsAsync<DeliveryConflictException>(
             () => Confirmations(db).TransitionAsync(Tenant, ShipmentId, DeliveryStatuses.Cancelled, "clerk"));
-        Assert.Contains("cannot move", failure.Message);
+        Assert.Contains("cannot be cancelled", failure.Message);
+        Assert.Contains("left the warehouse", failure.Message);
+    }
+
+    // ============ D1: cancelling a despatched shipment must not free a quantity nothing gave back
+
+    [Fact]
+    public async Task A_despatched_shipment_cannot_be_cancelled_because_nothing_reverses_the_goods_issue()
+    {
+        using var db = NewDatabase();
+
+        // The stock issue and the lot consumption are written at shipment creation
+        // (ShipmentController.IssueOrderStockAsync). DeliveryConfirmationService takes no stock
+        // dependency at all, and CANCELLED sits outside DeliveryStatuses.Despatched — so if this
+        // transition were allowed, one click would remove the quantity from the over-shipment
+        // ceiling AND from the delivered ledger while the material was already on a lorry, and the
+        // order line would be fully re-shippable against stock that had gone.
+        foreach (var inFlight in new[] { DeliveryStatuses.Dispatched, DeliveryStatuses.InTransit })
+        {
+            await SetStatusAsync(db, inFlight);
+
+            var failure = await Assert.ThrowsAsync<DeliveryConflictException>(
+                () => Confirmations(db).TransitionAsync(Tenant, ShipmentId, DeliveryStatuses.Cancelled, "clerk"));
+
+            // The refusal has to be legible at a loading bay, and it has to name the alternative
+            // that IS honest — a full refusal is a confirmation with zero accepted, not a deletion.
+            Assert.Contains("cannot be cancelled", failure.Message);
+            Assert.Contains("goods-return", failure.Message);
+            Assert.Contains("REJECTED", failure.Message);
+
+            // Nothing moved, and — the whole point — the despatched quantity is still on the order
+            // line. This assertion is what fails if the guard is removed.
+            await using var context = db.ContextFor(Tenant);
+            Assert.Equal(inFlight, (await context.Shipments.SingleAsync(s => s.Id == ShipmentId)).DeliveryStatus);
+            Assert.Equal(4m, Assert.Single(await Ledger(db).ForOrderAsync(Tenant, OrderId)).DespatchedQuantity);
+        }
+    }
+
+    [Fact]
+    public void The_cancellable_set_is_the_single_authority_and_names_only_the_pre_despatch_state()
+    {
+        // Wiring-contract failure #9: the guard lives with the constants, once, so the next status
+        // added to the ladder is a visible decision in one file. If DISPATCHED or IN_TRANSIT is
+        // ever put back into Cancellable, this fails before anything reaches a warehouse.
+        Assert.Equal(new[] { DeliveryStatuses.Scheduled }, DeliveryStatuses.Cancellable.ToArray());
+        foreach (var despatched in DeliveryStatuses.Despatched)
+        {
+            Assert.False(DeliveryStatuses.CanTransition(despatched, DeliveryStatuses.Cancelled),
+                $"{despatched} must not be cancellable: nothing in this system reverses its goods issue.");
+            Assert.DoesNotContain(despatched, DeliveryStatuses.Withdrawable);
+        }
+    }
+
+    [Fact]
+    public async Task A_shipment_that_never_left_can_still_be_cancelled()
+    {
+        using var db = NewDatabase();
+        await SetStatusAsync(db, DeliveryStatuses.Scheduled);
+
+        // The refusal above is narrow, not blanket. A plan that was abandoned before anything was
+        // picked accrued nothing, so cancelling it reverses nothing and is the honest record.
+        Assert.Equal(DeliveryStatuses.Cancelled,
+            await Confirmations(db).TransitionAsync(Tenant, ShipmentId, DeliveryStatuses.Cancelled, "clerk"));
+    }
+
+    // ======================================= D2: a signed shipment cannot be soft-deleted, at all
+
+    [Fact]
+    public async Task A_despatched_shipment_cannot_be_deleted()
+    {
+        using var db = NewDatabase();
+        await using var context = db.ContextFor(Tenant);
+
+        // The delete path set IsActive = false with no status check whatever. This row is the only
+        // account of a goods issue that really happened.
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => new ShipmentRepository(context).DeleteShipmentAsync(
+                ShipmentId, Tenant, "Raised against the wrong order.", "clerk@tenant"));
+        Assert.Contains("cannot be deleted", failure.Message);
+
+        Assert.True((await context.Shipments.SingleAsync(s => s.Id == ShipmentId)).IsActive);
+        Assert.Equal(4m, Assert.Single(await Ledger(db).ForOrderAsync(Tenant, OrderId)).DespatchedQuantity);
+    }
+
+    [Fact]
+    public async Task A_shipment_with_a_proof_of_delivery_cannot_be_deleted()
+    {
+        using var db = NewDatabase();
+        await ConfirmAsync(db, accepted: 4m);
+
+        // The status is walked back to a deletable one FIRST, so the status guard cannot be what
+        // refuses this. The POD check has to stand on its own: DeliveryStatus is one witness that a
+        // customer signed, and the signed document is the other. Delete the second check and this
+        // test goes green while a signature disappears.
+        await SetStatusAsync(db, DeliveryStatuses.Scheduled);
+
+        await using var context = db.ContextFor(Tenant);
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => new ShipmentRepository(context).DeleteShipmentAsync(
+                ShipmentId, Tenant, "Duplicate note.", "clerk@tenant"));
+        Assert.Contains("proof of delivery", failure.Message);
+
+        Assert.True((await context.Shipments.SingleAsync(s => s.Id == ShipmentId)).IsActive);
+    }
+
+    [Fact]
+    public async Task A_withdrawal_states_who_and_why_or_it_is_refused()
+    {
+        using var db = NewDatabase();
+        await SetStatusAsync(db, DeliveryStatuses.Scheduled);
+        await using var context = db.ContextFor(Tenant);
+        var repository = new ShipmentRepository(context);
+
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => repository.DeleteShipmentAsync(ShipmentId, Tenant, "   ", "clerk@tenant"));
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => repository.DeleteShipmentAsync(ShipmentId, Tenant, "Raised in error.", " "));
+        Assert.True((await context.Shipments.SingleAsync(s => s.Id == ShipmentId)).IsActive);
+
+        await repository.DeleteShipmentAsync(
+            ShipmentId, Tenant, "Customer moved the collection to next month.", "clerk@tenant");
+
+        var withdrawn = await context.Shipments.SingleAsync(s => s.Id == ShipmentId);
+        Assert.False(withdrawn.IsActive);
+        Assert.Equal("clerk@tenant", withdrawn.ModifiedBy);
+
+        // Who, when and why survive the row leaving every list — the point of attributing it.
+        var record = await context.ShipmentStatusHistories.AsNoTracking()
+            .Where(h => h.ShipmentId == ShipmentId && h.Notes!.Contains("withdrawn"))
+            .SingleAsync();
+        Assert.Equal("clerk@tenant", record.ChangedBy);
+        Assert.Contains("Customer moved the collection to next month.", record.Notes);
+    }
+
+    [Fact]
+    public async Task The_ledger_excludes_an_inactive_shipment_on_both_sides()
+    {
+        using var db = NewDatabase();
+        await ConfirmAsync(db, accepted: 3m, reason: DeliveryExceptionReasons.Damaged);
+
+        // Written straight to the column, deliberately: the repository now refuses this, and the
+        // ledger must not depend on that guard holding to be correct. The despatched side filtered
+        // Shipment.IsActive and the accepted side did not — so a withdrawn shipment lost its
+        // despatched quantity and KEPT its accepted quantity, which is the number that caps an
+        // invoice. The one figure that survived deletion was the one that authorises money.
+        await using (var tamper = db.ContextFor(Tenant))
+        {
+            (await tamper.Shipments.SingleAsync(s => s.Id == ShipmentId)).IsActive = false;
+            await tamper.SaveChangesAsync();
+        }
+
+        var line = Assert.Single(await Ledger(db).ForOrderAsync(Tenant, OrderId));
+        Assert.Equal(0m, line.DespatchedQuantity);
+        Assert.Equal(0m, line.AcceptedQuantity);
+        Assert.Equal(0m, line.RefusedQuantity);
+        Assert.Equal(4m, line.OutstandingQuantity);
+
+        // Both shapes the invoice ceiling reads, not just the order-scoped one.
+        Assert.Empty(await Ledger(db).AcceptedByOrderItemAsync(Tenant, [OrderItemId]));
+        Assert.Empty(await Ledger(db).CapsByOrderItemAsync(Tenant, [OrderItemId]));
     }
 
     [Fact]
@@ -105,7 +265,9 @@ public sealed class Gate7DeliveryConfirmationTests
     public async Task A_cancelled_shipment_accrues_no_despatched_quantity()
     {
         using var db = NewDatabase();
-        await Confirmations(db).TransitionAsync(Tenant, ShipmentId, DeliveryStatuses.Cancelled, "clerk");
+        // Cancellation is reachable only from SCHEDULED — see
+        // A_despatched_shipment_cannot_be_cancelled_because_nothing_reverses_the_goods_issue.
+        await CancelBeforeDespatchAsync(db);
 
         // If the ledger stopped consulting DeliveryStatuses.Despatched, a cancelled despatch would
         // permanently consume the order line with goods that never left.
@@ -164,8 +326,8 @@ public sealed class Gate7DeliveryConfirmationTests
     public async Task A_line_with_nothing_despatched_stays_on_the_pre_existing_ordered_ceiling()
     {
         using var db = NewDatabase();
-        // Cancel the despatch, so the delivery module knows nothing about this line at all.
-        await Confirmations(db).TransitionAsync(Tenant, ShipmentId, DeliveryStatuses.Cancelled, "clerk");
+        // Cancel before despatch, so the delivery module knows nothing about this line at all.
+        await CancelBeforeDespatchAsync(db);
 
         await using var context = db.ContextFor(Tenant);
         var invoice = await new CommercialFinanceApplicationService(context).CreateInvoiceAsync(
@@ -190,7 +352,7 @@ public sealed class Gate7DeliveryConfirmationTests
         // Despatched but unconfirmed lines are already blocked at draft creation, so the draft is
         // raised while the delivery module still knows nothing — then the goods go out, and the
         // customer refuses two.
-        await Confirmations(db).TransitionAsync(Tenant, ShipmentId, DeliveryStatuses.Cancelled, "clerk");
+        await CancelBeforeDespatchAsync(db);
         var draft = await finance.CreateInvoiceAsync(Tenant, OrderId, "inv-race",
             new CreateInvoiceRequest(null, null, [new CreateInvoiceLineRequest(OrderItemId, 4m)]),
             "billing");
@@ -568,6 +730,16 @@ public sealed class Gate7DeliveryConfirmationTests
         TestDb db, decimal accepted, string? reason = null)
         => Confirmations(db).ConfirmAsync(Tenant, ShipmentId, $"pod-{accepted}-{reason}",
             Command(accepted, reason), "driver");
+
+    /// <summary>
+    /// The only legal route to CANCELLED: back the shipment out to SCHEDULED — the state in which
+    /// nothing has left — and cancel from there.
+    /// </summary>
+    private static async Task CancelBeforeDespatchAsync(TestDb db)
+    {
+        await SetStatusAsync(db, DeliveryStatuses.Scheduled);
+        await Confirmations(db).TransitionAsync(Tenant, ShipmentId, DeliveryStatuses.Cancelled, "clerk");
+    }
 
     private static async Task SetStatusAsync(TestDb db, string status)
     {

@@ -69,6 +69,21 @@ public static class ListViewCatalog
                 new("recDate", "Received"),
                 new("ingestedAtUtc", "Nexora ingestion date"),
                 new("bidClosingDate", "Deadline"),
+                // FR-RFQ-04. Two DIFFERENT dates and they are never interchangeable:
+                // "Deadline" is when the bid must be back, "Required delivery" is when the
+                // buyer wants the goods. Default-visible beside the deadline on purpose —
+                // it was captured and shown to nobody, which is how a trader ends up
+                // quoting a lead time against the wrong date.
+                new("requiredDeliveryDate", "Required delivery"),
+                // FR-RFQ-04. The same deadline in the Umm al-Qura calendar, which is how a
+                // Saudi government tender publishes it. Hidden by default — nobody's grid
+                // rearranges itself on deploy — but selectable, so a rep working a tender can
+                // read the deadline in the calendar the tender was written in and check it
+                // against the Gregorian one beside it. Rendered alongside, never instead of.
+                new("bidClosingDateHijri", "Deadline (Hijri)", DefaultVisible: false),
+                // FR-RFQ-03. The standing agreement this inquiry is called off against —
+                // not the inquiry's own reference, which is the "RFQ #" column above.
+                new("agreementReference", "Agreement reference", DefaultVisible: false),
                 new("itemCount", "Items"),
                 new("leadSource", "Source"),
                 new("status", "Status"),
@@ -109,17 +124,57 @@ public static class ListViewCatalog
                 new("actions", "Actions", Locked: true)
             ]),
 
+            // THE line grid the configurable-columns request was actually about. Keys match the
+            // grid fields rendered by Frontend/src/pages/ExtractionReview/ExtractionReviewDetailPage.tsx.
+            //
+            // Two families of column live here and they are not the same kind of thing:
+            //
+            //   * The extraction columns are what the buyer's document said. They are editable
+            //     in the workbench and every one of them is a stored LeadItem property.
+            //   * The COMMERCIAL columns below the divider are what Nexora already knows about
+            //     the part — availability, incoming, expected date, stock unit cost — read from
+            //     the persisted lead-line commercial resolution. They are read-only, they are
+            //     hidden by default (nobody's grid rearranges itself on deploy), and where no
+            //     resolution exists for a line the cell says so rather than showing a 0 that
+            //     reads as "none in stock".
+            //
+            // `checkStatus` and `actions` are Locked: they are reorderable but cannot be hidden,
+            // because they are the review verdict and the row's only delete affordance.
             ["lead.items"] = new("lead.items", "LeadItem",
             [
+                new("checkStatus", "Review status", Locked: true),
                 new("lineItemNo", "Line #"),
                 new("productShortName", "Product"),
-                new("manufacturerName", "Manufacturer", DefaultVisible: false),
-                new("manufacturerPartNumber", "MPN"),
+                new("productShortDescription", "Description"),
                 new("quantity", "Qty"),
                 new("unitOfMeasure", "UoM"),
                 new("unitPrice", "Unit price"),
+                new("currency", "Currency"),
+                new("manufacturerName", "Manufacturer"),
+                new("manufacturerPartNumber", "MPN"),
+                new("itemMaterialCode", "Material code"),
                 new("leadTime", "Lead time", DefaultVisible: false),
-                new("itemText", "Notes", DefaultVisible: false)
+                new("commodityProduct", "Commodity", DefaultVisible: false),
+                new("alternateProductName", "Alt product", DefaultVisible: false),
+                new("alternatePartNumber", "Alt part #", DefaultVisible: false),
+                new("itemText", "Notes", DefaultVisible: false),
+
+                // Already captured per customer, previously readable only in a panel BELOW the
+                // grid — so a reviewer could not see the buyer's own Plant Code or Incoterms on
+                // the line they were correcting.
+                new("documentExtraColumns", "Customer document columns", DefaultVisible: false),
+
+                // Commercial context. Every one of these is persisted by
+                // Inventory/Commercial/CommercialLineResolutionApplicationService and was, until
+                // now, reachable only from a separate panel that showed no line grid at all.
+                new("stockAvailable", "Available now", DefaultVisible: false),
+                new("stockIncoming", "Incoming", DefaultVisible: false),
+                new("projectedShortage", "Projected shortage", DefaultVisible: false),
+                new("supplyStatus", "Supply status", DefaultVisible: false),
+                new("expectedAvailableOn", "Expected available", DefaultVisible: false),
+                new("stockUnitCost", "Stock unit cost", DefaultVisible: false),
+
+                new("actions", "Actions", Locked: true)
             ])
         };
 

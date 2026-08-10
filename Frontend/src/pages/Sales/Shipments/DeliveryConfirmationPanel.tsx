@@ -7,7 +7,7 @@ import {
 } from '@mui/material';
 import dayjs from 'dayjs';
 import deliveryService, {
-  DELIVERY_EXCEPTION_REASONS, DELIVERY_STATUS_LABEL, OPERATOR_TRANSITIONS,
+  CANNOT_CANCEL_REASON, DELIVERY_EXCEPTION_REASONS, DELIVERY_STATUS_LABEL, OPERATOR_TRANSITIONS,
   SHORTFALL_DECISIONS, type ConfirmDeliveryLineCommand, type DeliveryStatus,
 } from '../../../api/services/deliveryService';
 import type { ShipmentItemDTO } from '../../../api/services/shipmentService';
@@ -74,6 +74,9 @@ const DeliveryConfirmationPanel: React.FC<Props> = ({ shipmentId, orderId, deliv
 
   const allowed = OPERATOR_TRANSITIONS[deliveryStatus] ?? [];
   const canConfirm = deliveryStatus === 'DISPATCHED' || deliveryStatus === 'IN_TRANSIT';
+  // The "Mark Cancelled" button used to sit here for both of these states and reversed nothing.
+  // Its absence is explained rather than left to look like a missing feature.
+  const cancellationRefused = canConfirm;
 
   return (
     <Card sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none', mb: 2 }}>
@@ -120,6 +123,13 @@ const DeliveryConfirmationPanel: React.FC<Props> = ({ shipmentId, orderId, deliv
             </Typography>
           )}
         </Stack>
+
+        {cancellationRefused && (
+          <Alert severity="info" sx={{ mb: 2 }}>
+            <AlertTitle sx={{ fontWeight: 700 }}>This delivery cannot be cancelled</AlertTitle>
+            {CANNOT_CANCEL_REASON}
+          </Alert>
+        )}
 
         {/* FR-DLM-02. Despatched and accepted are two numbers, and both are shown. */}
         {ledgerQuery.data && ledgerQuery.data.length > 0 && (

@@ -1,5 +1,6 @@
 using ERP_RFQ_Automation.Intelligence.Decision;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Reporting;
 using ERP_RFQ_Automation.Tests.Support;
 
 namespace ERP_RFQ_Automation.Tests.Intelligence.Decision;
@@ -24,7 +25,7 @@ public sealed class LeadDecisionServiceTests
         }
 
         await using var context = database.ContextFor(TenantId);
-        var brief = await new LeadDecisionService(context).GetBriefAsync(1, TenantId, default);
+        var brief = await new LeadDecisionService(context, new GrossMarginService(context)).GetBriefAsync(1, TenantId, default);
 
         Assert.Equal(101, brief.Customer.CustomerId);
         Assert.Equal(CustomerIdentityEvidence.Canonical, brief.Customer.IdentityEvidence);
@@ -149,7 +150,7 @@ public sealed class LeadDecisionServiceTests
         }
 
         await using var context = database.ContextFor(TenantId);
-        var brief = await new LeadDecisionService(context).GetBriefAsync(1, TenantId, default);
+        var brief = await new LeadDecisionService(context, new GrossMarginService(context)).GetBriefAsync(1, TenantId, default);
 
         Assert.Equal(2, brief.Customer.Quotes);
         Assert.Equal(1, brief.Customer.Orders);
@@ -171,7 +172,7 @@ public sealed class LeadDecisionServiceTests
         }
 
         await using var context = database.ContextFor(TenantId);
-        var brief = await new LeadDecisionService(context).GetBriefAsync(1, TenantId, default);
+        var brief = await new LeadDecisionService(context, new GrossMarginService(context)).GetBriefAsync(1, TenantId, default);
 
         Assert.Equal(101, brief.Customer.CustomerId);
         Assert.Equal(CustomerIdentityEvidence.HeuristicName, brief.Customer.IdentityEvidence);
@@ -192,7 +193,7 @@ public sealed class LeadDecisionServiceTests
         }
 
         await using var context = database.ContextFor(TenantId);
-        var brief = await new LeadDecisionService(context).GetBriefAsync(1, TenantId, default);
+        var brief = await new LeadDecisionService(context, new GrossMarginService(context)).GetBriefAsync(1, TenantId, default);
 
         Assert.Null(brief.Customer.CustomerId);
         Assert.False(brief.Customer.IsExistingCustomer);
@@ -215,7 +216,7 @@ public sealed class LeadDecisionServiceTests
         }
 
         await using var context = database.ContextFor(TenantId);
-        var brief = await new LeadDecisionService(context).GetBriefAsync(1, TenantId, default);
+        var brief = await new LeadDecisionService(context, new GrossMarginService(context)).GetBriefAsync(1, TenantId, default);
 
         var item = Assert.Single(brief.Coverage.Items);
         Assert.False(item.Matched);
@@ -244,7 +245,7 @@ public sealed class LeadDecisionServiceTests
         }
 
         await using var context = database.ContextFor(TenantId);
-        var brief = await new LeadDecisionService(context).GetBriefAsync(1, TenantId, default);
+        var brief = await new LeadDecisionService(context, new GrossMarginService(context)).GetBriefAsync(1, TenantId, default);
 
         Assert.Equal(100m, brief.Coverage.CoveragePct);
         Assert.Null(brief.Currency);
@@ -272,7 +273,7 @@ public sealed class LeadDecisionServiceTests
         }
 
         await using var context = database.ContextFor(TenantId);
-        var brief = await new LeadDecisionService(context).GetBriefAsync(1, TenantId, default);
+        var brief = await new LeadDecisionService(context, new GrossMarginService(context)).GetBriefAsync(1, TenantId, default);
 
         Assert.Equal("USD", brief.Currency);
         Assert.Equal(190m, brief.EstimatedValue);
@@ -302,7 +303,7 @@ public sealed class LeadDecisionServiceTests
         }
 
         await using var context = database.ContextFor(TenantId);
-        var brief = await new LeadDecisionService(context).GetBriefAsync(1, TenantId, default);
+        var brief = await new LeadDecisionService(context, new GrossMarginService(context)).GetBriefAsync(1, TenantId, default);
 
         var item = Assert.Single(brief.Coverage.Items);
         Assert.False(item.Matched);
@@ -328,7 +329,7 @@ public sealed class LeadDecisionServiceTests
         }
 
         await using var context = database.ContextFor(TenantId);
-        var brief = await new LeadDecisionService(context).GetBriefAsync(1, TenantId, default);
+        var brief = await new LeadDecisionService(context, new GrossMarginService(context)).GetBriefAsync(1, TenantId, default);
 
         var item = Assert.Single(brief.Coverage.Items);
         Assert.False(item.Matched);
@@ -349,7 +350,7 @@ public sealed class LeadDecisionServiceTests
         }
 
         await using var context = database.ContextFor(TenantId);
-        var summaries = await new LeadDecisionService(context).GetSummariesAsync([1], TenantId, default);
+        var summaries = await new LeadDecisionService(context, new GrossMarginService(context)).GetSummariesAsync([1], TenantId, default);
 
         var summary = Assert.Single(summaries).Value;
         Assert.Equal(100m, summary.CoveragePct);

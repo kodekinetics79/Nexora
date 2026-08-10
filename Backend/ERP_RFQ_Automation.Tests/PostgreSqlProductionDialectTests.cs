@@ -757,6 +757,158 @@ public sealed class PostgreSqlProductionDialectTests
             + "query against them raises 42501 before any row predicate runs. Add the GRANT in the "
             + $"same migration that creates the table: {rlsWithoutGrant}");
 
+        // The OTHER direction, and the one that let a real defect through. Every assertion above
+        // this point is satisfied by granting MORE: the under-granting guard passes the moment a
+        // table holds SELECT, and the negative guard only looks at tables without row-level
+        // security. Nothing anywhere asserted that a table holds no MORE than it should.
+        //
+        // So when 20260810050406 granted SELECT, INSERT, UPDATE, DELETE on all fifteen tables it
+        // created — in one blanket statement, including five append-only ledgers — the lane was
+        // structurally incapable of seeing it. DELETE on delivery_proofs is the sharp end: the
+        // proof lines cascade from the header, and their accepted quantities are what caps the
+        // invoice, so deleting a POD un-caps the ceiling and the customer can be billed for goods
+        // they refused. The wiring contract had said in terms that DELETE must not be granted on
+        // inventory_reorder_alerts; the migration granted it anyway and nothing objected.
+        //
+        // This is a declared inventory rather than something derived from the schema, because
+        // "append-only" is a domain fact about what the row MEANS and no amount of catalogue
+        // inspection can recover it. Each entry is a verb some migration deliberately REVOKEd. If a
+        // future migration grants one back — by naming the table, or by a blanket GRANT over a list
+        // — this test names it. Removing an entry is a decision to be argued in a pull request, not
+        // a side effect of a grant statement written three files away.
+        var forbiddenPrivileges = new (string Table, string Privilege, string Why)[]
+        {
+            // Gate 5-8 ledgers. The five that follow are the defect this guard exists for.
+            ("delivery_proofs", "DELETE", "deleting a POD un-caps the invoice ceiling via its cascaded lines"),
+            ("delivery_proof_lines", "DELETE", "accepted quantity is what an invoice is raised against"),
+            ("delivery_shortfall_decisions", "DELETE", "one decision per shortfall is the append-only guarantee"),
+            ("inventory_reorder_alerts", "DELETE", "an alert is resolved by a status transition, never removed"),
+            ("material_lot_consumptions", "DELETE", "the lot-to-issue link is what traceability is reconstructed from"),
+            ("QuoteRemovalRecords", "DELETE", "a record of a removal that can itself be removed records nothing"),
+            ("MasterDataChangeEvents", "DELETE", "field-level audit trail"),
+            ("MasterDataChangeEvents", "UPDATE", "the only reason to update it is to change what it says happened"),
+            ("MasterDataFieldChanges", "DELETE", "field-level audit trail"),
+            ("MasterDataFieldChanges", "UPDATE", "the only reason to update it is to change what it says happened"),
+
+            // Pre-existing REVOKEs from earlier gates, none of which was certified until now.
+            ("procurement_events", "UPDATE", "append-only command log"),
+            ("procurement_events", "DELETE", "append-only command log"),
+            ("goods_receipts", "UPDATE", "a receipt is corrected by a further receipt"),
+            ("goods_receipts", "DELETE", "a receipt is corrected by a further receipt"),
+            ("goods_receipt_lines", "UPDATE", "received quantity drives the three-way match"),
+            ("goods_receipt_lines", "DELETE", "received quantity drives the three-way match"),
+            ("customer_quote_sourcing_decisions", "UPDATE", "the priced decision a customer quote was built on"),
+            ("customer_quote_sourcing_decisions", "DELETE", "the priced decision a customer quote was built on"),
+            ("commercial_demand_lines", "UPDATE", "demand lineage"),
+            ("commercial_demand_lines", "DELETE", "demand lineage"),
+            ("supplier_purchase_orders", "DELETE", "a PO is cancelled, not erased"),
+            ("supplier_purchase_order_lines", "DELETE", "a PO is cancelled, not erased"),
+            ("supplier_quotes", "DELETE", "the offer a decision was made against"),
+            ("sourcing_cases", "DELETE", "the case spine"),
+            ("procurement_outbox", "DELETE", "at-least-once dispatch evidence"),
+            ("Suppliers", "DELETE", "a supplier is deactivated, not erased"),
+            ("OrderToCashDocumentCounters", "DELETE", "deleting a counter restarts a legal document series"),
+            ("OrderToCashAuditEvents", "INSERT", "written by a privileged role only"),
+            ("OrderToCashAuditEvents", "UPDATE", "audit trail"),
+            ("OrderToCashAuditEvents", "DELETE", "audit trail"),
+            ("LegalDocumentCounters", "INSERT", "a legal series is allocated by a privileged path only"),
+            ("LegalDocumentCounters", "UPDATE", "a legal series is allocated by a privileged path only"),
+            ("LegalDocumentCounters", "DELETE", "a legal series is allocated by a privileged path only"),
+            ("LedgerAccounts", "DELETE", "double-entry ledger"),
+            ("AccountingPeriods", "DELETE", "double-entry ledger"),
+            ("JournalEntries", "DELETE", "a journal entry is reversed, not deleted"),
+            ("JournalEntryLines", "DELETE", "a journal entry is reversed, not deleted"),
+            // UPDATE is deliberately NOT on this list. CompleteLedgerKernelControls revoked it, and
+            // GovernTreasuryRulesAdjustmentsAndCashBridge granted it back on purpose so the
+            // receivables control account and unapplied-cash account can be set once. The revoke
+            // that reads like the current state is in that migration's Down(). The grant is safe
+            // because nexora_gl_guard_book bounds it: DELETE always raises, and an UPDATE is
+            // accepted only when both control accounts move from NULL to two distinct, active,
+            // correctly-categorised accounts, Version goes up by exactly one, and every other
+            // column is unchanged. That is a trigger doing what a grant cannot express.
+            ("LedgerBooks", "DELETE", "the book a period was closed against"),
+            ("BankStatementImports", "UPDATE", "an imported statement is what reconciliation is evidence against"),
+            ("BankStatements", "UPDATE", "an imported statement is what reconciliation is evidence against"),
+            ("BankStatementLines", "UPDATE", "an imported statement is what reconciliation is evidence against"),
+            ("ReconciliationAllocations", "UPDATE", "an allocation is reversed by a further allocation"),
+        };
+
+        await using var overGrantCommand = connection.CreateCommand();
+        overGrantCommand.CommandText = """
+            WITH forbidden(table_name, privilege) AS (
+                SELECT unnest(@tables::text[]), unnest(@privileges::text[])
+            )
+            SELECT string_agg(
+                       forbidden.table_name || '.' || forbidden.privilege,
+                       ', ' ORDER BY forbidden.table_name, forbidden.privilege)
+            FROM forbidden
+            JOIN pg_class table_definition ON table_definition.relname = forbidden.table_name
+            JOIN pg_namespace schema_definition
+              ON schema_definition.oid = table_definition.relnamespace
+             AND schema_definition.nspname = 'public'
+            WHERE has_table_privilege('nexora_tenant_app', table_definition.oid, forbidden.privilege);
+            """;
+        overGrantCommand.CommandText = """
+            WITH forbidden(table_name, privilege) AS (
+                SELECT unnest(@tables::text[]), unnest(@privileges::text[])
+            )
+            SELECT string_agg(
+                       forbidden.table_name || '.' || forbidden.privilege
+                         || ' [acl=' || coalesce(array_to_string(table_definition.relacl, ' '), 'default') || ']',
+                       ', ' ORDER BY forbidden.table_name, forbidden.privilege)
+            FROM forbidden
+            JOIN pg_class table_definition ON table_definition.relname = forbidden.table_name
+            JOIN pg_namespace schema_definition
+              ON schema_definition.oid = table_definition.relnamespace
+             AND schema_definition.nspname = 'public'
+            WHERE has_table_privilege('nexora_tenant_app', table_definition.oid, forbidden.privilege);
+            """;
+        overGrantCommand.Parameters.AddWithValue(
+            "tables", forbiddenPrivileges.Select(entry => entry.Table).ToArray());
+        overGrantCommand.Parameters.AddWithValue(
+            "privileges", forbiddenPrivileges.Select(entry => entry.Privilege).ToArray());
+        var overGranted = (await overGrantCommand.ExecuteScalarAsync()) as string;
+        Assert.True(overGranted is null,
+            "nexora_tenant_app holds a privilege on an append-only ledger that a migration "
+            + "deliberately REVOKEd. A blanket GRANT over a list of tables is how this happens — "
+            + "grant the verbs each table actually needs, per table. Over-granted: " + overGranted);
+
+        // The tables above are protected by a grant, which the table OWNER bypasses. The two that
+        // carry a field-level before/after trail are protected by a trigger as well, which nobody
+        // bypasses — four separate code comments assert this trigger exists, including one that
+        // justifies a CASCADE delete on the grounds that "the header itself can never be deleted
+        // (append-only trigger)". It did not exist until 20260810110923. Assert the thing the
+        // comments claim, so the claim and the schema cannot drift apart again.
+        await using var auditTriggerCommand = connection.CreateCommand();
+        auditTriggerCommand.CommandText = """
+            SELECT string_agg(expected.table_name, ', ' ORDER BY expected.table_name)
+            FROM unnest(ARRAY['MasterDataChangeEvents', 'MasterDataFieldChanges'])
+                AS expected(table_name)
+            LEFT JOIN pg_class table_definition ON table_definition.relname = expected.table_name
+            LEFT JOIN pg_namespace schema_definition
+              ON schema_definition.oid = table_definition.relnamespace
+             AND schema_definition.nspname = 'public'
+            LEFT JOIN pg_trigger trigger_definition
+              ON trigger_definition.tgrelid = table_definition.oid
+             AND trigger_definition.tgname = 'trg_master_data_audit_append_only'
+             AND NOT trigger_definition.tgisinternal
+            WHERE trigger_definition.oid IS NULL
+               OR trigger_definition.tgenabled <> 'O'
+               -- tgtype bits, per PostgreSQL's TRIGGER_TYPE_* macros: 1 = FOR EACH ROW,
+               -- 2 = BEFORE, 8 = DELETE, 16 = UPDATE. A BEFORE ... FOR EACH ROW trigger on
+               -- UPDATE OR DELETE is therefore exactly 27. AFTER would let the row change and
+               -- then raise, and a statement-level trigger would not see the rows at all.
+               OR (trigger_definition.tgtype & 16) = 0
+               OR (trigger_definition.tgtype & 8) = 0
+               OR (trigger_definition.tgtype & 2) = 0
+               OR (trigger_definition.tgtype & 1) = 0;
+            """;
+        var missingAuditTrigger = (await auditTriggerCommand.ExecuteScalarAsync()) as string;
+        Assert.True(missingAuditTrigger is null,
+            "trg_master_data_audit_append_only is missing, disabled, or does not fire BEFORE both "
+            + "UPDATE and DELETE. Four code comments state that this trigger is what makes the "
+            + $"master-data audit trail immutable: {missingAuditTrigger}");
+
         await using var modulePrivilegeCommand = connection.CreateCommand();
         modulePrivilegeCommand.CommandText = """
             SELECT has_table_privilege('nexora_tenant_app', 'public."Module"', 'SELECT')

@@ -14,9 +14,10 @@ spine for adjacent work is exactly what produced ~63,000 lines of code answering
 
 **Approved:** 2026-08-09 by Zack, product owner.
 **Scheduled:** after Gate 3 closes, before Gate 4 begins.
-**Status:** built and wired on `customers.list`, `leads.list` and `suppliers.list`. **The one grid
-he most likely pictured — the RFQ line grid (`lead.items`) — is still API-only.** See "What is
-still owed" below.
+**Status:** built and wired on `customers.list`, `leads.list`, `suppliers.list` and — as of
+2026-08-10 — **`lead.items`, the RFQ / lead LINE grid**, which is the grid the request was
+actually about. The quote line grid and the customer PO line grid are **not** wired; see "What is
+still owed" below for why and what it would take.
 
 ### What he asked for
 
@@ -84,14 +85,61 @@ because renaming it orphans every value already stored under it. Retiring preser
 merely stops offering the field. Changing a populated field's data type is refused outright rather
 than silently coercing.
 
+### What was built (2026-08-10) — the line grid
+
+`lead.items` now has a reader: the line-item grid in the **Extraction Review workbench**
+(`ExtractionReviewDetailPage`), which is where a Sales Engineer corrects a document's lines before
+it becomes an RFQ. Its own per-browser `localStorage` column model — the "precedent" named in the
+table above — is **deleted**, not left alongside the new one. That model could hide a column but
+not reorder one, was keyed per browser rather than per user, and could not see a field the tenant
+had defined.
+
+`LeadItem.CustomFieldsJson` was a **column with no reader**: the bag existed, the definition table
+existed, the picker would have offered the field, and nothing carried the value to the client.
+`LeadItemResponseDTO.CustomFields` now does, off the same lead-detail payload the grid already
+loads. A line with no value renders **"Not set"** — added to the shared hook, so the three list
+grids stop rendering an empty cell for an unset custom field too.
+
+Three enrichment families were assessed against the rule *offer only what genuinely exists*:
+
+| Candidate | Offered? | Source |
+|---|---|---|
+| **Extra document columns** | **Yes** — `Customer document columns`, hidden by default | `LeadItem.ExtraFields`, already on the payload and previously readable only in a panel *below* the grid |
+| **Inventory context** | **Yes** — `Available now`, `Incoming`, `Projected shortage`, `Supply status`, `Expected available`, `Stock unit cost`, all hidden by default | `LeadLineCommercialResolution`, already persisted per line by `CommercialLineResolutionApplicationService` |
+| **Commercial memory** (last won price, win rate) | **No** | See below — no batch read exists |
+
+The inventory join is **by part number, and it refuses rather than guesses.**
+`LeadLineCommercialResolution.LeadLineId` is a `LeadItemRevision` id, not a `LeadItem` id, and the
+only other candidate key is ordinal position — which silently attributes one line's stock to
+another the moment a reviewer inserts or deletes a row. So the client reproduces the server's own
+`First(part, materialCode, description)` precedence, and a part that appears on more than one line
+renders **"Part on several lines"**. A line with no resolution renders **"Not checked"**, never a
+`0` that reads as "none in stock". A line the reviewer typed in this session is never matched at
+all. A tenant without the Inventory entitlement gets a 403 on the read and every commercial cell
+says "Not checked" — the grid itself is unaffected.
+
 ### What is still owed
 
-- **`lead.items` — the RFQ line grid — has no UI.** It is in the catalog and reachable through the
-  API, but no grid consumes it. This is the grid the request was actually about: "additional fields
-  … in the lead". Until it is wired, the highest-value half of AA-01 is not delivered.
-- The three enrichment candidates listed above — inventory context, commercial memory, extra
-  document columns — are **not** yet offered as columns. Reordering is done; the thing worth
-  reordering is not.
+- **The quote line grid and the customer PO line grid are not wired.** Both
+  (`QuoteViewPage`/`EditQuotePage`, `ClientPurchaseOrderReviewPage`) render hand-rolled MUI
+  `<Table>` markup rather than a `DataGrid`, and `useColumnPreferences.arrangeColumns` produces
+  `GridColDef[]`. Wiring them means converting those screens to `DataGrid` first — a real refactor
+  of a pricing screen — or growing a second rendering path, which the one-mechanism rule forbids.
+  Neither view key exists in the catalog yet, deliberately: a key with no reader is the defect this
+  entry was opened to fix.
+- **Commercial memory is not offered as a column.** `ProductCommercialMemory` genuinely carries
+  `lineWinRatePercent` and `lastWonContext.unitPrice`, but the only reads are
+  `GET /commercial-learning/products` (top-N, so a part outside the window would render as absent
+  when it is merely untruncated — a misleading gap) and `GET /commercial-learning/products/{id}`
+  (one call per line, unusable on a 1,450-line document). It needs a batch read keyed by product
+  id, plus a decision about its `Products`+`Quotations` permission gate, which an extraction
+  reviewer may not hold. **No schema change** — this is an endpoint, not a column.
+- "Last supplier" from the inventory candidate list is **not** offered. `RelatedResources` carries
+  approved suppliers, quote history and purchase history as ranked *options*; none of them is "the
+  supplier we last bought this from", and labelling a ranked option as one would be an invented
+  commercial fact.
+- Commercial columns are **not sortable**, because the values are joined client-side and sorting
+  them would order the page rather than the result set.
 - `Timestamp`, `Json` and `Reference` field types are storable and validated but absent from the
   admin picker, so a tenant cannot actually create one.
 - Custom-field columns are not sortable or filterable — no server-side `jsonb` predicate is wired.

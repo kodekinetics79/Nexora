@@ -2,6 +2,7 @@ using ERP_RFQ_Automation.AI;
 using ERP_RFQ_Automation.Agent.Guardrails;
 using ERP_RFQ_Automation.Agent.Llm;
 using ERP_RFQ_Automation.Agent.Tools;
+using ERP_RFQ_Automation.Infrastructure;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -32,7 +33,11 @@ public static class AgentServiceCollectionExtensions
                 AnthropicProviderDefaults.Model(configuration));
             services.AddHttpClient<IAgentLlm, AnthropicAgentLlm>(c => c.Timeout = TimeSpan.FromSeconds(120))
                 .ConfigurePrimaryHttpMessageHandler(() =>
-                    AiEgressGuard.CreateHandler(() => anthropic.ProviderClass));
+                    AiEgressGuard.CreateHandler(() => anthropic.ProviderClass))
+                // SEC-G9: AnthropicAgentLlm sends the API key as x-api-key. The factory's own
+                // logging handlers write every header at Trace and redact nothing by default, so
+                // one diagnostic session at Trace would have put the live key in the log sink.
+                .RedactLoggedHeaders(OutboundHttpRedaction.SensitiveHeaders);
         }
         else
         {

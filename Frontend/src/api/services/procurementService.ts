@@ -133,6 +133,29 @@ export interface PurchaseOrderLine {
   hsCode?: string | null;
   /** Seeded from the product master when the order is raised; correctable until dispatch. */
   countryOfOrigin?: string | null;
+  /**
+   * What the lot recorder will demand when this line is received: "SERIAL" needs one serial per
+   * received unit, "LOT" needs the supplier's batch number, "UNTRACKED" needs nothing. Computed
+   * server-side from the product's tracking switches so the screen and the guard cannot disagree.
+   */
+  trackingMode: MaterialTrackingMode;
+}
+
+export type MaterialTrackingMode = "SERIAL" | "LOT" | "UNTRACKED";
+
+/**
+ * The traceability declaration a goods receipt carries per line. Dates are calendar dates
+ * (YYYY-MM-DD) because the server binds them to DateOnly — an ISO instant is rejected.
+ */
+export interface ReceiptLotDeclaration {
+  lotNumber?: string | null;
+  serialNumbers?: string[] | null;
+  countryOfOrigin?: string | null;
+  manufacturerName?: string | null;
+  manufacturerPartNumber?: string | null;
+  supplierBatchReference?: string | null;
+  manufactureDate?: string | null;
+  expiryDate?: string | null;
 }
 
 export interface SupplierPurchaseOrder {
@@ -777,7 +800,16 @@ const procurementService = {
       receiptNumber: string;
       expectedPurchaseOrderVersion: number;
       idempotencyKey: string;
-      lines: Array<{ purchaseOrderLineId: number; quantity: number }>;
+      lines: Array<{
+        purchaseOrderLineId: number;
+        quantity: number;
+        /**
+         * Required for a batch- or serial-tracked line; the server refuses the receipt without it
+         * and the refusal names the missing field. Omitted entirely for an untracked line, which
+         * gets a receipt-derived lot number.
+         */
+        lot?: ReceiptLotDeclaration;
+      }>;
     },
   ) => {
     const { idempotencyKey, ...body } = request;

@@ -206,6 +206,70 @@ public sealed class Gate6LotReservationTests
         Assert.Equal(4m, (await verify.MaterialLots.SingleAsync(x => x.Id == lotId)).QuantityConsumed);
     }
 
+    /// <summary>
+    /// The order-scoped goods issue (<c>POST api/Order/{id}/consume-stock</c>) moved on-hand and
+    /// flipped the hold to Consumed without ever declaring the lot. Because a lot's reservable
+    /// balance is (received − declared-consumed) minus ACTIVE holds, the consumed hold left the held
+    /// side while the consumed side never moved — so the lot offered the same units again, after
+    /// they had physically shipped, and a second order could hold and issue material that was gone.
+    ///
+    /// <para>This test fails if the delegation is removed: <c>QuantityConsumed</c> stays at 0 and
+    /// the lot is offered as reservable in full.</para>
+    /// </summary>
+    [Fact]
+    public async Task Issuing_a_whole_order_declares_its_lots_so_the_units_cannot_be_reserved_twice()
+    {
+        using var scenario = new LotScenario();
+        var lotId = await scenario.ReceiveLotAsync("BATCH-A", 5m);
+        await scenario.AllocateAsync(quantity: 4m);
+
+        await using (var issue = scenario.Context())
+        {
+            Assert.Equal(1, await InventoryServices.OrderStock(issue)
+                .ConsumeOrderAsync(scenario.BusinessUnitId, LotScenario.OrderId, "qa"));
+        }
+
+        await using var verify = scenario.Context();
+        var declaration = Assert.Single(await verify.MaterialLotConsumptions.ToListAsync());
+        Assert.Equal(lotId, declaration.MaterialLotId);
+        Assert.Equal(4m, declaration.Quantity);
+        Assert.Equal(4m, (await verify.MaterialLots.SingleAsync(x => x.Id == lotId)).QuantityConsumed);
+
+        // One unit was received but never issued, and one unit is all the lot may offer again.
+        var reservable = await InventoryServices.Availability(verify)
+            .GetReservableLotsAsync(scenario.BusinessUnitId, ProcurementTestData.Inventory);
+        Assert.Equal(1m, Assert.Single(reservable.Where(x => x.MaterialLotId == lotId)).Reservable);
+    }
+
+    /// <summary>
+    /// A hold that names no order line cannot be attributed to a lot consumption, so the
+    /// order-scoped issue refuses rather than moving stock it could not declare.
+    /// </summary>
+    [Fact]
+    public async Task An_order_hold_that_names_no_line_is_refused_rather_than_issued_undeclared()
+    {
+        using var scenario = new LotScenario();
+        await scenario.ReceiveLotAsync("BATCH-A", 5m);
+        await scenario.AllocateAsync(quantity: 4m);
+        await using (var detach = scenario.Context())
+        {
+            var hold = await detach.Set<StockReservation>()
+                .SingleAsync(x => x.OrderId == LotScenario.OrderId && x.Status == StockReservationStatus.Active);
+            hold.OrderItemId = null;
+            await detach.SaveChangesAsync();
+        }
+
+        await using var context = scenario.Context();
+        var refusal = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            InventoryServices.OrderStock(context).ConsumeOrderAsync(scenario.BusinessUnitId, LotScenario.OrderId, "qa"));
+
+        Assert.Contains("name no order line", refusal.Message, StringComparison.Ordinal);
+        await using var verify = scenario.Context();
+        Assert.Empty(await verify.MaterialLotConsumptions.ToListAsync());
+        Assert.Equal(StockReservationStatus.Active, (await verify.Set<StockReservation>()
+            .SingleAsync(x => x.OrderId == LotScenario.OrderId)).Status);
+    }
+
     [Fact]
     public async Task The_where_used_trace_has_no_undeclared_gap_once_the_issue_declares_for_itself()
     {

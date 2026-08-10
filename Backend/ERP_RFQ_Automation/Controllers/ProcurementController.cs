@@ -136,7 +136,8 @@ public sealed class ProcurementController(
             var result = await service.CreatePurchaseOrderAsync(new CreatePurchaseOrderCommand(
                 TenantId(), request.RfqId, request.SupplierId, request.CurrencyId, request.WarehouseId,
                 request.ExpectedOn, request.AwardIds, IdempotencyKey(), Actor(),
-                CorrelationId()), RequestAborted);
+                CorrelationId(), request.Incoterm, request.PortOfLoading,
+                request.PortOfDischarge), RequestAborted);
             return Created($"/api/procurement/purchase-orders/{result.Id}", result);
         });
 
@@ -233,6 +234,18 @@ public sealed class ProcurementController(
         catch (ProcurementConflictException exception)
         {
             return Conflict(Problem(StatusCodes.Status409Conflict, "Procurement conflict", exception.Message));
+        }
+        // The lot recorder's refusals are the receipt screen's validation messages — "this line is
+        // serial-tracked; one serial number per received unit is required" is the operator's
+        // instruction, not an internal fault. They used to fall through to the catch-all below and
+        // surface as a 500 with generic copy, which is how a correct guard reads as a broken screen.
+        catch (Traceability.MaterialTraceabilityConflictException exception)
+        {
+            return Conflict(Problem(StatusCodes.Status409Conflict, "Procurement conflict", exception.Message));
+        }
+        catch (Traceability.MaterialTraceabilityValidationException exception)
+        {
+            return BadRequest(Problem(StatusCodes.Status400BadRequest, "Invalid procurement request", exception.Message));
         }
         catch (UnauthorizedAccessException exception)
         {
@@ -362,13 +375,29 @@ public sealed record ApproveAwardRequest(
     long ExpectedQuoteVersion,
     string? Rationale);
 
+/// <summary>
+/// FR-SPO-06. The shipping and customs terms are OPTIONAL at creation and correctable until
+/// dispatch, but they must be carried when they are sent.
+///
+/// <para>They were missing from this record while <see cref="CreatePurchaseOrderCommand"/>
+/// declared them, the service normalised and persisted them
+/// (<c>ProcurementApplicationService.CreatePurchaseOrderAsync</c>), and the workbench dialog
+/// collected and posted all three
+/// (<c>Frontend/src/pages/Procurement/Sourcing/SourcingWorkbenchPage.tsx</c>). Model binding
+/// discarded them silently: the buyer keyed an Incoterm, saw the order created, and the order
+/// carried none — which then suppressed the non-delivered-term duty warning that reads it, and
+/// forced the terms to be re-keyed through the separate amendment endpoint.</para>
+/// </summary>
 public sealed record CreateSupplierPurchaseOrderRequest(
     long RfqId,
     long SupplierId,
     long CurrencyId,
     long WarehouseId,
     DateOnly ExpectedOn,
-    IReadOnlyCollection<long> AwardIds);
+    IReadOnlyCollection<long> AwardIds,
+    string? Incoterm = null,
+    string? PortOfLoading = null,
+    string? PortOfDischarge = null);
 
 public sealed record ApproveSupplierPurchaseOrderRequest(long ExpectedVersion);
 

@@ -16,6 +16,14 @@ public interface IGrossMarginService
 {
     Task<GrossMarginDTO> GetAsync(long businessUnitId, DateTime from, DateTime to,
         DateTime generatedAt, CancellationToken ct = default);
+
+    /// <summary>
+    /// The same computation as <see cref="GetAsync"/>, narrowed to one commercial case, so a
+    /// per-opportunity decision can depend on the margin instead of re-deriving one from the
+    /// currency-less product master. See <see cref="CommercialCaseMarginEvidence"/>.
+    /// </summary>
+    Task<CommercialCaseMarginEvidence> GetForCommercialCaseAsync(long businessUnitId,
+        long commercialCaseId, DateTime asOf, CancellationToken ct = default);
 }
 
 /// <summary>
@@ -98,7 +106,7 @@ public sealed class GrossMarginService : IGrossMarginService
         var decisions = await _db.Set<CustomerQuoteSourcingDecision>().AsNoTracking()
             .Where(d => d.BusinessUnitId == businessUnitId
                         && acceptedInWindow.Any(q => q.Id == d.QuoteId))
-            .Select(d => new DecisionRow(d.Id, d.QuoteId, d.QuoteItemId, d.Quantity,
+            .Select(d => new DecisionRow(d.Id, d.QuoteId, d.QuoteItemId, d.RfqItemId, d.Quantity,
                 d.SupplierLandedUnitCost, d.CustomerUnitPrice, d.CurrencyId, d.CreatedOn))
             .ToListAsync(ct);
 
@@ -161,6 +169,57 @@ public sealed class GrossMarginService : IGrossMarginService
         }
 
         return result;
+    }
+
+    /// <inheritdoc />
+    public async Task<CommercialCaseMarginEvidence> GetForCommercialCaseAsync(long businessUnitId,
+        long commercialCaseId, DateTime asOf, CancellationToken ct = default)
+    {
+        if (businessUnitId <= 0) throw new ArgumentOutOfRangeException(nameof(businessUnitId));
+        if (commercialCaseId <= 0)
+            return CommercialCaseMarginEvidence.None(
+                "This opportunity has no commercial case, so no priced quote line can be traced to it.");
+
+        // Quotes of the case, whatever their status. A superseded or rejected quote's landed cost is
+        // still the only cost evidence this demand has, and the dedupe below keeps the latest.
+        var caseQuotes = _db.Quotes.AsNoTracking()
+            .Where(q => q.BusinessUnitId == businessUnitId && q.CommercialCaseId == commercialCaseId);
+
+        var decisions = await _db.Set<CustomerQuoteSourcingDecision>().AsNoTracking()
+            .Where(d => d.BusinessUnitId == businessUnitId && caseQuotes.Any(q => q.Id == d.QuoteId))
+            .Select(d => new DecisionRow(d.Id, d.QuoteId, d.QuoteItemId, d.RfqItemId, d.Quantity,
+                d.SupplierLandedUnitCost, d.CustomerUnitPrice, d.CurrencyId, d.CreatedOn))
+            .ToListAsync(ct);
+
+        // One decision per demand line: the latest. See CommercialCaseMarginEvidence on why the key
+        // is RfqItemId here and QuoteItemId in the period report.
+        var sample = decisions
+            .GroupBy(d => d.RfqItemId)
+            .Select(g => g.OrderByDescending(d => d.CreatedOn).ThenByDescending(d => d.Id).First())
+            .ToList();
+
+        if (sample.Count == 0)
+            return CommercialCaseMarginEvidence.None(
+                "No line on this opportunity has been priced from an approved supplier award, so no "
+                + "customer price can be traced to the landed cost behind it.");
+
+        var evidenceAsOf = sample.Max(d => d.CreatedOn);
+        var fx = new FxConversionService(_db);
+        var totals = await ConvertAsync(fx, businessUnitId, sample, asOf, ct);
+
+        if (totals.Revenue.Total is not { } revenue || totals.Cost.Total is not { } cost)
+            return new CommercialCaseMarginEvidence(null, sample.Count, totals.Revenue.TargetCurrencyCode,
+                evidenceAsOf,
+                totals.Revenue.UnavailableReason ?? totals.Cost.UnavailableReason
+                ?? "The priced lines span currencies with no approved exchange rate, so they cannot be totalled.");
+
+        if (revenue <= 0m)
+            return new CommercialCaseMarginEvidence(null, sample.Count, totals.Revenue.TargetCurrencyCode,
+                evidenceAsOf,
+                "The priced lines total zero or less, so a margin percentage has no denominator.");
+
+        return new CommercialCaseMarginEvidence(Percent(revenue, cost), sample.Count,
+            totals.Revenue.TargetCurrencyCode, evidenceAsOf, null);
     }
 
     private static decimal Percent(decimal revenue, decimal cost) =>
@@ -303,6 +362,7 @@ public sealed class GrossMarginService : IGrossMarginService
         return ids.Distinct().ToList();
     }
 
-    private sealed record DecisionRow(long Id, long QuoteId, long QuoteItemId, decimal Quantity,
-        decimal SupplierLandedUnitCost, decimal CustomerUnitPrice, long CurrencyId, DateTime CreatedOn);
+    private sealed record DecisionRow(long Id, long QuoteId, long QuoteItemId, long RfqItemId,
+        decimal Quantity, decimal SupplierLandedUnitCost, decimal CustomerUnitPrice, long CurrencyId,
+        DateTime CreatedOn);
 }

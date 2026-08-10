@@ -37,9 +37,44 @@ import customerAwardService, {
   type PurchaseOrderLineMatchProposal,
   type QuoteAwardProjection,
 } from '../../../../api/services/customerAwardService';
+import commercialPolicyService from '../../../../api/services/commercialPolicyService';
+import uomService, { type UomDTO } from '../../../../api/services/uomService';
+import {
+  DEFAULT_COMMERCIAL_TOLERANCES,
+  priceMatches,
+  quantityMatches,
+} from '../../../../utils/commercialMatchingTolerance';
 import CustomerPoDocumentIntake from './CustomerPoDocumentIntake';
 
+/**
+ * A floating-point guard, NOT a commercial tolerance.
+ *
+ * It exists only so that arithmetic like `remaining - awarded` does not report a residue of 1e-13
+ * as an open balance. Whether a difference between what the buyer wrote and what we quoted MATTERS
+ * is a question for the tenant's policy — see `utils/commercialMatchingTolerance` — and this
+ * constant must never be used to answer it again.
+ */
 const EPSILON = 0.000001;
+
+/**
+ * Matches the buyer's own unit word against the tenant's configured units. Code first, then name,
+ * then a naive plural ("boxes" -> "box"), all case-insensitive.
+ *
+ * Deliberately conservative: no match returns undefined, the operator is shown what the document
+ * said and picks the unit themselves. Guessing here would put a unit the buyer never wrote onto the
+ * record the discrepancy check compares against.
+ */
+const resolveExtractedUom = (stated: string | null | undefined, units: UomDTO[]): number | undefined => {
+  const word = stated?.trim().toLowerCase();
+  if (!word) return undefined;
+  const candidates = [word, word.replace(/e?s$/, '')].filter(Boolean);
+  for (const candidate of candidates) {
+    const unit = units.find((option) => option.uomCode.trim().toLowerCase() === candidate)
+      ?? units.find((option) => option.uomName.trim().toLowerCase() === candidate);
+    if (unit) return unit.uomId;
+  }
+  return undefined;
+};
 
 export interface CustomerAwardQuoteLine {
   id: number;
@@ -95,6 +130,17 @@ interface CaptureLine {
   manufacturerPartNumber: string;
   quoteItemId: number | '';
   orderedQuantity: string;
+  /**
+   * The unit the BUYER ordered in. `''` means the operator has not stated one, which the payload
+   * sends as null — "the PO names no unit" — and never as our own quoted unit.
+   *
+   * The field existed on the entity and in the create command, and the capture screen never sent
+   * it, so every customer PO in the system stated no unit and every quantity comparison ran on
+   * bare numbers. A PO for "10 boxes" against a quote of "10 each" was an EXACT_MATCH.
+   */
+  uomId: number | '';
+  /** The unit word the document actually used, kept verbatim so an unmatched one is visible. */
+  statedUnitOfMeasure: string;
   awardedQuantity: string;
   unitPrice: string;
 }
@@ -163,6 +209,8 @@ const emptyRow = (reference: string): CaptureLine => ({
   manufacturerPartNumber: '',
   quoteItemId: '',
   orderedQuantity: '',
+  uomId: '',
+  statedUnitOfMeasure: '',
   awardedQuantity: '',
   unitPrice: '',
 });
@@ -225,6 +273,36 @@ const CustomerAwardWorkspace: React.FC<CustomerAwardWorkspaceProps> = ({
   });
 
   const projection = projectionQuery.data ?? fallbackProjection;
+
+  /**
+   * FR-COM-04. The tenant's own tolerances, so this screen answers the SAME question the server
+   * answers when it writes the discrepancy report. It previously compared against a hardcoded
+   * 0.000001, which meant a manager who had set 2% still watched their operators be told "Price
+   * differs" on every rounding difference — on the one screen where the difference is still cheap
+   * to fix. Same fetch as CreateQuotePage, same cache key, so it is one request per session.
+   */
+  const policyQuery = useQuery({
+    queryKey: ['commercial-policy'],
+    queryFn: () => commercialPolicyService.getPolicy(),
+  });
+  const tolerances = policyQuery.data ?? DEFAULT_COMMERCIAL_TOLERANCES;
+
+  /** The tenant's units, so the buyer's unit can be captured rather than assumed to be ours. */
+  const unitsQuery = useQuery({
+    queryKey: ['uoms', 'tenant'],
+    queryFn: () => uomService.listForTenant(),
+  });
+  const units = React.useMemo(
+    () => (unitsQuery.data ?? []).filter((unit) => unit.isActive),
+    [unitsQuery.data],
+  );
+  const unitCode = React.useCallback(
+    (uomId: number | '' | null | undefined) =>
+      (uomId === '' || uomId === null || uomId === undefined
+        ? undefined
+        : units.find((unit) => unit.uomId === uomId)?.uomCode),
+    [units],
+  );
 
   React.useEffect(() => {
     setExternalPoNumber('');
@@ -313,6 +391,12 @@ const CustomerAwardWorkspace: React.FC<CustomerAwardWorkspaceProps> = ({
       manufacturerPartNumber: line.manufacturerPartNumber ?? '',
       quoteItemId: '',
       orderedQuantity: line.orderedQuantity == null ? '' : String(line.orderedQuantity),
+      // The extractor reads the buyer's unit word and the intake panel already displays it; it was
+      // then dropped on the floor here, so the quantity travelled to the server with no unit at
+      // all. Resolved against the tenant's units where it can be, left blank and shown verbatim
+      // where it cannot — never silently replaced by the unit we quoted in.
+      uomId: resolveExtractedUom(line.unitOfMeasure, units) ?? '',
+      statedUnitOfMeasure: line.unitOfMeasure ?? '',
       awardedQuantity: line.orderedQuantity == null ? '' : String(line.orderedQuantity),
       unitPrice: line.unitPrice == null ? '' : String(line.unitPrice),
     })));
@@ -448,6 +532,9 @@ const CustomerAwardWorkspace: React.FC<CustomerAwardWorkspaceProps> = ({
           externalLineReference: row.externalLineReference.trim(),
           description: row.description.trim(),
           orderedQuantity: numberValue(row.orderedQuantity),
+          // The unit the buyer ordered in. Null means their PO stated none — an honest gap the
+          // server records as such, not an invitation to substitute the unit we quoted in.
+          uomId: row.uomId === '' ? null : row.uomId,
           unitPrice: numberValue(row.unitPrice),
           lineAmount: numberValue(row.unitPrice) * numberValue(row.orderedQuantity),
           customerItemCode: trimmedOrNull(row.customerItemCode),
@@ -764,11 +851,23 @@ const CustomerAwardWorkspace: React.FC<CustomerAwardWorkspaceProps> = ({
           const selectedLine = row.quoteItemId === '' ? undefined : balanceByItem.get(row.quoteItemId);
           const proposal = proposals[row.clientId];
           const chip = proposal ? matchStatusChip(proposal) : undefined;
-          const priceVariance = selectedLine && row.unitPrice.trim() !== ''
+          // FR-COM-04. Both chips now ask the SERVER's question, on the TENANT's tolerances.
+          //
+          // Price: buyer's unit price against the quoted unit price, inside the configured
+          // percentage or the absolute floor. Quantity: what WE are awarding against what the
+          // BUYER ordered — previously it compared the buyer's ordered quantity against the
+          // quotation's remaining quantity, which is a partial award and an ordinary event, so the
+          // chip fired on healthy lines and never on the case its label described.
+          const priceVariance = Boolean(selectedLine) && row.unitPrice.trim() !== ''
             && Number.isFinite(numberValue(row.unitPrice))
-            && Math.abs(numberValue(row.unitPrice) - selectedLine.unitPrice) > EPSILON;
-          const quantityVariance = selectedLine && validPositive(row.orderedQuantity)
-            && Math.abs(numberValue(row.orderedQuantity) - selectedLine.remainingQuantity) > EPSILON;
+            && !priceMatches(numberValue(row.unitPrice), selectedLine!.unitPrice, tolerances);
+          const quantityVariance = validPositive(row.orderedQuantity) && validPositive(row.awardedQuantity)
+            && !quantityMatches(numberValue(row.awardedQuantity), numberValue(row.orderedQuantity), tolerances);
+          // The buyer ordering in a unit we did not quote in is a different commercial deal, and
+          // the server refuses to raise a sales order on it without a recorded acceptance.
+          const buyerUnitCode = unitCode(row.uomId);
+          const unitVariance = Boolean(selectedLine) && row.uomId !== ''
+            && selectedLine!.uomId != null && row.uomId !== selectedLine!.uomId;
 
           return (
             <Box
@@ -874,7 +973,7 @@ const CustomerAwardWorkspace: React.FC<CustomerAwardWorkspaceProps> = ({
 
               <Divider sx={{ my: 1.5 }} />
 
-              <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: '2fr 1fr 1fr 1fr' }, gap: 1.5 }}>
+              <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: '2fr 1fr 1fr 1fr 1fr' }, gap: 1.5 }}>
                 <FormControl fullWidth size="small" error={Boolean(rowErrors.quoteItem)}>
                   <InputLabel id={`quote-line-${row.clientId}`}>Quote line</InputLabel>
                   <Select
@@ -909,6 +1008,42 @@ const CustomerAwardWorkspace: React.FC<CustomerAwardWorkspaceProps> = ({
                   slotProps={{ htmlInput: { min: 0, step: 'any', 'aria-label': 'Quantity the buyer ordered' } }}
                 />
 
+                {/*
+                  FR-COM-04. The unit that quantity is measured in, taken from the buyer's PO.
+                  Left blank until someone states it: the quantity means nothing without it, and
+                  seeding it from the quotation is exactly what made "10 boxes" match "10 each".
+                */}
+                <FormControl fullWidth size="small">
+                  <InputLabel id={`buyer-uom-${row.clientId}`}>Buyer unit</InputLabel>
+                  <Select<number | ''>
+                    labelId={`buyer-uom-${row.clientId}`}
+                    label="Buyer unit"
+                    value={units.some((unit) => unit.uomId === row.uomId) ? row.uomId : ''}
+                    onChange={(event) => updateRow(row.clientId, {
+                      uomId: event.target.value === '' ? '' : Number(event.target.value),
+                    })}
+                    disabled={busy}
+                  >
+                    <MenuItem value=""><em>Not stated on the PO</em></MenuItem>
+                    {units.map((unit) => (
+                      <MenuItem key={unit.uomId} value={unit.uomId}>
+                        {unit.uomCode} — {unit.uomName}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                  <Typography
+                    variant="caption"
+                    color={row.statedUnitOfMeasure && row.uomId === '' ? 'warning.main' : 'text.secondary'}
+                    sx={{ mx: 1.75, mt: 0.5 }}
+                  >
+                    {row.statedUnitOfMeasure && row.uomId === ''
+                      ? `PO says "${row.statedUnitOfMeasure}" — not a configured unit`
+                      : selectedLine
+                        ? `You quoted in ${selectedLine.uomCode || 'no stated unit'}`
+                        : 'From the buyer PO'}
+                  </Typography>
+                </FormControl>
+
                 <TextField
                   required
                   size="small"
@@ -938,20 +1073,30 @@ const CustomerAwardWorkspace: React.FC<CustomerAwardWorkspaceProps> = ({
                 />
               </Box>
 
-              {(priceVariance || quantityVariance) && (
+              {(priceVariance || quantityVariance || unitVariance) && (
                 <Stack direction="row" spacing={1} sx={{ mt: 1.5, flexWrap: 'wrap', gap: 1 }}>
                   {priceVariance && (
                     <Chip
                       size="small"
                       color="warning"
-                      label={`Price differs — you quoted ${selectedLine!.unitPrice}, buyer ordered ${row.unitPrice}`}
+                      label={`Price differs beyond the ${tolerances.priceTolerancePercent}% tolerance — `
+                        + `you quoted ${selectedLine!.unitPrice}, buyer ordered ${row.unitPrice}`}
                     />
                   )}
                   {quantityVariance && (
                     <Chip
                       size="small"
                       color="info"
-                      label={`Quantity differs — ${selectedLine!.remainingQuantity} remaining, buyer ordered ${row.orderedQuantity}`}
+                      label={`Quantity differs — buyer ordered ${row.orderedQuantity}`
+                        + `${buyerUnitCode ? ` ${buyerUnitCode}` : ''}, awarding ${row.awardedQuantity}`}
+                    />
+                  )}
+                  {unitVariance && (
+                    <Chip
+                      size="small"
+                      color="warning"
+                      label={`Unit differs — you quoted in ${selectedLine!.uomCode || 'a different unit'}, `
+                        + `buyer ordered in ${buyerUnitCode || 'another unit'}`}
                     />
                   )}
                 </Stack>

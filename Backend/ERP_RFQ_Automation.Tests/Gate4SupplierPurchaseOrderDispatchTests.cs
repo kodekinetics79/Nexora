@@ -92,4 +92,49 @@ public sealed class Gate4SupplierPurchaseOrderDispatchTests
 
         Assert.Contains("fully covered", refusal.Message, StringComparison.OrdinalIgnoreCase);
     }
+
+    /// <summary>
+    /// Decision register R31. A supplier who says no releases the demand they were covering.
+    ///
+    /// <para>This is the inverse of the test above, and it is the one that catches the defect the
+    /// acknowledgement feature introduced. Recording REJECTED does not move the order off SENT —
+    /// only an ACCEPTED answer advances the status — so before this fix the order stayed inside
+    /// the committed-supply set and kept netting its full quantity off the RFQ line. At the same
+    /// time both SLA sweeps deliberately skip a rejected order, because chasing a supplier who has
+    /// already refused is noise. Three alarms went quiet, the line still reported itself covered,
+    /// and re-sourcing was refused as "already fully covered". The material was never bought and
+    /// nothing anywhere said so.</para>
+    ///
+    /// <para>Asserting on the refusal rather than on a status is deliberate: the failure mode is
+    /// commercial, not structural. The order can sit at SENT forever without hurting anyone — what
+    /// hurts is a buyer being told there is nothing to do. Delete the acknowledgement clause from
+    /// <c>SupplierPurchaseOrderStatuses.IsCommittedSupply</c> and this test fails on a
+    /// <c>ProcurementConflictException</c> that should no longer be thrown.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_rejected_order_releases_the_demand_so_the_line_can_be_sourced_again()
+    {
+        using var fixture = new ProcurementScenario();
+        var released = await fixture.CreatePurchaseOrderAsync("reject-release", quantity: 8m);
+        Assert.Equal(SupplierPurchaseOrderStatuses.Sent, released.Status);
+
+        var rejected = await fixture.Execute(service => service.AcknowledgePurchaseOrderAsync(
+            new AcknowledgeSupplierPurchaseOrderCommand(
+                fixture.BusinessUnitId, released.Id, released.Version,
+                SupplierAcknowledgementStatuses.Rejected,
+                // SYNTHETIC supplier contact, not a real person or company.
+                "Supplier contact (synthetic)", "reject-release-ack", "buyer@tenant.test",
+                "corr-reject-release", null, null, "Cannot supply at the agreed price.")));
+
+        // The rejection is recorded, and the order deliberately does NOT change status: there is no
+        // REJECTED state on the ladder, and inventing one would need a migration. The coverage
+        // question is answered by the acknowledgement column instead.
+        Assert.Equal(SupplierAcknowledgementStatuses.Rejected, rejected.AcknowledgementStatus);
+        Assert.Equal(SupplierPurchaseOrderStatuses.Sent, rejected.Status);
+
+        // The behaviour that matters: the buyer can now go and buy the material somewhere else.
+        var resourced = await fixture.Execute(
+            service => service.CreateSolicitationAsync(fixture.Solicitation("reject-release-resource")));
+        Assert.NotNull(resourced);
+    }
 }

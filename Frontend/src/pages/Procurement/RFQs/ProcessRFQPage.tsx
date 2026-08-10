@@ -66,6 +66,21 @@ interface ProcessItem extends AcceptedLeadItemDTO {
   selectedName?: string; // To show the name of the selected product/quote
 }
 
+/**
+ * A lead line whose quantity the source document actually stated, as a number the RFQ payload can
+ * carry. `AcceptedLeadItemDTO.quantity` is `number | null` because "the document stated no readable
+ * quantity" is a real outcome of extraction, and it is NOT the same thing as zero — a line nobody
+ * could read a quantity from must be answered by a person, not silently sourced for none.
+ *
+ * This is written as a type predicate rather than a plain boolean so the submit path can map over
+ * the filtered lines and hand `RfqitemCreatePayload` a proven `number`, instead of asserting one
+ * with `!` and hoping the guard above it still runs. The three conditions are the same ones the
+ * server enforces, so the message the user sees here is the message they would have got from a
+ * round-trip 400.
+ */
+const hasStatedQuantity = (item: ProcessItem): item is ProcessItem & { quantity: number } =>
+  item.quantity !== null && Number.isInteger(item.quantity) && item.quantity >= 1;
+
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
 interface ProductSelectorProps {
@@ -282,7 +297,8 @@ const ItemRow: React.FC<ItemRowProps> = React.memo(({ item, index, onUpdate, onR
         partNo: item.manufacturerPartNumber,
         manufacturer: item.manufacturerName,
         businessUnitId: businessUnitId,
-        quantity: item.quantity,
+        // Not stated stays not stated: sending 0 would ask inventory to price a line for none.
+        quantity: item.quantity ?? undefined,
       });
       if (res.hasExactMatch && res.exactMatch) {
         const exact = res.exactMatch;
@@ -293,7 +309,10 @@ const ItemRow: React.FC<ItemRowProps> = React.memo(({ item, index, onUpdate, onR
           qtyOnHand: exact.qtyOnHand ?? 0,
           availableToPromise: exact.availableToPromise ?? 0,
           incomingAvailable: exact.incomingAvailable ?? 0,
-          projectedShortage: exact.projectedShortage ?? Math.max(0, item.quantity - (exact.availableToPromise ?? 0)),
+          // A shortage cannot be derived from a quantity nobody could read. undefined renders as
+          // an unknown; 0 would render as "none short", which is a claim about stock we cannot make.
+          projectedShortage: exact.projectedShortage
+            ?? (item.quantity === null ? undefined : Math.max(0, item.quantity - (exact.availableToPromise ?? 0))),
           availabilityStatus: exact.availabilityStatus,
           leadTimeDays: exact.leadTimeDays,
           expectedAvailableOn: exact.expectedAvailableOn,
@@ -496,9 +515,10 @@ const ItemRow: React.FC<ItemRowProps> = React.memo(({ item, index, onUpdate, onR
         <TextField
           size="small"
           type="number"
-          value={item.quantity}
+          value={item.quantity ?? ''}
           onChange={handleQtyChange}
-          error={!Number.isInteger(item.quantity) || item.quantity < 1}
+          error={item.quantity === null || !Number.isInteger(item.quantity) || item.quantity < 1}
+          helperText={item.quantity === null ? 'Not stated' : undefined}
           slotProps={{ htmlInput: { min: 1, step: 1, 'aria-label': `Quantity for ${item.productShortName || 'item'}` } }}
           sx={{ width: 80, '& .MuiInputBase-root': { height: 32, fontSize: '0.75rem', fontWeight: 700 } }}
         />
@@ -807,7 +827,7 @@ const ItemDetailsDialog: React.FC<{
         name: item.productShortName,
         partNo: item.manufacturerPartNumber,
         manufacturer: item.manufacturerName,
-        quantity: item.quantity,
+        quantity: item.quantity ?? undefined,
       });
       setMatchingResult(res);
     } catch (e) {
@@ -1116,7 +1136,7 @@ const ProcessRFQPage: React.FC = () => {
               partNo: it.manufacturerPartNumber,
               manufacturer: it.manufacturerName,
               businessUnitId: userData?.businessUnitId,
-              quantity: it.quantity,
+              quantity: it.quantity ?? undefined,
             });
             if (res.hasExactMatch && res.exactMatch) {
               const exact = res.exactMatch;
@@ -1127,7 +1147,8 @@ const ProcessRFQPage: React.FC = () => {
                 qtyOnHand: exact.qtyOnHand ?? 0,
                 availableToPromise: exact.availableToPromise ?? 0,
                 incomingAvailable: exact.incomingAvailable ?? 0,
-                projectedShortage: exact.projectedShortage ?? Math.max(0, it.quantity - (exact.availableToPromise ?? 0)),
+                projectedShortage: exact.projectedShortage
+                  ?? (it.quantity === null ? undefined : Math.max(0, it.quantity - (exact.availableToPromise ?? 0))),
                 availabilityStatus: exact.availabilityStatus,
                 leadTimeDays: exact.leadTimeDays,
                 expectedAvailableOn: exact.expectedAvailableOn,
@@ -1250,7 +1271,8 @@ const ProcessRFQPage: React.FC = () => {
 
     // The backend requires a whole-number Quantity >= 1 on every line; catch it here so the user
     // fixes the field instead of getting a round-trip 400.
-    const invalidQtyCount = includedItems.filter(i => !Number.isInteger(i.quantity) || i.quantity < 1).length;
+    const quantifiedItems = includedItems.filter(hasStatedQuantity);
+    const invalidQtyCount = includedItems.length - quantifiedItems.length;
     if (invalidQtyCount > 0) {
       toast.error(`${invalidQtyCount === 1 ? '1 line needs' : `${invalidQtyCount} lines need`} a whole-number quantity of at least 1 before the RFQ can be created.`);
       return;
@@ -1278,7 +1300,7 @@ const ProcessRFQPage: React.FC = () => {
       rfqtype: lead.rfqtype,
       customerId: matchedCustomer?.id,
       leadId: lead.id,
-      rfqitems: includedItems.map(item => ({
+      rfqitems: quantifiedItems.map(item => ({
         companyRef: item.companyRef,
         customerAccountPortalId: item.customerAccountPortalId,
         customerRfqno: item.customerRfqno,

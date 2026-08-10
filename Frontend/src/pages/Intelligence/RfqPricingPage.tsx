@@ -171,7 +171,17 @@ const RfqPricingPage: React.FC = () => {
           const raw = prices[line.rfqItemId] ?? '';
           const typedPrice = parseUserNumber(raw);
           const priceInvalid = raw.trim() !== '' && (typedPrice == null || typedPrice <= 0);
-          const belowFloor = typedPrice != null && line.floorUnitPrice != null && typedPrice < line.floorUnitPrice;
+          // A price and a floor can only be compared when they are the same money. The floor is
+          // the AWARDED SUPPLIER'S landed cost, which may be quoted in a different currency from
+          // the RFQ line, so comparing the bare numbers would be a number compared without its
+          // unit. When they differ the server converts through an approved FX rate at the send
+          // gate; here we say so rather than guess.
+          const floorComparable =
+            line.floorUnitPrice != null &&
+            line.floorCurrency != null &&
+            currency != null &&
+            line.floorCurrency.toUpperCase() === currency.toUpperCase();
+          const belowFloor = floorComparable && typedPrice != null && typedPrice < line.floorUnitPrice!;
           const lineTotal = typedPrice != null && typedPrice > 0 && line.quantity != null && line.quantity > 0
             ? typedPrice * line.quantity
             : null;
@@ -232,12 +242,12 @@ const RfqPricingPage: React.FC = () => {
                     priceInvalid
                       ? 'Enter a price greater than zero.'
                       : belowFloor
-                        ? `Below ${formatMoney(line.floorUnitPrice, currency)} — you could lose money on this line.`
-                        : line.floorUnitPrice != null
-                          ? `Try not to go below ${formatMoney(line.floorUnitPrice, currency)}.`
-                          : raw.trim() === ''
-                            ? 'No evidence-backed suggestion; this line is excluded from shadow totals.'
-                            : ' '
+                        ? `Below ${formatMoney(line.floorUnitPrice, line.floorCurrency)} — this is under what the goods cost you.`
+                        : floorComparable
+                          ? `Cost floor is ${formatMoney(line.floorUnitPrice, line.floorCurrency)} — the awarded supplier's landed cost.`
+                          : line.floorUnitPrice != null
+                            ? `Cost floor is ${formatMoney(line.floorUnitPrice, line.floorCurrency)} while this line is priced in ${currency ?? 'an unidentified currency'}; an approved exchange rate is needed before the two can be compared. The send will be held until then.`
+                            : 'No cost floor established — no supplier award has been recorded for this line, so there is nothing to check this price against.'
                   }
                   slotProps={{
                     input: {
@@ -255,8 +265,9 @@ const RfqPricingPage: React.FC = () => {
                   <Typography variant="caption" sx={{ fontWeight: 800, color: 'text.disabled', textTransform: 'uppercase', display: 'block', fontSize: '0.65rem' }}>
                     Suggested margin
                   </Typography>
+                  {/* marginPct is already a PERCENT (20 means 20%), so it is not scaled again. */}
                   <Typography sx={{ fontWeight: 800, fontSize: '0.85rem' }}>
-                    {line.marginPct != null ? `${Math.round(line.marginPct * 100)}%` : '—'}
+                    {line.marginPct != null ? `${Math.round(line.marginPct)}%` : 'No cost floor'}
                   </Typography>
                 </Box>
 

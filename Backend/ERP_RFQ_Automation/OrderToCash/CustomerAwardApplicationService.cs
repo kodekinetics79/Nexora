@@ -21,6 +21,12 @@ public interface ICustomerAwardApplicationService
         long purchaseOrderId, long? quoteId = null, CancellationToken cancellationToken = default);
     Task<CustomerPurchaseOrderView> CreatePurchaseOrderAsync(long businessUnitId, string idempotencyKey,
         string correlationId, CreateCustomerPurchaseOrderCommand command, string actor, CancellationToken cancellationToken = default);
+    Task<CustomerPurchaseOrderView> CancelPurchaseOrderAsync(long businessUnitId, long purchaseOrderId,
+        string idempotencyKey, string correlationId, CancelCustomerPurchaseOrderCommand command, string actor,
+        CancellationToken cancellationToken = default);
+    Task<CustomerPoDifferenceAcceptanceView> AcceptPurchaseOrderDifferencesAsync(long businessUnitId,
+        long purchaseOrderId, string idempotencyKey, string correlationId,
+        AcceptCustomerPoDifferencesCommand command, string actor, CancellationToken cancellationToken = default);
     Task<CustomerAwardView> CreateAwardAsync(long businessUnitId, string idempotencyKey,
         string correlationId, CreateCustomerAwardCommand command, string actor, CancellationToken cancellationToken = default);
     Task<CustomerAwardView> ConfirmAwardAsync(long businessUnitId, long awardId, string idempotencyKey,
@@ -74,6 +80,39 @@ public sealed record CreateCustomerAwardAllocationCommand(
 
 public sealed record VersionedCustomerAwardCommand(long ExpectedVersion);
 public sealed record CancelCustomerAwardCommand(long ExpectedVersion, string Reason);
+
+/// <summary>
+/// FR-COM-02. Withdraws a captured customer purchase order.
+///
+/// <para>Until this existed there was no way back on either document in the pair: the workspace
+/// confirms an award and converts it to a sales order in one click, and <c>CancelAwardAsync</c>
+/// then refuses because the award is <c>ORDERED</c>. An operator who mis-keyed the buyer's unit
+/// price had no path back, and <c>CustomerPurchaseOrder.CancellationReason</c> — with a CHECK
+/// constraint permitting it only in the <c>CANCELLED</c> status — had no writer at all.</para>
+///
+/// <para>The reason is mandatory and stored, not merely logged: it is the CHECK constraint's other
+/// half, and it is what a reviewer reads when the buyer sends the same PO number again.</para>
+/// </summary>
+public sealed record CancelCustomerPurchaseOrderCommand(long ExpectedVersion, string Reason);
+
+/// <summary>
+/// FR-COM-04. A named person accepting that a buyer PO disagrees with the quotation on price, part
+/// or unit, for one named award, and asking for the sales order anyway.
+///
+/// <para>The discrepancy report used to be produced only by the two read projections, so nothing in
+/// the write path consulted it and — with one-click confirm-and-convert — the review screen was
+/// reachable only after the sales order had been raised. The acceptance exists so the gate that now
+/// blocks conversion is one a person can pass DELIBERATELY, and never one they can miss.</para>
+///
+/// <para><b>Why it is a command on the PURCHASE ORDER and not on the award.</b> The decision is
+/// about the buyer's document against our quotation, which is what the Client PO review screen
+/// shows and what the reviewer is looking at. It also leaves the confirmed award untouched: a
+/// confirmed award is immutable apart from becoming ORDERED or CANCELLED — a rule enforced in the
+/// database by <c>nexora_otc_award_transition_guard</c> — and a signature written onto it would
+/// have had to punch a hole in that guard. <see cref="CustomerAwardId"/> keeps the acceptance
+/// bound to the one award it was given for.</para>
+/// </summary>
+public sealed record AcceptCustomerPoDifferencesCommand(long ExpectedVersion, long CustomerAwardId, string Reason);
 
 public sealed record CustomerPurchaseOrderLineView(
     long Id,
@@ -168,6 +207,18 @@ public sealed record ClientPurchaseOrderInboxRow(
     long? CustomerOrderId,
     string? CustomerOrderNumber);
 
+/// <summary>
+/// One buyer line beside the quotation line it was matched to, as the reviewer sees it.
+/// </summary>
+/// <param name="PurchaseOrderUomId">
+/// The unit the BUYER ordered in, or null when their document stated none. Never defaulted from
+/// the quotation: this is one half of the comparison <see cref="Differences"/> reports on.
+/// </param>
+/// <param name="PurchaseOrderUomCode">
+/// The buyer's unit as a word the reviewer can read. Null means the PO stated no unit, and the
+/// screen renders that as a visible gap rather than borrowing the quoted unit to fill the column.
+/// </param>
+/// <param name="QuotedUomId">The unit WE quoted in, from the RFQ line or the catalogue product.</param>
 public sealed record ClientPurchaseOrderMatchLineView(
     long CustomerPurchaseOrderLineId,
     string ExternalLineReference,
@@ -181,9 +232,28 @@ public sealed record ClientPurchaseOrderMatchLineView(
     decimal? AcceptedQuantity,
     string MatchStatus,
     IReadOnlyList<string> Differences,
+    int? PurchaseOrderUomId = null,
+    string? PurchaseOrderUomCode = null,
+    int? QuotedUomId = null,
+    string? QuotedUomCode = null,
     string? CustomerItemCode = null,
     string? ManufacturerName = null,
     string? ManufacturerPartNumber = null);
+
+/// <summary>
+/// FR-COM-04. The record that an award's blocking differences were accepted by a named person.
+/// The keys in <see cref="AcceptedDifferences"/> are
+/// <c>"{customerAwardId}:{purchaseOrderLineId}:{DIFFERENCE_CODE}"</c>, so accepting one line's price
+/// gap can never silently cover another line's, or another award's on the same purchase order.
+/// </summary>
+public sealed record CustomerPoDifferenceAcceptanceView(
+    long CustomerPurchaseOrderId,
+    long CustomerAwardId,
+    long Version,
+    IReadOnlyList<string> AcceptedDifferences,
+    string Reason,
+    string AcceptedBy,
+    DateTime AcceptedOn);
 
 /// <summary>
 /// FR-COM-02. A request to match buyer lines against one candidate quotation. The lines may be a
@@ -211,6 +281,19 @@ public sealed record QuoteLineMatchProposalView(
     int ReviewCount,
     IReadOnlyList<PurchaseOrderLineMatchProposal> Lines);
 
+/// <param name="Version">
+/// The purchase order's version, which the cancel command requires as its expected version.
+/// </param>
+/// <param name="AwardVersion">
+/// The award's version, which the accept-differences and convert commands require. Without it the
+/// review screen could show the gate but could not let anyone through it.
+/// </param>
+/// <param name="BlockingDifferences">
+/// The <c>"{lineId}:{CODE}"</c> pairs that currently refuse order conversion, minus anything already
+/// accepted. Empty means the award may be converted.
+/// </param>
+/// <param name="AcceptedDifferences">What a named person has already taken responsibility for.</param>
+/// <param name="CancellationReason">Why this purchase order was withdrawn. Null unless CANCELLED.</param>
 public sealed record ClientPurchaseOrderMatchView(
     ClientPurchaseOrderInboxRow Header,
     long CustomerId,
@@ -221,7 +304,11 @@ public sealed record ClientPurchaseOrderMatchView(
     long? AwardId,
     string? AwardNumber,
     string? AwardStatus,
-    IReadOnlyList<ClientPurchaseOrderMatchLineView> Lines);
+    IReadOnlyList<ClientPurchaseOrderMatchLineView> Lines,
+    long? AwardVersion = null,
+    IReadOnlyList<string>? BlockingDifferences = null,
+    IReadOnlyList<string>? AcceptedDifferences = null,
+    string? CancellationReason = null);
 
 public sealed class CustomerAwardConflictException(string message) : InvalidOperationException(message);
 
@@ -237,7 +324,9 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
         EnsureTenant(businessUnitId);
         var quote = await _db.Quotes
             .AsNoTracking()
-            .Include(x => x.QuoteItems).ThenInclude(x => x.Product)
+            // Both sources of the quoted unit, so QuotedUomCode can never return null for a unit
+            // QuotedUomId reports — a code missing beside an id is a gap that reads like an error.
+            .Include(x => x.QuoteItems).ThenInclude(x => x.Product).ThenInclude(x => x!.Uom)
             .Include(x => x.QuoteItems).ThenInclude(x => x.Rfqitem).ThenInclude(x => x!.Uom)
             .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.Id == quoteId, cancellationToken)
             ?? throw new KeyNotFoundException("Quote was not found in this tenant.");
@@ -261,8 +350,8 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
                 item.Quantity,
                 confirmed,
                 Math.Max(0m, item.Quantity - confirmed),
-                item.Rfqitem?.UomId ?? item.Product?.UomId,
-                item.Rfqitem?.Uom?.UomCode,
+                QuotedUomId(item),
+                QuotedUomCode(item),
                 item.UnitPrice);
         }).ToList();
 
@@ -341,10 +430,14 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
         var purchaseOrder = await _db.CustomerPurchaseOrders.AsNoTracking()
             .Include(x => x.Customer).Include(x => x.Currency).Include(x => x.CommercialCase)
             .Include(x => x.Lines).ThenInclude(x => x.Product)
+            // FR-COM-04. Both units, so the screen can state what each number is measured in.
+            // A quantity rendered without its unit is the wiring contract's failure #12: "10"
+            // against "10" reads as agreement whether the buyer meant boxes or each.
+            .Include(x => x.Lines).ThenInclude(x => x.Uom)
             .Include(x => x.Lines).ThenInclude(x => x.AwardAllocations)
-                .ThenInclude(x => x.QuoteItem).ThenInclude(x => x.Rfqitem)
+                .ThenInclude(x => x.QuoteItem).ThenInclude(x => x.Rfqitem).ThenInclude(x => x!.Uom)
             .Include(x => x.Lines).ThenInclude(x => x.AwardAllocations)
-                .ThenInclude(x => x.QuoteItem).ThenInclude(x => x.Product)
+                .ThenInclude(x => x.QuoteItem).ThenInclude(x => x.Product).ThenInclude(x => x!.Uom)
             .Include(x => x.Lines).ThenInclude(x => x.AwardAllocations)
                 .ThenInclude(x => x.Award).ThenInclude(x => x.Quote)
             .Include(x => x.Awards).ThenInclude(x => x.Quote)
@@ -358,6 +451,10 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
             .Select(x => new { x.Id, x.OrderNo }).SingleOrDefaultAsync(cancellationToken);
         // FR-COM-04. The tenant's tolerances decide what counts as a difference on this screen.
         var policy = await _db.ResolveAsync(businessUnitId, cancellationToken);
+        // Each line's blocking keys are stamped with the award that ACTUALLY allocated it, not with
+        // the header award: on a purchase order split across two awards those differ, and a key the
+        // conversion gate never computes would show as a blocker nobody could clear.
+        var blockingByLine = new List<string>();
         var lines = purchaseOrder.Lines.OrderBy(x => x.Id).Select(line =>
         {
             var allocation = line.AwardAllocations.Where(x => x.Award.Status != CustomerAwardStatuses.Cancelled)
@@ -366,12 +463,20 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
             var differences = LineDifferences(line, allocation, quoteLine, policy);
             var status = allocation is null ? "REVIEW_REQUIRED"
                 : differences.Count == 0 ? "EXACT_MATCH"
-                : differences.Count == 1 && differences[0] == "QUANTITY_DISCREPANCY" ? "PARTIAL_MATCH"
+                : differences.Count == 1 && differences[0] == CustomerPurchaseOrderDifferences.QuantityDiscrepancy
+                    ? "PARTIAL_MATCH"
                 : "DISCREPANCY";
+            if (allocation is not null)
+                blockingByLine.AddRange(differences
+                    .Where(CustomerPurchaseOrderDifferences.BlocksOrderConversion.Contains)
+                    .Select(code => DifferenceKey(allocation.CustomerAwardId, line.Id, code)));
             return new ClientPurchaseOrderMatchLineView(line.Id, line.ExternalLineReference,
                 line.Description, line.OrderedQuantity, line.UnitPrice, quoteLine?.Id,
                 quoteLine?.ItemDescription, quoteLine?.Quantity, quoteLine?.UnitPrice,
                 allocation?.AwardedQuantity, status, differences,
+                line.UomId, line.Uom?.UomCode,
+                quoteLine is null ? null : QuotedUomId(quoteLine),
+                quoteLine is null ? null : QuotedUomCode(quoteLine),
                 line.CustomerItemCode, line.ManufacturerName, line.ManufacturerPartNumber);
         }).ToList();
         var discrepancyCount = lines.Count(x => x.Differences.Count > 0);
@@ -382,9 +487,14 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
             purchaseOrder.ExternalPoNumber, purchaseOrder.Customer.Name,
             purchaseOrder.CommercialCase.MasterReference, purchaseOrder.ReceivedOn, purchaseOrder.Status,
             award?.QuoteId, award?.Quote.QuoteNo, outcome, discrepancyCount, order?.Id, order?.OrderNo);
+        // FR-COM-04. The gate ConvertToOrderAsync applies, computed here so the reviewer sees the
+        // same answer BEFORE pressing the button rather than as a 409 afterwards.
+        var accepted = await AcceptedDifferencesAsync(businessUnitId, purchaseOrder.Id, cancellationToken);
+        var blocking = blockingByLine.Where(key => !accepted.Contains(key)).ToList();
         return new ClientPurchaseOrderMatchView(header, purchaseOrder.CustomerId, purchaseOrder.CurrencyId,
             purchaseOrder.Currency.Code, purchaseOrder.PoDate, purchaseOrder.Version, award?.Id,
-            award?.AwardNumber, award?.Status, lines);
+            award?.AwardNumber, award?.Status, lines, award?.Version, blocking,
+            accepted.OrderBy(x => x, StringComparer.Ordinal).ToList(), purchaseOrder.CancellationReason);
     }
 
     /// <summary>
@@ -492,22 +602,60 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
         CustomerAwardLineAllocation? allocation, QuoteItem? quoteLine, CommercialMatchingPolicy policy)
     {
         var differences = new List<string>();
-        if (allocation is null) differences.Add("UNQUOTED_OR_UNMATCHED_LINE");
+        if (allocation is null) differences.Add(CustomerPurchaseOrderDifferences.UnquotedOrUnmatchedLine);
         if (allocation is not null && !CommercialMatchingTolerance.QuantityMatches(
                 allocation.AwardedQuantity, line.OrderedQuantity, policy))
-            differences.Add("QUANTITY_DISCREPANCY");
+            differences.Add(CustomerPurchaseOrderDifferences.QuantityDiscrepancy);
         // NOT tolerance-tested. A partial award is a decision someone made, not rounding: the
         // remaining quantity stays open on the quotation and must stay visible as such.
         if (quoteLine is not null && allocation is not null && allocation.AwardedQuantity < quoteLine.Quantity)
-            differences.Add("PARTIAL_QUOTE_AWARD");
+            differences.Add(CustomerPurchaseOrderDifferences.PartialQuoteAward);
         if (quoteLine is not null && PartIdentityConflicts(line, quoteLine))
-            differences.Add("PART_DISCREPANCY");
-        if (!line.UnitPrice.HasValue) differences.Add("PO_PRICE_NOT_PROVIDED");
+            differences.Add(CustomerPurchaseOrderDifferences.PartDiscrepancy);
+        // FR-COM-04, wiring contract failure #12: a number compared without its unit.
+        //
+        // Quantity and price were compared as bare decimals, so a PO for "10 boxes" against a quote
+        // of "10 each" classified as EXACT_MATCH, raised no difference, and produced a sales order
+        // for 10 EACH at our per-each price. Neither figure means anything without the unit it is
+        // measured in, and there is no conversion factor between two tenant units to appeal to —
+        // so the honest answer is to REPORT the disagreement and let a person resolve it, never to
+        // guess a factor.
+        //
+        // Only a stated difference is a difference. A PO that names no unit is silent, not
+        // contradictory — the same rule PartIdentityConflicts applies to part numbers — and a
+        // quotation whose RFQ line and product both name no unit gives nothing to compare against.
+        if (quoteLine is not null && line.UomId.HasValue && QuotedUomId(quoteLine) is { } quotedUom
+            && line.UomId.Value != quotedUom)
+            differences.Add(CustomerPurchaseOrderDifferences.UomDiscrepancy);
+        if (!line.UnitPrice.HasValue) differences.Add(CustomerPurchaseOrderDifferences.PoPriceNotProvided);
         else if (quoteLine is not null && !CommercialMatchingTolerance.PriceMatches(
                      line.UnitPrice.Value, quoteLine.UnitPrice, policy))
-            differences.Add("PRICE_DISCREPANCY");
+            differences.Add(CustomerPurchaseOrderDifferences.PriceDiscrepancy);
         return differences;
     }
+
+    /// <summary>
+    /// The unit WE quoted this line in.
+    ///
+    /// <para>A <see cref="QuoteItem"/> carries no unit of its own: the quantity it prices is the
+    /// RFQ line's quantity, so the RFQ line's unit is the quoted unit, and the catalogue product's
+    /// unit stands in only when the RFQ line named none. This is not a fallback that hides a gap —
+    /// when both are silent the answer is null, "we quoted no unit", which the match screen renders
+    /// as a visible gap and which raises no false UOM difference against the buyer.</para>
+    /// </summary>
+    private static int? QuotedUomId(QuoteItem quoteLine)
+        => quoteLine.Rfqitem?.UomId ?? quoteLine.Product?.UomId;
+
+    private static string? QuotedUomCode(QuoteItem quoteLine)
+        => quoteLine.Rfqitem?.UomId is not null ? quoteLine.Rfqitem.Uom?.UomCode : quoteLine.Product?.Uom?.UomCode;
+
+    /// <summary>
+    /// One difference, on one buyer line, under one award. Accepting a price gap on line 3 must
+    /// never license the same gap on line 7, nor a second award's gap on the same line, so the
+    /// acceptance ledger records the triple rather than the bare code.
+    /// </summary>
+    private static string DifferenceKey(long customerAwardId, long purchaseOrderLineId, string difference)
+        => $"{customerAwardId}:{purchaseOrderLineId}:{difference}";
 
     /// <summary>
     /// True when the part the buyer ordered is demonstrably not the part we quoted — either a
@@ -603,6 +751,143 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
             await AddAuditAsync(businessUnitId, OrderToCashAggregateTypes.CustomerPurchaseOrder, purchaseOrder.Id,
                 purchaseOrder.Version, OrderToCashCommands.CreatePurchaseOrder, null, purchaseOrder.Status,
                 actor, null, requestHash, idempotencyKey, correlationId, result, now, ct);
+            await _db.SaveChangesAsync(ct);
+            return result;
+        }, cancellationToken);
+
+    /// <summary>
+    /// FR-COM-02. Withdraws a captured customer purchase order and records why.
+    ///
+    /// <para>This is the writer <c>CustomerPurchaseOrder.CancellationReason</c> never had, and the
+    /// only way the <c>CANCELLED</c> status — declared in <see cref="CustomerPurchaseOrderStatuses"/>,
+    /// permitted by <c>CK_CustomerPurchaseOrders_Status</c>, and required by
+    /// <c>CK_CustomerPurchaseOrders_Cancellation</c> before a reason may be stored — becomes
+    /// reachable. It is what makes the guard in <see cref="CreateAwardAsync"/> against adding an
+    /// award to a cancelled PO a guard over a state a row can actually hold.</para>
+    ///
+    /// <para><b>The order of the two documents.</b> The award is cancelled first, never implicitly
+    /// by this command: an award is a commitment to a customer with its own quantity ledger and its
+    /// own reason, and withdrawing the paperwork it was read from must not silently release it.
+    /// So this refuses while ANY award on the order is not cancelled, and names the one that is in
+    /// the way.</para>
+    /// </summary>
+    public Task<CustomerPurchaseOrderView> CancelPurchaseOrderAsync(long businessUnitId, long purchaseOrderId,
+        string idempotencyKey, string correlationId, CancelCustomerPurchaseOrderCommand command, string actor,
+        CancellationToken cancellationToken = default)
+        => InTransactionAsync(async ct =>
+        {
+            ValidateCommandIdentity(businessUnitId, idempotencyKey, correlationId, actor);
+            if (string.IsNullOrWhiteSpace(command.Reason))
+                throw new ArgumentException("A cancellation reason is required.");
+            var reason = command.Reason.Trim();
+            if (reason.Length > 500)
+                throw new ArgumentException("A cancellation reason must be 500 characters or fewer.");
+            var requestHash = Hash(new { purchaseOrderId, command.ExpectedVersion, Reason = reason });
+            await LockTenantAsync(businessUnitId, ct);
+            var replay = await ReplayAsync<CustomerPurchaseOrderView>(businessUnitId,
+                OrderToCashCommands.CancelPurchaseOrder, idempotencyKey, requestHash, ct);
+            if (replay is not null) return replay;
+
+            await LockPurchaseOrderAsync(businessUnitId, purchaseOrderId, ct);
+            var purchaseOrder = await _db.CustomerPurchaseOrders
+                .Include(x => x.Lines).Include(x => x.Awards)
+                .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.Id == purchaseOrderId, ct)
+                ?? throw new KeyNotFoundException("Customer PO was not found in this tenant.");
+            EnsureVersion(purchaseOrder.Version, command.ExpectedVersion, "customer PO");
+            if (purchaseOrder.Status == CustomerPurchaseOrderStatuses.Cancelled)
+                throw new CustomerAwardConflictException("The customer PO is already cancelled.");
+
+            var liveAward = purchaseOrder.Awards
+                .Where(x => x.Status != CustomerAwardStatuses.Cancelled)
+                .OrderByDescending(x => x.Id).FirstOrDefault();
+            if (liveAward is not null)
+                throw new CustomerAwardConflictException(
+                    $"Award {liveAward.AwardNumber} is {liveAward.Status} against this customer PO. "
+                    + "Cancel the award first — and if it has already become a sales order, that order "
+                    + "has to be reversed before either document can be withdrawn.");
+
+            var now = DateTime.UtcNow;
+            var previousState = purchaseOrder.Status;
+            purchaseOrder.Status = CustomerPurchaseOrderStatuses.Cancelled;
+            purchaseOrder.CancellationReason = reason;
+            purchaseOrder.Version++;
+            purchaseOrder.ModifiedOn = now;
+            purchaseOrder.ModifiedBy = actor;
+            await _db.SaveChangesAsync(ct);
+
+            var result = MapPurchaseOrder(purchaseOrder);
+            await AddAuditAsync(businessUnitId, OrderToCashAggregateTypes.CustomerPurchaseOrder, purchaseOrder.Id,
+                purchaseOrder.Version, OrderToCashCommands.CancelPurchaseOrder, previousState, purchaseOrder.Status,
+                actor, reason, requestHash, idempotencyKey, correlationId, result, now, ct);
+            await _db.SaveChangesAsync(ct);
+            return result;
+        }, cancellationToken);
+
+    /// <summary>
+    /// FR-COM-04. Records that a named person accepts one award's blocking differences against the
+    /// quotation, which is what lets <see cref="ConvertToOrderAsync"/> proceed.
+    ///
+    /// <para>No new column: the acceptance IS the governance ledger entry, written through the same
+    /// audited, idempotent, version-stamped path as every other command in this aggregate. It is a
+    /// command on the PURCHASE ORDER — see <see cref="AcceptCustomerPoDifferencesCommand"/> for why
+    /// — and it moves the purchase order's version, so an acceptance and a concurrent award on the
+    /// same document cannot both believe they saw the same evidence.</para>
+    /// </summary>
+    public Task<CustomerPoDifferenceAcceptanceView> AcceptPurchaseOrderDifferencesAsync(long businessUnitId,
+        long purchaseOrderId, string idempotencyKey, string correlationId,
+        AcceptCustomerPoDifferencesCommand command, string actor,
+        CancellationToken cancellationToken = default)
+        => InTransactionAsync(async ct =>
+        {
+            ValidateCommandIdentity(businessUnitId, idempotencyKey, correlationId, actor);
+            if (command.CustomerAwardId <= 0)
+                throw new ArgumentException("The award whose differences are being accepted is required.");
+            if (string.IsNullOrWhiteSpace(command.Reason))
+                throw new ArgumentException("A reason is required to accept a customer PO difference.");
+            var reason = command.Reason.Trim();
+            if (reason.Length > 500)
+                throw new ArgumentException("A reason must be 500 characters or fewer.");
+            var requestHash = Hash(new { purchaseOrderId, command.ExpectedVersion, command.CustomerAwardId, Reason = reason });
+            await LockTenantAsync(businessUnitId, ct);
+            var replay = await ReplayAsync<CustomerPoDifferenceAcceptanceView>(businessUnitId,
+                OrderToCashCommands.AcceptPurchaseOrderDifferences, idempotencyKey, requestHash, ct);
+            if (replay is not null) return replay;
+
+            await LockPurchaseOrderAsync(businessUnitId, purchaseOrderId, ct);
+            var purchaseOrder = await _db.CustomerPurchaseOrders.Include(x => x.Lines)
+                .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.Id == purchaseOrderId, ct)
+                ?? throw new KeyNotFoundException("Customer PO was not found in this tenant.");
+            EnsureVersion(purchaseOrder.Version, command.ExpectedVersion, "customer PO");
+
+            var award = await LoadAwardForDifferenceCheckAsync(businessUnitId, command.CustomerAwardId, ct);
+            if (award.CustomerPurchaseOrderId != purchaseOrder.Id)
+                throw new ArgumentException("That award belongs to a different customer purchase order.");
+            if (award.Status is not (CustomerAwardStatuses.Draft or CustomerAwardStatuses.Confirmed))
+                throw new CustomerAwardConflictException(
+                    "Differences can only be accepted on an award that has not yet become a sales order.");
+
+            var alreadyAccepted = await AcceptedDifferencesAsync(businessUnitId, purchaseOrder.Id, ct);
+            var policy = await _db.ResolveAsync(businessUnitId, ct);
+            var outstanding = BlockingDifferences(award, policy)
+                .Where(key => !alreadyAccepted.Contains(key)).ToList();
+            // Validation that rejects the wrong values, not merely the impossible ones: an
+            // acceptance of nothing is a signature on a blank page, and it would sit in the ledger
+            // looking like someone had reviewed a difference that was never there.
+            if (outstanding.Count == 0)
+                throw new CustomerAwardConflictException(
+                    "This award has no outstanding price, part or unit difference to accept.");
+
+            var now = DateTime.UtcNow;
+            purchaseOrder.Version++;
+            purchaseOrder.ModifiedOn = now;
+            purchaseOrder.ModifiedBy = actor;
+            await _db.SaveChangesAsync(ct);
+
+            var result = new CustomerPoDifferenceAcceptanceView(purchaseOrder.Id, award.Id, purchaseOrder.Version,
+                outstanding, reason, actor, now);
+            await AddAuditAsync(businessUnitId, OrderToCashAggregateTypes.CustomerPurchaseOrder, purchaseOrder.Id,
+                purchaseOrder.Version, OrderToCashCommands.AcceptPurchaseOrderDifferences, purchaseOrder.Status,
+                purchaseOrder.Status, actor, reason, requestHash, idempotencyKey, correlationId, result, now, ct);
             await _db.SaveChangesAsync(ct);
             return result;
         }, cancellationToken);
@@ -867,6 +1152,28 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
                 throw new CustomerAwardConflictException(
                     $"Award {award.AwardNumber} cannot become a sales order yet. {taxBlocker}");
 
+            // FR-COM-04 DISCREPANCY GATE, the same shape as the tax blocker above.
+            //
+            // LineDifferences was invoked ONLY by the inbox and match projections, so nothing in
+            // the write path consulted it. With the workspace confirming and converting in one
+            // click, the review screen was reachable only AFTER the sales order existed — a report
+            // about a decision already taken. The wiring contract is explicit: any control a field
+            // feeds must actually block something.
+            //
+            // Recomputed here rather than trusted from the read model: the tolerances can be
+            // changed between capture and conversion, and the answer that matters is the one that
+            // holds when the order is raised.
+            var differencePolicy = await _db.ResolveAsync(businessUnitId, ct);
+            var acceptedDifferences = await AcceptedDifferencesAsync(businessUnitId,
+                award.CustomerPurchaseOrderId, ct);
+            var blockingDifferences = BlockingDifferences(award, differencePolicy)
+                .Where(key => !acceptedDifferences.Contains(key)).ToList();
+            if (blockingDifferences.Count > 0)
+                throw new CustomerAwardConflictException(
+                    $"Award {award.AwardNumber} cannot become a sales order: the customer PO differs from "
+                    + $"the quotation on {string.Join(", ", blockingDifferences)}. Review the differences and "
+                    + "accept them with a reason, or cancel the award and recapture the PO.");
+
             var draftStatus = await ResolveSetupAsync(businessUnitId, "OrderStatus", "DRAFT", ct)
                 ?? throw new CustomerAwardConflictException("No DRAFT OrderStatus is configured for this tenant.");
             var unpaidStatus = await ResolveSetupAsync(businessUnitId, "PaymentStatus", "UNPAID", ct);
@@ -905,10 +1212,21 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
                     Discount = allocation.DiscountSnapshot,
                     TaxAmount = allocation.TaxSnapshot,
                     TotalAmount = allocation.TotalSnapshot,
-                    // The buyer's own unit when their PO states one, otherwise the unit we quoted in.
-                    // The PO line no longer inherits our unit at capture time, so without this
-                    // fallback an order raised from a PO that omitted the unit would carry none.
-                    UomId = poLine.UomId ?? allocation.QuoteItem.Rfqitem?.UomId ?? allocation.QuoteItem.Product?.UomId,
+                    // The unit this sales order is raised in.
+                    //
+                    // It was `poLine.UomId ?? Rfqitem.UomId ?? Product.UomId` — three links of
+                    // silent substitution over a column the capture screen never wrote, so EVERY
+                    // order took our quoted unit no matter what the buyer's document said. That is
+                    // what turned a PO for "10 boxes" into a sales order for 10 EACH at our
+                    // per-each price without a word to anyone.
+                    //
+                    // The buyer's unit is now captured, and a unit that DISAGREES with ours is a
+                    // UOM_DISCREPANCY the gate above refuses unless a named person accepted it. So
+                    // what remains is a two-branch decision with no hidden case: the buyer's unit
+                    // when their PO states one, the unit we quoted in when it does not — silence is
+                    // not disagreement — and NULL when neither document states a unit, which is an
+                    // honest gap rather than an invented one.
+                    UomId = poLine.UomId ?? QuotedUomId(allocation.QuoteItem),
                     CustomerAwardLineAllocationId = allocation.Id,
                     CreatedBy = actor,
                     CreatedDate = now,
@@ -1034,6 +1352,12 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
     private async Task DerivePurchaseOrderStatusAsync(CustomerPurchaseOrder purchaseOrder, CustomerAward changingAward,
         string actor, DateTime now, CancellationToken cancellationToken)
     {
+        // New state, old guards — wiring contract failure #9. This method derives its status from
+        // award quantities alone, so once CANCELLED became reachable it would have UN-cancelled a
+        // withdrawn purchase order the next time an award on it moved, silently, and the stored
+        // CancellationReason would then violate CK_CustomerPurchaseOrders_Cancellation.
+        // Cancellation is terminal and is not derived from anything.
+        if (purchaseOrder.Status == CustomerPurchaseOrderStatuses.Cancelled) return;
         var consumed = await ConfirmedPoQuantitiesAsync(purchaseOrder.BusinessUnitId, purchaseOrder.Id, changingAward.Id, cancellationToken);
         if (changingAward.Status is CustomerAwardStatuses.Confirmed or CustomerAwardStatuses.Ordered)
             foreach (var allocation in changingAward.LineAllocations)
@@ -1119,6 +1443,75 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
             await _db.Database.ExecuteSqlInterpolatedAsync(
                 $"SELECT 1 FROM \"CustomerAwards\" WHERE \"BusinessUnitId\" = {businessUnitId} AND \"Id\" = {awardId} FOR UPDATE",
                 cancellationToken);
+    }
+
+    private async Task LockPurchaseOrderAsync(long businessUnitId, long purchaseOrderId,
+        CancellationToken cancellationToken)
+    {
+        if (_db.Database.IsNpgsql())
+            await _db.Database.ExecuteSqlInterpolatedAsync(
+                $"SELECT 1 FROM \"CustomerPurchaseOrders\" WHERE \"BusinessUnitId\" = {businessUnitId} AND \"Id\" = {purchaseOrderId} FOR UPDATE",
+                cancellationToken);
+    }
+
+    /// <summary>
+    /// The award with everything <see cref="LineDifferences"/> reads: the buyer's lines, and each
+    /// awarded quote line's RFQ line and catalogue product for the part and unit comparisons.
+    /// </summary>
+    private async Task<CustomerAward> LoadAwardForDifferenceCheckAsync(long businessUnitId, long awardId,
+        CancellationToken cancellationToken)
+        => await _db.CustomerAwards
+               .Include(x => x.PurchaseOrder).ThenInclude(x => x.Lines)
+               .Include(x => x.LineAllocations).ThenInclude(x => x.QuoteItem).ThenInclude(x => x.Rfqitem)
+               .Include(x => x.LineAllocations).ThenInclude(x => x.QuoteItem).ThenInclude(x => x.Product)
+               .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.Id == awardId, cancellationToken)
+           ?? throw new KeyNotFoundException("Customer award was not found in this tenant.");
+
+    /// <summary>
+    /// FR-COM-04. Every <c>"{awardId}:{lineId}:{CODE}"</c> on THIS award that refuses order conversion.
+    ///
+    /// <para>Scoped to the lines this award allocates, not to the whole purchase order: an order
+    /// split across two awards must not have the second award blocked by the first's differences,
+    /// and a buyer line nobody has matched yet is not this award's problem.</para>
+    /// </summary>
+    private static List<string> BlockingDifferences(CustomerAward award, CommercialMatchingPolicy policy)
+    {
+        var lines = award.PurchaseOrder.Lines.ToDictionary(x => x.Id);
+        return award.LineAllocations.OrderBy(x => x.CustomerPurchaseOrderLineId).ThenBy(x => x.Id)
+            .SelectMany(allocation =>
+            {
+                var line = lines[allocation.CustomerPurchaseOrderLineId];
+                return LineDifferences(line, allocation, allocation.QuoteItem, policy)
+                    .Where(CustomerPurchaseOrderDifferences.BlocksOrderConversion.Contains)
+                    .Select(code => DifferenceKey(award.Id, line.Id, code));
+            })
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+    }
+
+    /// <summary>
+    /// What a named person has already taken responsibility for on this purchase order, read back
+    /// out of the governance ledger the acceptance was written to. The ledger is the record — there
+    /// is no second copy on any row to drift out of step with it.
+    /// </summary>
+    private async Task<HashSet<string>> AcceptedDifferencesAsync(long businessUnitId, long purchaseOrderId,
+        CancellationToken cancellationToken)
+    {
+        var payloads = await _db.OrderToCashAuditEvents.AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId
+                && x.AggregateType == OrderToCashAggregateTypes.CustomerPurchaseOrder
+                && x.AggregateId == purchaseOrderId
+                && x.CommandType == OrderToCashCommands.AcceptPurchaseOrderDifferences)
+            .Select(x => x.ResultJson)
+            .ToListAsync(cancellationToken);
+        var accepted = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var payload in payloads)
+        {
+            var acceptance = JsonSerializer.Deserialize<CustomerPoDifferenceAcceptanceView>(payload, JsonOptions);
+            if (acceptance is null) continue;
+            foreach (var difference in acceptance.AcceptedDifferences) accepted.Add(difference);
+        }
+        return accepted;
     }
 
     private async Task<SetupMaster?> ResolveSetupAsync(long businessUnitId, string type, string code,

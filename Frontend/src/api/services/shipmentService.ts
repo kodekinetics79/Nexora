@@ -104,8 +104,16 @@ const shipmentService = {
     return response.data;
   },
 
-  delete: async (id: number, businessUnitId?: number) => {
-    await axiosInstance.delete(`/api/Shipment/${id}`, { params: { businessUnitId } });
+  /**
+   * Withdraws a shipment that never despatched.
+   *
+   * The reason is mandatory and the server rejects a blank one with 400. It is not optional here
+   * either: the endpoint used to take no reason and no actor at all, and set `IsActive = false` on
+   * any shipment including a signed one. The server refuses a despatched or proved shipment with
+   * 409 and its own sentence — surface that verbatim rather than inventing copy for it.
+   */
+  delete: async (id: number, reason: string, businessUnitId?: number) => {
+    await axiosInstance.delete(`/api/Shipment/${id}`, { params: { reason, businessUnitId } });
   }
 };
 

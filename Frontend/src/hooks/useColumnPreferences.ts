@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from 'react';
+import React, { useCallback, useMemo } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { GridColDef, GridColumnVisibilityModel, GridValidRowModel } from '@mui/x-data-grid';
 import listViewService, {
@@ -187,6 +187,18 @@ export const useColumnPreferences = (
             filterable: false,
             valueGetter: (_value: unknown, row: R) =>
               readCustomFieldValue((row as Record<string, unknown>)[customFieldBagField], stableKey),
+            // A record with no value for this field must SAY so. An empty cell in a
+            // grid reads as a loading state or as zero, and "zero" is a claim about a
+            // field nobody has filled in. Rendered here rather than inside
+            // readCustomFieldValue so the underlying read stays the raw value —
+            // exports and copy-to-clipboard should not carry interface copy.
+            renderCell: (params) => (params.value as string) === '' || params.value == null
+              ? React.createElement(
+                  'span',
+                  { style: { color: 'var(--mui-palette-text-disabled, #9ca3af)' } },
+                  'Not set',
+                )
+              : (params.value as string),
           } as GridColDef<R>);
           placed.add(column.key);
           continue;

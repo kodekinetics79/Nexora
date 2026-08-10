@@ -13,6 +13,15 @@ public class AcceptedLeadResponseDTO
     public string? BuyersName { get; set; }
     public DateTime RecDate { get; set; }
     public DateTime? BidClosingDate { get; set; }
+
+    /// <summary>
+    /// FR-RFQ-04. The delivery date the BUYER asked for, carried onto the accepted-lead views
+    /// because that is where a trader works the bid and commits a lead time. Distinct from
+    /// <see cref="BidClosingDate"/> (when the bid must be back) and from any supplier lead
+    /// time. Null means the document did not state one.
+    /// </summary>
+    public DateTime? RequiredDeliveryDate { get; set; }
+
     public string? BiddingDecision { get; set; }
     public DateTime? AcknowledgmentDate { get; set; }
     public DateTime? SubDate { get; set; }

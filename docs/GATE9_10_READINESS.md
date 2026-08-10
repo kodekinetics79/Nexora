@@ -19,8 +19,12 @@ checked, not taken on trust.
 | Transactional correctness under retry and multiple instances | Landed: execution-strategy wrapping, change-tracker clearing across 66 sites, SLA send-once with uncertain-not-resent semantics |
 | Performance work measurable locally | Partially done; index coverage lands with the migration |
 | **Arabic / RTL** | **Deferred by your decision R6.** The delivery note and quote PDF name it as a gap rather than half-rendering it |
+| Transport security | Landed: HSTS, a `default-src 'none'` CSP appropriate to a JSON-only origin, and a redirect that fires only on a request *known* to be plain. Full enforcement waits on item 5 below |
+| Secret leakage through logs and diagnostics | Landed: outbound header redaction from one shared list across all five HTTP clients; redacted `ToString()` on the outbound-email snapshot, the TOTP enrolment response (the `otpauth://` URI embeds the same seed) and the three mailbox DTOs; `[JsonIgnore]` on `User.PasswordHash`. Also found and covered a response that printed cleartext **MFA recovery codes** |
+| Committed credentials and demo files | Landed: script defaults now fail closed with a generating command; `.gitignore` covers the paths the code actually writes; six demo files untracked, history untouched |
+| CORS | Landed: the six loopback origins are Development-only. The deployed frontend and configured preview origins are unaffected |
 
-**Two guards were added that make a whole class of defect impossible to ship again**, and they are
+**Three guards were added that make a whole class of defect impossible to ship again**, and they are
 worth more than any single fix in this gate:
 
 - `HasPendingModelChanges()` — catches a model change with no migration. `GetPendingMigrationsAsync`
@@ -31,8 +35,15 @@ worth more than any single fix in this gate:
   hold no grant. Nothing proved the inverse. A policy with no grant is not a tighter boundary, it is
   a table nobody can read: PostgreSQL raises `42501` on the grant check before it evaluates any row
   predicate. Three tables shipped exactly that, and every test passed.
+- **Over-granting** — the mirror of the above, and the one that caught a defect of my own. Every
+  other privilege assertion in the suite is satisfied by granting *more*, so when the Gates 5–8
+  migration granted all four verbs on all fifteen tables it created — including five append-only
+  ledgers, and the one table the wiring contract had explicitly said must not carry `DELETE` — the
+  lane was structurally incapable of seeing it. The sharp end was `delivery_proofs`: its lines
+  cascade from the header and their accepted quantities cap the invoice, so deleting a
+  proof-of-delivery un-capped the ceiling and a customer could be billed for goods they refused.
 
-### The certification half — **blocked on you**, four items
+### The certification half — **blocked on you**, five items
 
 None of these can be closed by writing code. Each needs money, a signature, or both.
 
@@ -80,6 +91,47 @@ recoverable and this one is not.
 **Decide:** assign an owner, configure it, and schedule a **restore rehearsal**. The rehearsal is the
 deliverable, not the backup job.
 
+#### 5. The trusted edge-proxy contract — **a live spoofing exposure, not a nice-to-have**
+
+This entry was first written as "one cheap config value". **That was wrong, and the correction is the
+finding.** It was raised in severity after the behaviour was measured rather than reasoned about.
+
+`Program.cs` clears `KnownProxies` and `KnownNetworks` and repopulates them from configuration, and
+**nothing anywhere sets them** — no `ForwardedHeaders` section in `appsettings.json`, and
+`render.yaml:127-130` states outright that the trusted edge ranges "have not yet been supplied".
+
+The intuitive reading of two `Clear()` calls is "trust no hop". **It is backwards.**
+`ForwardedHeadersMiddleware` runs its known-address check only when at least one entry exists, so an
+empty pair **trusts every caller**. This is pinned by measurement, not argument:
+`ForwardedHeadersBehaviourTests` builds a host with the exact options `Program.cs` configures and
+asserts that a forwarded scheme from an unknown peer *is* applied, that the header is then consumed,
+and that `X-Original-Proto` is left behind exactly when that happened.
+
+**The consequence is a live exposure.** `X-Forwarded-For` is honoured from anyone, so the client
+address is attacker-suppliable — and that address is what the rate limiter's per-IP partition and
+`PlatformNetworkAccessMiddleware` both key on. Any caller can present whatever IP they like. This is
+pre-existing rather than newly introduced, and it **cannot be closed from code**: the only fix is
+supplying the ranges.
+
+It also caused a second defect, now fixed. The redirect middleware keyed its decision on the raw
+`X-Forwarded-Proto`, which `UseForwardedHeaders` has always consumed before it runs — so **the HTTPS
+redirect would never have fired in production**. Failure #7, inside the change written to close that
+class. It now keys on `X-Original-Proto`, which is exact: present if and only if an edge is in front
+*and* labels the scheme. The loop guard is unchanged — no evidence still means serve, never redirect.
+
+**A retraction belongs here too.** An earlier version of this document claimed that simply enabling
+`UseHttpsRedirection` would have caused an infinite redirect and taken the site down on first deploy.
+That was not true: the forwarded scheme *is* applied today, and Render does label it, so the
+framework pair would have worked. It would loop only behind an edge that terminates TLS without
+labelling the scheme. The custom middleware is still the right thing — it declines to guess where the
+framework assumes — but the case for it is narrower than was claimed.
+
+**Decide:** supply Render's edge IP ranges (or the trusted proxy hop count) for `ForwardedHeaders`.
+One value closes three things: the spoofable client address above, full HTTPS enforcement for
+requests that arrive unlabelled, and `PlatformAccess__NetworkMode: AllowList`, which is set to `Any`
+for the same missing fact. **This is now the cheapest high-severity item on the board and should be
+done first.**
+
 ---
 
 ## Gate 10 — history migration, training, parallel run, pilot acceptance
@@ -112,9 +164,13 @@ Three gate criteria have never been met and cannot be met from a development mac
 
 ## The short version
 
-**Four decisions and one environment.** Residency, malware spend, hosting plan, backup owner — and a
-pilot environment with a live mailbox.
+**Five decisions and one environment.** Residency, malware spend, hosting plan, backup owner, the
+trusted edge-proxy ranges — and a pilot environment with a live mailbox.
 
-Everything else on the board is engineering, and engineering is being finished. These five are not,
+The proxy ranges are the cheap one and worth doing first: it is a single config value, it costs
+nothing, and one answer closes two open security items at once (HTTPS enforcement and the platform
+network allow-list, both currently open for the same missing fact).
+
+Everything else on the board is engineering, and engineering is being finished. These six are not,
 and no amount of agent capacity moves them. They have lead time, so the cost of deciding them late is
 paid in calendar days at the end of the project, when it is most expensive.

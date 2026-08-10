@@ -33,12 +33,19 @@ FRONTEND_PORT="${NEXORA_FRONTEND_PORT:-5173}"
 BACKEND_URL="http://127.0.0.1:${BACKEND_PORT}"
 FRONTEND_URL="http://127.0.0.1:${FRONTEND_PORT}"
 
-# Local-only credentials. The owner password is 12+ characters because PlatformOwnerSeeder
-# refuses anything shorter rather than silently creating a weak account.
+# Local-only credentials. Emails default; PASSWORDS DELIBERATELY DO NOT.
+#
+# SEC-G9: both passwords used to carry a literal `${VAR:-<default>}` fallback, so the operator
+# and checker credentials for the platform control plane were published in a tracked file and
+# were what every run that did not set the variable actually used. Loopback binding is not a
+# mitigation for that — it decides who can reach the console, not what the password is, and the
+# same literal is one `docker run -p` or one copied-into-a-shared-environment away from being a
+# real credential. scripts/e2e/run-phase1-base-journey.sh already generates its secrets per run;
+# this follows it, and refuses rather than inventing one silently.
 OWNER_EMAIL="${NEXORA_OWNER_EMAIL:-owner@nexora.local}"
-OWNER_PASSWORD="${NEXORA_OWNER_PASSWORD:-LocalOwner!2026}"
 CHECKER_EMAIL="${NEXORA_CHECKER_EMAIL:-checker@nexora.local}"
-CHECKER_PASSWORD="${NEXORA_CHECKER_PASSWORD:-LocalChecker!2026}"
+OWNER_PASSWORD="${NEXORA_OWNER_PASSWORD:-}"
+CHECKER_PASSWORD="${NEXORA_CHECKER_PASSWORD:-}"
 
 log()  { printf '\033[1;36m[nexora]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[nexora]\033[0m %s\n' "$*"; }
@@ -81,6 +88,23 @@ for pair in "API:$BACKEND_PORT:NEXORA_BACKEND_PORT" "frontend:$FRONTEND_PORT:NEX
     holder="$(lsof -nP -iTCP:"${port}" -sTCP:LISTEN 2>/dev/null | awk 'NR==2 {print $1" (pid "$2")"}')"
     die "Port $port is already in use${holder:+ by $holder} (needed for the $name). Free it, or set $override."
   fi
+done
+
+# SEC-G9: fail here rather than fall back to a committed literal. PlatformOwnerSeeder refuses
+# anything under 12 characters rather than silently creating a weak account, so the check
+# mirrors it — a run that dies at the seeder five steps later, with the database already up, is
+# a worse version of the same message.
+for pair in "NEXORA_OWNER_PASSWORD:$OWNER_PASSWORD" "NEXORA_CHECKER_PASSWORD:$CHECKER_PASSWORD"; do
+  var="${pair%%:*}"; value="${pair#*:}"
+  if [[ -z "$value" ]]; then
+    die "$var is not set. This script no longer ships a default password for the platform
+     control plane. Choose one for this machine, e.g.:
+
+       export $var=\"\$(python3 -c 'import secrets;print(\"Local!\"+secrets.token_urlsafe(18))')\"
+
+     Both NEXORA_OWNER_PASSWORD and NEXORA_CHECKER_PASSWORD are required."
+  fi
+  [[ ${#value} -ge 12 ]] || die "$var must be at least 12 characters; PlatformOwnerSeeder refuses anything shorter."
 done
 
 mkdir -p "$RUN_DIR"
@@ -295,10 +319,10 @@ cat <<BANNER
   ────────────────────────────────────────────────────────────────
    Operator console   ${FRONTEND_URL}/platform/tenants
    Email              ${OWNER_EMAIL}
-   Password           ${OWNER_PASSWORD}
+   Password           the value of \$NEXORA_OWNER_PASSWORD (not printed)
    MFA seed file      ${RUN_DIR}/platform-owner-mfa-secret (mode 600; never printed)
    Checker email      ${CHECKER_EMAIL}
-   Checker password   ${CHECKER_PASSWORD}
+   Checker password   the value of \$NEXORA_CHECKER_PASSWORD (not printed)
    Checker MFA file   ${RUN_DIR}/platform-checker-mfa-secret (mode 600; never printed)
   ────────────────────────────────────────────────────────────────
 

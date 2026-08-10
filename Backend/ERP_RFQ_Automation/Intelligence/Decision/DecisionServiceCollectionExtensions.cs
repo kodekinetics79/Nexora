@@ -1,3 +1,6 @@
+using ERP_RFQ_Automation.Reporting;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+
 namespace ERP_RFQ_Automation.Intelligence.Decision;
 
 public static class DecisionServiceCollectionExtensions
@@ -13,6 +16,10 @@ public static class DecisionServiceCollectionExtensions
     /// </summary>
     public static IServiceCollection AddLeadDecisionIntelligence(this IServiceCollection services)
     {
+        // The brief's margin is read from the gross-margin service rather than re-derived, so the
+        // registration travels with it. TryAdd, because Program.cs registers the same pair for the
+        // reporting surface and whichever runs first should win without a duplicate.
+        services.TryAddScoped<IGrossMarginService, GrossMarginService>();
         services.AddScoped<ILeadDecisionService, LeadDecisionService>();
         return services;
     }

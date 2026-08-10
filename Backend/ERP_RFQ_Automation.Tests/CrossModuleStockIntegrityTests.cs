@@ -7,6 +7,7 @@ using ERP_RFQ_Automation.Inventory;
 using ERP_RFQ_Automation.Inventory.Commercial;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Procurement;
+using ERP_RFQ_Automation.Reporting;
 using ERP_RFQ_Automation.Repositories;
 using ERP_RFQ_Automation.Services;
 using ERP_RFQ_Automation.Tests.Support;
@@ -447,7 +448,7 @@ public sealed class CrossModuleStockIntegrityTests
         }
 
         await using var context = database.ContextFor(Tenant);
-        var brief = await new LeadDecisionService(context).GetBriefAsync(1, Tenant, default);
+        var brief = await new LeadDecisionService(context, new GrossMarginService(context)).GetBriefAsync(1, Tenant, default);
 
         // 12 on hand - 3 reserved - 3 quarantined - 2 safety stock = 4 promisable. The brief used
         // to print 999.
@@ -481,7 +482,7 @@ public sealed class CrossModuleStockIntegrityTests
         }
 
         await using var context = database.ContextFor(Tenant);
-        var brief = await new LeadDecisionService(context).GetBriefAsync(1, Tenant, default);
+        var brief = await new LeadDecisionService(context, new GrossMarginService(context)).GetBriefAsync(1, Tenant, default);
 
         var item = Assert.Single(brief.Coverage.Items);
         Assert.True(item.Matched);

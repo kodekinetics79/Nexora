@@ -82,6 +82,17 @@ export interface LeadResponseDTO {
   leadSource: string;
   recDate: string;
   bidClosingDate: string;
+  // FR-RFQ-04. The date the BUYER asked for delivery on. NOT the bid deadline above and
+  // NOT a supplier lead time — three different dates, and quoting a lead time without
+  // this one in view is how a promise gets made that cannot be kept. Null/absent means
+  // the document never stated one, and is rendered as an explicit gap.
+  requiredDeliveryDate?: string | null;
+  // FR-RFQ-04. bidClosingDate in the Umm al-Qura calendar, shown ALONGSIDE the Gregorian
+  // date, never instead of it — a Hijri deadline read as a Gregorian one loses the bid.
+  bidClosingDateHijri?: string | null;
+  // FR-RFQ-03. The standing agreement / frame contract this inquiry is called off
+  // against. Distinct from rfqno (the inquiry's own reference).
+  agreementReference?: string | null;
   emailSource: string;
   clientemail: string;
   status: string;
@@ -152,6 +163,15 @@ export interface LeadItemResponseDTO {
   // Unrecognized customer-document columns preserved verbatim at extraction time
   // ({"original column header": "cell value"}); absent/null when none.
   extraFields?: Record<string, string> | null;
+  /**
+   * AA-01 · tenant-defined custom field values for this line, as the RAW jsonb string keyed by
+   * custom-field stable key. Read by useColumnPreferences to materialise `cf:` columns on the
+   * lead line grid. Null when the tenant has defined no fields or this line carries no values.
+   *
+   * Not the same thing as `extraFields`: that is the buyer's own column headings captured
+   * verbatim and ungoverned; this is values against fields the tenant defined and typed.
+   */
+  customFields?: string | null;
 }
 
 export interface AttachmentResponseDTO {
@@ -178,6 +198,10 @@ export interface AcceptedLeadResponseDTO {
   customerMatchReasonCode?: string | null;
   customerMatchConfidence?: number | null;
   clientCandidates?: ClientCandidateDTO[] | null;
+  // FR-RFQ-04. The delivery date the BUYER asked for, carried onto the accepted-lead
+  // queues because that is where a trader works the bid and commits a lead time.
+  // Never the submission deadline and never a supplier lead time.
+  requiredDeliveryDate?: string | null;
   acceptedDate: string;
   assignedToFullName?: string;
   assignedToId?: number;

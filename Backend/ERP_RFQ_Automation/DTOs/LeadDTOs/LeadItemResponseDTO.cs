@@ -39,5 +39,17 @@
         /// camelCase "extraFields" with keys preserved as-is.
         /// </summary>
         public Dictionary<string, string>? ExtraFields { get; set; }
+
+        /// <summary>
+        /// AA-01 · tenant-defined custom field values for this lead/RFQ line, as the raw jsonb
+        /// object keyed by custom-field stable key. Carried on the lead detail payload so the
+        /// line grid can render a custom-field column without a round trip per row. Null when
+        /// the tenant has defined no custom fields or this line has no values.
+        ///
+        /// Deliberately distinct from <see cref="ExtraFields"/>: that is an UNGOVERNED verbatim
+        /// capture of the buyer's own column headings; this holds values against fields the
+        /// tenant defined, typed and named. One is evidence, the other is a schema.
+        /// </summary>
+        public string? CustomFields { get; set; }
     }
 }

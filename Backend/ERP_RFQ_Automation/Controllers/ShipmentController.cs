@@ -420,17 +420,54 @@ namespace ERP_RFQ_Automation.Controllers
             }
         }
 
+        /// <summary>
+        /// Withdraws a shipment that never despatched. A reason is required and the actor is taken
+        /// from the token, never from the request — see
+        /// <c>ShipmentRepository.DeleteShipmentAsync</c> for what this refuses and why.
+        ///
+        /// <para>Every refusal reaches the caller as its own status code with the server's own
+        /// sentence: 400 for a missing reason, 404 for a shipment that is not this tenant's, 409 for
+        /// a despatched or proved shipment. This used to be one <c>catch (Exception)</c> returning
+        /// a 500 with the message stringified into it, so a governed refusal was indistinguishable
+        /// from a database outage on the screen and in the logs.</para>
+        /// </summary>
         [HttpDelete("{id}")]
         [RequireModulePermission("Shipments", PermissionAction.Delete)]
-        public async Task<IActionResult> DeleteShipment(long id, [FromQuery] long? businessUnitId = null)
+        public async Task<IActionResult> DeleteShipment(
+            long id, [FromQuery] string? reason = null, [FromQuery] long? businessUnitId = null)
         {
+            // TryParse, not Parse: this block sits outside the try that used to swallow everything
+            // into a 500, and a malformed claim must not become an unhandled exception.
+            _ = long.TryParse(User.FindFirst("businessUnitId")?.Value, out var claimBUId);
+            var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
+            if (targetBUId <= 0)
+                return BadRequest(new { message = "Business Unit ID is required." });
+
+            // The actor comes from the token. A destructive verb attributed to a name the caller
+            // supplied is not attribution.
+            var actor = User.FindFirst("email")?.Value ?? User.Identity?.Name;
+            if (string.IsNullOrWhiteSpace(actor))
+                return Unauthorized(new
+                {
+                    message = "A shipment can only be withdrawn by a named authenticated user."
+                });
+
             try
             {
-                var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-                var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
-
-                await _repository.DeleteShipmentAsync(id, targetBUId);
+                await _repository.DeleteShipmentAsync(id, targetBUId, reason ?? string.Empty, actor);
                 return NoContent();
+            }
+            catch (ArgumentException ex)
+            {
+                return BadRequest(new { message = ex.Message });
+            }
+            catch (KeyNotFoundException ex)
+            {
+                return NotFound(new { message = ex.Message });
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Conflict(new { message = ex.Message });
             }
             catch (Exception ex)
             {

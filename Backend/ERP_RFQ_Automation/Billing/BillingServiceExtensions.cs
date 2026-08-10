@@ -35,7 +35,12 @@ public static class BillingServiceExtensions
         services.AddScoped<UsageBillingReadinessService>();
         services.AddScoped<AccountingOutboxService>();
         services.AddHttpClient(nameof(HttpAccountingExportConnector), client =>
-            client.Timeout = TimeSpan.FromSeconds(30));
+                client.Timeout = TimeSpan.FromSeconds(30))
+            // SEC-G9: AccountingOutboxDispatcher sets Authorization: Bearer <accounting API key>.
+            // The factory's logging handlers write every header at Trace and redact nothing by
+            // default, so a single diagnostic session would have exported the tenant's accounting
+            // credential into the log sink alongside the invoices it authorises.
+            .RedactLoggedHeaders(ERP_RFQ_Automation.Infrastructure.OutboundHttpRedaction.SensitiveHeaders);
         services.AddSingleton<IAccountingExportConnector, HttpAccountingExportConnector>();
         services.AddOptions<AccountingExportOptions>()
             .Bind(configuration.GetSection(AccountingExportOptions.SectionName));

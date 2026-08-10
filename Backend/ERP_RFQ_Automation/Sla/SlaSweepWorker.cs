@@ -407,13 +407,25 @@ public sealed class SlaSweepWorker : BackgroundService
         var graceDays = policy.QuoteExpiryGraceDays;
         var noResponseDays = policy.QuoteNoResponseExpiryDays;
 
+        // A non-positive silence window DISABLES trigger 2 rather than firing it on everything.
+        // With noResponseDays = 0 the clause below reduces to "SentOn < now", which is true of
+        // every quote ever sent, so one bad policy row would expire the entire open quote book on
+        // the next tick — with no reopen path (LifecyclePolicy.QuoteReopenable is empty). The
+        // value is not one the domain admits: SlaController clamps writes to 1-365 and the code
+        // default is 90, so a zero can only arrive from a backfill, which is exactly what
+        // 20260809163319 did. That data is corrected by migration; this guard is the structural
+        // fix, and it matches the fail-safe the two supplier sweeps already apply to their own
+        // non-positive policy values.
+        var noResponseEnabled = noResponseDays > 0;
+
         return db.Quotes.AsNoTracking()
             .Where(q => q.BusinessUnitId == businessUnitId
                         && q.StatusId != null && sentStatusIds.Contains(q.StatusId.Value)
                         && ((q.ValidUntil != null
                              && q.ValidUntil >= EarliestCommercialDeadline
                              && q.ValidUntil.Value.AddDays(graceDays) < now)
-                            || (q.SentOn != null
+                            || (noResponseEnabled
+                                && q.SentOn != null
                                 && q.RespondedOn == null
                                 && q.SentOn.Value.AddDays(noResponseDays) < now
                                 && !(q.ValidityExtendedOn != null

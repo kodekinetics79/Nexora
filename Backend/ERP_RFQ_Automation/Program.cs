@@ -515,28 +515,28 @@ builder.Services.AddHttpClient<OllamaLlmService>(client =>
     {
         var endpointResolver = services.GetRequiredService<IAiProviderEndpointResolver>();
         return AiEgressGuard.CreateHandler(() => endpointResolver.Current.ProviderClass);
-    });
+    })
+    // SEC-G9: IHttpClientFactory's own logging writes the FULL request and response header
+    // collection at Trace, and HttpClientFactoryOptions.ShouldRedactHeaderValue defaults to
+    // redacting NOTHING. OllamaLlmService sets Authorization: Bearer <provider key>, so raising
+    // the log level for a single diagnostic session — the one thing anyone does while chasing an
+    // inference failure — would write the live key into the log sink. Named explicitly rather
+    // than left to the default, in all five registrations.
+    .RedactLoggedHeaders(OutboundHttpRedaction.SensitiveHeaders);
 
 // CORS restricted to configured frontend origins (SEC-13). AllowAnyOrigin is
 // unsafe for a system with authenticated, tenant-scoped data. Always include
 // the known deployment origins, then merge env-configured origins for previews
-// and future custom domains. Normalize trailing slashes because CORS origin
-// matching is exact.
-var configuredCorsOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? [];
-var corsOrigins = configuredCorsOrigins
-    .Concat([
-        "http://localhost:5173",
-        "http://localhost:4173",
-        "http://localhost:3000",
-        "http://127.0.0.1:5173",
-        "http://127.0.0.1:4173",
-        "http://127.0.0.1:3000",
-        "https://nexora1-ai.vercel.app"
-    ])
-    .Where(origin => !string.IsNullOrWhiteSpace(origin))
-    .Select(origin => origin.Trim().TrimEnd('/'))
-    .Distinct(StringComparer.OrdinalIgnoreCase)
-    .ToArray();
+// and future custom domains.
+//
+// SEC-G9: the six loopback origins this list used to carry UNCONDITIONALLY are now
+// Development-only (TransportSecurityPolicy.DevelopmentOrigins). A CORS allow-list is
+// enforced by the browser and not by the network, so while production admitted
+// http://localhost:5173 any page a developer — or an attacker — served on that origin
+// could call the production API and READ the response, with whatever bearer token the
+// visitor's session carried. Normalisation and exact-match semantics are unchanged.
+var corsOrigins = TransportSecurityPolicy.ResolveCorsOrigins(
+    builder.Configuration, builder.Environment.IsDevelopment());
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("DefaultCors", policy =>
@@ -938,12 +938,18 @@ app.UseExceptionHandler(errApp => errApp.Run(async ctx =>
     await ctx.Response.WriteAsync("{\"error\":\"An unexpected error occurred.\"}");
 }));
 
-// Baseline security headers (SEC-13)
+// Baseline security headers (SEC-13). SEC-G9 adds the Content-Security-Policy this set was
+// missing; the policy itself and the reasoning behind every directive live in
+// Infrastructure/TransportSecurityPolicy.cs. Set here rather than per-endpoint so it covers
+// EVERY response, including the ones a future middleware registration starts producing —
+// which is the whole point, given three writers store user-supplied files under the web root.
+var contentSecurityPolicy = TransportSecurityPolicy.ContentSecurityPolicyFor(app.Environment);
 app.Use(async (ctx, next) =>
 {
     ctx.Response.Headers["X-Content-Type-Options"] = "nosniff";
     ctx.Response.Headers["X-Frame-Options"] = "DENY";
     ctx.Response.Headers["Referrer-Policy"] = "no-referrer";
+    ctx.Response.Headers["Content-Security-Policy"] = contentSecurityPolicy;
     await next();
 });
 
@@ -961,7 +967,68 @@ if (app.Environment.IsDevelopment())
     app.UseSwagger();
     app.UseSwaggerUI();
 }
-//app.UseHttpsRedirection(); // enable at deploy time once TLS is terminated in front of the app
+// SEC-G9: transport security — HTTPS redirection and HSTS, which were absent.
+//
+// WHAT UseForwardedHeaders ACTUALLY DOES HERE — measured, and the opposite of the intuitive
+// reading. TLS is terminated at the hosting edge, so the socket is always plain HTTP. The
+// process learns the real scheme from X-Forwarded-Proto via UseForwardedHeaders (above, and
+// deliberately EARLIER in the pipeline than this line so the rewrite has already happened).
+// It looks as though that rewrite could not occur, because Program.cs clears
+// KnownProxies/KnownNetworks and no environment repopulates them — appsettings.json has no
+// ForwardedHeaders section and render.yaml states the edge ranges "have not yet been supplied".
+// It occurs anyway: ForwardedHeadersMiddleware runs its known-address check ONLY when at least
+// one entry exists, so an empty pair trusts EVERY caller. Request.Scheme is therefore rewritten
+// today, from anyone — which is precisely the spoofing exposure the SEC-H6 note above warns of
+// for X-Forwarded-For. ForwardedHeadersBehaviourTests pins all of this.
+//
+// The consequence that shapes this block: the middleware CONSUMES X-Forwarded-Proto, so nothing
+// downstream can read it. A redirect keyed on that header can never fire — a control that looks
+// configured and does nothing. The decision is keyed on X-Original-Proto instead, which
+// ForwardedHeadersMiddleware writes exactly when it rewrote the scheme.
+//
+// WHY NOT THE FRAMEWORK PAIR. UseHttpsRedirection redirects any request whose scheme is not
+// https. Behind an edge that terminates TLS and does NOT label the scheme, that is every
+// request, each answered with a 307 the edge forwards straight back — an infinite redirect.
+// UseLoopSafeHttpsRedirection redirects only a request KNOWN to be plain: a configured trusted
+// edge makes the scheme authoritative, or X-Original-Proto shows an edge labelled it. Where
+// neither holds the scheme is genuinely unknowable and the request is SERVED. That pass-through
+// is the loop guard and is what makes ON-by-default safe. Nothing about SEC-H6 is weakened: this
+// middleware reads forwarding headers only to choose between redirect and serve, while the
+// client address the rate limiter and PlatformNetworkAccessMiddleware depend on still comes
+// solely from the normalized RemoteIpAddress.
+//
+// HSTS rides the same request-is-secure test rather than UseHsts, so it cannot end up as a
+// header that is configured and never emitted. Development is excluded outright; the local
+// console and the E2E harness both drive http://127.0.0.1 against a host with no certificate.
+//
+// STILL OWED BY THE DEPLOYMENT, and it is configuration rather than code: set
+// ForwardedHeaders:KnownProxies/:KnownNetworks to the edge's ranges. Until then any caller can
+// spoof X-Forwarded-For, so the rate limiter's per-IP partition and the platform network
+// boundary are working from an attacker-supplied address — a pre-existing SEC-H6 gap this gate
+// did not create and cannot close from code.
+var httpsRedirectionEnabled =
+    TransportSecurityPolicy.ShouldRedirectToHttps(app.Environment, app.Configuration);
+var forwardedSchemeIsTrusted = TransportSecurityPolicy.ForwardedProtoIsTrusted(app.Configuration);
+if (httpsRedirectionEnabled)
+{
+    app.UseLoopSafeHttpsRedirection(TransportSecurityPolicy.HstsHeaderValue, forwardedSchemeIsTrusted);
+}
+if (!app.Environment.IsDevelopment())
+{
+    app.Logger.LogInformation(
+        "Transport security: HTTPS redirection and HSTS {State}; forwarded scheme is {Trust}. " +
+        "Set ForwardedHeaders:KnownProxies or :KnownNetworks to the edge ranges to make the scheme " +
+        "authoritative, or {Key} to override the first value.",
+        httpsRedirectionEnabled ? "ENABLED" : "DISABLED",
+        forwardedSchemeIsTrusted ? "TRUSTED" : "UNTRUSTED (only requests labelled X-Forwarded-Proto are redirected)",
+        TransportSecurityPolicy.HttpsRedirectionEnabledKey);
+}
+// DELIBERATELY ABSENT: app.UseStaticFiles(). ProductRepository.PersistAttachmentAsync,
+// CustomerController and UserController all write user-supplied bytes under WebRootPath with
+// the uploaded extension preserved, and .html is on DocumentIntakeAllowList — so that one line
+// would publish stored HTML on the API origin, unauthenticated, and the frontend keeps its JWT
+// in localStorage. The Content-Security-Policy set above is the second line of defence if it is
+// ever added; do not treat it as permission to add it.
 // Use CORS
 app.UseCors("DefaultCors");
 app.UseAuthentication();

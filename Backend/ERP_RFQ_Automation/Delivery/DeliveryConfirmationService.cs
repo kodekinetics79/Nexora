@@ -345,9 +345,17 @@ public sealed class DeliveryConfirmationService(
 
     /// <summary>
     /// FR-DLM-05, the operator-facing half of the ladder: SCHEDULED to DISPATCHED to IN_TRANSIT, or
-    /// CANCELLED from anything still in flight. DELIVERED and DELIVERY_EXCEPTION are not reachable
-    /// here — <see cref="DeliveryStatuses.CanTransition"/> refuses them — because they are outcomes
-    /// of what the customer accepted, not selections.
+    /// CANCELLED from SCHEDULED. DELIVERED and DELIVERY_EXCEPTION are not reachable here —
+    /// <see cref="DeliveryStatuses.CanTransition"/> refuses them — because they are outcomes of
+    /// what the customer accepted, not selections.
+    ///
+    /// <para><b>This method holds no stock dependency, and that is now stated rather than assumed.</b>
+    /// It changes a status and writes a history note. Every accrual a delivery status drives — the
+    /// goods issue, the lot consumption, the over-shipment ceiling, the delivered ledger — is made
+    /// elsewhere and none of it is reversible from here, which is why cancellation is refused for
+    /// every state in <see cref="DeliveryStatuses.Despatched"/> instead of silently un-accruing it.
+    /// If a goods-return path is ever built, the reversal belongs on this transition and this
+    /// paragraph is the one that has to change.</para>
     /// </summary>
     public async Task<string> TransitionAsync(
         long businessUnitId, long shipmentId, string nextStatus, string actor,
@@ -368,6 +376,23 @@ public sealed class DeliveryConfirmationService(
             ?? throw new DeliveryValidationException("Shipment was not found in this tenant.");
         if (!shipment.IsActive)
             throw new DeliveryConflictException("A withdrawn shipment has no lifecycle.");
+
+        // The refusal an operator actually reads. DeliveryStatuses.Cancellable is the authority and
+        // TransitionDeliveryStatus below enforces it on its own; what it says on its own is
+        // "A shipment cannot move from DISPATCHED to CANCELLED", which tells the person at the
+        // loading bay nothing about why or what to do instead. Stated here, once, rather than as a
+        // client-side string that could contradict the server.
+        if (string.Equals(next, DeliveryStatuses.Cancelled, StringComparison.Ordinal)
+            && DeliveryStatuses.Despatched.Contains(shipment.DeliveryStatus))
+            throw new DeliveryConflictException(
+                $"A {shipment.DeliveryStatus} shipment cannot be cancelled. The goods have already "
+                + "left the warehouse: the stock was issued and the material lots were consumed "
+                + "against this delivery note when it was raised, and this system has no "
+                + "goods-return path that can reverse either. Cancelling would free the quantity "
+                + "back onto the order line while the material is still out. Record what the "
+                + "customer accepted instead — a consignment refused in full is a delivery "
+                + "confirmation with zero accepted on every line and a reason of REJECTED, which "
+                + "leaves the whole quantity outstanding for a re-supply or credit decision.");
 
         try
         {

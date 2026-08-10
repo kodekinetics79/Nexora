@@ -76,6 +76,12 @@ public interface IBackgroundWorkerHeartbeats
 public sealed class BackgroundWorkerHeartbeats : IBackgroundWorkerHeartbeats
 {
     private static readonly TimeSpan MinimumTolerance = TimeSpan.FromMinutes(2);
+
+    /// <summary>
+    /// Baseline ceiling on the staleness tolerance, so a worker that declares an absurd
+    /// interval cannot make this check meaningless. See <see cref="Tolerance"/> for why it is
+    /// a baseline rather than an absolute cap.
+    /// </summary>
     private static readonly TimeSpan MaximumTolerance = TimeSpan.FromHours(6);
     private static readonly TimeSpan DefaultStartupGrace = TimeSpan.FromMinutes(5);
 
@@ -132,11 +138,30 @@ public sealed class BackgroundWorkerHeartbeats : IBackgroundWorkerHeartbeats
     private static TimeSpan Normalize(TimeSpan interval)
         => interval <= TimeSpan.Zero ? MinimumTolerance : interval;
 
+    /// <summary>
+    /// How long a registered worker may stay silent before the check calls it dead: three of
+    /// its own periods plus a minute of slack, bounded at both ends.
+    ///
+    /// <para>The upper bound is <see cref="MaximumTolerance"/> OR one period plus a minute,
+    /// whichever is larger. The <c>Math.Max</c> is not a loosening — it is what stops the cap
+    /// from being shorter than the interval it is judging. A worker cannot beat before its
+    /// own period has elapsed, so a tolerance below that period declares the worker dead
+    /// while it is doing exactly what it was configured to do, and an alarm that is red while
+    /// nothing is wrong trains people to ignore it. It became reachable when the mailbox
+    /// poll interval was corrected from seconds to minutes: the poller's documented maximum
+    /// of 1440 stopped meaning 24 minutes and started meaning 24 hours, four times the flat
+    /// six-hour cap. Workers at or under six hours — every other one today, including the
+    /// six-hourly billing run — are unaffected but for that one minute of slack.</para>
+    /// </summary>
     private static TimeSpan Tolerance(TimeSpan expectedInterval)
     {
-        var tolerance = expectedInterval * 3 + TimeSpan.FromMinutes(1);
+        var slack = TimeSpan.FromMinutes(1);
+        var tolerance = expectedInterval * 3 + slack;
         if (tolerance < MinimumTolerance) return MinimumTolerance;
-        return tolerance > MaximumTolerance ? MaximumTolerance : tolerance;
+        var ceiling = MaximumTolerance > expectedInterval + slack
+            ? MaximumTolerance
+            : expectedInterval + slack;
+        return tolerance > ceiling ? ceiling : tolerance;
     }
 
     private sealed class Entry

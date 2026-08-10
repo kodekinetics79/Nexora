@@ -285,8 +285,41 @@ const LeadDetailPage: React.FC = () => {
               <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Client Email" value={lead.clientemail} /></Grid>
 
               <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Received" value={formatDate(lead.recDate)} /></Grid>
-              <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Bid Close" value={formatDate(lead.bidClosingDate)} /></Grid>
+              {/* FR-RFQ-04. The Gregorian deadline, with the Hijri rendering of the SAME
+                  date directly beneath it. Saudi government tenders publish closing dates
+                  in Hijri; a Hijri date read as a Gregorian one loses the bid, so the two
+                  are shown together and the cross-check is a glance rather than a
+                  conversion someone has to do in their head. */}
+              <Grid size={{ xs: 12, md: 4 }} component="div">
+                <DataField label="Bid Close" value={formatDate(lead.bidClosingDate)} />
+                {lead.bidClosingDateHijri && (
+                  <Typography
+                    variant="caption"
+                    sx={{ display: 'block', mt: -1.2, mb: 1.5, fontFamily: 'monospace', color: 'text.secondary', fontWeight: 700 }}
+                  >
+                    {lead.bidClosingDateHijri} H
+                  </Typography>
+                )}
+              </Grid>
               <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Source" value={lead.leadSource} /></Grid>
+
+              {/* FR-RFQ-04. What the BUYER asked for. It sits next to the bid deadline
+                  because the two are constantly confused and they drive different
+                  decisions: the deadline governs when we must answer, this governs what
+                  we may promise. "Not stated" is a real answer and is shown as one. */}
+              <Grid size={{ xs: 12, md: 4 }} component="div">
+                <DataField
+                  label="Required Delivery (buyer)"
+                  value={lead.requiredDeliveryDate ? formatDate(lead.requiredDeliveryDate) : 'Not stated on the document'}
+                />
+              </Grid>
+              {/* FR-RFQ-03. The standing agreement this inquiry is called off against. */}
+              <Grid size={{ xs: 12, md: 4 }} component="div">
+                <DataField
+                  label="Agreement Reference"
+                  value={lead.agreementReference || 'None stated'}
+                />
+              </Grid>
 
               {/* Audit-grade ingestion timestamp (earliest source received_on;
                   legacy pipeline timestamp / createdDate as display fallbacks),

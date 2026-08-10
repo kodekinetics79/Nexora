@@ -120,3 +120,40 @@ public static class GrossMarginStatuses
     public const string Available = "available";
     public const string Unavailable = "unavailable";
 }
+
+/// <summary>
+/// The same value-weighted margin as <see cref="GrossMarginDTO"/>, narrowed to the priced lines of a
+/// single commercial case so a decision about ONE opportunity can depend on it.
+///
+/// <para><b>Why this exists.</b> The Lead Decision Brief declared a margin field and never assigned
+/// it, and its consumer read <c>margin is null</c> as "escalate for margin review" — so every
+/// opportunity escalated, permanently. The cost side of a lead was unobtainable only for as long as
+/// the brief looked at <c>Product.UnitCost</c>, which carries no currency and is not a landed cost.
+/// <c>CustomerQuoteSourcingDecision</c> carries both landed cost and the customer price it produced,
+/// on one row, in one stated currency — so the brief now reads the same record the board-facing
+/// figure reads, through the same service, and the two cannot disagree.</para>
+///
+/// <para><b>Sample rule.</b> One decision per <c>RfqItemId</c> — the latest. This differs
+/// deliberately from the period report's key (<c>QuoteItemId</c>): the report spans many quotes and
+/// must not double-count a re-priced LINE, whereas a single case may carry several quote revisions
+/// of the SAME demand line, and summing those would count one line's revenue two or three times.
+/// Both rules mean "count each line once"; the identity of "line" differs with the population.</para>
+/// </summary>
+/// <param name="MarginPercent">Value-weighted <c>(revenue − cost) / revenue</c> percent, one decimal
+/// place. Null whenever <paramref name="UnavailableReason"/> is set — never zero.</param>
+/// <param name="CostedLines">Demand lines carrying a currency-qualified landed cost. This is a count
+/// of quote lines, not of lead lines: it is the number of lines that could be costed at all.</param>
+/// <param name="CurrencyCode">ISO code the totals were converted to. Null when unavailable.</param>
+/// <param name="EvidenceAsOfUtc">When the newest sampled sourcing decision was recorded.</param>
+/// <param name="UnavailableReason">Why there is no figure, in words fit to show a reader.</param>
+public sealed record CommercialCaseMarginEvidence(
+    decimal? MarginPercent,
+    int CostedLines,
+    string? CurrencyCode,
+    DateTime? EvidenceAsOfUtc,
+    string? UnavailableReason)
+{
+    /// <summary>No figure, and the reason why — never a zero standing in for "not measured".</summary>
+    public static CommercialCaseMarginEvidence None(string reason, int costedLines = 0) =>
+        new(null, costedLines, null, null, reason);
+}

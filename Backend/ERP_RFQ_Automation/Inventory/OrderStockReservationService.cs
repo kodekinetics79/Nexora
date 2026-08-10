@@ -113,7 +113,20 @@ public interface IOrderStockReservationService
     /// <summary>Releases all active holds for an order (order cancelled / unallocated).</summary>
     Task<int> ReleaseOrderAsync(long businessUnitId, long orderId, string? actor = null, CancellationToken ct = default);
 
-    /// <summary>Consumes all active holds for an order on goods issue/delivery, decrementing on-hand.</summary>
+    /// <summary>
+    /// Consumes all active holds for an order on goods issue/delivery, decrementing on-hand and
+    /// declaring the lot movement for every hold that names a lot.
+    ///
+    /// <para>Implemented by delegating to <see cref="ConsumeOrderLinesAsync"/> with each line's own
+    /// held quantity, so the traceability declaration cannot be skipped. It used to consume holds
+    /// directly, which left <c>MaterialLot.QuantityConsumed</c> untouched and made the issued units
+    /// reservable a second time.</para>
+    /// </summary>
+    /// <returns>The number of holds consumed.</returns>
+    /// <exception cref="KeyNotFoundException">The order is not in this tenant.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// A hold on the order names no order line, so its movement could not be declared.
+    /// </exception>
     Task<int> ConsumeOrderAsync(long businessUnitId, long orderId, string? actor = null, CancellationToken ct = default);
 
     /// <summary>
@@ -389,39 +402,51 @@ public sealed class OrderStockReservationService(
 
     public async Task<int> ConsumeOrderAsync(long businessUnitId, long orderId, string? actor = null, CancellationToken ct = default)
     {
-        var reservationIds = await _db.Set<StockReservation>().AsNoTracking()
+        // LOT DECLARATION: this used to read reservation IDs and call _availability.ConsumeAsync in
+        // a loop, never touching the lot declarer. On-hand fell and the hold flipped to Consumed,
+        // but MaterialLot.QuantityConsumed never moved — and GetReservableLotsAsync computes a lot's
+        // reservable balance as (received - consumed) minus ACTIVE holds only. The consumed hold
+        // drops out of the held side while the consumed side never moves, so the lot offered its
+        // full original quantity again, after the goods had physically left. The same units could
+        // then be held and issued a second time, with certificates and origin attached to material
+        // that is no longer in the building.
+        //
+        // The declaration lives on the line path, so this order-scoped entry point now delegates to
+        // it, declaring for every line exactly the quantity that line currently holds. That keeps
+        // the endpoint's meaning ("issue everything reserved for this order") while making the
+        // traceability ledger tell the truth.
+        var holds = await _db.Set<StockReservation>().AsNoTracking()
             .Where(r => r.BusinessUnitId == businessUnitId && r.OrderId == orderId
                         && r.Status == StockReservationStatus.Active)
             .OrderBy(r => r.Id)
-            .Select(r => r.Id)
+            .Select(r => new { r.Id, r.OrderItemId, r.Quantity })
             .ToListAsync(ct);
-        if (reservationIds.Count == 0) return 0;
+        if (holds.Count == 0) return 0;
 
-        // ATOMICITY: a goods issue for a multi-line order is one physical event. Consuming each
-        // hold in its own transaction meant a failure part-way left some lines' on-hand
-        // decremented and others not, with no record of which.
-        async Task ConsumeAllAsync()
-        {
-            foreach (var id in reservationIds)
-                await _availability.ConsumeAsync(businessUnitId, id, actor, ct);
-        }
+        // A hold that names no order line cannot be declared: a lot consumption is recorded against
+        // (lot, order, order line), so there is nowhere to attribute it. Refusing is the only honest
+        // answer — issuing it silently is exactly the double-reservable defect described above, and
+        // issuing it without a declaration would reopen it for un-lotted stock's neighbours too.
+        var unattributable = holds.Where(x => x.OrderItemId is null).Select(x => x.Id).ToArray();
+        if (unattributable.Length > 0)
+            throw new InvalidOperationException(
+                $"Order {orderId} holds stock on reservation(s) {string.Join(", ", unattributable)} that name no "
+                + "order line, so a goods issue cannot declare what it moved. Release those holds, or issue "
+                + "through the shipment path, which declares per line.");
 
-        if (_db.Database.CurrentTransaction is not null)
-        {
-            await ConsumeAllAsync();
-            return reservationIds.Count;
-        }
+        var declared = holds
+            .GroupBy(x => x.OrderItemId!.Value)
+            .ToDictionary(g => g.Key, g => g.Sum(x => x.Quantity));
 
-        var strategy = _db.Database.CreateExecutionStrategy();
-        await strategy.ExecuteAsync(async () =>
-        {
-            _db.ChangeTracker.Clear();
-            var isolation = _db.Database.IsNpgsql() ? IsolationLevel.ReadCommitted : IsolationLevel.Serializable;
-            await using var transaction = await _db.Database.BeginTransactionAsync(isolation, ct);
-            await ConsumeAllAsync();
-            await transaction.CommitAsync(ct);
-        });
-        return reservationIds.Count;
+        _ = await ConsumeOrderLinesAsync(businessUnitId, orderId, declared, actor, ct: ct);
+
+        // The contract is a count of holds consumed. The declared quantity IS what the lines held,
+        // so this is normally every hold read above; counting the rows that actually moved keeps the
+        // number honest if stock changed hands underneath this call.
+        var holdIds = holds.Select(x => x.Id).ToArray();
+        return await _db.Set<StockReservation>().AsNoTracking()
+            .CountAsync(r => r.BusinessUnitId == businessUnitId && holdIds.Contains(r.Id)
+                             && r.Status == StockReservationStatus.Consumed, ct);
     }
 
     public async Task<OrderIssueResult> ConsumeOrderLinesAsync(

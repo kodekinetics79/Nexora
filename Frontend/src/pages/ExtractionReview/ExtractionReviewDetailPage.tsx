@@ -4,13 +4,12 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Box, Typography, Paper, Button, Chip, Grid, CircularProgress, Stack,
   IconButton, Breadcrumbs, Link, Dialog, DialogTitle, DialogContent,
-  DialogActions, TextField, Alert, Tooltip, Divider, Popover, FormGroup,
-  FormControlLabel, Checkbox,
+  DialogActions, TextField, Alert, Tooltip, Divider,
 } from '@mui/material';
 import {
   DataGrid, GridActionsCellItem, useGridApiRef,
   type GridColDef, type GridRowModel, type GridRowId, type GridCellParams,
-  type GridColumnVisibilityModel, type GridRowSelectionModel, type GridPaginationModel,
+  type GridRowSelectionModel, type GridPaginationModel,
 } from '@mui/x-data-grid';
 import {
   Description as FileIcon,
@@ -21,7 +20,6 @@ import {
   Add as AddIcon,
   Delete as DeleteIcon,
   ArrowBack as BackIcon,
-  ViewColumn as ColumnsIcon,
   EditNote as BulkEditIcon,
   RadioButtonUnchecked as VerifiedDotIcon,
   ErrorOutlined as NeedsCheckDotIcon,
@@ -38,6 +36,11 @@ import { fieldEvidenceKey } from '../../api/services/extractionReviewService';
 import type { LeadItemResponseDTO } from '../../api/services/leadService';
 import ClientIdentityPanel from '../Leads/ClientIdentityPanel';
 import type { ClientSelection } from '../Leads/ResolveClientDialog';
+import commercialIntelligenceService, {
+  type CommercialLineResolutionDTO,
+} from '../../api/services/commercialIntelligenceService';
+import useColumnPreferences from '../../hooks/useColumnPreferences';
+import ColumnPreferences from '../../components/common/ColumnPreferences';
 import { useAuth } from '../../context/AuthContext';
 import { openAuthenticatedFile } from '../../utils/authenticatedFile';
 import FieldEvidencePopover from './FieldEvidencePopover';
@@ -79,95 +82,77 @@ interface ReviewLineItem extends CheckableLine {
   // in the workbench and deliberately excluded from the submit payload so the
   // backend preserves the stored values untouched.
   extraFields?: Record<string, string> | null;
+  // AA-01 · the tenant-defined custom-field bag, raw jsonb text. Read-only here and
+  // excluded from the submit payload for the same reason as extraFields: this screen
+  // corrects what the document said, and sending a bag it never edits would let a
+  // stale copy overwrite a value set elsewhere.
+  customFields?: string | null;
 }
 
 interface ReviewHeaderState {
   rfqno: string;
   buyersName: string;
   bidClosingDate: string;
+  // FR-RFQ-04. The date the BUYER asked for delivery on. A separate field from the
+  // bid closing date above and from any line's lead time: the reviewer is looking at
+  // the source document, so this is the only place the extraction can be corrected.
+  requiredDeliveryDate: string;
   opportunityNo: string;
   headerRemarks: string;
 }
 
 // ---------------------------------------------------------------------------
-// Per-user view preferences (column visibility), persisted locally. Key shape
-// copied from LeadsPage so one reviewer's preferences never leak into another
-// account sharing the same browser.
+// AA-01 · commercial context on the line.
+//
+// Every figure below is READ from `LeadLineCommercialResolution`, which the
+// inventory-intelligence service already persists per lead line and which this
+// screen previously did not show at all. Nothing here is computed, estimated or
+// defaulted: where no resolution exists for a line the cell says so, because a
+// blank "available" cell reads as "none in stock" and that is a supply answer
+// nobody gave.
+//
+// The join is by PART NUMBER, not by row position. The resolution is keyed on
+// the immutable revision line id, which is not the editable LeadItem id, and the
+// only other candidate — ordinal position — silently attributes one line's stock
+// to another the moment a reviewer inserts or deletes a row. A part that appears
+// on two lines is reported as ambiguous rather than resolved to the first match.
 // ---------------------------------------------------------------------------
 
-const COLUMNS_KEY_BASE = 'nexora.extractionReview.columnVisibility';
-
-const userScopedKey = (base: string): string => {
-  try {
-    const raw = localStorage.getItem('userData');
-    if (raw) {
-      const parsed: unknown = JSON.parse(raw);
-      if (parsed && typeof parsed === 'object' && 'id' in parsed) {
-        const id = (parsed as { id?: unknown }).id;
-        if (typeof id === 'number' || typeof id === 'string') return `${base}:user-${id}`;
-      }
-    }
-  } catch {
-    // Corrupted userData — fall back to a global preference key.
+/** Mirrors `First(snapshot.Part, snapshot.MaterialCode, snapshot.Description)` on the server. */
+const resolutionJoinKey = (
+  part?: string | null,
+  materialCode?: string | null,
+  description?: string | null,
+): string | null => {
+  for (const candidate of [part, materialCode, description]) {
+    const trimmed = (candidate ?? '').trim();
+    if (trimmed) return trimmed.toUpperCase();
   }
-  return `${base}:global`;
+  return null;
 };
 
-// Curated default column set. Four rarely-populated columns start hidden so the
-// grid fits a laptop viewport without horizontal scrolling; they stay one click
-// away rather than being deleted, because the data behind them is real.
-const DEFAULT_COLUMN_VISIBILITY: GridColumnVisibilityModel = {
-  checkStatus: true,
-  lineItemNo: true,
-  productShortName: true,
-  productShortDescription: true,
-  quantity: true,
-  unitOfMeasure: true,
-  unitPrice: true,
-  currency: true,
-  manufacturerName: true,
-  manufacturerPartNumber: true,
-  itemMaterialCode: true,
-  leadTime: true,
-  commodityProduct: false,
-  alternateProductName: false,
-  alternatePartNumber: false,
-  itemText: false,
-  actions: true,
+/** Sentinel for "this part is on more than one line, so no line owns this resolution". */
+const AMBIGUOUS = Symbol('ambiguous');
+type ResolutionLookup = Map<string, CommercialLineResolutionDTO | typeof AMBIGUOUS>;
+
+const SUPPLY_STATUS_LABEL: Record<CommercialLineResolutionDTO['classification'], string> = {
+  KnownInStock: 'In stock',
+  KnownIncoming: 'Incoming',
+  KnownShortage: 'Shortage',
+  UnknownProduct: 'Unknown product',
+  PossibleMatchReview: 'Possible match — review',
+  NonInventoryService: 'Service / non-inventory',
 };
 
-const HIDEABLE_COLUMNS: ReadonlyArray<{ field: string; label: string }> = [
-  { field: 'lineItemNo', label: 'Line #' },
-  { field: 'productShortName', label: 'Product' },
-  { field: 'productShortDescription', label: 'Description' },
-  { field: 'quantity', label: 'Qty' },
-  { field: 'unitOfMeasure', label: 'UoM' },
-  { field: 'unitPrice', label: 'Unit Price' },
-  { field: 'currency', label: 'Currency' },
-  { field: 'manufacturerName', label: 'Manufacturer' },
-  { field: 'manufacturerPartNumber', label: 'Mfr Part #' },
-  { field: 'itemMaterialCode', label: 'Material Code' },
-  { field: 'leadTime', label: 'Lead Time' },
-  { field: 'commodityProduct', label: 'Commodity' },
-  { field: 'alternateProductName', label: 'Alt Product' },
-  { field: 'alternatePartNumber', label: 'Alt Part #' },
-  { field: 'itemText', label: 'Item Text' },
-];
+/** What a commercial cell shows when there is no honest number to show. */
+const NOT_CHECKED = 'Not checked';
+const AMBIGUOUS_TEXT = 'Part on several lines';
 
-const loadColumnVisibility = (): GridColumnVisibilityModel => {
-  try {
-    const raw = localStorage.getItem(userScopedKey(COLUMNS_KEY_BASE));
-    if (raw) {
-      const parsed: unknown = JSON.parse(raw);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        return { ...DEFAULT_COLUMN_VISIBILITY, ...(parsed as GridColumnVisibilityModel), checkStatus: true, actions: true };
-      }
-    }
-  } catch {
-    // Unreadable preference — use the curated defaults.
-  }
-  return { ...DEFAULT_COLUMN_VISIBILITY };
-};
+/** Columns that carry no extraction evidence, so the evidence popover must not open on them. */
+const NON_EVIDENCED_FIELDS: ReadonlySet<string> = new Set([
+  'documentExtraColumns', 'stockAvailable', 'stockIncoming', 'projectedShortage',
+  'supplyStatus', 'expectedAvailableOn', 'stockUnitCost',
+]);
 
 // ---------------------------------------------------------------------------
 // Draft persistence. A reviewer who loses twenty minutes of corrections once
@@ -248,6 +233,7 @@ const mapItems = (items: LeadItemResponseDTO[] | undefined): ReviewLineItem[] =>
     itemText: it.itemText ?? '',
     leadTime: it.leadTime ?? '',
     extraFields: it.extraFields ?? null,
+    customFields: it.customFields ?? null,
   }));
 
 /** Bulk-settable columns. Both are low-cardinality and wrong on whole documents at a time. */
@@ -292,9 +278,21 @@ const ExtractionReviewDetailPage: React.FC = () => {
     enabled: !!id && Number.isFinite(leadId),
     retry: false,
   });
+  // AA-01 · what Nexora already knows about each part. Read-only, never written by
+  // this screen, and non-fatal: a tenant without the Inventory entitlement gets a
+  // 403 here and the commercial columns show "Not checked" rather than the page
+  // failing. The optional columns are hidden by default, so most reviewers pay for
+  // nothing they did not ask to see.
+  const lineResolutions = useQuery({
+    queryKey: ['lead-line-resolutions', leadId],
+    queryFn: () => commercialIntelligenceService.getLeadLineResolutions(leadId),
+    enabled: !!id && Number.isFinite(leadId),
+    retry: false,
+  });
 
   const [header, setHeader] = useState<ReviewHeaderState>({
-    rfqno: '', buyersName: '', bidClosingDate: '', opportunityNo: '', headerRemarks: '',
+    rfqno: '', buyersName: '', bidClosingDate: '', requiredDeliveryDate: '',
+    opportunityNo: '', headerRemarks: '',
   });
   const [items, setItems] = useState<ReviewLineItem[]>([]);
   // Client organisation staged by the reviewer. Deliberately NOT written on
@@ -306,8 +304,6 @@ const ExtractionReviewDetailPage: React.FC = () => {
   const [approveDialogOpen, setApproveDialogOpen] = useState(false);
   const [approvalReason, setApprovalReason] = useState('Verified against the source document.');
   const [processingEvidenceExpanded, setProcessingEvidenceExpanded] = useState(false);
-  const [columnVisibility, setColumnVisibility] = useState<GridColumnVisibilityModel>(loadColumnVisibility);
-  const [columnsAnchor, setColumnsAnchor] = useState<HTMLElement | null>(null);
   const [selection, setSelection] = useState<GridRowSelectionModel>({ type: 'include', ids: new Set<GridRowId>() });
   const [bulkField, setBulkField] = useState<BulkField | null>(null);
   const [bulkValue, setBulkValue] = useState('');
@@ -328,6 +324,7 @@ const ExtractionReviewDetailPage: React.FC = () => {
       rfqno: lead.rfqno ?? '',
       buyersName: lead.buyersName ?? '',
       bidClosingDate: toDateInput(lead.bidClosingDate),
+      requiredDeliveryDate: toDateInput(lead.requiredDeliveryDate ?? null),
       opportunityNo: lead.opportunityNo ?? '',
       headerRemarks: lead.headerRemarks ?? '',
     };
@@ -457,15 +454,63 @@ const ExtractionReviewDetailPage: React.FC = () => {
     ]);
   };
 
-  const applyColumnVisibility = (model: GridColumnVisibilityModel) => {
-    const next: GridColumnVisibilityModel = { ...model, checkStatus: true, actions: true };
-    setColumnVisibility(next);
-    try {
-      localStorage.setItem(userScopedKey(COLUMNS_KEY_BASE), JSON.stringify(next));
-    } catch {
-      // Storage unavailable — preference just won't persist.
+  // AA-01 · part number → the one resolution that unambiguously belongs to it.
+  // A part claimed by two resolutions collapses to AMBIGUOUS: showing either
+  // one's stock against a line would be a supply promise nobody made.
+  const resolutionsByPart = useMemo<ResolutionLookup>(() => {
+    const lookup: ResolutionLookup = new Map();
+    for (const row of lineResolutions.data ?? []) {
+      const key = (row.requestedPartNumber ?? '').trim().toUpperCase();
+      if (!key) continue;
+      lookup.set(key, lookup.has(key) ? AMBIGUOUS : row);
     }
-  };
+    return lookup;
+  }, [lineResolutions.data]);
+
+  // Parts this document repeats. The resolutions are keyed on the immutable
+  // revision, so a part duplicated across LINES is not detectable from the
+  // resolution side alone — it must also be refused here.
+  //
+  // Derived from the SERVER copy of the lines, not from the editable draft, for
+  // two reasons: the resolutions were computed against that same stored document,
+  // and a set recomputed on every keystroke would rebuild the whole column
+  // definition array — the exact cost the `actions` column below is written to
+  // avoid on a 1,450-line review.
+  const duplicatedPartsOnDocument = useMemo<Set<string>>(() => {
+    const seen = new Set<string>();
+    const duplicated = new Set<string>();
+    for (const row of lead?.leadItems ?? []) {
+      const key = resolutionJoinKey(row.manufacturerPartNumber, row.itemMaterialCode, row.productShortDescription);
+      if (!key) continue;
+      if (seen.has(key)) duplicated.add(key); else seen.add(key);
+    }
+    return duplicated;
+  }, [lead?.leadItems]);
+
+  const resolutionFor = useCallback(
+    (row: ReviewLineItem): CommercialLineResolutionDTO | typeof AMBIGUOUS | null => {
+      // A line the reviewer typed in this session was never resolved against
+      // stock. Matching it to a resolution by part number would show a supply
+      // answer for a line nobody has checked.
+      if (row.isNew) return null;
+      const key = resolutionJoinKey(row.manufacturerPartNumber, row.itemMaterialCode, row.productShortDescription);
+      if (!key) return null;
+      if (duplicatedPartsOnDocument.has(key)) return AMBIGUOUS;
+      return resolutionsByPart.get(key) ?? null;
+    },
+    [resolutionsByPart, duplicatedPartsOnDocument],
+  );
+
+  /** Renders one commercial cell, keeping "unknown" visibly distinct from a real zero. */
+  const commercialText = useCallback(
+    (row: ReviewLineItem, read: (resolution: CommercialLineResolutionDTO) => string): string => {
+      const resolution = resolutionFor(row);
+      if (resolution === null) return NOT_CHECKED;
+      if (resolution === AMBIGUOUS) return AMBIGUOUS_TEXT;
+      return read(resolution);
+    },
+    [resolutionFor],
+  );
 
   const selectedIds = useMemo<number[]>(() => {
     if (selection.type === 'exclude') {
@@ -527,6 +572,7 @@ const ExtractionReviewDetailPage: React.FC = () => {
       rfqno: header.rfqno || undefined,
       buyersName: header.buyersName || undefined,
       bidClosingDate: header.bidClosingDate || undefined,
+      requiredDeliveryDate: header.requiredDeliveryDate || undefined,
       opportunityNo: header.opportunityNo || undefined,
       headerRemarks: header.headerRemarks || undefined,
       // Only sent when the reviewer picked a client in this session. Omitted
@@ -636,6 +682,90 @@ const ExtractionReviewDetailPage: React.FC = () => {
     { field: 'alternateProductName', headerName: 'Alt Product', width: 170, editable: canEditLeads },
     { field: 'alternatePartNumber', headerName: 'Alt Part #', width: 150, editable: canEditLeads },
     { field: 'itemText', headerName: 'Item Text', width: 200, editable: canEditLeads },
+
+    // ── Read-only context. None of it is editable, because none of it is a claim
+    //    this document made — it is what Nexora already recorded about the part.
+    {
+      // The buyer's own unmapped columns, on the line rather than in a panel below
+      // the grid. Plant Code, Incoterms, Project, Cost Center — the commercial
+      // context a Sales Engineer was previously scrolling past the grid to read.
+      field: 'documentExtraColumns',
+      headerName: 'Customer document columns',
+      width: 260,
+      sortable: false,
+      filterable: false,
+      valueGetter: (_value: unknown, row: ReviewLineItem) => {
+        const entries = Object.entries(row.extraFields ?? {});
+        return entries.length === 0
+          ? 'None captured'
+          : entries.map(([key, value]) => `${key}: ${value}`).join(' · ');
+      },
+    },
+    {
+      field: 'stockAvailable',
+      headerName: 'Available now',
+      width: 130,
+      sortable: false,
+      filterable: false,
+      valueGetter: (_value: unknown, row: ReviewLineItem) =>
+        commercialText(row, (r) => r.availableToPromise.toLocaleString(undefined, { maximumFractionDigits: 4 })),
+    },
+    {
+      field: 'stockIncoming',
+      headerName: 'Incoming',
+      width: 120,
+      sortable: false,
+      filterable: false,
+      valueGetter: (_value: unknown, row: ReviewLineItem) =>
+        commercialText(row, (r) => r.incomingAvailable.toLocaleString(undefined, { maximumFractionDigits: 4 })),
+    },
+    {
+      field: 'projectedShortage',
+      headerName: 'Projected shortage',
+      width: 150,
+      sortable: false,
+      filterable: false,
+      valueGetter: (_value: unknown, row: ReviewLineItem) =>
+        commercialText(row, (r) => r.projectedShortage.toLocaleString(undefined, { maximumFractionDigits: 4 })),
+    },
+    {
+      field: 'supplyStatus',
+      headerName: 'Supply status',
+      width: 180,
+      sortable: false,
+      filterable: false,
+      valueGetter: (_value: unknown, row: ReviewLineItem) =>
+        commercialText(row, (r) => SUPPLY_STATUS_LABEL[r.classification] ?? r.classification),
+    },
+    {
+      field: 'expectedAvailableOn',
+      headerName: 'Expected available',
+      width: 160,
+      sortable: false,
+      filterable: false,
+      valueGetter: (_value: unknown, row: ReviewLineItem) =>
+        commercialText(row, (r) => {
+          if (!r.expectedAvailableOn) return 'No date recorded';
+          const parsed = dayjs(r.expectedAvailableOn);
+          return parsed.isValid() ? parsed.format('DD MMM YYYY') : 'No date recorded';
+        }),
+    },
+    {
+      // The stored product unit cost the resolution was evidenced against. It is
+      // null whenever the tenant has no single base currency, and that is rendered
+      // as an explicit gap: a bare number with no currency is failure #12.
+      field: 'stockUnitCost',
+      headerName: 'Stock unit cost',
+      width: 160,
+      sortable: false,
+      filterable: false,
+      valueGetter: (_value: unknown, row: ReviewLineItem) =>
+        commercialText(row, (r) =>
+          r.unitCost == null || !r.costCurrencyCode
+            ? 'Not recorded'
+            : `${r.costCurrencyCode} ${r.unitCost.toLocaleString(undefined, { maximumFractionDigits: 6 })}`),
+    },
+
     ...(canEditLeads ? [{
       field: 'actions',
       type: 'actions',
@@ -655,7 +785,14 @@ const ExtractionReviewDetailPage: React.FC = () => {
         />,
       ],
     } as GridColDef] : []),
-  ], [canEditLeads, flaggedByLine, assertions]);
+  ], [canEditLeads, flaggedByLine, assertions, commercialText]);
+
+  // AA-01 · the ONE column-preference mechanism, shared with every other wired
+  // grid. It replaces this page's own localStorage model, which was per browser
+  // rather than per user, could not reorder anything, and could not see a field
+  // the tenant defined. `customFields` is the raw jsonb bag carried on each line.
+  const columnPreferences = useColumnPreferences('lead.items', { customFieldBagField: 'customFields' });
+  const orderedColumns = columnPreferences.arrangeColumns(columns);
 
   const columnLabel = useCallback(
     (field: string) => columns.find((column) => column.field === field)?.headerName ?? field,
@@ -664,6 +801,11 @@ const ExtractionReviewDetailPage: React.FC = () => {
 
   const handleCellClick = (params: GridCellParams, event: React.MouseEvent) => {
     if (params.field === 'checkStatus' || params.field === 'actions' || params.field === '__check__') return;
+    // Field evidence answers "where in the customer's document did this value come
+    // from". The commercial columns did not come from the document and a
+    // tenant-defined field is not an extraction, so opening the evidence popover on
+    // them would report "Not linked" for values that were never meant to be linked.
+    if (NON_EVIDENCED_FIELDS.has(params.field) || params.field.startsWith('cf:')) return;
     const row = params.row as ReviewLineItem;
     if (row.isNew) return; // Nothing was extracted for a row the reviewer typed.
     // The grid delegates its listeners from the root, so `currentTarget` is the
@@ -857,6 +999,23 @@ const ExtractionReviewDetailPage: React.FC = () => {
                   disabled={isSubmitting || !canEditLeads} slotProps={{ inputLabel: { shrink: true } }}
                 />
               </Grid>
+              {/* FR-RFQ-04. What the BUYER asked for, beside the bid deadline it is
+                  constantly confused with. The Hijri rendering of the closing date is
+                  shown read-only underneath: Saudi tenders publish the deadline in
+                  Umm al-Qura, and this screen — where a human has the source document
+                  open — is where that cross-check is worth anything. */}
+              <Grid size={{ xs: 12, md: 4 }}>
+                <TextField
+                  fullWidth size="small" type="date" label="Required Delivery Date (buyer)"
+                  value={header.requiredDeliveryDate} onChange={handleHeaderChange('requiredDeliveryDate')}
+                  disabled={isSubmitting || !canEditLeads} slotProps={{ inputLabel: { shrink: true } }}
+                  helperText={
+                    lead?.bidClosingDateHijri
+                      ? `Closing date in Hijri: ${lead.bidClosingDateHijri} H`
+                      : 'The date the buyer wants the goods — not a supplier lead time.'
+                  }
+                />
+              </Grid>
               <Grid size={{ xs: 12, md: 4 }}>
                 <TextField fullWidth size="small" label="Opportunity #" value={header.opportunityNo} onChange={handleHeaderChange('opportunityNo')} disabled={isSubmitting || !canEditLeads} />
               </Grid>
@@ -933,15 +1092,7 @@ const ExtractionReviewDetailPage: React.FC = () => {
                 <Chip label={items.length} size="small" sx={{ fontWeight: 900, height: 18, fontSize: '0.7rem' }} />
               </Stack>
               <Stack direction="row" spacing={1} sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
-                <Button
-                  variant="outlined"
-                  size="small"
-                  startIcon={<ColumnsIcon />}
-                  onClick={(event) => setColumnsAnchor(event.currentTarget)}
-                  sx={{ fontWeight: 800, borderRadius: 2 }}
-                >
-                  Columns
-                </Button>
+                <ColumnPreferences preferences={columnPreferences} />
                 {canEditLeads && <Button
                   variant="outlined"
                   size="small"
@@ -990,13 +1141,13 @@ const ExtractionReviewDetailPage: React.FC = () => {
               <DataGrid
                 apiRef={apiRef}
                 rows={items}
-                columns={columns}
+                columns={orderedColumns}
                 getRowId={(r) => r.id}
                 editMode="cell"
                 processRowUpdate={processRowUpdate}
                 onProcessRowUpdateError={(err) => enqueueSnackbar(String(err?.message ?? 'Row update failed'), { variant: 'error' })}
-                columnVisibilityModel={columnVisibility}
-                onColumnVisibilityModelChange={applyColumnVisibility}
+                columnVisibilityModel={columnPreferences.columnVisibilityModel}
+                onColumnVisibilityModelChange={columnPreferences.onColumnVisibilityModelChange}
                 checkboxSelection={canEditLeads}
                 rowSelectionModel={selection}
                 onRowSelectionModelChange={setSelection}
@@ -1081,34 +1232,6 @@ const ExtractionReviewDetailPage: React.FC = () => {
       <Typography variant="caption" color="text.secondary">
         Received {dayjs(lead.recDate).isValid() ? dayjs(lead.recDate).format('DD MMM YYYY') : '—'} · Source {lead.leadSource || '—'}
       </Typography>
-
-      {/* Column visibility */}
-      <Popover
-        open={Boolean(columnsAnchor)}
-        anchorEl={columnsAnchor}
-        onClose={() => setColumnsAnchor(null)}
-        anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
-        transformOrigin={{ vertical: 'top', horizontal: 'right' }}
-      >
-        <Box sx={{ p: 2, minWidth: 240 }}>
-          <Typography sx={{ fontWeight: 800, fontSize: '0.8rem', mb: 1 }}>Visible columns</Typography>
-          <FormGroup>
-            {HIDEABLE_COLUMNS.map((column) => (
-              <FormControlLabel
-                key={column.field}
-                control={
-                  <Checkbox
-                    size="small"
-                    checked={columnVisibility[column.field] !== false}
-                    onChange={(event) => applyColumnVisibility({ ...columnVisibility, [column.field]: event.target.checked })}
-                  />
-                }
-                label={<Typography sx={{ fontSize: '0.8rem' }}>{column.label}</Typography>}
-              />
-            ))}
-          </FormGroup>
-        </Box>
-      </Popover>
 
       {/* Glass box: where this value came from */}
       <FieldEvidencePopover

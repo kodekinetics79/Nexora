@@ -877,7 +877,13 @@ public sealed class OpportunityPriorityApplicationService(
                     ? ("SEARCH_KNOWN_SUPPLIERS", "Search known Suppliers")
                 : fulfilment.Value is < 0.999m
                         ? ("SEARCH_KNOWN_SUPPLIERS", "Source uncovered quantity")
-                    : margin is null or < 15m
+                    // Escalate on an EVIDENCED thin margin only. This used to read
+                    // `margin is null or < 15m`, and the producer never assigned the field, so the
+                    // queue escalated every opportunity forever — a signal that fires on everything
+                    // carries no information and teaches people to skip the queue. An unmeasured
+                    // margin is not a thin one: it falls through to the stage's own next step, and
+                    // `currentBlocker` above already names the missing cost evidence.
+                    : margin is < 15m
                         ? ("ESCALATE_APPROVAL", "Escalate margin review")
                     : string.Equals(lead.CurrentStage, "Lead", StringComparison.Ordinal)
                         ? ("OPEN_OPPORTUNITY", "Open opportunity")

@@ -22,6 +22,7 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 from pathlib import Path
 import struct
 import sys
@@ -118,9 +119,18 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--api", default="http://127.0.0.1:5192")
     parser.add_argument("--email", default="owner@nexora.local")
-    parser.add_argument("--password", default="LocalOwner!2026")
+    # SEC-G9: no default. This carried a literal platform-owner password, which made it a
+    # published operator credential rather than a local convenience — every run that did not
+    # pass --password used it, and the value was in git. It is read from NEXORA_OWNER_PASSWORD
+    # (the same variable run-platform-console.sh now requires) or given explicitly, and the
+    # script refuses rather than guessing.
+    parser.add_argument("--password", default=os.environ.get("NEXORA_OWNER_PASSWORD"))
     parser.add_argument("--totp-secret-file", default=".local-run/platform-owner-mfa-secret")
     args = parser.parse_args()
+    if not args.password:
+        print("FATAL: no owner password. Set NEXORA_OWNER_PASSWORD (the same value "
+              "run-platform-console.sh was started with) or pass --password.")
+        return 2
     api = args.api.rstrip("/")
 
     status, login = call("POST", f"{api}/api/platform/auth/login",

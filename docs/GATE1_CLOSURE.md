@@ -8,8 +8,8 @@ real rendered-browser path. Anything short of that is reported short, with the m
 |---|---|---|---|
 | FR-RFQ-01 · three intake channels | PARTIAL | **PARTIAL** | Watched-folder screen built; folder *state* (files waiting, last sweep) has no endpoint because nothing persists it. SFTP/SharePoint descoped by the client-hosted decision |
 | FR-RFQ-02 · nine intake formats | VERIFIED | **VERIFIED** | — DOCX now also read structurally |
-| FR-RFQ-03 · ID format + agreement reference | CONFLICTING | **CLOSED** | `NXR-` numbering ratified as an approved deviation; agreement reference now captured |
-| FR-RFQ-04 · bilingual OCR + eleven fields | PARTIAL | **CLOSED** | Hijri, closing time, delivery location and required delivery date all captured; Arabic deferred by approved deviation |
+| FR-RFQ-03 · ID format + agreement reference | CONFLICTING | **CLOSED** | `NXR-` numbering ratified as an approved deviation; agreement reference captured **and read** — see the correction under FR-RFQ-03 / FR-RFQ-04 |
+| FR-RFQ-04 · bilingual OCR + eleven fields | PARTIAL | **CLOSED** | Hijri, closing time, delivery location and required delivery date captured **and read** — three of them had no reader at all until the continuity audit; see the correction below. Arabic deferred by approved deviation. No automatic check that a promised lead time meets the buyer's required date — decision required |
 | FR-RFQ-05 · amendment versions the RFQ | PARTIAL | **CLOSED** | A closing-date amendment now versions the existing inquiry in either direction |
 | FR-RFQ-06 · duplicates held before creation | CONFLICTING | **CLOSED** | — |
 | FR-RFQ-07 · routing rules in master data | PARTIAL | **CLOSED** | Admin screen built and Territory (region) rules now derive and fire. Key-account-team stays underivable and says so on every decision — no customer→team link exists to derive it from |
@@ -30,6 +30,32 @@ captured end to end: delivery location, the buyer's required delivery date, the 
 rendered alongside the Gregorian one, and the standing-agreement reference. "Requested Delivery:
 9 weeks" now lands on the buyer's requirement rather than being forced into a supplier lead time —
 the conflation that once wrote "deliver immediately" onto every line.
+
+> **Correction, and the reason it is recorded rather than quietly fixed.** For one gate this
+> paragraph was false in the only way that matters. Three of those four fields —
+> `RequiredDeliveryDate`, `BidClosingDateHijri` and `AgreementReference` — were written by
+> extraction and read by **nothing**: no DTO, no projection, no screen, no column in the list-view
+> catalogue. "Captured end to end" described a write. Claiming the Hijri date was "rendered
+> alongside the Gregorian one" claimed a read that did not exist anywhere in the codebase, which is
+> failure #2 in `WIRING_CONTRACT.md` with a gate document vouching for it — the false assurance the
+> contract exists to stop, and worse than the gap it concealed, because a reader of this page would
+> have stopped looking.
+>
+> The claim is now true. `RequiredDeliveryDate` is on `LeadResponseDTO`, in both lead projections,
+> correctable by the reviewer through `LeadReviewHeaderDTO`, a default-visible `leads.list` column
+> beside the deadline, and a field on the lead detail screen and the extraction workbench.
+> `BidClosingDateHijri` renders under the Gregorian bid-close date on the lead detail screen and as
+> the helper line on the workbench field a reviewer reads with the source document open — the only
+> place a Hijri/Gregorian cross-check is worth anything — plus a selectable list column. It stayed
+> in scope rather than going to the deferred Arabic work (decision R6) for the reason the entity
+> already gave: this is data correctness, not language. A Hijri deadline read as a Gregorian one
+> loses the bid whatever language the interface is in. `AgreementReference` renders on the lead
+> detail screen and as a selectable list column.
+>
+> **Still owed, and not claimed here: nothing compares the buyer's required delivery date to what
+> Nexora promises.** The date is now visible to the person making the promise, which is what
+> FR-RFQ-04 asks for; an automatic guard is not, and it needs a decision rather than an
+> implementation. See item 3 under "Found while closing, not yet fixed" below.
 
 **FR-RFQ-05.** A closing-date amendment versions the existing inquiry instead of queueing for a
 human, in either direction, gated on the same similarity bar as the neighbouring arm so a genuine
@@ -87,8 +113,9 @@ through:
 
 ## Found while closing, not yet fixed
 
-Four items surfaced while building the two missing screens. All are recorded rather than fixed,
-to keep this increment inside its scope.
+Items surfaced while building the two missing screens and during the Gate 1 continuity audit.
+All are recorded rather than fixed, to keep this increment inside its scope, except where a line
+is explicitly marked FIXED.
 
 0. **Territory and Key-account-team routing rules can never fire.** The engine derives scope keys
    for `Branch` and `ProductCategory` only, so a rule written against either of the other two
@@ -97,13 +124,45 @@ to keep this increment inside its scope.
    exists, but the engine cannot act on two of its six scopes. The screen says so inline rather
    than letting an administrator create a rule that silently never applies.
 
-1. **The mailbox polling interval contradicts itself.** The stored default is `300` and
-   `EmailBackgroundService` reads it with `TimeSpan.FromSeconds`, but the mailbox health text, the
-   DTO default of `5` and the mailbox screen all describe it as **minutes**. An operator who sets
-   `5` expecting five minutes gets a five-second poll. Whichever unit is intended, three surfaces
-   currently state the wrong one.
+1. ~~**The mailbox polling interval contradicts itself.**~~ **FIXED.** The stored default is `300`
+   and `EmailBackgroundService` read it with `TimeSpan.FromSeconds`, while the mailbox health text,
+   the DTO default of `5` and the mailbox screen all described it as **minutes** — an operator
+   setting `5` for five minutes got a five-second IMAP poll. Minutes is now the unit everywhere,
+   because minutes is what every human-facing surface already promised. Existing rows are **not
+   backfilled**: each keeps its number and changes meaning from seconds to minutes, a sixty-fold
+   slowdown, so no row can start polling faster than it does today and the transition cannot create
+   the hazard it removes. The **column default** `300` — five minutes as seconds, five hours as
+   minutes — must move to `5` and is owed to the migration owner; it is recorded in
+   `WIRING_CONTRACT.md` and is unreachable through the product, since both the create and the
+   update path always write the value explicitly. One adjacent defect fixed with it: the interval
+   was read across *every* active mailbox, so an outbound-only SMTP row set the inbound poll rate
+   for the whole tenant despite the DTO documenting the field as "ignored for SMTP".
 2. **Folder-sourced inquiries cannot be filtered.** The All Inquiries lead-source filter offers
    Email, Manual and Bulk only, so the three watched-folder sources are invisible to it.
+4. **The mailbox health line reports a per-mailbox interval the poller does not honour.** There is
+   one poll loop for the whole host and it sleeps for the **minimum** interval across every active
+   IMAP mailbox, so a tenant with mailboxes at 5 and 60 minutes polls both every 5 — while the
+   60-minute row's health line reads "Polling every 60 minute(s)". The number is the stored
+   setting, not the rate in force. Correcting the copy is trivial; giving each mailbox its own
+   schedule is a change to how the poller is structured, and it is not in this scope. Pre-existing,
+   and unrelated to the unit fix except that the unit fix is what makes the sentence worth reading.
+
+3. **The buyer's required delivery date is visible but nothing compares it to what we promise.**
+   This one needs a decision, not an implementation, which is why it is here rather than done.
+   `Rfqitem.RequiredDesiredDate` — the per-line required date the comparison machinery already
+   reads — is **never written by either lead→RFQ conversion path**
+   (`Repositories/LeadRepository.cs:425`, `Intelligence/Conversion/LeadConversionIntelligence.cs:281`);
+   it is settable only through the RFQ create/update controller. So for every lead-originated RFQ,
+   which is all of them, three existing controls are inert: the `DELIVERY_DATE_MISSED` **blocker**
+   (`CommercialLearning/CommercialLearningService.cs:1042`), the required-date gate inside
+   `IsOfferEvidenceCurrent` (`:623`), and `QuoteItemResponseDTO.RequestedDeliveryDate`
+   (`Services/QuoteService.cs:895`), which reads through the same null column and shows a sales
+   engineer nothing beside the lead time they are committing to. Seeding the line date from
+   `Lead.RequiredDeliveryDate` at conversion needs **no schema change** and would light all three
+   up at once — but it would also arm a hard control: `ProcurementApplicationService.ApproveAwardAsync`
+   **throws** on an ineligible comparison, so every award to a supplier who cannot make the buyer's
+   date would begin to fail outright. Block, warn, or override-with-reason is a commercial policy
+   call and is not one to make by side effect. **Decision required** before this is wired.
 
 ## What the watched-folder channel actually is
 

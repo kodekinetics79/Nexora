@@ -49,7 +49,26 @@ public sealed class PlatformMfaChallengeRequest
 }
 
 public sealed record PlatformMfaStatusResponse(bool Enabled, DateTime? EnabledAtUtc, int RecoveryCodesRemaining);
-public sealed record PlatformMfaEnrollmentStartResponse(string Secret, string OtpAuthUri);
+
+/// <summary>
+/// The one response that carries a live TOTP enrolment seed. It is served exactly once, to the
+/// operator who is enrolling, and it must reach no other surface.
+/// </summary>
+public sealed record PlatformMfaEnrollmentStartResponse(string Secret, string OtpAuthUri)
+{
+    /// <summary>
+    /// SEC-G9. A record's compiler-generated ToString prints EVERY property, so a single
+    /// <c>_logger.LogInformation("enrolment started {Response}", response)</c> would write the
+    /// operator's TOTP seed to the log — and a seed in a log is a second factor that is no longer
+    /// a factor, because anyone with log access can generate the codes. <see cref="OtpAuthUri"/>
+    /// is redacted with it and is not a lesser secret: the otpauth:// URI EMBEDS the same seed
+    /// in its query string, which is exactly how the QR code carries it. Redacted at the source
+    /// rather than by trusting every future call site, matching the same override on
+    /// <c>IssuedTenantAdminInvitation</c> and <c>ProvisioningSubmitResult</c>.
+    /// </summary>
+    public override string ToString() =>
+        "PlatformMfaEnrollmentStartResponse { Secret = [redacted], OtpAuthUri = [redacted] }";
+}
 
 public sealed class PlatformMfaEnrollmentConfirmRequest
 {
@@ -58,7 +77,18 @@ public sealed class PlatformMfaEnrollmentConfirmRequest
 }
 
 public sealed record PlatformMfaEnrollmentConfirmResponse(
-    DateTime EnabledAtUtc, IReadOnlyList<string> RecoveryCodes);
+    DateTime EnabledAtUtc, IReadOnlyList<string> RecoveryCodes)
+{
+    /// <summary>
+    /// SEC-G9, and the same defect as on the enrolment start response. Recovery codes bypass the
+    /// second factor by design, so a logged list is a standing set of single-use passwords for the
+    /// platform-owner plane. The COUNT is kept because it is what an operator diagnosing an
+    /// enrolment actually needs, and it is already public on <c>PlatformMfaStatusResponse</c>.
+    /// </summary>
+    public override string ToString() =>
+        $"PlatformMfaEnrollmentConfirmResponse {{ EnabledAtUtc = {EnabledAtUtc:O}, "
+        + $"RecoveryCodes = [redacted, {RecoveryCodes?.Count ?? 0} issued] }}";
+}
 
 // ---- Tenants -------------------------------------------------------------
 

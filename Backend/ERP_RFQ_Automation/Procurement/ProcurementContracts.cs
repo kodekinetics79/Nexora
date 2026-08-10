@@ -410,9 +410,16 @@ public sealed record SupplierOfferView(long Id, long SolicitationId, long RfqIte
 public sealed record SourcingAwardView(long Id, long RfqItemId, long SupplierQuotedItemId, long SupplierId,
     string SupplierName, decimal Quantity, decimal LandedUnitCost, long CurrencyId, string CurrencyCode,
     string Status, string? Rationale, long? PurchaseOrderId, long Version);
+/// <summary>
+/// <paramref name="TrackingMode"/> is <c>SERIAL</c>, <c>LOT</c> or <c>UNTRACKED</c>, computed from the
+/// product exactly as <c>Traceability.MaterialLotTrackingModes.FromProduct</c> computes it at receipt
+/// time. It is on this view because the receipt screen has to ask for what the recorder will demand:
+/// without it, turning on a product's batch or serial switch made every goods receipt for that
+/// product throw inside the receipt transaction, naming a field no screen offered.
+/// </summary>
 public sealed record SupplierPurchaseOrderLineView(long Id, long RfqItemId, long ProductId, string Description,
     decimal OrderedQuantity, decimal ReceivedQuantity, decimal OpenQuantity, decimal UnitCost,
-    decimal LandedUnitCost, long WarehouseId,
+    decimal LandedUnitCost, long WarehouseId, string TrackingMode,
     string? HsCode = null, string? CountryOfOrigin = null);
 /// <summary>
 /// FR-SPO-01. <c>ApprovedBy</c> and <c>ApprovedOn</c> are optional so that ISSUED rows raised before
