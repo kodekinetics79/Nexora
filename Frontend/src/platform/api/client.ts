@@ -64,6 +64,7 @@ import type {
   TenantActivationDecision,
   ActivationControlEvidenceReceipt,
   Tenant,
+  TenantAdminInvitation,
   TenantDataAsset,
   TenantDataRecoveryEvidence,
   TenantDeletionCertificationDecision,
@@ -84,6 +85,8 @@ import type {
   TestOutboundEmailResult,
   UpdateRateCardInput,
   UpdateTenantAiPolicyInput,
+  UpdateTenantProfileInput,
+  ResendTenantAdminInvitationResult,
   UsageRatingCorrection,
   RegisterTenantDataAssetInput,
   VerifyTenantDataAssetInput,
@@ -148,6 +151,12 @@ export interface PlatformApi {
   getOverview(): Promise<OverviewMetrics>;
   listTenants(): Promise<Tenant[]>;
   getTenant(id: string): Promise<Tenant>;
+  updateTenantProfile(id: string, input: UpdateTenantProfileInput): Promise<Tenant>;
+  listTenantAdminInvitations(id: string): Promise<TenantAdminInvitation[]>;
+  resendTenantAdminInvitation(
+    id: string,
+    input: { userId?: string | null; reason: string },
+  ): Promise<ResendTenantAdminInvitationResult>;
   markTenantPastDue(id: string, reason: string): Promise<Tenant>;
   resolveTenantPastDue(id: string, reason: string): Promise<Tenant>;
   listTenantDataAssets(tenantId: string): Promise<TenantDataAsset[]>;
@@ -867,6 +876,26 @@ const httpPlatformApi: PlatformApi = {
     (await platformHttp.get<BackendTenant[]>('/api/platform/tenants')).data.map(normalizeTenant),
   getTenant: async (id) =>
     normalizeTenant((await platformHttp.get<BackendTenant>(`/api/platform/tenants/${id}`)).data),
+  updateTenantProfile: async (id, input) =>
+    normalizeTenant((await platformHttp.put<BackendTenant>(`/api/platform/tenants/${id}/profile`, input)).data),
+  listTenantAdminInvitations: async (id) =>
+    (await platformHttp.get<TenantAdminInvitation[]>(`/api/platform/tenants/${id}/admin-invitations`)).data
+      .map((item) => ({ ...item, id: String(item.id), userId: String(item.userId) })),
+  resendTenantAdminInvitation: async (id, input) => {
+    const body = { ...input, userId: input.userId == null ? null : Number(input.userId) };
+    const result = (await platformHttp.post<ResendTenantAdminInvitationResult>(
+      `/api/platform/tenants/${id}/admin-invitations/resend`, body,
+    )).data;
+    return {
+      ...result,
+      activationUrl: result.activationUrl ?? null,
+      invitation: {
+        ...result.invitation,
+        id: String(result.invitation.id),
+        userId: String(result.invitation.userId),
+      },
+    };
+  },
   markTenantPastDue: async (id, reason) =>
     normalizeTenant((await platformHttp.post<BackendTenant>(`/api/platform/tenants/${id}/mark-past-due`, { reason })).data),
   resolveTenantPastDue: async (id, reason) =>

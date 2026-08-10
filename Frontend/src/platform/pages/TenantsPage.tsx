@@ -26,6 +26,8 @@ import {
 } from '@mui/x-data-grid';
 import {
   Add as AddIcon,
+  DeleteOutlined as DeleteIcon,
+  EditOutlined as EditIcon,
   Inventory2Outlined as ArchiveIcon,
   Login as ImpersonateIcon,
   PauseCircleOutlined as SuspendIcon,
@@ -252,11 +254,36 @@ export default function TenantsPage() {
     {
       field: 'actions',
       headerName: 'Actions',
-      width: 170,
+      width: 230,
       sortable: false,
       filterable: false,
       renderCell: (p) => (
         <Stack direction="row" spacing={0.5} onClick={(e) => e.stopPropagation()}>
+          <Tooltip title={permissions.canAdministerTenants ? 'Edit tenant profile and administrator access' : REQUIRED_ROLE_COPY.tenantAdmin}>
+            <span>
+              <IconButton
+                size="small"
+                aria-label="Edit tenant"
+                disabled={!permissions.canAdministerTenants}
+                onClick={() => navigate(`/platform/tenants/${p.row.id}?tab=profile-access`)}
+              >
+                <EditIcon fontSize="small" />
+              </IconButton>
+            </span>
+          </Tooltip>
+          <Tooltip title={permissions.isOwner ? 'Delete / offboard with retention controls' : REQUIRED_ROLE_COPY.owner}>
+            <span>
+              <IconButton
+                size="small"
+                color="error"
+                aria-label="Delete or offboard tenant"
+                disabled={!permissions.isOwner}
+                onClick={() => navigate(`/platform/tenants/${p.row.id}?tab=lifecycle`)}
+              >
+                <DeleteIcon fontSize="small" />
+              </IconButton>
+            </span>
+          </Tooltip>
           {/* Every lifecycle verb here is Owner|SupportAdmin server-side, so a BillingAdmin
               or ReadOnlyOps operator sees them disabled with the reason rather than a 403. */}
           <Tooltip

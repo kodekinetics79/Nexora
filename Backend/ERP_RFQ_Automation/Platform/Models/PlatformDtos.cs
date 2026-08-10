@@ -104,6 +104,37 @@ public class TenantSummaryDto
 }
 
 /// <summary>
+/// Editable customer identity fields. Commercial terms, slug, residency and base currency are
+/// intentionally absent because they have separate governed workflows or immutable lineage.
+/// Blank optional values clear the corresponding profile field.
+/// </summary>
+public sealed class UpdateTenantProfileRequest
+{
+    [Required, StringLength(256)]
+    public string Name { get; set; } = null!;
+
+    [StringLength(256)] public string? LegalName { get; set; }
+    [StringLength(64)] public string? RegistrationNumber { get; set; }
+    [StringLength(64)] public string? TaxNumber { get; set; }
+    [StringLength(2, MinimumLength = 2)] public string? CountryCode { get; set; }
+    [StringLength(128)] public string? Industry { get; set; }
+    [Url, StringLength(512)] public string? Website { get; set; }
+    [StringLength(256)] public string? AddressLine1 { get; set; }
+    [StringLength(256)] public string? AddressLine2 { get; set; }
+    [StringLength(128)] public string? City { get; set; }
+    [StringLength(128)] public string? StateProvince { get; set; }
+    [StringLength(32)] public string? PostalCode { get; set; }
+    [StringLength(64)] public string? Phone { get; set; }
+    [EmailAddress, StringLength(320)] public string? ContactEmail { get; set; }
+    [Url, StringLength(1024)] public string? LogoUrl { get; set; }
+    [StringLength(128)] public string? TimeZoneId { get; set; }
+    [StringLength(35)] public string? Locale { get; set; }
+
+    [Required, StringLength(1000, MinimumLength = 3)]
+    public string Reason { get; set; } = null!;
+}
+
+/// <summary>
 /// Everything it takes to stand up a customer company, in one atomic request.
 ///
 /// <para><b>Why this is not three fields.</b> Tenant creation is the first step of every

@@ -89,6 +89,102 @@ public class TenantsController : ControllerBase
         return tenant is null ? NotFound() : Ok(ToDto(tenant));
     }
 
+    // PUT /api/platform/tenants/{id}/profile
+    [HttpPut("{id:long}/profile")]
+    [Authorize(Policy = PlatformPolicies.TenantAdmin)]
+    public async Task<ActionResult<TenantSummaryDto>> UpdateProfile(
+        long id, [FromBody] UpdateTenantProfileRequest request, CancellationToken ct)
+    {
+        if (!ModelState.IsValid) return BadRequest(ModelState);
+        if (ValidateEditableProfile(request) is string validationError)
+            return BadRequest(new { error = validationError });
+
+        var actor = User.FindFirst("email")?.Value ?? "platform";
+        var now = DateTime.UtcNow;
+        var strategy = _context.Database.CreateExecutionStrategy();
+
+        try
+        {
+            await strategy.ExecuteAsync(async () =>
+            {
+                _context.ChangeTracker.Clear();
+                await using var tx = await _context.Database.BeginTransactionAsync(ct);
+
+                var tenant = await _context.Set<Tenant>().IgnoreQueryFilters()
+                    .FirstOrDefaultAsync(t => t.Id == id, ct)
+                    ?? throw new TenantNotFoundException();
+
+                if (tenant.Status == TenantStatus.Archived)
+                    throw new InvalidTenantStatusTransitionException(
+                        tenant.Status, "non-archived", "edited",
+                        "An archived tenant is a retention-controlled record. Restore it before editing its company profile.");
+
+                var before = ProfileAuditSnapshot(tenant);
+                tenant.Name = request.Name.Trim();
+                tenant.LegalName = Normalize(request.LegalName);
+                tenant.RegistrationNumber = Normalize(request.RegistrationNumber);
+                tenant.TaxNumber = Normalize(request.TaxNumber);
+                tenant.CountryCode = Normalize(request.CountryCode)?.ToUpperInvariant();
+                tenant.Industry = Normalize(request.Industry);
+                tenant.Website = Normalize(request.Website);
+                tenant.AddressLine1 = Normalize(request.AddressLine1);
+                tenant.AddressLine2 = Normalize(request.AddressLine2);
+                tenant.City = Normalize(request.City);
+                tenant.StateProvince = Normalize(request.StateProvince);
+                tenant.PostalCode = Normalize(request.PostalCode);
+                tenant.Phone = Normalize(request.Phone);
+                tenant.ContactEmail = Normalize(request.ContactEmail);
+                tenant.LogoUrl = Normalize(request.LogoUrl);
+                tenant.TimeZoneId = Normalize(request.TimeZoneId);
+                tenant.Locale = Normalize(request.Locale);
+                tenant.ModifiedOn = now;
+                tenant.ModifiedBy = actor;
+
+                if (tenant.PrimaryBusinessUnitId is long businessUnitId)
+                {
+                    var businessUnit = await _context.BusinessUnits.IgnoreQueryFilters()
+                        .FirstOrDefaultAsync(b => b.Id == businessUnitId, ct);
+                    if (businessUnit is not null)
+                    {
+                        businessUnit.BusinessUnitName = tenant.Name;
+                        businessUnit.ModifiedOn = now;
+                        businessUnit.ModifiedBy = actor;
+                    }
+
+                    var quoteConfiguration = await _context.QuoteConfigurations.IgnoreQueryFilters()
+                        .FirstOrDefaultAsync(q => q.BusinessUnitId == businessUnitId, ct);
+                    if (quoteConfiguration is not null)
+                    {
+                        quoteConfiguration.Logo = tenant.LogoUrl;
+                        quoteConfiguration.CompanyAddress = PostalAddressOf(tenant);
+                        quoteConfiguration.CompanyPhone = tenant.Phone;
+                        quoteConfiguration.CompanyEmail = tenant.ContactEmail;
+                        quoteConfiguration.ModifiedOn = now;
+                        quoteConfiguration.ModifiedBy = actor;
+                    }
+                }
+
+                await _context.SaveChangesAsync(ct);
+                await _audit.WriteAsync(User, "tenant.profile.update", nameof(Tenant), id.ToString(),
+                    new { reason = request.Reason.Trim(), before, after = ProfileAuditSnapshot(tenant) },
+                    actAsTenantId: id, httpContext: HttpContext, ct: ct);
+                await tx.CommitAsync(ct);
+            });
+        }
+        catch (TenantNotFoundException)
+        {
+            return NotFound();
+        }
+        catch (InvalidTenantStatusTransitionException exception)
+        {
+            return Conflict(new { error = exception.Message });
+        }
+
+        var updated = await _context.Set<Tenant>().IgnoreQueryFilters().AsNoTracking()
+            .Include(t => t.Plan).FirstAsync(t => t.Id == id, ct);
+        return Ok(ToDto(updated));
+    }
+
     // POST /api/platform/tenants  (provision)
     [HttpPost]
     [Authorize(Policy = PlatformPolicies.TenantAdmin)]
@@ -1185,6 +1281,59 @@ public class TenantsController : ControllerBase
         UpdatedOn = p.UpdatedOn,
         UpdatedBy = p.UpdatedBy
     };
+
+    private static string? ValidateEditableProfile(UpdateTenantProfileRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.Name)) return "name is required.";
+        if (Normalize(request.CountryCode) is string country
+            && (country.Length != 2 || !country.All(char.IsAsciiLetter)))
+            return $"countryCode '{country}' is not an ISO-3166-1 alpha-2 code (two letters, e.g. 'SA').";
+
+        if (Normalize(request.TimeZoneId) is string timeZone)
+        {
+            try
+            {
+                TimeZoneInfo.FindSystemTimeZoneById(timeZone);
+            }
+            catch (Exception exception) when (exception is TimeZoneNotFoundException or InvalidTimeZoneException)
+            {
+                return $"timeZoneId '{timeZone}' is not a time zone this server recognises; use an IANA identifier such as 'Asia/Riyadh'.";
+            }
+        }
+
+        return null;
+    }
+
+    private static object ProfileAuditSnapshot(Tenant tenant) => new
+    {
+        tenant.Name,
+        tenant.LegalName,
+        tenant.RegistrationNumber,
+        tenant.TaxNumber,
+        tenant.CountryCode,
+        tenant.Industry,
+        tenant.Website,
+        tenant.AddressLine1,
+        tenant.AddressLine2,
+        tenant.City,
+        tenant.StateProvince,
+        tenant.PostalCode,
+        tenant.Phone,
+        tenant.ContactEmail,
+        tenant.LogoUrl,
+        tenant.TimeZoneId,
+        tenant.Locale
+    };
+
+    private static string? PostalAddressOf(Tenant tenant)
+    {
+        var address = string.Join(", ", new[]
+        {
+            tenant.AddressLine1, tenant.AddressLine2, tenant.City, tenant.StateProvince,
+            tenant.PostalCode, tenant.CountryCode
+        }.Where(part => !string.IsNullOrWhiteSpace(part)));
+        return address.Length == 0 ? null : address;
+    }
 
     private static string? Normalize(string? value)
         => string.IsNullOrWhiteSpace(value) ? null : value.Trim();

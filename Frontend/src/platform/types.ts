@@ -140,6 +140,36 @@ export interface Tenant extends TenantCompanyProfile, TenantCommercialTerms {
   createdAt: string | null; // ISO
 }
 
+export interface UpdateTenantProfileInput extends TenantCompanyProfile {
+  name: string;
+  timeZoneId: string | null;
+  locale: string | null;
+  reason: string;
+}
+
+export interface TenantAdminInvitation {
+  id: string;
+  userId: string;
+  email: string;
+  status: string;
+  issuedAtUtc: string;
+  expiresAtUtc: string;
+  redeemedAtUtc: string | null;
+  revokedAtUtc: string | null;
+  revokedBy: string | null;
+  revocationReason: string | null;
+  lastSentAtUtc: string | null;
+  sendCount: number;
+  issuedBy: string;
+}
+
+export interface ResendTenantAdminInvitationResult {
+  invitation: TenantAdminInvitation;
+  emailDispatched: boolean;
+  /** Returned exactly once when the outbound provider did not transmit the message. */
+  activationUrl: string | null;
+}
+
 export interface BillingMeterCatalogEntry {
   eventType: string;
   billingMeterKey: string;

@@ -78,11 +78,10 @@ public sealed class RevokeTenantAdminInvitationRequest
 /// <summary>
 /// The operator's answer to "did the invite go out?".
 ///
-/// <para>It carries no token and no link, deliberately. Handing the activation URL back to the
-/// person who pressed the button would put the customer's credential-in-waiting into the
-/// operator's hands — precisely the property this whole flow exists to remove. When mail is
-/// genuinely blocked, the documented fallback is the generated-password handover that
-/// provisioning already supports, which is at least visible as such.</para>
+/// <para>It normally carries no token or link. When the configured provider does not transmit the
+/// message, the newly minted URL is returned exactly once to the authenticated platform operator.
+/// That mirrors the synchronous provisioning contract and prevents a mail outage from producing
+/// a valid but permanently unreachable invitation. Only the hash remains after this response.</para>
 /// </summary>
 public sealed class ResendTenantAdminInvitationResponse
 {
@@ -94,4 +93,10 @@ public sealed class ResendTenantAdminInvitationResponse
     /// left the building.
     /// </summary>
     public bool EmailDispatched { get; set; }
+
+    /// <summary>
+    /// Present only when delivery failed and the operator is an Owner; single-use and never
+    /// persisted in cleartext. SupportAdmin can reissue mail but cannot take custody of the link.
+    /// </summary>
+    public string? ActivationUrl { get; set; }
 }

@@ -2,7 +2,7 @@ import { useMemo } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { Box, Button, Tab, Tabs } from '@mui/material';
-import { ArrowBack as BackIcon } from '@mui/icons-material';
+import { ArrowBack as BackIcon, DeleteOutlined as DeleteIcon, EditOutlined as EditIcon } from '@mui/icons-material';
 import Stack from '../components/Flex';
 import { platformApi } from '../api/client';
 import { platformErrorMessage } from '../api/apiError';
@@ -19,9 +19,11 @@ import LifecycleTab from './tenant/LifecycleTab';
 import AiGovernanceTab from './tenant/AiGovernanceTab';
 import EntitlementsTab from './tenant/EntitlementsTab';
 import DataStorageTab from './tenant/DataStorageTab';
+import ProfileAccessTab from './tenant/ProfileAccessTab';
 
 const TABS = [
   { key: 'overview', label: 'Overview' },
+  { key: 'profile-access', label: 'Profile & access' },
   { key: 'commercial', label: 'Commercial' },
   { key: 'entitlements', label: 'Entitlements' },
   { key: 'support', label: 'Support' },
@@ -40,6 +42,7 @@ export default function TenantDetailPage() {
   const availableTabs = useMemo(
     () => TABS.filter((entry) =>
       (entry.key !== 'support' || permissions.canAdministerTenants)
+      && (entry.key !== 'profile-access' || permissions.canAdministerTenants)
       && (entry.key !== 'ai-governance' || permissions.isOwner)
       && (entry.key !== 'data-storage' || permissions.isOwner)),
     [permissions.canAdministerTenants, permissions.isOwner],
@@ -99,7 +102,17 @@ export default function TenantDetailPage() {
         title={tenant.name}
         subtitle={tenant.legalName ?? tenant.slug}
         actions={
-          <Stack direction="row" spacing={1}>
+          <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap' }}>
+            {permissions.canAdministerTenants && (
+              <Button size="small" variant="outlined" startIcon={<EditIcon />} onClick={() => openTab('profile-access')}>
+                Edit tenant
+              </Button>
+            )}
+            {permissions.isOwner && (
+              <Button size="small" variant="outlined" color="error" startIcon={<DeleteIcon />} onClick={() => openTab('lifecycle')}>
+                Delete / offboard
+              </Button>
+            )}
             <BillingModeChip mode={tenant.billingMode} />
             <PlanChip tier={tenant.planCode ?? 'none'} />
             <TenantStatusChip status={tenant.status} />
@@ -135,6 +148,7 @@ export default function TenantDetailPage() {
           canViewSupport={permissions.canAdministerTenants}
         />
       )}
+      {tab === 'profile-access' && permissions.canAdministerTenants && <ProfileAccessTab tenant={tenant} />}
       {tab === 'commercial' && <CommercialTab tenant={tenant} />}
       {tab === 'entitlements' && <EntitlementsTab tenant={tenant} />}
       {tab === 'support' && permissions.canAdministerTenants && <SupportTab tenant={tenant} />}
