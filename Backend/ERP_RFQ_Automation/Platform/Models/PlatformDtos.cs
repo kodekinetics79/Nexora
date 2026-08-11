@@ -533,6 +533,16 @@ public class TenantBaselineDto
     public bool QuoteConfiguration { get; set; }
     public string? BaseCurrency { get; set; }
     public int UnitsOfMeasure { get; set; }
+
+    /// <summary>
+    /// Lead, RFQ, quote, order and payment lifecycle rows the baseline seeder had to write. Zero on
+    /// the normal path, where <c>TenantsController.Provision</c> and
+    /// <c>ProvisioningStepExecutor</c>'s lifecycle-statuses step already wrote them. A NON-zero
+    /// figure is the signal worth reading: it means the workspace reached the seeder without the
+    /// states its own quote and order screens resolve, and the seeder repaired it.
+    /// </summary>
+    public int LifecycleStatuses { get; set; }
+
     public int Roles { get; set; }
     public int PermissionGrants { get; set; }
     public string? LeadReferencePrefix { get; set; }

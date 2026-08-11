@@ -54,6 +54,31 @@ public sealed class AiProcessingPolicyTenantIsolationPostgreSqlTests(PostgreSqlT
         // whatever it sets, can execute under it. Written as a reachability test rather than as a
         // second expected name, this still fails on a policy added TO PUBLIC or TO any of the
         // request-path roles, which is the whole of what it was defending.
+        //
+        // The two named exemptions arrived with
+        // 20260811210000_TenantProvisioningSeedsUnderForcedRowSecurity, which adds
+        // nexora_ai_default_policy_seed_read and _seed_write TO PUBLIC so that the SECURITY
+        // DEFINER seeder nexora_create_default_ai_policy() can write the row it exists to write on
+        // a schema owner that does not bypass RLS. TO PUBLIC is not a choice there: measured on
+        // postgres:16, a SECURITY DEFINER function cannot change role at all — both
+        // `SET LOCAL ROLE` in the body and `SET role TO` in the function's own SET clause answer
+        // "cannot set parameter \"role\" within security-definer function" — so no policy can be
+        // addressed to a role the seeder switches into, and the only remaining spellings are the
+        // owner's per-deployment name or a predicate.
+        //
+        // THE EXEMPTION IS BY NAME, AND THAT IS DELIBERATE. An earlier draft excluded by SHAPE —
+        // "the predicate mentions CURRENT_USER and pg_get_userbyid(seeder.proowner)" — and it was
+        // a strict weakening, demonstrated with a working exploit. Substring tests cannot tell a
+        // CONJUNCT from a dead disjunct, so a policy reading
+        //
+        //     WITH CHECK ("UpdatedBy" = 'ai-policy-migrator' OR CURRENT_USER = (SELECT ...))
+        //
+        // satisfied every shape test while admitting exactly the cross-tenant INSERT
+        // 20260811110019_DropAiDefaultProvisioningPolicy was written to close — verified planting
+        // RetentionDays 3650 / DataResidency 'ATTACKER-REGION' / EgressPolicy 'AllFieldsRaw' on
+        // another tenant. A name list cannot be talked into admitting a policy that is not on it,
+        // so the invariant below stays TOTAL for anything new. What a name list cannot do is
+        // notice an edit to a policy that keeps its name, which is what the pin after it is for.
         Assert.Equal("nexora_tenant_isolation", await ScalarStringAsync(connection, """
             SELECT string_agg(policy.polname, ', ' ORDER BY policy.polname)
             FROM pg_policy policy
@@ -69,7 +94,50 @@ public sealed class AiProcessingPolicyTenantIsolationPostgreSqlTests(PostgreSqlT
                        CROSS JOIN pg_roles request_role
                        WHERE request_role.rolname IN (
                                  'nexora_tenant_app', 'nexora_identity_app', 'nexora_pipeline_app')
-                         AND pg_has_role(request_role.oid, admitted.role_oid, 'USAGE')));
+                         AND pg_has_role(request_role.oid, admitted.role_oid, 'USAGE')))
+              AND policy.polname NOT IN ('nexora_ai_default_policy_seed_read',
+                                         'nexora_ai_default_policy_seed_write');
+            """));
+
+        // The two exempted policies, pinned to their exact deparsed predicate and command. This
+        // is what stops the exemption from becoming a hole: changing the AND in either fence to an
+        // OR keeps the name, keeps the substrings, and leaks — and moves this digest. So does
+        // widening FOR SELECT to FOR ALL, dropping one of the pair, or loosening the tenant pin.
+        //
+        // The constants are md5 of pg_get_expr output taken on this fixture's own connection
+        // (default search_path, postgres:16-alpine, which PostgreSqlTestDatabase pins). A
+        // PostgreSQL upgrade that changes deparsing will fail this and want re-recording; that is
+        // the correct direction for a tripwire to fail.
+        Assert.Equal(
+            "nexora_ai_default_policy_seed_read:r:151354757dd6a274a2635be36b6ff046, "
+          + "nexora_ai_default_policy_seed_write:a:678997dac075447f78592d5998530ebd",
+            await ScalarStringAsync(connection, """
+                SELECT string_agg(
+                           policy.polname || ':' || policy.polcmd::text || ':' ||
+                           md5(coalesce(pg_get_expr(policy.polqual, policy.polrelid), '')
+                            || coalesce(pg_get_expr(policy.polwithcheck, policy.polrelid), '')),
+                           ', ' ORDER BY policy.polname)
+                FROM pg_policy policy
+                JOIN pg_class target ON target.oid = policy.polrelid
+                JOIN pg_namespace target_schema
+                  ON target_schema.oid = target.relnamespace AND target_schema.nspname = 'public'
+                WHERE target.relname = 'AiProcessingPolicies'
+                  AND policy.polname IN ('nexora_ai_default_policy_seed_read',
+                                         'nexora_ai_default_policy_seed_write');
+                """));
+
+        // The fence is only a fence while no request-path role can BE the seeder's owner.
+        // TenantRlsCommandInterceptor issues SET LOCAL ROLE into one of these three on every
+        // request path, and none of them holds the privileges of the schema owner.
+        Assert.Equal(0L, await ScalarAsync(connection, """
+            SELECT count(*) FROM pg_roles request_role
+            WHERE request_role.rolname IN (
+                      'nexora_tenant_app', 'nexora_identity_app', 'nexora_pipeline_app')
+              AND pg_has_role(
+                      request_role.oid,
+                      (SELECT seeder.proowner FROM pg_proc seeder
+                       WHERE seeder.oid = 'public.nexora_create_default_ai_policy()'::regprocedure),
+                      'USAGE');
             """));
 
         // The half the filter above deliberately does not check: that the policy it excluded is
@@ -131,6 +199,62 @@ public sealed class AiProcessingPolicyTenantIsolationPostgreSqlTests(PostgreSqlT
 
         // 42501 with this message is the row-level security refusal specifically, not the table
         // grant — the grant was restored above, and a privilege refusal reads "permission denied".
+        Assert.Equal("42501", refused.SqlState);
+        Assert.Contains("row-level security", refused.MessageText, StringComparison.OrdinalIgnoreCase);
+
+        await transaction.RollbackAsync();
+    }
+
+    /// <summary>
+    /// The behavioural half of the owner-fence exclusion above.
+    ///
+    /// <para>20260811210000_TenantProvisioningSeedsUnderForcedRowSecurity introduced a GUC —
+    /// <c>nexora.provisioning_business_unit_id</c> — that names the tenant the seeder policies
+    /// admit. Custom GUCs are settable by anybody, so "only the seeder sets it" is a convention
+    /// and not a control. The control is the other half of the predicate: those policies also
+    /// require <c>CURRENT_USER</c> to be the seeder function's owner, and a request is always
+    /// <c>nexora_tenant_app</c>. This test is the attacker's best case — the tenant sets the
+    /// provisioning GUC to the VICTIM, holds an INSERT grant it does not normally have, and
+    /// reproduces the constants the write policy pins — and it must still get nothing.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_tenant_cannot_reach_another_tenant_through_the_provisioning_scope_guc()
+    {
+        await using var connection = await database.OpenConnectionAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+
+        await SeedBusinessUnitAsync(connection, AttackerBusinessUnitId, "AI-GUC-ATTACKER");
+        await SeedBusinessUnitAsync(connection, VictimBusinessUnitId, "AI-GUC-VICTIM");
+
+        await ExecuteAsync(connection,
+            """GRANT INSERT ON public."AiProcessingPolicies" TO nexora_tenant_app;""");
+
+        // The attacker's own tenant GUC points at itself — it has to, or nexora_tenant_isolation
+        // would refuse the session everything and the test would pass for the wrong reason. The
+        // provisioning GUC points at the victim, which is the whole attempt.
+        await ExecuteAsync(connection,
+            $"SELECT set_config('nexora.business_unit_id', '{AttackerBusinessUnitId}', true);");
+        await ExecuteAsync(connection,
+            $"SELECT set_config('nexora.provisioning_business_unit_id', '{VictimBusinessUnitId}', true);");
+        await ExecuteAsync(connection, "SET LOCAL ROLE nexora_tenant_app;");
+
+        // Read: the seeder's FOR SELECT policy names the victim, and the attacker still cannot see
+        // the row the provisioning trigger created for them.
+        Assert.Equal(0L, await ScalarAsync(connection, $"""
+            SELECT count(*) FROM public."AiProcessingPolicies"
+            WHERE "BusinessUnitId" = {VictimBusinessUnitId};
+            """));
+
+        // Write: every constant the seeder's FOR INSERT policy pins, reproduced exactly.
+        var refused = await Assert.ThrowsAsync<PostgresException>(() => ExecuteAsync(connection, $"""
+            INSERT INTO public."AiProcessingPolicies"
+                ("BusinessUnitId", "IsEnabled", "ExternalProcessingAllowed", "AllowedPurposes",
+                 "Version", "UpdatedOn", "UpdatedBy",
+                 "RetentionDays", "DataResidency", "EgressPolicy")
+            VALUES ({VictimBusinessUnitId}, TRUE, FALSE, 'RfqExtraction,BoqDraft',
+                    1, now(), 'tenant-provisioning',
+                    3650, 'ATTACKER-REGION', 'AllFieldsRaw');
+            """));
         Assert.Equal("42501", refused.SqlState);
         Assert.Contains("row-level security", refused.MessageText, StringComparison.OrdinalIgnoreCase);
 

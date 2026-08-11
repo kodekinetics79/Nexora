@@ -6,6 +6,7 @@ using ERP_RFQ_Automation.CustomFields;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using ERP_RFQ_Automation.MasterData;
 using ERP_RFQ_Automation.Security;
+using ERP_RFQ_Automation.SupplierGovernance;
 
 namespace ERP_RFQ_Automation.Models;
 
@@ -134,6 +135,10 @@ public partial class ErpRfqAutomationContext : DbContext
     public override int SaveChanges(bool acceptAllChangesOnSuccess)
     {
         LeadPersistenceRules.Prepare(this);
+        // Before the audit capture, so the create audit records the values that were actually
+        // stored. Here rather than in SupplierRepository because the bulk Excel importer never
+        // touches the repository — see SupplierGovernanceIdentityRules.
+        SupplierGovernanceIdentityRules.Stamp(ChangeTracker);
         CustomFieldGovernanceInterceptor.Validate(ChangeTracker);
         LifecycleGovernanceInterceptor.Validate(ChangeTracker);
         MasterDataAuditInterceptor.ValidateAppendOnly(ChangeTracker);
@@ -151,6 +156,7 @@ public partial class ErpRfqAutomationContext : DbContext
     public override async Task<int> SaveChangesAsync(bool acceptAllChangesOnSuccess, CancellationToken cancellationToken = default)
     {
         LeadPersistenceRules.Prepare(this);
+        SupplierGovernanceIdentityRules.Stamp(ChangeTracker);
         CustomFieldGovernanceInterceptor.Validate(ChangeTracker);
         LifecycleGovernanceInterceptor.Validate(ChangeTracker);
         MasterDataAuditInterceptor.ValidateAppendOnly(ChangeTracker);

@@ -777,6 +777,23 @@ public sealed class PostgreSqlProductionDialectTests
         // role, and none of the three execution roles is a member of it, so nothing on a request
         // path can execute under it. A policy added TO PUBLIC or TO any request-path role still
         // fails here, which is the whole of what this was defending.
+        //
+        // The two named exemptions arrived with
+        // 20260811210000_TenantProvisioningSeedsUnderForcedRowSecurity. It adds two policies TO
+        // PUBLIC so that nexora_create_default_ai_policy() — SECURITY DEFINER, and therefore
+        // running as the schema owner — can write the row it exists to write on an owner that
+        // does not bypass RLS. TO PUBLIC is forced, not chosen: a SECURITY DEFINER function
+        // cannot change role, measured both as `SET LOCAL ROLE` and as a `SET role TO` clause, so
+        // no role list can name it and the only alternative is the owner's per-deployment name.
+        //
+        // Exempted BY NAME. An earlier draft exempted by shape — "the predicate mentions
+        // CURRENT_USER and pg_get_userbyid(seeder.proowner)" — and that was a strict weakening
+        // with a working exploit: a substring test cannot tell a conjunct from a dead disjunct, so
+        // `WITH CHECK (<anything> OR CURRENT_USER = (SELECT ...))` passed while admitting exactly
+        // the cross-tenant INSERT 20260811110019 was written to close. A name list stays total for
+        // anything new; the pin below covers the case a name list cannot, an edit to a policy that
+        // keeps its name. The full treatment, including the behavioural proof, lives in
+        // AiProcessingPolicyTenantIsolationPostgreSqlTests.
         await using var provisioningPolicyCommand = connection.CreateCommand();
         provisioningPolicyCommand.CommandText = """
             SELECT string_agg(policy.polname, ', ' ORDER BY policy.polname)
@@ -794,10 +811,61 @@ public sealed class PostgreSqlProductionDialectTests
                        CROSS JOIN pg_roles request_role
                        WHERE request_role.rolname IN (
                                  'nexora_tenant_app', 'nexora_identity_app', 'nexora_pipeline_app')
-                         AND pg_has_role(request_role.oid, admitted.role_oid, 'USAGE')));
+                         AND pg_has_role(request_role.oid, admitted.role_oid, 'USAGE')))
+              AND policy.polname NOT IN ('nexora_ai_default_policy_seed_read',
+                                         'nexora_ai_default_policy_seed_write');
             """;
         Assert.Equal("nexora_tenant_isolation",
             (await provisioningPolicyCommand.ExecuteScalarAsync()) as string);
+
+        // The two exempted policies pinned to their exact deparsed predicate and command, so that
+        // an AND->OR edit of either fence — same name, same substrings, and it leaks — moves this
+        // digest. So does widening FOR SELECT to FOR ALL, dropping one of the pair, or loosening
+        // the tenant pin. Constants are md5 of pg_get_expr output on this fixture's connection
+        // (default search_path, postgres:16-alpine). A deparse change on a PostgreSQL upgrade
+        // fails this and wants re-recording, which is the correct direction for a tripwire.
+        await using var seedPolicyPinCommand = connection.CreateCommand();
+        seedPolicyPinCommand.CommandText = """
+            SELECT string_agg(
+                       policy.polname || ':' || policy.polcmd::text || ':' ||
+                       md5(coalesce(pg_get_expr(policy.polqual, policy.polrelid), '')
+                        || coalesce(pg_get_expr(policy.polwithcheck, policy.polrelid), '')),
+                       ', ' ORDER BY policy.polname)
+            FROM pg_policy policy
+            JOIN pg_class table_definition ON table_definition.oid = policy.polrelid
+            JOIN pg_namespace schema_definition
+              ON schema_definition.oid = table_definition.relnamespace
+             AND schema_definition.nspname = 'public'
+            WHERE table_definition.relname = 'AiProcessingPolicies'
+              AND policy.polname IN ('nexora_ai_default_policy_seed_read',
+                                     'nexora_ai_default_policy_seed_write');
+            """;
+        Assert.Equal(
+            "nexora_ai_default_policy_seed_read:r:151354757dd6a274a2635be36b6ff046, "
+          + "nexora_ai_default_policy_seed_write:a:678997dac075447f78592d5998530ebd",
+            (await seedPolicyPinCommand.ExecuteScalarAsync()) as string);
+
+        // No request-path role holds the privileges of either seeder function's owner, which is
+        // what makes the exclusion above an exclusion and not a hole. Both seeders are checked:
+        // public.nexora_create_default_ai_policy() writes public."AiProcessingPolicies", and
+        // platform.nexora_seed_tenant_meter_source_policies() writes
+        // platform."TenantMeterSourcePolicies" on the same tenant-creation journey.
+        await using var seederOwnerCommand = connection.CreateCommand();
+        seederOwnerCommand.CommandText = """
+            SELECT count(*)
+            FROM pg_roles request_role
+            CROSS JOIN unnest(ARRAY[
+                     'public.nexora_create_default_ai_policy()',
+                     'platform.nexora_seed_tenant_meter_source_policies()'
+                 ]) AS seeder(signature)
+            WHERE request_role.rolname IN (
+                      'nexora_tenant_app', 'nexora_identity_app', 'nexora_pipeline_app')
+              AND pg_has_role(
+                      request_role.oid,
+                      (SELECT proowner FROM pg_proc WHERE oid = seeder.signature::regprocedure),
+                      'USAGE');
+            """;
+        Assert.Equal(0L, (long)(await seederOwnerCommand.ExecuteScalarAsync())!);
 
         await using var unresolvedIndexCommand = connection.CreateCommand();
         unresolvedIndexCommand.CommandText = """

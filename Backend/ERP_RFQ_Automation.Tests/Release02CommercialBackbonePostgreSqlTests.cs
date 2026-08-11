@@ -67,16 +67,25 @@ public sealed class Release02CommercialBackbonePostgreSqlTests(PostgreSqlTestDat
     /// the replacement was stronger. It was not; it was strictly weaker, and the claim has been
     /// removed. Both conjuncts are restored below, and the reason they could not simply be pasted
     /// onto a raw INSERT is worth recording: BOTH COLUMNS ARE NULLABLE WITH NO STORE DEFAULT AND NO
-    /// TRIGGER. They are populated by SupplierRepository.AddAsync, which is why this test now
-    /// writes its supplier through that repository — the real creation path — instead of raw SQL.
-    /// A raw INSERT still yields NULL for both, which is a genuine gap raised in the report.
+    /// TRIGGER.
+    ///
+    /// UPDATE. The gap that note recorded turned out to be wider than "a raw INSERT": the columns
+    /// were populated by SupplierRepository.AddAsync and by nothing else, so the bulk Excel
+    /// importer — which never touches the repository — wrote suppliers with both NULL and made
+    /// them permanently ungovernable. The assignment now lives at the single point every write
+    /// path passes through (SupplierGovernanceIdentityRules.Stamp, called from
+    /// ErpRfqAutomationContext.SaveChanges), so this test would now hold whichever creation path
+    /// it used; it keeps writing through the repository because that remains the real screen path.
+    /// A raw INSERT that bypasses SaveChanges entirely still yields NULL for both, which is why
+    /// 20260811233000_BackfillSupplierGovernanceIdentity repairs the rows already written that way.
     /// </summary>
     [Fact]
     [Trait("Category", "PostgreSQL")]
     public async Task Supplier_governance_state_is_fail_closed_and_demand_lines_are_immutable()
     {
-        // The supplier goes in through the repository, because that is where EffectiveFrom and
-        // ConcurrencyToken are assigned; everything else is raw SQL on the same database.
+        // The supplier goes in through the repository — the real screen path. EffectiveFrom and
+        // ConcurrencyToken are stamped at SaveChanges; everything else is raw SQL on the same
+        // database.
         long supplierId;
         await using (var context = database.ContextFor(null))
         {

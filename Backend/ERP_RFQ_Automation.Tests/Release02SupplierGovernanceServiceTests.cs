@@ -1,7 +1,10 @@
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Services;
 using ERP_RFQ_Automation.SupplierGovernance;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
+using OfficeOpenXml;
 
 namespace ERP_RFQ_Automation.Tests;
 
@@ -149,6 +152,75 @@ public sealed class Release02SupplierGovernanceServiceTests
                 VerificationStatus = SupplierGovernanceUnknown.Unknown
             }));
     }
+
+    /// <summary>
+    /// THE regression for the bulk-import gap. A Supplier created entirely through the spreadsheet
+    /// importer — which never touches <c>SupplierRepository</c> and never sets either governance
+    /// identity column — is governable, and the columns are populated.
+    ///
+    /// <para><b>What used to happen.</b> <c>Supplier.ConcurrencyToken</c> and
+    /// <c>Supplier.EffectiveFrom</c> are nullable with no store default and no trigger, and only
+    /// <c>SupplierRepository.AddAsync</c> assigned them. A bulk-imported Supplier therefore landed
+    /// with both NULL, and <c>GovernAsync</c> compares the stored value against the caller's
+    /// NON-nullable <c>ExpectedConcurrencyToken</c>: null can never equal a Guid, so every
+    /// governance decision on an imported Supplier was rejected as
+    /// <c>SupplierGovernanceConflictException</c> — "The Supplier changed after it was loaded.
+    /// Refresh and review the latest evidence." Refreshing returns the same null, so the Supplier
+    /// was permanently ungovernable behind an error telling the operator to retry.</para>
+    ///
+    /// <para>The assertion is the whole journey rather than the column, because the column being
+    /// non-null is only interesting if the decision it blocked now goes through.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_supplier_imported_from_a_spreadsheet_can_be_governed()
+    {
+        ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
+        using var database = new TestDb();
+        await using (var setup = database.ContextFor(null))
+        {
+            Seed.EnsureBusinessUnit(setup, 501);
+            await setup.SaveChangesAsync();
+        }
+
+        byte[] workbook;
+        await using (var context = database.ContextFor(501))
+            workbook = await Uploader(context).GenerateTemplateAsync(501);
+
+        await using (var context = database.ContextFor(501))
+        {
+            using var stream = new MemoryStream(workbook);
+            var upload = await Uploader(context).UploadTemplateAsync(stream, 501, "importer@example.test");
+            Assert.True(upload.Success, upload.Message);
+        }
+
+        long supplierId;
+        Guid token;
+        await using (var verify = database.ContextFor(501))
+        {
+            var imported = await verify.Suppliers.AsNoTracking().SingleAsync();
+            supplierId = imported.Id;
+            Assert.True(imported.ConcurrencyToken.HasValue,
+                "A bulk-imported Supplier landed with no concurrency token, which makes every "
+                + "governance decision on it fail as a conflict that refreshing cannot clear.");
+            token = imported.ConcurrencyToken.Value;
+
+            // Governance is effective from the moment the record came into existence — the same
+            // rule SupplierRepository.AddAsync applied when it was the only creation path.
+            Assert.Equal(imported.CreatedOn, imported.EffectiveFrom);
+        }
+
+        await using var governContext = database.ContextFor(501);
+        var decision = await new SupplierGovernanceService(governContext).GovernAsync(new GovernSupplierCommand(
+            501, supplierId, SupplierGovernanceStatuses.Approved, SupplierVerificationStatuses.Verified,
+            SupplierComplianceStatuses.Cleared, SupplierRiskStatuses.Low, SupplierReadinessStatuses.Ready,
+            token, "evidence reviewed", "manager@example.test", "imported-supplier-governance-1", "corr-1"));
+
+        Assert.Equal(SupplierGovernanceStatuses.Approved, decision.GovernanceStatus);
+        Assert.NotEqual(token, decision.ConcurrencyToken);
+    }
+
+    private static SupplierUploaderService Uploader(ErpRfqAutomationContext context)
+        => new(context, NullLogger<SupplierUploaderService>.Instance);
 
     private static Supplier Supplier(long id, long tenant, Guid token) => new()
     {

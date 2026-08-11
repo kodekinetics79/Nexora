@@ -179,8 +179,13 @@ namespace ERP_RFQ_Automation.Repositories
             supplier.ComplianceStatus = SupplierGovernanceUnknown.Unknown;
             supplier.RiskStatus = SupplierGovernanceUnknown.Unknown;
             supplier.ReadinessStatus = SupplierReadinessStatuses.ReviewRequired;
-            supplier.EffectiveFrom = supplier.CreatedOn;
-            supplier.ConcurrencyToken = Guid.NewGuid();
+
+            // EffectiveFrom and ConcurrencyToken used to be assigned here, and ONLY here — so the
+            // bulk Excel importer, which never touches this repository, wrote suppliers with both
+            // columns NULL and made them permanently ungovernable. The assignment now lives at the
+            // single point every write path passes through: SupplierGovernanceIdentityRules.Stamp,
+            // called from ErpRfqAutomationContext.SaveChanges. Do not restore it here; two copies
+            // of the rule is how the importer came to be missing one.
 
             try
             {

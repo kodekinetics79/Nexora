@@ -1,8 +1,10 @@
+using System.Data.Common;
 using ERP_RFQ_Automation.MasterData;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Services;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.Logging.Abstractions;
 using OfficeOpenXml;
 
@@ -392,14 +394,28 @@ public sealed class MasterDataChangeAuditTests
 
     /// <summary>
     /// The capture runs on EVERY save in the application, so its cost on a save that has nothing
-    /// to do with master data has to be negligible, and "negligible" has to be a measured number
+    /// to do with master data has to be negligible, and "negligible" has to be a measured property
     /// rather than an assurance.
     ///
-    /// <para>The bound is deliberately loose — an order of magnitude above what the measurement
-    /// actually shows — because a tight timing assertion on a shared CI box is a test that fails
-    /// for reasons unrelated to the code. It is here to catch a regression that adds a query or an
-    /// allocation per entry, not to police microseconds. The measured figure is printed so the
-    /// number in the change report is a real one.</para>
+    /// <para><b>Why this is no longer a stopwatch.</b> The previous form of this test asserted a
+    /// wall-clock threshold in microseconds. It measured the machine, not the method: it failed
+    /// twice in full-suite runs (12,505µs and 4,292.6µs) while passing every time in isolation,
+    /// and a red line that means "the box was busy" is a red line that teaches everyone to ignore
+    /// red lines. The INTENT — prove the capture is one in-memory pass, not a query or a growing
+    /// amount of work per entry — is unchanged; it is now measured with instruments that do not
+    /// move when the machine is loaded.</para>
+    ///
+    /// <para><b>What replaces it.</b> Two properties, both deterministic under load.
+    /// <list type="number">
+    /// <item>ZERO database commands, counted by an EF command interceptor. A regression that reads
+    /// anything per entry — the specific failure the old bound was aiming at — moves this from 0,
+    /// and 0 is not a threshold anybody can argue with.</item>
+    /// <item>LINEAR shape. Allocated bytes per tracked entry, from
+    /// <see cref="GC.GetAllocatedBytesForCurrentThread"/>, stay flat when the tracker quadruples.
+    /// A pass per entry — the O(n²) shape — quadruples the per-entry figure instead. Allocation
+    /// counting is exact and load-insensitive: a busy CI box does not allocate on this thread's
+    /// behalf.</item>
+    /// </list></para>
     /// </summary>
     [Fact]
     public async Task The_capture_costs_a_single_pass_over_the_change_tracker()
@@ -407,9 +423,63 @@ public sealed class MasterDataChangeAuditTests
         using var database = new TestDb();
         await SeedTenantAsync(database, Tenant);
 
-        await using var context = database.ContextFor(Tenant);
-        // A deliberately fat change tracker of entities the capture must ignore.
-        for (var i = 0; i < 500; i++)
+        // ---- 1. not one database round trip, at any tracker size --------------------------
+        var counter = new CommandCounter();
+        await using var context = database.ContextFor(Tenant, counter);
+        TrackNonMasterDataEntities(context, 500);
+        counter.Reset();
+
+        for (var i = 0; i < 20; i++) MasterDataAuditInterceptor.Capture(context);
+
+        Assert.True(counter.Commands == 0,
+            $"Capture issued {counter.Commands} database command(s) over 500 tracked "
+            + "non-master-data entries. It must read nothing: everything it needs is already in "
+            + "the change tracker.");
+
+        // Nothing was enlisted: the fast path must not touch the tracker it walked.
+        Assert.Equal(500, context.ChangeTracker.Entries().Count());
+
+        // ---- 2. one pass over the tracker, not a pass per entry ----------------------------
+        // Measured at two sizes so the ASSERTION is about shape rather than about a number that
+        // depends on this machine, this runtime and this EF version.
+        var small = AllocatedBytesPerEntryPerCapture(database, entries: 250);
+        var large = AllocatedBytesPerEntryPerCapture(database, entries: 1_000);
+
+        Assert.True(large < small * 2,
+            $"Capture allocated {small:F0} bytes per entry over 250 tracked entries and "
+            + $"{large:F0} over 1,000 — {large / small:F1}x. A single pass costs the same per "
+            + "entry whatever the tracker holds; growth of this shape means work per entry that "
+            + "itself scales with the tracker.");
+    }
+
+    /// <summary>
+    /// Bytes allocated by one <c>Capture</c> call, divided by the number of tracked entries.
+    ///
+    /// <para>Synchronous and free of awaits between the two counter reads, deliberately: the
+    /// counter is per-THREAD, and an await could resume the continuation somewhere else and
+    /// measure a thread that did none of the work.</para>
+    /// </summary>
+    private static double AllocatedBytesPerEntryPerCapture(TestDb database, int entries)
+    {
+        using var context = database.ContextFor(Tenant);
+        TrackNonMasterDataEntities(context, entries);
+
+        // Warm up the type switch, the JIT and any lazily-built EF metadata, so what is measured
+        // below is the steady-state pass rather than one-off initialisation.
+        for (var i = 0; i < 20; i++) MasterDataAuditInterceptor.Capture(context);
+
+        const int iterations = 50;
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        for (var i = 0; i < iterations; i++) MasterDataAuditInterceptor.Capture(context);
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        return (double)allocated / iterations / entries;
+    }
+
+    /// <summary>A deliberately fat change tracker of entities the capture must ignore.</summary>
+    private static void TrackNonMasterDataEntities(ErpRfqAutomationContext context, int count)
+    {
+        for (var i = 0; i < count; i++)
             context.Warehouses.Add(new Warehouse
             {
                 WarehouseName = $"WH-{i}",
@@ -420,22 +490,43 @@ public sealed class MasterDataChangeAuditTests
                 IsActive = true
             });
         context.ChangeTracker.DetectChanges();
+    }
 
-        // Warm up the type-switch and the JIT before timing.
-        for (var i = 0; i < 20; i++) MasterDataAuditInterceptor.Capture(context);
+    /// <summary>Counts every command EF sends to the database, on this context only.</summary>
+    private sealed class CommandCounter : DbCommandInterceptor
+    {
+        private long _commands;
 
-        const int iterations = 200;
-        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
-        for (var i = 0; i < iterations; i++) MasterDataAuditInterceptor.Capture(context);
-        stopwatch.Stop();
+        public long Commands => Interlocked.Read(ref _commands);
 
-        var microsecondsPerSave = stopwatch.Elapsed.TotalMilliseconds * 1000 / iterations;
-        Assert.True(microsecondsPerSave < 2_000,
-            $"Capture cost {microsecondsPerSave:F1}µs over 500 tracked non-master-data entries. "
-            + "That is far above a single in-memory pass and suggests a query or an allocation per entry.");
+        public void Reset() => Interlocked.Exchange(ref _commands, 0);
 
-        // Nothing was enlisted: the fast path must not touch the tracker it walked.
-        Assert.Equal(500, context.ChangeTracker.Entries().Count());
+        public override InterceptionResult<DbDataReader> ReaderExecuting(
+            DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result)
+        { Interlocked.Increment(ref _commands); return result; }
+
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(
+            DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result,
+            CancellationToken cancellationToken = default)
+        { Interlocked.Increment(ref _commands); return ValueTask.FromResult(result); }
+
+        public override InterceptionResult<int> NonQueryExecuting(
+            DbCommand command, CommandEventData eventData, InterceptionResult<int> result)
+        { Interlocked.Increment(ref _commands); return result; }
+
+        public override ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(
+            DbCommand command, CommandEventData eventData, InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        { Interlocked.Increment(ref _commands); return ValueTask.FromResult(result); }
+
+        public override InterceptionResult<object> ScalarExecuting(
+            DbCommand command, CommandEventData eventData, InterceptionResult<object> result)
+        { Interlocked.Increment(ref _commands); return result; }
+
+        public override ValueTask<InterceptionResult<object>> ScalarExecutingAsync(
+            DbCommand command, CommandEventData eventData, InterceptionResult<object> result,
+            CancellationToken cancellationToken = default)
+        { Interlocked.Increment(ref _commands); return ValueTask.FromResult(result); }
     }
 
     // ============================================================ helpers

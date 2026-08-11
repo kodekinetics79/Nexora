@@ -99,6 +99,57 @@ public static class LifecycleStatusCatalog
             .ToArray();
     }
 
+    /// <summary>
+    /// Adds every catalogue row this business unit does not already have, and reports how many.
+    ///
+    /// <para>Check-then-insert, never overwrite: a state the tenant already carries keeps its own
+    /// label, and a second copy is never written — duplicates would put each state twice in every
+    /// picker and give <see cref="ResolveIdAsync"/> two rows to choose between. Matched per
+    /// (type, code) with the type folded for case and spacing and the code folded for case, the
+    /// same comparison the original <c>Release01CommercialIdentity</c> seed used, so a tenant that
+    /// spells the type "Quote Status" is recognised rather than duplicated.</para>
+    ///
+    /// <para>Rows are ADDED to the change tracker and NOT saved. The caller decides when to flush,
+    /// which is what lets <c>TenantBaselineSeeder</c> keep its one-SaveChanges-inside-the-caller's-
+    /// transaction contract.</para>
+    ///
+    /// <para>This lives here rather than in each caller because the seeding rule was previously
+    /// restated at every creation path — and one of them, <c>DemoUserSeeder</c>, simply did not
+    /// have it, so a demo/pilot business unit was created at boot with no <c>QuoteStatus</c> rows
+    /// at all and could not raise a quote.</para>
+    /// </summary>
+    /// <param name="businessUnit">Tracked or already-saved; its id is what the existence check
+    /// reads and its navigation is what the new rows are attached to.</param>
+    public static async Task<int> EnsureAsync(
+        ErpRfqAutomationContext db, BusinessUnit businessUnit, string actor,
+        DateTime? now = null, CancellationToken ct = default)
+    {
+        // IgnoreQueryFilters: these seeders run on the platform plane or at boot, where the tenant
+        // filter is a no-op, but a filtered existence check called from a context scoped to a
+        // DIFFERENT business unit would answer "absent" for rows that exist and write duplicates.
+        var present = (await db.SetupMasters.IgnoreQueryFilters().AsNoTracking()
+                .Where(row => row.BusinessUnitId == businessUnit.Id)
+                .Select(row => new { row.SetupType, row.SetupCode })
+                .ToListAsync(ct))
+            .Select(row => Key(row.SetupType, row.SetupCode))
+            .ToHashSet(StringComparer.Ordinal);
+
+        var missing = CreateFor(businessUnit, actor, now)
+            .Where(status => !present.Contains(Key(status.SetupType, status.SetupCode)))
+            .ToArray();
+
+        db.SetupMasters.AddRange(missing);
+        return missing.Length;
+    }
+
+    private static string Key(string? setupType, string? setupCode)
+        => string.Concat(
+            (setupType ?? string.Empty).Replace(" ", string.Empty).ToLowerInvariant(),
+            // ASCII unit separator: a delimiter no SetupType or SetupCode can contain, so
+            // ("Quote", "StatusDRAFT") and ("QuoteStatus", "DRAFT") cannot collide on one key.
+            "\u001f",
+            (setupCode ?? string.Empty).ToUpperInvariant());
+
     public static async Task<long> ResolveIdAsync(
         ErpRfqAutomationContext db, long businessUnitId, string aggregateType, string code, CancellationToken ct = default)
     {

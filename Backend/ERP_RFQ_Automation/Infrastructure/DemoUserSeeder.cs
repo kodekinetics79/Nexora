@@ -1,4 +1,5 @@
 using ERP_RFQ_Automation.AI;
+using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Platform.Models;
 using Microsoft.EntityFrameworkCore;
@@ -82,6 +83,25 @@ public static class DemoUserSeeder
             db.AiProcessingPolicies.Add(
                 AiProcessingPolicy.CreateSecureDefault(businessUnit.Id, "system:demo-seed", now));
             await db.SaveChangesAsync();
+        }
+
+        // THE lifecycle states. This seeder created a business unit, an AI policy, a role and a
+        // user — and no Setup_Master lifecycle rows at all, which is a business unit that cannot
+        // raise a quote. QuoteService resolves QuoteStatus/DRAFT and falls back to the documented
+        // legacy id 42, and Quotes."StatusID" is a foreign key to Setup_Master."SetupID": with no
+        // row carrying that id the first quote fails on the foreign key, and where some other
+        // tenant's row happens to hold it the quote is stamped with a status from somebody else's
+        // workspace. OrderService then refuses the conversion outright ("No OrderStatus setup found
+        // in the system"). This is a demo/pilot tenant — the one somebody walks the journey on —
+        // so it is exactly the tenant on which that must not happen.
+        var lifecycleStatuses = await LifecycleStatusCatalog.EnsureAsync(
+            db, businessUnit, "system:demo-seed", now);
+        if (lifecycleStatuses > 0)
+        {
+            await db.SaveChangesAsync();
+            logger.LogInformation(
+                "Seeded {Count} lifecycle status row(s) for demo business unit {BusinessUnitId}.",
+                lifecycleStatuses, businessUnit.Id);
         }
 
         var role = await db.SetupMasters

@@ -192,6 +192,91 @@ public sealed class TenantBaselineSeederTests
         Assert.Equal("SAR", total.TargetCurrencyCode);
     }
 
+    /// <summary>
+    /// A business unit that reaches the seeder WITHOUT lifecycle statuses leaves it with them, and
+    /// can then raise a quote.
+    ///
+    /// <para><b>The gap this closes.</b> The six <c>QuoteStatus</c> codes were reference data
+    /// written once per business unit by whichever creation path ran — the
+    /// <c>lifecycle-statuses</c> provisioning step, <c>TenantsController.Provision</c>, or
+    /// <c>BusinessUnitRepository.AddAsync</c> — and by a one-time migration for the units that
+    /// pre-dated them. Nothing checked afterwards: <c>ProvisioningStepReconciler</c> has no probe
+    /// for that step, the squashed baseline's reference data seeds only <c>public."Module"</c>, and
+    /// this seeder — the documented repair a support engineer re-runs — did not fill the gap. A
+    /// business unit that lost that one step stayed unable to quote for the rest of its life.</para>
+    ///
+    /// <para>The test raises the quote the way the application does, through
+    /// <c>LifecycleStatusCatalog.ResolveIdAsync</c>, because that is the call that threw
+    /// "DRAFT is not configured and active for this tenant."</para>
+    /// </summary>
+    [Fact]
+    public async Task A_business_unit_that_never_got_its_lifecycle_statuses_is_repaired_by_the_seeder()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(null);
+        ReconcileModuleCatalogue(context);
+
+        // Deliberately NOT ProvisionedBusinessUnit: this is the unit whose lifecycle-statuses step
+        // never took effect, which is the whole point.
+        context.BusinessUnits.Add(new BusinessUnit
+        {
+            Id = Bu,
+            BusinessUnitCode = "ACME-TRADING",
+            BusinessUnitName = "Acme Industrial Trading",
+            IsActive = true,
+            CreatedBy = Actor,
+            CreatedOn = DateTime.UtcNow
+        });
+        await context.SaveChangesAsync();
+
+        Assert.Empty(await context.SetupMasters.IgnoreQueryFilters()
+            .Where(row => row.BusinessUnitId == Bu && row.SetupType == "QuoteStatus").ToListAsync());
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => LifecycleStatusCatalog.ResolveIdAsync(context, Bu, "Quote", "DRAFT"));
+
+        var summary = await Seeder(context).SeedAsync(Bu, AcmeProfile, Actor);
+
+        // Every lifecycle row the catalogue defines, not only the quote ones: OrderService
+        // resolves OrderStatus/DRAFT and PaymentStatus/UNPAID on the conversion that a won quote
+        // becomes, and throws by name when either is absent.
+        Assert.Equal(
+            LifecycleStatusCatalog.CreateFor(new BusinessUnit { Id = Bu }, Actor).Count,
+            summary.LifecycleStatusesCreated);
+
+        await using var verify = db.ContextFor(Bu);
+        Assert.Equal(
+            ["ACCEPTED", "DRAFT", "EXPIRED", "ORDERED", "REJECTED", "SENT"],
+            await verify.SetupMasters.Where(row => row.SetupType == "QuoteStatus")
+                .Select(row => row.SetupCode).OrderBy(code => code).ToListAsync());
+
+        // And the call that used to throw now names a row that belongs to THIS tenant.
+        var draftStatusId = await LifecycleStatusCatalog.ResolveIdAsync(verify, Bu, "Quote", "DRAFT");
+        var draft = await verify.SetupMasters.SingleAsync(row => row.SetupId == draftStatusId);
+        Assert.Equal("QuoteStatus", draft.SetupType);
+        Assert.Equal(Bu, draft.BusinessUnitId);
+    }
+
+    /// <summary>
+    /// The other half of the same rule: a business unit that ALREADY has its lifecycle statuses is
+    /// not given a second set. Duplicate rows would put every state twice in every picker and give
+    /// <c>ResolveIdAsync</c> two rows to choose between.
+    /// </summary>
+    [Fact]
+    public async Task Lifecycle_statuses_a_business_unit_already_has_are_never_duplicated()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(null);
+        ReconcileModuleCatalogue(context);
+        ProvisionedBusinessUnit(context);   // seeds the lifecycle statuses, as provisioning does
+
+        var summary = await Seeder(context).SeedAsync(Bu, AcmeProfile, Actor);
+
+        Assert.Equal(0, summary.LifecycleStatusesCreated);
+
+        await using var verify = db.ContextFor(Bu);
+        Assert.Equal(6, await verify.SetupMasters.CountAsync(row => row.SetupType == "QuoteStatus"));
+    }
+
     [Fact]
     public async Task The_sales_representative_holds_exactly_the_grants_intended_and_nothing_beyond()
     {
