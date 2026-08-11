@@ -134,7 +134,7 @@ public sealed class ProcurementDispatchWorkerTests
         fixture.SeedPending();
 
         var first = fixture.Worker.ProcessOneAsync(default);
-        await notification.SendStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await notification.SendStarted.Task.WaitAsync(TestWaits.Liveness);
 
         var claimed = await fixture.StateAsync();
         Assert.NotNull(claimed.Message.LeaseToken);
@@ -232,7 +232,7 @@ public sealed class ProcurementDispatchWorkerTests
         fixture.SeedPending();
 
         var processing = fixture.Worker.ProcessOneAsync(default);
-        await notification.SendStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await notification.SendStarted.Task.WaitAsync(TestWaits.Liveness);
         var health = await new ProcurementDispatchHealthCheck(fixture.Heartbeat)
             .CheckHealthAsync(new Microsoft.Extensions.Diagnostics.HealthChecks.HealthCheckContext());
 

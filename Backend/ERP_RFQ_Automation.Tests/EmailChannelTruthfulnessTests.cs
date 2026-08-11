@@ -287,7 +287,7 @@ public sealed class EmailChannelTruthfulnessTests
 
         var worker = new EmailBackgroundService(provider, logger, heartbeats, health);
         await worker.StartAsync(CancellationToken.None);
-        await ((StubEmailService)emailService).Polled.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        await ((StubEmailService)emailService).Polled.Task.WaitAsync(TestWaits.Liveness);
         // StopAsync awaits ExecuteAsync itself, and the loop only becomes cancellable again at
         // the Task.Delay AFTER the heartbeat decision — so this is a deterministic barrier, not
         // a sleep-and-hope.

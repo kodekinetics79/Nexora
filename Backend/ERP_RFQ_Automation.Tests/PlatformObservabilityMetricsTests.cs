@@ -667,7 +667,7 @@ public class PlatformObservabilityMetricsTests
         await worker.StartAsync(CancellationToken.None);
         try
         {
-            await queue.Settled.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            await queue.Settled.Task.WaitAsync(TestWaits.Liveness);
             // The metric is written just after the queue transition; give the loop a beat.
             for (var i = 0; i < 100 && harness.For("nexora.extraction.job.duration").Count == 0; i++)
                 await Task.Delay(20);

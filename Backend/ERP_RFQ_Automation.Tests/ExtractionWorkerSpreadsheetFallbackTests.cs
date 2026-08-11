@@ -46,7 +46,7 @@ public sealed class ExtractionWorkerSpreadsheetFallbackTests
         await worker.StartAsync(CancellationToken.None);
         try
         {
-            var recordedError = await queue.PermanentFailure.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            var recordedError = await queue.PermanentFailure.Task.WaitAsync(TestWaits.Liveness);
 
             // Terminal state contract: no retry against a deterministically closed gate.
             // Reverting this puts the job back on five attempts of exponential backoff.
@@ -93,7 +93,7 @@ public sealed class ExtractionWorkerSpreadsheetFallbackTests
         await worker.StartAsync(CancellationToken.None);
         try
         {
-            var outcome = await persister.Persisted.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            var outcome = await persister.Persisted.Task.WaitAsync(TestWaits.Liveness);
 
             Assert.Equal(0, llm.CallCount); // structured fast-path fully preserved
             Assert.NotEqual(ExtractionOutcomeStatus.Failed, outcome.Status);
@@ -127,7 +127,7 @@ public sealed class ExtractionWorkerSpreadsheetFallbackTests
         await worker.StartAsync(CancellationToken.None);
         try
         {
-            var recordedError = await queue.RetryableFailure.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            var recordedError = await queue.RetryableFailure.Task.WaitAsync(TestWaits.Liveness);
 
             Assert.StartsWith("All chunks failed; no data extracted.", recordedError);
             Assert.Contains("[diagnostics:", recordedError);
@@ -218,7 +218,7 @@ public sealed class ExtractionWorkerSpreadsheetFallbackTests
         await worker.StartAsync(CancellationToken.None);
         try
         {
-            var outcome = await persister.Persisted.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            var outcome = await persister.Persisted.Task.WaitAsync(TestWaits.Liveness);
 
             Assert.Equal(0, llm.CallCount);
             Assert.Equal(ExtractionProcessingPath.DeterministicRules, outcome.ProcessingPath);

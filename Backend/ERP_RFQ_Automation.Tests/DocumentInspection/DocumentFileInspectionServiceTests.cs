@@ -361,7 +361,7 @@ public sealed class DocumentFileInspectionServiceTests
 
         Assert.Equal(MalwareScanStatus.Unavailable, result.Status);
         Assert.Contains("timed out", result.Reason, StringComparison.OrdinalIgnoreCase);
-        await server.WaitAsync(TimeSpan.FromSeconds(2));
+        await server.WaitAsync(TestWaits.Liveness);
     }
 
     [Fact]
@@ -528,7 +528,7 @@ public sealed class DocumentFileInspectionServiceTests
         await using var content = new MemoryStream("safe content"u8.ToArray());
 
         var result = await scanner.ScanAsync(content);
-        await server.WaitAsync(TimeSpan.FromSeconds(2));
+        await server.WaitAsync(TestWaits.Liveness);
         return result;
     }
 
