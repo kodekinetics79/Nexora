@@ -152,11 +152,30 @@ export default function PlansFlagsPage() {
   const formatPrice = (plan: Plan) =>
     plan.priceMonthlyUsd == null ? 'Not priced' : plan.priceMonthlyUsd === 0 ? 'Free' : `${fmtCurrency(plan.priceMonthlyUsd)}/mo`;
 
-  const numbersValid =
-    [form.weight, form.maxConcurrentExtractionJobs].every((v) => Number.isInteger(Number(v)) && Number(v) >= 1) &&
-    [form.maxDocsPerMonth, form.maxSeats].every((v) => Number.isInteger(Number(v)) && Number(v) >= 0) &&
-    (form.monthlyPriceUsd.trim() === '' || (Number.isFinite(Number(form.monthlyPriceUsd)) && Number(form.monthlyPriceUsd) >= 0));
-  const formValid = form.code.trim().length > 0 && form.name.trim().length > 0 && numbersValid;
+  // `Number('')` is 0, so a CLEARED quota field used to pass every one of these checks and be
+  // submitted as a hard zero. The server does not read zero as "unlimited" — it reads the plan
+  // as unquotaed and falls back to the 50-document unplanned-tenant allowance — so an operator
+  // who emptied a box to mean "no limit" silently throttled every tenant on that plan.
+  const numberProblem = (value: string, label: string, min: number): string | null => {
+    if (value.trim() === '') return `${label} is required. It cannot be left blank.`;
+    if (!/^\d+$/.test(value.trim())) return `${label} must be a whole number.`;
+    if (Number(value) < min) return `${label} must be at least ${min}.`;
+    return null;
+  };
+  const fieldProblems = {
+    weight: numberProblem(form.weight, 'Dispatcher weight', 1),
+    maxConcurrentExtractionJobs: numberProblem(form.maxConcurrentExtractionJobs, 'Max concurrent extraction jobs', 1),
+    maxDocsPerMonth: numberProblem(form.maxDocsPerMonth, 'Max docs / month', 0),
+    maxSeats: numberProblem(form.maxSeats, 'Max seats', 0),
+    monthlyPriceUsd: form.monthlyPriceUsd.trim() === ''
+      ? null
+      : Number.isFinite(Number(form.monthlyPriceUsd)) && Number(form.monthlyPriceUsd) >= 0
+        ? null
+        : 'Monthly price must be a number of 0 or more, or blank for "not priced".',
+    code: form.code.trim().length === 0 ? 'A plan code is required.' : null,
+    name: form.name.trim().length === 0 ? 'A plan name is required.' : null,
+  };
+  const formValid = Object.values(fieldProblems).every((problem) => problem === null);
 
   return (
     <Box>
@@ -299,7 +318,8 @@ export default function PlansFlagsPage() {
                 label="Dispatcher weight"
                 value={form.weight}
                 onChange={(e) => setForm({ ...form, weight: e.target.value })}
-                helperText="1–1000"
+                error={Boolean(fieldProblems.weight)}
+                helperText={fieldProblems.weight ?? '1–1000'}
                 fullWidth
               />
             </Stack>
@@ -308,18 +328,24 @@ export default function PlansFlagsPage() {
                 label="Max concurrent extraction jobs"
                 value={form.maxConcurrentExtractionJobs}
                 onChange={(e) => setForm({ ...form, maxConcurrentExtractionJobs: e.target.value })}
+                error={Boolean(fieldProblems.maxConcurrentExtractionJobs)}
+                helperText={fieldProblems.maxConcurrentExtractionJobs ?? '1 or more. How many extraction jobs a tenant on this plan may run at once.'}
                 fullWidth
               />
               <TextField
                 label="Max docs / month"
                 value={form.maxDocsPerMonth}
                 onChange={(e) => setForm({ ...form, maxDocsPerMonth: e.target.value })}
+                error={Boolean(fieldProblems.maxDocsPerMonth)}
+                helperText={fieldProblems.maxDocsPerMonth ?? 'Zero is not "unlimited" — it drops the plan to the unplanned-tenant allowance.'}
                 fullWidth
               />
               <TextField
                 label="Max seats"
                 value={form.maxSeats}
                 onChange={(e) => setForm({ ...form, maxSeats: e.target.value })}
+                error={Boolean(fieldProblems.maxSeats)}
+                helperText={fieldProblems.maxSeats ?? 'The number of users a tenant on this plan may have.'}
                 fullWidth
               />
             </Stack>

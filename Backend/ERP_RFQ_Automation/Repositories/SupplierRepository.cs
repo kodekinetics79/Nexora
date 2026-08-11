@@ -140,15 +140,22 @@ namespace ERP_RFQ_Automation.Repositories
             return supplier ?? throw new KeyNotFoundException($"Supplier with ID {id} not found in Business Unit {businessUnitId}.");
         }
 
-        public async Task AddAsync(Supplier supplier)
+        public Task AddAsync(Supplier supplier)
         {
             if (supplier.Buid is null or <= 0)
                 throw new ArgumentException("Supplier must belong to an authenticated Business Unit.");
 
-            await using var transaction = _context.Database.IsRelational()
-                && _context.Database.CurrentTransaction is null
-                ? await _context.Database.BeginTransactionAsync(System.Data.IsolationLevel.Serializable)
-                : null;
+            return ExecuteInTransactionAsync(() => AddCoreAsync(supplier));
+        }
+
+        private async Task AddCoreAsync(Supplier supplier)
+        {
+            // Reset on entry, because a strategy retry re-runs this whole method with the SAME
+            // instance: attempt 1 may have got as far as the first SaveChanges (which assigns the
+            // identity key) before the second one failed and rolled the transaction back. Re-adding
+            // an entity that still carries that key makes EF insert the id explicitly instead of
+            // letting the sequence assign one.
+            supplier.Id = 0;
 
             // Validate unique name within same BusinessUnit
             var normalizedName = supplier.Name.Trim();
@@ -187,30 +194,17 @@ namespace ERP_RFQ_Automation.Repositories
             // called from ErpRfqAutomationContext.SaveChanges. Do not restore it here; two copies
             // of the rule is how the importer came to be missing one.
 
-            try
-            {
-                _context.Suppliers.Add(supplier);
-                await _context.SaveChangesAsync();
-                supplier.DocId = _numberGenerator.Generate(supplier.Id, supplier.Buid.Value);
-                await _context.SaveChangesAsync();
-
-                if (transaction is not null)
-                    await transaction.CommitAsync();
-            }
-            catch
-            {
-                if (transaction is not null)
-                    await transaction.RollbackAsync();
-                throw;
-            }
+            _context.Suppliers.Add(supplier);
+            await _context.SaveChangesAsync();
+            supplier.DocId = _numberGenerator.Generate(supplier.Id, supplier.Buid.Value);
+            await _context.SaveChangesAsync();
         }
 
-        public async Task UpdateAsync(Supplier supplier, long businessUnitId)
+        public Task UpdateAsync(Supplier supplier, long businessUnitId) =>
+            ExecuteInTransactionAsync(() => UpdateCoreAsync(supplier, businessUnitId));
+
+        private async Task UpdateCoreAsync(Supplier supplier, long businessUnitId)
         {
-            await using var transaction = _context.Database.IsRelational()
-                && _context.Database.CurrentTransaction is null
-                ? await _context.Database.BeginTransactionAsync(System.Data.IsolationLevel.Serializable)
-                : null;
             var existing = await _context.Suppliers.AsNoTracking().FirstOrDefaultAsync(s => s.Id == supplier.Id && s.Buid == businessUnitId);
             if (existing == null)
                 throw new KeyNotFoundException($"Supplier with ID {supplier.Id} not found in Business Unit {businessUnitId}.");
@@ -254,8 +248,46 @@ namespace ERP_RFQ_Automation.Repositories
             supplier.ConcurrencyToken = Guid.NewGuid();
             entry.State = EntityState.Modified;
             await _context.SaveChangesAsync();
-            if (transaction is not null)
+        }
+
+        /// <summary>
+        /// Runs <paramref name="operation"/> inside a SERIALIZABLE transaction that the configured
+        /// retrying execution strategy owns.
+        ///
+        /// <para><b>The defect this closes.</b> Both write paths used to call
+        /// <c>_context.Database.BeginTransactionAsync(Serializable)</c> directly. Program.cs
+        /// configures <c>EnableRetryOnFailure</c>, so EF installs
+        /// <c>NpgsqlRetryingExecutionStrategy</c> — and that strategy throws
+        /// <c>InvalidOperationException: ... does not support user-initiated transactions</c> the
+        /// moment anything opens its own. <c>POST /api/Supplier</c> therefore returned 500 for every
+        /// request against PostgreSQL; the controller's blanket <c>catch (Exception)</c> reported it
+        /// as "Unable to create the supplier", which reads like a validation problem rather than a
+        /// transaction one. It was invisible to the test suite because the SQLite lane configures no
+        /// retry strategy, so the same call succeeds there.</para>
+        ///
+        /// <para>Shaped exactly like <c>CustomerRepository</c> and <c>ContactRepository</c>: the
+        /// change tracker is cleared on each attempt because a retry re-runs the whole delegate and
+        /// entities left over from the failed attempt would be saved twice, and a caller-owned
+        /// ambient transaction is honoured rather than nested — the caller already owns the
+        /// retriable unit in that case.</para>
+        /// </summary>
+        private async Task ExecuteInTransactionAsync(Func<Task> operation)
+        {
+            if (!_context.Database.IsRelational() || _context.Database.CurrentTransaction is not null)
+            {
+                await operation();
+                return;
+            }
+
+            var strategy = _context.Database.CreateExecutionStrategy();
+            await strategy.ExecuteAsync(async () =>
+            {
+                _context.ChangeTracker.Clear();
+                await using var transaction = await _context.Database.BeginTransactionAsync(
+                    System.Data.IsolationLevel.Serializable);
+                await operation();
                 await transaction.CommitAsync();
+            });
         }
 
         public async Task DeleteAsync(long id, long businessUnitId)

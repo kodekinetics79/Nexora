@@ -810,9 +810,35 @@ public static class GrowthIntelligenceRules
             IdempotencyKey = command.IdempotencyKey.Trim(),
             RequestHash = requestHash,
             CorrelationId = command.CorrelationId.Trim(),
-            CreatedAtUtc = command.AsOfUtc
+            // NORMALISED TO WHAT POSTGRESQL CAN STORE, not written raw.
+            //
+            // A .NET DateTime counts 100-ns ticks; PostgreSQL `timestamp` counts MICROSECONDS, and
+            // Npgsql converts by integer division. So a value whose seventh fractional digit is
+            // non-zero — nine times in ten — comes back from the row one tick smaller than the
+            // value this method returned.
+            //
+            // That is not cosmetic here. AcknowledgeFindingAsync answers the FIRST request with
+            // this in-memory entity and an idempotent REPLAY with the row read back, so the same
+            // idempotency key returned two different `acknowledgedAt` values to the caller — the
+            // one thing an idempotent endpoint promises it will not do. It also made CI red on
+            // main roughly nine runs in ten while passing locally on the tenth, which is how it
+            // survived: the suite looked flaky rather than wrong.
+            //
+            // Rounding to storable precision at creation makes the value the API returns the value
+            // it stored. Same normalisation as SubscriptionInvoiceService.NormalizePostgreSqlTimestamp
+            // and UsageMeteringService.NormalizeTimestamp, for the same reason.
+            CreatedAtUtc = NormalizePostgreSqlTimestamp(command.AsOfUtc)
         };
     }
+
+    /// <summary>
+    /// Truncates to PostgreSQL's microsecond resolution so a persisted value round-trips equal.
+    /// Deliberately does NOT call ToUniversalTime: every caller already supplies a UTC instant
+    /// (the field is AsOfUtc, set from DateTime.UtcNow), and converting a Kind=Unspecified value
+    /// would silently shift it by the host's offset. This changes precision only.
+    /// </summary>
+    private static DateTime NormalizePostgreSqlTimestamp(DateTime value) =>
+        new(value.Ticks - value.Ticks % 10, DateTimeKind.Utc);
 
     public static bool IsIdempotentReplay(SalesCoachingAcknowledgement existing, string requestHash)
     {

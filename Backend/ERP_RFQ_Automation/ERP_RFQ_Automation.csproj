@@ -51,6 +51,27 @@
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
+    <!-- LOAD-BEARING DESPITE APPEARANCES. Do not remove without doing the two things below first.
+         This looks like dead weight: PostgreSQL is the only provider this application ever
+         configures, there are ZERO `UseSqlServer` call sites, and 136 `IsNpgsql()` branches in
+         this project encode Npgsql-specific DDL and RLS behaviour with no SQL Server equivalent.
+         Removing it was attempted on 2026-08-11 and BROKE THE BUILD with two errors, both from
+         transitive dependencies rather than from the provider itself:
+
+           1. Services/EmailService.cs:1040 — `IsDuplicateKeyException` still type-tests
+              `Microsoft.Data.SqlClient.SqlException` (error 2627/2601) alongside the
+              PostgresException 23505 branch that replaced it. Microsoft.Data.SqlClient reaches
+              the compile only through this package. The branch is unreachable on Npgsql, so it
+              is deletable — but that is a source change, not a package change.
+           2. LeadIdentity/LeadIdentityApplicationService.cs:1377 — `JsonElement.DeepEquals` is a
+              System.Text.Json 9.x API. This project targets net8.0, whose in-box
+              System.Text.Json is 8.x and does NOT have it. It compiles today only because this
+              package transitively uplifts System.Text.Json. That is an accident, and it means a
+              core lead-deduplication comparison depends on a SQL Server provider reference.
+
+         To retire this reference properly: delete the dead SqlClient branch in EmailService, add
+         an explicit `System.Text.Json` PackageReference at the version the graph resolves today,
+         then remove this line and run the full suite. -->
     <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="9.0.9" />
     <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="9.0.4" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Tools" Version="9.0.9">

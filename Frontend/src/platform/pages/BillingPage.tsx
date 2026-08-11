@@ -160,9 +160,14 @@ export default function BillingPage() {
     enabled: !!tenantId,
   });
 
+  // Gated like every other read on this page. It was the one that was not, so a SupportAdmin
+  // who opened /platform/billing was soft-landed on the "Billing is a separate duty" notice
+  // while the console fired a request that could only ever 403 — a red line in the network tab
+  // and an audited refusal, for a screen that had already decided not to show them anything.
   const rateCardsQuery = useQuery({
     queryKey: platformKeys.rateCards(),
     queryFn: () => platformApi.listRateCards(),
+    enabled: permissions.canAdministerBilling,
   });
 
   const invalidateBilling = () => {
@@ -758,7 +763,11 @@ export default function BillingPage() {
         {rateCardsQuery.isLoading ? (
           <LoadingState label="Loading rate cards…" minHeight={160} />
         ) : rateCardsQuery.isError ? (
-          <ErrorState minHeight={160} message="Rate cards could not be loaded." onRetry={() => rateCardsQuery.refetch()} />
+          <ErrorState
+            minHeight={160}
+            message={platformErrorMessage(rateCardsQuery.error, 'Rate cards could not be loaded')}
+            onRetry={() => rateCardsQuery.refetch()}
+          />
         ) : (rateCardsQuery.data?.length ?? 0) === 0 ? (
           <EmptyState title="No rate cards" message="Create a rate card before computing statements." minHeight={160} />
         ) : (

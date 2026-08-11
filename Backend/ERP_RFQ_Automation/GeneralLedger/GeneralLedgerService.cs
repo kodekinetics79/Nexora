@@ -633,18 +633,31 @@ public sealed class GeneralLedgerService(ErpRfqAutomationContext context) : IGen
         });
     }
 
-    private async Task<T> InSerializableTransactionAsync<T>(Func<Task<T>> action)
+    /// <summary>
+    /// The serialization-conflict retry loop, wrapped in the CONNECTION-fault execution strategy.
+    /// The loop retries a 40001/40P01 the database reports on a live connection; the strategy
+    /// retries a dropped connection and, critically, is the only thing that makes a user-initiated
+    /// transaction legal at all — <c>EnableRetryOnFailure</c> (Program.cs) installs
+    /// <c>NpgsqlRetryingExecutionStrategy</c>, which otherwise rejects one outright and made every
+    /// ledger write throw against PostgreSQL.
+    /// </summary>
+    private Task<T> InSerializableTransactionAsync<T>(Func<Task<T>> action)
     {
-        for (var attempt = 1; ; attempt++)
+        var strategy = _context.Database.CreateExecutionStrategy();
+        return strategy.ExecuteAsync(async () =>
         {
-            await using var transaction = await _context.Database.BeginTransactionAsync(IsolationLevel.Serializable);
-            try { var result = await action(); await transaction.CommitAsync(); return result; }
-            catch (Exception ex) when (attempt < 3 && IsRetryable(ex))
+            _context.ChangeTracker.Clear();
+            for (var attempt = 1; ; attempt++)
             {
-                await transaction.RollbackAsync(); _context.ChangeTracker.Clear();
-                await Task.Delay(TimeSpan.FromMilliseconds(20 * attempt));
+                await using var transaction = await _context.Database.BeginTransactionAsync(IsolationLevel.Serializable);
+                try { var result = await action(); await transaction.CommitAsync(); return result; }
+                catch (Exception ex) when (attempt < 3 && IsRetryable(ex))
+                {
+                    await transaction.RollbackAsync(); _context.ChangeTracker.Clear();
+                    await Task.Delay(TimeSpan.FromMilliseconds(20 * attempt));
+                }
             }
-        }
+        });
     }
 
     private static bool IsRetryable(Exception exception)

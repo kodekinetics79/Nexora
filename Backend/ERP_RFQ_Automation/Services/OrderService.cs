@@ -441,23 +441,48 @@ namespace ERP_RFQ_Automation.Services
             {
                 if (_lifecycle is not null)
                 {
-                    await using var transaction = await _context.Database.BeginTransactionAsync(IsolationLevel.Serializable);
-                    await _lifecycle.TransitionQuoteInCurrentTransactionAsync(
-                        businessUnitId,
-                        quote.Id,
-                        new LifecycleActor("system:order-create", "order-service"),
-                        new LifecycleTransitionCommand(
-                            "ORDERED",
-                            quote.LifecycleVersion,
-                            null,
-                            null,
-                            "order-create",
-                            Guid.NewGuid().ToString("N"),
-                            $"order-from-quote:{quote.Id}",
-                            $"order-from-quote:{quote.Id}:v{quote.LifecycleVersion}"),
-                        false,
-                        CancellationToken.None);
-                    await transaction.CommitAsync();
+                    // The transaction is owned by the configured execution strategy. Program.cs
+                    // enables retry-on-failure, so NpgsqlRetryingExecutionStrategy is installed and
+                    // rejects a user-initiated transaction outside its delegate — quote-to-order
+                    // conversion threw "does not support user-initiated transactions" on every
+                    // PostgreSQL request. Same shape as InTransactionAsync below, with one
+                    // deliberate difference: NO ChangeTracker.Clear, because the Order graph was
+                    // staged (Add) before this block and clearing would discard it. The transition
+                    // carries its own idempotency key, so a retry converges rather than duplicating.
+                    var lifecycleTransition = async () =>
+                    {
+                        await _lifecycle.TransitionQuoteInCurrentTransactionAsync(
+                            businessUnitId,
+                            quote.Id,
+                            new LifecycleActor("system:order-create", "order-service"),
+                            new LifecycleTransitionCommand(
+                                "ORDERED",
+                                quote.LifecycleVersion,
+                                null,
+                                null,
+                                "order-create",
+                                Guid.NewGuid().ToString("N"),
+                                $"order-from-quote:{quote.Id}",
+                                $"order-from-quote:{quote.Id}:v{quote.LifecycleVersion}"),
+                            false,
+                            CancellationToken.None);
+                    };
+
+                    if (_context.Database.CurrentTransaction is not null || !_context.Database.IsRelational())
+                    {
+                        await lifecycleTransition();
+                    }
+                    else
+                    {
+                        var strategy = _context.Database.CreateExecutionStrategy();
+                        await strategy.ExecuteAsync(async () =>
+                        {
+                            await using var transaction = await _context.Database.BeginTransactionAsync(
+                                IsolationLevel.Serializable);
+                            await lifecycleTransition();
+                            await transaction.CommitAsync();
+                        });
+                    }
                 }
                 else
                 {

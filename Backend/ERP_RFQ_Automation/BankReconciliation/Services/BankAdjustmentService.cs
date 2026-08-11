@@ -44,44 +44,69 @@ public sealed class BankAdjustmentService(ErpRfqAutomationContext context,
             Description = Token(request.Description, "adjustment description", 500), request.Amount,
             EvidenceReference = Evidence(request.EvidenceReference), Distributions = distributions };
         var requestHash = Hash(normalized);
-        await using var transaction = await _context.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
-        var replay = await _context.BankAdjustments.Include(x => x.Distributions).SingleOrDefaultAsync(x =>
-            x.BusinessUnitId == businessUnitId && x.IdempotencyKey == idempotencyKey.Trim(), ct);
-        if (replay is not null)
+        return await InSerializableTransactionAsync(async token =>
         {
-            if (replay.RequestHash != requestHash) throw new BankReconciliationConflictException("Idempotency key was reused with different adjustment data.");
-            await transaction.CommitAsync(ct); return Map(replay);
-        }
-        var account = await _context.BankAccounts.SingleOrDefaultAsync(x =>
-            x.BusinessUnitId == businessUnitId && x.Id == request.BankAccountId, ct)
-            ?? throw new KeyNotFoundException("Bank account not found.");
-        if (account.Status != BankAccountStatuses.Active)
-            throw new BankReconciliationConflictException("Bank adjustments require an active bank account.");
-        var statementLine = await _context.BankStatementLines.SingleOrDefaultAsync(x =>
-            x.BusinessUnitId == businessUnitId && x.Id == request.BankStatementLineId &&
-            x.BankAccountId == account.Id, ct) ?? throw new KeyNotFoundException("Bank statement line not found.");
-        if (request.Amount > Math.Abs(statementLine.SignedAmount))
-            throw new ArgumentException("Adjustment amount cannot exceed the statement line amount.");
-        var ledgerIds = distributions.Select(x => x.LedgerAccountId).Distinct().ToArray();
-        var ledgers = await _context.LedgerAccounts.Where(x => x.BusinessUnitId == businessUnitId &&
-            ledgerIds.Contains(x.Id)).ToListAsync(ct);
-        if (ledgers.Count != ledgerIds.Length || ledgers.Any(x => !x.IsActive || x.IsControlAccount || x.Id == account.LedgerAccountId))
-            throw new ArgumentException("Adjustment distributions require active non-control accounts distinct from cash.");
-        var adjustment = new BankAdjustment
-        {
-            BusinessUnitId = businessUnitId, BankAccountId = account.Id, BankStatementLineId = statementLine.Id,
-            AccountingPeriodId = request.AccountingPeriodId, AccountingDate = normalized.AccountingDate,
-            AdjustmentType = normalized.AdjustmentType, Description = normalized.Description, Amount = request.Amount,
-            EvidenceReference = normalized.EvidenceReference, IdempotencyKey = idempotencyKey.Trim(),
-            RequestHash = requestHash, PreparedBy = Actor(actor), PreparedOn = DateTime.UtcNow,
-            Distributions = distributions.Select(x => new BankAdjustmentDistribution
+            var replay = await _context.BankAdjustments.Include(x => x.Distributions).SingleOrDefaultAsync(x =>
+                x.BusinessUnitId == businessUnitId && x.IdempotencyKey == idempotencyKey.Trim(), token);
+            if (replay is not null)
             {
-                BusinessUnitId = businessUnitId, Sequence = x.Sequence, LedgerAccountId = x.LedgerAccountId,
-                Amount = x.Amount, Description = x.Description
-            }).ToList()
-        };
-        _context.BankAdjustments.Add(adjustment); await _context.SaveChangesAsync(ct);
-        await transaction.CommitAsync(ct); return Map(adjustment);
+                if (replay.RequestHash != requestHash) throw new BankReconciliationConflictException("Idempotency key was reused with different adjustment data.");
+                return Map(replay);
+            }
+            var account = await _context.BankAccounts.SingleOrDefaultAsync(x =>
+                x.BusinessUnitId == businessUnitId && x.Id == request.BankAccountId, token)
+                ?? throw new KeyNotFoundException("Bank account not found.");
+            if (account.Status != BankAccountStatuses.Active)
+                throw new BankReconciliationConflictException("Bank adjustments require an active bank account.");
+            var statementLine = await _context.BankStatementLines.SingleOrDefaultAsync(x =>
+                x.BusinessUnitId == businessUnitId && x.Id == request.BankStatementLineId &&
+                x.BankAccountId == account.Id, token) ?? throw new KeyNotFoundException("Bank statement line not found.");
+            if (request.Amount > Math.Abs(statementLine.SignedAmount))
+                throw new ArgumentException("Adjustment amount cannot exceed the statement line amount.");
+            var ledgerIds = distributions.Select(x => x.LedgerAccountId).Distinct().ToArray();
+            var ledgers = await _context.LedgerAccounts.Where(x => x.BusinessUnitId == businessUnitId &&
+                ledgerIds.Contains(x.Id)).ToListAsync(token);
+            if (ledgers.Count != ledgerIds.Length || ledgers.Any(x => !x.IsActive || x.IsControlAccount || x.Id == account.LedgerAccountId))
+                throw new ArgumentException("Adjustment distributions require active non-control accounts distinct from cash.");
+            // Constructed INSIDE the delegate: an entity built outside stays tracked as Added after
+            // a failed attempt and would be inserted twice by the retry.
+            var adjustment = new BankAdjustment
+            {
+                BusinessUnitId = businessUnitId, BankAccountId = account.Id, BankStatementLineId = statementLine.Id,
+                AccountingPeriodId = request.AccountingPeriodId, AccountingDate = normalized.AccountingDate,
+                AdjustmentType = normalized.AdjustmentType, Description = normalized.Description, Amount = request.Amount,
+                EvidenceReference = normalized.EvidenceReference, IdempotencyKey = idempotencyKey.Trim(),
+                RequestHash = requestHash, PreparedBy = Actor(actor), PreparedOn = DateTime.UtcNow,
+                Distributions = distributions.Select(x => new BankAdjustmentDistribution
+                {
+                    BusinessUnitId = businessUnitId, Sequence = x.Sequence, LedgerAccountId = x.LedgerAccountId,
+                    Amount = x.Amount, Description = x.Description
+                }).ToList()
+            };
+            _context.BankAdjustments.Add(adjustment); await _context.SaveChangesAsync(token);
+            return Map(adjustment);
+        }, ct);
+    }
+
+    /// <summary>
+    /// Owns the SERIALIZABLE transaction through the configured execution strategy.
+    /// <c>EnableRetryOnFailure</c> (Program.cs) installs <c>NpgsqlRetryingExecutionStrategy</c>,
+    /// which refuses a transaction opened outside its delegate — both adjustment write paths threw
+    /// against PostgreSQL before this existed.
+    /// </summary>
+    private Task<T> InSerializableTransactionAsync<T>(Func<CancellationToken, Task<T>> action,
+        CancellationToken cancellationToken)
+    {
+        var strategy = _context.Database.CreateExecutionStrategy();
+        return strategy.ExecuteAsync(async () =>
+        {
+            _context.ChangeTracker.Clear();
+            await using var transaction = await _context.Database.BeginTransactionAsync(
+                IsolationLevel.Serializable, cancellationToken);
+            var result = await action(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+            return result;
+        });
     }
 
     public async Task<BankAdjustmentDto> GetAsync(long businessUnitId, long adjustmentId, CancellationToken ct = default)
@@ -100,11 +125,11 @@ public sealed class BankAdjustmentService(ErpRfqAutomationContext context,
     {
         var targetAction = Token(action, "bank adjustment action", 20).ToLowerInvariant();
         var trustedActor = Actor(actor);
-        await using var transaction = await _context.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+        return await InSerializableTransactionAsync(async _ =>
+        {
         var adjustment = await LockAsync(businessUnitId, adjustmentId, ct);
         if (IsTransitionReplay(adjustment, targetAction, request, trustedActor))
         {
-            await transaction.CommitAsync(ct);
             return Map(adjustment);
         }
         if (adjustment.Version != request.ExpectedVersion)
@@ -155,7 +180,8 @@ public sealed class BankAdjustmentService(ErpRfqAutomationContext context,
             adjustment.ReversalJournalEntryId = reversal.JournalEntryId; adjustment.ReversalBankJournalEntryLineId = reversal.BankJournalEntryLineId;
         }
         else throw new BankReconciliationConflictException("The requested bank adjustment transition is not allowed.");
-        adjustment.Version++; await _context.SaveChangesAsync(ct); await transaction.CommitAsync(ct); return Map(adjustment);
+        adjustment.Version++; await _context.SaveChangesAsync(ct); return Map(adjustment);
+        }, ct);
     }
 
     private static bool IsTransitionReplay(BankAdjustment adjustment, string action,

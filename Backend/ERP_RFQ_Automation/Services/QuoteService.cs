@@ -1610,7 +1610,30 @@ namespace ERP_RFQ_Automation.Services
         /// </summary>
         private static readonly DateTime EarliestCommercialValidity = new(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
-        public async Task<QuoteValidityExtensionResultDTO> ExtendQuoteValidityAsync(
+        /// <summary>
+        /// Validity extension. The whole call is the retriable unit: it opens its own transaction
+        /// partway down, and <c>NpgsqlRetryingExecutionStrategy</c> (Program.cs
+        /// <c>EnableRetryOnFailure</c>) refuses a transaction opened outside a strategy delegate —
+        /// so this threw "does not support user-initiated transactions" on every PostgreSQL request.
+        /// </summary>
+        public Task<QuoteValidityExtensionResultDTO> ExtendQuoteValidityAsync(
+            long quoteId, long businessUnitId, DateTime newValidUntil, string reason,
+            string actor, long? actorUserId, string idempotencyKey, CancellationToken ct = default)
+        {
+            if (!_context.Database.IsRelational() || _context.Database.CurrentTransaction is not null)
+                return ExtendQuoteValidityCoreAsync(
+                    quoteId, businessUnitId, newValidUntil, reason, actor, actorUserId, idempotencyKey, ct);
+
+            var strategy = _context.Database.CreateExecutionStrategy();
+            return strategy.ExecuteAsync(() =>
+            {
+                _context.ChangeTracker.Clear();
+                return ExtendQuoteValidityCoreAsync(
+                    quoteId, businessUnitId, newValidUntil, reason, actor, actorUserId, idempotencyKey, ct);
+            });
+        }
+
+        private async Task<QuoteValidityExtensionResultDTO> ExtendQuoteValidityCoreAsync(
             long quoteId, long businessUnitId, DateTime newValidUntil, string reason,
             string actor, long? actorUserId, string idempotencyKey, CancellationToken ct = default)
         {
@@ -1915,7 +1938,26 @@ namespace ERP_RFQ_Automation.Services
             return await GetQuoteByIdAsync(id);
         }
 
-        public async Task ResolveRevisionImpactAsync(long quoteId, long businessUnitId, string actor,
+        /// <summary>
+        /// Resolves open revision impacts. Wrapped in the configured execution strategy for the
+        /// same reason as <see cref="ExtendQuoteValidityAsync"/>: it opens a transaction of its own,
+        /// which <c>NpgsqlRetryingExecutionStrategy</c> refuses outside a strategy delegate.
+        /// </summary>
+        public Task ResolveRevisionImpactAsync(long quoteId, long businessUnitId, string actor,
+            string idempotencyKey, CancellationToken ct = default)
+        {
+            if (!_context.Database.IsRelational() || _context.Database.CurrentTransaction is not null)
+                return ResolveRevisionImpactCoreAsync(quoteId, businessUnitId, actor, idempotencyKey, ct);
+
+            var strategy = _context.Database.CreateExecutionStrategy();
+            return strategy.ExecuteAsync(() =>
+            {
+                _context.ChangeTracker.Clear();
+                return ResolveRevisionImpactCoreAsync(quoteId, businessUnitId, actor, idempotencyKey, ct);
+            });
+        }
+
+        private async Task ResolveRevisionImpactCoreAsync(long quoteId, long businessUnitId, string actor,
             string idempotencyKey, CancellationToken ct = default)
         {
             await using var transaction = _context.Database.IsNpgsql() && _context.Database.CurrentTransaction is null

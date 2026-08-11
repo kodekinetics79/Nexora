@@ -101,10 +101,21 @@ public class TenantActivationController : ControllerBase
                 // Clears this address's failure counter: the caller demonstrably held a real
                 // invitation, so whatever mistyped attempts preceded it were not an attack.
                 await _throttle.RegisterSuccessAsync(ActivationPlane, ClientIp(), ct);
+                // The password is set either way; whether the DOOR is open is a different fact
+                // with a different owner, and this endpoint used to assert the wrong one. See
+                // TenantActivationResult.SignInAvailable — an invitation is issued by the last
+                // step of provisioning, and the tenant does not become signable-into until an
+                // operator takes the authoritative activation decision. Saying "you can now sign
+                // in" to somebody the login will refuse is the one sentence that turns a governed
+                // gate into a support ticket.
                 return Ok(new
                 {
                     status = "activated",
-                    message = "Your password is set. You can now sign in."
+                    signInAvailable = result.SignInAvailable,
+                    message = result.SignInAvailable
+                        ? "Your password is set. You can now sign in."
+                        : "Your password is set. Your workspace is still being activated, so sign-in "
+                          + "is not open yet — whoever set it up will confirm when it is ready."
                 });
 
             case TenantActivationStatus.PasswordRejected:

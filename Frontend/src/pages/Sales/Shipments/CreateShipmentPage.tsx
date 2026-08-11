@@ -74,21 +74,29 @@ const CreateShipmentPage: React.FC = () => {
   });
 
   // Fetch orders for selection
-  const { data: orders } = useQuery({
+  const {
+    data: orders,
+    isLoading: isLoadingOrders,
+    isError: isOrdersError,
+  } = useQuery({
     queryKey: ['orders-for-shipment', businessUnitId],
     queryFn: () => orderService.getAll({ businessUnitId, pageSize: 100 }),
     enabled: !isEdit && !isFromOrder,
   });
 
   // Fetch statuses
-  const { data: statusesData } = useQuery({
+  const {
+    data: statusesData,
+    isLoading: isLoadingStatuses,
+    isError: isStatusesError,
+  } = useQuery({
     queryKey: ['shipment-statuses'],
     queryFn: () => setupService.getAll({ setupType: 'ShipmentStatus' }),
   });
   const statuses = statusesData?.items || [];
 
   // Fetch existing shipment if editing
-  const { data: existingShipment, isLoading: isLoadingShipment } = useQuery({
+  const { data: existingShipment, isLoading: isLoadingShipment, isError: isShipmentError } = useQuery({
     queryKey: ['shipment-edit', shipmentId],
     queryFn: () => shipmentService.getById(Number(shipmentId), businessUnitId),
     enabled: isEdit && !!shipmentId,
@@ -217,6 +225,22 @@ const CreateShipmentPage: React.FC = () => {
     return <Box sx={{ display: 'flex', justifyContent: 'center', p: 5 }}><CircularProgress /></Box>;
   }
 
+  // Without this, a failed load fell through to the form and rendered a live, editable
+  // "Edit Shipment undefined" for a shipment that does not exist.
+  if (isEdit && (isShipmentError || !existingShipment)) {
+    return (
+      <Box sx={{ p: 4 }}>
+        <Typography variant="h6" sx={{ fontWeight: 800, mb: 1 }}>We couldn&apos;t load this shipment.</Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+          It may have been removed, or it belongs to another workspace. Nothing was changed.
+        </Typography>
+        <Button variant="outlined" startIcon={<BackIcon />} onClick={() => navigate('/sales/shipments')}>
+          Back to shipments
+        </Button>
+      </Box>
+    );
+  }
+
   return (
     <Box sx={{ p: 3, bgcolor: 'background.default', minHeight: '100vh' }}>
       <Stack direction="row" sx={{ justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
@@ -253,12 +277,23 @@ const CreateShipmentPage: React.FC = () => {
                       inputLabel: { shrink: true }
                     }}
                   >
+                    {/* A `select` TextField with no children is a MUI error AND an empty dropdown
+                        the user gets no reason for. Say why it is empty — still loading, failed to
+                        load, or genuinely no shippable orders — instead of rendering nothing. */}
                     {isFromOrder && selectedOrder ? (
                       <MenuItem value={selectedOrder.id}>{selectedOrder.orderNo} - {selectedOrder.customerName}</MenuItem>
-                    ) : (
-                      orders?.map(order => (
+                    ) : orders && orders.length > 0 ? (
+                      orders.map(order => (
                         <MenuItem key={order.id} value={order.id}>{order.orderNo} - {order.customerName}</MenuItem>
                       ))
+                    ) : (
+                      <MenuItem value="" disabled>
+                        {isLoadingOrders
+                          ? 'Loading sales orders…'
+                          : isOrdersError
+                            ? 'Sales orders could not be loaded — reload the page to try again'
+                            : 'No sales orders are available to ship'}
+                      </MenuItem>
                     )}
                   </TextField>
                 </Grid>
@@ -275,9 +310,19 @@ const CreateShipmentPage: React.FC = () => {
                       inputLabel: { shrink: true }
                     }}
                   >
-                    {statuses.map(status => (
-                      <MenuItem key={status.setupId} value={status.setupId}>{status.setupName}</MenuItem>
-                    ))}
+                    {statuses.length > 0 ? (
+                      statuses.map(status => (
+                        <MenuItem key={status.setupId} value={status.setupId}>{status.setupName}</MenuItem>
+                      ))
+                    ) : (
+                      <MenuItem value="" disabled>
+                        {isLoadingStatuses
+                          ? 'Loading statuses…'
+                          : isStatusesError
+                            ? 'Shipment statuses could not be loaded — reload the page to try again'
+                            : 'No shipment statuses are configured — add them under Setup'}
+                      </MenuItem>
+                    )}
                   </TextField>
                 </Grid>
                 <Grid size={{ xs: 12, md: 6 }}>

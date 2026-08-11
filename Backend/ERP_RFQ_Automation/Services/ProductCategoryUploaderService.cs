@@ -65,7 +65,17 @@ namespace ERP_RFQ_Automation.Services
             return await package.GetAsByteArrayAsync();
         }
 
-        public async Task<ServiceResult<string>> UploadCategoryTemplateAsync(Stream fileStream, long businessUnitId, string createdBy)
+                /// <summary>
+        /// Bulk import entry point. The whole import is run as one retriable unit so that the
+        /// transaction it opens is owned by the configured execution strategy — see
+        /// <see cref="ERP_RFQ_Automation.Infrastructure.RetriableUploadTransaction"/> for the
+        /// defect this closes (every upload returned 500 against PostgreSQL).
+        /// </summary>
+        public Task<ServiceResult<string>> UploadCategoryTemplateAsync(Stream fileStream, long businessUnitId, string createdBy) =>
+            ERP_RFQ_Automation.Infrastructure.RetriableUploadTransaction.ExecuteAsync(
+                _context, fileStream, () => UploadCategoryTemplateCoreAsync(fileStream, businessUnitId, createdBy));
+
+        private async Task<ServiceResult<string>> UploadCategoryTemplateCoreAsync(Stream fileStream, long businessUnitId, string createdBy)
         {
             using var package = new ExcelPackage(fileStream);
             var ws = package.Workbook.Worksheets[0];
@@ -244,7 +254,17 @@ namespace ERP_RFQ_Automation.Services
             return await package.GetAsByteArrayAsync();
         }
 
-        public async Task<ServiceResult<string>> UploadSubCategoryTemplateAsync(Stream fileStream, long businessUnitId, string createdBy)
+                /// <summary>
+        /// Bulk import entry point. The whole import is run as one retriable unit so that the
+        /// transaction it opens is owned by the configured execution strategy — see
+        /// <see cref="ERP_RFQ_Automation.Infrastructure.RetriableUploadTransaction"/> for the
+        /// defect this closes (every upload returned 500 against PostgreSQL).
+        /// </summary>
+        public Task<ServiceResult<string>> UploadSubCategoryTemplateAsync(Stream fileStream, long businessUnitId, string createdBy) =>
+            ERP_RFQ_Automation.Infrastructure.RetriableUploadTransaction.ExecuteAsync(
+                _context, fileStream, () => UploadSubCategoryTemplateCoreAsync(fileStream, businessUnitId, createdBy));
+
+        private async Task<ServiceResult<string>> UploadSubCategoryTemplateCoreAsync(Stream fileStream, long businessUnitId, string createdBy)
         {
             using var package = new ExcelPackage(fileStream);
             var ws = package.Workbook.Worksheets[0];

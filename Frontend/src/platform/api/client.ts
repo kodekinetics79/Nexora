@@ -38,6 +38,7 @@ import type {
   ChangePlatformMfaPolicyInput,
   PlatformOperator,
   PlatformOperatorRole,
+  PlatformReauthentication,
   ProvisionedBaseline,
   ProvisionedBilling,
   ProvisioningDraftSummary,
@@ -168,6 +169,19 @@ export interface PlatformApi {
     id: string,
     input: { userId?: string | null; reason: string },
   ): Promise<ResendTenantAdminInvitationResult>;
+  /**
+   * Kill an outstanding activation link WITHOUT issuing another.
+   *
+   * The distinction from resend is the whole point and it is why the backend has both:
+   * resend supersedes the old link with a new one sent to the address ON FILE, so an
+   * invitation typed to the wrong address, or forwarded out of the intended mailbox,
+   * could previously only ever be replaced — never withdrawn. This is the door out.
+   */
+  revokeTenantAdminInvitation(
+    id: string,
+    invitationId: string,
+    reason: string,
+  ): Promise<void>;
   markTenantPastDue(id: string, reason: string): Promise<Tenant>;
   resolveTenantPastDue(id: string, reason: string): Promise<Tenant>;
   listTenantDataAssets(tenantId: string): Promise<TenantDataAsset[]>;
@@ -366,6 +380,17 @@ export interface PlatformApi {
   getEffectiveMfaPolicy(): Promise<PlatformEffectiveMfaPolicy>;
   getMfaPolicy(): Promise<PlatformMfaPolicy>;
   changeMfaPolicy(input: ChangePlatformMfaPolicyInput): Promise<PlatformMfaPolicy>;
+
+  /**
+   * Step-up: prove the password again so this session may run a high-risk operation.
+   *
+   * With MFA enforcement relaxed, the server refuses purge, export, personal-data erasure,
+   * legal-hold release and invoice finalisation from a password-only session with a 403 whose
+   * body says to POST the password here and retry. Nothing in the console called this, so that
+   * instruction named an endpoint the operator had no way to reach — the remedy was real and
+   * unreachable. See `useStepUpReauthentication`.
+   */
+  reauthenticate(currentPassword: string): Promise<PlatformReauthentication>;
 }
 
 // --- backend wire shapes (ids arrive as numbers) ----------------------------
@@ -426,7 +451,9 @@ type BackendProvisionResult = {
     email: string;
     roleName: string;
     generatedPassword?: string | null;
-    invitation?: { expiresAtUtc: string; activationUrl: string } | null;
+    // activationUrl is populated ONLY when emailSent is false — see
+    // FoundingAdminInvitation and PlatformDtos.AdminInvitationDto.
+    invitation?: { expiresAtUtc: string; activationUrl?: string | null; emailSent?: boolean } | null;
   };
   baseline?: ProvisionedBaseline | null;
   billing?: (Omit<ProvisionedBilling, 'warnings'> & { warnings?: string[] | null }) | null;
@@ -964,6 +991,11 @@ const httpPlatformApi: PlatformApi = {
       },
     };
   },
+  revokeTenantAdminInvitation: async (id, invitationId, reason) => {
+    await platformHttp.post(
+      `/api/platform/tenants/${id}/admin-invitations/${invitationId}/revoke`, { reason },
+    );
+  },
   markTenantPastDue: async (id, reason) =>
     normalizeTenant((await platformHttp.post<BackendTenant>(`/api/platform/tenants/${id}/mark-past-due`, { reason })).data),
   resolveTenantPastDue: async (id, reason) =>
@@ -1035,7 +1067,16 @@ const httpPlatformApi: PlatformApi = {
         email: data.foundingAdmin.email,
         roleName: data.foundingAdmin.roleName,
         generatedPassword: data.foundingAdmin.generatedPassword ?? null,
-        invitation: data.foundingAdmin.invitation ?? null,
+        invitation: data.foundingAdmin.invitation
+          ? {
+              expiresAtUtc: data.foundingAdmin.invitation.expiresAtUtc,
+              // Withheld by the server whenever the mail went out; normalised to null
+              // here so the handover screen can branch on it instead of rendering
+              // `undefined` into a Copy button.
+              activationUrl: data.foundingAdmin.invitation.activationUrl ?? null,
+              emailSent: data.foundingAdmin.invitation.emailSent ?? false,
+            }
+          : null,
       },
       baseline: data.baseline ?? null,
       billing: data.billing ? { ...data.billing, warnings: data.billing.warnings ?? [] } : null,
@@ -1642,6 +1683,12 @@ const httpPlatformApi: PlatformApi = {
 
   changeMfaPolicy: async (input) =>
     (await platformHttp.put<PlatformMfaPolicy>('/api/platform/auth/policy', input)).data,
+
+  reauthenticate: async (currentPassword) =>
+    (await platformHttp.post<PlatformReauthentication>(
+      '/api/platform/auth/reauthenticate',
+      { currentPassword },
+    )).data,
 };
 
 export const platformApi: PlatformApi = httpPlatformApi;

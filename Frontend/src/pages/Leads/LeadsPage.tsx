@@ -196,8 +196,27 @@ const LeadsPage: React.FC = () => {
 
   const syncEmailsMutation = useMutation({
     mutationFn: () => leadService.fetchEmails(),
-    onSuccess: () => {
-      enqueueSnackbar('Email synchronization started successfully!', { variant: 'success' });
+    onSuccess: (report) => {
+      // A 200 is not uniformly a success. The server answers 200 with no `mailboxes`
+      // count when the tenant has NO active IMAP mailbox — nothing was polled and
+      // nothing ever will be — and puts the reason in `message`. Showing a green
+      // "synchronized successfully" over that is the exact lie the backend removed
+      // from its own side (ING-08, EmailController.ManualFetchAndSaveLeads), and it
+      // sends a tenant back to this button forever instead of to mailbox settings.
+      if (!report?.mailboxes) {
+        enqueueSnackbar(
+          report?.message ?? 'No mailbox was polled, so no new leads were fetched.',
+          { variant: 'warning', autoHideDuration: 8000 },
+        );
+        return;
+      }
+      const found = report.newMessages ?? 0;
+      enqueueSnackbar(
+        found > 0
+          ? `Checked ${report.mailboxes} mailbox(es) — ${found} new message(s) ingested.`
+          : `Checked ${report.mailboxes} mailbox(es) — no new messages.`,
+        { variant: 'success' },
+      );
       queryClient.invalidateQueries({ queryKey: ['leads'] });
     },
     onError: (error: unknown) => enqueueSnackbar(

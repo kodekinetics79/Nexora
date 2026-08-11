@@ -247,7 +247,10 @@ function validateCommercial(draft: ProvisionDraft): FieldErrors {
   }
 
   if (isBlank(draft.accountOwnerEmail)) {
-    errors.accountOwnerEmail = 'Name the internal owner — an unowned account is an unbilled account.';
+    // Asks for the EMAIL, because that is the only thing this field accepts. "Name the internal
+    // owner" read as an instruction to type a name, and the operator who did got told to enter a
+    // valid email address on a field that had just asked them for a person.
+    errors.accountOwnerEmail = "Enter the internal owner's email address — an unowned account is an unbilled account.";
   } else if (!EMAIL.test(trimmed(draft.accountOwnerEmail))) {
     errors.accountOwnerEmail = 'Enter a valid email address.';
   }

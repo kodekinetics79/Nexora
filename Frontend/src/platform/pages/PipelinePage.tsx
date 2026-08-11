@@ -52,10 +52,11 @@ export default function PipelinePage() {
   const [recovering, setRecovering] = useState<ExtractionJob | null>(null);
   const [recoveryKey, setRecoveryKey] = useState('');
 
-  const { data: stats, isLoading: statsLoading } = useQuery({
+  const statsQuery = useQuery({
     queryKey: platformKeys.queue(),
     queryFn: () => platformApi.getQueueStats(),
   });
+  const { data: stats, isLoading: statsLoading } = statsQuery;
 
   const { data: tenants } = useQuery({
     queryKey: platformKeys.tenants(),
@@ -64,7 +65,7 @@ export default function PipelinePage() {
 
   const statusFilter: JobStatus | 'all' = tab === 1 ? 'dead_letter' : 'all';
   const jobsQuery = { tenantId: tenantParam === 'all' ? undefined : tenantParam, status: statusFilter };
-  const { data: jobs, isLoading: jobsLoading, isError, refetch } = useQuery({
+  const { data: jobs, isLoading: jobsLoading, isError, error, refetch } = useQuery({
     queryKey: platformKeys.jobs(jobsQuery),
     queryFn: () => platformApi.listJobs(jobsQuery),
   });
@@ -148,7 +149,19 @@ export default function PipelinePage() {
     <Box>
       <PageHeader title="Extraction Pipeline" subtitle="Global and per-tenant extraction queue health with dead-letter review." />
 
-      {statsLoading || !stats ? (
+      {/* `statsLoading || !stats` alone was a trap: on a failed queue read isLoading goes false
+          and `stats` stays undefined, so the condition is permanently true and the page showed
+          four skeleton tiles FOREVER — no error, no retry, nothing to tell the operator the
+          numbers they are not seeing were never fetched. */}
+      {statsQuery.isError ? (
+        <Box sx={{ mb: 3 }}>
+          <ErrorState
+            minHeight={140}
+            message={platformErrorMessage(statsQuery.error, 'Queue health could not be read')}
+            onRetry={() => statsQuery.refetch()}
+          />
+        </Box>
+      ) : statsLoading || !stats ? (
         <TilesSkeleton count={4} />
       ) : (
         <Grid container spacing={2.5} sx={{ mb: 3 }}>
@@ -190,8 +203,14 @@ export default function PipelinePage() {
                 </MenuItem>
               ))}
             </TextField>
+            {/* Refreshes the tiles as well as the grid. It used to refetch only the job list,
+                so clicking it beside four stat tiles left every one of them stale. */}
             <Tooltip title="Refresh">
-              <IconButton onClick={() => refetch()} sx={{ bgcolor: 'action.hover', borderRadius: 2 }}>
+              <IconButton
+                onClick={() => { void refetch(); void statsQuery.refetch(); }}
+                aria-label="Refresh pipeline"
+                sx={{ bgcolor: 'action.hover', borderRadius: 2 }}
+              >
                 <RefreshIcon fontSize="small" />
               </IconButton>
             </Tooltip>
@@ -211,7 +230,7 @@ export default function PipelinePage() {
 
         <Box sx={{ height: 'calc(100vh - 460px)', minHeight: 360 }}>
           {isError ? (
-            <ErrorState message="The pipeline service did not respond." onRetry={() => refetch()} />
+            <ErrorState message={platformErrorMessage(error, 'The job list could not be read')} onRetry={() => refetch()} />
           ) : !jobsLoading && (jobs?.length ?? 0) === 0 ? (
             <EmptyState
               icon={<ProcessedIcon sx={{ fontSize: 44 }} />}

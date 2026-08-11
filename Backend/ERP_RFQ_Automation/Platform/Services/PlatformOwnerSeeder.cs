@@ -71,10 +71,38 @@ public static class PlatformOwnerSeeder
         // EMPTY platform-user table. Any existing row (even a deactivated one) means
         // the plane has been provisioned and further changes belong to the audited
         // /api/platform/users endpoints.
-        if (await db.Set<PlatformUser>().AnyAsync(ct))
+        var existingEmails = await db.Set<PlatformUser>()
+            .OrderBy(u => u.Id)
+            .Select(u => u.Email)
+            .Take(10)
+            .ToListAsync(ct);
+
+        if (existingEmails.Count > 0)
         {
-            logger.LogInformation(
-                "Platform owner bootstrap skipped: platform users already exist and the seeder never overwrites.");
+            // Warning, not Information, and it NAMES the accounts that won the race.
+            //
+            // DemoUserSeeder also creates a platform owner (from PlatformOwner:Email/Password), and it
+            // runs first. When DemoUser:Enabled is true this branch therefore swallows
+            // Platform:BootstrapOwnerEmail/Password entirely — the operator sets both keys, gets no
+            // signal above Information, and then cannot log in with the credential they just
+            // configured. That is a silent, self-inflicted lockout, and the diagnosis is exactly the
+            // list of emails that already exist, so it is logged rather than left to be inferred.
+            var configuredEmailIsPresent = existingEmails
+                .Any(existing => string.Equals(existing, email.Trim(), StringComparison.OrdinalIgnoreCase));
+
+            logger.LogWarning(
+                "Platform owner bootstrap skipped: {Count} platform user(s) already exist ({Emails}) and the "
+                + "seeder never overwrites. The configured {EmailKey}=\"{ConfiguredEmail}\" {Verdict}. If another "
+                + "seeder (e.g. DemoUserSeeder, when DemoUser:Enabled=true) created the account above, the "
+                + "bootstrap password configured here was NOT applied — sign in with that seeder's credential, "
+                + "or start against an empty platform-user table.",
+                existingEmails.Count,
+                string.Join(", ", existingEmails),
+                EmailConfigKey,
+                email.Trim(),
+                configuredEmailIsPresent
+                    ? "matches an existing account, whose password may differ from the one configured here"
+                    : "was NOT created and cannot be used to sign in");
             return;
         }
 

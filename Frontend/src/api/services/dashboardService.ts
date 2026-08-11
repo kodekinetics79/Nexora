@@ -281,26 +281,38 @@ export interface GrossMarginDTO {
 // concentration read off lines alone is misleading when two documents supply
 // most of the volume.
 
+// These two interfaces MUST mirror BrandDemandDTO / BrandDemandRowDTO in
+// Backend/.../DTOs/Dashboard/PilotAnalyticsDTOs.cs. They previously did not: they declared
+// `lineCount`, `documentCount`, a `totalDocuments` total and a `variants` string[], none of
+// which the API has ever returned. Every row therefore rendered `undefined`, and
+// `data.totalDocuments.toLocaleString()` threw — so the sidebar's "Brand Demand" entry led
+// to a blank error boundary on a tenant with no data, which is every new tenant.
 export interface BrandDemandRowDTO {
   /** Normalised manufacturer name, e.g. "CROUSE HINDS/EATON". */
   manufacturer: string;
-  /** Raw spellings folded into this row — shown so the grouping is auditable. */
-  variants?: string[] | null;
-  lineCount: number;
-  totalQuantity: number | null;
+  normalizedKey: string;
+  /** How many raw spellings were folded into this row. A COUNT, not the list of spellings. */
+  variants: number;
+  lines: number;
   /** Documents (leads) this manufacturer appears on. The honest weight. */
-  documentCount: number;
+  documents: number;
+  totalQuantity: number | null;
+  lineSharePercent: number;
 }
 
 export interface BrandDemandDTO {
-  rows: BrandDemandRowDTO[];
+  generatedAt: string;
+  from: string | null;
+  to: string | null;
   /** Denominators for the whole window, so shares can be stated honestly. */
   totalLines: number;
   linesWithManufacturer: number;
+  linesWithoutManufacturer: number;
   distinctManufacturers: number;
-  totalDocuments: number;
-  generatedAt: string;
-  filter?: { from: string; to: string } | null;
+  distinctRawSpellings: number;
+  topFiveLineSharePercent: number;
+  rows: BrandDemandRowDTO[];
+  quantityCaveat: string;
 }
 
 export interface BrandDemandParams {

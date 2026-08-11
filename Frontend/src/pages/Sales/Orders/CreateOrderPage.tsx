@@ -67,7 +67,7 @@ const CreateOrderPage: React.FC = () => {
   const [items, setItems] = useState<OrderItemState[]>([]);
 
   // Queries
-  const { data: orderData, isLoading: isLoadingOrder } = useQuery({
+  const { data: orderData, isLoading: isLoadingOrder, isError: isOrderError } = useQuery({
     queryKey: ['order-edit', id],
     queryFn: () => orderService.getById(Number(id), businessUnitId),
     enabled: isEditMode,
@@ -217,6 +217,20 @@ const CreateOrderPage: React.FC = () => {
 
   if (isEditMode && isLoadingOrder) {
     return <Box sx={{ display: 'flex', justifyContent: 'center', p: 5 }}><CircularProgress /></Box>;
+  }
+
+  // Without this, a failed load fell through to the form and rendered a live, editable
+  // "Edit Order #undefined" with a working Update button for an order that does not exist.
+  if (isEditMode && (isOrderError || !orderData)) {
+    return (
+      <Box sx={{ p: 4 }}>
+        <Typography variant="h6" sx={{ fontWeight: 800, mb: 1 }}>We couldn&apos;t load this order.</Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+          It may have been removed, or it belongs to another workspace. Nothing was changed.
+        </Typography>
+        <Button variant="outlined" onClick={() => navigate('/sales/orders')}>Back to orders</Button>
+      </Box>
+    );
   }
 
   return (

@@ -1,8 +1,88 @@
+# Docker build context filter for Backend/Dockerfile.
+#
+# The context is the Backend/ directory (render.yaml sets `rootDir: Backend`), so anything
+# outside it — Frontend/, .local-run/, the repository .git/ — is already out of scope and does
+# not need a rule here. What follows is only about what lives under Backend/.
+#
+# MEASURED on 2026-08-11 against this tree with a probe image (`FROM busybox; COPY . /ctx`):
+#     no rules at all      1,570,240 KB   (1.45 GB, 60 s to transfer)
+#     with these rules       144,040 KB   (144 MB, 14 s)
+# The bin/ and obj/ rules alone account for 1,284 MB of that. They were already here and they
+# were already working — if you are reading this because a build feels slow, the context is not
+# where the time goes; see the build-memory record in Dockerfile:11-105.
+
+# === .NET build output — the bulk of it ===
+# 1,284 MB on a developer machine that has built both configurations. None of it is build input:
+# `dotnet restore` + `dotnet publish` inside the image regenerate everything.
 **/bin/
 **/obj/
 **/.vs/
-**/appsettings.Development.json
-**/appsettings.*.Local.json
-ERP_RFQ_Automation.Tests/
-ERP_RFQ_Automation/Uploads/
 **/*.user
+
+# === Not compiled into the image ===
+# ERP_RFQ_Automation.Tests is not in the publish graph and pulls Testcontainers, SQLite and the
+# xunit runner behind it.
+ERP_RFQ_Automation.Tests/
+# ERP_RFQ_Automation.AcceptanceFixture is a standalone console harness. It is NOT in
+# ERP_RFQ_Automation.sln, no script or workflow references it, and nothing in the Dockerfile
+# builds it — it only ProjectReferences the app, never the other way round.
+ERP_RFQ_Automation.AcceptanceFixture/
+**/TestResults/
+**/*.trx
+
+# === Test/tool output that lands under Backend/ when a command is run from the wrong place ===
+**/node_modules/
+**/.local-run/
+**/.e2e-run/
+**/playwright-report/
+
+# === Secrets and local configuration — must never be layered into an image ===
+# appsettings.Local.json needed its own line: Docker's `*` matches a run of characters, so
+# `appsettings.*.Local.json` matches appsettings.Foo.Local.json but NOT appsettings.Local.json.
+# The root .gitignore covers that filename, so it is a file developers really do create, and
+# without this line it was being copied into the build stage.
+**/appsettings.Development.json
+**/appsettings.Local.json
+**/appsettings.*.Local.json
+**/secrets.json
+**/.env
+**/.env.*
+**/*.pfx
+**/*.pem
+
+# === Runtime-written content, not source ===
+# The app writes uploaded documents here when it runs outside a container. Tenant data; it has
+# no business in an image layer.
+ERP_RFQ_Automation/Uploads/
+
+# === OS / editor cruft ===
+**/.DS_Store
+**/.vscode/
+
+# -----------------------------------------------------------------------------------------
+# DELIBERATELY NOT IGNORED — do not "optimise" these without reading why.
+#
+# ERP_RFQ_Automation/Migrations/  (95 MB, 269 files, 66% of the remaining context)
+#   Every one of these files is excluded from compilation today by
+#   `<Compile Remove="Migrations\**\*.cs" />` in the .csproj, so ignoring the folder would cost
+#   the build nothing and save 95 MB. It is still not ignored, on purpose.
+#
+#   That .csproj block is labelled TRANSITIONAL. The documented end state is that
+#   MigrationsBaseline\ is RENAMED to Migrations\ and the Compile Remove is deleted. On the day
+#   that happens, a `.dockerignore` line naming Migrations/ would silently exclude the only
+#   migrations the application has. EF selects migrations by the [DbContext] attribute that
+#   lives in the .Designer.cs half, so a missing migration is not an error — it is INVISIBLE
+#   (Dockerfile:49-54). Program.cs calls MigrateAsync() at boot with
+#   Database__ApplyMigrationsOnStartup=true, so the deploy would go green having applied
+#   nothing at all.
+#
+#   95 MB of context transfer is 13 seconds. A schema that silently does not exist is not
+#   recoverable. Trading the second for the first is not a saving.
+#
+# ERP_RFQ_Automation/tessdata/  (22 MB)
+#   Tesseract loads language data from ContentRootPath/tessdata at RUNTIME and the .csproj
+#   copies it to the publish output. Without it OCR fails silently — see the .csproj comment.
+#
+# ERP_RFQ_Automation/MigrationsBaseline/  (9.3 MB)
+#   The live migration estate, plus the .sql files embedded as resources.
+# -----------------------------------------------------------------------------------------

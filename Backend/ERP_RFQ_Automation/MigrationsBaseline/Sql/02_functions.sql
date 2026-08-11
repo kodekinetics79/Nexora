@@ -4,13 +4,20 @@
 -- applying all 134 pre-baseline migrations in order. Do not hand-edit:
 -- regenerate with MigrationsBaseline/regenerate-baseline-sql.py, then re-run
 -- the schema-parity diff.
+--
+-- Every statement is IDEMPOTENT. Production is still at the pre-squash head with
+-- the whole schema already materialised, and Program.cs applies migrations
+-- uncaught at boot, so a bare CREATE here is a failed deploy. Objects with no
+-- IF NOT EXISTS form are wrapped in a DO block that checks pg_catalog for that
+-- exact object - never a broader condition that could skip a policy or a
+-- constraint the database is genuinely missing.
 -- ==========================================================================
 
 --
 -- Name: nexora_guard_accounting_outbox(); Type: FUNCTION; Schema: platform; Owner: -
 --
 
-CREATE FUNCTION platform.nexora_guard_accounting_outbox() RETURNS trigger
+CREATE OR REPLACE FUNCTION platform.nexora_guard_accounting_outbox() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -34,7 +41,7 @@ END $$;
 -- Name: nexora_guard_append_only_record(); Type: FUNCTION; Schema: platform; Owner: -
 --
 
-CREATE FUNCTION platform.nexora_guard_append_only_record() RETURNS trigger
+CREATE OR REPLACE FUNCTION platform.nexora_guard_append_only_record() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -51,7 +58,7 @@ $$;
 -- Name: nexora_guard_billing_statement_line_mutation(); Type: FUNCTION; Schema: platform; Owner: -
 --
 
-CREATE FUNCTION platform.nexora_guard_billing_statement_line_mutation() RETURNS trigger
+CREATE OR REPLACE FUNCTION platform.nexora_guard_billing_statement_line_mutation() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 DECLARE parent_status text;
@@ -74,7 +81,7 @@ $$;
 -- Name: nexora_guard_billing_statement_mutation(); Type: FUNCTION; Schema: platform; Owner: -
 --
 
-CREATE FUNCTION platform.nexora_guard_billing_statement_mutation() RETURNS trigger
+CREATE OR REPLACE FUNCTION platform.nexora_guard_billing_statement_mutation() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -102,7 +109,7 @@ $$;
 -- Name: nexora_guard_provisioning_lease_transfer(); Type: FUNCTION; Schema: platform; Owner: -
 --
 
-CREATE FUNCTION platform.nexora_guard_provisioning_lease_transfer() RETURNS trigger
+CREATE OR REPLACE FUNCTION platform.nexora_guard_provisioning_lease_transfer() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -150,7 +157,7 @@ $$;
 -- Name: nexora_guard_subscription_invoice(); Type: FUNCTION; Schema: platform; Owner: -
 --
 
-CREATE FUNCTION platform.nexora_guard_subscription_invoice() RETURNS trigger
+CREATE OR REPLACE FUNCTION platform.nexora_guard_subscription_invoice() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -200,7 +207,7 @@ END $$;
 -- Name: nexora_guard_subscription_revenue_action(); Type: FUNCTION; Schema: platform; Owner: -
 --
 
-CREATE FUNCTION platform.nexora_guard_subscription_revenue_action() RETURNS trigger
+CREATE OR REPLACE FUNCTION platform.nexora_guard_subscription_revenue_action() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -225,7 +232,7 @@ END $$;
 -- Name: nexora_guard_subscription_tax_rule(); Type: FUNCTION; Schema: platform; Owner: -
 --
 
-CREATE FUNCTION platform.nexora_guard_subscription_tax_rule() RETURNS trigger
+CREATE OR REPLACE FUNCTION platform.nexora_guard_subscription_tax_rule() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -249,7 +256,7 @@ END $$;
 -- Name: nexora_guard_tenant_legal_hold(); Type: FUNCTION; Schema: platform; Owner: -
 --
 
-CREATE FUNCTION platform.nexora_guard_tenant_legal_hold() RETURNS trigger
+CREATE OR REPLACE FUNCTION platform.nexora_guard_tenant_legal_hold() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -285,7 +292,7 @@ $$;
 -- Name: nexora_guard_usage_event_insert(); Type: FUNCTION; Schema: platform; Owner: -
 --
 
-CREATE FUNCTION platform.nexora_guard_usage_event_insert() RETURNS trigger
+CREATE OR REPLACE FUNCTION platform.nexora_guard_usage_event_insert() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 DECLARE
@@ -343,7 +350,7 @@ END $$;
 -- Name: nexora_reconcile_subscription_invoice_rollups(); Type: FUNCTION; Schema: platform; Owner: -
 --
 
-CREATE FUNCTION platform.nexora_reconcile_subscription_invoice_rollups() RETURNS trigger
+CREATE OR REPLACE FUNCTION platform.nexora_reconcile_subscription_invoice_rollups() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 DECLARE
@@ -381,7 +388,7 @@ END $$;
 -- Name: nexora_seed_tenant_meter_source_policies(); Type: FUNCTION; Schema: platform; Owner: -
 --
 
-CREATE FUNCTION platform.nexora_seed_tenant_meter_source_policies() RETURNS trigger
+CREATE OR REPLACE FUNCTION platform.nexora_seed_tenant_meter_source_policies() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'platform'
     AS $$
@@ -405,7 +412,7 @@ END $$;
 -- Name: nexora_ai_policy_audit_allowed(bigint, text, text, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_ai_policy_audit_allowed(tenant_id bigint, action_name text, target_type text, target_id text) RETURNS boolean
+CREATE OR REPLACE FUNCTION public.nexora_ai_policy_audit_allowed(tenant_id bigint, action_name text, target_type text, target_id text) RETURNS boolean
     LANGUAGE sql STABLE SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public', 'platform'
     AS $$
@@ -424,7 +431,7 @@ $$;
 -- Name: nexora_ar_evidence_event(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_ar_evidence_event() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_ar_evidence_event() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -526,7 +533,7 @@ $$;
 -- Name: nexora_ar_governed_mutation(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_ar_governed_mutation() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_ar_governed_mutation() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -916,7 +923,7 @@ $$;
 -- Name: nexora_ar_reconcile_kept_promise_payment(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_ar_reconcile_kept_promise_payment() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_ar_reconcile_kept_promise_payment() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -978,7 +985,7 @@ $$;
 -- Name: nexora_ar_validate_tenant_reference(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_ar_validate_tenant_reference() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_ar_validate_tenant_reference() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -1087,7 +1094,7 @@ $$;
 -- Name: nexora_ar_verify_provider_evidence(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_ar_verify_provider_evidence() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_ar_verify_provider_evidence() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -1131,7 +1138,7 @@ $$;
 -- Name: nexora_ar_verify_run_decision_profile(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_ar_verify_run_decision_profile() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_ar_verify_run_decision_profile() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -1159,7 +1166,7 @@ $$;
 -- Name: nexora_assign_commercial_case(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_assign_commercial_case() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_assign_commercial_case() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 DECLARE
@@ -1229,7 +1236,7 @@ $$;
 -- Name: nexora_bank_certify_run(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_bank_certify_run() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_bank_certify_run() RETURNS trigger
     LANGUAGE plpgsql
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -1350,7 +1357,7 @@ $$;
 -- Name: nexora_bank_check_match_trigger(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_bank_check_match_trigger() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_bank_check_match_trigger() RETURNS trigger
     LANGUAGE plpgsql
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -1371,7 +1378,7 @@ $$;
 -- Name: nexora_bank_evidence_event(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_bank_evidence_event() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_bank_evidence_event() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -1435,7 +1442,7 @@ END $$;
 -- Name: nexora_bank_guard_account(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_bank_guard_account() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_bank_guard_account() RETURNS trigger
     LANGUAGE plpgsql
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -1477,7 +1484,7 @@ $$;
 -- Name: nexora_bank_guard_allocation(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_bank_guard_allocation() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_bank_guard_allocation() RETURNS trigger
     LANGUAGE plpgsql
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -1504,7 +1511,7 @@ $$;
 -- Name: nexora_bank_guard_import(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_bank_guard_import() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_bank_guard_import() RETURNS trigger
     LANGUAGE plpgsql
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -1523,7 +1530,7 @@ $$;
 -- Name: nexora_bank_guard_match(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_bank_guard_match() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_bank_guard_match() RETURNS trigger
     LANGUAGE plpgsql
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -1561,7 +1568,7 @@ $$;
 -- Name: nexora_bank_immutable_evidence(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_bank_immutable_evidence() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_bank_immutable_evidence() RETURNS trigger
     LANGUAGE plpgsql
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -1575,7 +1582,7 @@ $$;
 -- Name: nexora_bank_validate_match(bigint); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_bank_validate_match(match_id bigint) RETURNS void
+CREATE OR REPLACE FUNCTION public.nexora_bank_validate_match(match_id bigint) RETURNS void
     LANGUAGE plpgsql
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -1642,7 +1649,7 @@ $$;
 -- Name: nexora_bank_validate_statement(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_bank_validate_statement() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_bank_validate_statement() RETURNS trigger
     LANGUAGE plpgsql
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -1663,7 +1670,7 @@ $$;
 -- Name: nexora_create_default_ai_policy(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_create_default_ai_policy() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_create_default_ai_policy() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -1682,7 +1689,7 @@ $$;
 -- Name: nexora_evidence_append_only(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_evidence_append_only() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_evidence_append_only() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -1694,7 +1701,7 @@ END; $$;
 -- Name: nexora_evidence_occurrence_guard(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_evidence_occurrence_guard() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_evidence_occurrence_guard() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -1718,7 +1725,7 @@ END; $$;
 -- Name: nexora_extraction_run_guard(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_extraction_run_guard() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_extraction_run_guard() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -1753,7 +1760,7 @@ END; $$;
 -- Name: nexora_finance_audit_append_only(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_finance_audit_append_only() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_finance_audit_append_only() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -1766,7 +1773,7 @@ $$;
 -- Name: nexora_finance_outbox_core_immutable(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_finance_outbox_core_immutable() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_finance_outbox_core_immutable() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -1787,7 +1794,7 @@ $$;
 -- Name: nexora_finance_reject_truncate(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_finance_reject_truncate() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_finance_reject_truncate() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -1800,7 +1807,7 @@ $$;
 -- Name: nexora_gl_authenticated_actor(bigint); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_gl_authenticated_actor(business_unit_id bigint) RETURNS text
+CREATE OR REPLACE FUNCTION public.nexora_gl_authenticated_actor(business_unit_id bigint) RETURNS text
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -1845,7 +1852,7 @@ $$;
 -- Name: nexora_gl_certify_period_close(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_gl_certify_period_close() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_gl_certify_period_close() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -1911,7 +1918,7 @@ $$;
 -- Name: nexora_gl_enforce_book_currency(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_gl_enforce_book_currency() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_gl_enforce_book_currency() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -1934,7 +1941,7 @@ $$;
 -- Name: nexora_gl_evidence_event(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_gl_evidence_event() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_gl_evidence_event() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -1974,7 +1981,7 @@ $$;
 -- Name: nexora_gl_guard_account(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_gl_guard_account() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_gl_guard_account() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -2016,7 +2023,7 @@ $$;
 -- Name: nexora_gl_guard_book(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_gl_guard_book() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_gl_guard_book() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -2064,7 +2071,7 @@ END; $$;
 -- Name: nexora_gl_guard_journal(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_gl_guard_journal() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_gl_guard_journal() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -2171,7 +2178,7 @@ $$;
 -- Name: nexora_gl_guard_line(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_gl_guard_line() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_gl_guard_line() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -2201,7 +2208,7 @@ $$;
 -- Name: nexora_gl_guard_period(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_gl_guard_period() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_gl_guard_period() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -2292,7 +2299,7 @@ $$;
 -- Name: nexora_gl_validate_posting(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_gl_validate_posting() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_gl_validate_posting() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -2382,7 +2389,7 @@ $$;
 -- Name: nexora_guard_ai_request_update(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_guard_ai_request_update() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_guard_ai_request_update() RETURNS trigger
     LANGUAGE plpgsql
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -2427,7 +2434,7 @@ $$;
 -- Name: nexora_guard_commercial_exception_case(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_guard_commercial_exception_case() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_guard_commercial_exception_case() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -2461,7 +2468,7 @@ $$;
 -- Name: nexora_guard_commercial_exception_outbox(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_guard_commercial_exception_outbox() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_guard_commercial_exception_outbox() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -2482,7 +2489,7 @@ $$;
 -- Name: nexora_guard_commercial_line_resolution_update(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_guard_commercial_line_resolution_update() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_guard_commercial_line_resolution_update() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -2520,7 +2527,7 @@ END $$;
 -- Name: nexora_guard_opportunity_outbox(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_guard_opportunity_outbox() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_guard_opportunity_outbox() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -2541,7 +2548,7 @@ $$;
 -- Name: nexora_guard_quote_delivery_mutation(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_guard_quote_delivery_mutation() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_guard_quote_delivery_mutation() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -2572,7 +2579,7 @@ END $$;
 -- Name: nexora_otc_allocation_delete_guard(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_otc_allocation_delete_guard() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_otc_allocation_delete_guard() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -2590,7 +2597,7 @@ $$;
 -- Name: nexora_otc_audit_append_only(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_otc_audit_append_only() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_otc_audit_append_only() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -2603,7 +2610,7 @@ $$;
 -- Name: nexora_otc_award_transition_guard(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_otc_award_transition_guard() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_otc_award_transition_guard() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 DECLARE exceeded record;
@@ -2683,7 +2690,7 @@ $$;
 -- Name: nexora_otc_order_item_source_guard(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_otc_order_item_source_guard() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_otc_order_item_source_guard() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 DECLARE source_record record;
@@ -2719,7 +2726,7 @@ $$;
 -- Name: nexora_otc_order_source_guard(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_otc_order_source_guard() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_otc_order_source_guard() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 DECLARE award_record record;
@@ -2754,7 +2761,7 @@ $$;
 -- Name: nexora_otc_outbox_event(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_otc_outbox_event() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_otc_outbox_event() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -2806,7 +2813,7 @@ $$;
 -- Name: nexora_otc_validate_allocation(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_otc_validate_allocation() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_otc_validate_allocation() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 DECLARE award_record record;
@@ -2847,7 +2854,7 @@ $$;
 -- Name: nexora_otc_validate_award(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_otc_validate_award() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_otc_validate_award() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 DECLARE po_record record;
@@ -2886,7 +2893,7 @@ $$;
 -- Name: nexora_otc_validate_purchase_order(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_otc_validate_purchase_order() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_otc_validate_purchase_order() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -2918,7 +2925,7 @@ $$;
 -- Name: nexora_otc_validate_purchase_order_line(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_otc_validate_purchase_order_line() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_otc_validate_purchase_order_line() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -2936,7 +2943,7 @@ $$;
 -- Name: nexora_payment_allocation_valid(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_payment_allocation_valid() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_payment_allocation_valid() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -3019,7 +3026,7 @@ $$;
 -- Name: nexora_payment_outbox_event(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_payment_outbox_event() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_payment_outbox_event() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -3059,7 +3066,7 @@ $$;
 -- Name: nexora_payment_posted_immutable(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_payment_posted_immutable() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_payment_posted_immutable() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -3122,7 +3129,7 @@ END $$;
 -- Name: nexora_protect_commercial_identity(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_protect_commercial_identity() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_protect_commercial_identity() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -3148,7 +3155,7 @@ $$;
 -- Name: nexora_protect_commercial_lifecycle_event(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_protect_commercial_lifecycle_event() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_protect_commercial_lifecycle_event() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -3162,7 +3169,7 @@ $$;
 -- Name: nexora_protect_custom_field_governance(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_protect_custom_field_governance() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_protect_custom_field_governance() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -3180,7 +3187,7 @@ $$;
 -- Name: nexora_protect_lead_status_history(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_protect_lead_status_history() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_protect_lead_status_history() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -3193,7 +3200,7 @@ $$;
 -- Name: nexora_protect_procurement_callback_receipt(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_protect_procurement_callback_receipt() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_protect_procurement_callback_receipt() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -3206,7 +3213,7 @@ $$;
 -- Name: nexora_protect_procurement_handoff_lineage(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_protect_procurement_handoff_lineage() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_protect_procurement_handoff_lineage() RETURNS trigger
     LANGUAGE plpgsql
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -3255,7 +3262,7 @@ $$;
 -- Name: nexora_protect_projected_supplier_quote_lineage(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_protect_projected_supplier_quote_lineage() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_protect_projected_supplier_quote_lineage() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -3278,7 +3285,7 @@ $$;
 -- Name: nexora_protect_source_document_identity(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_protect_source_document_identity() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_protect_source_document_identity() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -3305,7 +3312,7 @@ END; $$;
 -- Name: nexora_protect_source_occurrence_metadata(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_protect_source_occurrence_metadata() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_protect_source_occurrence_metadata() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -3320,7 +3327,7 @@ END; $$;
 -- Name: nexora_protect_supplier_quote_lineage(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_protect_supplier_quote_lineage() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_protect_supplier_quote_lineage() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -3343,7 +3350,7 @@ $$;
 -- Name: nexora_protect_supplier_rfq_lineage(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_protect_supplier_rfq_lineage() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_protect_supplier_rfq_lineage() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -3363,7 +3370,7 @@ $$;
 -- Name: nexora_receivable_issued_immutable(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_receivable_issued_immutable() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_receivable_issued_immutable() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -3648,7 +3655,7 @@ $$;
 -- Name: nexora_receivable_line_issued_immutable(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_receivable_line_issued_immutable() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_receivable_line_issued_immutable() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -3684,7 +3691,7 @@ $$;
 -- Name: nexora_receivable_live_outstanding(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_receivable_live_outstanding(business_unit_id bigint, document_id bigint) RETURNS numeric
+CREATE OR REPLACE FUNCTION public.nexora_receivable_live_outstanding(business_unit_id bigint, document_id bigint) RETURNS numeric
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -3734,7 +3741,7 @@ $$;
 -- Name: nexora_receivable_order_item_valid(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_receivable_order_item_valid() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_receivable_order_item_valid() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -3758,7 +3765,7 @@ $$;
 -- Name: nexora_receivable_outbox_event(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_receivable_outbox_event() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_receivable_outbox_event() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -3806,7 +3813,7 @@ $$;
 -- Name: nexora_record_lead_status_history(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_record_lead_status_history() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_record_lead_status_history() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 DECLARE actor text; actor_source text; transition_reason text;
@@ -3836,7 +3843,7 @@ $$;
 -- Name: nexora_refund_governed(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_refund_governed() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_refund_governed() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -4029,7 +4036,7 @@ $$;
 -- Name: nexora_refund_outbox_event(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_refund_outbox_event() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_refund_outbox_event() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -4082,7 +4089,7 @@ $$;
 -- Name: nexora_reject_ai_ledger_mutation(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_reject_ai_ledger_mutation() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_reject_ai_ledger_mutation() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -4095,7 +4102,7 @@ $$;
 -- Name: nexora_reject_classification_source_mutation(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_reject_classification_source_mutation() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_reject_classification_source_mutation() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -4115,7 +4122,7 @@ $$;
 -- Name: nexora_reject_commercial_demand_line_mutation(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_reject_commercial_demand_line_mutation() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_reject_commercial_demand_line_mutation() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -4129,7 +4136,7 @@ $$;
 -- Name: nexora_reject_commercial_exception_event_mutation(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_reject_commercial_exception_event_mutation() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_reject_commercial_exception_event_mutation() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -4142,7 +4149,7 @@ $$;
 -- Name: nexora_reject_commercial_exception_operation_mutation(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_reject_commercial_exception_operation_mutation() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_reject_commercial_exception_operation_mutation() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -4155,7 +4162,7 @@ $$;
 -- Name: nexora_reject_extraction_dead_letter_event_mutation(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_reject_extraction_dead_letter_event_mutation() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_reject_extraction_dead_letter_event_mutation() RETURNS trigger
     LANGUAGE plpgsql
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -4169,7 +4176,7 @@ $$;
 -- Name: nexora_reject_lead_review_audit_mutation(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_reject_lead_review_audit_mutation() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_reject_lead_review_audit_mutation() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -4182,7 +4189,7 @@ $$;
 -- Name: nexora_reject_learning_governance_mutation(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_reject_learning_governance_mutation() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_reject_learning_governance_mutation() RETURNS trigger
     LANGUAGE plpgsql
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -4196,7 +4203,7 @@ $$;
 -- Name: nexora_reject_master_data_audit_mutation(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_reject_master_data_audit_mutation() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_reject_master_data_audit_mutation() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -4211,7 +4218,7 @@ $$;
 -- Name: nexora_reject_opportunity_immutable_mutation(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_reject_opportunity_immutable_mutation() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_reject_opportunity_immutable_mutation() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -4224,7 +4231,7 @@ $$;
 -- Name: nexora_reject_procurement_event_mutation(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_reject_procurement_event_mutation() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_reject_procurement_event_mutation() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -4239,7 +4246,7 @@ $$;
 -- Name: nexora_reject_referenced_inventory_tenant_change(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_reject_referenced_inventory_tenant_change() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_reject_referenced_inventory_tenant_change() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -4259,7 +4266,7 @@ $$;
 -- Name: nexora_reject_referenced_product_tenant_change(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_reject_referenced_product_tenant_change() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_reject_referenced_product_tenant_change() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -4279,7 +4286,7 @@ $$;
 -- Name: nexora_reject_routing_decision_mutation(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_reject_routing_decision_mutation() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_reject_routing_decision_mutation() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -4291,7 +4298,7 @@ END $$;
 -- Name: nexora_reject_sales_coaching_ack_mutation(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_reject_sales_coaching_ack_mutation() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_reject_sales_coaching_ack_mutation() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -4305,7 +4312,7 @@ $$;
 -- Name: nexora_reject_sales_event_mutation(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_reject_sales_event_mutation() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_reject_sales_event_mutation() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -4317,7 +4324,7 @@ END $$;
 -- Name: nexora_reject_sourcing_case_lineage_mutation(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_reject_sourcing_case_lineage_mutation() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_reject_sourcing_case_lineage_mutation() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -4338,7 +4345,7 @@ $$;
 -- Name: nexora_reject_supplier_negotiation_decision_mutation(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_reject_supplier_negotiation_decision_mutation() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_reject_supplier_negotiation_decision_mutation() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -4352,7 +4359,7 @@ $$;
 -- Name: nexora_reject_supplier_quote_append_only_mutation(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_reject_supplier_quote_append_only_mutation() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_reject_supplier_quote_append_only_mutation() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -4366,7 +4373,7 @@ $$;
 -- Name: nexora_release01a_forbid_history_mutation(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_release01a_forbid_history_mutation() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_release01a_forbid_history_mutation() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -4378,7 +4385,7 @@ END $$;
 -- Name: nexora_release01a_occurrence_guard(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_release01a_occurrence_guard() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_release01a_occurrence_guard() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -4419,7 +4426,7 @@ END $$;
 -- Name: nexora_release01b_contact_tenant_guard(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_release01b_contact_tenant_guard() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_release01b_contact_tenant_guard() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -4444,7 +4451,7 @@ END; $$;
 -- Name: nexora_release01b_intake_before_claim_guard(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_release01b_intake_before_claim_guard() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_release01b_intake_before_claim_guard() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -4467,7 +4474,7 @@ END; $$;
 -- Name: nexora_release01b_lead_occurrence_source_guard(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_release01b_lead_occurrence_source_guard() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_release01b_lead_occurrence_source_guard() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -4484,7 +4491,7 @@ END; $$;
 -- Name: nexora_release01c_sync_intake_from_job(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_release01c_sync_intake_from_job() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_release01c_sync_intake_from_job() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 DECLARE
@@ -4561,7 +4568,7 @@ END; $$;
 -- Name: nexora_require_commercial_exception_event(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_require_commercial_exception_event() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_require_commercial_exception_event() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -4611,7 +4618,7 @@ $$;
 -- Name: nexora_require_lifecycle_command(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_require_lifecycle_command() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_require_lifecycle_command() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -4629,7 +4636,7 @@ $$;
 -- Name: nexora_require_opportunity_event(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_require_opportunity_event() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_require_opportunity_event() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 DECLARE source_kind text;
@@ -4660,7 +4667,7 @@ $$;
 -- Name: nexora_require_opportunity_outbox(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_require_opportunity_outbox() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_require_opportunity_outbox() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -4682,7 +4689,7 @@ $$;
 -- Name: nexora_source_document_purge_forward_only(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_source_document_purge_forward_only() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_source_document_purge_forward_only() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 DECLARE
@@ -4734,7 +4741,7 @@ END; $$;
 -- Name: nexora_treasury_guard_adjustment(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_treasury_guard_adjustment() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_treasury_guard_adjustment() RETURNS trigger
     LANGUAGE plpgsql
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -4818,7 +4825,7 @@ END $$;
 -- Name: nexora_treasury_guard_distribution(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_treasury_guard_distribution() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_treasury_guard_distribution() RETURNS trigger
     LANGUAGE plpgsql
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -4837,7 +4844,7 @@ END $$;
 -- Name: nexora_treasury_guard_rule(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_treasury_guard_rule() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_treasury_guard_rule() RETURNS trigger
     LANGUAGE plpgsql
     SET search_path TO 'pg_catalog', 'public'
     AS $_$
@@ -4910,7 +4917,7 @@ END $_$;
 -- Name: nexora_treasury_guard_snapshot(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_treasury_guard_snapshot() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_treasury_guard_snapshot() RETURNS trigger
     LANGUAGE plpgsql
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -4932,7 +4939,7 @@ END $$;
 -- Name: nexora_treasury_validate_adjustment(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_treasury_validate_adjustment() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_treasury_validate_adjustment() RETURNS trigger
     LANGUAGE plpgsql
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -5015,7 +5022,7 @@ END $$;
 -- Name: nexora_treasury_validate_cash_bridge(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_treasury_validate_cash_bridge() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_treasury_validate_cash_bridge() RETURNS trigger
     LANGUAGE plpgsql
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -5139,7 +5146,7 @@ END; $$;
 -- Name: nexora_treasury_validate_match_rule(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_treasury_validate_match_rule() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_treasury_validate_match_rule() RETURNS trigger
     LANGUAGE plpgsql
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -5165,7 +5172,7 @@ END $$;
 -- Name: nexora_treasury_validate_run_rules(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_treasury_validate_run_rules() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_treasury_validate_run_rules() RETURNS trigger
     LANGUAGE plpgsql
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -5185,7 +5192,7 @@ END $$;
 -- Name: nexora_validate_commercial_line_resolution(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_validate_commercial_line_resolution() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_validate_commercial_line_resolution() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -5210,7 +5217,7 @@ END $$;
 -- Name: nexora_validate_downstream_commercial_identity(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_validate_downstream_commercial_identity() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_validate_downstream_commercial_identity() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -5270,7 +5277,7 @@ END; $$;
 -- Name: nexora_validate_inventory_tenant(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_validate_inventory_tenant() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_validate_inventory_tenant() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -5307,7 +5314,7 @@ END $$;
 -- Name: nexora_validate_inventory_warehouse_tenant(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_validate_inventory_warehouse_tenant() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_validate_inventory_warehouse_tenant() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -5324,7 +5331,7 @@ END $$;
 -- Name: nexora_validate_lead_commercial_identity(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_validate_lead_commercial_identity() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_validate_lead_commercial_identity() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -5354,7 +5361,7 @@ END; $$;
 -- Name: nexora_validate_learning_governance_insert(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_validate_learning_governance_insert() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_validate_learning_governance_insert() RETURNS trigger
     LANGUAGE plpgsql
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -5373,7 +5380,7 @@ $$;
 -- Name: nexora_validate_opportunity_feedback(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_validate_opportunity_feedback() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_validate_opportunity_feedback() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -5394,7 +5401,7 @@ $$;
 -- Name: nexora_validate_opportunity_outcome(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_validate_opportunity_outcome() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_validate_opportunity_outcome() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 DECLARE recommendation_created timestamp without time zone;
@@ -5416,7 +5423,7 @@ $$;
 -- Name: nexora_validate_opportunity_recommendation_lineage(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_validate_opportunity_recommendation_lineage() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_validate_opportunity_recommendation_lineage() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -5449,7 +5456,7 @@ $$;
 -- Name: nexora_validate_order_commercial_identity(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_validate_order_commercial_identity() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_validate_order_commercial_identity() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -5483,7 +5490,7 @@ END; $$;
 -- Name: nexora_validate_procurement_inventory_tenant(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_validate_procurement_inventory_tenant() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_validate_procurement_inventory_tenant() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -5504,7 +5511,7 @@ $$;
 -- Name: nexora_validate_procurement_product_tenant(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_validate_procurement_product_tenant() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_validate_procurement_product_tenant() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -5525,7 +5532,7 @@ $$;
 -- Name: nexora_write_finance_audit(bigint, text, bigint, text, text, jsonb, timestamp without time zone); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_write_finance_audit(business_unit_id bigint, aggregate_type text, aggregate_id bigint, audit_action text, audit_actor text, audit_detail jsonb, occurred_on timestamp without time zone) RETURNS void
+CREATE OR REPLACE FUNCTION public.nexora_write_finance_audit(business_unit_id bigint, aggregate_type text, aggregate_id bigint, audit_action text, audit_actor text, audit_detail jsonb, occurred_on timestamp without time zone) RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -5605,7 +5612,7 @@ $$;
 -- Name: nexora_write_finance_outbox(bigint, text, bigint, bigint, text, jsonb, timestamp without time zone); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_write_finance_outbox(business_unit_id bigint, aggregate_type text, aggregate_id bigint, aggregate_version bigint, event_type text, event_payload jsonb, event_time timestamp without time zone) RETURNS void
+CREATE OR REPLACE FUNCTION public.nexora_write_finance_outbox(business_unit_id bigint, aggregate_type text, aggregate_id bigint, aggregate_version bigint, event_type text, event_payload jsonb, event_time timestamp without time zone) RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -5628,7 +5635,7 @@ $$;
 -- Name: nexora_write_off_allocation_governed(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_write_off_allocation_governed() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_write_off_allocation_governed() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -5673,7 +5680,7 @@ $$;
 -- Name: nexora_write_off_governed(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_write_off_governed() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_write_off_governed() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -5798,7 +5805,7 @@ $$;
 -- Name: nexora_write_off_outbox_event(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_write_off_outbox_event() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.nexora_write_off_outbox_event() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -5837,7 +5844,7 @@ $$;
 -- Name: nexora_write_otc_audit(bigint, text, bigint, bigint, text, text, text, text, text, text, text, jsonb, text, timestamp without time zone); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.nexora_write_otc_audit(business_unit_id bigint, aggregate_type text, aggregate_id bigint, aggregate_version bigint, command_type text, previous_state text, new_state text, actor text, reason text, request_hash text, idempotency_key text, result_json jsonb, correlation_id text, occurred_on timestamp without time zone) RETURNS void
+CREATE OR REPLACE FUNCTION public.nexora_write_otc_audit(business_unit_id bigint, aggregate_type text, aggregate_id bigint, aggregate_version bigint, command_type text, previous_state text, new_state text, actor text, reason text, request_hash text, idempotency_key text, result_json jsonb, correlation_id text, occurred_on timestamp without time zone) RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
     AS $_$
@@ -5896,7 +5903,7 @@ $_$;
 -- Name: wave1_reject_append_only_mutation(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.wave1_reject_append_only_mutation() RETURNS trigger
+CREATE OR REPLACE FUNCTION public.wave1_reject_append_only_mutation() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN

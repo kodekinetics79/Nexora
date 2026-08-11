@@ -148,37 +148,50 @@ export default function TenantHandoverDialog({ result, onClose }: Props) {
             </>
           ) : invitation ? (
             <>
-              <Stack spacing={0.5}>
-                <Typography variant="overline" sx={{ fontWeight: 800, color: 'text.secondary' }} id="handover-link-label">
-                  Activation link
-                </Typography>
-                <Stack direction="row" spacing={1} alignItems="center">
-                  <Typography
-                    aria-labelledby="handover-link-label"
-                    sx={{
-                      fontFamily: 'monospace', fontSize: '0.85rem',
-                      px: 1.5, py: 1, borderRadius: 1.5, flex: 1,
-                      bgcolor: 'action.hover', wordBreak: 'break-all',
-                    }}
-                  >
-                    {invitation.activationUrl}
+              {/*
+                The link is served ONLY when the mail did not go out — it is a bearer
+                credential, and the server withholds it on the ordinary path. Rendering
+                it unconditionally put an empty monospace box under an "Activation link"
+                heading and a Copy button that copied `undefined`, on every successful
+                invite, alongside a caption claiming a link was there to copy.
+              */}
+              {invitation.activationUrl ? (
+                <Stack spacing={0.5}>
+                  <Typography variant="overline" sx={{ fontWeight: 800, color: 'text.secondary' }} id="handover-link-label">
+                    Activation link
                   </Typography>
-                  <Button
-                    variant="outlined"
-                    startIcon={<CopyIcon fontSize="small" />}
-                    onClick={() => copy(invitation.activationUrl, 'Activation link')}
-                    sx={{ fontWeight: 700, whiteSpace: 'nowrap' }}
-                  >
-                    Copy
-                  </Button>
+                  <Stack direction="row" spacing={1} alignItems="center">
+                    <Typography
+                      aria-labelledby="handover-link-label"
+                      sx={{
+                        fontFamily: 'monospace', fontSize: '0.85rem',
+                        px: 1.5, py: 1, borderRadius: 1.5, flex: 1,
+                        bgcolor: 'action.hover', wordBreak: 'break-all',
+                      }}
+                    >
+                      {invitation.activationUrl}
+                    </Typography>
+                    <Button
+                      variant="outlined"
+                      startIcon={<CopyIcon fontSize="small" />}
+                      onClick={() => copy(invitation.activationUrl!, 'Activation link')}
+                      sx={{ fontWeight: 700, whiteSpace: 'nowrap' }}
+                    >
+                      Copy
+                    </Button>
+                  </Stack>
                 </Stack>
-              </Stack>
-              <Alert severity="info" sx={{ borderRadius: 2 }}>
+              ) : null}
+              <Alert severity={invitation.activationUrl ? 'warning' : 'info'} sx={{ borderRadius: 2 }}>
                 <AlertTitle sx={{ fontWeight: 800 }}>No password exists yet</AlertTitle>
                 {admin?.email} sets their own on this single-use link, so nothing secret passes
                 through you. It expires on {fmtDateTime(invitation.expiresAtUtc)}; after that the
-                invitation has to be reissued. The link is also emailed to them — copy it here only
-                if you need to deliver it another way.
+                invitation has to be reissued.{' '}
+                {invitation.activationUrl
+                  ? 'The invitation email was NOT sent, so this link is the only copy — deliver it '
+                    + 'yourself through a secure channel, or configure outbound email and resend.'
+                  : 'The invitation has been emailed to them; the link itself is deliberately not '
+                    + 'shown here. Use Resend from the tenant’s access tab if it does not arrive.'}
               </Alert>
             </>
           ) : (

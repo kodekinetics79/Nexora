@@ -11,7 +11,12 @@ import {
   TextField,
   Typography,
 } from '@mui/material';
-import { ContentCopy as CopyIcon, Send as SendIcon, Save as SaveIcon } from '@mui/icons-material';
+import {
+  ContentCopy as CopyIcon,
+  Send as SendIcon,
+  Save as SaveIcon,
+  LinkOff as RevokeIcon,
+} from '@mui/icons-material';
 import { useSnackbar } from 'notistack';
 import Stack from '../../components/Flex';
 import PageSection from '../../components/PageSection';
@@ -92,6 +97,8 @@ export default function ProfileAccessTab({ tenant }: { tenant: Tenant }) {
   const [resendReason, setResendReason] = useState('Customer did not receive the original activation email.');
   const [recoveryLink, setRecoveryLink] = useState<string | null>(null);
   const [regionOpen, setRegionOpen] = useState(false);
+  /** Id of the outstanding invitation the operator is withdrawing, or null. */
+  const [revokeTarget, setRevokeTarget] = useState<string | null>(null);
   const [region, setRegion] = useState(tenant.dataRegion ?? '');
 
   useEffect(() => setRegion(tenant.dataRegion ?? ''), [tenant]);
@@ -144,6 +151,28 @@ export default function ProfileAccessTab({ tenant }: { tenant: Tenant }) {
       );
     },
     onError: (error) => enqueueSnackbar(platformErrorMessage(error, 'Invitation reissue failed'), { variant: 'error' }),
+  });
+
+  /**
+   * WITHDRAW a link without minting another.
+   *
+   * Reissue was the only action this screen offered, and reissue always sends a fresh link
+   * to the address ON FILE. So an invitation typed to the wrong address, or forwarded out of
+   * the intended mailbox, could only ever be replaced with another one going to the same
+   * place — there was no way at all to kill an outstanding link. The endpoint existed
+   * (POST .../admin-invitations/{id}/revoke, TenantAdmin-gated, reason required); nothing
+   * in the console called it.
+   */
+  const revoke = useMutation({
+    mutationFn: ({ invitationId, reason }: { invitationId: string; reason: string }) =>
+      platformApi.revokeTenantAdminInvitation(tenant.id, invitationId, reason),
+    onSuccess: () => {
+      setRevokeTarget(null);
+      queryClient.invalidateQueries({ queryKey: platformKeys.tenantInvitations(tenant.id) });
+      enqueueSnackbar('The activation link was withdrawn and can no longer be used', { variant: 'success' });
+    },
+    onError: (error) => enqueueSnackbar(
+      platformErrorMessage(error, 'The invitation could not be withdrawn'), { variant: 'error' }),
   });
 
   const set = (key: keyof UpdateTenantProfileInput, value: string) =>
@@ -353,14 +382,32 @@ export default function ProfileAccessTab({ tenant }: { tenant: Tenant }) {
                       </Typography>
                     </Box>
                     {invitation.status !== 'Redeemed' && (
-                      <Button
-                        variant="outlined"
-                        startIcon={resend.isPending ? <CircularProgress size={16} /> : <SendIcon />}
-                        disabled={resend.isPending || resendReason.trim().length < 3}
-                        onClick={() => resend.mutate(invitation.userId)}
-                      >
-                        Reissue &amp; send
-                      </Button>
+                      <Stack direction="row" spacing={1}>
+                        <Button
+                          variant="outlined"
+                          startIcon={resend.isPending ? <CircularProgress size={16} /> : <SendIcon />}
+                          disabled={resend.isPending || resendReason.trim().length < 3}
+                          onClick={() => resend.mutate(invitation.userId)}
+                        >
+                          Reissue &amp; send
+                        </Button>
+                        {/* Only an OUTSTANDING link can be withdrawn. Expired and already-revoked
+                            invitations ("Expired"/"Revoked"/"Redeemed") are listed for the record
+                            and have nothing live to kill —
+                            the endpoint answers 409 for both, so offering the button would be a
+                            control that exists only to refuse. */}
+                        {invitation.status === 'Pending' && (
+                          <Button
+                            variant="outlined"
+                            color="error"
+                            startIcon={<RevokeIcon />}
+                            disabled={revoke.isPending}
+                            onClick={() => setRevokeTarget(invitation.id)}
+                          >
+                            Withdraw
+                          </Button>
+                        )}
+                      </Stack>
                     )}
                   </Stack>
                 </Box>
@@ -373,6 +420,26 @@ export default function ProfileAccessTab({ tenant }: { tenant: Tenant }) {
           </Typography>
         </Stack>
       </PageSection>
+
+      <ReasonDialog
+        open={revokeTarget !== null}
+        title="Withdraw this activation link"
+        confirmLabel="Withdraw the link"
+        confirmColor="error"
+        minReasonLength={3}
+        description={
+          <>
+            The link stops working immediately and <strong>no replacement is sent</strong>. Use this
+            when the invitation reached the wrong mailbox — reissuing would only send another one to
+            the same address. The founding administrator will need a fresh invitation before they can
+            set a password, so say what went wrong: this sentence is the audit record of why a
+            customer&apos;s access was withdrawn.
+          </>
+        }
+        busy={revoke.isPending}
+        onClose={() => setRevokeTarget(null)}
+        onConfirm={(reason) => revokeTarget && revoke.mutate({ invitationId: revokeTarget, reason })}
+      />
     </Stack>
   );
 }

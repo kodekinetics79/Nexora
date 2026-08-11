@@ -231,6 +231,8 @@ public sealed class TenantDataReset(
         // guards intact — a half-reset tenant is harder to reason about than an un-reset one.
         await ExecuteAsync(connection, transaction, "SET LOCAL session_replication_role = 'replica';", cancellationToken);
 
+        await AssertSweepIsNotSilentlyRefusedAsync(connection, transaction, cancellationToken);
+
         var deleted = new List<TenantResetTableCount>();
         foreach (var (table, column) in await ResettableTablesAsync(connection, cancellationToken))
         {
@@ -303,6 +305,74 @@ public sealed class TenantDataReset(
 
         return (string?)await command.ExecuteScalarAsync(cancellationToken)
             ?? throw new InvalidOperationException($"No tenant column found on public.\"{table}\".");
+    }
+
+    /// <summary>
+    /// Refuses to sweep at all when this connection's row-level-security posture means the DELETEs
+    /// would be silently refused.
+    ///
+    /// <para><b>The defect this exists to make impossible.</b> The sweep runs on the OWNER
+    /// connection — it has to, because <c>session_replication_role</c> is superuser-restricted and
+    /// is what suspends the append-only guards. But the owner is NOT exempt from row-level
+    /// security: ~100 of the tenant-plane tables are declared <c>FORCE ROW LEVEL SECURITY</c>,
+    /// which subjects the owner to its own policies, and every one of those policies is written
+    /// <c>TO nexora_tenant_app</c>. PostgreSQL matches a policy's role list with
+    /// <c>has_privs_of_role()</c> and the runtime role is <c>NOINHERIT</c>, so no policy applies,
+    /// the default is deny, and <c>DELETE</c> returns 0 WITHOUT RAISING. The caller records a table
+    /// only when <c>rows &gt; 0</c>, so a silently-refused table is simply absent from the report:
+    /// the operator is told "Deleted 8,412 row(s) across 41 table(s)" while the forced tables —
+    /// including <c>EmailIngests</c> and <c>LeadIngestionOccurrences</c>, the two this class names
+    /// as its whole point — still hold everything, and the next poll re-reads the mailbox and
+    /// discards every message as a duplicate. Verbatim the outcome the class summary says it
+    /// exists to prevent.</para>
+    ///
+    /// <para><b>Why this is a PRECONDITION and not a post-sweep row count.</b> A post-sweep count
+    /// is the same defect rebuilt inside its own verification: the deny that swallowed the DELETE
+    /// swallows the SELECT too, so the survivors count as zero and the check passes. The condition
+    /// has to be read from the catalogue, which no policy hides, and read BEFORE any work.</para>
+    ///
+    /// <para><b>The repair, when someone takes it on:</b> the one <c>TenantPurgeExecutor</c> made
+    /// after proving all of this against postgres:16 — delete under a dedicated NOBYPASSRLS role
+    /// (<c>nexora_purge_app</c>) with its scope GUC set, so the database rather than a WHERE clause
+    /// is what bounds the sweep. Until then, refusing is the only honest answer available.</para>
+    /// </summary>
+    private static async Task AssertSweepIsNotSilentlyRefusedAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(
+            """
+            SELECT
+                (SELECT count(*)::bigint
+                 FROM pg_class c
+                 JOIN pg_namespace n ON n.oid = c.relnamespace
+                 WHERE n.nspname = 'public' AND c.relkind = 'r' AND c.relforcerowsecurity
+                   AND NOT EXISTS (
+                       SELECT 1 FROM pg_policy p
+                       WHERE p.polrelid = c.oid
+                         AND (p.polroles = '{0}'::oid[]
+                              OR EXISTS (SELECT 1 FROM unnest(p.polroles) role_oid
+                                         WHERE pg_has_role(current_user, role_oid, 'USAGE')))))
+                AS unreachable,
+                (SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user) AS bypasses;
+            """, connection, transaction);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken)) return;
+
+        var unreachable = reader.GetInt64(0);
+        var bypasses = !reader.IsDBNull(1) && reader.GetBoolean(1);
+
+        // BYPASSRLS makes every policy irrelevant, so the sweep is sound regardless.
+        if (bypasses || unreachable == 0) return;
+
+        throw new TenantResetRefusedException(
+            $"Tenant data reset REFUSED before deleting anything: {unreachable} table(s) in public are "
+            + "declared FORCE ROW LEVEL SECURITY with no policy this connection's role can satisfy, and "
+            + "this connection does not hold BYPASSRLS. DELETE on those tables returns 0 without raising, "
+            + "so the sweep would report a total it did not achieve and leave the tenant in an unknown "
+            + "state — the exact failure this facility exists to prevent. Fix it the way "
+            + "TenantPurgeExecutor did: run the deletes under a dedicated role with its tenant scope "
+            + "GUC set, rather than on the bare owner connection.");
     }
 
     private string OwnerConnectionString() =>

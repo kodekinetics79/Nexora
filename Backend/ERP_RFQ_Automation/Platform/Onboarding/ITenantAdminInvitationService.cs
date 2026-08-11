@@ -128,8 +128,37 @@ public sealed record TenantActivationResult(
     ActivationTokenState TokenState,
     IReadOnlyList<string> PasswordFailures)
 {
+    /// <summary>
+    /// Whether the account this token belongs to can actually SIGN IN yet.
+    ///
+    /// <para><b>Why redeeming a link is not the same as being able to use the product.</b> The
+    /// invitation is issued by the LAST step of provisioning, while the tenant is still
+    /// <c>TenantStatus.Provisioning</c>. Going live is a separate, deliberately governed act — an
+    /// operator pressing "Activate tenant" on the authoritative activation policy — and until it
+    /// happens <c>AuthRepository</c> refuses the login with "This organization's workspace is
+    /// still provisioning and has not passed authoritative activation"
+    /// (<c>TenantAccessSnapshot.IsAccessDenied</c>).</para>
+    ///
+    /// <para>So the two ends of the journey have different owners and the seam between them used
+    /// to lie: the invitation email said "choose your password and sign in for the first time",
+    /// this endpoint answered "Your password is set. You can now sign in.", and the page then
+    /// pushed the customer at a sign-in screen that answered 403. The customer's very first
+    /// interaction with the product was a refusal they could not self-repair. This flag is what
+    /// lets both surfaces say the true thing instead.</para>
+    ///
+    /// <para>Defaults to <c>true</c>: every construction other than a real redemption (token
+    /// rejected, password rejected, and every existing test double) is a path where the question
+    /// is not asked, and the value is only ever READ on the <see cref="TenantActivationStatus.Activated"/>
+    /// branch.</para>
+    /// </summary>
+    public bool SignInAvailable { get; init; } = true;
+
     public static readonly TenantActivationResult Activated =
         new(TenantActivationStatus.Activated, ActivationTokenState.Valid, Array.Empty<string>());
+
+    /// <summary>Activated, saying plainly whether sign-in is open yet. See <see cref="SignInAvailable"/>.</summary>
+    public static TenantActivationResult ActivatedWith(bool signInAvailable) =>
+        Activated with { SignInAvailable = signInAvailable };
 
     public static TenantActivationResult TokenRejected(ActivationTokenState state) =>
         new(TenantActivationStatus.TokenRejected, state, Array.Empty<string>());

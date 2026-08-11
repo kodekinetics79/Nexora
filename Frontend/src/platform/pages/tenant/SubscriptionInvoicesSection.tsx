@@ -29,6 +29,7 @@ import { platformErrorMessage } from '../../api/apiError';
 import { platformKeys } from '../../api/queryKeys';
 import { usePlatformAuth } from '../../auth/usePlatformAuth';
 import { usePlatformPermissions } from '../../auth/usePlatformPermissions';
+import { useStepUpReauthentication, isStepUpCancelled } from '../../auth/useStepUpReauthentication';
 import type {
   BillingStatementSummary,
   CreateSubscriptionInvoiceInput,
@@ -107,8 +108,17 @@ export default function SubscriptionInvoicesSection({
     queryClient.invalidateQueries({ queryKey: platformKeys.subscriptionInvoices(tenant.id) });
     queryClient.invalidateQueries({ queryKey: platformKeys.tenantBilling(tenant.id) });
   };
-  const fail = (fallback: string) => (error: unknown) =>
+  // Invoice finalisation carries [PlatformHighRiskOperation]; with MFA enforcement relaxed the
+  // server refuses it until this session re-proves its password. `guard` supplies that step and
+  // re-runs the same request. On an MFA-bound session it is a no-op.
+  const stepUp = useStepUpReauthentication();
+
+  const fail = (fallback: string) => (error: unknown) => {
+    // Cancelling the step-up dialog means the operator chose not to proceed; the server never
+    // saw the request, so "Finalization was refused" would be an untrue account of what happened.
+    if (isStepUpCancelled(error)) return;
     enqueueSnackbar(platformErrorMessage(error, fallback), { variant: 'error' });
+  };
 
   const createMutation = useMutation({
     mutationFn: () => platformApi.createSubscriptionInvoice(create),
@@ -121,7 +131,8 @@ export default function SubscriptionInvoicesSection({
     onError: fail('The invoice could not be created'),
   });
   const finalizeMutation = useMutation({
-    mutationFn: (invoice: SubscriptionInvoice) => platformApi.finalizeSubscriptionInvoice(invoice.id),
+    mutationFn: (invoice: SubscriptionInvoice) =>
+      stepUp.guard(() => platformApi.finalizeSubscriptionInvoice(invoice.id)),
     onSuccess: () => {
       enqueueSnackbar('Invoice finalized', { variant: 'success' });
       setFinalize(null);
@@ -426,6 +437,9 @@ export default function SubscriptionInvoicesSection({
         onChange={setRevenueAction}
         onConfirm={(action) => revenueActionMutation.mutate(action)}
       />
+
+      {/* Inert until the server actually demands a step-up. */}
+      {stepUp.dialog}
     </>
   );
 }

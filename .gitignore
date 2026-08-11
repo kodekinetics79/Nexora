@@ -9,6 +9,16 @@
 **/appsettings.Local.json
 *.pfx
 *.pem
+# `.env` itself, not only `.env.local`. deploy/single-box/.env.example instructs the operator to
+# `cp .env.example .env` and fill in Jwt__Key, Jwt__PlatformKey, Security__SecretProtectionKey,
+# the three CommercialFinance secrets and the database password — and then relies on them
+# remembering its "Never commit .env" line, because nothing here covered the bare name. That is
+# the single highest-value filename to ignore in this repository and it was the one missing.
+# `.env.example` stays tracked via the negation below.
+.env
+.env.*
+!.env.example
+!**/.env.example
 .env.local
 .env.*.local
 secrets.json

@@ -80,7 +80,8 @@ public sealed class TenantActivationInvitationTests
     /// TenantsController so these tests pin the activation flow, not provisioning.
     /// </summary>
     private static async Task<(Tenant tenant, User admin)> SeedTenantWithAdminAsync(
-        TestDb db, string slug, string email, string initialPassword = "operator-chosen-secret")
+        TestDb db, string slug, string email, string initialPassword = "operator-chosen-secret",
+        TenantStatus status = TenantStatus.Active)
     {
         await using var context = db.ContextFor(null);
 
@@ -113,7 +114,7 @@ public sealed class TenantActivationInvitationTests
         {
             Name = $"Tenant {slug}",
             Slug = slug,
-            Status = TenantStatus.Active,
+            Status = status,
             PrimaryBusinessUnitId = businessUnit.Id,
             CreatedBy = "tests",
             CreatedOn = DateTime.UtcNow
@@ -189,6 +190,61 @@ public sealed class TenantActivationInvitationTests
             .SingleAsync(i => i.Id == issued.InvitationId);
         Assert.NotNull(invitation.RedeemedAtUtc);
         Assert.Equal("203.0.113.10", invitation.RedeemedFromIp);
+    }
+
+    /// <summary>
+    /// The seam between provisioning and going live, which used to lie to the customer.
+    ///
+    /// <para>The invitation is issued by the LAST step of provisioning, so at the moment a
+    /// founding administrator redeems their link the ordinary state of the tenant is
+    /// <see cref="TenantStatus.Provisioning"/> — going live is a separate, governed act taken by
+    /// an operator on the authoritative activation policy. Until it happens, <c>AuthRepository</c>
+    /// refuses the login (<c>TenantAccessSnapshot.IsAccessDenied</c>). The invitation email says
+    /// "choose your password and sign in for the first time", the endpoint used to answer
+    /// unconditionally with "Your password is set. You can now sign in.", and the activation page
+    /// then redirected to /login — where the customer's first contact with the product was a 403
+    /// they could not self-repair.</para>
+    ///
+    /// <para>Redemption itself is unaffected: the password is set either way. Only the claim about
+    /// what happens next is now checked rather than assumed.</para>
+    /// </summary>
+    [Fact]
+    public async Task Redeeming_before_the_tenant_goes_live_sets_the_password_but_does_not_promise_sign_in()
+    {
+        using var db = new TestDb();
+        var (tenant, admin) = await SeedTenantWithAdminAsync(
+            db, "activation-provisioning", "sara@customer.example",
+            status: TenantStatus.Provisioning);
+        var issued = await IssueAsync(db, tenant, admin);
+
+        await using (var redeemContext = db.ContextFor(null))
+        {
+            var result = await Service(redeemContext).RedeemAsync(issued.Token, GoodPassword, "203.0.113.10");
+            Assert.Equal(TenantActivationStatus.Activated, result.Status);
+            Assert.False(result.SignInAvailable);
+        }
+
+        // The credential is genuinely set — this is not a refusal, it is an honest one-line
+        // difference in what the customer is told to do next.
+        await using var verify = db.ContextFor(null);
+        var activated = await verify.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == admin.Id);
+        Assert.True(BCrypt.Net.BCrypt.Verify(GoodPassword, activated.PasswordHash));
+        Assert.True(activated.IsActive);
+    }
+
+    [Fact]
+    public async Task Redeeming_on_a_live_tenant_says_sign_in_is_open()
+    {
+        using var db = new TestDb();
+        var (tenant, admin) = await SeedTenantWithAdminAsync(
+            db, "activation-live", "sara@customer.example", status: TenantStatus.Active);
+        var issued = await IssueAsync(db, tenant, admin);
+
+        await using var redeemContext = db.ContextFor(null);
+        var result = await Service(redeemContext).RedeemAsync(issued.Token, GoodPassword, "203.0.113.10");
+
+        Assert.Equal(TenantActivationStatus.Activated, result.Status);
+        Assert.True(result.SignInAvailable);
     }
 
     [Fact]

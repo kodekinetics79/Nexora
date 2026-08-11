@@ -26,10 +26,19 @@ BACKEND_DIR="$REPO_ROOT/Backend/ERP_RFQ_Automation"
 FRONTEND_DIR="$REPO_ROOT/Frontend"
 RUN_DIR="$REPO_ROOT/.local-run"
 
-PG_CONTAINER="nexora-local-pg"
 PG_PORT="${NEXORA_PG_PORT:-55433}"
 BACKEND_PORT="${NEXORA_BACKEND_PORT:-5192}"
 FRONTEND_PORT="${NEXORA_FRONTEND_PORT:-5173}"
+
+# The container name is DERIVED FROM THE PORT, and must stay that way.
+#
+# It used to be the literal `nexora-local-pg` while NEXORA_PG_PORT was still honoured, which
+# made the port look like an isolation knob when it was not: startup and teardown both run
+# `docker rm -f` on that fixed name, so a second stack started on a different port destroyed
+# the FIRST stack's database — and announced it as "Removing a stale container from a previous
+# run", which reads like routine cleanup rather than the deletion of someone else's data.
+# Two concurrent runs on different ports must not be able to touch each other's container.
+PG_CONTAINER="nexora-local-pg-${PG_PORT}"
 BACKEND_URL="http://127.0.0.1:${BACKEND_PORT}"
 FRONTEND_URL="http://127.0.0.1:${FRONTEND_PORT}"
 
@@ -89,6 +98,18 @@ for pair in "API:$BACKEND_PORT:NEXORA_BACKEND_PORT" "frontend:$FRONTEND_PORT:NEX
     die "Port $port is already in use${holder:+ by $holder} (needed for the $name). Free it, or set $override."
   fi
 done
+
+# The database container is now per-port, so two stacks can run side by side without one
+# deleting the other's data. Everything under .local-run/ is still SHARED, though: the logs and
+# both MFA seed files are fixed paths, so a second concurrent stack overwrites the first's
+# platform-owner-mfa-secret — and the PART C harness reads that fixed path, so the first stack's
+# authenticator codes silently stop working. Nothing is destroyed and no restart is needed, but
+# the operator should know which run last wrote those files. Said out loud rather than fixed by
+# moving the paths, because the harness and the docs both address them by name.
+if [[ "$PG_PORT" != "55433" || "$BACKEND_PORT" != "5192" || "$FRONTEND_PORT" != "5173" ]]; then
+  warn "Non-default ports: this run owns container $PG_CONTAINER only."
+  warn "Note .local-run/ logs and MFA seed files are shared paths — this run will overwrite them."
+fi
 
 # SEC-G9: fail here rather than fall back to a committed literal. PlatformOwnerSeeder refuses
 # anything under 12 characters rather than silently creating a weak account, so the check
@@ -185,6 +206,13 @@ log "Building the API."
 dotnet build "$BACKEND_DIR" --nologo -v quiet >"$RUN_DIR/build.log" 2>&1 || {
   tail -40 "$RUN_DIR/build.log"; die "Backend build failed — see $RUN_DIR/build.log"; }
 
+# Cors__AllowedOrigins__0 is passed because NEXORA_FRONTEND_PORT must reach the BACKEND too.
+# TransportSecurityPolicy.ResolveCorsOrigins only adds a fixed loopback set in Development, and
+# that set is the DEFAULT port. A run on any other frontend port therefore started cleanly,
+# served the SPA, and then failed every single API call with a CORS error — the console rendered
+# its sign-in form and answered "Unable to reach the platform control plane", which reads like a
+# backend outage rather than a misconfigured origin. The port override is only honest if the
+# origin it produces is allowed.
 log "Starting the API on $BACKEND_URL (applying ~200 migrations on first run)."
 (
   cd "$BACKEND_DIR"
@@ -200,6 +228,7 @@ log "Starting the API on $BACKEND_URL (applying ~200 migrations on first run)."
   Notifications__AppBaseUrl="$FRONTEND_URL" \
   Notifications__OutboundGuard__Mode="$OUTBOUND_GUARD" \
   Security__SecretProtectionKey="$SECRET_PROTECTION_KEY" \
+  Cors__AllowedOrigins__0="$FRONTEND_URL" \
   ASPNETCORE_ENVIRONMENT=Development \
   ASPNETCORE_URLS="$BACKEND_URL" \
   dotnet run --no-build --no-launch-profile
@@ -364,6 +393,8 @@ cat <<BANNER
    Checker password   the value of \$NEXORA_CHECKER_PASSWORD (not printed)
    Checker MFA file   ${RUN_DIR}/platform-checker-mfa-secret (mode 600; never printed)
    Outbound guard     ${OUTBOUND_GUARD}
+   DB container       ${PG_CONTAINER} (port ${PG_PORT}) — this run owns it
+                      and removes ONLY this container on shutdown.
   ────────────────────────────────────────────────────────────────
 
    Click "Provision Tenant" for the four-step wizard.

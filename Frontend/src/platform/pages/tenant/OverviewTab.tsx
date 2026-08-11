@@ -41,6 +41,8 @@ interface Props {
   tenant: Tenant;
   /** Read once by the page shell so the banners and the Lifecycle tab agree. */
   offboarding: TenantOffboardingStatus | undefined;
+  /** True when the offboarding read FAILED, which is not the same as a tenant with no clock. */
+  offboardingUnavailable?: boolean;
   onOpenTab: (tab: string) => void;
   canViewSupport: boolean;
 }
@@ -52,7 +54,7 @@ interface Props {
  * each is money or data leaving the building unnoticed: a trial that has expired and is
  * still being served, commercial terms nobody set, and a deletion whose clock is running.</p>
  */
-export default function OverviewTab({ tenant, offboarding, onOpenTab, canViewSupport }: Props) {
+export default function OverviewTab({ tenant, offboarding, offboardingUnavailable, onOpenTab, canViewSupport }: Props) {
   const navigate = useNavigate();
 
   const summaryQuery = useQuery({
@@ -92,6 +94,17 @@ export default function OverviewTab({ tenant, offboarding, onOpenTab, canViewSup
           {commercialState === 'plan-missing'
             ? 'This tenant is Billable or on Trial with no plan, so it is priced by nobody and charged for nothing.'
             : 'This tenant is not billable and no reason is recorded — free service nobody signed for.'}
+        </Alert>
+      )}
+
+      {/* Absence of a banner used to mean two different things: "no deletion is scheduled" and
+          "we could not find out". A tenant with a running purge clock therefore looked entirely
+          normal whenever the offboarding read failed. */}
+      {offboardingUnavailable && (
+        <Alert severity="warning" sx={{ borderRadius: 2 }}>
+          <AlertTitle sx={{ fontWeight: 800 }}>Offboarding state unknown</AlertTitle>
+          The retention and purge record for this tenant could not be read, so this page cannot
+          tell you whether a deletion is scheduled. Open the Lifecycle tab before acting on it.
         </Alert>
       )}
 
@@ -192,6 +205,14 @@ export default function OverviewTab({ tenant, offboarding, onOpenTab, canViewSup
                     <EmptyState
                       title="Ticket details restricted"
                       message="Your role can see ticket counts, but customer support content requires tenant administration access."
+                      minHeight={140}
+                    />
+                  ) : summary.support.openTicketCount > 0 ? (
+                    // "Never raised one" was shown even with a non-zero open-ticket count on the
+                    // stat tile directly above it — the page contradicting itself on the same screen.
+                    <EmptyState
+                      title="Open tickets are not in this list"
+                      message={`This customer has ${fmtNumber(summary.support.openTicketCount)} open ticket(s), none of them recent enough to appear here. Open the desk to see them.`}
                       minHeight={140}
                     />
                   ) : (

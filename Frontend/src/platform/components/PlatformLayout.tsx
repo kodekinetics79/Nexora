@@ -40,26 +40,48 @@ import {
 import { useAppTheme } from '../../context/ThemeContext';
 import { usePlatformAuth } from '../auth/usePlatformAuth';
 import { usePlatformPermissions } from '../auth/usePlatformPermissions';
+import type { PlatformPermissions } from '../auth/permissions';
 import SkipLink, { MAIN_CONTENT_ID } from '../../components/layout/SkipLink';
 import PlatformMfaEnforcementBanner from './PlatformMfaEnforcementBanner';
 
 /** Referenced by the mobile drawer toggle's `aria-controls`. */
 const PLATFORM_NAV_ID = 'platform-sidebar';
 
-const NAV = [
-  { to: '/platform/overview', label: 'Overview', icon: <OverviewIcon />, requiresTenantAdmin: false },
-  { to: '/platform/tenants', label: 'Tenants', icon: <TenantsIcon />, requiresTenantAdmin: false },
-  { to: '/platform/pipeline', label: 'Pipeline', icon: <PipelineIcon />, requiresTenantAdmin: false },
-  { to: '/platform/plans', label: 'Plans', icon: <PlansIcon />, requiresTenantAdmin: false },
-  { to: '/platform/users', label: 'Users', icon: <UsersIcon />, requiresTenantAdmin: false },
-  { to: '/platform/billing', label: 'Billing', icon: <BillingIcon />, requiresTenantAdmin: false },
-  { to: '/platform/support', label: 'Support', icon: <SupportIcon />, requiresTenantAdmin: true },
-  { to: '/platform/email', label: 'Email', icon: <EmailIcon />, requiresTenantAdmin: false },
-  { to: '/platform/security', label: 'Security', icon: <SecurityIcon />, requiresTenantAdmin: false },
+/**
+ * Each entry names the permission the SERVER requires of the screen behind it, not a guess.
+ *
+ * This used to be a single `requiresTenantAdmin` flag, which meant only Support was gated and
+ * every other screen was advertised to every role. Three of them are not open to every role:
+ *   /platform/users     — `PlatformUsersController` is `[Authorize(Policy = Owner)]` at class
+ *                         level, list included, so SupportAdmin, BillingAdmin and ReadOnlyOps
+ *                         were being offered a screen that could only ever refuse them.
+ *   /platform/billing   — `PlatformBillingController` is class-level `Platform.Billing`, so
+ *                         SupportAdmin and ReadOnlyOps were in the same position.
+ *   /platform/security  — its impersonation-session read is `Platform.Impersonate`, and that
+ *                         one is not even soft-landed: a BillingAdmin got a red error panel
+ *                         with a Retry button that can never succeed.
+ * `visible` returning undefined means "every platform role", which is the honest default for
+ * the screens whose reads really are open to the whole plane.
+ */
+const NAV: {
+  to: string;
+  label: string;
+  icon: React.ReactElement;
+  visible?: (permissions: PlatformPermissions) => boolean;
+}[] = [
+  { to: '/platform/overview', label: 'Overview', icon: <OverviewIcon /> },
+  { to: '/platform/tenants', label: 'Tenants', icon: <TenantsIcon /> },
+  { to: '/platform/pipeline', label: 'Pipeline', icon: <PipelineIcon /> },
+  { to: '/platform/plans', label: 'Plans', icon: <PlansIcon /> },
+  { to: '/platform/users', label: 'Users', icon: <UsersIcon />, visible: (p) => p.isOwner },
+  { to: '/platform/billing', label: 'Billing', icon: <BillingIcon />, visible: (p) => p.canAdministerBilling },
+  { to: '/platform/support', label: 'Support', icon: <SupportIcon />, visible: (p) => p.canAdministerTenants },
+  { to: '/platform/email', label: 'Email', icon: <EmailIcon /> },
+  { to: '/platform/security', label: 'Security', icon: <SecurityIcon />, visible: (p) => p.canImpersonate },
   // Its own entry rather than a link buried on the Security page: an operator looking for
   // "why is the console not asking me for a code" needs to find it from the chrome.
-  { to: '/platform/security/authentication', label: 'Platform Authentication', icon: <PolicyIcon />, requiresTenantAdmin: false },
-  { to: '/platform/audit', label: 'Audit Log', icon: <AuditIcon />, requiresTenantAdmin: false },
+  { to: '/platform/security/authentication', label: 'Platform Authentication', icon: <PolicyIcon /> },
+  { to: '/platform/audit', label: 'Audit Log', icon: <AuditIcon /> },
 ];
 
 const DRAWER_WIDTH = 264;
@@ -119,7 +141,7 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
       </Box>
 
       <List sx={{ px: 1.5, flex: 1 }}>
-        {NAV.filter((item) => !item.requiresTenantAdmin || permissions.canAdministerTenants).map((item) => (
+        {NAV.filter((item) => !item.visible || item.visible(permissions)).map((item) => (
           <ListItemButton
             key={item.to}
             component={NavLink}

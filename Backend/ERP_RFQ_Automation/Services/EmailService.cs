@@ -1257,8 +1257,21 @@ namespace ERP_RFQ_Automation.Services
                     return (0, extracted);
                 }
                 
-                // Use transaction to ensure atomic Lead + Items + Attachments creation
-                using var transaction = await context.Database.BeginTransactionAsync();
+                // Use transaction to ensure atomic Lead + Items + Attachments creation.
+                //
+                // The transaction is opened INSIDE the configured execution strategy's delegate.
+                // Program.cs enables retry-on-failure, so NpgsqlRetryingExecutionStrategy is
+                // installed and refuses a user-initiated transaction opened outside one — the email
+                // door's lead write threw "does not support user-initiated transactions" on every
+                // PostgreSQL run, and the outer catch below reported it only as "Failed to save RFQ
+                // from email", which reads like an extraction problem.
+                //
+                // The change tracker is deliberately NOT cleared on entry: the EmailIngest for this
+                // message is staged above and is part of the same unit of work.
+                var strategy = context.Database.CreateExecutionStrategy();
+                return await strategy.ExecuteAsync(async () =>
+                {
+                await using var transaction = await context.Database.BeginTransactionAsync();
                 try
                 {
                     // Parse dates
@@ -1353,6 +1366,7 @@ namespace ERP_RFQ_Automation.Services
                     _logger.LogError(txEx, "Transaction rolled back for email: {Subject}", message.Subject);
                     throw; // Re-throw to outer catch
                 }
+                });
             }
             catch (Exception ex)
             {

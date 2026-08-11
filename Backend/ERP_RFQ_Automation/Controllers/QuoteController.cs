@@ -144,12 +144,21 @@ namespace ERP_RFQ_Automation.Controllers
                     return Conflict("The selected customer does not match the RFQ commercial identity.");
                 request.CustomerId = rfq.CustomerId;
 
-                await using var transaction = await _context.Database.BeginTransactionAsync();
+                // NO transaction is opened here, deliberately.
+                //
+                // This action used to open one and then re-stamp the created quote's commercial
+                // identity inside it. Two things were wrong with that. Program.cs configures
+                // EnableRetryOnFailure, so NpgsqlRetryingExecutionStrategy is installed and refuses
+                // a user-initiated transaction outside its delegate — POST /api/Quote therefore
+                // threw "does not support user-initiated transactions" on every PostgreSQL request.
+                // And had it not, CreateQuoteAsync opens its OWN serializable transaction inside its
+                // own execution strategy, which cannot nest inside an already-open one.
+                //
+                // The re-stamp is gone with it because it was redundant: QuoteService.CreateQuoteAsync
+                // already calls quote.InheritCommercialIdentity(rfq) on both the create and the
+                // idempotent-replay path, inside that transaction — so the identity is committed
+                // atomically with the quote rather than in a second, separate write.
                 var created = await _quoteService.CreateQuoteAsync(request);
-                var quoteEntity = await _context.Quotes.SingleAsync(item => item.Id == created.Id);
-                quoteEntity.InheritCommercialIdentity(rfq);
-                await _context.SaveChangesAsync();
-                await transaction.CommitAsync();
                 var quote = await _repository.GetByIdAsync(created.Id, claimBUId);
                 return CreatedAtAction(nameof(GetById), new { id = quote.Id, businessUnitId = quote.BusinessUnitId }, quote);
             }

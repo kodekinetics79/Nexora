@@ -26,6 +26,19 @@ namespace ERP_RFQ_Automation.Migrations
     ///   independent 24-section pg_catalog fingerprint (15,197 records) both diff EMPTY
     ///   in both directions between the 134-migration database and this baseline.
     ///
+    ///   The replay is IDEMPOTENT, and that is what makes the deploy self-healing rather
+    ///   than dependent on somebody running MigrationsBaseline/stamp-existing-database.sql
+    ///   against production at the right moment. A dump assumes an empty database;
+    ///   production was not empty. It sat at the pre-squash head with the whole schema
+    ///   materialised and no history row naming this migration, so EF replayed the dump
+    ///   onto objects that already existed: 3,014 errors, 1,520 of them 42P07, the first
+    ///   killing the boot at Program.cs's uncaught MigrateAsync(). Every CREATE now
+    ///   carries IF NOT EXISTS or OR REPLACE, and the object kinds PostgreSQL gives no
+    ///   such form - constraints, foreign keys, triggers, policies, identity columns - are
+    ///   wrapped in a DO block keyed on that exact object in pg_catalog. Applying this to
+    ///   a database that already has the schema is a 0-line pg_dump no-op.
+    ///   SquashedBaselineIdempotencyPostgreSqlTests is what keeps it that way.
+    ///
     /// Portable lane (SQLite / SQL Server)
     ///   Falls through to the EF-generated model operations below. Those tests build the
     ///   schema from the model and never had the PostgreSQL-only controls; this keeps

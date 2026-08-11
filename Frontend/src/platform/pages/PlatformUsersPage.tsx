@@ -139,8 +139,14 @@ export default function PlatformUsersPage() {
   const mfaResetMutation = useMutation({
     mutationFn: (user: PlatformOperator) => platformApi.resetPlatformUserMfa(user.id),
     onSuccess: () => {
-      enqueueSnackbar('MFA reset. All target sessions were revoked; re-enrollment is required.', { variant: 'success' });
+      // The endpoint returns no body, so the console has no evidence of what was revoked. It
+      // used to assert "All target sessions were revoked" as fact — a claim about a security
+      // outcome that nothing on the wire supported.
+      enqueueSnackbar('MFA reset. That operator must enroll a new authenticator before signing in again.', { variant: 'success' });
       setDialog(null);
+      // Was the only mutation on this page that did not invalidate, so the grid kept showing
+      // the pre-reset row and the reset looked like it had not happened.
+      invalidate();
     },
     onError: (error) =>
       enqueueSnackbar(platformErrorMessage(error, 'MFA reset failed'), { variant: 'error' }),

@@ -4,6 +4,13 @@
 -- applying all 134 pre-baseline migrations in order. Do not hand-edit:
 -- regenerate with MigrationsBaseline/regenerate-baseline-sql.py, then re-run
 -- the schema-parity diff.
+--
+-- Every statement is IDEMPOTENT. Production is still at the pre-squash head with
+-- the whole schema already materialised, and Program.cs applies migrations
+-- uncaught at boot, so a bare CREATE here is a failed deploy. Objects with no
+-- IF NOT EXISTS form are wrapped in a DO block that checks pg_catalog for that
+-- exact object - never a broader condition that could skip a policy or a
+-- constraint the database is genuinely missing.
 -- ==========================================================================
 
 --

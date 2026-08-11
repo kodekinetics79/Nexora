@@ -39,8 +39,8 @@ const TOP_N = 15;
 
 const measureValue = (row: BrandDemandRowDTO, measure: Measure): number => {
   if (measure === 'quantity') return row.totalQuantity ?? 0;
-  if (measure === 'documents') return row.documentCount;
-  return row.lineCount;
+  if (measure === 'documents') return row.documents;
+  return row.lines;
 };
 
 const BrandDemandPage: React.FC = () => {
@@ -104,7 +104,7 @@ const BrandDemandPage: React.FC = () => {
       ) : model.ranked.length === 0 ? (
         <EmptyState
           title="No manufacturer recorded on any line"
-          message={`${data.totalLines.toLocaleString()} line${data.totalLines === 1 ? '' : 's'} across ${data.totalDocuments.toLocaleString()} document${data.totalDocuments === 1 ? '' : 's'} carry no manufacturer name, so there is nothing to group.`}
+          message={`${data.linesWithoutManufacturer.toLocaleString()} of ${data.totalLines.toLocaleString()} extracted line${data.totalLines === 1 ? '' : 's'} carry no manufacturer name, so there is nothing to group.`}
           icon={<BrandIcon sx={{ fontSize: 44 }} />}
         />
       ) : (
@@ -128,11 +128,13 @@ const BrandDemandPage: React.FC = () => {
                 <Typography variant="caption" color="text.secondary">after name normalisation</Typography>
               </Box>
               <Box>
-                <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 800, textTransform: 'uppercase', fontSize: '0.63rem' }}>Documents</Typography>
+                {/* The API exposes no total document count — only a per-manufacturer one — so
+                    the complement of the coverage figure is shown instead of inventing a total. */}
+                <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 800, textTransform: 'uppercase', fontSize: '0.63rem' }}>Lines with no manufacturer</Typography>
                 <Typography sx={{ fontWeight: 900, fontSize: '1.5rem', lineHeight: 1.2 }}>
-                  {data.totalDocuments.toLocaleString()}
+                  {data.linesWithoutManufacturer.toLocaleString()}
                 </Typography>
-                <Typography variant="caption" color="text.secondary">customer documents in scope</Typography>
+                <Typography variant="caption" color="text.secondary">excluded, not redistributed</Typography>
               </Box>
               <Box>
                 <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 800, textTransform: 'uppercase', fontSize: '0.63rem' }}>Top {Math.min(TOP_N, model.ranked.length)} share</Typography>
@@ -181,7 +183,7 @@ const BrandDemandPage: React.FC = () => {
                 return (
                   <Box key={row.manufacturer} component="li">
                     <Stack direction="row" spacing={1} sx={{ alignItems: 'baseline', justifyContent: 'space-between', mb: 0.4 }}>
-                      <Tooltip title={row.variants?.length ? `Spellings folded in: ${row.variants.join(', ')}` : 'No alternate spellings recorded'}>
+                      <Tooltip title={row.variants > 1 ? `${row.variants.toLocaleString()} raw spellings folded into this row` : 'No alternate spellings recorded'}>
                         <Typography sx={{ fontWeight: 700, fontSize: '0.82rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                           {row.manufacturer}
                         </Typography>
@@ -189,13 +191,13 @@ const BrandDemandPage: React.FC = () => {
                       <Typography sx={{ fontWeight: 900, fontSize: '0.82rem', whiteSpace: 'nowrap', color: 'text.primary' }}>
                         {value.toLocaleString()}
                         <Typography component="span" variant="caption" sx={{ color: 'text.secondary', fontWeight: 600, ml: 0.75 }}>
-                          {row.documentCount} doc{row.documentCount === 1 ? '' : 's'} · {row.lineCount.toLocaleString()} line{row.lineCount === 1 ? '' : 's'}
+                          {row.documents} doc{row.documents === 1 ? '' : 's'} · {row.lines.toLocaleString()} line{row.lines === 1 ? '' : 's'}
                         </Typography>
                       </Typography>
                     </Stack>
                     <Box
                       role="img"
-                      aria-label={`${row.manufacturer}: ${value.toLocaleString()} ${MEASURE_META[measure].axis} across ${row.documentCount} document${row.documentCount === 1 ? '' : 's'}`}
+                      aria-label={`${row.manufacturer}: ${value.toLocaleString()} ${MEASURE_META[measure].axis} across ${row.documents} document${row.documents === 1 ? '' : 's'}`}
                       sx={{ height: 8, bgcolor: 'action.hover', borderRadius: '4px', overflow: 'hidden' }}
                     >
                       <Box sx={{ height: '100%', width: `${width}%`, bgcolor: 'primary.main', borderRadius: '4px' }} />
@@ -229,21 +231,16 @@ const BrandDemandPage: React.FC = () => {
                 {model.ranked.map((row) => (
                   <TableRow key={row.manufacturer} hover>
                     <TableCell sx={{ fontWeight: 700 }}>{row.manufacturer}</TableCell>
-                    <TableCell align="right">{row.lineCount.toLocaleString()}</TableCell>
+                    <TableCell align="right">{row.lines.toLocaleString()}</TableCell>
                     <TableCell align="right">
                       {row.totalQuantity == null ? <Typography variant="caption" color="text.disabled">Not recorded</Typography> : row.totalQuantity.toLocaleString()}
                     </TableCell>
-                    <TableCell align="right">{row.documentCount.toLocaleString()}</TableCell>
+                    <TableCell align="right">{row.documents.toLocaleString()}</TableCell>
                     <TableCell>
-                      {row.variants && row.variants.length > 1 ? (
-                        <Stack direction="row" spacing={0.5} useFlexGap sx={{ flexWrap: 'wrap' }}>
-                          {row.variants.slice(0, 4).map((variant) => (
-                            <Chip key={variant} size="small" variant="outlined" label={variant} sx={{ height: 18, fontSize: '0.62rem' }} />
-                          ))}
-                          {row.variants.length > 4 && (
-                            <Typography variant="caption" color="text.secondary">+{row.variants.length - 4} more</Typography>
-                          )}
-                        </Stack>
+                      {/* The API returns the NUMBER of raw spellings folded in, not the spellings
+                          themselves, so the count is stated rather than a list of chips faked from it. */}
+                      {row.variants > 1 ? (
+                        <Chip size="small" variant="outlined" label={`${row.variants.toLocaleString()} spellings`} sx={{ height: 18, fontSize: '0.62rem' }} />
                       ) : (
                         <Typography variant="caption" color="text.disabled">One spelling</Typography>
                       )}
@@ -257,9 +254,9 @@ const BrandDemandPage: React.FC = () => {
           <Divider sx={{ my: 2.5 }} />
           <Stack spacing={0.75}>
             <Typography variant="caption" color="text.secondary">
-              Counted from {data.linesWithManufacturer.toLocaleString()} of {data.totalLines.toLocaleString()} extracted lines across{' '}
-              {data.totalDocuments.toLocaleString()} document{data.totalDocuments === 1 ? '' : 's'}. Lines with no manufacturer are excluded, not
-              redistributed.
+              Counted from {data.linesWithManufacturer.toLocaleString()} of {data.totalLines.toLocaleString()} extracted line
+              {data.totalLines === 1 ? '' : 's'}, folded from {data.distinctRawSpellings.toLocaleString()} raw spelling
+              {data.distinctRawSpellings === 1 ? '' : 's'}. Lines with no manufacturer are excluded, not redistributed.
             </Typography>
             <Typography variant="caption" color="text.secondary">
               Units are summed as written on each document; they are not converted between packs, reels or pieces, so unit totals are
@@ -271,10 +268,13 @@ const BrandDemandPage: React.FC = () => {
               </Typography>
             )}
           </Stack>
-          {data.totalDocuments > 0 && data.totalDocuments < 10 && (
+          {/* Small-sample caveat. Keyed on the lines actually counted, because the API
+              publishes no total document count to key it on. */}
+          {data.linesWithManufacturer > 0 && data.linesWithManufacturer < 50 && (
             <Alert severity="info" sx={{ mt: 2 }}>
-              This ranking rests on {data.totalDocuments} document{data.totalDocuments === 1 ? '' : 's'}. A single large enquiry can dominate it —
-              read the Documents column before treating any brand as a trend.
+              This ranking rests on {data.linesWithManufacturer.toLocaleString()} line
+              {data.linesWithManufacturer === 1 ? '' : 's'}. A single large enquiry can dominate it — read the Documents
+              column before treating any brand as a trend.
             </Alert>
           )}
         </>

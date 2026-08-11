@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
+  Alert,
   Autocomplete,
   Box,
   Button,
@@ -209,8 +210,20 @@ export default function AuditExplorer({ tenantId, height = 'calc(100vh - 340px)'
               setPage(0);
             }}
             sx={{ minWidth: 280 }}
+            loading={actionsQuery.isLoading}
             renderInput={(params) => (
-              <TextField {...params} label="Action" placeholder={actions.length === 0 ? 'Any action' : ''} />
+              <TextField
+                {...params}
+                label="Action"
+                placeholder={actions.length === 0 ? 'Any action' : ''}
+                // A failed action-catalogue read used to render as "No options", which is what an
+                // audit log with no entries in it looks like. An investigator was being told the
+                // log was empty when the request had failed.
+                error={actionsQuery.isError}
+                helperText={actionsQuery.isError
+                  ? 'The action list could not be read, so this filter is empty for that reason and not because nothing has been logged.'
+                  : undefined}
+              />
             )}
             renderOption={(props, option) => {
               const meta = (actionsQuery.data ?? []).find((entry) => entry.action === option);
@@ -399,12 +412,31 @@ export default function AuditExplorer({ tenantId, height = 'calc(100vh - 340px)'
                 <Typography variant="overline" sx={{ fontWeight: 800 }}>
                   Raw context
                 </Typography>
-                <Box
-                  component="pre"
-                  sx={{ mt: 0.5, p: 1.5, m: 0, borderRadius: 2, bgcolor: 'action.hover', fontSize: 12, overflowX: 'auto' }}
-                >
-                  {renderValue(entryQuery.data.metadata)}
-                </Box>
+                {/*
+                  The server withholds the payload from an operator who could not have
+                  written it, and says so with `metadataDisclosed: false` — precisely so
+                  this screen can tell "restricted" from "this action recorded nothing".
+                  Rendering the null unconditionally collapsed those two into one, which
+                  is the worst possible answer to give somebody reconstructing an incident.
+                */}
+                {entryQuery.data.metadataDisclosed === false ? (
+                  <Alert severity="info" sx={{ mt: 0.5, borderRadius: 2 }}>
+                    This action's context is restricted for your role. The action, actor, target
+                    and outcome above are complete.
+                    {entryQuery.data.metadataPolicy
+                      ? ` Requires: ${entryQuery.data.metadataPolicy}.`
+                      : ''}
+                  </Alert>
+                ) : (
+                  <Box
+                    component="pre"
+                    sx={{ mt: 0.5, p: 1.5, m: 0, borderRadius: 2, bgcolor: 'action.hover', fontSize: 12, overflowX: 'auto' }}
+                  >
+                    {entryQuery.data.metadata == null
+                      ? 'This action recorded no additional context.'
+                      : renderValue(entryQuery.data.metadata)}
+                  </Box>
+                )}
               </Box>
             </Stack>
           )}

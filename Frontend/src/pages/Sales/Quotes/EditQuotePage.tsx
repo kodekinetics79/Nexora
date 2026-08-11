@@ -86,7 +86,7 @@ const EditQuotePage: React.FC = () => {
     queryFn: () => productService.getAll({ pageSize: 200, businessUnitId }).then(r => r.items),
   });
 
-  const { data: quote, isLoading: isLoadingQuote } = useQuery({
+  const { data: quote, isLoading: isLoadingQuote, isError: isQuoteError } = useQuery({
     queryKey: ['quote-edit', id],
     queryFn: () => quoteService.getById(Number(id), businessUnitId),
     enabled: !!id
@@ -278,6 +278,23 @@ const EditQuotePage: React.FC = () => {
   };
 
   if (isLoadingQuote) return <Box sx={{ p: 4, display: 'flex', justifyContent: 'center' }}><CircularProgress /></Box>;
+
+  // A failed load used to fall through to the form below, which then rendered an empty,
+  // fully editable quote titled "Edit: " with a live Update button — an edit screen for a
+  // record that does not exist. Say so instead, and offer the only action that can work.
+  if (isQuoteError || !quote) {
+    return (
+      <Box sx={{ p: 4 }}>
+        <Typography variant="h6" sx={{ fontWeight: 800, mb: 1 }}>We couldn&apos;t load this quote.</Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+          It may have been removed, or it belongs to another workspace. Nothing was changed.
+        </Typography>
+        <Button variant="outlined" startIcon={<BackIcon />} onClick={() => navigate('/sales/quotes')}>
+          Back to quotes
+        </Button>
+      </Box>
+    );
+  }
 
   return (
     <Box sx={{ p: 2, bgcolor: 'background.default', minHeight: '100vh' }}>

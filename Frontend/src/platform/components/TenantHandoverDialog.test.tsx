@@ -69,19 +69,41 @@ describe('credential handover', () => {
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(/password copied/i));
   });
 
-  it('shows the activation link, its expiry and the absence of a password on the invite path', () => {
+  it('shows the activation link, its expiry and the absence of a password when the mail did NOT go out', () => {
     const payload = result();
     payload.foundingAdmin.invitation = {
       expiresAtUtc: '2026-08-13T09:00:00Z',
+      // The server serves the link ONLY on this branch — a live activation link is a
+      // bearer credential and is withheld once the invitation has been emailed.
       activationUrl: 'https://app.example/activate/abc123',
+      emailSent: false,
     };
 
     render(<TenantHandoverDialog result={payload} onClose={vi.fn()} />);
 
     expect(screen.getByText('https://app.example/activate/abc123')).toBeInTheDocument();
     expect(screen.getByText(/no password exists yet/i)).toBeInTheDocument();
+    expect(screen.getByText(/this link is the only copy/i)).toBeInTheDocument();
     // Nothing irrecoverable is on screen, so the operator is not held hostage.
     expect(screen.getByRole('button', { name: /done/i })).toBeEnabled();
+  });
+
+  it('does not render an empty link box when the invitation was emailed', () => {
+    const payload = result();
+    // The ordinary path: mail accepted, so the server withholds activationUrl. The
+    // screen used to render an "Activation link" heading over an empty monospace box
+    // and a Copy button that copied `undefined`, under a caption promising a link.
+    payload.foundingAdmin.invitation = {
+      expiresAtUtc: '2026-08-13T09:00:00Z',
+      activationUrl: null,
+      emailSent: true,
+    };
+
+    render(<TenantHandoverDialog result={payload} onClose={vi.fn()} />);
+
+    expect(screen.queryByText(/^activation link$/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^copy$/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/has been emailed to them/i)).toBeInTheDocument();
   });
 
   it('renders the server billing warnings rather than burying them', () => {

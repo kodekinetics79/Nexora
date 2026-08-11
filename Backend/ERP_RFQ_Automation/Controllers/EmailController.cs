@@ -93,9 +93,22 @@ namespace ERP_RFQ_Automation.Controllers
             {
                 if (!long.TryParse(User.FindFirst("businessUnitId")?.Value, out var businessUnitId) || businessUnitId <= 0)
                     return Forbid();
-                await _folderService.SaveFilesToSharedFolderAsync(
+                // The count WRITTEN, not the count posted. FolderService skips a zero-byte file, an
+                // unusable filename and a path-traversal filename and carries on, so `files.Count`
+                // is the number of files the browser sent — a number this endpoint had no way of
+                // contradicting and therefore always reported as success.
+                var saved = await _folderService.SaveFilesToSharedFolderAsync(
                     files, folderType, businessUnitId, cancellationToken);
-                return Ok(new { message = $"{files.Count} files uploaded successfully to the {folderType} leads folder." });
+                var skipped = files.Count - saved;
+                return Ok(new
+                {
+                    message = skipped > 0
+                        ? $"{saved} of {files.Count} files were uploaded to the {folderType} leads folder. "
+                          + $"{skipped} could not be stored — they were empty, or their filename was rejected."
+                        : $"{saved} files uploaded successfully to the {folderType} leads folder.",
+                    uploaded = saved,
+                    skipped
+                });
             }
             catch (ArgumentException ex)
             {
