@@ -1,4 +1,5 @@
 using ERP_RFQ_Automation.Authorization;
+using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
 
@@ -48,6 +49,7 @@ public sealed record TenantBaselineSummary(
     int UnitsOfMeasureCreated,
     int CountriesCreated,
     int DiscountTypesCreated,
+    int LifecycleStatusesCreated,
     int ModulesCreated,
     int RolesCreated,
     int RolePermissionsCreated,
@@ -82,6 +84,10 @@ public sealed record TenantBaselineSummary(
 /// <item>No <c>RolePermission</c> template, so the second role the customer's Super Administrator
 /// creates starts with zero grants and nothing to copy — and a role below
 /// <see cref="RoleRanks.Admin"/> with no rows is denied everything, with no error naming why.</item>
+/// <item>No lifecycle <c>Setup_Master</c> rows, so the tenant has no <c>QuoteStatus</c>,
+/// <c>OrderStatus</c> or <c>PaymentStatus</c> to point at. See
+/// <see cref="TenantBaselineSeeder.EnsureLifecycleStatusesAsync"/> for what that costs — it is the
+/// difference between a workspace that can raise its first quote and one that cannot.</item>
 /// </list>
 ///
 /// <para><b>Transaction contract.</b> This runs INSIDE the caller's transaction and on the
@@ -171,6 +177,7 @@ public sealed class TenantBaselineSeeder(
         var units = await EnsureUnitsOfMeasureAsync(businessUnitId, seededBy, now, ct);
         var countries = await EnsureCountryAsync(businessUnitId, profile.CountryCode, seededBy, now, ct);
         var discountTypes = await EnsureDiscountTypesAsync(businessUnitId, seededBy, now, ct);
+        var lifecycleStatuses = await EnsureLifecycleStatusesAsync(businessUnit, seededBy, now, ct);
         var (leadReferenceSeeded, leadReferencePrefix) =
             await EnsureLeadReferenceConfigurationAsync(businessUnit, now, ct);
         var roles = await EnsureStarterRolesAsync(businessUnitId, seededBy, now, ct);
@@ -188,6 +195,7 @@ public sealed class TenantBaselineSeeder(
             units,
             countries,
             discountTypes,
+            lifecycleStatuses,
             roles.ModulesCreated,
             roles.RolesCreated,
             roles.GrantsCreated,
@@ -198,9 +206,10 @@ public sealed class TenantBaselineSeeder(
 
         logger.LogInformation(
             "Seeded tenant baseline for business unit {BusinessUnitId}: base currency {Currency}, "
-            + "{Units} unit(s) of measure, {Countries} country row(s), {Roles} starter role(s) holding "
-            + "{Grants} permission grant(s).",
-            businessUnitId, currency.Code, units, countries, roles.RolesCreated, roles.GrantsCreated);
+            + "{Units} unit(s) of measure, {Countries} country row(s), {LifecycleStatuses} lifecycle "
+            + "status row(s), {Roles} starter role(s) holding {Grants} permission grant(s).",
+            businessUnitId, currency.Code, units, countries, lifecycleStatuses,
+            roles.RolesCreated, roles.GrantsCreated);
 
         return summary;
     }
@@ -442,6 +451,44 @@ public sealed class TenantBaselineSeeder(
         }
         return created;
     }
+
+    /// <summary>
+    /// The lifecycle states — <c>LeadStatus</c>, <c>RFQStatus</c>, <c>QuoteStatus</c>,
+    /// <c>OrderStatus</c>, <c>PaymentStatus</c> — taken verbatim from
+    /// <see cref="LifecycleStatusCatalog"/> rather than restated here, because a second copy of the
+    /// list is a second thing to keep in step with <c>LifecyclePolicy</c>.
+    ///
+    /// <para><b>Why this belongs in the baseline and not only in provisioning.</b> These rows
+    /// were reference data written once per business unit, by whichever creation path ran:
+    /// <c>ProvisioningStepExecutor</c>'s <c>lifecycle-statuses</c> step,
+    /// <c>TenantsController.Provision</c>, or <c>BusinessUnitRepository.AddAsync</c>. Nothing ever
+    /// checked afterwards. A business unit created before that step existed, one whose step failed
+    /// while later steps succeeded — the reconciler has no probe for this step, so it can neither
+    /// confirm nor repair it — or one created by any path that did not think to seed them, is left
+    /// permanently without them, and this seeder is the documented repair tool that a support
+    /// engineer re-runs. Filling the gap here makes the repair actually repair.</para>
+    ///
+    /// <para><b>What a missing <c>QuoteStatus</c> costs, concretely.</b>
+    /// <c>QuoteService.CreateQuoteAsync</c> resolves DRAFT through
+    /// <c>ResolveQuoteStatusIdAsync</c>, which falls back to the documented legacy id 42 when no
+    /// row carries the code. <c>Quotes."StatusID"</c> is a foreign key to
+    /// <c>Setup_Master."SetupID"</c>, so on a database where no row has that id the tenant's first
+    /// quote fails on the foreign key, and on one where some OTHER tenant's row happens to hold it
+    /// the quote is stamped with a status belonging to somebody else's workspace.
+    /// <c>LifecycleStatusCatalog.ResolveIdAsync</c> — the path
+    /// <c>RfqRepository</c> and <c>LeadConversionIntelligence</c> take — instead throws
+    /// "DRAFT is not configured and active for this tenant." Downstream,
+    /// <c>DashboardRepository</c> and <c>QuoteRepository.GetQuoteStatsAsync</c> count against ids
+    /// that match nothing and report zeros without saying why.</para>
+    ///
+    /// <para>The check-then-insert itself lives on the catalogue
+    /// (<see cref="LifecycleStatusCatalog.EnsureAsync"/>) rather than here, because this is the
+    /// THIRD caller that needs it, and the caller that did NOT have it — <c>DemoUserSeeder</c> —
+    /// is how a business unit came to exist with no <c>QuoteStatus</c> rows at all.</para>
+    /// </summary>
+    private Task<int> EnsureLifecycleStatusesAsync(
+        BusinessUnit businessUnit, string actor, DateTime now, CancellationToken ct)
+        => LifecycleStatusCatalog.EnsureAsync(context, businessUnit, actor, now, ct);
 
     /// <summary>
     /// The commercial-case reference format.

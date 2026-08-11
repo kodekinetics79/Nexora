@@ -307,13 +307,16 @@ public sealed class TenantPurgeForcedRowSecurityPostgreSqlTests : IAsyncLifetime
 
     private async Task SeedAsync()
     {
-        // session_replication_role = replica for the BusinessUnits inserts, and not for
-        // convenience: nexora_create_default_ai_policy() is a SECURITY DEFINER AFTER INSERT
-        // trigger owned by the schema owner, so its INSERT into the FORCE-protected
-        // "AiProcessingPolicies" is evaluated as that owner and refused with "new row violates
-        // row-level security policy". Provisioning a business unit is therefore already broken
-        // in this configuration, independently of the purge. Reported separately; suppressed here
-        // so this suite tests one thing.
+        // session_replication_role = replica keeps the seed to the rows this suite is about. It
+        // used to be load-bearing for a second reason: nexora_create_default_ai_policy() is a
+        // SECURITY DEFINER AFTER INSERT trigger owned by the schema owner, so its INSERT into the
+        // FORCE-protected "AiProcessingPolicies" was evaluated as that owner and refused with "new
+        // row violates row-level security policy" — provisioning a business unit was broken in
+        // this configuration, independently of the purge. That was reported separately and fixed
+        // by 20260811210000_TenantProvisioningSeedsUnderForcedRowSecurity, which
+        // TenantProvisioningForcedRowSecurityPostgreSqlTests covers on a fixture of this same
+        // shape. Replica mode stays because it is still what suspends the append-only guards and
+        // the foreign keys for the DELETEs above.
         await ExecuteAsync(_superuserConnectionString, $"""
             SET session_replication_role = replica;
 

@@ -2,6 +2,7 @@ using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.MultiTenancy;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 
 namespace ERP_RFQ_Automation.Tests.Support;
 
@@ -37,8 +38,20 @@ public sealed class TestDb : IDisposable
 
     /// <summary>A context scoped to <paramref name="businessUnitId"/>; pass null for an
     /// unfiltered "background worker / anonymous" context (query filters become no-ops).</summary>
-    public ErpRfqAutomationContext ContextFor(long? businessUnitId)
-        => new(_options, new StubTenant(businessUnitId));
+    /// <param name="interceptors">Optional EF interceptors for this context only — a command
+    /// counter, a failure injector. Omitted by every caller that does not need one, and a context
+    /// built with one still shares the same in-memory database as every other.</param>
+    public ErpRfqAutomationContext ContextFor(long? businessUnitId, params IInterceptor[] interceptors)
+    {
+        if (interceptors.Length == 0) return new(_options, new StubTenant(businessUnitId));
+
+        var options = new DbContextOptionsBuilder<ErpRfqAutomationContext>()
+            .UseSqlite(_connection)
+            .EnableSensitiveDataLogging()
+            .AddInterceptors(interceptors)
+            .Options;
+        return new(options, new StubTenant(businessUnitId));
+    }
 
     public void Dispose() => _connection.Dispose();
 }

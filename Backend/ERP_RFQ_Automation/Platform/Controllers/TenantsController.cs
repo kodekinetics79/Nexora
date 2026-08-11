@@ -782,6 +782,7 @@ public class TenantsController : ControllerBase
                         Baseline = new
                         {
                             workspace.BaseCurrencyCode, workspace.UnitsOfMeasureCreated,
+                            workspace.LifecycleStatusesCreated,
                             workspace.RolesCreated, workspace.RolePermissionsCreated,
                             workspace.QuoteConfigurationCreated, workspace.LeadReferencePrefix,
                             Roles = workspace.RoleNames
@@ -839,6 +840,7 @@ public class TenantsController : ControllerBase
                 QuoteConfiguration = workspace.QuoteConfigurationCreated,
                 BaseCurrency = workspace.BaseCurrencyCode,
                 UnitsOfMeasure = workspace.UnitsOfMeasureCreated,
+                LifecycleStatuses = workspace.LifecycleStatusesCreated,
                 Roles = workspace.RolesCreated,
                 PermissionGrants = workspace.RolePermissionsCreated,
                 LeadReferencePrefix = workspace.LeadReferencePrefix

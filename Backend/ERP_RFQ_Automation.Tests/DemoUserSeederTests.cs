@@ -143,6 +143,51 @@ public sealed class DemoUserSeederTests : IDisposable
         Assert.Equal(10m, policy.ExternalDependencyCeilingPercent);
     }
 
+    /// <summary>
+    /// The demo tenant can raise a quote.
+    ///
+    /// <para>This seeder created a business unit, an AI policy, a role and a user, and no
+    /// <c>Setup_Master</c> lifecycle rows at all — so the pilot business unit somebody actually
+    /// walks the journey on had zero <c>QuoteStatus</c> rows. <c>QuoteService</c> then falls back
+    /// to the documented legacy id 42, and <c>Quotes."StatusID"</c> is a foreign key to
+    /// <c>Setup_Master."SetupID"</c>: no row with that id means the first quote fails on the
+    /// foreign key, and another tenant's row holding it means the quote is stamped with a status
+    /// from someone else's workspace. The assertion is the resolution the application performs,
+    /// not a row count.</para>
+    /// </summary>
+    [Fact]
+    public async Task Seeder_provisions_the_lifecycle_states_the_quote_and_order_paths_resolve()
+    {
+        var config = Config(new()
+        {
+            ["DemoUser:Enabled"] = "true",
+            ["DemoUser:Password"] = "FirstRunSecret!1",
+            ["PlatformOwner:Password"] = "FirstRunSecret!1",
+        });
+
+        // Twice: a restart must not give every picker a duplicate of every state.
+        await DemoUserSeeder.EnsureAsync(BuildProvider(), config, new FakeEnv { EnvironmentName = "Development" });
+        await DemoUserSeeder.EnsureAsync(BuildProvider(), config, new FakeEnv { EnvironmentName = "Development" });
+
+        await using var db = NewContext();
+        var businessUnit = await db.BusinessUnits.SingleAsync();
+
+        var draftQuoteStatusId = await ERP_RFQ_Automation.CommercialCases.Lifecycle.LifecycleStatusCatalog
+            .ResolveIdAsync(db, businessUnit.Id, "Quote", "DRAFT");
+        var draft = await db.SetupMasters.SingleAsync(row => row.SetupId == draftQuoteStatusId);
+        Assert.Equal("QuoteStatus", draft.SetupType);
+        Assert.Equal(businessUnit.Id, draft.BusinessUnitId);
+
+        Assert.Equal(6, await db.SetupMasters.CountAsync(row => row.SetupType == "QuoteStatus"));
+
+        // OrderService resolves these two by name on the conversion a won quote becomes, and
+        // throws "No OrderStatus setup found in the system" when either is absent.
+        Assert.Equal(1, await db.SetupMasters.CountAsync(
+            row => row.SetupType == "OrderStatus" && row.SetupCode == "DRAFT"));
+        Assert.Equal(1, await db.SetupMasters.CountAsync(
+            row => row.SetupType == "PaymentStatus" && row.SetupCode == "UNPAID"));
+    }
+
     [Fact]
     public async Task Seeder_refuses_to_run_in_production()
     {
