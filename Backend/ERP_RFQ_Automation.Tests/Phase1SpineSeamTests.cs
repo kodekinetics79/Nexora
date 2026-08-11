@@ -255,7 +255,19 @@ internal sealed class UpstreamSpine : IDisposable
     public const int FirstLineQuantity = 40;
     public const string FirstLinePart = "SPINE-VALVE-0001";
 
-    private static readonly DateTime Now = new(2026, 8, 10, 9, 0, 0, DateTimeKind.Utc);
+    /// <summary>
+    /// Anchored to the real clock, deliberately, where every other seeded date in this file is a
+    /// literal.
+    ///
+    /// <para>This value becomes the goods-receipt date, and <c>PostGoodsReceiptAsync</c> refuses a
+    /// receipt that precedes its purchase order's issuance event — an event stamped with
+    /// <see cref="DateTime.UtcNow"/> when the test issues the order moments earlier. A literal
+    /// "today" therefore has a shelf life of one day: this class pinned 2026-08-10 and began
+    /// failing at 00:00 UTC on the 11th, in a subsystem nobody had touched, with a message
+    /// ("Receipt date cannot precede the PO issuance date") that names the symptom and not the
+    /// cause. Any hard-coded date compared against a real-clock value is the same trap.</para>
+    /// </summary>
+    private static DateTime Now => DateTime.UtcNow;
     private readonly TestDb _database = new();
 
     public UpstreamSpine()
@@ -421,7 +433,19 @@ internal sealed class DownstreamSpine : IDisposable
     public const string OriginCountry = "DE";
     public const long ShipmentStatusId = 97_202;
 
-    private static readonly DateTime Now = new(2026, 8, 10, 9, 0, 0, DateTimeKind.Utc);
+    /// <summary>
+    /// Anchored to the real clock, deliberately, where every other seeded date in this file is a
+    /// literal.
+    ///
+    /// <para>This value becomes the goods-receipt date, and <c>PostGoodsReceiptAsync</c> refuses a
+    /// receipt that precedes its purchase order's issuance event — an event stamped with
+    /// <see cref="DateTime.UtcNow"/> when the test issues the order moments earlier. A literal
+    /// "today" therefore has a shelf life of one day: this class pinned 2026-08-10 and began
+    /// failing at 00:00 UTC on the 11th, in a subsystem nobody had touched, with a message
+    /// ("Receipt date cannot precede the PO issuance date") that names the symptom and not the
+    /// cause. Any hard-coded date compared against a real-clock value is the same trap.</para>
+    /// </summary>
+    private static DateTime Now => DateTime.UtcNow;
     private readonly ProcurementScenario _procurement = new();
 
     public DownstreamSpine()
