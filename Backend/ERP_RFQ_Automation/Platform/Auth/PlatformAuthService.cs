@@ -13,7 +13,16 @@ public interface IPlatformAuthService
 {
     Task<PlatformLoginResponse> LoginAsync(PlatformLoginRequest request);
     Task<PlatformLoginResponse> CompleteMfaChallengeAsync(
-        PlatformMfaChallengeRequest request, CancellationToken ct = default);
+        PlatformMfaChallengeRequest request, string? userAgent = null,
+        HttpContext? httpContext = null, CancellationToken ct = default);
+
+    /// <summary>
+    /// Re-verify the caller's CURRENT password and stamp their session with the moment they did it.
+    /// The stamp is what <c>PlatformHighRiskOperationFilter</c> reads, so a step-up is proved
+    /// server-side and is bounded by <c>Platform:Mfa:PasswordReauthWindowMinutes</c>.
+    /// </summary>
+    Task<DateTime?> ReauthenticateAsync(
+        long platformUserId, string? jti, string? currentPassword, CancellationToken ct = default);
     Task<PlatformMfaStatusResponse> GetMfaStatusAsync(long platformUserId, CancellationToken ct = default);
     Task<PlatformMfaEnrollmentStartResponse> BeginMfaEnrollmentAsync(
         long platformUserId, CancellationToken ct = default);
@@ -47,13 +56,31 @@ public class PlatformAuthService : IPlatformAuthService
     private readonly ErpRfqAutomationContext _context;
     private readonly IConfiguration _config;
     private readonly ILogger<PlatformAuthService> _logger;
+    private readonly IPlatformMfaPolicyProvider? _mfaPolicy;
+    private readonly IPlatformBrowserTrustService? _browserTrust;
 
+    /// <param name="mfaPolicy">
+    /// The server-authoritative enforcement policy. OPTIONAL in the constructor and REQUIRED in
+    /// behaviour: when it is absent — a unit test constructing this service directly — enforcement
+    /// is treated as <see cref="PlatformMfaMode.REQUIRED"/>, which is the strict path this class has
+    /// always taken. A missing dependency must never be the thing that relaxes a security control.
+    /// </param>
+    /// <param name="browserTrust">
+    /// Absent means "remember this browser" is simply not offered, and every sign-in is challenged.
+    /// Same fail-closed reasoning.
+    /// </param>
     public PlatformAuthService(
-        ErpRfqAutomationContext context, IConfiguration config, ILogger<PlatformAuthService> logger)
+        ErpRfqAutomationContext context,
+        IConfiguration config,
+        ILogger<PlatformAuthService> logger,
+        IPlatformMfaPolicyProvider? mfaPolicy = null,
+        IPlatformBrowserTrustService? browserTrust = null)
     {
         _context = context;
         _config = config;
         _logger = logger;
+        _mfaPolicy = mfaPolicy;
+        _browserTrust = browserTrust;
     }
 
     public async Task<PlatformLoginResponse> LoginAsync(PlatformLoginRequest request)
@@ -84,11 +111,40 @@ public class PlatformAuthService : IPlatformAuthService
         }
 
         var issuedAt = DateTime.UtcNow;
+
+        // The enforcement decision is taken HERE, on the server, from a persisted policy row and the
+        // process's own environment classification. Nothing on the request participates in it — a
+        // client that sends "mfaRequired: false" changes nothing at all.
+        var effective = _mfaPolicy is null
+            ? null
+            : await _mfaPolicy.GetEffectiveAsync();
+        var enforcementDisabled = effective?.EnforcementDisabled ?? false;
+        var relaxed = effective?.PasswordOnlySessionsPermitted ?? false;
+
         var mfa = await _context.Set<PlatformMfaCredential>().AsNoTracking()
             .SingleOrDefaultAsync(credential => credential.PlatformUserId == user.Id);
-        if (mfa?.EnabledAtUtc is not null)
+        if (mfa?.EnabledAtUtc is not null && !enforcementDisabled)
         {
-            return withChallenge(await GetOrCreateChallengeAsync(user.Id, issuedAt));
+            // "Remember this browser": the second factor was presented on this machine inside its
+            // trust window and the server still remembers it, so challenging again buys nothing
+            // except the habit of approving prompts. Redemption is a hash lookup that carries the
+            // revocation and expiry predicates with it, so a revoked trust falls straight through to
+            // the challenge below on the very next attempt.
+            var trust = _browserTrust is null
+                ? null
+                : await _browserTrust.RedeemAsync(user.Id, request.BrowserTrustToken);
+            if (trust is null)
+                return withChallenge(await GetOrCreateChallengeAsync(user.Id, issuedAt));
+
+            var trusted = IssuePlatformSession(user, issuedAt, issuedAt, trust.Id);
+            trusted.BrowserTrustUsed = true;
+            trusted.BrowserTrustExpiresAtUtc = trust.ExpiresAtUtc;
+            await _context.SaveChangesAsync();
+            await UpdateLastLoginAsync(user.Id, issuedAt);
+            _logger.LogInformation(
+                "Platform login for {Email} satisfied MFA from remembered browser trust {TrustId}.",
+                user.Email, trust.Id);
+            return trusted;
         }
 
         // Sec-D2: an operator who has never enrolled still gets a token — refusing one outright
@@ -97,7 +153,15 @@ public class PlatformAuthService : IPlatformAuthService
         // now satisfies PlatformPolicies.Enrollment only, so it can read its own MFA status,
         // enrol, and log out, and nothing else. It used to satisfy PlatformScope and therefore
         // every read on the control plane.
+        //
+        // ...unless the server-authoritative policy has relaxed enforcement, in which case the same
+        // password-only token satisfies the full scope — a decision made by the assertion in
+        // AddPlatformPolicies from the same policy row, never from the claim below, which stays
+        // honestly absent. An enrolled operator's TOTP secret is untouched by any of this and is
+        // waiting exactly where it was when enforcement returns.
         var response = IssuePlatformSession(user, issuedAt, mfaAuthenticatedAtUtc: null);
+        response.MfaEnforcementRelaxed = relaxed;
+        response.MfaEnrollmentRequired = !relaxed;
         await _context.SaveChangesAsync();
 
         await UpdateLastLoginAsync(user.Id, issuedAt);
@@ -116,7 +180,8 @@ public class PlatformAuthService : IPlatformAuthService
     }
 
     public async Task<PlatformLoginResponse> CompleteMfaChallengeAsync(
-        PlatformMfaChallengeRequest request, CancellationToken ct = default)
+        PlatformMfaChallengeRequest request, string? userAgent = null,
+        HttpContext? httpContext = null, CancellationToken ct = default)
     {
         if (request.ChallengeId == Guid.Empty
             || (string.IsNullOrWhiteSpace(request.TotpCode) == string.IsNullOrWhiteSpace(request.RecoveryCode)))
@@ -168,7 +233,51 @@ public class PlatformAuthService : IPlatformAuthService
         {
             throw new UnauthorizedAccessException("The MFA code was already used.");
         }
+
+        // AFTER the challenge has committed, never before: a trust minted alongside a challenge that
+        // then failed to consume would be a second factor granted for a code that was never accepted.
+        if (request.RememberBrowser && _browserTrust is not null)
+        {
+            var grant = await _browserTrust.IssueAsync(challenge.PlatformUserId, userAgent, httpContext, ct);
+            // The one and only time this value leaves the server. The row holds its SHA-256.
+            response.BrowserTrustToken = grant.Token;
+            response.BrowserTrustExpiresAtUtc = grant.ExpiresAtUtc;
+        }
+
         return response;
+    }
+
+    /// <summary>
+    /// Step-up: prove the person at the keyboard is still the operator who signed in.
+    ///
+    /// <para>Returns the moment of proof, or null if the password was wrong — and stamps it on the
+    /// SESSION row rather than handing back a token, so the window cannot be extended by replaying a
+    /// response and cannot outlive the session it was granted on. Revoking the session revokes the
+    /// step-up with it, in the same UPDATE, for free.</para>
+    /// </summary>
+    public async Task<DateTime?> ReauthenticateAsync(
+        long platformUserId, string? jti, string? currentPassword, CancellationToken ct = default)
+    {
+        if (platformUserId <= 0 || string.IsNullOrWhiteSpace(jti) || string.IsNullOrEmpty(currentPassword))
+            return null;
+
+        var user = await _context.Set<PlatformUser>().AsNoTracking()
+            .SingleOrDefaultAsync(candidate => candidate.Id == platformUserId, ct);
+        if (user is null || !user.IsActive || !BCrypt.Net.BCrypt.Verify(currentPassword, user.PasswordHash))
+            return null;
+
+        var now = DateTime.UtcNow;
+        var stamped = await _context.Set<PlatformSession>()
+            .Where(session => session.Jti == jti
+                              && session.PlatformUserId == platformUserId
+                              && session.RevokedAtUtc == null
+                              && session.ExpiresAtUtc > now)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(session => session.LastPasswordReauthAtUtc, now), ct);
+
+        // A correct password on a session that is already revoked or expired proves nothing useful:
+        // there is nothing left to step up.
+        return stamped == 1 ? now : null;
     }
 
     public async Task<PlatformMfaStatusResponse> GetMfaStatusAsync(
@@ -356,7 +465,7 @@ public class PlatformAuthService : IPlatformAuthService
     }
 
     private PlatformLoginResponse IssuePlatformSession(
-        PlatformUser user, DateTime issuedAt, DateTime? mfaAuthenticatedAtUtc)
+        PlatformUser user, DateTime issuedAt, DateTime? mfaAuthenticatedAtUtc, long? browserTrustId = null)
     {
         var (token, expires, jti) = GeneratePlatformToken(user, issuedAt, mfaAuthenticatedAtUtc);
 
@@ -369,7 +478,10 @@ public class PlatformAuthService : IPlatformAuthService
             SessionGeneration = user.SessionGeneration,
             IssuedAtUtc = issuedAt,
             ExpiresAtUtc = expires,
-            MfaAuthenticatedAtUtc = mfaAuthenticatedAtUtc
+            MfaAuthenticatedAtUtc = mfaAuthenticatedAtUtc,
+            // Pinned so revoking the browser trust ends this session too — PlatformSessionValidator
+            // re-checks it on every request.
+            BrowserTrustId = browserTrustId
         });
         return new PlatformLoginResponse
         {

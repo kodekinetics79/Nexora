@@ -60,6 +60,46 @@ openssl rand -base64 32
 - **Treat this key like `Jwt:Key`.** Losing or rotating it makes every already-encrypted
   mailbox password undecryptable and email polling stops until credentials are re-entered.
 
+## Platform operator MFA enforcement (`Platform:Mfa:*`)
+
+Whether platform operators must present a second factor is a **persisted, versioned, audited
+policy row** (`platform."PlatformMfaPolicies"`, singleton), not a configuration flag — so a change
+has an author, a reason and an expiry, and so it cannot be made by editing a file. What
+configuration decides is the **ceiling**: what this deployment is allowed to do at all. That
+decision is taken in `Platform/Auth/PlatformMfaPolicyOptions.cs` from `IHostEnvironment` plus the
+keys below, and it is enforced three times — at startup, on write, and again on every read — so a
+database restored from a staging snapshot is ignored rather than obeyed.
+
+| Environment class | Derived from `ASPNETCORE_ENVIRONMENT` | Permitted modes |
+| --- | --- | --- |
+| `Production` | `Production`, **and anything unrecognised** | `REQUIRED` only |
+| `StagingOrUat` | `Staging`, `UAT`, `PreProduction`, `PreProd`, `QA` | `REQUIRED`, `OPTIONAL` (+ `DISABLED_TEST_ONLY` only with the isolation key below) |
+| `LocalOrTest` | `Development`, `Testing`, `Test`, `Local`, `IntegrationTest` | all three |
+
+An unrecognised environment name classifies as **Production**. That is deliberate: the opposite
+default fails open on exactly the name nobody remembered to add. There is deliberately **no key
+that names the environment class directly** — such a key would be a production bypass with extra
+steps.
+
+| Key (env form) | Default | Range | What it does |
+| --- | --- | --- | --- |
+| `Platform:Mfa:IsolatedTestInfrastructure` (`Platform__Mfa__IsolatedTestInfrastructure`) | `false` | bool | Declares a Staging/UAT deployment to be isolated test infrastructure with no customer data. It is the **only** thing that lets Staging reach `DISABLED_TEST_ONLY`. Setting it in a Production-classified environment makes the API **fail at startup**, exactly like `Jwt:Key` — a staging appsettings copied onto a production host must not boot. |
+| `Platform:Mfa:MaxBypassHours` (`Platform__Mfa__MaxBypassHours`) | `24` | 1–24 | Ceiling on how long any non-`REQUIRED` policy may run. An expiry is **mandatory** for every mode other than `REQUIRED`; the effective mode reverts to `REQUIRED` on the first read after it passes, with no job and no human involved. |
+| `Platform:Mfa:BrowserTrustHours` (`Platform__Mfa__BrowserTrustHours`) | `12` | 8–12 | "Remember this browser" window. The server stores only SHA-256 of the token the browser holds (`platform."PlatformBrowserTrusts"`); revoking is a column both the login redemption and `PlatformSessionValidator` read, so it takes effect on the next request and ends the session the trust minted. |
+| `Platform:Mfa:PasswordReauthWindowMinutes` (`Platform__Mfa__PasswordReauthWindowMinutes`) | `5` | 1–15 | How long a password re-authentication (`POST /api/platform/auth/reauthenticate`) satisfies a high-risk operation. |
+
+A value that parses but sits outside its range **throws at startup** rather than being clamped: an
+operator who wrote `MaxBypassHours: 240` believes they have ten days, and a silent clamp to 24
+leaves the belief and the system disagreeing with nobody told.
+
+**Compensating controls while enforcement is relaxed.** Tenant purge, tenant export, personal-data
+erasure, legal-hold release and subscription-invoice finalisation carry
+`[PlatformHighRiskOperation]`. On an MFA-bound session it changes nothing. On a password-only
+session — reachable only on non-production infrastructure — it demands a password
+re-authentication inside the window above, on top of the existing typed confirmations and role
+gates. Changing the MFA policy itself always requires Owner, current-password re-authentication, a
+reason of at least 20 characters, a mandatory bounded expiry and a typed confirmation phrase.
+
 ## Configuration pattern (how secrets are supplied now)
 
 `appsettings.json` is a **committed template containing only placeholders**

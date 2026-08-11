@@ -42,6 +42,20 @@ public static class ProvisioningServiceCollectionExtensions
         services.TryAddScoped<ITenantProvisioningService, TenantProvisioningService>();
         services.TryAddScoped<IProvisioningDraftService, ProvisioningDraftService>();
 
+        // Scoped for the same reason the service is: the recovery writes the ownership change and
+        // its audit record on ONE context so they share a transaction. Registered here rather than
+        // left to the caller because a deployment that can accept provisioning work but cannot
+        // recover an execution abandoned by a dead node has no way out of a stuck tenant except a
+        // hand-written UPDATE — which is the exact thing the database trigger now refuses.
+        services.TryAddScoped<IProvisioningLeaseRecovery, ProvisioningLeaseRecovery>();
+
+        // Stateless probes; scoped only to sit alongside the context they are handed.
+        services.TryAddScoped<IProvisioningStepReconciler, ProvisioningStepReconciler>();
+
+        // Read-only, and registered here rather than with the activation policy because it reads
+        // the provisioning journal first and the policy second.
+        services.TryAddScoped<IProvisioningDiagnosticsService, ProvisioningDiagnosticsService>();
+
         // The runner creates its OWN scopes per step and per journal write, so it must not be
         // scoped itself: it outlives any single request and is resolved by both the worker and
         // the synchronous compatibility path.

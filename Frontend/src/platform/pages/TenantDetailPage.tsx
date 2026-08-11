@@ -20,10 +20,15 @@ import AiGovernanceTab from './tenant/AiGovernanceTab';
 import EntitlementsTab from './tenant/EntitlementsTab';
 import DataStorageTab from './tenant/DataStorageTab';
 import ProfileAccessTab from './tenant/ProfileAccessTab';
+import ProvisioningDiagnosticsTab from './tenant/ProvisioningDiagnosticsTab';
 
 const TABS = [
   { key: 'overview', label: 'Overview' },
   { key: 'profile-access', label: 'Profile & access' },
+  // Deliberately high in the order and visible to every platform role: it is read-only, and it
+  // is the screen somebody opens when a tenant is stuck. Burying it behind the money tabs is
+  // how "Provisioning failed." stayed the whole story for as long as it did.
+  { key: 'provisioning', label: 'Provisioning' },
   { key: 'commercial', label: 'Commercial' },
   { key: 'entitlements', label: 'Entitlements' },
   { key: 'support', label: 'Support' },
@@ -149,6 +154,7 @@ export default function TenantDetailPage() {
         />
       )}
       {tab === 'profile-access' && permissions.canAdministerTenants && <ProfileAccessTab tenant={tenant} />}
+      {tab === 'provisioning' && <ProvisioningDiagnosticsTab tenant={tenant} />}
       {tab === 'commercial' && <CommercialTab tenant={tenant} />}
       {tab === 'entitlements' && <EntitlementsTab tenant={tenant} />}
       {tab === 'support' && permissions.canAdministerTenants && <SupportTab tenant={tenant} />}

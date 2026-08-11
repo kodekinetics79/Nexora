@@ -50,7 +50,13 @@ describe('PlatformLoginScreen MFA challenge', () => {
 
     fireEvent.change(await screen.findByLabelText(/6-digit authenticator code/), { target: { value: '123456' } });
     fireEvent.click(screen.getByRole('button', { name: 'Verify and enter' }));
-    await waitFor(() => expect(platformCompleteMfa).toHaveBeenCalledWith(challenge, { totpCode: '123456' }));
+    // rememberBrowser travels with every verification, false unless the operator ticked the box.
+    // Asserting it explicitly is what stops a future refactor from sending `true` by default —
+    // which would silently extend a second factor to twelve hours for people who never asked.
+    await waitFor(() => expect(platformCompleteMfa).toHaveBeenCalledWith(
+      challenge,
+      { totpCode: '123456', rememberBrowser: false },
+    ));
   });
 
   it('can complete the same challenge with a single-use recovery code', async () => {
@@ -66,7 +72,25 @@ describe('PlatformLoginScreen MFA challenge', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Verify and enter' }));
     await waitFor(() => expect(platformCompleteMfa).toHaveBeenCalledWith(
       challenge,
-      { recoveryCode: 'AAAAAA-BBBBBB-CCCCCC-DDDDDD' },
+      { recoveryCode: 'AAAAAA-BBBBBB-CCCCCC-DDDDDD', rememberBrowser: false },
+    ));
+  });
+
+  it('asks the server to remember this browser only when the operator ticks the box', async () => {
+    const challenge = { challengeId: 'challenge-4', expiresAtUtc: '2099-01-01T00:00:00Z', email: 'owner@nexora.local' };
+    platformLogin.mockResolvedValue({ mfaRequired: true, challenge });
+    render(<PlatformLoginScreen />);
+    fireEvent.change(screen.getByLabelText(/Email/), { target: { value: challenge.email } });
+    fireEvent.change(screen.getByLabelText(/Password/), { target: { value: 'secret' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Enter Control Plane' }));
+
+    fireEvent.change(await screen.findByLabelText(/6-digit authenticator code/), { target: { value: '123456' } });
+    fireEvent.click(screen.getByLabelText(/Remember this browser/));
+    fireEvent.click(screen.getByRole('button', { name: 'Verify and enter' }));
+
+    await waitFor(() => expect(platformCompleteMfa).toHaveBeenCalledWith(
+      challenge,
+      { totpCode: '123456', rememberBrowser: true },
     ));
   });
 });

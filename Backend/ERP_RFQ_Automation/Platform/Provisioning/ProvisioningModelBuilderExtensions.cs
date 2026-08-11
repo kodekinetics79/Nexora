@@ -41,6 +41,8 @@ public static class ProvisioningModelBuilderExtensions
             entity.Property(x => x.FailedStep).HasMaxLength(64);
             entity.Property(x => x.FailureReason).HasMaxLength(2000);
             entity.Property(x => x.LeaseOwner).HasMaxLength(200);
+            entity.Property(x => x.LastRecoveredBy).HasMaxLength(320);
+            entity.Property(x => x.LastRecoveryReason).HasMaxLength(1000);
 
             // Stored as its NAME. An execution row is read during a support investigation months
             // later, and reordering the enum must never turn a historical Failed into a Cancelled.

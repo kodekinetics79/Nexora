@@ -24,10 +24,18 @@ public interface ITenantActivationPolicyService
 }
 
 /// <summary>The only authority permitted to transition a newly provisioned tenant to Active.</summary>
+/// <param name="posture">
+/// Deployment-wide facts that production-readiness certification has to answer for. OPTIONAL, and
+/// a null one is treated as "unknown", which fails the prerequisite rather than passing it: an
+/// unwired probe must not be able to certify anything. Optional rather than required so the
+/// existing three-argument construction in tests and in any partially wired host keeps working —
+/// the loss is a certification that cannot pass, never an activation that wrongly does.
+/// </param>
 public sealed class TenantActivationPolicyService(
     ErpRfqAutomationContext db,
     IPlatformAuditService audit,
-    ITenantAccessService tenantAccess) : ITenantActivationPolicyService
+    ITenantAccessService tenantAccess,
+    IPlatformDeploymentPosture? posture = null) : ITenantActivationPolicyService
 {
     private const long ActivationAdvisorySalt = unchecked((long)0x4E45584F52414143UL); // NEXORAAC
     public async Task<TenantActivationDecision?> EvaluateAsync(long tenantId, CancellationToken ct = default)
@@ -143,18 +151,151 @@ public sealed class TenantActivationPolicyService(
         var activeLegalHold = await db.Set<TenantLegalHold>().AsNoTracking()
             .AnyAsync(x => x.TenantId == tenantId && x.ReleasedOn == null, ct);
 
-        var blockers = controls.Where(x => !x.Satisfied).Select(x => x.Code).ToArray();
+        // ---- profile-scoped classification --------------------------------------------------
+        //
+        // Everything above this line decided WHETHER each control passes, and is untouched by the
+        // deployment profile. Everything below decides what an unsatisfied control MEANS. The
+        // split is the whole safety property: no profile can change what is checked or how a
+        // control is evaluated, only whether a named, catalogued external prerequisite is allowed
+        // to stand in the way of a workspace that exists to be tested.
+        var deferralPermitted = DeploymentProfilePolicy.PermitsDeferral(tenant);
+        var profileWire = TenantDeploymentProfiles.ToWire(tenant.DeploymentProfile);
+        var classified = controls.Select(control =>
+        {
+            if (control.Satisfied)
+                return control with
+                {
+                    Disposition = ActivationControlDispositions.Satisfied, BlocksProduction = false
+                };
+
+            var prerequisite = DeploymentPrerequisiteCatalog.ForControl(control.Code);
+
+            // BLOCKING for a PRODUCTION tenant, always — deferralPermitted is false there and
+            // there is no branch that can make it true. BLOCKING also for anything outside the
+            // catalogue in every profile, which is why a missing plan or an unactivated founding
+            // administrator still stops a local test workspace: those are defects, not absent
+            // third parties.
+            if (!deferralPermitted || prerequisite is null)
+                return control with
+                {
+                    Disposition = ActivationControlDispositions.Blocking,
+                    BlocksProduction = true,
+                    ProductionRequirement = prerequisite?.ProductionRequirement
+                };
+
+            return control with
+            {
+                Disposition = prerequisite.DeferredDisposition,
+                // Deliberately still true. The deferral buys an activation on this profile and
+                // nothing else: the control stays on the production blocker list and keeps
+                // certification impossible.
+                BlocksProduction = true,
+                DeferralKey = prerequisite.Key,
+                ProductionRequirement = prerequisite.ProductionRequirement
+            };
+        }).ToList();
+
+        var blockers = classified
+            .Where(x => x.Disposition == ActivationControlDispositions.Blocking)
+            .Select(x => x.Code).ToArray();
+        var productionBlockers = classified.Where(x => x.BlocksProduction).Select(x => x.Code).ToArray();
+        var deferred = classified
+            .Where(x => x.Disposition == ActivationControlDispositions.Deferred)
+            .Select(x => x.Code).ToArray();
+        var externallyBlocked = classified
+            .Where(x => x.Disposition == ActivationControlDispositions.ExternallyBlocked)
+            .Select(x => x.Code).ToArray();
+
         var warnings = new List<string>();
         if (tenant.Status == TenantStatus.Active)
             warnings.Add("Tenant is already Active; this is a current-state reassessment, not transition evidence.");
+        if (deferred.Length + externallyBlocked.Length > 0)
+            warnings.Add(
+                $"{deferred.Length + externallyBlocked.Length} production prerequisite(s) are deferred under the "
+                + $"{profileWire} deployment profile. They remain production blockers and this tenant cannot be "
+                + "certified production-ready while any of them is deferred.");
+        if (tenant.DeploymentProfile == TenantDeploymentProfile.Demo && !DeploymentProfilePolicy.IsApproved(tenant))
+            warnings.Add(
+                "This tenant is marked DEMO but carries no recorded Owner approval, so nothing is deferred and "
+                + "it fails closed exactly as PRODUCTION. Set the profile through "
+                + "PUT /api/platform/tenants/{id}/deployment-profile to record one.");
 
         var pastDue = await db.Set<SubscriptionInvoice>().AsNoTracking().AnyAsync(x =>
             x.TenantId == tenantId && x.DueAtUtc < now
             && x.TotalAmount > x.CreditedAmount + x.PaidAmount && x.Status != SubscriptionInvoiceStatus.Void, ct);
         return new TenantActivationDecision(tenant.Id, blockers.Length == 0,
             CommercialState(tenant, pastDue), AccessState(tenant), DataState(offboarding),
-            activeLegalHold ? "ACTIVE" : "NONE", controls, blockers,
-            warnings, TenantActivationPolicy.Version, now);
+            activeLegalHold ? "ACTIVE" : "NONE", classified, blockers,
+            warnings, TenantActivationPolicy.Version, now)
+        {
+            DeploymentProfile = profileWire,
+            DeploymentProfileDetail = DeploymentProfilePolicy.Describe(tenant),
+            ProductionBlockingControls = productionBlockers,
+            DeferredControls = deferred,
+            ExternallyBlockedControls = externallyBlocked,
+            ProductionReadiness = CertifyProductionReadiness(classified, productionBlockers)
+        };
+    }
+
+    /// <summary>
+    /// The strict verdict, evaluated identically for every profile.
+    ///
+    /// <para>This is the surface the deferral vocabulary is paid for with. An operator may bring a
+    /// LOCAL_TEST tenant up with the customer's ERP absent; they may not then claim the tenant is
+    /// production-ready, because certification reads <c>BlocksProduction</c> — which a deferral
+    /// does not clear — plus the deployment-wide prerequisites that never mapped to an activation
+    /// control at all.</para>
+    /// </summary>
+    private ProductionReadinessCertification CertifyProductionReadiness(
+        IReadOnlyList<ActivationControlDecision> controls, IReadOnlyList<string> productionBlockers)
+    {
+        var byCode = controls.ToDictionary(x => x.Code, StringComparer.Ordinal);
+        var statuses = new List<DeploymentPrerequisiteStatus>();
+
+        foreach (var definition in DeploymentPrerequisiteCatalog.All)
+        {
+            bool satisfied;
+            string detail;
+
+            if (definition.ControlCode is { Length: > 0 } code)
+            {
+                var control = byCode.GetValueOrDefault(code);
+                satisfied = control is { Satisfied: true };
+                detail = control is null
+                    ? $"Activation control '{code}' was not evaluated, so this prerequisite cannot be evidenced."
+                    : control.Satisfied
+                        ? $"Activation control '{code}' passes."
+                        : $"Activation control '{code}' is {control.Disposition}: {control.Detail}";
+            }
+            else if (definition.Key == DeploymentPrerequisiteCatalog.PrivateClamAv)
+            {
+                // Null posture is UNKNOWN, and unknown is not satisfied. A probe nobody wired up
+                // must not be able to certify a deployment it never looked at.
+                var probed = posture?.PrivateMalwareScanning();
+                satisfied = probed?.Satisfied ?? false;
+                detail = probed?.Detail
+                         ?? "The malware-scanning posture probe is not wired up, so this deployment's "
+                         + "scanner cannot be evidenced.";
+            }
+            else
+            {
+                satisfied = false;
+                detail = "This prerequisite has no evidence source and cannot be certified.";
+            }
+
+            statuses.Add(new DeploymentPrerequisiteStatus(
+                definition.Key, definition.Title, definition.ControlCode, satisfied,
+                satisfied ? ActivationControlDispositions.Satisfied : definition.DeferredDisposition,
+                definition.ProductionRequirement, detail));
+        }
+
+        var unmet = statuses.Where(x => !x.Satisfied).Select(x => x.Key).ToArray();
+        var certifiable = productionBlockers.Count == 0 && unmet.Length == 0;
+        return new ProductionReadinessCertification(certifiable, productionBlockers, statuses,
+            certifiable
+                ? "Every activation control is satisfied and every deployment prerequisite is evidenced."
+                : $"Not certifiable: {productionBlockers.Count} activation control(s) and {unmet.Length} "
+                  + "deployment prerequisite(s) are outstanding. A deferral never clears either list.");
     }
 
     public async Task<TenantActivationDecision> ActivateAsync(long tenantId, ClaimsPrincipal actor,
@@ -180,8 +321,21 @@ public sealed class TenantActivationPolicyService(
             tenant.ModifiedOn = DateTime.UtcNow;
             tenant.ModifiedBy = actor.FindFirst("email")?.Value ?? actor.Identity?.Name ?? "platform";
             await db.SaveChangesAsync(ct);
+            // The profile and the deferrals are recorded ON the activation, not merely alongside
+            // it. An activation taken under LOCAL_TEST is a different claim from one taken under
+            // PRODUCTION, and an audit row that did not say which would let the weaker one be read
+            // months later as the stronger one.
             await audit.WriteAsync(actor, "tenant.activate", nameof(Tenant), tenant.Id.ToString(),
-                new { decision.PolicyVersion, decision.EvaluatedAtUtc, Evidence = decision.Controls.SelectMany(x => x.EvidenceReferences).Distinct() },
+                new
+                {
+                    decision.PolicyVersion, decision.EvaluatedAtUtc,
+                    decision.DeploymentProfile,
+                    deferredControls = decision.DeferredControls,
+                    externallyBlockedControls = decision.ExternallyBlockedControls,
+                    productionBlockingControls = decision.ProductionBlockingControls,
+                    productionCertifiable = decision.ProductionReadiness.Certifiable,
+                    Evidence = decision.Controls.SelectMany(x => x.EvidenceReferences).Distinct()
+                },
                 tenant.Id, httpContext, ct);
             await tx.CommitAsync(ct);
             if (tenant.PrimaryBusinessUnitId is long bu) tenantAccess.Evict(bu);

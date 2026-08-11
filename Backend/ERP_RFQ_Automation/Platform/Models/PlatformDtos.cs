@@ -11,6 +11,18 @@ public class PlatformLoginRequest
 
     [Required]
     public string Password { get; set; } = null!;
+
+    /// <summary>
+    /// The opaque "remember this browser" token this browser was handed the last time its owner
+    /// completed an MFA challenge here. Presented on login so an operator who has already proved a
+    /// second factor on this machine today is not challenged again for it.
+    ///
+    /// <para>It is a bearer credential and the server holds only its SHA-256 hash
+    /// (<c>PlatformBrowserTrust</c>). An absent, unknown, expired or revoked value is simply
+    /// ignored — it can never do anything except SKIP a challenge for the user it belongs to, and
+    /// never substitute for the password above.</para>
+    /// </summary>
+    public string? BrowserTrustToken { get; set; }
 }
 
 public class PlatformLoginResponse
@@ -36,6 +48,27 @@ public class PlatformLoginResponse
     /// which one to open. The client routes on this to the enrollment screen.</para>
     /// </summary>
     public bool MfaEnrollmentRequired { get; set; }
+
+    /// <summary>
+    /// True when this session was issued WITHOUT a second factor because the server-authoritative
+    /// platform MFA policy currently permits it (OPTIONAL or DISABLED_TEST_ONLY). It is a REPORT of
+    /// a backend decision, never an instruction to the backend: the console renders a banner from
+    /// it, and every authorization decision is made again on the server regardless of what the
+    /// console does with it.
+    /// </summary>
+    public bool MfaEnforcementRelaxed { get; set; }
+
+    /// <summary>The raw "remember this browser" token, present exactly once — on the response to the
+    /// challenge that created it. It is never stored server-side in this form and never returned
+    /// again.</summary>
+    public string? BrowserTrustToken { get; set; }
+
+    public DateTime? BrowserTrustExpiresAtUtc { get; set; }
+
+    /// <summary>True when this session's second factor came from a browser that had already been
+    /// challenged inside its trust window, rather than from a code entered now.</summary>
+    public bool BrowserTrustUsed { get; set; }
+
     [System.Text.Json.Serialization.JsonIgnore]
     public bool RecoveryCodeUsed { get; set; }
 }
@@ -46,6 +79,10 @@ public sealed class PlatformMfaChallengeRequest
     public Guid ChallengeId { get; set; }
     public string? TotpCode { get; set; }
     public string? RecoveryCode { get; set; }
+
+    /// <summary>Issue a browser-trust token alongside the session, so ordinary navigation on this
+    /// machine costs one challenge for the configured window instead of one per session.</summary>
+    public bool RememberBrowser { get; set; }
 }
 
 public sealed record PlatformMfaStatusResponse(bool Enabled, DateTime? EnabledAtUtc, int RecoveryCodesRemaining);
@@ -144,6 +181,38 @@ public class TenantSummaryDto
     public string? BillingContactEmail { get; set; }
     public string? BillingAddress { get; set; }
     public string? AccountOwnerEmail { get; set; }
+
+    // Deployment profile. On the LIST payload as well as the detail payload, deliberately: a
+    // tenant on a relaxed profile is a tenant whose activation decision means something weaker
+    // than the others on the same screen, and that has to be legible without opening it.
+    /// <summary>One of <see cref="TenantDeploymentProfiles"/>: PRODUCTION, LOCAL_TEST or DEMO.</summary>
+    public string DeploymentProfile { get; set; } = TenantDeploymentProfiles.Production;
+    public string? DeploymentProfileReason { get; set; }
+    public string? DeploymentProfileApprovedBy { get; set; }
+    public DateTime? DeploymentProfileApprovedOn { get; set; }
+}
+
+/// <summary>
+/// Moves a tenant between deployment profiles.
+///
+/// <para>Its own request and its own Owner-gated route rather than a field on
+/// <see cref="UpdateTenantProfileRequest"/>, for the same reason the data region is: the profile
+/// form is Owner-or-SupportAdmin and describes the customer, while this decides which production
+/// controls that customer's workspace is allowed to defer. Putting it on the same form would have
+/// made a control-relaxation decision available to whoever was correcting a postcode.</para>
+/// </summary>
+public sealed class SetTenantDeploymentProfileRequest
+{
+    /// <summary>One of <see cref="TenantDeploymentProfiles"/>. Unrecognised values are refused.</summary>
+    [Required, StringLength(16)]
+    public string Profile { get; set; } = null!;
+
+    /// <summary>
+    /// Required for every profile other than PRODUCTION, and audited. Returning to PRODUCTION
+    /// needs no justification — tightening a gate never does.
+    /// </summary>
+    [StringLength(1000)]
+    public string? Reason { get; set; }
 }
 
 /// <summary>

@@ -37,6 +37,10 @@ export const platformKeys = {
   provisioningDrafts: () => [...platformKeys.all, 'provisioning', 'drafts'] as const,
   provisioningDraft: (id: string) => [...platformKeys.all, 'provisioning', 'draft', id] as const,
   slugCheck: (slug: string) => [...platformKeys.all, 'provisioning', 'slug-check', slug] as const,
+  // Keyed per tenant because the whole provisioning tab — status, classification, recovery
+  // safety and both blocker lists — is driven by this one payload.
+  provisioningDiagnostics: (tenantId: string) =>
+    [...platformKeys.all, 'provisioning', 'diagnostics', tenantId] as const,
 
   // Offboarding. Keyed per tenant because every button on the lifecycle tab is driven by
   // the server's `can*` flags in this one payload.
@@ -56,6 +60,12 @@ export const platformKeys = {
   tenantDeletionCertification: (tenantId: string) =>
     [...platformKeys.all, 'tenant', tenantId, 'deletion-certification'] as const,
   platformMfa: () => [...platformKeys.all, 'auth', 'mfa'] as const,
+
+  // Platform MFA enforcement. The effective read is separate from the Owner read model
+  // because the chrome polls it on every screen to decide whether a banner is owed, while
+  // the full model — operator counts, available modes — is only wanted on one page.
+  platformAuthPolicy: () => [...platformKeys.all, 'auth', 'policy'] as const,
+  platformAuthPolicyEffective: () => [...platformKeys.all, 'auth', 'policy', 'effective'] as const,
 
   supportTickets: (filter?: unknown) => [...platformKeys.all, 'support', 'tickets', filter ?? null] as const,
   supportTicket: (id: string) => [...platformKeys.all, 'support', 'ticket', id] as const,

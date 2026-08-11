@@ -128,8 +128,32 @@ export interface TenantCommercialTerms {
   dataRegion: string | null;
 }
 
+/**
+ * What a tenant's deployment is FOR, and therefore which production prerequisites its
+ * activation decision may record as deferred.
+ *
+ * `PRODUCTION` is the default and the strict one: nothing is deferrable on it, ever. The
+ * console never decides this — it renders what the server says, and the server is the only
+ * thing that can change it.
+ */
+export type TenantDeploymentProfile = 'PRODUCTION' | 'LOCAL_TEST' | 'DEMO';
+
+export const TENANT_DEPLOYMENT_PROFILES: TenantDeploymentProfile[] = ['PRODUCTION', 'LOCAL_TEST', 'DEMO'];
+
+/** Set through the Owner-gated endpoint, which is the only writer of the approval fields. */
+export interface SetTenantDeploymentProfileInput {
+  profile: TenantDeploymentProfile;
+  /** Required for anything other than PRODUCTION; at least 15 characters. */
+  reason: string | null;
+}
+
 export interface Tenant extends TenantCompanyProfile, TenantCommercialTerms {
   id: string;
+  deploymentProfile: TenantDeploymentProfile;
+  deploymentProfileReason: string | null;
+  /** Absent on a DEMO tenant means UNAPPROVED: the server defers nothing for it. */
+  deploymentProfileApprovedBy: string | null;
+  deploymentProfileApprovedOn: string | null;
   name: string;
   slug: string;
   planId: string | null;
@@ -292,15 +316,54 @@ export interface VerifyTenantDataAssetInput {
   reason: string;
 }
 
+/**
+ * What an unsatisfied control MEANS for this tenant's deployment profile. It never says
+ * anything about whether the control passed — `satisfied` is still the strict answer.
+ */
+export type ActivationControlDisposition =
+  | 'SATISFIED'
+  | 'BLOCKING'
+  /** Deferred: something this side could stand up and has not. Still a production blocker. */
+  | 'DEFERRED'
+  /** Deferred: the prerequisite belongs to a third party. Still a production blocker. */
+  | 'EXTERNALLY_BLOCKED';
+
 export interface ActivationControlDecision {
   code: string;
   satisfied: boolean;
   detail: string;
   evidenceReferences: string[];
+  disposition: ActivationControlDisposition;
+  /** True for every unsatisfied control, in every profile. A deferral never clears it. */
+  blocksProduction: boolean;
+  /** The deployment-prerequisite key that explains a deferral, when there is one. */
+  deferralKey: string | null;
+  /** What production actually needs. Rendered verbatim next to a deferred control. */
+  productionRequirement: string | null;
+}
+
+export interface DeploymentPrerequisiteStatus {
+  key: string;
+  title: string;
+  /** Null when the prerequisite governs no activation control — it is answered for here only. */
+  controlCode: string | null;
+  satisfied: boolean;
+  disposition: ActivationControlDisposition;
+  productionRequirement: string;
+  detail: string;
+}
+
+export interface ProductionReadinessCertification {
+  /** True only when every control passes AND every deployment prerequisite is evidenced. */
+  certifiable: boolean;
+  blockingControls: string[];
+  prerequisites: DeploymentPrerequisiteStatus[];
+  detail: string;
 }
 
 export interface TenantActivationDecision {
   tenantId: string;
+  /** Whether the tenant may be activated UNDER ITS OWN PROFILE. Never a production claim. */
   ready: boolean;
   commercialState: string;
   accessState: string;
@@ -311,6 +374,13 @@ export interface TenantActivationDecision {
   warnings: string[];
   policyVersion: string;
   evaluatedAtUtc: string;
+  deploymentProfile: TenantDeploymentProfile;
+  deploymentProfileDetail: string;
+  /** Every unsatisfied control, regardless of profile. */
+  productionBlockingControls: string[];
+  deferredControls: string[];
+  externallyBlockedControls: string[];
+  productionReadiness: ProductionReadinessCertification;
 }
 
 export interface RecordActivationControlEvidenceInput {
@@ -911,6 +981,86 @@ export interface SubmitProvisioningResult {
   generatedPassword: string | null;
   /** Explains a null password or activation link so it never reads as a failure. */
   secretNotice: string | null;
+}
+
+// --- Provisioning diagnostics ------------------------------------------------
+//
+// The read model that replaced "Provisioning failed." Every field below was already
+// persisted and none of it reached a human, which is why one sentence had to stand in
+// for four unrelated causes with four different owners.
+
+/** Whose problem this is — the only question that decides who has to act. */
+export type ProvisioningIssueClassification =
+  /** The submitted request has to change. No retry helps. */
+  | 'CUSTOMER_INPUT'
+  /** This deployment is wired wrong: a missing grant, a worker that is switched off. */
+  | 'PLATFORM_CONFIGURATION'
+  /** Something outside this process refused or never answered. */
+  | 'EXTERNAL_DEPENDENCY'
+  /** Unclassified and non-terminal. Retrying is the correct first move. */
+  | 'RETRYABLE_SYSTEM_FAILURE';
+
+export interface ProvisioningStepDiagnostic {
+  step: string;
+  label: string;
+  ordinal: number;
+  status: ProvisioningStepStatus;
+  attemptCount: number;
+  startedOn: string | null;
+  completedOn: string | null;
+  durationMs: number | null;
+  failureCode: string | null;
+  failureReason: string | null;
+}
+
+export interface ProvisioningRecoveryAction {
+  action: 'resume' | 'retry-step';
+  step: string | null;
+  /** False when the server would refuse outright. The console must say why, never just disable. */
+  available: boolean;
+  /** False when the server would accept it but it cannot succeed or would not help. */
+  safe: boolean;
+  detail: string;
+}
+
+export interface ProvisioningBlocker {
+  code: string;
+  scope: TenantDeploymentProfile;
+  disposition: ActivationControlDisposition;
+  detail: string;
+  productionRequirement: string | null;
+}
+
+export interface TenantProvisioningDiagnostics {
+  tenantId: string | null;
+  tenantName: string | null;
+  tenantStatus: string | null;
+  deploymentProfile: TenantDeploymentProfile;
+  executionId: string | null;
+  /** An execution state, or `NotStarted` when the tenant has no durable execution at all. */
+  status: ProvisioningExecutionState | 'NotStarted';
+  currentStep: string | null;
+  steps: ProvisioningStepDiagnostic[];
+  completedSteps: string[];
+  failedStep: ProvisioningStepDiagnostic | null;
+  failureReason: string | null;
+  failureCode: string | null;
+  /** The one thing that has to exist before this can succeed, named. */
+  missingPrerequisite: string | null;
+  classification: ProvisioningIssueClassification;
+  classificationDetail: string;
+  correlationId: string | null;
+  attemptCount: number;
+  completedStepCount: number;
+  totalStepCount: number;
+  startedOn: string | null;
+  completedOn: string | null;
+  recoveryActions: ProvisioningRecoveryAction[];
+  productionBlockers: ProvisioningBlocker[];
+  localTestBlockers: ProvisioningBlocker[];
+  /** Why the two lists are empty for a reason other than "there are none". */
+  blockersUnavailableReason: string | null;
+  evaluatedAtUtc: string;
 }
 
 export interface SlugAvailability {
@@ -1808,4 +1958,65 @@ export interface PlatformConnectionTestInput {
   tls?: 'None' | 'StartTls' | 'Implicit';
   username?: string;
   password?: string;
+}
+
+// --- platform authentication policy (Platform Admin → Security → Platform Authentication) ---
+
+/** Mirrors `PlatformMfaMode` on the server. Screaming-snake on both sides on purpose: the
+ *  value is persisted, typed by an operator into a confirmation box, and read out of an
+ *  audit row years later, so the strings must be character-identical everywhere. */
+export type PlatformMfaMode = 'REQUIRED' | 'OPTIONAL' | 'DISABLED_TEST_ONLY';
+
+export type PlatformMfaEnvironmentClass = 'Production' | 'StagingOrUat' | 'LocalOrTest';
+
+/**
+ * The narrow read every authenticated operator may make, used to decide whether the console
+ * owes a persistent banner and whether the MFA enrollment gate applies.
+ *
+ * It is a REPORT of a server decision. Nothing the console does with it changes what the API
+ * allows — every `/api/platform/*` route re-decides on the server from the same policy row.
+ */
+export interface PlatformEffectiveMfaPolicy {
+  mode: PlatformMfaMode;
+  /** What the row says, which differs from `mode` exactly when a bypass has expired. */
+  declaredMode: PlatformMfaMode;
+  environmentClass: PlatformMfaEnvironmentClass;
+  environmentName: string;
+  effectiveFromUtc: string;
+  expiresAtUtc: string | null;
+  /** No second factor is enforced anywhere. This is what the banner is owed for. */
+  enforcementDisabled: boolean;
+  /** A password-only session reaches the privileged plane — OPTIONAL as well as disabled. */
+  passwordOnlySessionsPermitted: boolean;
+  bypassExpired: boolean;
+  changedBy: string | null;
+  version: number;
+}
+
+/** The Owner read model behind the Platform Authentication screen. */
+export interface PlatformMfaPolicy extends PlatformEffectiveMfaPolicy {
+  isolatedTestInfrastructure: boolean;
+  changeReason: string | null;
+  updatedAtUtc: string | null;
+  /** Operators with an enrolled second factor — who a change actually affects. */
+  enrolledOperatorCount: number;
+  activeOperatorCount: number;
+  activeMfaBoundSessionCount: number;
+  activeBrowserTrustCount: number;
+  /** Decided by the BACKEND from its own environment classification. The console renders
+   *  only these; anything else is refused server-side regardless of what it sends. */
+  availableModes: PlatformMfaMode[];
+  confirmationPhrases: Record<string, string>;
+  maxBypassHours: number;
+  minimumReasonLength: number;
+  browserTrustHours: number;
+}
+
+export interface ChangePlatformMfaPolicyInput {
+  mode: PlatformMfaMode;
+  currentPassword: string;
+  reason: string;
+  expiresAtUtc?: string | null;
+  confirmation: string;
+  expectedVersion?: number | null;
 }

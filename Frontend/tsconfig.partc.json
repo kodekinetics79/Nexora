@@ -1,0 +1,27 @@
+{
+  // TEST-ONLY. Scoped type-check for the PART C harness.
+  //
+  // The root tsconfig includes only `src`, so nothing under `e2e/` has ever been type-checked —
+  // which is why 35 spec files there import `node:crypto` against a workspace that has no
+  // @types/node. This config type-checks the PART C files alone, so a rename in
+  // `src/platform` that breaks the harness is caught by `npx tsc -p tsconfig.partc.json
+  // --noEmit` rather than at minute nine of a watched Chrome run.
+  //
+  // `types: []` drops `vite/client` (irrelevant here) and, with no @types/node in the tree,
+  // is why the harness uses Web Crypto and env values instead of `node:crypto` and `node:fs`.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": [],
+    "noEmit": true,
+    "allowImportingTsExtensions": true
+  },
+  "include": [
+    "e2e/support/partc-ambient.d.ts",
+    "e2e/partc-governed-recovery.spec.ts",
+    "e2e/partc-synthetic-tenant.seed.ts",
+    "e2e/support/partc-control-plane.ts",
+    "e2e/support/partc-step-ledger.ts",
+    "playwright.partc-governed-recovery.config.ts",
+    "playwright.partc-seed.config.ts"
+  ]
+}

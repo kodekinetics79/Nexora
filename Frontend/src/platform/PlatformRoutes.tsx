@@ -19,6 +19,7 @@ const BillingPage = lazy(() => import('./pages/BillingPage'));
 const SupportPage = lazy(() => import('./pages/SupportPage'));
 const SecurityPage = lazy(() => import('./pages/SecurityPage'));
 const EmailSettingsPage = lazy(() => import('./pages/EmailSettingsPage'));
+const PlatformAuthenticationPage = lazy(() => import('./pages/PlatformAuthenticationPage'));
 
 const PlatformLoader = () => (
   <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '60vh', width: '100%' }}>
@@ -56,6 +57,10 @@ export default function PlatformRoutes() {
             <Route path="billing" element={<BillingPage />} />
             <Route path="support" element={<SupportPage />} />
             <Route path="security" element={<SecurityPage />} />
+            {/* Nested under security deliberately: this is Platform Admin → Security →
+                Platform Authentication, and the URL should say so. SecurityPage stays the
+                per-operator enrollment/session view; this is the plane-wide policy. */}
+            <Route path="security/authentication" element={<PlatformAuthenticationPage />} />
             <Route path="email" element={<EmailSettingsPage />} />
             <Route path="audit" element={<AuditLogPage />} />
             {/*

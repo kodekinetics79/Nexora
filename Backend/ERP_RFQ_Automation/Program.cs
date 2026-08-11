@@ -182,6 +182,15 @@ builder.Services.AddSingleton<IFileInspectionService>(services =>
 });
 builder.Services.AddScoped<ExtractionDeadLetterService>();
 
+// Server-authoritative platform MFA enforcement (Platform/Auth). FAIL FAST: this line reads and
+// validates Platform:Mfa:* and throws before the host is built if a production deployment has
+// claimed isolated-test-infrastructure status or configured a bound outside its permitted range —
+// the same contract as SecretProtection.CreateFromConfiguration above and
+// UnifiedDocumentIngestionGuard.Enforce below. Registered BEFORE the platform auth service, which
+// takes the policy provider and the browser-trust ledger as optional dependencies and treats their
+// absence as "enforce".
+builder.Services.AddPlatformMfaPolicy(builder.Configuration, builder.Environment);
+
 // Platform-Owner control-plane services (ADR-0005)
 builder.Services.AddScoped<ERP_RFQ_Automation.Platform.Auth.IPlatformAuthService, ERP_RFQ_Automation.Platform.Auth.PlatformAuthService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.Platform.Services.IPlatformAuditService, ERP_RFQ_Automation.Platform.Services.PlatformAuditService>();

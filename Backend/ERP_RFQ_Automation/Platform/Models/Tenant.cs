@@ -171,6 +171,109 @@ public class Tenant
 
     /// <summary>Internal owner of this account (the operator's CSM/AE email), for escalation.</summary>
     public string? AccountOwnerEmail { get; set; }
+
+    // ==== Deployment profile =================================================================
+    // What this tenant's deployment is FOR, and therefore which production prerequisites it is
+    // entitled to defer. Server-authoritative and persisted, deliberately: the alternative that
+    // was rejected is inferring "this looks like a test tenant" from the hostname, the slug or
+    // ASPNETCORE_ENVIRONMENT, all of which are properties of the PROCESS rather than of the
+    // customer record, and all of which would let a production tenant inherit a relaxed gate
+    // because somebody ran the API with the wrong environment variable.
+
+    /// <summary>
+    /// Defaults to <see cref="TenantDeploymentProfile.Production"/>. The default is the strict
+    /// one on purpose: a tenant nobody has classified is a tenant that fails closed.
+    /// </summary>
+    public TenantDeploymentProfile DeploymentProfile { get; set; } = TenantDeploymentProfile.Production;
+
+    /// <summary>
+    /// Why this tenant is not on the production profile. Required by the API for every profile
+    /// other than <see cref="TenantDeploymentProfile.Production"/>, for the same reason
+    /// <see cref="BillingModeReason"/> is required for every mode other than Billable: a relaxed
+    /// gate is always a decision somebody signed for.
+    /// </summary>
+    public string? DeploymentProfileReason { get; set; }
+
+    /// <summary>
+    /// The Owner who approved the non-production profile, by email. Absence is what makes a DEMO
+    /// tenant UNAPPROVED — and an unapproved DEMO defers nothing and fails closed exactly as
+    /// PRODUCTION does, so a row edited directly in the database cannot buy itself a deferral.
+    /// </summary>
+    public string? DeploymentProfileApprovedBy { get; set; }
+
+    public DateTime? DeploymentProfileApprovedOn { get; set; }
+}
+
+/// <summary>
+/// What a tenant's deployment is for. Decides which production prerequisites may be recorded as
+/// DEFERRED or EXTERNALLY_BLOCKED instead of failing activation outright.
+///
+/// <para><b>This never weakens the production gate.</b> A
+/// <see cref="Production"/> tenant is evaluated exactly as it was before this enum existed: every
+/// unsatisfied control blocks. The other two profiles change nothing about what is CHECKED or how
+/// a control is decided — only about whether a named, catalogued external prerequisite is allowed
+/// to stand in the way of a workspace that exists to be tested. In every profile the deferred
+/// prerequisites stay visible as production blockers and make production-readiness certification
+/// impossible.</para>
+///
+/// <para>Stored as its NAME, like <see cref="TenantBillingMode"/>: an activation decision recorded
+/// today has to remain explainable years later, and reordering this enum must never reclassify a
+/// historical LOCAL_TEST activation as a PRODUCTION one.</para>
+/// </summary>
+public enum TenantDeploymentProfile
+{
+    /// <summary>A real customer. Every control is a hard gate. The default.</summary>
+    Production = 0,
+
+    /// <summary>
+    /// A workspace stood up to exercise the product on a laptop or a CI runner. Nobody's data is
+    /// in it, no invoice is printed from it, and the third-party estate a real customer brings
+    /// (their storage, their ERP, their identity provider, their tax authority) does not exist.
+    /// </summary>
+    LocalTest = 1,
+
+    /// <summary>
+    /// A sales or training workspace shown to real people. Deferral applies only once an Owner
+    /// has recorded an approval — see <see cref="Tenant.DeploymentProfileApprovedBy"/>.
+    /// </summary>
+    Demo = 2
+}
+
+/// <summary>
+/// Wire vocabulary for <see cref="TenantDeploymentProfile"/>. SCREAMING_SNAKE on the wire matches
+/// the vocabulary the activation decision already speaks (<c>PROSPECT</c>, <c>RESTRICTED</c>,
+/// <c>PURGED</c>), so a console reading one payload never has to switch conventions halfway down it.
+/// </summary>
+public static class TenantDeploymentProfiles
+{
+    public const string Production = "PRODUCTION";
+    public const string LocalTest = "LOCAL_TEST";
+    public const string Demo = "DEMO";
+
+    public static string ToWire(TenantDeploymentProfile profile) => profile switch
+    {
+        TenantDeploymentProfile.LocalTest => LocalTest,
+        TenantDeploymentProfile.Demo => Demo,
+        _ => Production
+    };
+
+    /// <summary>
+    /// Parses a wire code. Unrecognised input is REFUSED rather than defaulted, because the two
+    /// plausible defaults are both wrong: defaulting to Production silently ignores an operator's
+    /// request, and defaulting to LocalTest hands out a relaxed gate on a typo.
+    /// </summary>
+    public static bool TryParse(string? value, out TenantDeploymentProfile profile)
+    {
+        switch (value?.Trim().ToUpperInvariant())
+        {
+            case Production: profile = TenantDeploymentProfile.Production; return true;
+            case LocalTest: profile = TenantDeploymentProfile.LocalTest; return true;
+            case Demo: profile = TenantDeploymentProfile.Demo; return true;
+            default: profile = TenantDeploymentProfile.Production; return false;
+        }
+    }
+
+    public static IReadOnlyList<string> All => [Production, LocalTest, Demo];
 }
 
 /// <summary>

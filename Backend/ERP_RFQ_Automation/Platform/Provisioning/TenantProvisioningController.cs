@@ -40,17 +40,20 @@ public class TenantProvisioningController : ControllerBase
     private readonly IProvisioningDraftService _drafts;
     private readonly IPlatformAuditService _audit;
     private readonly ILogger<TenantProvisioningController> _logger;
+    private readonly IProvisioningDiagnosticsService _diagnostics;
 
     public TenantProvisioningController(
         ITenantProvisioningService provisioning,
         IProvisioningDraftService drafts,
         IPlatformAuditService audit,
-        ILogger<TenantProvisioningController> logger)
+        ILogger<TenantProvisioningController> logger,
+        IProvisioningDiagnosticsService diagnostics)
     {
         _provisioning = provisioning;
         _drafts = drafts;
         _audit = audit;
         _logger = logger;
+        _diagnostics = diagnostics;
     }
 
     // ---- submit ---------------------------------------------------------------------------
@@ -213,6 +216,38 @@ public class TenantProvisioningController : ControllerBase
 
         var executions = await _provisioning.ListAsync(wanted, take, ct);
         return Ok(executions.Select(ProvisioningProjection.ToDto));
+    }
+
+    // ---- diagnose -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Why a tenant is not finished, in the four terms somebody can act on: what failed, whose
+    /// problem it is, what is missing, and what may safely be pressed.
+    ///
+    /// <para><b>Read-only, and therefore only PlatformScope.</b> Diagnosing a broken tenant must be
+    /// available to whoever is on call, from a session with no mutation authority, without a reason
+    /// prompt — otherwise the first thing somebody does under pressure is the thing that changes
+    /// state. Every mutation this screen leads to keeps its own TenantAdmin gate.</para>
+    /// </summary>
+    [HttpGet("tenants/{tenantId:long}/diagnostics")]
+    public async Task<ActionResult<TenantProvisioningDiagnostics>> Diagnose(
+        long tenantId, CancellationToken ct)
+    {
+        var diagnostics = await _diagnostics.ForTenantAsync(tenantId, ct);
+        return diagnostics is null ? NotFound() : Ok(diagnostics);
+    }
+
+    /// <summary>
+    /// The same read model keyed by execution, so an attempt that failed BEFORE it created a
+    /// tenant row is still diagnosable. That case has no tenant page to open, and it is exactly
+    /// the case the old "Provisioning failed." toast was most useless for.
+    /// </summary>
+    [HttpGet("executions/{id:long}/diagnostics")]
+    public async Task<ActionResult<TenantProvisioningDiagnostics>> DiagnoseExecution(
+        long id, CancellationToken ct)
+    {
+        var diagnostics = await _diagnostics.ForExecutionAsync(id, ct);
+        return diagnostics is null ? NotFound() : Ok(diagnostics);
     }
 
     // ---- repair ---------------------------------------------------------------------------

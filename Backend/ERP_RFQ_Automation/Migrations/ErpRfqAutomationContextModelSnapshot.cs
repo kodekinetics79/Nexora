@@ -17588,6 +17588,114 @@ namespace ERP_RFQ_Automation.Migrations
                         });
                 });
 
+            modelBuilder.Entity("ERP_RFQ_Automation.Platform.Auth.PlatformBrowserTrust", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<DateTime>("ExpiresAtUtc")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("Label")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<DateTime?>("LastUsedAtUtc")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<long>("PlatformUserId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("RevocationReason")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<DateTime?>("RevokedAtUtc")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("RevokedBy")
+                        .HasMaxLength(320)
+                        .HasColumnType("character varying(320)");
+
+                    b.Property<string>("TokenHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character(64)")
+                        .IsFixedLength();
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TokenHash")
+                        .IsUnique();
+
+                    b.HasIndex("PlatformUserId", "RevokedAtUtc", "ExpiresAtUtc");
+
+                    b.ToTable("PlatformBrowserTrusts", "platform");
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Platform.Auth.PlatformMfaPolicy", b =>
+                {
+                    b.Property<long>("Id")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("ChangeReason")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
+                    b.Property<string>("ChangedBy")
+                        .HasMaxLength(320)
+                        .HasColumnType("character varying(320)");
+
+                    b.Property<long?>("ChangedByPlatformUserId")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<DateTime>("EffectiveFromUtc")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("EnvironmentClass")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasDefaultValue("Production");
+
+                    b.Property<DateTime?>("ExpiresAtUtc")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<DateTime?>("ExpiryRecordedAtUtc")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("Mode")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasDefaultValue("REQUIRED");
+
+                    b.Property<DateTime>("UpdatedAtUtc")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .HasColumnType("bigint");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("PlatformMfaPolicies", "platform", t =>
+                        {
+                            t.HasCheckConstraint("CK_PlatformMfaPolicies_Singleton", "\"Id\" = 1");
+                        });
+                });
+
             modelBuilder.Entity("ERP_RFQ_Automation.Platform.DataAssets.TenantDataAsset", b =>
                 {
                     b.Property<long>("Id")
@@ -18413,6 +18521,9 @@ namespace ERP_RFQ_Automation.Migrations
 
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
 
+                    b.Property<long?>("BrowserTrustId")
+                        .HasColumnType("bigint");
+
                     b.Property<DateTime>("ExpiresAtUtc")
                         .HasColumnType("timestamp without time zone");
 
@@ -18423,6 +18534,9 @@ namespace ERP_RFQ_Automation.Migrations
                         .IsRequired()
                         .HasMaxLength(64)
                         .HasColumnType("character varying(64)");
+
+                    b.Property<DateTime?>("LastPasswordReauthAtUtc")
+                        .HasColumnType("timestamp without time zone");
 
                     b.Property<DateTime?>("MfaAuthenticatedAtUtc")
                         .HasColumnType("timestamp without time zone");
@@ -18585,6 +18699,24 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<string>("DataRegion")
                         .HasMaxLength(32)
                         .HasColumnType("character varying(32)");
+
+                    b.Property<string>("DeploymentProfile")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasDefaultValue("Production");
+
+                    b.Property<string>("DeploymentProfileApprovedBy")
+                        .HasMaxLength(320)
+                        .HasColumnType("character varying(320)");
+
+                    b.Property<DateTime?>("DeploymentProfileApprovedOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("DeploymentProfileReason")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
 
                     b.Property<string>("Industry")
                         .HasMaxLength(128)
@@ -19021,6 +19153,20 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<long?>("InvitationId")
                         .HasColumnType("bigint");
 
+                    b.Property<string>("LastRecoveredBy")
+                        .HasMaxLength(320)
+                        .HasColumnType("character varying(320)");
+
+                    b.Property<DateTime?>("LastRecoveredOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("LastRecoveryReason")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
+                    b.Property<DateTime?>("LeaseHeartbeatAt")
+                        .HasColumnType("timestamp without time zone");
+
                     b.Property<string>("LeaseOwner")
                         .HasMaxLength(200)
                         .HasColumnType("character varying(200)");
@@ -19038,6 +19184,9 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<long?>("ProvisionedBusinessUnitId")
                         .HasColumnType("bigint");
+
+                    b.Property<int>("RecoveredAttemptCount")
+                        .HasColumnType("integer");
 
                     b.Property<string>("RequestFingerprint")
                         .IsRequired()
@@ -25953,6 +26102,17 @@ namespace ERP_RFQ_Automation.Migrations
                         .IsRequired();
 
                     b.Navigation("BusinessUnit");
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Platform.Auth.PlatformBrowserTrust", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Platform.Models.PlatformUser", "PlatformUser")
+                        .WithMany()
+                        .HasForeignKey("PlatformUserId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("PlatformUser");
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.Platform.DataAssets.TenantDataAsset", b =>

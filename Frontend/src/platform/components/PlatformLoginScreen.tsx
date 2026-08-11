@@ -3,7 +3,9 @@ import {
   Alert,
   Box,
   Button,
+  Checkbox,
   CircularProgress,
+  FormControlLabel,
   IconButton,
   InputAdornment,
   Paper,
@@ -36,6 +38,7 @@ export default function PlatformLoginScreen() {
   const [error, setError] = useState<string | null>(null);
   const [challenge, setChallenge] = useState<PlatformMfaChallenge | null>(null);
   const [useRecoveryCode, setUseRecoveryCode] = useState(false);
+  const [rememberBrowser, setRememberBrowser] = useState(false);
   const [verificationCode, setVerificationCode] = useState('');
 
   const handleSubmit = async (e: FormEvent) => {
@@ -69,7 +72,9 @@ export default function PlatformLoginScreen() {
     try {
       await platformCompleteMfa(
         challenge,
-        useRecoveryCode ? { recoveryCode: verificationCode.trim() } : { totpCode: verificationCode.trim() },
+        useRecoveryCode
+          ? { recoveryCode: verificationCode.trim(), rememberBrowser }
+          : { totpCode: verificationCode.trim(), rememberBrowser },
       );
     } catch (err: unknown) {
       setError(platformErrorMessage(err, 'The verification code was refused. Try again before the challenge expires.'));
@@ -163,6 +168,20 @@ export default function PlatformLoginScreen() {
               >
                 {useRecoveryCode ? 'Use authenticator code instead' : 'Use a recovery code'}
               </Button>
+              {/* One challenge per trusted browser per window, instead of one per session. The
+                  alternative — challenging every 30 minutes for a whole working day — does not make
+                  an operator safer; it teaches them to approve prompts without reading them, which
+                  is the reflex MFA-fatigue attacks are built on. The server bounds the window and
+                  stores only a hash of the token this produces. */}
+              <FormControlLabel
+                control={
+                  <Checkbox
+                    checked={rememberBrowser}
+                    onChange={(event) => setRememberBrowser(event.target.checked)}
+                  />
+                }
+                label="Remember this browser"
+              />
               {error && <Alert severity="error">{error}</Alert>}
               <Button
                 type="submit"

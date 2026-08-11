@@ -316,6 +316,125 @@ public class TenantsController : ControllerBase
     /// </summary>
     private const int MinimumDataRegionReasonLength = 15;
 
+    /// <summary>
+    /// Moves a tenant between deployment profiles, which decides which catalogued production
+    /// prerequisites its activation decision may record as DEFERRED / EXTERNALLY_BLOCKED.
+    ///
+    /// <para><b>Owner-only, and this endpoint is the ONLY way a deferral becomes available.</b>
+    /// <c>DeploymentProfilePolicy</c> requires an approver, an approval instant and a reason before
+    /// a DEMO tenant defers anything, and all three are written here and nowhere else — so a row
+    /// whose profile column was edited by hand buys no relaxation at all. LOCAL_TEST is entitled
+    /// without an approval because there is nothing to relax: a workspace on a laptop has no
+    /// customer, no invoice and no third-party estate.</para>
+    ///
+    /// <para><b>Refused once the tenant is live.</b> A tenant that has left Provisioning was
+    /// activated under a recorded profile, and re-labelling it afterwards would restate the basis
+    /// of a decision that has already been taken and audited — the same defect the data-region
+    /// endpoint refuses. Tightening back to PRODUCTION is always allowed, because tightening never
+    /// invalidates evidence.</para>
+    /// </summary>
+    [HttpPut("{id:long}/deployment-profile")]
+    [Authorize(Policy = PlatformPolicies.Owner)]
+    public async Task<ActionResult<TenantSummaryDto>> SetDeploymentProfile(
+        long id, [FromBody] SetTenantDeploymentProfileRequest request, CancellationToken ct)
+    {
+        if (!ModelState.IsValid) return BadRequest(ModelState);
+
+        if (!TenantDeploymentProfiles.TryParse(request.Profile, out var profile))
+            return BadRequest(new
+            {
+                error = $"'{request.Profile}' is not a deployment profile. Use one of " +
+                        $"{string.Join(", ", TenantDeploymentProfiles.All)}."
+            });
+
+        var reason = Normalize(request.Reason);
+        if (profile != TenantDeploymentProfile.Production
+            && (reason is null || reason.Length < MinimumDataRegionReasonLength))
+            return BadRequest(new
+            {
+                error = $"A reason of at least {MinimumDataRegionReasonLength} characters is required to " +
+                        "move a tenant off the PRODUCTION deployment profile. Deferring a production " +
+                        "control is a decision, and the record has to say on what basis it was taken."
+            });
+
+        var tenant = await _context.Set<Tenant>().IgnoreQueryFilters()
+            .FirstOrDefaultAsync(t => t.Id == id, ct);
+        if (tenant is null) return NotFound();
+
+        if (tenant.Status == TenantStatus.Archived)
+            return Conflict(new
+            {
+                error = "An archived tenant is a retention-controlled record. Restore it before changing " +
+                        "its deployment profile."
+            });
+
+        if (tenant.Status != TenantStatus.Provisioning && profile != TenantDeploymentProfile.Production)
+            return Conflict(new
+            {
+                error = $"This tenant is {tenant.Status} and was activated under the " +
+                        $"{TenantDeploymentProfiles.ToWire(tenant.DeploymentProfile)} profile. A live tenant " +
+                        "cannot be relabelled onto a profile that defers production controls; that would " +
+                        "restate the basis of an activation that has already been taken and audited. " +
+                        "Tightening back to PRODUCTION is always available."
+            });
+
+        var previous = tenant.DeploymentProfile;
+        if (previous == profile)
+            return Conflict(new
+            {
+                error = $"That is already this tenant's deployment profile ({TenantDeploymentProfiles.ToWire(profile)})."
+            });
+
+        var now = DateTime.UtcNow;
+        var actor = User.FindFirst("email")?.Value ?? "platform";
+
+        var strategy = _context.Database.CreateExecutionStrategy();
+        try
+        {
+            await strategy.ExecuteAsync(async () =>
+            {
+                _context.ChangeTracker.Clear();
+                await using var tx = await _context.Database.BeginTransactionAsync(ct);
+
+                var target = await _context.Set<Tenant>().IgnoreQueryFilters()
+                    .FirstOrDefaultAsync(t => t.Id == id, ct)
+                    ?? throw new TenantNotFoundException();
+
+                target.DeploymentProfile = profile;
+                // Cleared on the way back to PRODUCTION rather than left behind: a stale approver
+                // on a production tenant reads as an approval that is still in force.
+                target.DeploymentProfileReason = profile == TenantDeploymentProfile.Production ? null : reason;
+                target.DeploymentProfileApprovedBy = profile == TenantDeploymentProfile.Production ? null : actor;
+                target.DeploymentProfileApprovedOn = profile == TenantDeploymentProfile.Production ? null : now;
+                target.ModifiedOn = now;
+                target.ModifiedBy = actor;
+                await _context.SaveChangesAsync(ct);
+
+                await _audit.WriteAsync(User, "tenant.deployment-profile.set", nameof(Tenant), id.ToString(),
+                    new
+                    {
+                        from = TenantDeploymentProfiles.ToWire(previous),
+                        to = TenantDeploymentProfiles.ToWire(profile),
+                        reason,
+                        deferrablePrerequisites = profile == TenantDeploymentProfile.Production
+                            ? Array.Empty<string>()
+                            : DeploymentPrerequisiteCatalog.All.Select(x => x.Key).ToArray()
+                    },
+                    actAsTenantId: id, httpContext: HttpContext, ct: ct);
+
+                await tx.CommitAsync(ct);
+            });
+        }
+        catch (TenantNotFoundException)
+        {
+            return NotFound();
+        }
+
+        var updated = await _context.Set<Tenant>().IgnoreQueryFilters().AsNoTracking()
+            .Include(t => t.Plan).FirstAsync(t => t.Id == id, ct);
+        return Ok(ToDto(updated));
+    }
+
     // POST /api/platform/tenants  (provision)
     [HttpPost]
     [Authorize(Policy = PlatformPolicies.TenantAdmin)]
@@ -1432,7 +1551,12 @@ public class TenantsController : ControllerBase
         BillingContactName = t.BillingContactName,
         BillingContactEmail = t.BillingContactEmail,
         BillingAddress = t.BillingAddress,
-        AccountOwnerEmail = t.AccountOwnerEmail
+        AccountOwnerEmail = t.AccountOwnerEmail,
+
+        DeploymentProfile = TenantDeploymentProfiles.ToWire(t.DeploymentProfile),
+        DeploymentProfileReason = t.DeploymentProfileReason,
+        DeploymentProfileApprovedBy = t.DeploymentProfileApprovedBy,
+        DeploymentProfileApprovedOn = t.DeploymentProfileApprovedOn
     };
 
     private static TenantAiPolicyDto ToAiPolicyDto(AiProcessingPolicy p) => new()

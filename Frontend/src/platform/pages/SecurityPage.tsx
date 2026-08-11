@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Link as RouterLink } from 'react-router-dom';
 import {
   Box,
   Button,
@@ -79,6 +80,19 @@ export default function SecurityPage() {
         title="Security"
         subtitle="Impersonation sessions and platform-plane failure evidence."
       />
+
+      {/* The plane-wide policy lives on its own screen; this panel is the operator's OWN second
+          factor. Two different things that both say "MFA", so the link says which is which. */}
+      <Paper sx={{ p: 2.5, borderRadius: 3, mb: 2.5 }}>
+        <Typography variant="h6" sx={{ fontWeight: 800, mb: 0.5 }}>Platform Authentication</Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+          Whether a second factor is enforced for every operator on this deployment, who last changed
+          it, and when a relaxation expires. Owner only.
+        </Typography>
+        <Button component={RouterLink} to="/platform/security/authentication" variant="outlined" size="small">
+          Open Platform Authentication
+        </Button>
+      </Paper>
 
       <PlatformMfaPanel />
 

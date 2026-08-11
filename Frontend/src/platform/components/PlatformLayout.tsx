@@ -30,6 +30,7 @@ import {
   ReceiptLong as AuditIcon,
   MarkEmailReadOutlined as EmailIcon,
   Shield as SecurityIcon,
+  LockOutlined as PolicyIcon,
   SupportAgent as SupportIcon,
   Tune as PlansIcon,
   Workspaces as TenantsIcon,
@@ -40,6 +41,7 @@ import { useAppTheme } from '../../context/ThemeContext';
 import { usePlatformAuth } from '../auth/usePlatformAuth';
 import { usePlatformPermissions } from '../auth/usePlatformPermissions';
 import SkipLink, { MAIN_CONTENT_ID } from '../../components/layout/SkipLink';
+import PlatformMfaEnforcementBanner from './PlatformMfaEnforcementBanner';
 
 /** Referenced by the mobile drawer toggle's `aria-controls`. */
 const PLATFORM_NAV_ID = 'platform-sidebar';
@@ -54,6 +56,9 @@ const NAV = [
   { to: '/platform/support', label: 'Support', icon: <SupportIcon />, requiresTenantAdmin: true },
   { to: '/platform/email', label: 'Email', icon: <EmailIcon />, requiresTenantAdmin: false },
   { to: '/platform/security', label: 'Security', icon: <SecurityIcon />, requiresTenantAdmin: false },
+  // Its own entry rather than a link buried on the Security page: an operator looking for
+  // "why is the console not asking me for a code" needs to find it from the chrome.
+  { to: '/platform/security/authentication', label: 'Platform Authentication', icon: <PolicyIcon />, requiresTenantAdmin: false },
   { to: '/platform/audit', label: 'Audit Log', icon: <AuditIcon />, requiresTenantAdmin: false },
 ];
 
@@ -264,6 +269,10 @@ export default function PlatformLayout() {
             </Tooltip>
           </Toolbar>
         </AppBar>
+
+        {/* Above the main region and outside <Outlet />, so it is present on EVERY platform
+            screen for as long as enforcement is off — not only on the page that turned it off. */}
+        <PlatformMfaEnforcementBanner />
 
         <Box
           component="main"

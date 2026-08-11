@@ -288,6 +288,48 @@ public class ProvisioningExecution
     public DateTime? LeaseUntil { get; set; }
 
     /// <summary>
+    /// The last instant the holding runner proved it was still alive: written when the lease is
+    /// taken and re-written at every step boundary, on the SAME journal transaction that renews
+    /// <see cref="LeaseUntil"/>.
+    ///
+    /// <para><b>Why a separate column when <see cref="LeaseUntil"/> already moves.</b>
+    /// <c>LeaseUntil</c> is a deadline derived from configuration, so "how long has this been
+    /// quiet?" cannot be read off it without also knowing which <c>LeaseDuration</c> was in force
+    /// when it was written — and that value is editable at runtime through
+    /// <c>IOptionsMonitor</c>. A recovery decision that hinges on a number somebody may have
+    /// changed since is not evidence. This column is an OBSERVATION: a runner was demonstrably
+    /// executing at this instant.</para>
+    ///
+    /// <para><b>Its resolution is one step, not one second.</b> The heartbeat is written between
+    /// steps rather than by a timer, so a runner inside a long step looks silent for the length of
+    /// that step. That is why the staleness rule (<see cref="ProvisioningLeaseStaleness"/>)
+    /// demands BOTH a lapsed lease and a heartbeat older than a grace that can never be shorter
+    /// than the configured lease.</para>
+    /// </summary>
+    public DateTime? LeaseHeartbeatAt { get; set; }
+
+    /// <summary>
+    /// How many times ownership of this execution has been taken away from an abandoned attempt
+    /// by <c>IProvisioningLeaseRecovery</c>. Distinct from <see cref="AttemptCount"/>: an
+    /// execution on its fourth attempt is ordinary, and an execution on its fourth FORCED recovery
+    /// is a runner that keeps dying in the same place, which is a different problem with a
+    /// different fix.
+    /// </summary>
+    public int RecoveredAttemptCount { get; set; }
+
+    /// <summary>When ownership was last force-recovered.</summary>
+    public DateTime? LastRecoveredOn { get; set; }
+
+    /// <summary>Who recovered it, by email. Recovery is a privileged act and is never anonymous.</summary>
+    public string? LastRecoveredBy { get; set; }
+
+    /// <summary>
+    /// Why. Demanded rather than optional, and kept on the row as well as in the audit log — the
+    /// operator who finds this execution next is reading the execution, not the audit trail.
+    /// </summary>
+    public string? LastRecoveryReason { get; set; }
+
+    /// <summary>
     /// Optimistic concurrency over the whole row. The lease is the coarse guard; this stops the
     /// finer race where a runner and an operator's cancel land on the row in the same instant.
     /// </summary>
@@ -307,6 +349,19 @@ public class ProvisioningExecution
     public bool IsLeasedAt(DateTime utcNow)
         => State == ProvisioningExecutionState.Running
            && LeaseUntil is { } until && until > utcNow;
+
+    /// <summary>
+    /// The most recent instant at which SOMETHING is known to have been happening to this
+    /// execution, in descending order of how directly it evidences a live runner.
+    ///
+    /// <para><see cref="LeaseHeartbeatAt"/> first, because it is the only value written for the
+    /// express purpose of saying "still here". <see cref="LeaseUntil"/> next, so rows written
+    /// before the heartbeat column existed are still assessable rather than instantly stale — a
+    /// backfilled null must never read as "abandoned since 1970". Then the attempt's start, then
+    /// the row's creation, so the fallback chain always terminates on a non-null column.</para>
+    /// </summary>
+    public DateTime LastProgressAt
+        => LeaseHeartbeatAt ?? LeaseUntil ?? StartedOn ?? CreatedOn;
 }
 
 /// <summary>

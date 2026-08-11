@@ -32,7 +32,20 @@ const activationBlocked: TenantActivationDecision = {
   controls: [{
     code: 'security.privileged-mfa-policy', satisfied: false,
     detail: 'Owner-approved privileged MFA evidence is required.', evidenceReferences: [],
+    disposition: 'BLOCKING', blocksProduction: true, deferralKey: null, productionRequirement: null,
   }],
+  // A PRODUCTION tenant: nothing is deferrable, so blocking and production-blocking agree.
+  deploymentProfile: 'PRODUCTION',
+  deploymentProfileDetail: 'PRODUCTION: every activation control is a hard gate and nothing is deferrable.',
+  productionBlockingControls: ['security.privileged-mfa-policy'],
+  deferredControls: [],
+  externallyBlockedControls: [],
+  productionReadiness: {
+    certifiable: false,
+    blockingControls: ['security.privileged-mfa-policy'],
+    prerequisites: [],
+    detail: 'Not certifiable.',
+  },
 };
 const deletionBlocked: TenantDeletionCertificationDecision = {
   tenantId: '9', ready: false, evidenceIds: [], evaluatedUtc: '2026-08-08T12:00:00Z',

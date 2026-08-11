@@ -1,6 +1,9 @@
 import type { ReactNode } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { Box, Button, Paper, Typography } from '@mui/material';
 import { usePlatformAuth } from '../auth/usePlatformAuth';
+import { platformApi } from '../api/client';
+import { platformKeys } from '../api/queryKeys';
 import PlatformLoginScreen from './PlatformLoginScreen';
 import PlatformMfaPanel from './PlatformMfaPanel';
 
@@ -14,21 +17,42 @@ import PlatformMfaPanel from './PlatformMfaPanel';
  * re-renders this component without a full-page reload.
  *
  * Sec-D2: a session that has NOT completed a second factor is gated the same way, one step
- * further in. The server's `PlatformPolicies.PlatformScope` now requires `amr=mfa`, so such a
- * session can reach exactly two things — its own MFA status and enrollment, and logout — and
+ * further in. The server's `PlatformPolicies.PlatformScope` requires a satisfied second factor, so
+ * such a session can reach exactly two things — its own MFA status and enrollment, and logout — and
  * every console screen behind this guard would answer 403. Rendering the enrollment step in
  * place is what turns "the whole console is broken" into "finish setting up your account", and
  * it is derived from the same `amr` claim the server reads rather than from a separate flag that
  * could disagree with it.
+ *
+ * <p><b>And one exception, taken from the server.</b> When the server-authoritative MFA policy has
+ * relaxed enforcement, a password-only session is one the backend WILL serve — so gating it here
+ * would leave the console unusable in exactly the state the policy was set up to allow, and the
+ * operator staring at an enrollment screen with no way past it. The exception is granted by
+ * `/api/platform/auth/policy/effective`, the same read the authorization layer makes, and never by
+ * a local flag: if that call fails or is still loading, the strict gate stands. The console cannot
+ * grant itself anything here — every screen behind this guard is re-authorised server-side.</p>
  */
 export default function PlatformGuard({ children }: { children: ReactNode }) {
   const { isPlatformAuthed, isPlatformMfaAuthenticated, platformLogout } = usePlatformAuth();
+
+  const policyQuery = useQuery({
+    queryKey: platformKeys.platformAuthPolicyEffective(),
+    queryFn: () => platformApi.getEffectiveMfaPolicy(),
+    // Only asked once there is a session to ask with, and never for a session that already
+    // carries a second factor — that path needs no exception and should cost no request.
+    enabled: isPlatformAuthed && !isPlatformMfaAuthenticated,
+    retry: false,
+  });
 
   if (!isPlatformAuthed) {
     return <PlatformLoginScreen />;
   }
 
-  if (!isPlatformMfaAuthenticated) {
+  // Fail closed: only an affirmative `passwordOnlySessionsPermitted` from the server opens this,
+  // and an error, a timeout or a still-loading query all leave the enrollment gate in place.
+  const serverPermitsPasswordOnly = policyQuery.data?.passwordOnlySessionsPermitted === true;
+
+  if (!isPlatformMfaAuthenticated && !serverPermitsPasswordOnly) {
     return (
       <Box sx={{ maxWidth: 720, mx: 'auto', p: 3 }}>
         <Paper sx={{ p: 3, borderRadius: 3, mb: 2.5 }}>

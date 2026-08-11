@@ -20,6 +20,11 @@ const platformTabs = [
   { name: 'Support', path: '/platform/support', heading: 'Support' },
   { name: 'Email', path: '/platform/email', heading: 'Email' },
   { name: 'Security', path: '/platform/security', heading: 'Security' },
+  {
+    name: 'Platform Authentication',
+    path: '/platform/security/authentication',
+    heading: 'Platform Authentication',
+  },
   { name: 'Audit Log', path: '/platform/audit', heading: 'Audit Log' },
 ] as const;
 
