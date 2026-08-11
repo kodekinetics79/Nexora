@@ -1,305 +1,398 @@
 using ERP_RFQ_Automation.Tests.Support;
-using Microsoft.EntityFrameworkCore;
-using Microsoft.EntityFrameworkCore.Infrastructure;
-using Microsoft.EntityFrameworkCore.Migrations;
 using Npgsql;
 
 namespace ERP_RFQ_Automation.Tests;
 
+/// <summary>
+/// SQUASH NOTE — both tests in this file used to drive migrations.
+///
+/// PopulatedUpgrade_RejectsUnsafeLegacyIdentity built a database at
+/// 20260724004000_AuthoritativeEvidenceIngestion, planted one of three unsafe legacy shapes, and
+/// asserted that 20260724223932_Release01CommercialIdentity (or, for the order case,
+/// 20260724230121_Release01OrderLineage) REFUSED to apply, with a named SQLSTATE, rather than
+/// upgrading a database whose commercial identity could not be trusted.
+///
+/// PopulatedUpgrade_BackfillsAndProtectsNexoraSerialLineage upgraded a safe database and asserted
+/// the serial propagated from lead to RFQ to quote to order, then exercised the guards that keep it
+/// there, the tenant-role RLS boundary, and the governed quote lifecycle.
+///
+/// 20260811033109_SquashedSchemaBaseline erased those ids. "The migration aborts rather than
+/// corrupt" is migration-time behaviour and cannot survive a squash — but every unsafe shape it
+/// aborted on is refused by the LIVE schema, and that is the guarantee that still protects a
+/// running system. The serial BACKFILL is retired (an RFQ, quote or order without an inherited
+/// serial cannot be written at all now, which the second test proves); none of its guards are.
+///
+/// WHAT CHANGED IN THE SCENARIO SET, precisely — an earlier revision of this file quietly lost a
+/// scenario and mislabelled the rest, so the accounting is spelled out:
+///   * cross_tenant and null_customer are the ORIGINAL two, asserted forward, same SQLSTATEs.
+///   * order_from_quote_without_customer is the original THIRD scenario
+///     (order_quote_null_customer). Its shape is unchanged — an order sourced from a quote that
+///     has no resolved customer — but its SQLSTATE moved from 23514 to 23503, because at head the
+///     refusal comes from the nexora_validate_order_commercial_identity TRIGGER rather than from a
+///     CHECK the migration was in the middle of adding. The shape is what matters and the shape is
+///     unchanged.
+///   * order_claiming_a_quote_it_cannot_name is ADDED to keep a 23514 order refusal in the set:
+///     CK_Orders_SourceIdentity refuses SourceType = 'LEGACY_QUOTE' with no QuoteID.
+///   * cross_tenant_customer is RELOCATED, not new — it is the crossTenantLead assertion that used
+///     to sit in the second test in this file. It is counted here so it is not counted twice.
+///
+/// Only one assertion from the original pair is deliberately NOT restored: the count of six seeded
+/// QuoteStatus codes for the upgraded tenant. That was one-time per-tenant reference data written
+/// by the migration into Setup_Master for the tenants that existed at that moment. It cannot run
+/// again, the baseline's 11_reference_data.sql seeds only public."Module", and nothing else seeds
+/// it — see the report accompanying this change, which raises that as a finding rather than
+/// encoding it here as an assertion that would pass vacuously.
+/// </summary>
 [Collection(PostgreSqlIntegrationCollection.Name)]
-public sealed class Release01CommercialIdentityMigrationPostgreSqlTests
+public sealed class Release01CommercialIdentityMigrationPostgreSqlTests(PostgreSqlTestDatabase database)
 {
-    private readonly PostgreSqlTestDatabase _database;
-
-    public Release01CommercialIdentityMigrationPostgreSqlTests(PostgreSqlTestDatabase database) =>
-        _database = database;
+    private const long TenantOne = 94_911;
+    private const long TenantTwo = 94_912;
 
     [Theory]
+    // An RFQ in one tenant reaching for a lead in another.
     [InlineData("cross_tenant", "23503")]
+    // A lead naming a customer while its match status still says it has not resolved one.
     [InlineData("null_customer", "23514")]
-    [InlineData("order_quote_null_customer", "23514")]
+    // A lead VERIFIED against a customer belonging to a different tenant.
+    [InlineData("cross_tenant_customer", "23503")]
+    // An order sourced from a quote that never resolved a customer — the original third scenario.
+    [InlineData("order_from_quote_without_customer", "23503")]
+    // An order that claims to come from a quote while naming no quote at all.
+    [InlineData("order_claiming_a_quote_it_cannot_name", "23514")]
     [Trait("Category", "PostgreSQL")]
-    public async Task PopulatedUpgrade_RejectsUnsafeLegacyIdentity(string scenario, string expectedSqlState)
+    public async Task Unsafe_commercial_identity_is_refused_by_the_database(
+        string scenario, string expectedSqlState)
     {
-        var databaseName = $"release01_identity_guard_{Guid.NewGuid():N}";
-        var adminBuilder = new NpgsqlConnectionStringBuilder(_database.ConnectionString) { Database = "postgres" };
-        var isolatedBuilder = new NpgsqlConnectionStringBuilder(_database.ConnectionString) { Database = databaseName };
-        await using (var admin = new NpgsqlConnection(adminBuilder.ConnectionString))
-        {
-            await admin.OpenAsync();
-            await using var create = admin.CreateCommand();
-            create.CommandText = $"CREATE DATABASE \"{databaseName}\"";
-            await create.ExecuteNonQueryAsync();
-        }
+        var needsOrderChain = scenario.StartsWith("order_", StringComparison.Ordinal);
 
-        try
+        await using var connection = await database.OpenConnectionAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+
+        await using (var seed = connection.CreateCommand())
         {
-            await using var context = _database.ContextForConnectionString(isolatedBuilder.ConnectionString, null);
-            var migrator = context.GetService<IMigrator>();
-            await migrator.MigrateAsync("20260724004000_AuthoritativeEvidenceIngestion");
-            await context.Database.ExecuteSqlRawAsync("""
+            seed.Transaction = transaction;
+            seed.CommandText = $"""
                 INSERT INTO "BusinessUnits"
                     ("ID", "BusinessUnitCode", "BusinessUnitName", "CreatedBy", "CreatedOn")
-                VALUES (94911, 'R1G1', 'Guard tenant one', 'tests', now()),
-                       (94912, 'R1G2', 'Guard tenant two', 'tests', now());
-                INSERT INTO "Email_Configurations"
-                    ("ID", "BusinessUnitID", "ConfigurationName", "EmailAddress", "Protocol", "Host",
-                     "Port", "Username", "Password", "UseSSL", "PollingInterval", "IsActive", "CreatedOn")
-                VALUES (94912, 94912, 'guard', 'guard@nexora.invalid', 'IMAP', 'localhost',
-                        993, 'tests', 'tests', true, 300, false, now());
-                INSERT INTO "EmailIngests" ("ID", "MessageID", "FromEmail", "EmailConfigurationID", "CreatedOn")
-                VALUES (94912, 'release-01-guard', 'unknown@nexora.invalid', 94912, now());
+                VALUES ({TenantOne}, 'R1G1', 'Guard tenant one', 'tests', now()),
+                       ({TenantTwo}, 'R1G2', 'Guard tenant two', 'tests', now());
                 INSERT INTO "Customers"
-                    ("ID", "Name", "ContactEmail", "ImageURL", "BUID", "CreatedBy", "CreatedOn")
-                VALUES (94911, 'Guard customer', 'buyer@nexora.invalid', '', 94911, 'tests', now());
-                """);
+                    ("ID", "Name", "ContactEmail", "ImageURL", "BUID", "CreatedBy", "CreatedOn", "ConcurrencyToken")
+                VALUES ({TenantOne}, 'Guard customer', 'buyer@nexora.invalid', '', {TenantOne},
+                        'tests', now(), gen_random_uuid());
+                INSERT INTO "Leads"
+                    ("ID", "RFQNo", "RecDate", "LeadSource", "CreatedBy", "CreatedDate",
+                     "BusinessUnitID", "Clientemail")
+                VALUES ({TenantTwo}, 'CROSS-LEAD', now(), 'MigrationTest', 'tests', now(),
+                        {TenantTwo}, 'unknown@nexora.invalid');
+                """;
+            await seed.ExecuteNonQueryAsync();
+        }
 
-            if (scenario == "cross_tenant")
-            {
-                await context.Database.ExecuteSqlRawAsync("""
-                    INSERT INTO "Leads"
-                        ("ID", "RFQNo", "RecDate", "LeadSource", "CreatedBy", "CreatedDate",
-                         "BusinessUnitID", "EmailIngestsID", "Clientemail")
-                    VALUES (94912, 'CROSS-LEAD', now(), 'MigrationTest', 'tests', now(),
-                            94912, 94912, 'unknown@nexora.invalid');
-                    INSERT INTO "RFQ"
-                        ("ID", "RFQNo", "RecDate", "BusinessUnitID", "LeadID", "CreatedBy", "CreatedDate")
-                    VALUES (94911, 'CROSS-RFQ', now(), 94911, 94912, 'tests', now());
-                    """);
-            }
-            else if (scenario == "null_customer")
-            {
-                await context.Database.ExecuteSqlRawAsync("""
-                    INSERT INTO "Leads"
-                        ("ID", "RFQNo", "RecDate", "LeadSource", "CreatedBy", "CreatedDate",
-                         "BusinessUnitID", "EmailIngestsID", "Clientemail")
-                    VALUES (94911, 'NULL-CUSTOMER-LEAD', now(), 'MigrationTest', 'tests', now(),
-                            94911, 94912, 'unknown@nexora.invalid');
-                    INSERT INTO "RFQ"
-                        ("ID", "RFQNo", "RecDate", "BusinessUnitID", "LeadID", "CustomerID", "CreatedBy", "CreatedDate")
-                    VALUES (94911, 'NULL-CUSTOMER-RFQ', now(), 94911, 94911, 94911, 'tests', now());
-                    """);
-            }
+        if (needsOrderChain)
+        {
+            // A lead → RFQ → quote chain in tenant one that NEVER resolved a customer. Every link
+            // inherits the case and serial faithfully; the customer is the thing that is missing,
+            // which is exactly the legacy shape the migration refused to carry forward.
+            await using var chain = connection.CreateCommand();
+            chain.Transaction = transaction;
+            chain.CommandText = $"""
+                INSERT INTO "Leads"
+                    ("ID", "RFQNo", "RecDate", "LeadSource", "CreatedBy", "CreatedDate",
+                     "BusinessUnitID", "Clientemail")
+                VALUES ({TenantOne}, 'ORDER-LEAD', now(), 'MigrationTest', 'tests', now(),
+                        {TenantOne}, 'unknown@nexora.invalid');
+                INSERT INTO "RFQ"
+                    ("ID", "RFQNo", "RecDate", "BusinessUnitID", "LeadID", "CommercialCaseID",
+                     "NexoraSerial", "CreatedBy", "CreatedDate")
+                SELECT {TenantOne}, 'ORDER-RFQ', now(), {TenantOne}, {TenantOne},
+                       lead."CommercialCaseId", lead."CommercialCaseReference", 'tests', now()
+                FROM "Leads" lead WHERE lead."ID" = {TenantOne};
+                INSERT INTO "Quotes"
+                    ("ID", "QuoteNo", "BusinessUnitID", "RFQID", "CommercialCaseID", "NexoraSerial",
+                     "CreatedBy", "CreatedDate")
+                SELECT {TenantOne}, 'ORDER-QUOTE', {TenantOne}, {TenantOne},
+                       rfq."CommercialCaseID", rfq."NexoraSerial", 'tests', now()
+                FROM "RFQ" rfq WHERE rfq."ID" = {TenantOne};
+                INSERT INTO "Setup_Master"
+                    ("SetupID", "SetupType", "SetupCode", "SetupValue", "BusinessUnitID", "IsActive",
+                     "CreatedBy", "CreatedOn")
+                VALUES (94920, 'QuoteStatus', 'DRAFT', 'Draft', {TenantOne}, true, 'tests', now());
+                """;
+            await chain.ExecuteNonQueryAsync();
+        }
 
-            var targetMigration = "20260724223932_Release01CommercialIdentity";
-            if (scenario == "order_quote_null_customer")
-            {
-                await context.Database.ExecuteSqlRawAsync("""
-                    INSERT INTO "Leads"
-                        ("ID", "RFQNo", "RecDate", "LeadSource", "CreatedBy", "CreatedDate",
-                         "BusinessUnitID", "EmailIngestsID", "Clientemail")
-                    VALUES (94911, 'ORDER-LEAD', now(), 'MigrationTest', 'tests', now(),
-                            94911, 94912, 'unknown@nexora.invalid');
-                    INSERT INTO "RFQ"
-                        ("ID", "RFQNo", "RecDate", "BusinessUnitID", "LeadID", "CreatedBy", "CreatedDate")
-                    VALUES (94911, 'ORDER-RFQ', now(), 94911, 94911, 'tests', now());
-                    INSERT INTO "Quotes"
-                        ("ID", "QuoteNo", "BusinessUnitID", "RFQID", "CreatedBy", "CreatedDate")
-                    VALUES (94911, 'ORDER-QUOTE', 94911, 94911, 'tests', now());
-                    """);
-                await migrator.MigrateAsync(targetMigration);
-                var statusId = await context.Database.SqlQueryRaw<long>("""
-                    SELECT "SetupID" AS "Value" FROM "Setup_Master"
-                    WHERE "BusinessUnitID" = 94911 AND "SetupType" = 'QuoteStatus' AND "SetupCode" = 'DRAFT'
-                    """).SingleAsync();
-                await context.Database.ExecuteSqlInterpolatedAsync($"""
-                    INSERT INTO "Orders"
-                        ("ID", "OrderNo", "QuoteID", "LeadID", "RFQID", "CustomerID", "BusinessUnitID", "SourceType",
-                         "StatusID", "OrderDate", "TotalAmount", "PaidAmount", "CreatedBy", "CreatedOn")
-                    VALUES (94911, 'ORDER-QUOTE-NULL-CUSTOMER', 94911, 94911, 94911, 94911, 94911, 'LEGACY_QUOTE',
-                            {statusId}, now(), 100, 0, 'tests', now())
-                    """);
-                targetMigration = "20260724230121_Release01OrderLineage";
-            }
+        var unsafeWrite = scenario switch
+        {
+            // Inherits the FOREIGN lead's case and serial faithfully, and is still refused: the
+            // guard is about the tenant boundary, not about a mismatched string.
+            "cross_tenant" => $"""
+                INSERT INTO "RFQ"
+                    ("ID", "RFQNo", "RecDate", "BusinessUnitID", "LeadID", "CommercialCaseID",
+                     "NexoraSerial", "CreatedBy", "CreatedDate")
+                SELECT {TenantOne}, 'CROSS-RFQ', now(), {TenantOne}, {TenantTwo},
+                       lead."CommercialCaseId", lead."CommercialCaseReference", 'tests', now()
+                FROM "Leads" lead WHERE lead."ID" = {TenantTwo};
+                """,
+            "null_customer" => $"""
+                INSERT INTO "Leads"
+                    ("ID", "RFQNo", "RecDate", "LeadSource", "CreatedBy", "CreatedDate",
+                     "BusinessUnitID", "Clientemail", "CustomerID")
+                VALUES (94913, 'NULL-CUSTOMER-LEAD', now(), 'MigrationTest', 'tests', now(),
+                        {TenantOne}, 'unknown@nexora.invalid', {TenantOne});
+                """,
+            "cross_tenant_customer" => $"""
+                INSERT INTO "Leads"
+                    ("ID", "RFQNo", "RecDate", "LeadSource", "CreatedBy", "CreatedDate",
+                     "BusinessUnitID", "Clientemail", "CustomerID", "CustomerMatchStatus")
+                VALUES (94914, 'CROSS-CUSTOMER-LEAD', now(), 'MigrationTest', 'tests', now(),
+                        {TenantTwo}, 'unknown@nexora.invalid', {TenantOne}, 'VERIFIED');
+                """,
+            // Orders."CustomerID" is NOT NULL, so an order off a customer-less quote must invent
+            // one. The trigger compares the order's identity tuple with its quote's and refuses.
+            "order_from_quote_without_customer" => $"""
+                INSERT INTO "Orders"
+                    ("ID", "OrderNo", "QuoteID", "LeadID", "RFQID", "CustomerID", "BusinessUnitID",
+                     "SourceType", "StatusID", "OrderDate", "TotalAmount", "PaidAmount",
+                     "CreatedBy", "CreatedOn", "CommercialCaseID", "NexoraSerial")
+                SELECT {TenantOne}, 'ORDER-QUOTE-NULL-CUSTOMER', {TenantOne}, {TenantOne}, {TenantOne},
+                       {TenantOne}, {TenantOne}, 'LEGACY_QUOTE', 94920, now(), 100, 0, 'tests', now(),
+                       quote."CommercialCaseID", quote."NexoraSerial"
+                FROM "Quotes" quote WHERE quote."ID" = {TenantOne};
+                """,
+            "order_claiming_a_quote_it_cannot_name" => $"""
+                INSERT INTO "Orders"
+                    ("ID", "OrderNo", "QuoteID", "LeadID", "RFQID", "CustomerID", "BusinessUnitID",
+                     "SourceType", "StatusID", "OrderDate", "TotalAmount", "PaidAmount",
+                     "CreatedBy", "CreatedOn")
+                VALUES (94915, 'ORDER-NO-QUOTE', NULL, {TenantOne}, {TenantOne}, {TenantOne},
+                        {TenantOne}, 'LEGACY_QUOTE', 94920, now(), 100, 0, 'tests', now());
+                """,
+            _ => throw new ArgumentOutOfRangeException(nameof(scenario), scenario, null)
+        };
 
-            var failure = await Assert.ThrowsAsync<PostgresException>(() =>
-                migrator.MigrateAsync(targetMigration));
+        await using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = unsafeWrite;
+            var failure = await Assert.ThrowsAsync<PostgresException>(() => command.ExecuteNonQueryAsync());
             Assert.Equal(expectedSqlState, failure.SqlState);
         }
-        finally
-        {
-            NpgsqlConnection.ClearAllPools();
-            await using var admin = new NpgsqlConnection(adminBuilder.ConnectionString);
-            await admin.OpenAsync();
-            await using var drop = admin.CreateCommand();
-            drop.CommandText = $"DROP DATABASE IF EXISTS \"{databaseName}\" WITH (FORCE)";
-            await drop.ExecuteNonQueryAsync();
-        }
+
+        await transaction.RollbackAsync();
     }
 
     [Fact]
     [Trait("Category", "PostgreSQL")]
-    public async Task PopulatedUpgrade_BackfillsAndProtectsNexoraSerialLineage()
+    public async Task Commercial_serial_lineage_is_inherited_through_orders_and_then_immutable()
     {
-        var databaseName = $"release01_identity_{Guid.NewGuid():N}";
-        var adminBuilder = new NpgsqlConnectionStringBuilder(_database.ConnectionString) { Database = "postgres" };
-        var isolatedBuilder = new NpgsqlConnectionStringBuilder(_database.ConnectionString) { Database = databaseName };
+        await using var connection = await database.OpenConnectionAsync();
 
-        await using (var admin = new NpgsqlConnection(adminBuilder.ConnectionString))
+        // The lifecycle ledger accepts the quote aggregate. This was the migration's own
+        // widening of CK_lifecycle_events_AggregateType and is asserted on the deployed
+        // constraint text, not on migration source.
+        await using (var lifecycle = connection.CreateCommand())
         {
-            await admin.OpenAsync();
-            await using var create = admin.CreateCommand();
-            create.CommandText = $"CREATE DATABASE \"{databaseName}\"";
-            await create.ExecuteNonQueryAsync();
+            lifecycle.CommandText = """
+                SELECT pg_get_constraintdef(oid) FROM pg_constraint
+                WHERE conname = 'CK_lifecycle_events_AggregateType';
+                """;
+            var definition = Assert.IsType<string>(await lifecycle.ExecuteScalarAsync());
+            Assert.Contains("'Quote'", definition, StringComparison.Ordinal);
         }
 
-        try
+        await using var transaction = await connection.BeginTransactionAsync();
+        await using (var seed = connection.CreateCommand())
         {
-            await using var context = _database.ContextForConnectionString(isolatedBuilder.ConnectionString, null);
-            var migrator = context.GetService<IMigrator>();
-            await migrator.MigrateAsync("20260724004000_AuthoritativeEvidenceIngestion");
-            await context.Database.ExecuteSqlRawAsync("""
+            seed.Transaction = transaction;
+            seed.CommandText = """
                 INSERT INTO "BusinessUnits"
                     ("ID", "BusinessUnitCode", "BusinessUnitName", "CreatedBy", "CreatedOn")
-                VALUES (94901, 'REL01', 'Release 01 migration', 'tests', now());
-
-                INSERT INTO "Email_Configurations"
-                    ("ID", "BusinessUnitID", "ConfigurationName", "EmailAddress", "Protocol", "Host",
-                     "Port", "Username", "Password", "UseSSL", "PollingInterval", "IsActive", "CreatedOn")
-                VALUES (94901, 94901, 'release-01', 'release01@nexora.invalid', 'IMAP', 'localhost',
-                        993, 'tests', 'tests', true, 300, false, now());
-
-                INSERT INTO "EmailIngests"
-                    ("ID", "MessageID", "FromEmail", "EmailConfigurationID", "CreatedOn")
-                VALUES (94901, 'release-01-upgrade', 'buyer@nexora.invalid', 94901, now());
-
+                VALUES (94901, 'REL01', 'Release 01 identity', 'tests', now());
                 INSERT INTO "Customers"
-                    ("ID", "Name", "ContactEmail", "ImageURL", "BUID", "CreatedBy", "CreatedOn")
-                VALUES (94901, 'Release 01 customer', 'buyer@nexora.invalid', '', 94901, 'tests', now());
-
+                    ("ID", "Name", "ContactEmail", "ImageURL", "BUID", "CreatedBy", "CreatedOn",
+                     "ConcurrencyToken")
+                VALUES (94901, 'Release 01 customer', 'buyer@nexora.invalid', '', 94901, 'tests',
+                        now(), gen_random_uuid());
                 INSERT INTO "Contacts"
-                    ("ID", "CustomerID", "FirstName", "LastName", "Email", "CreatedBy", "CreatedOn")
-                VALUES (94901, 94901, 'Release', 'Buyer', 'buyer@nexora.invalid', 'tests', now());
-
+                    ("ID", "BusinessUnitID", "CustomerID", "FirstName", "LastName",
+                     "CreatedBy", "CreatedOn", "ConcurrencyToken")
+                VALUES (94901, 94901, 94901, 'Release', 'Buyer', 'tests', now(), gen_random_uuid());
                 INSERT INTO "Leads"
                     ("ID", "RFQNo", "RecDate", "LeadSource", "CreatedBy", "CreatedDate",
-                     "BusinessUnitID", "EmailIngestsID", "Clientemail")
-                VALUES (94901, 'CUSTOMER-RFQ-94901', now(), 'MigrationTest', 'tests', now(), 94901, 94901,
-                        'buyer@nexora.invalid');
-
+                     "BusinessUnitID", "Clientemail", "CustomerID", "ContactID", "CustomerMatchStatus")
+                VALUES (94901, 'CUSTOMER-RFQ-94901', now(), 'MigrationTest', 'tests', now(), 94901,
+                        'buyer@nexora.invalid', 94901, 94901, 'VERIFIED');
                 INSERT INTO "RFQ"
-                    ("ID", "RFQNo", "RecDate", "BusinessUnitID", "LeadID", "CreatedBy", "CreatedDate")
-                VALUES (94901, 'NEXORA-RFQ-94901', now(), 94901, 94901, 'tests', now());
-
+                    ("ID", "RFQNo", "RecDate", "BusinessUnitID", "LeadID", "CommercialCaseID",
+                     "NexoraSerial", "CustomerID", "ContactID", "CreatedBy", "CreatedDate")
+                SELECT 94901, 'NEXORA-RFQ-94901', now(), 94901, 94901,
+                       lead."CommercialCaseId", lead."CommercialCaseReference",
+                       lead."CustomerID", lead."ContactID", 'tests', now()
+                FROM "Leads" lead WHERE lead."ID" = 94901;
                 INSERT INTO "Quotes"
-                    ("ID", "QuoteNo", "BusinessUnitID", "RFQID", "CreatedBy", "CreatedDate")
-                VALUES (94901, 'QUOTE-94901', 94901, 94901, 'tests', now());
-                """);
-
-            var leadSerial = await context.Database.SqlQueryRaw<string>("""
-                SELECT "CommercialCaseReference" AS "Value" FROM "Leads" WHERE "ID" = 94901
-                """).SingleAsync();
-
-            await migrator.MigrateAsync("20260724223932_Release01CommercialIdentity");
-
-            var downstream = await context.Database.SqlQueryRaw<string>("""
-                SELECT "NexoraSerial" AS "Value" FROM "RFQ" WHERE "ID" = 94901
-                UNION ALL
-                SELECT "NexoraSerial" AS "Value" FROM "Quotes" WHERE "ID" = 94901
-                ORDER BY "Value"
-                """).ToListAsync();
-            Assert.Equal(2, downstream.Count);
-            Assert.All(downstream, serial => Assert.Equal(leadSerial, serial));
-
-            var constraint = await context.Database.SqlQueryRaw<string>("""
-                SELECT pg_get_constraintdef(oid) AS "Value"
-                FROM pg_constraint
-                WHERE conname = 'CK_lifecycle_events_AggregateType'
-                """).SingleAsync();
-            Assert.Contains("Quote", constraint);
-
-            var quoteStatusCount = await context.Database.SqlQueryRaw<int>("""
-                SELECT count(*)::int AS "Value" FROM "Setup_Master"
-                WHERE "BusinessUnitID" = 94901 AND "SetupType" = 'QuoteStatus'
-                  AND "SetupCode" IN ('DRAFT','SENT','ACCEPTED','REJECTED','EXPIRED','ORDERED')
-                """).SingleAsync();
-            Assert.Equal(6, quoteStatusCount);
-
-            var statusId = await context.Database.SqlQueryRaw<long>("""
-                SELECT "SetupID" AS "Value" FROM "Setup_Master"
-                WHERE "BusinessUnitID" = 94901 AND "SetupType" = 'QuoteStatus' AND "SetupCode" = 'DRAFT'
-                """).SingleAsync();
-            await context.Database.ExecuteSqlInterpolatedAsync($"""
+                    ("ID", "QuoteNo", "BusinessUnitID", "RFQID", "CommercialCaseID", "NexoraSerial",
+                     "CustomerID", "ContactID", "CreatedBy", "CreatedDate")
+                SELECT 94901, 'QUOTE-94901', 94901, 94901, rfq."CommercialCaseID", rfq."NexoraSerial",
+                       rfq."CustomerID", rfq."ContactID", 'tests', now()
+                FROM "RFQ" rfq WHERE rfq."ID" = 94901;
+                INSERT INTO "Setup_Master"
+                    ("SetupID", "SetupType", "SetupCode", "SetupValue", "BusinessUnitID", "IsActive",
+                     "CreatedBy", "CreatedOn")
+                VALUES (94910, 'QuoteStatus', 'DRAFT', 'Draft', 94901, true, 'tests', now());
                 INSERT INTO "Orders"
-                    ("ID", "OrderNo", "QuoteID", "LeadID", "RFQID", "CustomerID", "BusinessUnitID", "SourceType",
-                     "StatusID", "OrderDate", "TotalAmount", "PaidAmount", "CreatedBy", "CreatedOn")
-                VALUES (94901, 'ORDER-94901', 94901, 94901, 94901, 94901, 94901, 'LEGACY_QUOTE',
-                        {statusId}, now(), 100, 0, 'tests', now())
-                """);
-            await migrator.MigrateAsync("20260724230121_Release01OrderLineage");
+                    ("ID", "OrderNo", "QuoteID", "LeadID", "RFQID", "CustomerID", "ContactID",
+                     "BusinessUnitID", "SourceType", "StatusID", "OrderDate", "TotalAmount",
+                     "PaidAmount", "CreatedBy", "CreatedOn", "CommercialCaseID", "NexoraSerial")
+                SELECT 94901, 'ORDER-94901', 94901, 94901, 94901, quote."CustomerID", quote."ContactID",
+                       94901, 'LEGACY_QUOTE', 94910, now(), 100, 0, 'tests', now(),
+                       quote."CommercialCaseID", quote."NexoraSerial"
+                FROM "Quotes" quote WHERE quote."ID" = 94901;
+                """;
+            await seed.ExecuteNonQueryAsync();
+        }
 
-            var orderSerial = await context.Database.SqlQueryRaw<string>("""
-                SELECT "NexoraSerial" AS "Value" FROM "Orders" WHERE "ID" = 94901
-                """).SingleAsync();
-            Assert.Equal(leadSerial, orderSerial);
+        // The serial the case allocated to the lead is the one the RFQ, the quote AND the order
+        // carry — all four read together, so a guard that merely accepted anything non-null would
+        // not pass. The order leg is the one the original test ended on and is the reason
+        // Release01OrderLineage existed.
+        await using (var lineage = connection.CreateCommand())
+        {
+            lineage.Transaction = transaction;
+            lineage.CommandText = """
+                SELECT lead."CommercialCaseReference", rfq."NexoraSerial", quote."NexoraSerial",
+                       "order"."NexoraSerial"
+                FROM "Leads" lead
+                JOIN "RFQ" rfq ON rfq."ID" = 94901
+                JOIN "Quotes" quote ON quote."ID" = 94901
+                JOIN "Orders" "order" ON "order"."ID" = 94901
+                WHERE lead."ID" = 94901;
+                """;
+            await using var reader = await lineage.ExecuteReaderAsync();
+            Assert.True(await reader.ReadAsync());
+            var serial = reader.GetString(0);
+            Assert.NotEmpty(serial);
+            Assert.Equal(serial, reader.GetString(1));
+            Assert.Equal(serial, reader.GetString(2));
+            Assert.Equal(serial, reader.GetString(3));
+        }
 
-            var forgedOrder = await Assert.ThrowsAsync<PostgresException>(() =>
-                context.Database.ExecuteSqlRawAsync(
-                    "UPDATE \"Orders\" SET \"NexoraSerial\" = 'FORGED' WHERE \"ID\" = 94901"));
-            Assert.Equal("55000", forgedOrder.SqlState);
+        // Once assigned it cannot be rewritten — on the quote…
+        await AssertRejectedAsync(connection, transaction,
+            """UPDATE "Quotes" SET "NexoraSerial" = 'FORGED' WHERE "ID" = 94901;""");
 
-            await context.Database.ExecuteSqlRawAsync("""
+        // …nor on the ORDER. nexora_validate_order_commercial_identity is a separate trigger from
+        // the one guarding RFQ and Quotes, and this is its only negative test: the whole point of a
+        // database trigger over a C# guard is that it holds against raw SQL like this.
+        await AssertRejectedAsync(connection, transaction,
+            """UPDATE "Orders" SET "NexoraSerial" = 'FORGED' WHERE "ID" = 94901;""");
+
+        // The order's customer is equally sealed once assigned.
+        await AssertRejectedAsync(connection, transaction,
+            """UPDATE "Orders" SET "CustomerID" = 94902 WHERE "ID" = 94901;""");
+
+        // And the quote's status cannot be moved outside the governed lifecycle command, which is
+        // what keeps the lifecycle ledger above a complete record rather than a partial one.
+        await AssertRejectedAsync(connection, transaction,
+            """UPDATE "Quotes" SET "StatusID" = 1 WHERE "ID" = 94901;""");
+
+        await transaction.RollbackAsync();
+    }
+
+    /// <summary>
+    /// The tenant execution role's boundary on the customer master.
+    ///
+    /// RESTORED. An earlier revision of this file dropped this block entirely when the migration
+    /// walk around it was removed. It is the only test in the suite that reads "Customers" and
+    /// "Contacts" under nexora_tenant_app, and a cross-tenant write refusal on the customer master
+    /// is the single guarantee the whole tenant-isolation design exists to provide — so losing it
+    /// silently was the worst of the removals. It never needed a migration: it is a property of the
+    /// deployed policies, and it is asserted here directly against them.
+    ///
+    /// The visibility counts are scoped to the two tenants this test creates because the shared
+    /// fixture database carries rows from every other test in the collection. The scoping does not
+    /// weaken the assertion: tenant two's customer and contact are inside the scope, and the point
+    /// is precisely that they are not counted.
+    /// </summary>
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task Tenant_role_sees_only_its_own_customer_master_and_cannot_write_across_the_boundary()
+    {
+        const long tenantA = 94_931;
+        const long tenantB = 94_932;
+
+        await using var connection = await database.OpenConnectionAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+
+        await using (var seed = connection.CreateCommand())
+        {
+            seed.Transaction = transaction;
+            seed.CommandText = $"""
                 INSERT INTO "BusinessUnits"
                     ("ID", "BusinessUnitCode", "BusinessUnitName", "CreatedBy", "CreatedOn")
-                VALUES (94902, 'REL02', 'Other tenant', 'tests', now());
+                VALUES ({tenantA}, 'R1RLS-A', 'Release 01 RLS A', 'tests', now()),
+                       ({tenantB}, 'R1RLS-B', 'Release 01 RLS B', 'tests', now());
                 INSERT INTO "Customers"
-                    ("ID", "Name", "ContactEmail", "ImageURL", "BUID", "CreatedBy", "CreatedOn")
-                VALUES (94902, 'Other customer', 'other@nexora.invalid', '', 94902, 'tests', now());
-                """);
-
-            await using (var tenantTransaction = await context.Database.BeginTransactionAsync())
-            {
-                await context.Database.ExecuteSqlRawAsync("""
-                    SET LOCAL ROLE nexora_tenant_app;
-                    SET LOCAL nexora.business_unit_id = '94901';
-                    """);
-                var visibleCustomers = await context.Database.SqlQueryRaw<int>("""
-                    SELECT count(*)::int AS "Value" FROM "Customers"
-                    """).SingleAsync();
-                var visibleContacts = await context.Database.SqlQueryRaw<int>("""
-                    SELECT count(*)::int AS "Value" FROM "Contacts"
-                    """).SingleAsync();
-                Assert.Equal(1, visibleCustomers);
-                Assert.Equal(1, visibleContacts);
-
-                var deniedCustomer = await Assert.ThrowsAsync<PostgresException>(() =>
-                    context.Database.ExecuteSqlRawAsync("""
-                        INSERT INTO "Customers"
-                            ("ID", "Name", "ContactEmail", "ImageURL", "BUID", "CreatedBy", "CreatedOn")
-                        VALUES (94903, 'Forged customer', 'forged@nexora.invalid', '', 94902, 'tests', now())
-                        """));
-                Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, deniedCustomer.SqlState);
-                await tenantTransaction.RollbackAsync();
-            }
-
-            var crossTenantLead = await Assert.ThrowsAsync<PostgresException>(() =>
-                context.Database.ExecuteSqlRawAsync("""
-                    INSERT INTO "Leads"
-                        ("ID", "RFQNo", "RecDate", "LeadSource", "CreatedBy", "CreatedDate",
-                         "BusinessUnitID", "CustomerID", "CustomerMatchStatus")
-                    VALUES (94902, 'CROSS-TENANT', now(), 'MigrationTest', 'tests', now(),
-                            94901, 94902, 'VERIFIED')
-                    """));
-            Assert.Equal("23503", crossTenantLead.SqlState);
-
-            var immutable = await Assert.ThrowsAsync<PostgresException>(() =>
-                context.Database.ExecuteSqlRawAsync(
-                    "UPDATE \"Quotes\" SET \"NexoraSerial\" = 'FORGED' WHERE \"ID\" = 94901"));
-            Assert.Equal("55000", immutable.SqlState);
-
-            var ungovernedStatus = await Assert.ThrowsAsync<PostgresException>(() =>
-                context.Database.ExecuteSqlRawAsync(
-                    "UPDATE \"Quotes\" SET \"StatusID\" = 1 WHERE \"ID\" = 94901"));
-            Assert.Equal("55000", ungovernedStatus.SqlState);
+                    ("ID", "Name", "ContactEmail", "ImageURL", "BUID", "CreatedBy", "CreatedOn",
+                     "ConcurrencyToken")
+                VALUES ({tenantA}, 'Tenant A customer', 'a-94931@nexora.invalid', '', {tenantA},
+                        'tests', now(), gen_random_uuid()),
+                       ({tenantB}, 'Tenant B customer', 'b-94932@nexora.invalid', '', {tenantB},
+                        'tests', now(), gen_random_uuid());
+                INSERT INTO "Contacts"
+                    ("ID", "BusinessUnitID", "CustomerID", "FirstName", "LastName",
+                     "CreatedBy", "CreatedOn", "ConcurrencyToken")
+                VALUES ({tenantA}, {tenantA}, {tenantA}, 'A', 'Buyer', 'tests', now(), gen_random_uuid()),
+                       ({tenantB}, {tenantB}, {tenantB}, 'B', 'Buyer', 'tests', now(), gen_random_uuid());
+                """;
+            await seed.ExecuteNonQueryAsync();
         }
-        finally
+
+        await using (var scoped = connection.CreateCommand())
         {
-            NpgsqlConnection.ClearAllPools();
-            await using var admin = new NpgsqlConnection(adminBuilder.ConnectionString);
-            await admin.OpenAsync();
-            await using var drop = admin.CreateCommand();
-            drop.CommandText = $"DROP DATABASE IF EXISTS \"{databaseName}\" WITH (FORCE)";
-            await drop.ExecuteNonQueryAsync();
+            scoped.Transaction = transaction;
+            scoped.CommandText = $"""
+                SET LOCAL ROLE nexora_tenant_app;
+                SET LOCAL nexora.business_unit_id = '{tenantA}';
+                SELECT (SELECT count(*) FROM "Customers" WHERE "BUID" IN ({tenantA}, {tenantB})),
+                       (SELECT count(*) FROM "Contacts" WHERE "BusinessUnitID" IN ({tenantA}, {tenantB}));
+                """;
+            await using var reader = await scoped.ExecuteReaderAsync();
+            Assert.True(await reader.ReadAsync());
+            Assert.Equal(1L, reader.GetInt64(0));
+            Assert.Equal(1L, reader.GetInt64(1));
         }
+
+        // Still inside the tenant-A session: writing a customer into tenant B is refused by the
+        // policy's WITH CHECK, not by anything the application chose to do.
+        await using (var forged = connection.CreateCommand())
+        {
+            forged.Transaction = transaction;
+            forged.CommandText = $"""
+                INSERT INTO "Customers"
+                    ("ID", "Name", "ContactEmail", "ImageURL", "BUID", "CreatedBy", "CreatedOn",
+                     "ConcurrencyToken")
+                VALUES (94933, 'Forged customer', 'forged-94933@nexora.invalid', '', {tenantB},
+                        'tests', now(), gen_random_uuid());
+                """;
+            var denied = await Assert.ThrowsAsync<PostgresException>(() => forged.ExecuteNonQueryAsync());
+            Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, denied.SqlState);
+        }
+
+        await transaction.RollbackAsync();
+    }
+
+    /// <summary>55000 — object_not_in_prerequisite_state, raised by both identity guards.</summary>
+    private static async Task AssertRejectedAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, string sql)
+    {
+        await transaction.SaveAsync("guard");
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = sql;
+        var error = await Assert.ThrowsAsync<PostgresException>(() => command.ExecuteNonQueryAsync());
+        Assert.Equal(PostgresErrorCodes.ObjectNotInPrerequisiteState, error.SqlState);
+        await transaction.RollbackAsync("guard");
     }
 }

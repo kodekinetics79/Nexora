@@ -8,14 +8,16 @@ public sealed class Release02ProcurementHandoffPostgreSqlTests(PostgreSqlTestDat
 {
     [Fact]
     [Trait("Category", "PostgreSQL")]
-    public async Task Gate3_callback_inbox_has_migration_rls_least_privilege_and_append_only_trigger()
+    public async Task Gate3_callback_inbox_has_rls_least_privilege_and_append_only_trigger()
     {
         await using var connection = await database.OpenConnectionAsync();
         await using var command = connection.CreateCommand();
+        // Squash note: this list used to open with count(*) FROM "__EFMigrationsHistory" WHERE
+        // "MigrationId" = '20260727171327_V1Gate03IntegrationOperationalVisibility'.
+        // 20260811033109_SquashedSchemaBaseline erased that id. The controls the migration
+        // installed are asserted against the live catalogue below and are unchanged.
         command.CommandText = """
             SELECT
-                (SELECT count(*) FROM "__EFMigrationsHistory"
-                 WHERE "MigrationId" = '20260727171327_V1Gate03IntegrationOperationalVisibility') = 1,
                 (SELECT count(*) FROM pg_policies
                  WHERE schemaname = 'public' AND tablename = 'procurement_callback_receipts'
                    AND policyname = 'nexora_tenant_isolation'
@@ -29,7 +31,8 @@ public sealed class Release02ProcurementHandoffPostgreSqlTests(PostgreSqlTestDat
             """;
         await using var reader = await command.ExecuteReaderAsync();
         Assert.True(await reader.ReadAsync());
-        for (var index = 0; index < 5; index++) Assert.True(reader.GetBoolean(index));
+        for (var index = 0; index < 4; index++)
+            Assert.True(reader.GetBoolean(index), $"Callback inbox schema assertion {index + 1} failed.");
     }
 
     [Fact]
@@ -73,16 +76,18 @@ public sealed class Release02ProcurementHandoffPostgreSqlTests(PostgreSqlTestDat
 
     [Fact]
     [Trait("Category", "PostgreSQL")]
-    public async Task Handoff_schema_has_migration_rls_least_privilege_and_lineage_trigger()
+    public async Task Handoff_schema_has_rls_least_privilege_and_lineage_trigger()
     {
         await using var connection = await database.OpenConnectionAsync();
         await using var command = connection.CreateCommand();
+        // Squash note: dropped the two leading id checks for
+        // '20260726194942_Release02ProcurementHandoffs' and
+        // '20260726205812_Release02ProcurementHandoffHardening'. Both ids were erased by
+        // 20260811033109_SquashedSchemaBaseline. The hardening migration's whole contribution —
+        // the tenant policy, the DELETE revoke, the sequence privileges, the lineage trigger and
+        // the two tenant-qualified foreign keys — is still asserted below, against pg_catalog.
         command.CommandText = """
             SELECT
-                (SELECT count(*) FROM "__EFMigrationsHistory"
-                 WHERE "MigrationId" = '20260726194942_Release02ProcurementHandoffs') = 1,
-                (SELECT count(*) FROM "__EFMigrationsHistory"
-                 WHERE "MigrationId" = '20260726205812_Release02ProcurementHandoffHardening') = 1,
                 (SELECT count(*) FROM pg_policies
                  WHERE schemaname = 'public' AND tablename = 'procurement_handoffs'
                    AND policyname = 'nexora_tenant_isolation'
@@ -99,7 +104,8 @@ public sealed class Release02ProcurementHandoffPostgreSqlTests(PostgreSqlTestDat
             """;
         await using var reader = await command.ExecuteReaderAsync();
         Assert.True(await reader.ReadAsync());
-        for (var index = 0; index < 7; index++) Assert.True(reader.GetBoolean(index));
+        for (var index = 0; index < 5; index++)
+            Assert.True(reader.GetBoolean(index), $"Handoff schema assertion {index + 1} failed.");
     }
 
     [Fact]

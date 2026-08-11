@@ -11,10 +11,14 @@ public sealed class Release02SupplierQuotePostgreSqlTests(PostgreSqlTestDatabase
     {
         await using var connection = await database.OpenConnectionAsync();
         await using var command = connection.CreateCommand();
+        // Squash note: this list used to open with
+        // count(*) FROM "__EFMigrationsHistory" WHERE "MigrationId" = '20260726112455_Release02SupplierQuoteInbox'.
+        // 20260811033109_SquashedSchemaBaseline erased that id, so the check can only ever be 0.
+        // It was never the coverage: the RLS policies, grants and append-only triggers that the
+        // migration installed are asserted directly against the live catalogue below, and those
+        // are what a regression would actually break.
         command.CommandText = """
             SELECT
-                (SELECT count(*) FROM "__EFMigrationsHistory"
-                 WHERE "MigrationId" = '20260726112455_Release02SupplierQuoteInbox') = 1,
                 (SELECT count(*) FROM pg_policies
                  WHERE schemaname = 'public' AND policyname = 'nexora_tenant_isolation'
                    AND tablename = ANY(ARRAY[
@@ -34,7 +38,8 @@ public sealed class Release02SupplierQuotePostgreSqlTests(PostgreSqlTestDatabase
             """;
         await using var reader = await command.ExecuteReaderAsync();
         Assert.True(await reader.ReadAsync());
-        for (var index = 0; index < 6; index++) Assert.True(reader.GetBoolean(index));
+        for (var index = 0; index < 5; index++)
+            Assert.True(reader.GetBoolean(index), $"Supplier quote schema assertion {index + 1} failed.");
     }
 
 
@@ -44,10 +49,10 @@ public sealed class Release02SupplierQuotePostgreSqlTests(PostgreSqlTestDatabase
     {
         await using var connection = await database.OpenConnectionAsync();
         await using var command = connection.CreateCommand();
+        // Squash note: dropped leading id check for
+        // '20260726114748_Release02SupplierOfferPricingBridge' — see the method above.
         command.CommandText = """
             SELECT
-                (SELECT count(*) FROM "__EFMigrationsHistory"
-                 WHERE "MigrationId" = '20260726114748_Release02SupplierOfferPricingBridge') = 1,
                 (SELECT count(*) FROM pg_policies
                  WHERE schemaname = 'public' AND policyname = 'nexora_tenant_isolation'
                    AND tablename = 'customer_quote_sourcing_decisions') = 1,
@@ -61,6 +66,7 @@ public sealed class Release02SupplierQuotePostgreSqlTests(PostgreSqlTestDatabase
             """;
         await using var reader = await command.ExecuteReaderAsync();
         Assert.True(await reader.ReadAsync());
-        for (var index = 0; index < 5; index++) Assert.True(reader.GetBoolean(index));
+        for (var index = 0; index < 4; index++)
+            Assert.True(reader.GetBoolean(index), $"Pricing bridge schema assertion {index + 1} failed.");
     }
 }

@@ -11,95 +11,44 @@ namespace ERP_RFQ_Automation.Tests;
 [Collection(PostgreSqlIntegrationCollection.Name)]
 public sealed class V2Gate01CommercialExceptionPostgreSqlTests(PostgreSqlTestDatabase database)
 {
+    /// <summary>
+    /// SQUASH NOTE — this replaces
+    /// Data_bearing_baseline_upgrades_without_rewriting_existing_routing_rows.
+    ///
+    /// That test built a database at 20260728202215_AllowNonEmailLeadIntake, wrote a lead, a
+    /// routing decision and an unassigned work item, then migrated to head and asserted the work
+    /// item came through unchanged, that the new exception ledger started EMPTY rather than being
+    /// populated from routing rows, and that
+    /// AK_unassigned_work_items_BusinessUnitId_Id — the alternate key the exception case's
+    /// tenant-qualified foreign key needs — existed.
+    ///
+    /// 20260811033109_SquashedSchemaBaseline erased that id. "Existing rows are not rewritten" is a
+    /// property of an upgrade, and there is no upgrade left to have it. The reason the alternate key
+    /// was introduced is not an upgrade property at all, and is asserted here: a commercial
+    /// exception case reaches its work item through BOTH columns, so an exception in one tenant
+    /// cannot be raised against another tenant's unassigned work.
+    /// </summary>
     [Fact]
     [Trait("Category", "PostgreSQL")]
-    public async Task Data_bearing_baseline_upgrades_without_rewriting_existing_routing_rows()
+    public async Task Exception_cases_reach_unassigned_work_only_within_their_own_tenant()
     {
-        const string databaseName = "nexora_v2g1_upgrade_rehearsal";
-        var adminBuilder = new NpgsqlConnectionStringBuilder(database.ConnectionString);
-        await using (var admin = await database.OpenConnectionAsync())
-        {
-            await using var reset = admin.CreateCommand();
-            reset.CommandText = $"DROP DATABASE IF EXISTS {databaseName}; CREATE DATABASE {databaseName};";
-            await reset.ExecuteNonQueryAsync();
-        }
-
-        try
-        {
-            var rehearsalBuilder = new NpgsqlConnectionStringBuilder(adminBuilder.ConnectionString)
-            {
-                Database = databaseName
-            };
-            await using (var baseline = database.ContextForConnectionString(rehearsalBuilder.ConnectionString, 831001))
-            {
-                await baseline.Database.MigrateAsync("20260728202215_AllowNonEmailLeadIntake");
-                // Pinned to the rehearsal era (see Seed.HistoricalLead).
-                var lead = Seed.HistoricalLead(baseline, 831011, 831001);
-                var decision = new LeadRoutingDecision
-                {
-                    BusinessUnitId = 831001,
-                    LeadId = lead.Id,
-                    MatchStatus = CustomerMatchStatus.NoEvidence,
-                    Outcome = RoutingOutcome.Unassigned,
-                    DecisionCode = "NO_OWNER",
-                    Explanation = "{\"reason\":\"Authorized migration rehearsal row.\"}",
-                    PolicyVersion = "routing-v1",
-                    CorrelationId = "upgrade-rehearsal",
-                    IdempotencyKey = "upgrade-rehearsal",
-                    CreatedOn = DateTime.UtcNow
-                };
-                baseline.Add(new UnassignedWorkItem
-                {
-                    BusinessUnitId = 831001,
-                    LeadId = lead.Id,
-                    RoutingDecision = decision,
-                    ReasonCode = "NO_OWNER",
-                    Status = WorkItemStatus.Open,
-                    Priority = 80,
-                    EnteredOn = DateTime.UtcNow,
-                    SlaDueOn = DateTime.UtcNow.AddHours(1),
-                    RequiredAction = "Assign an owner",
-                    IdempotencyKey = "upgrade-work-item",
-                    Version = 1
-                });
-                await baseline.SaveChangesAsync();
-                Assert.Equal(1, await baseline.Set<UnassignedWorkItem>().CountAsync());
-            }
-
-            await using (var upgraded = database.ContextForConnectionString(rehearsalBuilder.ConnectionString, 831001))
-            {
-                await upgraded.Database.MigrateAsync();
-                var row = Assert.Single(await upgraded.Set<UnassignedWorkItem>().AsNoTracking().ToArrayAsync());
-                Assert.Equal(831011, row.LeadId);
-                Assert.Equal("upgrade-work-item", row.IdempotencyKey);
-                Assert.True(await upgraded.Database.CanConnectAsync());
-            }
-
-            await using var verify = new NpgsqlConnection(rehearsalBuilder.ConnectionString);
-            await verify.OpenAsync();
-            await using var command = verify.CreateCommand();
-            command.CommandText = """
-                SELECT
-                  EXISTS (
-                    SELECT 1 FROM "__EFMigrationsHistory"
-                    WHERE "MigrationId" = '20260729020217_V2Gate01CommercialExceptionCenter'
-                  ),
-                  (SELECT count(*) FROM commercial_exception_cases) = 0,
-                  EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'AK_unassigned_work_items_BusinessUnitId_Id');
-                """;
-            await using var reader = await command.ExecuteReaderAsync();
-            Assert.True(await reader.ReadAsync());
-            Assert.True(reader.GetBoolean(0));
-            Assert.True(reader.GetBoolean(1));
-            Assert.True(reader.GetBoolean(2));
-        }
-        finally
-        {
-            await using var admin = await database.OpenConnectionAsync();
-            await using var drop = admin.CreateCommand();
-            drop.CommandText = $"DROP DATABASE IF EXISTS {databaseName} WITH (FORCE);";
-            await drop.ExecuteNonQueryAsync();
-        }
+        await using var connection = await database.OpenConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT
+                EXISTS (SELECT 1 FROM pg_constraint
+                    WHERE conname = 'AK_unassigned_work_items_BusinessUnitId_Id'
+                      AND contype = 'u' AND array_length(conkey, 1) = 2),
+                EXISTS (SELECT 1 FROM pg_constraint
+                    WHERE conrelid = 'public.commercial_exception_cases'::regclass
+                      AND contype = 'f'
+                      AND confrelid = 'public.unassigned_work_items'::regclass
+                      AND array_length(conkey, 1) = 2);
+            """;
+        await using var reader = await command.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        Assert.True(reader.GetBoolean(0), "AK_unassigned_work_items_BusinessUnitId_Id is missing or not composite.");
+        Assert.True(reader.GetBoolean(1), "commercial_exception_cases reaches work items without the tenant.");
     }
 
     [Fact]
@@ -227,10 +176,11 @@ public sealed class V2Gate01CommercialExceptionPostgreSqlTests(PostgreSqlTestDat
     {
         await using var connection = await database.OpenConnectionAsync();
         await using var command = connection.CreateCommand();
+        // Squash note: dropped the leading id check for '%_V2Gate01CommercialExceptionCenter'.
+        // 20260811033109_SquashedSchemaBaseline erased that id. The four policies, the forced-RLS
+        // flags, the three grant shapes and the five guard triggers are asserted below.
         command.CommandText = """
             SELECT
-                (SELECT count(*) FROM "__EFMigrationsHistory"
-                 WHERE "MigrationId" LIKE '%_V2Gate01CommercialExceptionCenter') = 1,
                 (SELECT count(*) FROM pg_policies
                  WHERE schemaname = 'public' AND policyname = 'nexora_tenant_isolation'
                    AND tablename = ANY(ARRAY['commercial_exception_cases','commercial_exception_events','commercial_exception_operations','commercial_exception_outbox'])) = 4,
@@ -248,7 +198,8 @@ public sealed class V2Gate01CommercialExceptionPostgreSqlTests(PostgreSqlTestDat
             """;
         await using var reader = await command.ExecuteReaderAsync();
         Assert.True(await reader.ReadAsync());
-        for (var index = 0; index < 7; index++) Assert.True(reader.GetBoolean(index));
+        for (var index = 0; index < 6; index++)
+            Assert.True(reader.GetBoolean(index), $"Commercial exception schema assertion {index + 1} failed.");
     }
 
     [Fact]

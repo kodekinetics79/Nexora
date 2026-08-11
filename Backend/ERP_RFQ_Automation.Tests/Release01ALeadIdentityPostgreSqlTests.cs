@@ -16,102 +16,102 @@ public sealed class Release01ALeadIdentityPostgreSqlTests
     private readonly PostgreSqlTestDatabase _database;
     public Release01ALeadIdentityPostgreSqlTests(PostgreSqlTestDatabase database) => _database = database;
 
+    /// <summary>
+    /// SQUASH NOTE — this replaces
+    /// Populated_release01c_migration_rollback_and_reupgrade_preserve_identity_history_and_cost_status.
+    ///
+    /// That test built a database at 20260724230121_Release01OrderLineage, planted a legacy lead
+    /// with items, a customer, a contact with no tenant, an extraction job with no occurrence and
+    /// an extraction run with no cost status, then walked up through
+    /// 20260725022734_Release01BIntakeIdentityAcceptance and
+    /// 20260725041211_Release01CTenantContactMetadata, back down and up again, asserting at every
+    /// step that the backfilled revision, occurrence, contact tenant, job link and cost statuses
+    /// were correct and that the lead's commercial serial never moved.
+    ///
+    /// 20260811033109_SquashedSchemaBaseline erased all three ids. Those BACKFILLS are retired —
+    /// the columns they filled are NOT NULL now, so a row missing them cannot be written — and
+    /// that is exactly the guarantee asserted here instead. It is stronger than the backfill test
+    /// was: the backfill proved a legacy row COULD be repaired, this proves an unrepaired row
+    /// cannot be created in the first place.
+    ///
+    ///   * A contact belongs to exactly one parent and carries its tenant, with a TENANT-QUALIFIED
+    ///     foreign key to the supplier — a contact cannot be attached across a tenant boundary.
+    ///   * An extraction run must declare BOTH cost statuses; there is no default to fall through
+    ///     to, so "we do not know what this cost" has to be said out loud, which is what
+    ///     HistoricalUnpriced / HistoricalUnknown said for the legacy rows.
+    ///   * A cost amount without a currency is refused outright.
+    ///
+    /// The lead-identity chain the same migrations built — revisions, occurrences and the stable
+    /// commercial serial — is exercised end to end by the two tests below and by
+    /// Concurrent_duplicate_ingestion_converges_on_one_lead_and_two_occurrences, through
+    /// LeadIdentityApplicationService rather than through a migration.
+    /// </summary>
     [Fact]
-    public async Task Populated_release01c_migration_rollback_and_reupgrade_preserve_identity_history_and_cost_status()
+    [Trait("Category", "PostgreSQL")]
+    public async Task Contact_tenancy_and_extraction_cost_status_cannot_be_left_unstated()
     {
-        var databaseName = $"release01a_upgrade_{Guid.NewGuid():N}";
-        var adminBuilder = new NpgsqlConnectionStringBuilder(_database.ConnectionString) { Database = "postgres" };
-        var isolatedBuilder = new NpgsqlConnectionStringBuilder(_database.ConnectionString) { Database = databaseName };
-        await using (var admin = new NpgsqlConnection(adminBuilder.ConnectionString))
-        {
-            await admin.OpenAsync();
-            await using var create = admin.CreateCommand(); create.CommandText = $"CREATE DATABASE \"{databaseName}\""; await create.ExecuteNonQueryAsync();
-        }
-        try
-        {
-            await using var db = _database.ContextForConnectionString(isolatedBuilder.ConnectionString, null);
-            var migrator = db.GetService<IMigrator>();
-            const string previous = "20260724230121_Release01OrderLineage";
-            const string release01b = "20260725022734_Release01BIntakeIdentityAcceptance";
-            const string release01c = "20260725041211_Release01CTenantContactMetadata";
-            await migrator.MigrateAsync(previous);
-            await db.Database.ExecuteSqlRawAsync("""
-                INSERT INTO "BusinessUnits" ("ID","BusinessUnitCode","BusinessUnitName","CreatedBy","CreatedOn")
-                VALUES (99121,'R01AUP','Release 01A upgrade','tests',now());
-                INSERT INTO "Email_Configurations"
-                  ("ID","BusinessUnitID","ConfigurationName","EmailAddress","Protocol","Host","Port","Username","Password","UseSSL","PollingInterval","IsActive","CreatedOn")
-                VALUES (99121,99121,'upgrade','upgrade@nexora.invalid','IMAP','localhost',993,'tests','tests',true,300,false,now());
-                INSERT INTO "EmailIngests" ("ID","MessageID","FromEmail","EmailConfigurationID","CreatedOn")
-                VALUES (99121,'release-01a-upgrade','buyer@nexora.invalid',99121,now());
-                INSERT INTO "Leads" ("ID","RFQNo","RecDate","LeadSource","CreatedBy","CreatedDate","BusinessUnitID","EmailIngestsID","Clientemail")
-                VALUES (99121,'CUSTOMER-RFQ-99121',now(),'MigrationTest','tests',now(),99121,99121,'buyer@nexora.invalid');
-                INSERT INTO "LeadItems" ("ID","LeadID","LineItemNo","ManufacturerPartNumber","Quantity","UnitOfMeasure")
-                VALUES (99121,99121,'1','PART-99121',4,'EA');
-                INSERT INTO "Customers" ("ID","Name","ContactEmail","ImageURL","BUID","CreatedBy","CreatedOn")
-                VALUES (99121,'Release 01B Customer','buyer-99121@nexora.invalid','',99121,'tests',now());
-                INSERT INTO "Contacts" ("ID","CustomerID","FirstName","LastName","Email","CreatedBy","CreatedOn")
-                VALUES (99121,99121,'Release','Contact','contact-99121@nexora.invalid','tests',now());
-                INSERT INTO "ExtractionJobs"
-                  ("Id","BatchId","BusinessUnitId","SourceType","ContentHash","StoragePath","FileName","FileType","Status","Priority","SchedulerTag","Attempts","MaxAttempts","NextAttemptAt","CreatedOn","UpdatedOn")
-                VALUES (99121,'99121000-0000-0000-0000-000000000001',99121,'ManualUpload',repeat('c',64),'evidence://99121','rfq.csv','csv','Succeeded',0,0,1,5,now(),now(),now());
-                INSERT INTO document_corpora (id,business_unit_id,batch_id,source_type,status,created_on,updated_on)
-                VALUES (99121,99121,'99121000-0000-0000-0000-000000000001','ManualUpload','Completed',now(),now());
-                INSERT INTO source_documents
-                  (id,business_unit_id,corpus_id,extraction_job_id,content_hash,original_file_name,detected_mime_type,object_bucket,object_key,object_version,byte_size,page_count,security_status,processing_status,created_on,updated_on)
-                VALUES (99121,99121,99121,99121,repeat('c',64),'rfq.csv','text/csv','acceptance','99121','v1',10,1,'Cleared','Completed',now(),now());
-                INSERT INTO source_document_occurrences
-                  (id,business_unit_id,source_document_id,corpus_id,extraction_job_id,idempotency_key,source_metadata,received_on)
-                VALUES (99121,99121,99121,99121,99121,'release-01b-migration','{{}}'::jsonb,now());
-                """);
-            var serial = await db.Database.SqlQueryRaw<string>("SELECT \"CommercialCaseReference\" AS \"Value\" FROM \"Leads\" WHERE \"ID\"=99121").SingleAsync();
+        await using var connection = await _database.OpenConnectionAsync();
 
-            await migrator.MigrateAsync(release01b);
-            await AssertBackfill(db, serial);
-            await db.Database.ExecuteSqlRawAsync("""
-                INSERT INTO extraction_runs
-                  (business_unit_id,source_document_id,run_id,extraction_job_id,attempt_number,parser_version,schema_version,status,
-                   started_on,completed_on,page_count,region_count,inquiry_count,line_item_count,evidence_count,finding_count,created_on,updated_on)
-                VALUES (99121,99121,'99121000-0000-0000-0000-000000000002',99121,1,'historical/v1','historical/v1','Completed',
-                        now(),now(),1,0,1,1,0,0,now(),now())
-                ON CONFLICT DO NOTHING;
-                """);
-            await migrator.MigrateAsync(release01c);
-            await AssertRelease01C(db);
-            await migrator.MigrateAsync(release01b);
-            Assert.Equal(serial, await db.Database.SqlQueryRaw<string>("SELECT \"CommercialCaseReference\" AS \"Value\" FROM \"Leads\" WHERE \"ID\"=99121").SingleAsync());
-            await migrator.MigrateAsync(release01c);
-            await AssertBackfill(db, serial);
-            await AssertRelease01C(db);
-        }
-        finally
+        await using (var schema = connection.CreateCommand())
         {
-            NpgsqlConnection.ClearAllPools();
-            await using var admin = new NpgsqlConnection(adminBuilder.ConnectionString); await admin.OpenAsync();
-            await using var drop = admin.CreateCommand(); drop.CommandText = $"DROP DATABASE IF EXISTS \"{databaseName}\" WITH (FORCE)"; await drop.ExecuteNonQueryAsync();
+            schema.CommandText = """
+                SELECT
+                    (SELECT is_nullable FROM information_schema.columns
+                     WHERE table_schema = 'public' AND table_name = 'Contacts'
+                       AND column_name = 'BusinessUnitID') = 'NO',
+                    EXISTS (SELECT 1 FROM pg_constraint
+                        WHERE conname = 'FK_Contacts_Suppliers_SupplierID_BusinessUnitID'
+                          AND contype = 'f' AND array_length(conkey, 1) = 2),
+                    EXISTS (SELECT 1 FROM pg_constraint
+                        WHERE conname = 'CK_Contacts_ExactlyOneParent' AND convalidated),
+                    (SELECT count(*)::int FROM information_schema.columns
+                     WHERE table_schema = 'public' AND table_name = 'extraction_runs'
+                       AND column_name IN ('processing_cost_status', 'ocr_cost_status')
+                       AND is_nullable = 'NO' AND column_default IS NULL) = 2,
+                    EXISTS (SELECT 1 FROM pg_constraint
+                        WHERE conname = 'ck_extraction_runs_cost' AND convalidated);
+                """;
+            await using var reader = await schema.ExecuteReaderAsync();
+            Assert.True(await reader.ReadAsync());
+            for (var index = 0; index < 5; index++)
+                Assert.True(reader.GetBoolean(index), $"Release 01 identity assertion {index + 1} failed.");
         }
-    }
 
-    private static async Task AssertBackfill(DbContext db, string serial)
-    {
-        Assert.Equal(1, await db.Database.SqlQueryRaw<int>("SELECT count(*)::int AS \"Value\" FROM \"LeadRevisions\" WHERE \"BusinessUnitId\"=99121 AND \"LeadId\"=99121 AND \"RevisionNumber\"=1").SingleAsync());
-        Assert.Equal(1, await db.Database.SqlQueryRaw<int>("SELECT count(*)::int AS \"Value\" FROM \"LeadIngestionOccurrences\" WHERE \"BusinessUnitId\"=99121 AND \"LeadId\"=99121").SingleAsync());
-        Assert.Equal(serial, await db.Database.SqlQueryRaw<string>("SELECT \"CommercialCaseReference\" AS \"Value\" FROM \"Leads\" WHERE \"ID\"=99121").SingleAsync());
-        Assert.Equal(99121, await db.Database.SqlQueryRaw<long>("SELECT \"BusinessUnitID\" AS \"Value\" FROM \"Contacts\" WHERE \"ID\"=99121").SingleAsync());
-        Assert.Equal(99121, await db.Database.SqlQueryRaw<long>("SELECT \"SourceDocumentOccurrenceId\" AS \"Value\" FROM \"ExtractionJobs\" WHERE \"Id\"=99121").SingleAsync());
-        Assert.Equal("Resolved", await db.Database.SqlQueryRaw<string>("SELECT intake_status AS \"Value\" FROM source_document_occurrences WHERE id=99121").SingleAsync());
-    }
+        // And ONE of them is shown to bite, rather than merely to exist. Only the tenant-qualified
+        // contact foreign key is exercised by a write below; the extraction-run cost-status and
+        // cost-evidence constraints above are asserted on the catalogue only.
+        await using var transaction = await connection.BeginTransactionAsync();
+        await using (var seed = connection.CreateCommand())
+        {
+            seed.Transaction = transaction;
+            seed.CommandText = """
+                INSERT INTO "BusinessUnits"
+                    ("ID", "BusinessUnitCode", "BusinessUnitName", "CreatedBy", "CreatedOn")
+                VALUES (99131, 'R01A-A', 'Release 01A tenant A', 'tests', now()),
+                       (99132, 'R01A-B', 'Release 01A tenant B', 'tests', now());
+                INSERT INTO "Suppliers"
+                    ("ID", "Name", "ContactEmail", "ImageURL", "BUID", "IsActive", "CreatedBy", "CreatedOn")
+                VALUES (99133, 'Release 01A supplier', 'supplier-99133@nexora.invalid', 'n/a', 99131,
+                        true, 'tests', now());
+                """;
+            await seed.ExecuteNonQueryAsync();
+        }
 
-    private static async Task AssertRelease01C(DbContext db)
-    {
-        Assert.Equal("HistoricalUnpriced", await db.Database.SqlQueryRaw<string>(
-            "SELECT processing_cost_status AS \"Value\" FROM extraction_runs WHERE extraction_job_id=99121").SingleAsync());
-        Assert.Equal("HistoricalUnknown", await db.Database.SqlQueryRaw<string>(
-            "SELECT ocr_cost_status AS \"Value\" FROM extraction_runs WHERE extraction_job_id=99121").SingleAsync());
-        Assert.True(await db.Database.SqlQueryRaw<bool>("""
-            SELECT EXISTS (
-                SELECT 1 FROM pg_constraint
-                WHERE conname = 'FK_Contacts_Suppliers_SupplierID_BusinessUnitID') AS "Value"
-            """).SingleAsync());
+        // A contact for tenant A's supplier, filed under tenant B.
+        await using (var crossTenant = connection.CreateCommand())
+        {
+            crossTenant.Transaction = transaction;
+            crossTenant.CommandText = """
+                INSERT INTO "Contacts"
+                    ("ID", "BusinessUnitID", "SupplierID", "FirstName", "LastName",
+                     "CreatedBy", "CreatedOn", "ConcurrencyToken")
+                VALUES (99134, 99132, 99133, 'Cross', 'Tenant', 'tests', now(), gen_random_uuid());
+                """;
+            var error = await Assert.ThrowsAsync<PostgresException>(() => crossTenant.ExecuteNonQueryAsync());
+            Assert.Equal(PostgresErrorCodes.ForeignKeyViolation, error.SqlState);
+        }
+
+        await transaction.RollbackAsync();
     }
 
     [Fact]

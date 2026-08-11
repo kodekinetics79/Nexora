@@ -17,76 +17,112 @@ namespace ERP_RFQ_Automation.Tests;
 [Collection(PostgreSqlIntegrationCollection.Name)]
 public sealed class FinalPlatformRevenueControlsPostgreSqlTests(PostgreSqlTestDatabase database)
 {
-    private const string PreviousMigration = "20260808210430_Wave6BillingCutoverIntegrity";
-    private const string CurrentMigration = "20260808234734_FinalPlatformRevenueControls";
-
+    /// <summary>
+    /// SQUASH NOTE — this replaces
+    /// Data_bearing_upgrade_preserves_invoices_and_outbox_and_backfills_zero_rollups.
+    ///
+    /// That test built a database at 20260808210430_Wave6BillingCutoverIntegrity, wrote a finalized
+    /// invoice and a pending accounting-outbox message from before revenue actions existed, and
+    /// upgraded to 20260808234734_FinalPlatformRevenueControls to prove the new refund, reversal
+    /// and write-off rollups came out as ZERO on an invoice nobody had refunded, and that the
+    /// existing outbox message was left unattached to any revenue action rather than being
+    /// retro-fitted to one.
+    ///
+    /// 20260811033109_SquashedSchemaBaseline erased both ids. The BACKFILL is retired — the three
+    /// rollups are NOT NULL with a zero store default, so an invoice without them cannot exist —
+    /// and that default is exactly what is asserted here. The catalogue half of the assertion holds
+    /// for every invoice; the behavioural half writes and reads ONE invoice, exactly as the
+    /// original did. Money that has not moved reads as zero, never as null and never as unknown,
+    /// and the balance identity that depends on those three columns is a CHECK constraint.
+    /// </summary>
     [Fact]
     [Trait("Category", "PostgreSQL")]
-    public async Task Data_bearing_upgrade_preserves_invoices_and_outbox_and_backfills_zero_rollups()
+    public async Task Revenue_rollups_default_to_zero_and_the_outbox_need_not_name_an_action()
     {
-        var databaseName = $"nexora_revenue_upgrade_{Guid.NewGuid():N}";
-        var target = new NpgsqlConnectionStringBuilder(database.ConnectionString) { Database = databaseName };
-        await ExecuteAdminAsync(database.ConnectionString, $"CREATE DATABASE \"{databaseName}\"");
+        await using var connection = await database.OpenConnectionAsync();
 
-        try
+        await using (var schema = connection.CreateCommand())
         {
-            await using var context = database.ContextForConnectionString(target.ConnectionString, null);
-            var migrator = context.GetService<IMigrator>();
-            await migrator.MigrateAsync(PreviousMigration);
-            await context.Database.ExecuteSqlRawAsync("""
+            schema.CommandText = """
+                SELECT
+                    (SELECT count(*)::int FROM information_schema.columns
+                     WHERE table_schema = 'platform' AND table_name = 'SubscriptionInvoices'
+                       AND column_name IN ('RefundedAmount', 'ReversedPaymentAmount', 'WrittenOffAmount')
+                       AND is_nullable = 'NO' AND column_default LIKE '0%') = 3,
+                    (SELECT is_nullable = 'YES' FROM information_schema.columns
+                     WHERE table_schema = 'platform' AND table_name = 'AccountingOutbox'
+                       AND column_name = 'SubscriptionRevenueActionId'),
+                    EXISTS (SELECT 1 FROM pg_constraint
+                        WHERE conname = 'CK_SubscriptionInvoices_RevenueAmounts' AND convalidated);
+                """;
+            await using var reader = await schema.ExecuteReaderAsync();
+            Assert.True(await reader.ReadAsync());
+            for (var index = 0; index < 3; index++)
+                Assert.True(reader.GetBoolean(index), $"Revenue rollup assertion {index + 1} failed.");
+        }
+
+        await using var transaction = await connection.BeginTransactionAsync();
+        await using (var seed = connection.CreateCommand())
+        {
+            seed.Transaction = transaction;
+            seed.CommandText = """
                 INSERT INTO platform."Tenants"
                     ("Id","Name","Slug","Status","CreatedOn","BillingMode")
-                VALUES (997101,'Revenue upgrade tenant','revenue-upgrade-997101','Active',now(),'Billable');
+                VALUES (997101,'Revenue rollup tenant','revenue-rollup-997101','Active',now(),'Billable');
                 INSERT INTO platform."RateCards"
                     ("Id","Code","Currency","EffectiveFromUtc","IsActive","CreatedOn","Version")
-                VALUES (997102,'revenue-upgrade-card','USD','2025-01-01',true,now(),1);
+                VALUES (997102,'revenue-rollup-card','USD','2025-01-01',true,now(),1);
                 INSERT INTO platform."BillingStatements"
                     ("Id","TenantId","PeriodStartUtc","PeriodEndUtc","RateCardId","Currency",
                      "Status","TotalAmount","ComputedAtUtc","ComputedBy","Version")
                 VALUES (997103,997101,'2026-01-01','2026-02-01',997102,'USD',
-                        'Final',100,now(),'system:upgrade-test',1);
+                        'Final',100,now(),'system:rollup-test',1);
                 INSERT INTO platform."SubscriptionInvoices"
                     ("Id","TenantId","BillingStatementId","InvoiceNumber","Status","Currency",
                      "Subtotal","TaxRatePercent","TaxAmount","TotalAmount","CreditedAmount","PaidAmount",
                      "IssuedAtUtc","DueAtUtc","SellerSnapshotJson","BuyerSnapshotJson","TaxTreatment",
                      "SourceEvidenceJson","SourceEvidenceSha256","CreatedBy","CreatedAtUtc","Version")
-                VALUES (997104,997101,997103,'NX-UPGRADE-997104','Finalized','USD',100,0,0,100,0,0,
+                VALUES (997104,997101,997103,'NX-ROLLUP-997104','Finalized','USD',100,0,0,100,0,0,
                         now(),now()+interval '30 days',jsonb_build_object(),jsonb_build_object(),'exempt',
                         jsonb_build_object(),repeat('a',64),
-                        'system:upgrade-test',now(),1);
+                        'system:rollup-test',now(),1);
                 INSERT INTO platform."AccountingOutbox"
                     ("Id","TenantId","SubscriptionInvoiceId","MessageType","IdempotencyKey","PayloadJson",
                      "PayloadSha256","Status","ReconciliationStatus","AttemptCount","MaxAttempts",
                      "CreatedAtUtc","AvailableAtUtc")
                 VALUES ('99710400-0000-0000-0000-000000000001',997101,997104,'invoice.finalized',
-                        'upgrade-outbox-997104',jsonb_build_object(),repeat('b',64),
+                        'rollup-outbox-997104',jsonb_build_object(),repeat('b',64),
                         'Pending','NotSent',0,8,now(),now());
-                """);
+                """;
+            await seed.ExecuteNonQueryAsync();
+        }
 
-            await migrator.MigrateAsync(CurrentMigration);
-
-            await using var connection = new NpgsqlConnection(target.ConnectionString);
-            await connection.OpenAsync();
-            await using var command = new NpgsqlCommand("""
+        // The invoice named none of the three rollups and the outbox message named no revenue
+        // action, which is the exact shape the upgrade produced for pre-existing rows.
+        await using (var rollups = connection.CreateCommand())
+        {
+            rollups.Transaction = transaction;
+            rollups.CommandText = """
                 SELECT count(*) = 1
                        AND min("RefundedAmount") = 0
                        AND min("ReversedPaymentAmount") = 0
                        AND min("WrittenOffAmount") = 0
-                FROM platform."SubscriptionInvoices" WHERE "Id"=997104;
-                """, connection);
-            Assert.True((bool)(await command.ExecuteScalarAsync())!);
-            await using var outbox = new NpgsqlCommand("""
+                FROM platform."SubscriptionInvoices" WHERE "Id" = 997104;
+                """;
+            Assert.True((bool)(await rollups.ExecuteScalarAsync())!);
+        }
+
+        await using (var outbox = connection.CreateCommand())
+        {
+            outbox.Transaction = transaction;
+            outbox.CommandText = """
                 SELECT count(*) FROM platform."AccountingOutbox"
-                WHERE "SubscriptionInvoiceId"=997104 AND "SubscriptionRevenueActionId" IS NULL;
-                """, connection);
+                WHERE "SubscriptionInvoiceId" = 997104 AND "SubscriptionRevenueActionId" IS NULL;
+                """;
             Assert.Equal(1L, (long)(await outbox.ExecuteScalarAsync())!);
         }
-        finally
-        {
-            NpgsqlConnection.ClearAllPools();
-            await ExecuteAdminAsync(database.ConnectionString,
-                $"DROP DATABASE IF EXISTS \"{databaseName}\" WITH (FORCE)");
-        }
+
+        await transaction.RollbackAsync();
     }
 
     [Fact]

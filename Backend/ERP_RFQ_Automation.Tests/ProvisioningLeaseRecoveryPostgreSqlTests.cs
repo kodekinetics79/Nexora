@@ -56,14 +56,20 @@ public sealed class ProvisioningLeaseRecoveryPostgreSqlTests : IAsyncLifetime
     {
         await using var connection = await _database.OpenConnectionAsync();
 
-        // The migration was DISCOVERED AND APPLIED by the fixture's MigrateAsync, not merely
-        // authored. This lane builds its schema from the migrations exactly as production does, so
-        // a migration EF cannot find — a missing or malformed designer, a name that does not match
+        // The schema was DISCOVERED AND APPLIED by the fixture's MigrateAsync, not merely authored.
+        // This lane builds its schema from the migrations exactly as production does, so a
+        // migration EF cannot find — a missing or malformed designer, a name that does not match
         // its attribute — fails here rather than on a deploy.
-        Assert.Equal(1, await ScalarIntAsync(connection, """
-            SELECT count(*) FROM "__EFMigrationsHistory"
-             WHERE "MigrationId" = '20260810214500_ProvisioningStaleLeaseRecoveryAndOwnershipFence';
-            """));
+        //
+        // Squash note: this used to name '20260810214500_ProvisioningStaleLeaseRecoveryAndOwnershipFence'
+        // specifically. 20260811033109_SquashedSchemaBaseline erased that id, and pinning the
+        // baseline's own id here would just break again on the next migration. What the assertion
+        // was really protecting is that the history table is populated at all — i.e. the schema
+        // came from the migration pipeline and not from EnsureCreated, which derives it from the
+        // model and would silently produce a table with none of the raw-SQL controls below.
+        Assert.True(await ScalarIntAsync(connection, """
+            SELECT count(*) FROM "__EFMigrationsHistory";
+            """) >= 1, "The test schema was not built by EF migrations.");
 
         // 'A' is ENABLE ALWAYS; 'O' is the default ENABLE ORIGIN, which does NOT fire under
         // session_replication_role = 'replica'. Asserted directly because the difference between

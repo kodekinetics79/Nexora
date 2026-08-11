@@ -20,85 +20,55 @@ public sealed class OpportunityPriorityPostgreSqlSecurityTests(PostgreSqlTestDat
         "commercial_opportunity_operations"
     ];
 
+    /// <summary>
+    /// SQUASH NOTE — this replaces Populated_component_migration_upgrades_rolls_back_and_reupgrades.
+    ///
+    /// That test built a database at 20260729031740_V2Gate02OpportunityPriorityShadow, wrote a
+    /// recommendation from before the commercial-component columns existed, then walked up through
+    /// 20260729043226_V2Gate02OpportunityCommercialComponents and
+    /// 20260729054001_V2Gate02ValidateOpportunityCommercialComponents, back down and up again. Its
+    /// point was that the backfill marked the legacy row 'legacy_reconcile_required' instead of
+    /// inventing a component breakdown for a recommendation nobody had decomposed.
+    ///
+    /// 20260811033109_SquashedSchemaBaseline erased all three ids. The BACKFILL is retired — the
+    /// columns exist from the first row now — but its governing idea, that a components payload is
+    /// never assumed, is a live schema property and is asserted here:
+    ///
+    ///   * ComponentsJson has NO column default. There is nothing for an un-decomposed
+    ///     recommendation to silently fall through to; a writer that has no components must say so.
+    ///   * The append-only guard is present and is ENABLE ORIGIN, matching the way the platform
+    ///     is permitted to correct these rows in a replica-mode repair and no other way.
+    ///
+    /// The three CHECK constraints the third migration VALIDATEd are asserted, with convalidated,
+    /// by Latest_schema_forces_tenant_RLS_and_installs_integrity_guards below, and their behaviour
+    /// by Commercial_component_constraints_reject_invalid_expected_value and
+    /// Commercial_component_constraints_reject_currency_and_json_mismatches.
+    /// </summary>
     [Fact]
     [Trait("Category", "PostgreSQL")]
-    public async Task Populated_component_migration_upgrades_rolls_back_and_reupgrades()
+    public async Task Component_payload_has_no_default_to_fall_through_to()
     {
-        var databaseName = $"nexora_v2g2_upgrade_{Guid.NewGuid():N}";
-        var adminBuilder = new NpgsqlConnectionStringBuilder(database.ConnectionString) { Database = "postgres" };
-        var isolatedBuilder = new NpgsqlConnectionStringBuilder(database.ConnectionString) { Database = databaseName };
-        await using (var admin = new NpgsqlConnection(adminBuilder.ConnectionString))
-        {
-            await admin.OpenAsync();
-            await using var create = admin.CreateCommand();
-            create.CommandText = $"CREATE DATABASE \"{databaseName}\"";
-            await create.ExecuteNonQueryAsync();
-        }
-
-        try
-        {
-            await using var context = database.ContextForConnectionString(isolatedBuilder.ConnectionString, 839_001);
-            var migrator = context.GetService<IMigrator>();
-            const string previous = "20260729031740_V2Gate02OpportunityPriorityShadow";
-            const string current = "20260729054001_V2Gate02ValidateOpportunityCommercialComponents";
-            await migrator.MigrateAsync(previous);
-
-            // Pinned to the rehearsal era (see Seed.HistoricalLead).
-            var lead = Seed.HistoricalLead(context, 839_011, 839_001);
-            await context.SaveChangesAsync();
-            var identity = await context.Leads.IgnoreQueryFilters().AsNoTracking()
-                .Where(x => x.Id == lead.Id)
-                .Select(x => new { x.CommercialCaseId, x.CommercialCaseReference })
-                .SingleAsync();
-
-            await using (var transaction = await context.Database.BeginTransactionAsync())
-            {
-                await context.Database.ExecuteSqlInterpolatedAsync($$"""
-                    INSERT INTO commercial_opportunity_recommendations
-                      ("Id","BusinessUnitId","CommercialCaseId","NexoraSerial","LeadId","LeadVersion",
-                       "RecommendationKey","PolicyVersion","FeatureSchemaVersion","EvidenceCutoffAtUtc",
-                       "EvidenceSnapshotJson","EvidenceHash","PriorityScore","PriorityBand","Confidence",
-                       "Completeness","SampleSize","RecommendedActionCode","RecommendedActionLabel",
-                       "RationaleJson","CohortKey","Mode","GeneratedAtUtc")
-                    VALUES (839101,839001,{{identity.CommercialCaseId}},{{identity.CommercialCaseReference}},839011,1,
-                            'migration-recommendation','migration-policy','migration-schema',now()-interval '1 minute',
-                            '{}'::jsonb,repeat('a',64),50,'Medium',0.5,0.5,1,'REVIEW','Review opportunity',
-                            '[]'::jsonb,'insufficient-evidence','Shadow',now());
-                    INSERT INTO commercial_opportunity_events
-                      ("Id","BusinessUnitId","OpportunityRecommendationId","EventType","SourceType","SourceId",
-                       "ActorId","OccurredAtUtc","CorrelationId","IdempotencyKey","RequestHash","PayloadJson")
-                    VALUES (839102,839001,839101,'OpportunityRecommendation.Generated','Recommendation',839101,
-                            'migration-test',now(),'migration-event','migration-event',repeat('b',64),'{}'::jsonb);
-                    INSERT INTO commercial_opportunity_outbox
-                      ("Id","BusinessUnitId","OpportunityEventId","EventType","PayloadJson",
-                       "OccurredAtUtc","AvailableAtUtc","AttemptCount")
-                    VALUES (839103,839001,839102,'OpportunityRecommendation.Generated','{}'::jsonb,now(),now(),0);
-                    """);
-                await transaction.CommitAsync();
-            }
-
-            await migrator.MigrateAsync(current);
-            await AssertComponentMigrationStateAsync(context, expectedColumns: 3, expectedHistory: true);
-            Assert.Equal("legacy_reconcile_required", await context.Database.SqlQueryRaw<string>(
-                "SELECT \"ComponentsJson\"->>'status' AS \"Value\" FROM commercial_opportunity_recommendations WHERE \"Id\"=839101").SingleAsync());
-
-            await migrator.MigrateAsync(previous);
-            await AssertComponentMigrationStateAsync(context, expectedColumns: 0, expectedHistory: false);
-
-            await migrator.MigrateAsync(current);
-            await AssertComponentMigrationStateAsync(context, expectedColumns: 3, expectedHistory: true);
-            Assert.Equal("legacy_reconcile_required", await context.Database.SqlQueryRaw<string>(
-                "SELECT \"ComponentsJson\"->>'status' AS \"Value\" FROM commercial_opportunity_recommendations WHERE \"Id\"=839101").SingleAsync());
-        }
-        finally
-        {
-            NpgsqlConnection.ClearAllPools();
-            await using var admin = new NpgsqlConnection(adminBuilder.ConnectionString);
-            await admin.OpenAsync();
-            await using var drop = admin.CreateCommand();
-            drop.CommandText = $"DROP DATABASE IF EXISTS \"{databaseName}\" WITH (FORCE)";
-            await drop.ExecuteNonQueryAsync();
-        }
+        await using var connection = await database.OpenConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT
+                (SELECT count(*)::int FROM information_schema.columns
+                 WHERE table_schema = 'public'
+                   AND table_name = 'commercial_opportunity_recommendations'
+                   AND column_name IN ('ComponentsJson', 'ExpectedCommercialValue',
+                                       'ExpectedCommercialValueCurrency')) = 3,
+                (SELECT column_default IS NULL FROM information_schema.columns
+                 WHERE table_schema = 'public'
+                   AND table_name = 'commercial_opportunity_recommendations'
+                   AND column_name = 'ComponentsJson'),
+                (SELECT tgenabled::text = 'O' FROM pg_trigger
+                 WHERE tgrelid = 'public.commercial_opportunity_recommendations'::regclass
+                   AND tgname = 'trg_opportunity_recommendations_append_only');
+            """;
+        await using var reader = await command.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        for (var index = 0; index < 3; index++)
+            Assert.True(reader.GetBoolean(index), $"Component payload assertion {index + 1} failed.");
     }
 
     [Fact]
@@ -107,14 +77,17 @@ public sealed class OpportunityPriorityPostgreSqlSecurityTests(PostgreSqlTestDat
     {
         await using var connection = await database.OpenConnectionAsync();
         await using var command = connection.CreateCommand();
+        // Squash note: three leading id checks were dropped here
+        // ('..._V2Gate02OpportunityPriorityShadow', '..._V2Gate02OpportunityCommercialComponents',
+        // '..._V2Gate02ValidateOpportunityCommercialComponents'), because
+        // 20260811033109_SquashedSchemaBaseline erased those ids. The first two only ever stood in
+        // for the tables, policies, triggers and constraints asserted below. The third stood for
+        // one specific property — that the three NOT VALID CHECK constraints were subsequently
+        // VALIDATEd — so `AND convalidated` was added to the constraint assertion below to hold it
+        // directly. A constraint left NOT VALID would now fail here instead of passing on a
+        // migration id.
         command.CommandText = """
             SELECT
-                (SELECT count(*) FROM "__EFMigrationsHistory"
-                 WHERE "MigrationId" = '20260729031740_V2Gate02OpportunityPriorityShadow') = 1,
-                (SELECT count(*) FROM "__EFMigrationsHistory"
-                 WHERE "MigrationId" = '20260729043226_V2Gate02OpportunityCommercialComponents') = 1,
-                (SELECT count(*) FROM "__EFMigrationsHistory"
-                 WHERE "MigrationId" = '20260729054001_V2Gate02ValidateOpportunityCommercialComponents') = 1,
                 (SELECT count(*) FROM pg_policies
                  WHERE schemaname = 'public'
                    AND policyname = 'nexora_tenant_isolation'
@@ -166,7 +139,8 @@ public sealed class OpportunityPriorityPostgreSqlSecurityTests(PostgreSqlTestDat
                    AND conname = ANY(ARRAY[
                      'CK_opportunity_recommendations_EcvNonNegative',
                      'CK_opportunity_recommendations_EcvCurrency',
-                     'CK_opportunity_recommendations_ComponentsObject'])) = 3,
+                     'CK_opportunity_recommendations_ComponentsObject'])
+                   AND convalidated) = 3,
                 (SELECT count(*)
                  FROM pg_policy p
                  JOIN pg_class c ON c.oid = p.polrelid
@@ -186,7 +160,7 @@ public sealed class OpportunityPriorityPostgreSqlSecurityTests(PostgreSqlTestDat
 
         await using var reader = await command.ExecuteReaderAsync();
         Assert.True(await reader.ReadAsync());
-        for (var index = 0; index < 14; index++)
+        for (var index = 0; index < 11; index++)
             Assert.True(reader.GetBoolean(index), $"Gate 2 schema security assertion {index + 1} failed.");
     }
 
@@ -700,46 +674,6 @@ public sealed class OpportunityPriorityPostgreSqlSecurityTests(PostgreSqlTestDat
         command.Transaction = transaction;
         command.CommandText = sql;
         await command.ExecuteNonQueryAsync();
-    }
-
-    private static async Task AssertComponentMigrationStateAsync(
-        ErpRfqAutomationContext context,
-        int expectedColumns,
-        bool expectedHistory)
-    {
-        Assert.Equal(1, await context.Database.SqlQueryRaw<int>(
-            "SELECT count(*)::int AS \"Value\" FROM commercial_opportunity_recommendations WHERE \"Id\"=839101").SingleAsync());
-        Assert.Equal(expectedColumns, await context.Database.SqlQueryRaw<int>("""
-            SELECT count(*)::int AS "Value"
-            FROM information_schema.columns
-            WHERE table_name='commercial_opportunity_recommendations'
-              AND column_name IN ('ComponentsJson','ExpectedCommercialValue','ExpectedCommercialValueCurrency')
-            """).SingleAsync());
-        Assert.Equal(expectedHistory, await context.Database.SqlQueryRaw<bool>("""
-            SELECT count(*) = 2 AS "Value"
-            FROM "__EFMigrationsHistory"
-            WHERE "MigrationId" IN (
-                '20260729043226_V2Gate02OpportunityCommercialComponents',
-                '20260729054001_V2Gate02ValidateOpportunityCommercialComponents')
-            """).SingleAsync());
-        if (!expectedHistory) return;
-        Assert.Equal(3, await context.Database.SqlQueryRaw<int>("""
-            SELECT count(*)::int AS "Value" FROM pg_constraint
-            WHERE conrelid='commercial_opportunity_recommendations'::regclass
-              AND conname IN ('CK_opportunity_recommendations_ComponentsObject',
-                              'CK_opportunity_recommendations_EcvCurrency',
-                              'CK_opportunity_recommendations_EcvNonNegative')
-              AND convalidated
-            """).SingleAsync());
-        Assert.Null(await context.Database.SqlQueryRaw<string?>("""
-            SELECT column_default AS "Value" FROM information_schema.columns
-            WHERE table_name='commercial_opportunity_recommendations' AND column_name='ComponentsJson'
-            """).SingleAsync());
-        Assert.Equal("O", await context.Database.SqlQueryRaw<string>("""
-            SELECT tgenabled::text AS "Value" FROM pg_trigger
-            WHERE tgrelid='commercial_opportunity_recommendations'::regclass
-              AND tgname='trg_opportunity_recommendations_append_only'
-            """).SingleAsync());
     }
 
     private sealed class OpportunityFixture(long tenantId, long leadId, long baseId, char hashCharacter)

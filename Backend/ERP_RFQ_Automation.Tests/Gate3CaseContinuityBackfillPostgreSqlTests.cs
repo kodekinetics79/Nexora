@@ -1,201 +1,141 @@
-using ERP_RFQ_Automation.Models;
-using ERP_RFQ_Automation.Procurement;
 using ERP_RFQ_Automation.Tests.Support;
-using Microsoft.EntityFrameworkCore;
-using Microsoft.EntityFrameworkCore.Infrastructure;
-using Microsoft.EntityFrameworkCore.Migrations;
 using Npgsql;
 
 namespace ERP_RFQ_Automation.Tests;
 
 /// <summary>
-/// Certifies the case-continuity backfill against the production dialect. Populating the two
-/// documents at creation only fixes the future; every supplier purchase order and shipment already
-/// in the database was written before the columns existed, and would otherwise sit permanently
-/// blank while the chain that could answer for them was still intact.
+/// SQUASH NOTE — this file used to be
+/// Upgrade_backfills_shipments_from_their_order_and_supplier_orders_from_their_RFQ.
 ///
-/// The rehearsal seeds a fully migrated database, migrates the case-continuity migration back down
-/// so the columns disappear, then migrates up again — so the assertion is on the migration's own
-/// SQL running against real rows, not on a hand-run script that resembles it.
+/// It seeded a fully migrated database, migrated 20260809175352_Gate3CaseContinuityAndLeadOutcome
+/// back DOWN so the two continuity columns disappeared, then migrated up again so the assertion sat
+/// on the migration's own SQL running against real rows: a shipment recovered its case from its
+/// order, a customer-demand purchase order recovered its case from its RFQ, a STOCK purchase order
+/// was correctly left blank (replenishment has no case, and a reference there would be an
+/// invention), and a shipment whose order never came from a lead stayed an honest gap.
+///
+/// 20260811033109_SquashedSchemaBaseline erased that id, so there is no longer a migration to walk
+/// down to. The BACKFILL itself is retired: it repaired documents written before the columns
+/// existed, and no database can be in that state again.
+///
+/// WHAT REPLACED IT
+///   * Creation-time population — the forward half the backfill's own summary called "fixing the
+///     future" — is CommercialCaseContinuityTests, which drives Shipment.InheritCommercialIdentity
+///     and SupplierPurchaseOrder.InheritCommercialIdentity directly, including the cross-tenant
+///     refusal.
+///   * What no other test covers, and what is asserted below, is the DATABASE half: the two
+///     continuity columns are NULLABLE, so an unresolvable document stays an honest gap instead of
+///     being forced to invent a case; and they are backed by TENANT-QUALIFIED foreign keys, so a
+///     document cannot be stamped with another tenant's case even from raw SQL with the guard
+///     objects bypassed. The backfill's most important property was that it refused to fabricate a
+///     reference; this is the constraint that makes fabrication impossible for everyone else too.
 /// </summary>
 [Collection(PostgreSqlIntegrationCollection.Name)]
 public sealed class Gate3CaseContinuityBackfillPostgreSqlTests(PostgreSqlTestDatabase database)
 {
-    private const string PreviousMigration = "20260809172925_Gate3SpineAndMatchingPolicy";
-    private const string CurrentMigration = "20260809175352_Gate3CaseContinuityAndLeadOutcome";
-
-    private const long Tenant = 96_401;
-    private const long LeadId = 96_402;
-    private const long RfqId = 96_403;
-    private const long CustomerId = 96_404;
-    private const long CurrencyId = 96_405;
-    private const long SupplierId = 96_406;
-    private const long OrderStatusId = 96_407;
-    private const long ShipmentStatusId = 96_408;
-    private const long OrderId = 96_409;
-    private const long ShipmentId = 96_410;
-    private const long CustomerDemandPoId = 96_411;
-    private const long StockPoId = 96_412;
-    private const long OrphanOrderId = 96_413;
-    private const long OrphanShipmentId = 96_414;
+    private const long TenantA = 96_951;
+    private const long TenantB = 96_952;
 
     [Fact]
     [Trait("Category", "PostgreSQL")]
-    public async Task Upgrade_backfills_shipments_from_their_order_and_supplier_orders_from_their_RFQ()
+    public async Task Case_continuity_columns_are_optional_and_cannot_cite_another_tenants_case()
     {
-        var databaseName = $"nexora_case_continuity_{Guid.NewGuid():N}";
-        var target = new NpgsqlConnectionStringBuilder(database.ConnectionString) { Database = databaseName };
-        await ExecuteAdminAsync($"CREATE DATABASE \"{databaseName}\"");
+        await using var connection = await database.OpenConnectionAsync();
 
-        try
+        // Nullable on purpose. A NOT NULL column here would have forced the backfill — and forces
+        // every writer since — to put SOMETHING in it, which is how invented lineage gets created.
+        await using (var nullable = connection.CreateCommand())
         {
-            long caseId;
-            string serial;
-            await using (var context = database.ContextForConnectionString(target.ConnectionString, null))
-            {
-                await context.Database.MigrateAsync();
-                (caseId, serial) = await SeedAsync(context);
-            }
-
-            await using (var context = database.ContextForConnectionString(target.ConnectionString, null))
-            {
-                var migrator = context.GetService<IMigrator>();
-                await migrator.MigrateAsync(PreviousMigration);
-                await migrator.MigrateAsync(CurrentMigration);
-            }
-
-            await using var connection = new NpgsqlConnection(target.ConnectionString);
-            await connection.OpenAsync();
-
-            Assert.Equal(caseId, await ScalarAsync<long?>(connection,
-                $"SELECT \"CommercialCaseId\" FROM public.\"Shipments\" WHERE \"ID\" = {ShipmentId}"));
-            Assert.Equal(serial, await ScalarAsync<string>(connection,
-                $"SELECT \"NexoraSerial\" FROM public.\"Shipments\" WHERE \"ID\" = {ShipmentId}"));
-
-            Assert.Equal(caseId, await ScalarAsync<long?>(connection,
-                $"SELECT \"CommercialCaseId\" FROM public.supplier_purchase_orders WHERE \"Id\" = {CustomerDemandPoId}"));
-            Assert.Equal(serial, await ScalarAsync<string>(connection,
-                $"SELECT \"NexoraSerial\" FROM public.supplier_purchase_orders WHERE \"Id\" = {CustomerDemandPoId}"));
-
-            // A STOCK order shares the same RFQ, and is still left null: replenishment has no
-            // case, so a reference here would be an invention rather than a recovery.
-            Assert.True(await ScalarAsync<bool?>(connection,
-                $"""
-                 SELECT "CommercialCaseId" IS NULL AND "NexoraSerial" IS NULL
-                 FROM public.supplier_purchase_orders WHERE "Id" = {StockPoId}
-                 """));
-
-            // A shipment whose order never came from a lead cannot resolve, and stays an honest gap.
-            Assert.True(await ScalarAsync<bool?>(connection,
-                $"""
-                 SELECT "CommercialCaseId" IS NULL AND "NexoraSerial" IS NULL
-                 FROM public."Shipments" WHERE "ID" = {OrphanShipmentId}
-                 """));
+            nullable.CommandText = """
+                SELECT count(*)::int FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND ((table_name = 'Shipments' AND column_name IN ('CommercialCaseId', 'NexoraSerial'))
+                    OR (table_name = 'supplier_purchase_orders' AND column_name IN ('CommercialCaseId', 'NexoraSerial')))
+                  AND is_nullable = 'YES';
+                """;
+            Assert.Equal(4, Convert.ToInt32(await nullable.ExecuteScalarAsync()));
         }
-        finally
+
+        // Both references carry the tenant in the key. A single-column FK to "CommercialCases"
+        // would satisfy PostgreSQL while pointing a shipment at another tenant's case.
+        await using (var tenantQualified = connection.CreateCommand())
         {
-            NpgsqlConnection.ClearAllPools();
-            await ExecuteAdminAsync($"DROP DATABASE IF EXISTS \"{databaseName}\" WITH (FORCE)");
+            tenantQualified.CommandText = """
+                SELECT count(*)::int FROM pg_constraint
+                WHERE contype = 'f'
+                  AND confrelid = 'public."CommercialCases"'::regclass
+                  AND conrelid IN ('public."Shipments"'::regclass, 'public.supplier_purchase_orders'::regclass)
+                  AND array_length(conkey, 1) = 2;
+                """;
+            Assert.Equal(2, Convert.ToInt32(await tenantQualified.ExecuteScalarAsync()));
         }
-    }
 
-    private static async Task<(long CaseId, string Serial)> SeedAsync(ErpRfqAutomationContext context)
-    {
-        var now = new DateTime(2026, 8, 9, 9, 0, 0, DateTimeKind.Unspecified);
-        Seed.EnsureBusinessUnit(context, Tenant);
-        Seed.Customer(context, CustomerId, Tenant, "Case continuity customer");
-        var lead = Seed.Lead(context, LeadId, Tenant, buyersName: "Continuity buyer");
-        context.SetupMasters.AddRange(
-            Status(OrderStatusId, "OrderStatus", "OPEN", now),
-            Status(ShipmentStatusId, "ShipmentStatus", "READY", now));
-        context.Currencies.Add(new Currency
+        await using var transaction = await connection.BeginTransactionAsync();
+        var foreignCaseId = await SeedAsync(connection, transaction);
+
+        // The stamp that the backfill would have made, made by hand and pointed at the wrong
+        // tenant. It is refused by the FOREIGN KEY itself — not by an application trigger a bulk
+        // repair could switch off — which is why the tenant has to be IN the key.
+        await using (var crossTenant = connection.CreateCommand())
         {
-            Id = CurrencyId, BusinessUnitId = Tenant, Code = "CNT", CurrencyName = "Continuity currency",
-            ExchangeRate = 1m, IsBaseCurrency = true, IsActive = true, CreatedBy = "qa", CreatedOn = now
-        });
-        AgentSeed.Supplier(context, SupplierId, Tenant, "Continuity supplier", "supplier@continuity.test");
-        await context.SaveChangesAsync();
+            crossTenant.Transaction = transaction;
+            crossTenant.CommandText = $"""
+                UPDATE public."Shipments" SET "CommercialCaseId" = {foreignCaseId} WHERE "ID" = 96959;
+                """;
+            var error = await Assert.ThrowsAsync<PostgresException>(() => crossTenant.ExecuteNonQueryAsync());
+            Assert.Equal(PostgresErrorCodes.ForeignKeyViolation, error.SqlState);
+        }
 
-        // PostgreSQL allocates the commercial case by trigger, so the lead has to be re-read
-        // before the rest of the chain can inherit from it.
-        await context.Entry(lead).ReloadAsync();
-        var caseId = lead.CommercialCaseId;
-        var serial = lead.CommercialCaseReference;
-
-        var rfq = AgentSeed.Rfq(context, RfqId, Tenant, "RFQ-CONTINUITY");
-        rfq.LeadId = LeadId;
-        rfq.InheritCommercialIdentity(lead);
-        context.Set<Order>().AddRange(
-            Seed.StampCommercialCase(new Order
-            {
-                Id = OrderId, OrderNo = "SO-CONTINUITY", CustomerId = CustomerId, BusinessUnitId = Tenant,
-                StatusId = OrderStatusId, SourceType = OrderSourceTypes.Manual, TotalAmount = 40m,
-                PaidAmount = 0m, OrderDate = now, CreatedBy = "qa", CreatedOn = now, IsActive = true
-            }, caseId, serial),
-            new Order
-            {
-                Id = OrphanOrderId, OrderNo = "SO-CONTINUITY-ORPHAN", CustomerId = CustomerId,
-                BusinessUnitId = Tenant, StatusId = OrderStatusId, SourceType = OrderSourceTypes.Manual,
-                TotalAmount = 10m, PaidAmount = 0m, OrderDate = now, CreatedBy = "qa", CreatedOn = now,
-                IsActive = true
-            });
-        await context.SaveChangesAsync();
-
-        // Written the way the schema held them before this migration: the columns exist, and
-        // nothing has ever put a value in them.
-        context.Shipments.AddRange(
-            new Shipment
-            {
-                Id = ShipmentId, ShipmentNo = "SH-CONTINUITY", OrderId = OrderId, BusinessUnitId = Tenant,
-                StatusId = ShipmentStatusId, ShipmentDate = now, CreatedBy = "qa", CreatedOn = now,
-                IsActive = true
-            },
-            new Shipment
-            {
-                Id = OrphanShipmentId, ShipmentNo = "SH-CONTINUITY-ORPHAN", OrderId = OrphanOrderId,
-                BusinessUnitId = Tenant, StatusId = ShipmentStatusId, ShipmentDate = now,
-                CreatedBy = "qa", CreatedOn = now, IsActive = true
-            });
-        context.SupplierPurchaseOrders.AddRange(
-            PurchaseOrder(CustomerDemandPoId, SupplierPurchaseOrderDemandSources.CustomerDemand, now),
-            PurchaseOrder(StockPoId, SupplierPurchaseOrderDemandSources.Stock, now));
-        await context.SaveChangesAsync();
-
-        return (caseId, serial);
+        await transaction.RollbackAsync();
     }
-
-    private static SupplierPurchaseOrder PurchaseOrder(long id, string demandSource, DateTime now) => new()
-    {
-        Id = id, BusinessUnitId = Tenant, RfqId = RfqId, SupplierId = SupplierId, CurrencyId = CurrencyId,
-        PurchaseOrderNumber = $"PO-CONTINUITY-{id}", Status = SupplierPurchaseOrderStatuses.Draft,
-        DemandSource = demandSource, TotalValue = 24m, IdempotencyKey = $"continuity-{id}",
-        RequestHash = new string('c', 64), CreatedOn = now, CreatedBy = "qa"
-    };
-
-    private static SetupMaster Status(long setupId, string type, string value, DateTime now) => new()
-    {
-        SetupId = setupId, SetupType = type, SetupCode = value, SetupValue = value,
-        BusinessUnitId = Tenant, IsActive = true, CreatedBy = "qa", CreatedOn = now
-    };
 
     /// <summary>
-    /// Reads one value, reporting an unresolved reference as a null rather than a cast failure —
-    /// "the backfill left this blank" is the diagnosis, and it should read like one.
+    /// Two tenants, each with a lead — the commercial case is allocated by trigger on the lead —
+    /// and one order and shipment in tenant A. Returns tenant B's case id.
     /// </summary>
-    private static async Task<T?> ScalarAsync<T>(NpgsqlConnection connection, string sql)
+    private static async Task<long> SeedAsync(NpgsqlConnection connection, NpgsqlTransaction transaction)
     {
-        await using var command = new NpgsqlCommand(sql, connection);
-        var value = await command.ExecuteScalarAsync();
-        return value is null or DBNull ? default : (T)value;
-    }
+        await using (var seed = connection.CreateCommand())
+        {
+            seed.Transaction = transaction;
+            seed.CommandText = $"""
+                INSERT INTO public."BusinessUnits"
+                    ("ID", "BusinessUnitCode", "BusinessUnitName", "CreatedBy", "CreatedOn")
+                VALUES ({TenantA}, 'G3-CC-A', 'Case continuity A', 'qa', now()),
+                       ({TenantB}, 'G3-CC-B', 'Case continuity B', 'qa', now());
+                INSERT INTO public."Customers"
+                    ("ID", "Name", "ImageURL", "BUID", "IsActive", "CreatedBy", "CreatedOn",
+                     "ConcurrencyToken")
+                VALUES (96953, 'Case continuity customer', '', {TenantA}, true, 'qa', now(),
+                        gen_random_uuid());
+                INSERT INTO public."Setup_Master"
+                    ("SetupID", "SetupType", "SetupCode", "SetupValue", "BusinessUnitID", "IsActive",
+                     "CreatedBy", "CreatedOn")
+                VALUES (96954, 'OrderStatus', 'OPEN', 'OPEN', {TenantA}, true, 'qa', now()),
+                       (96955, 'ShipmentStatus', 'READY', 'READY', {TenantA}, true, 'qa', now());
+                INSERT INTO public."Leads"
+                    ("ID", "RFQNo", "RecDate", "LeadSource", "CreatedBy", "CreatedDate", "BusinessUnitID")
+                VALUES (96956, 'RFQ-CONTINUITY-A', now(), 'Tests', 'qa', now(), {TenantA}),
+                       (96957, 'RFQ-CONTINUITY-B', now(), 'Tests', 'qa', now(), {TenantB});
+                INSERT INTO public."Orders"
+                    ("ID", "OrderNo", "CustomerID", "BusinessUnitID", "StatusID", "SourceType",
+                     "TotalAmount", "PaidAmount", "OrderDate", "CreatedBy", "CreatedOn")
+                VALUES (96958, 'SO-CONTINUITY', 96953, {TenantA}, 96954, 'MANUAL',
+                        40, 0, now(), 'qa', now());
+                INSERT INTO public."Shipments"
+                    ("ID", "ShipmentNo", "OrderID", "BusinessUnitID", "StatusID", "ShipmentDate",
+                     "CreatedBy", "CreatedOn")
+                VALUES (96959, 'SH-CONTINUITY', 96958, {TenantA}, 96955, now(), 'qa', now());
+                """;
+            await seed.ExecuteNonQueryAsync();
+        }
 
-    private async Task ExecuteAdminAsync(string sql)
-    {
-        var admin = new NpgsqlConnectionStringBuilder(database.ConnectionString) { Database = "postgres" };
-        await using var connection = new NpgsqlConnection(admin.ConnectionString);
-        await connection.OpenAsync();
-        await using var command = connection.CreateCommand();
-        command.CommandText = sql;
-        await command.ExecuteNonQueryAsync();
+        await using var foreignCase = connection.CreateCommand();
+        foreignCase.Transaction = transaction;
+        foreignCase.CommandText = """SELECT "CommercialCaseId" FROM public."Leads" WHERE "ID" = 96957;""";
+        var value = await foreignCase.ExecuteScalarAsync();
+        Assert.NotNull(value);
+        Assert.IsNotType<DBNull>(value);
+        return Convert.ToInt64(value);
     }
 }

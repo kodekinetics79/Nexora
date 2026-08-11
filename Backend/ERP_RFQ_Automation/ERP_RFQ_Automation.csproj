@@ -6,6 +6,42 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
 
+  <!-- ==========================================================================
+       SQUASH BASELINE — TRANSITIONAL BLOCK. Remove together with the Migrations\
+       folder once the lead approves the squash.
+
+       The 134 pre-baseline migrations under Migrations\ are superseded by the
+       single baseline in MigrationsBaseline\. They are retained on disk (not
+       deleted) so the change stays reversible, but they are removed from
+       compilation: their 134 .Designer.cs files are 2,308,701 lines — 92% of
+       everything the compiler reads — and are what pushes `dotnet publish`
+       past 8 GB on Render.
+
+       MigrationsBaseline\ uses namespace ERP_RFQ_Automation.Migrations, so after
+       approval the folder is renamed to Migrations\ with no code change.
+       ========================================================================== -->
+  <ItemGroup>
+    <Compile Remove="Migrations\**\*.cs" />
+    <!-- No exceptions. AddSetupMasterRoleRank.LegacyRankBackfillSql used to be the one
+         reason a single migration file stayed compiled: RoleRankAuthorityTests executed
+         that const directly. The const has been moved verbatim to
+         ERP_RFQ_Automation.Tests/Support/LegacyRoleRankBackfill.cs, which is where it
+         belongs now that the squash means nothing executes it in production - a new
+         database is created with Setup_Master.RoleRank already present and defaulted,
+         and every existing database ran the backfill once, before being stamped. The
+         Migrations\ folder is therefore fully excluded and can be deleted outright. -->
+  </ItemGroup>
+
+  <!-- The squashed baseline replays a schema-only pg_dump of a database built from
+       all 134 pre-baseline migrations. The dump lives as SQL (reviewable as SQL, and
+       out of the C# compiler's working set) and is embedded in the assembly so
+       Migrate(), `migrations script` and `migrations bundle` all carry it.
+       LogicalName is pinned so the resource id cannot drift with folder renames. -->
+  <ItemGroup>
+    <EmbeddedResource Include="MigrationsBaseline\Sql\*.sql"
+                      LogicalName="Nexora.SquashedSchemaBaseline.%(Filename)%(Extension)" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="AWSSDK.S3" Version="4.0.101.4" />
     <PackageReference Include="BCrypt.Net-Next" Version="4.0.3" />

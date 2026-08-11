@@ -22,90 +22,81 @@ public sealed class PostgreSqlProductionDialectTests
     public PostgreSqlProductionDialectTests(PostgreSqlTestDatabase database)
         => _database = database;
 
+    /// <summary>
+    /// SQUASH NOTE — this replaces FinancialMigration_ClassifiesHistoricalQuoteArithmetic.
+    ///
+    /// That test built an isolated database at 20260723140000_AddAiGovernanceLedger, wrote two
+    /// legacy quotes — one whose line total excluded tax and one whose total included it — and
+    /// upgraded to 20260723150000_EnforceQuoteOrderFinancialIntegrity to prove the migration
+    /// classified them as FinancialCalculationVersion 1 and 2 respectively rather than assuming one
+    /// arithmetic for both and silently restating a customer's price. It then seeded a legacy role
+    /// and upgraded to 20260723160000_AddCommercialFinanceLedger to prove the finance modules were
+    /// granted to it.
+    ///
+    /// 20260811033109_SquashedSchemaBaseline erased all three ids. Both are one-time data
+    /// migrations over rows that predate the columns, and neither can run again: the version column
+    /// is NOT NULL with a store default, and the role-permission seed acted on roles that existed
+    /// at that moment.
+    ///
+    /// What survives, and is asserted here, is the half that still governs every quote written
+    /// today: the arithmetic version is recorded on the row, defaults to the CURRENT arithmetic
+    /// (2), and is never null — so no quote is ever evaluated under an assumed convention. The
+    /// version-1 population is closed and finite; the risk the migration was managing was
+    /// misreading it, and a row that cannot omit its version cannot be misread.
+    /// </summary>
     [Fact]
     [Trait("Category", "PostgreSQL")]
-    public async Task FinancialMigration_ClassifiesHistoricalQuoteArithmetic()
+    public async Task Quote_arithmetic_version_is_recorded_on_every_quote_and_defaults_to_current()
     {
-        var databaseName = $"finance_{Guid.NewGuid():N}";
-        var adminBuilder = new NpgsqlConnectionStringBuilder(_database.ConnectionString)
-        {
-            Database = "postgres"
-        };
-        var isolatedBuilder = new NpgsqlConnectionStringBuilder(_database.ConnectionString)
-        {
-            Database = databaseName
-        };
+        await using var connection = await _database.OpenConnectionAsync();
 
-        await using (var admin = new NpgsqlConnection(adminBuilder.ConnectionString))
+        await using (var column = connection.CreateCommand())
         {
-            await admin.OpenAsync();
-            await using var create = admin.CreateCommand();
-            create.CommandText = $"CREATE DATABASE \"{databaseName}\"";
-            await create.ExecuteNonQueryAsync();
+            column.CommandText = """
+                SELECT is_nullable = 'NO' AND column_default LIKE '%2%'
+                FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'Quotes'
+                  AND column_name = 'FinancialCalculationVersion';
+                """;
+            Assert.True((bool)(await column.ExecuteScalarAsync())!);
         }
 
-        try
+        await using var transaction = await connection.BeginTransactionAsync();
+        await using (var seed = connection.CreateCommand())
         {
-            await using (var context = _database.ContextForConnectionString(isolatedBuilder.ConnectionString, null))
-            {
-                var migrator = context.GetService<IMigrator>();
-                await migrator.MigrateAsync("20260723140000_AddAiGovernanceLedger");
-                await context.Database.ExecuteSqlRawAsync("""
-                    INSERT INTO "BusinessUnits"
-                        ("ID", "BusinessUnitCode", "BusinessUnitName", "CreatedBy", "CreatedOn")
-                    VALUES (94001, 'FINMIG', 'Finance Migration', 'tests', now());
-
-                    INSERT INTO "Quotes"
-                        ("ID", "QuoteNo", "BusinessUnitID", "CreatedBy", "CreatedDate", "TotalAmount")
-                    VALUES
-                        (94001, 'QT-LEGACY-EXCLUSIVE', 94001, 'tests', now(), 100),
-                        (94002, 'QT-LEGACY-INCLUSIVE', 94001, 'tests', now(), 105);
-
-                    INSERT INTO "QuoteItems"
-                        ("ID", "QuoteID", "ItemDescription", "Quantity", "UnitPrice", "Discount", "TaxAmount", "TotalAmount", "CreatedBy", "CreatedDate")
-                    VALUES
-                        (94001, 94001, 'Exclusive', 1, 100, 0, 5, 100, 'tests', now()),
-                        (94002, 94002, 'Inclusive', 1, 100, 0, 5, 105, 'tests', now());
-                    """);
-
-                await migrator.MigrateAsync("20260723150000_EnforceQuoteOrderFinancialIntegrity");
-
-                var versions = await context.Quotes.IgnoreQueryFilters()
-                    .Where(quote => quote.Id == 94_001 || quote.Id == 94_002)
-                    .OrderBy(quote => quote.Id)
-                    .Select(quote => quote.FinancialCalculationVersion)
-                    .ToListAsync();
-                Assert.Equal(new[] { 1, 2 }, versions);
-
-                await context.Database.ExecuteSqlRawAsync("""
-                    INSERT INTO "Setup_Master"
-                        ("SetupID", "SetupType", "SetupCode", "SetupValue", "BusinessUnitID", "IsActive", "CreatedBy", "CreatedOn")
-                    VALUES (94010, 'Role', 'FINANCE_MANAGER', 'Finance Manager', 94001, true, 'tests', now());
-                    """);
-                await migrator.MigrateAsync("20260723160000_AddCommercialFinanceLedger");
-
-                var financePermissionCount = await context.Database.SqlQueryRaw<long>("""
-                    SELECT count(*) AS "Value"
-                    FROM "RolePermissions" permission
-                    JOIN "Module" module ON module."ID" = permission."ModuleID"
-                    WHERE permission."RoleID" = 94010
-                      AND permission."BusinessUnitID" = 94001
-                      AND permission."CanCreate" = true
-                      AND permission."CanEdit" = true
-                      AND module."ModuleName" IN ('Accounts Receivable', 'Customer Payments')
-                    """).SingleAsync();
-                Assert.Equal(2, financePermissionCount);
-            }
+            seed.Transaction = transaction;
+            seed.CommandText = """
+                INSERT INTO "BusinessUnits"
+                    ("ID", "BusinessUnitCode", "BusinessUnitName", "CreatedBy", "CreatedOn")
+                VALUES (94001, 'FINMIG', 'Finance arithmetic', 'tests', now());
+                INSERT INTO "Leads"
+                    ("ID", "RFQNo", "RecDate", "LeadSource", "CreatedBy", "CreatedDate", "BusinessUnitID")
+                VALUES (94001, 'FIN-LEAD', now(), 'Tests', 'tests', now(), 94001);
+                INSERT INTO "RFQ"
+                    ("ID", "RFQNo", "RecDate", "BusinessUnitID", "LeadID", "CommercialCaseID",
+                     "NexoraSerial", "CreatedBy", "CreatedDate")
+                SELECT 94001, 'FIN-RFQ', now(), 94001, 94001,
+                       lead."CommercialCaseId", lead."CommercialCaseReference", 'tests', now()
+                FROM "Leads" lead WHERE lead."ID" = 94001;
+                INSERT INTO "Quotes"
+                    ("ID", "QuoteNo", "BusinessUnitID", "RFQID", "CommercialCaseID", "NexoraSerial",
+                     "CreatedBy", "CreatedDate", "TotalAmount")
+                SELECT 94001, 'QT-DEFAULT-VERSION', 94001, 94001, rfq."CommercialCaseID",
+                       rfq."NexoraSerial", 'tests', now(), 100
+                FROM "RFQ" rfq WHERE rfq."ID" = 94001;
+                """;
+            await seed.ExecuteNonQueryAsync();
         }
-        finally
+
+        // The quote named no version, and landed on the current arithmetic rather than on 0 or null.
+        await using (var version = connection.CreateCommand())
         {
-            NpgsqlConnection.ClearAllPools();
-            await using var admin = new NpgsqlConnection(adminBuilder.ConnectionString);
-            await admin.OpenAsync();
-            await using var drop = admin.CreateCommand();
-            drop.CommandText = $"DROP DATABASE IF EXISTS \"{databaseName}\" WITH (FORCE)";
-            await drop.ExecuteNonQueryAsync();
+            version.Transaction = transaction;
+            version.CommandText = """SELECT "FinancialCalculationVersion" FROM "Quotes" WHERE "ID" = 94001;""";
+            Assert.Equal(2, Convert.ToInt32(await version.ExecuteScalarAsync()));
         }
+
+        await transaction.RollbackAsync();
     }
 
     [Fact]
@@ -491,34 +482,76 @@ public sealed class PostgreSqlProductionDialectTests
         Assert.Equal(PostgresErrorCodes.ForeignKeyViolation, mismatchError.SqlState);
     }
 
+    /// <summary>
+    /// SQUASH NOTE — this replaces ProviderEvidenceMigration_PreservesUnsignedHistoricalRows.
+    ///
+    /// That test built a database at 20260723232000_GovernPromiseIdempotency, wrote a finance
+    /// contact and a dunning delivery attempt from before provider signatures existed, and upgraded
+    /// to 20260723233000_GovernProviderEvidence to prove the migration left both rows UNSIGNED
+    /// rather than stamping them with a placeholder digest that would later read as cryptographic
+    /// proof a provider never gave. It then migrated back down and checked the secrets table
+    /// survived.
+    ///
+    /// 20260811033109_SquashedSchemaBaseline erased both ids, and with them the walk. The
+    /// migration's rule did not go with them — it was written into the schema as two CHECK
+    /// constraints, and those are what is asserted here, on the live catalogue and by trying to
+    /// break them:
+    ///
+    ///   * ProviderSignature stays NULLABLE, so "nobody signed this" remains representable and no
+    ///     future writer is forced to invent a value;
+    ///   * but a signature that IS present must be a 64-character lowercase hex digest, so the
+    ///     placeholder the migration refused to write cannot be written by anything else either.
+    ///
+    /// This is strictly more than the old test proved: it checked two specific historical rows
+    /// were left alone, this checks that no row anywhere can carry a fabricated signature.
+    /// </summary>
     [Fact]
     [Trait("Category", "PostgreSQL")]
-    public async Task ProviderEvidenceMigration_PreservesUnsignedHistoricalRows()
+    public async Task Provider_signatures_are_optional_but_never_fabricated()
     {
-        var databaseName = $"provider_evidence_{Guid.NewGuid():N}";
-        var adminBuilder = new NpgsqlConnectionStringBuilder(_database.ConnectionString) { Database = "postgres" };
-        var isolatedBuilder = new NpgsqlConnectionStringBuilder(_database.ConnectionString) { Database = databaseName };
+        await using var connection = await _database.OpenConnectionAsync();
 
-        await using (var admin = new NpgsqlConnection(adminBuilder.ConnectionString))
+        await using (var schema = connection.CreateCommand())
         {
-            await admin.OpenAsync();
-            await using var create = admin.CreateCommand();
-            create.CommandText = $"CREATE DATABASE \"{databaseName}\"";
-            await create.ExecuteNonQueryAsync();
+            schema.CommandText = """
+                SELECT
+                    (SELECT count(*)::int FROM information_schema.columns
+                     WHERE table_schema = 'public'
+                       AND table_name IN ('FinanceCommunicationContacts', 'DunningDeliveryAttempts')
+                       AND column_name = 'ProviderSignature'
+                       AND is_nullable = 'YES') = 2,
+                    (SELECT count(*)::int FROM pg_constraint
+                     WHERE conname IN ('CK_FinanceCommunicationContacts_ProviderSignature',
+                                       'CK_DunningDeliveryAttempts_ProviderSignature')
+                       AND contype = 'c' AND convalidated
+                       AND position('[0-9a-f]{64}' in pg_get_constraintdef(oid)) > 0) = 2,
+                    to_regclass('public."FinanceProviderSecrets"') IS NOT NULL;
+                """;
+            await using var reader = await schema.ExecuteReaderAsync();
+            Assert.True(await reader.ReadAsync());
+            for (var index = 0; index < 3; index++)
+                Assert.True(reader.GetBoolean(index), $"Provider evidence assertion {index + 1} failed.");
         }
 
-        try
+        // Now the two halves, on real rows.
+        //
+        // session_replication_role = replica disarms the signing TRIGGER but leaves CHECK
+        // constraints in force. That separation is the whole point: it lets the historical shape
+        // — a contact row carrying no provider signature — be created exactly as it existed before
+        // the migration, and then shows that the CHECK still refuses a FABRICATED one. A test that
+        // could not create the historical shape could not prove anything about it.
+        await using var transaction = await connection.BeginTransactionAsync();
+        await using (var seed = connection.CreateCommand())
         {
-            await using var context = _database.ContextForConnectionString(isolatedBuilder.ConnectionString, null);
-            var migrator = context.GetService<IMigrator>();
-            await migrator.MigrateAsync("20260723232000_GovernPromiseIdempotency");
-            await context.Database.ExecuteSqlRawAsync("""
+            seed.Transaction = transaction;
+            seed.CommandText = """
                 INSERT INTO "BusinessUnits"
                     ("ID", "BusinessUnitCode", "BusinessUnitName", "CreatedBy", "CreatedOn")
-                VALUES (94801, 'EVIDENCE', 'Evidence migration', 'tests', now());
+                VALUES (94801, 'EVIDENCE', 'Provider evidence', 'tests', now());
                 INSERT INTO "Customers"
-                    ("ID", "Name", "ImageURL", "BUID", "CreatedBy", "CreatedOn")
-                VALUES (94802, 'Legacy evidence customer', '', 94801, 'tests', now());
+                    ("ID", "Name", "ImageURL", "BUID", "CreatedBy", "CreatedOn", "ConcurrencyToken")
+                VALUES (94802, 'Provider evidence customer', '', 94801, 'tests', now(), gen_random_uuid());
+                SET LOCAL session_replication_role = replica;
                 INSERT INTO "FinanceCommunicationContacts"
                     ("Id", "BusinessUnitId", "CustomerId", "Purpose", "Channel", "DestinationToken",
                      "MaskedDestination", "IsVerified", "IsActive", "EffectiveFrom",
@@ -528,8 +561,6 @@ public sealed class PostgreSqlProductionDialectTests
                         'l***@example.com', true, true, timestamp '2026-07-01', 'legacy-provider-evidence',
                         '94803000-0000-0000-0000-000000000001', 'legacy-contact-94803', repeat('1', 64),
                         1, 'tests', timestamp '2026-07-01');
-
-                SET session_replication_role = replica;
                 INSERT INTO "DunningDeliveryAttempts"
                     ("Id", "BusinessUnitId", "DunningNoticeId", "ProviderEventId", "AttemptNumber",
                      "Status", "MaskedDestination", "ArtifactHash", "TemplateVersion", "ProviderReference",
@@ -537,34 +568,94 @@ public sealed class PostgreSqlProductionDialectTests
                 VALUES (94804, 94801, 94899, '94804000-0000-0000-0000-000000000001', 1,
                         'Delivered', 'l***@example.com', repeat('2', 64), 'legacy-v1', 'legacy-provider-ref',
                         timestamp '2026-07-01', 'legacy-signed-evidence', timestamp '2026-07-01', 'tests');
-                SET session_replication_role = origin;
-                """);
-
-            await migrator.MigrateAsync("20260723233000_GovernProviderEvidence");
-
-            var unsignedRows = await context.Database.SqlQueryRaw<long>("""
-                SELECT
-                    (SELECT count(*) FROM "FinanceCommunicationContacts" WHERE "ProviderSignature" IS NULL) +
-                    (SELECT count(*) FROM "DunningDeliveryAttempts" WHERE "ProviderSignature" IS NULL)
-                    AS "Value"
-                """).SingleAsync();
-            Assert.Equal(2, unsignedRows);
-
-            await migrator.MigrateAsync("20260723232000_GovernPromiseIdempotency");
-            var secretTableSurvivedDowngrade = await context.Database.SqlQueryRaw<bool>("""
-                SELECT to_regclass('public."FinanceProviderSecrets"') IS NOT NULL AS "Value"
-                """).SingleAsync();
-            Assert.True(secretTableSurvivedDowngrade);
+                """;
+            await seed.ExecuteNonQueryAsync();
         }
-        finally
+
+        // BOTH historical rows exist and BOTH are unsigned. Nothing stamped either. The delivery
+        // attempt is the second table the migration had to leave alone and is re-seeded here after
+        // an earlier revision of this test dropped it from the behavioural half.
+        await using (var unsigned = connection.CreateCommand())
         {
-            NpgsqlConnection.ClearAllPools();
-            await using var admin = new NpgsqlConnection(adminBuilder.ConnectionString);
-            await admin.OpenAsync();
-            await using var drop = admin.CreateCommand();
-            drop.CommandText = $"DROP DATABASE IF EXISTS \"{databaseName}\" WITH (FORCE)";
-            await drop.ExecuteNonQueryAsync();
+            unsigned.Transaction = transaction;
+            unsigned.CommandText = """
+                SELECT (SELECT "ProviderSignature" IS NULL FROM "FinanceCommunicationContacts" WHERE "Id" = 94803)
+                   AND (SELECT "ProviderSignature" IS NULL FROM "DunningDeliveryAttempts" WHERE "Id" = 94804);
+                """;
+            Assert.True((bool)(await unsigned.ExecuteScalarAsync())!);
         }
+
+        // A placeholder is refused by the CHECK, so the value the migration declined to write
+        // cannot be written by anything else either.
+        await transaction.SaveAsync("fabricated");
+        await using (var fabricated = connection.CreateCommand())
+        {
+            fabricated.Transaction = transaction;
+            fabricated.CommandText = """
+                UPDATE "FinanceCommunicationContacts" SET "ProviderSignature" = 'unverified'
+                WHERE "Id" = 94803;
+                """;
+            var error = await Assert.ThrowsAsync<PostgresException>(() => fabricated.ExecuteNonQueryAsync());
+            Assert.Equal(PostgresErrorCodes.CheckViolation, error.SqlState);
+        }
+        await transaction.RollbackAsync("fabricated");
+
+        // The same refusal on the delivery attempt — a separate table with its own constraint, and
+        // the one an operator is most tempted to backfill because a delivery either happened or it
+        // did not.
+        await transaction.SaveAsync("fabricated_attempt");
+        await using (var fabricatedAttempt = connection.CreateCommand())
+        {
+            fabricatedAttempt.Transaction = transaction;
+            fabricatedAttempt.CommandText = """
+                UPDATE "DunningDeliveryAttempts" SET "ProviderSignature" = 'unverified'
+                WHERE "Id" = 94804;
+                """;
+            var error = await Assert.ThrowsAsync<PostgresException>(() => fabricatedAttempt.ExecuteNonQueryAsync());
+            Assert.Equal(PostgresErrorCodes.CheckViolation, error.SqlState);
+        }
+        await transaction.RollbackAsync("fabricated_attempt");
+
+        // …while a well-formed digest is accepted, so the constraint is discriminating rather than
+        // simply refusing every write.
+        await transaction.SaveAsync("wellformed");
+        await using (var wellFormed = connection.CreateCommand())
+        {
+            wellFormed.Transaction = transaction;
+            wellFormed.CommandText = """
+                UPDATE "FinanceCommunicationContacts" SET "ProviderSignature" = repeat('a', 64)
+                WHERE "Id" = 94803;
+                """;
+            Assert.Equal(1, await wellFormed.ExecuteNonQueryAsync());
+        }
+        await transaction.RollbackAsync("wellformed");
+
+        // And with the triggers ARMED, the unsigned shape cannot be created at all: the write path
+        // is fail-closed on provider evidence, so the unsigned population is closed and finite —
+        // which is what made leaving those rows alone the safe choice rather than a gap. The guard
+        // reports a missing verification secret (55000) or an invalid signature (23514) depending
+        // on whether a secret happens to be configured; both are the same refusal.
+        await using (var armed = connection.CreateCommand())
+        {
+            armed.Transaction = transaction;
+            armed.CommandText = """
+                SET LOCAL session_replication_role = origin;
+                INSERT INTO "FinanceCommunicationContacts"
+                    ("Id", "BusinessUnitId", "CustomerId", "Purpose", "Channel", "DestinationToken",
+                     "MaskedDestination", "IsVerified", "IsActive", "EffectiveFrom",
+                     "VerificationEvidenceReference", "VerificationProviderEventId", "IdempotencyKey",
+                     "RequestHash", "Version", "CreatedBy", "CreatedOn")
+                VALUES (94804, 94801, 94802, 'Collections', 'Email', 'vault:new-contact',
+                        'n***@example.com', true, true, timestamp '2026-07-02', 'new-provider-evidence',
+                        '94804000-0000-0000-0000-000000000001', 'new-contact-94804', repeat('2', 64),
+                        1, 'tests', timestamp '2026-07-02');
+                """;
+            var error = await Assert.ThrowsAsync<PostgresException>(() => armed.ExecuteNonQueryAsync());
+            Assert.Contains(error.SqlState,
+                new[] { PostgresErrorCodes.ObjectNotInPrerequisiteState, PostgresErrorCodes.CheckViolation });
+        }
+
+        await transaction.RollbackAsync();
     }
 
     [Fact]
@@ -593,9 +684,13 @@ public sealed class PostgreSqlProductionDialectTests
         Assert.False(context.Database.HasPendingModelChanges(),
             "The EF model has changes no migration reflects. Author the migration before merging: "
             + "the portable lane builds its schema from the model and will not catch this.");
-        Assert.Contains("20260723120000_CompleteTenantRlsCoverage", applied);
-        Assert.Contains("20260723130000_GovernExtractionReview", applied);
-        Assert.Contains("20260723140000_AddAiGovernanceLedger", applied);
+        // Squash note: three specific ids used to be named here
+        // ('..._CompleteTenantRlsCoverage', '..._GovernExtractionReview', '..._AddAiGovernanceLedger').
+        // 20260811033109_SquashedSchemaBaseline erased them, and naming the baseline's own id would
+        // only break again on the next migration. The property those three were standing in for —
+        // that this database was built by applying migrations rather than by EnsureCreated —
+        // is asserted directly.
+        Assert.NotEmpty(applied);
 
         await using var connection = await _database.OpenConnectionAsync();
         await using var roleCommand = connection.CreateCommand();
