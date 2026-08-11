@@ -171,10 +171,12 @@ public sealed class Wave1PlatformGovernancePostgreSqlTests(PostgreSqlTestDatabas
     {
         await using var connection = await database.OpenConnectionAsync();
         await using var command = connection.CreateCommand();
+        // Squash note: dropped the leading id check for '20260730044854_Wave1PlatformParity'.
+        // 20260811033109_SquashedSchemaBaseline erased that id. Forced RLS on all six tables, the
+        // six tenant policies, both grant shapes and the three append-only triggers are asserted
+        // below, against pg_catalog.
         command.CommandText = """
             SELECT
-                EXISTS (SELECT 1 FROM "__EFMigrationsHistory"
-                    WHERE "MigrationId" = '20260730044854_Wave1PlatformParity'),
                 (SELECT bool_and(relrowsecurity AND relforcerowsecurity)
                     FROM pg_class WHERE oid = ANY(ARRAY[
                         'public.governed_artifacts'::regclass,
@@ -198,7 +200,7 @@ public sealed class Wave1PlatformGovernancePostgreSqlTests(PostgreSqlTestDatabas
             """;
         await using var reader = await command.ExecuteReaderAsync();
         Assert.True(await reader.ReadAsync());
-        for (var index = 0; index < 6; index++)
+        for (var index = 0; index < 5; index++)
             Assert.True(reader.GetBoolean(index), $"Wave 1 schema assertion {index + 1} failed.");
     }
 

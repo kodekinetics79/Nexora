@@ -3,7 +3,6 @@ using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.Controllers;
 using ERP_RFQ_Automation.DTOs;
 using ERP_RFQ_Automation.Interfaces;
-using ERP_RFQ_Automation.Migrations;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.AspNetCore.Http;
@@ -34,11 +33,12 @@ public sealed class RoleRankAuthorityTests
 {
     private const long Bu = 42;
 
-    // ---------------- 1. migration backfill ----------------
+    // ---------------- 1. the one-time rank backfill ----------------
 
     /// <summary>
-    /// Executes <see cref="AddSetupMasterRoleRank.LegacyRankBackfillSql"/> — the exact statement the
-    /// migration runs against production PostgreSQL — over a seeded relational database, and
+    /// Executes <see cref="LegacyRoleRankBackfill.Sql"/> — the exact statement the migration ran
+    /// against production PostgreSQL, moved out of the migration when
+    /// 20260811033109_SquashedSchemaBaseline retired it — over a seeded relational database, and
     /// asserts the rank each representative legacy name lands on.
     ///
     /// The names are the real ones: the two tiers the old rule recognised, the ordinary job titles
@@ -95,7 +95,7 @@ public sealed class RoleRankAuthorityTests
         // Nothing is privileged before the backfill: the column defaults to Member.
         Assert.All(ctx.SetupMasters.AsNoTracking().ToList(), r => Assert.Equal(RoleRanks.Member, r.RoleRank));
 
-        ctx.Database.ExecuteSqlRaw(AddSetupMasterRoleRank.LegacyRankBackfillSql);
+        ctx.Database.ExecuteSqlRaw(LegacyRoleRankBackfill.Sql);
 
         var stored = ctx.SetupMasters.AsNoTracking().ToDictionary(r => r.SetupId, r => r.RoleRank);
         id = 1;
@@ -123,7 +123,7 @@ public sealed class RoleRankAuthorityTests
         ctx.SetupMasters.Add(NewRow(1, "role", "SUPERVISOR", "Supervisor Admin"));
         ctx.SaveChanges();
 
-        ctx.Database.ExecuteSqlRaw(AddSetupMasterRoleRank.LegacyRankBackfillSql);
+        ctx.Database.ExecuteSqlRaw(LegacyRoleRankBackfill.Sql);
         // Raw SQL bypasses the change tracker, which still holds the pre-backfill entity.
         ctx.ChangeTracker.Clear();
         Assert.Equal(RoleRanks.Owner, ctx.SetupMasters.AsNoTracking().Single(r => r.SetupId == 1).RoleRank);

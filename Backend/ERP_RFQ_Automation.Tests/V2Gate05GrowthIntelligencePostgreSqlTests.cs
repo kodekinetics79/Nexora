@@ -23,10 +23,13 @@ public sealed class V2Gate05GrowthIntelligencePostgreSqlTests(PostgreSqlTestData
 
         await using var connection = await database.OpenConnectionAsync();
         await using var schema = connection.CreateCommand();
+        // Squash note: dropped the leading id check for
+        // '20260729135045_V2Gate05SalesCoachingGrowthIntelligence'.
+        // 20260811033109_SquashedSchemaBaseline erased that id. Forced RLS, the tenant policy
+        // predicate, the grant shape, the two append-only triggers and the two tenant-qualified
+        // foreign keys are all still asserted below, against pg_catalog.
         schema.CommandText = """
             SELECT
-                (SELECT count(*) FROM "__EFMigrationsHistory"
-                 WHERE "MigrationId" = '20260729135045_V2Gate05SalesCoachingGrowthIntelligence') = 1,
                 (SELECT relrowsecurity AND relforcerowsecurity FROM pg_class
                  WHERE oid = 'public.sales_coaching_acknowledgements'::regclass),
                 EXISTS (SELECT 1 FROM pg_policies
@@ -53,7 +56,7 @@ public sealed class V2Gate05GrowthIntelligencePostgreSqlTests(PostgreSqlTestData
         await using (var reader = await schema.ExecuteReaderAsync())
         {
             Assert.True(await reader.ReadAsync());
-            for (var index = 0; index < 7; index++)
+            for (var index = 0; index < 6; index++)
                 Assert.True(reader.GetBoolean(index), $"Growth schema assertion {index + 1} failed.");
         }
 

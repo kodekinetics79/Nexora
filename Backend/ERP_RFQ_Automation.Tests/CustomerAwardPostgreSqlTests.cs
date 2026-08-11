@@ -17,15 +17,13 @@ public sealed class CustomerAwardPostgreSqlTests(PostgreSqlTestDatabase database
 
     [Fact]
     [Trait("Category", "PostgreSQL")]
-    public async Task MigrationInstallsTenantPoliciesAndLeastPrivilegeGrants()
+    // Squash note: this method opened by asserting that '20260723190000_AddCustomerAwards' was
+    // present in "__EFMigrationsHistory". 20260811033109_SquashedSchemaBaseline erased that id, so
+    // the check could only ever be 0. It was never the coverage — the six tenant policies and the
+    // order-to-cash grant shape below are — and both are asserted against the live catalogue.
+    public async Task OrderToCashSchemaHasTenantPoliciesAndLeastPrivilegeGrants()
     {
         await using var connection = await _database.OpenConnectionAsync();
-        await using var migration = connection.CreateCommand();
-        migration.CommandText = """
-            SELECT count(*) FROM "__EFMigrationsHistory"
-            WHERE "MigrationId" = '20260723190000_AddCustomerAwards'
-            """;
-        Assert.Equal(1L, (long)(await migration.ExecuteScalarAsync())!);
 
         await using var policies = connection.CreateCommand();
         policies.CommandText = """

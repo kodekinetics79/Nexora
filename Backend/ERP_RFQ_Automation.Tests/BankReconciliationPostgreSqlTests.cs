@@ -20,18 +20,15 @@ public sealed class BankReconciliationPostgreSqlTests(PostgreSqlTestDatabase dat
 
     [Fact]
     [Trait("Category", "PostgreSQL")]
-    public async Task FreshMigration_InstallsBankReconciliationSchemaAndForcedTenantIsolation()
+    // Squash note: this method opened by asserting that the three bank-reconciliation migration
+    // ids ('..._GovernBankReconciliation', '..._CompleteBankReconciliationEvidence',
+    // '..._GovernTreasuryRulesAdjustmentsAndCashBridge') were present in "__EFMigrationsHistory".
+    // 20260811033109_SquashedSchemaBaseline erased all three. Their combined product — eleven
+    // forced-RLS tables, the twelve evidence and cash-bridge columns, and everything below — is
+    // asserted against the live catalogue, which is the property the ids were standing in for.
+    public async Task BankReconciliationSchemaIsInstalledWithForcedTenantIsolation()
     {
         await using var connection = await _database.OpenConnectionAsync();
-        await using var migration = connection.CreateCommand();
-        migration.CommandText = """
-            SELECT count(*) FROM "__EFMigrationsHistory"
-            WHERE "MigrationId" IN (
-                '20260724001000_GovernBankReconciliation',
-                '20260724002000_CompleteBankReconciliationEvidence',
-                '20260724003000_GovernTreasuryRulesAdjustmentsAndCashBridge')
-            """;
-        Assert.Equal(3L, (long)(await migration.ExecuteScalarAsync())!);
 
         await using var tables = connection.CreateCommand();
         tables.CommandText = """
@@ -76,142 +73,80 @@ public sealed class BankReconciliationPostgreSqlTests(PostgreSqlTestDatabase dat
         Assert.Empty(await parity.Database.GetPendingMigrationsAsync());
     }
 
+    /// <summary>
+    /// SQUASH NOTE — this replaces UpgradeFrom02000_BackfillsProtectedRunAndExactMatchRuleEvidence.
+    ///
+    /// That test built a database at 20260724002000_CompleteBankReconciliationEvidence, wrote a
+    /// reconciliation run and a DeterministicExact match from before rule-set evidence existed, and
+    /// upgraded to 20260724003000_GovernTreasuryRulesAdjustmentsAndCashBridge to prove the
+    /// migration reconstructed the evidence chain — run to rule snapshot to rule to match, with
+    /// matching definition hashes — rather than leaving matches that claimed a rule nobody could
+    /// name. It then asserted the DOWN path REFUSED, with "cannot downgrade treasury governance".
+    ///
+    /// 20260811033109_SquashedSchemaBaseline erased both ids. The reconstruction and the
+    /// downgrade refusal are migration-time behaviour and cannot survive a squash. The RULE the
+    /// reconstruction was restoring is not migration-time at all — it is a CHECK constraint, and it
+    /// is asserted here:
+    ///
+    ///   * a run always carries a rule-set hash and a snapshot time (NOT NULL, no exceptions)
+    ///     — asserted on the catalogue;
+    ///   * a DeterministicExact match MUST name the rule it fired and the definition hash it fired
+    ///     against — asserted BY WRITING one that does not, and watching the database refuse it;
+    ///   * and, symmetrically, a Manual match must NOT carry them, so a human decision cannot be
+    ///     dressed up as an automated one — this direction is asserted only by the constraint being
+    ///     present and convalidated, NOT by an attempted write. It is the weaker of the two.
+    ///
+    /// The snapshot chain itself — that a run can only snapshot ACTIVE rules belonging to its own
+    /// bank account — is RuleSnapshot_RejectsDraftAndWrongBankAccountRules below.
+    /// </summary>
     [Fact]
     [Trait("Category", "PostgreSQL")]
-    public async Task UpgradeFrom02000_BackfillsProtectedRunAndExactMatchRuleEvidence()
+    public async Task Deterministic_matches_must_name_the_rule_they_fired()
     {
-        var databaseName = $"bank_upgrade_{Guid.NewGuid():N}";
-        var adminBuilder = new NpgsqlConnectionStringBuilder(_database.ConnectionString) { Database = "postgres" };
-        var isolatedBuilder = new NpgsqlConnectionStringBuilder(_database.ConnectionString) { Database = databaseName };
-
-        await using (var admin = new NpgsqlConnection(adminBuilder.ConnectionString))
+        var fixture = await SeedFixtureAsync(991_110, 991_210, "USD", createJournal: false);
+        long runId;
+        await using (var context = _database.ContextFor(null))
         {
-            await admin.OpenAsync();
-            await using var create = admin.CreateCommand();
-            create.CommandText = $"CREATE DATABASE \"{databaseName}\"";
-            await create.ExecuteNonQueryAsync();
+            runId = (await new BankReconciliationService(context).CreateRunAsync(fixture.TenantId,
+                "rule-evidence-run", new(fixture.Statement.Id, DateTime.UtcNow.Date), "preparer@test")).Id;
         }
 
-        try
+        await using var connection = await _database.OpenConnectionAsync();
+        await using (var schema = connection.CreateCommand())
         {
-            await using var context = _database.ContextForConnectionString(isolatedBuilder.ConnectionString, null);
-            var migrator = context.GetService<IMigrator>();
-            await migrator.MigrateAsync("20260724002000_CompleteBankReconciliationEvidence");
-            await context.Database.ExecuteSqlRawAsync("""
-                INSERT INTO "BusinessUnits"
-                    ("ID","BusinessUnitCode","BusinessUnitName","CreatedBy","CreatedOn")
-                VALUES (992001,'BANKUPG','Bank Upgrade Regression','tests',now());
-
-                INSERT INTO "Currency"
-                    ("ID","BusinessUnitID","Code","CurrencyName","Symbol","ExchangeRate","IsBaseCurrency",
-                     "IsActive","CreatedBy","CreatedOn")
-                VALUES (992002,992001,'BUP','Bank Upgrade Currency','B',1,true,true,'tests',now());
-
-                INSERT INTO "LedgerBooks"
-                    ("Id","BusinessUnitId","Name","FunctionalCurrencyId","TimeZoneId","FiscalYearStartMonth",
-                     "IdempotencyKey","RequestHash","Version","CreatedBy","CreatedOn")
-                VALUES (992003,992001,'Upgrade ledger',992002,'UTC',1,'upgrade-book',repeat('1',64),1,'tests',now());
-
-                INSERT INTO "LedgerAccounts"
-                    ("Id","BusinessUnitId","Code","Name","Category","NormalBalance","CurrencyId",
-                     "IsControlAccount","IsContraAccount","AllowsManualPosting","IsActive","IdempotencyKey",
-                     "RequestHash","Version","CreatedBy","CreatedOn")
-                VALUES (992004,992001,'1000','Upgrade cash','Asset','Debit',992002,
-                        false,false,true,true,'upgrade-cash',repeat('2',64),1,'tests',now());
-
-                INSERT INTO "BankAccounts"
-                    ("Id","BusinessUnitId","Name","InstitutionName","MaskedAccountNumber","AccountFingerprint",
-                     "CurrencyId","LedgerAccountId","Status","OpeningDate","IdempotencyKey","RequestHash",
-                     "Version","CreatedBy","CreatedOn")
-                VALUES (992005,992001,'Upgrade bank','Migration Bank','****2005',repeat('3',64),992002,992004,
-                        'Active',current_date - 30,'upgrade-bank',repeat('4',64),1,'tests',now());
-
-                INSERT INTO "BankStatementImports"
-                    ("Id","BusinessUnitId","BankAccountId","SourceType","OriginalFileName","RawObjectReference",
-                     "RawPayload","SourceHash","ParserVersion","Status","IdempotencyKey","RequestHash",
-                     "ImportedBy","ImportedOn")
-                VALUES (992006,992001,992005,'CSV','upgrade.csv','evidence/upgrade.csv',
-                        convert_to('upgrade-source','UTF8'),
-                        encode(digest(convert_to('upgrade-source','UTF8'),'sha256'),'hex'),
-                        'upgrade-v1','Validated','upgrade-import',repeat('5',64),'importer@test',now());
-
-                INSERT INTO "BankStatements"
-                    ("Id","BusinessUnitId","BankStatementImportId","BankAccountId","CurrencyId",
-                     "StatementReference","PeriodStart","PeriodEnd","OpeningBalance","ClosingBalance",
-                     "CalculatedClosingBalance","ContentHash","Version")
-                VALUES (992007,992001,992006,992005,992002,'STMT-UPGRADE',current_date,current_date,
-                        0,100,100,repeat('6',64),1);
-
-                INSERT INTO "BankStatementLines"
-                    ("Id","BusinessUnitId","BankStatementId","BankAccountId","SourceOrdinal","BookingDate",
-                     "ValueDate","SignedAmount","Direction","OriginalAmountText","ExternalTransactionId",
-                     "BankReference","TransactionCode","Counterparty","RemittanceText","NormalizedReference",
-                     "LineFingerprint")
-                VALUES (992008,992001,992007,992005,1,current_date,current_date,100,'Credit','100.00',
-                        'TX-UPGRADE','REF-UPGRADE','CREDIT','Upgrade customer','Upgrade receipt',
-                        'REFUPGRADE',repeat('7',64));
-
-                INSERT INTO "ReconciliationRuns"
-                    ("Id","BusinessUnitId","BankAccountId","BankStatementId","ReconciliationThrough","Status",
-                     "BankClosingBalance","BookClosingBalance","MatchedAmount","UnexplainedDifference",
-                     "IdempotencyKey","RequestHash","Version","PreparedBy","PreparedOn")
-                VALUES (992009,992001,992005,992007,current_date,'Draft',100,0,0,100,
-                        'upgrade-run',repeat('8',64),1,'preparer@test',now());
-
-                INSERT INTO "ReconciliationMatches"
-                    ("Id","BusinessUnitId","ReconciliationRunId","MatchType","Confidence","RuleCode",
-                     "RuleVersion","MatchReason","EvidenceReference","Status","IdempotencyKey","RequestHash",
-                     "Version","CreatedBy","CreatedOn")
-                VALUES (992010,992001,992009,'DeterministicExact',1,'EXACT_AMOUNT_DIRECTION_V1',1,
-                        NULL,NULL,'Proposed','upgrade-exact-match',repeat('9',64),1,'matcher@test',now());
-                """);
-
-            await migrator.MigrateAsync("20260724003000_GovernTreasuryRulesAdjustmentsAndCashBridge");
-
-            var evidenceCount = await context.Database.SqlQueryRaw<long>("""
-                SELECT count(*) AS "Value"
-                FROM "ReconciliationRuns" run
-                JOIN "ReconciliationRunRules" snapshot
-                  ON snapshot."BusinessUnitId" = run."BusinessUnitId"
-                 AND snapshot."ReconciliationRunId" = run."Id"
-                JOIN "BankMatchingRules" rule
-                  ON rule."BusinessUnitId" = snapshot."BusinessUnitId"
-                 AND rule."Id" = snapshot."BankMatchingRuleId"
-                JOIN "ReconciliationMatches" match
-                  ON match."BusinessUnitId" = run."BusinessUnitId"
-                 AND match."ReconciliationRunId" = run."Id"
-                WHERE run."Id" = 992009 AND match."Id" = 992010
-                  AND run."RuleSetHash" IS NOT NULL AND length(run."RuleSetHash") = 64
-                  AND run."RuleSetSnapshotOn" = run."PreparedOn"
-                  AND snapshot."DefinitionHash" = rule."DefinitionHash"
-                  AND match."BankMatchingRuleId" = rule."Id"
-                  AND match."RuleDefinitionHash" = rule."DefinitionHash"
-                  AND match."RuleCode" = 'EXACT_AMOUNT_DIRECTION'
-                  AND match."RuleVersion" = 1
-                  AND run."Version" = 1 AND match."Version" = 1
-                """).SingleAsync();
-            Assert.Equal(1L, evidenceCount);
-            Assert.Equal("20260724003000_GovernTreasuryRulesAdjustmentsAndCashBridge",
-                await context.Database.SqlQueryRaw<string>("""
-                    SELECT "MigrationId" AS "Value" FROM "__EFMigrationsHistory"
-                    WHERE "MigrationId" = '20260724003000_GovernTreasuryRulesAdjustmentsAndCashBridge'
-                    """).SingleAsync());
-
-            var downgradeError = await Assert.ThrowsAnyAsync<Exception>(() =>
-                migrator.MigrateAsync("20260724002000_CompleteBankReconciliationEvidence"));
-            var postgresError = Assert.IsType<PostgresException>(downgradeError.GetBaseException());
-            Assert.Equal(PostgresErrorCodes.ObjectNotInPrerequisiteState, postgresError.SqlState);
-            Assert.Contains("cannot downgrade treasury governance", postgresError.MessageText);
+            schema.CommandText = """
+                SELECT
+                    (SELECT count(*)::int FROM information_schema.columns
+                     WHERE table_schema = 'public' AND table_name = 'ReconciliationRuns'
+                       AND column_name IN ('RuleSetHash', 'RuleSetSnapshotOn')
+                       AND is_nullable = 'NO') = 2,
+                    (SELECT count(*)::int FROM information_schema.columns
+                     WHERE table_schema = 'public' AND table_name = 'ReconciliationMatches'
+                       AND column_name IN ('BankMatchingRuleId', 'RuleDefinitionHash')) = 2,
+                    EXISTS (SELECT 1 FROM pg_constraint
+                        WHERE conname = 'CK_ReconciliationMatches_ManualEvidence' AND convalidated);
+                """;
+            await using var reader = await schema.ExecuteReaderAsync();
+            Assert.True(await reader.ReadAsync());
+            for (var index = 0; index < 3; index++)
+                Assert.True(reader.GetBoolean(index), $"Rule evidence assertion {index + 1} failed.");
         }
-        finally
-        {
-            NpgsqlConnection.ClearAllPools();
-            await using var admin = new NpgsqlConnection(adminBuilder.ConnectionString);
-            await admin.OpenAsync();
-            await using var drop = admin.CreateCommand();
-            drop.CommandText = $"DROP DATABASE IF EXISTS \"{databaseName}\" WITH (FORCE)";
-            await drop.ExecuteNonQueryAsync();
-        }
+
+        await using var transaction = await connection.BeginTransactionAsync();
+        await using var unevidenced = connection.CreateCommand();
+        unevidenced.Transaction = transaction;
+        unevidenced.CommandText = $"""
+            INSERT INTO "ReconciliationMatches"
+                ("BusinessUnitId","ReconciliationRunId","MatchType","Confidence","RuleCode",
+                 "RuleVersion","MatchReason","EvidenceReference","BankMatchingRuleId","RuleDefinitionHash",
+                 "Status","IdempotencyKey","RequestHash","Version","CreatedBy","CreatedOn")
+            VALUES ({fixture.TenantId},{runId},'DeterministicExact',1,'EXACT_AMOUNT_DIRECTION_V1',1,
+                    NULL,NULL,NULL,NULL,'Proposed','unevidenced-exact-match',repeat('9',64),1,
+                    'matcher@test',now());
+            """;
+        var error = await Assert.ThrowsAsync<PostgresException>(() => unevidenced.ExecuteNonQueryAsync());
+        Assert.Equal(PostgresErrorCodes.CheckViolation, error.SqlState);
+        await transaction.RollbackAsync();
     }
 
     [Fact]

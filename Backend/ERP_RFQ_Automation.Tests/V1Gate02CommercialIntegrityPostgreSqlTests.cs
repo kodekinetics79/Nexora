@@ -1,8 +1,6 @@
 using ERP_RFQ_Automation.Tests.Support;
 using ERP_RFQ_Automation.Inventory.Commercial;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.EntityFrameworkCore.Infrastructure;
-using Microsoft.EntityFrameworkCore.Migrations;
 using Npgsql;
 
 namespace ERP_RFQ_Automation.Tests;
@@ -132,95 +130,37 @@ public sealed class V1Gate02CommercialIntegrityPostgreSqlTests(PostgreSqlTestDat
         Assert.Equal(tenantTwo, tenantTwoRows[0].BusinessUnitId);
     }
 
-    [Fact]
-    [Trait("Category", "PostgreSQL")]
-    public async Task Populated_upgrade_downgrade_reupgrade_and_restored_clone_preserve_data()
-    {
-        const string previousMigration = "20260726205812_Release02ProcurementHandoffHardening";
-        const string currentMigration = "20260727042452_V1Gate02CommercialIntelligenceIntegrity";
-        var sourceName = $"gate2_source_{Guid.NewGuid():N}";
-        var restoredName = $"gate2_restore_{Guid.NewGuid():N}";
-        var adminBuilder = new NpgsqlConnectionStringBuilder(database.ConnectionString) { Database = "postgres" };
-        var sourceBuilder = new NpgsqlConnectionStringBuilder(database.ConnectionString) { Database = sourceName };
-        var restoredBuilder = new NpgsqlConnectionStringBuilder(database.ConnectionString) { Database = restoredName };
-
-        await ExecuteAdminAsync(adminBuilder.ConnectionString, $"CREATE DATABASE \"{sourceName}\"");
-        try
-        {
-            await using (var source = database.ContextForConnectionString(sourceBuilder.ConnectionString, null))
-            {
-                var migrator = source.GetService<IMigrator>();
-                await migrator.MigrateAsync(previousMigration);
-                await source.Database.ExecuteSqlRawAsync("""
-                    INSERT INTO public."BusinessUnits"
-                        ("ID", "BusinessUnitCode", "BusinessUnitName", "CreatedBy", "CreatedOn")
-                    VALUES (9927201, 'G2-UP', 'Gate 2 populated upgrade', 'tests', now());
-                    INSERT INTO public."Products"
-                        ("ID", "ProductName", "PartNo", "QtyOnHand", "ReorderPoint", "BUID", "CreatedBy", "CreatedOn")
-                    VALUES (9927201, 'Gate 2 product', 'G2-UP-PART', 0, 0, 9927201, 'tests', now());
-                    INSERT INTO public."Inventory"
-                        ("Id", "ProductName", "PartNo", "QtyOnHand", "ReorderPoint", "ProductId", "Buid", "CreatedBy", "CreatedOn")
-                    VALUES (9927201, 'Gate 2 stock', 'G2-UP-PART', 12, 0, 9927201, 9927201, 'tests', now());
-                    """);
-            }
-
-            NpgsqlConnection.ClearAllPools();
-            await ExecuteAdminAsync(adminBuilder.ConnectionString,
-                $"CREATE DATABASE \"{restoredName}\" TEMPLATE \"{sourceName}\"");
-
-            await using (var source = database.ContextForConnectionString(sourceBuilder.ConnectionString, null))
-            {
-                var migrator = source.GetService<IMigrator>();
-                await migrator.MigrateAsync();
-                Assert.Equal(12m, await source.Set<ERP_RFQ_Automation.Models.Inventory>()
-                    .Where(x => x.Id == 9927201 && x.Buid == 9927201).Select(x => x.QtyOnHand).SingleAsync());
-                Assert.Contains(currentMigration, await source.Database.SqlQueryRaw<string>("""
-                    SELECT "MigrationId" AS "Value" FROM public."__EFMigrationsHistory"
-                    """).ToListAsync());
-                await migrator.MigrateAsync(previousMigration);
-                Assert.Equal(12m, await source.Set<ERP_RFQ_Automation.Models.Inventory>().IgnoreQueryFilters()
-                    .Where(x => x.Id == 9927201).Select(x => x.QtyOnHand).SingleAsync());
-                Assert.DoesNotContain(currentMigration, await source.Database.SqlQueryRaw<string>("""
-                    SELECT "MigrationId" AS "Value" FROM public."__EFMigrationsHistory"
-                    """).ToListAsync());
-                await migrator.MigrateAsync();
-                Assert.Equal(12m, await source.Set<ERP_RFQ_Automation.Models.Inventory>()
-                    .Where(x => x.Id == 9927201 && x.Buid == 9927201).Select(x => x.QtyOnHand).SingleAsync());
-            }
-
-            await using (var restored = database.ContextForConnectionString(restoredBuilder.ConnectionString, null))
-            {
-                await restored.GetService<IMigrator>().MigrateAsync();
-                Assert.Equal(12m, await restored.Set<ERP_RFQ_Automation.Models.Inventory>()
-                    .Where(x => x.Id == 9927201 && x.Buid == 9927201).Select(x => x.QtyOnHand).SingleAsync());
-                Assert.Contains(currentMigration, await restored.Database.SqlQueryRaw<string>("""
-                    SELECT "MigrationId" AS "Value" FROM public."__EFMigrationsHistory"
-                    """).ToListAsync());
-            }
-        }
-        finally
-        {
-            NpgsqlConnection.ClearAllPools();
-            await ExecuteAdminAsync(adminBuilder.ConnectionString,
-                $"DROP DATABASE IF EXISTS \"{restoredName}\" WITH (FORCE)");
-            await ExecuteAdminAsync(adminBuilder.ConnectionString,
-                $"DROP DATABASE IF EXISTS \"{sourceName}\" WITH (FORCE)");
-        }
-    }
+    // DELETED BY THE SQUASH — Populated_upgrade_downgrade_reupgrade_and_restored_clone_preserve_data
+    //
+    // It created an isolated database at 20260726205812_Release02ProcurementHandoffHardening, wrote
+    // a business unit, a product and an inventory row, cloned the database as a restored backup,
+    // then walked up to 20260727042452_V1Gate02CommercialIntelligenceIntegrity, back down and up
+    // again, asserting after every step that QtyOnHand was still 12 and that the Gate 2 id was
+    // present or absent as expected.
+    //
+    // Every assertion in it was migration identity or data-survives-a-walk. Both were erased by
+    // 20260811033109_SquashedSchemaBaseline, not weakened: there is one migration, so there is no
+    // previous migration to walk to, and no database will ever perform this upgrade again — a new
+    // database starts at the baseline and an existing one is stamped past it without running any
+    // DDL at all.
+    //
+    // WHAT STILL COVERS IT
+    //   * The Gate 2 schema itself — the tenant-qualified composite foreign keys and the five
+    //     commercial-inventory RLS policies the migration installed — is asserted against the live
+    //     catalogue by Commercial_inventory_foreign_keys_are_tenant_qualified_and_reject_cross_tenant_rows
+    //     above, which also drives real cross-tenant INSERTs through them.
+    //   * Runtime_role_rls_hides_other_tenant_commercial_inventory_rows above proves the policies
+    //     actually hide rows under the tenant execution role.
+    //   * The surviving walk — that the baseline's Down reverts exactly what its Up creates, and
+    //     that Up replays onto the ground Down leaves — is
+    //     SquashedBaselineMigrationPostgreSqlTests.Baseline_down_reverts_exactly_what_its_up_creates_and_up_replays_identically.
+    //   * Row-level durability across a restore is a PostgreSQL property, not a Nexora one, and was
+    //     never what this file was for.
 
     private static async Task ExecuteAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, string sql)
     {
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = sql;
-        await command.ExecuteNonQueryAsync();
-    }
-
-    private static async Task ExecuteAdminAsync(string connectionString, string sql)
-    {
-        await using var connection = new NpgsqlConnection(connectionString);
-        await connection.OpenAsync();
-        await using var command = connection.CreateCommand();
         command.CommandText = sql;
         await command.ExecuteNonQueryAsync();
     }

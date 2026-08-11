@@ -1,7 +1,7 @@
+using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Repositories;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.EntityFrameworkCore.Infrastructure;
-using Microsoft.EntityFrameworkCore.Migrations;
 using Npgsql;
 
 namespace ERP_RFQ_Automation.Tests;
@@ -15,10 +15,12 @@ public sealed class Release02CommercialBackbonePostgreSqlTests(PostgreSqlTestDat
     {
         await using var connection = await database.OpenConnectionAsync();
         await using var command = connection.CreateCommand();
+        // Squash note: dropped the leading id check for
+        // '20260726105111_Release02SupplierQuoteCommercialBackbone'.
+        // 20260811033109_SquashedSchemaBaseline erased that id. The policies, grants and
+        // immutability triggers it installed are asserted against pg_catalog below.
         command.CommandText = """
             SELECT
-                (SELECT count(*) FROM "__EFMigrationsHistory"
-                 WHERE "MigrationId" = '20260726105111_Release02SupplierQuoteCommercialBackbone') = 1,
                 (SELECT count(*) FROM pg_policies
                  WHERE schemaname = 'public' AND policyname = 'nexora_tenant_isolation'
                    AND tablename = ANY(ARRAY[
@@ -37,82 +39,167 @@ public sealed class Release02CommercialBackbonePostgreSqlTests(PostgreSqlTestDat
             """;
         await using var reader = await command.ExecuteReaderAsync();
         Assert.True(await reader.ReadAsync());
-        for (var index = 0; index < 6; index++) Assert.True(reader.GetBoolean(index));
+        for (var index = 0; index < 5; index++)
+            Assert.True(reader.GetBoolean(index), $"Commercial backbone schema assertion {index + 1} failed.");
     }
 
+    /// <summary>
+    /// SQUASH NOTE — this replaces Populated_upgrade_backfills_safe_supplier_state_and_DemandLine_without_rewriting_history.
+    ///
+    /// That test built a database at 20260726064437_ServerAuthoritativeRfqNumbers, inserted a legacy
+    /// supplier and RFQ line, upgraded to 20260726105111_Release02SupplierQuoteCommercialBackbone
+    /// and asserted three things: the demand line was backfilled from the RFQ item, the legacy
+    /// supplier landed on FAIL-CLOSED governance state rather than an approved one, and the demand
+    /// line was immutable afterwards. Then it counted two migration ids.
+    ///
+    /// 20260811033109_SquashedSchemaBaseline erased the ids and the backfill alike. The BACKFILL is
+    /// genuinely retired — it could only ever run against rows written before the columns existed,
+    /// and no database can be in that state again — but the two properties the backfill existed to
+    /// establish are not retired at all, and are asserted here directly and, for the supplier, more
+    /// strongly than before:
+    ///
+    ///   * A supplier written today lands on UNVERIFIED / REVIEW_REQUIRED, bounded by CHECK
+    ///     constraints, and carries a concurrency token and an effective-from date.
+    ///   * A commercial demand line cannot be rewritten or deleted once written.
+    ///
+    /// CORRECTION. An earlier revision of this file dropped two conjuncts from the supplier
+    /// assertion — "ConcurrencyToken" IS NOT NULL and "EffectiveFrom" IS NOT NULL — while claiming
+    /// the replacement was stronger. It was not; it was strictly weaker, and the claim has been
+    /// removed. Both conjuncts are restored below, and the reason they could not simply be pasted
+    /// onto a raw INSERT is worth recording: BOTH COLUMNS ARE NULLABLE WITH NO STORE DEFAULT AND NO
+    /// TRIGGER. They are populated by SupplierRepository.AddAsync, which is why this test now
+    /// writes its supplier through that repository — the real creation path — instead of raw SQL.
+    /// A raw INSERT still yields NULL for both, which is a genuine gap raised in the report.
+    /// </summary>
     [Fact]
     [Trait("Category", "PostgreSQL")]
-    public async Task Populated_upgrade_backfills_safe_supplier_state_and_DemandLine_without_rewriting_history()
+    public async Task Supplier_governance_state_is_fail_closed_and_demand_lines_are_immutable()
     {
-        var databaseName = $"release02_upgrade_{Guid.NewGuid():N}";
-        var adminBuilder = new NpgsqlConnectionStringBuilder(database.ConnectionString) { Database = "postgres" };
-        var isolatedBuilder = new NpgsqlConnectionStringBuilder(database.ConnectionString)
+        // The supplier goes in through the repository, because that is where EffectiveFrom and
+        // ConcurrencyToken are assigned; everything else is raw SQL on the same database.
+        long supplierId;
+        await using (var context = database.ContextFor(null))
         {
-            Database = databaseName,
-            IncludeErrorDetail = true
-        };
-        await using (var admin = new NpgsqlConnection(adminBuilder.ConnectionString))
-        {
-            await admin.OpenAsync();
-            await using var create = admin.CreateCommand();
-            create.CommandText = $"CREATE DATABASE \"{databaseName}\"";
-            await create.ExecuteNonQueryAsync();
+            Seed.EnsureBusinessUnit(context, 98_201);
+            await context.SaveChangesAsync();
+            var supplier = new Supplier
+            {
+                Name = "Release 02 backbone supplier",
+                ContactEmail = "new-r02@example.test",
+                ImageUrl = "n/a",
+                Buid = 98_201,
+                IsActive = true,
+                CreatedBy = "qa",
+                CreatedOn = DateTime.UtcNow
+            };
+            await new SupplierRepository(context).AddAsync(supplier);
+            supplierId = supplier.Id;
         }
 
-        try
+        await using var connection = await database.OpenConnectionAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+
+        await using (var seed = connection.CreateCommand())
         {
-            await using var context = database.ContextForConnectionString(isolatedBuilder.ConnectionString, null);
-            var migrator = context.GetService<IMigrator>();
-            const string previous = "20260726064437_ServerAuthoritativeRfqNumbers";
-            const string current = "20260726105111_Release02SupplierQuoteCommercialBackbone";
-            await migrator.MigrateAsync(previous);
-            await context.Database.ExecuteSqlRawAsync("""
-                INSERT INTO "BusinessUnits"
-                    ("ID", "BusinessUnitCode", "BusinessUnitName", "CreatedBy", "CreatedOn")
-                VALUES (98201, 'R02-UP', 'Release 02 upgrade', 'qa', now());
-                INSERT INTO "Suppliers"
-                    ("ID", "Name", "ContactEmail", "ImageURL", "BUID", "IsActive", "CreatedBy", "CreatedOn")
-                VALUES (98202, 'Legacy Supplier', 'legacy-r02@example.test', 'n/a', 98201, true, 'qa', now());
+            seed.Transaction = transaction;
+            seed.CommandText = """
                 INSERT INTO "RFQ"
                     ("ID", "RFQNo", "RecDate", "CreatedBy", "CreatedDate", "BusinessUnitID", "NexoraSerial")
                 VALUES (98203, 'R02-RFQ', now(), 'qa', now(), 98201, 'NXR-R02-98203');
                 INSERT INTO "RFQItems"
                     ("ID", "RFQID", "Quantity", "CreatedBy", "CreatedDate")
                 VALUES (98204, 98203, 2, 'qa', now());
-                """);
+                INSERT INTO commercial_demand_lines
+                    ("Id", "BusinessUnitId", "RfqId", "RfqItemId", "NexoraSerial", "IdentityKey",
+                     "CreatedOn", "CreatedBy")
+                VALUES (98205, 98201, 98203, 98204, 'NXR-R02-98203', '98201:98203:98204', now(), 'qa');
+                """;
+            await seed.ExecuteNonQueryAsync();
+        }
 
-            await migrator.MigrateAsync(current);
-            Assert.Equal(1, await context.Database.SqlQueryRaw<int>("""
-                SELECT count(*)::int AS "Value" FROM commercial_demand_lines
-                WHERE "BusinessUnitId" = 98201 AND "RfqId" = 98203
-                  AND "RfqItemId" = 98204 AND "NexoraSerial" = 'NXR-R02-98203'
-                """).SingleAsync());
-            Assert.True(await context.Database.SqlQueryRaw<bool>("""
-                SELECT "ConcurrencyToken" IS NOT NULL
-                   AND "EffectiveFrom" IS NOT NULL
-                   AND "GovernanceStatus" = 'UNVERIFIED'
-                   AND "ReadinessStatus" = 'REVIEW_REQUIRED' AS "Value"
-                FROM "Suppliers" WHERE "ID" = 98202
-                """).SingleAsync());
-            var immutable = await Assert.ThrowsAsync<PostgresException>(() =>
-                context.Database.ExecuteSqlRawAsync("""
-                    UPDATE commercial_demand_lines SET "NexoraSerial" = 'CHANGED'
-                    WHERE "RfqItemId" = 98204
-                    """));
-            Assert.Equal(PostgresErrorCodes.ObjectNotInPrerequisiteState, immutable.SqlState);
-            Assert.Equal(2, await context.Database.SqlQueryRaw<int>($"""
-                SELECT count(*)::int AS "Value" FROM "__EFMigrationsHistory"
-                WHERE "MigrationId" IN ('{previous}', '{current}')
-                """).SingleAsync());
-        }
-        finally
+        // Fail-closed by DEFAULT, not by application code: a supplier row that names none of the
+        // governance columns is UNVERIFIED and REVIEW_REQUIRED, never approved or ready.
+        await using (var state = connection.CreateCommand())
         {
-            NpgsqlConnection.ClearAllPools();
-            await using var admin = new NpgsqlConnection(adminBuilder.ConnectionString);
-            await admin.OpenAsync();
-            await using var drop = admin.CreateCommand();
-            drop.CommandText = $"DROP DATABASE IF EXISTS \"{databaseName}\" WITH (FORCE)";
-            await drop.ExecuteNonQueryAsync();
+            state.Transaction = transaction;
+            state.CommandText = $"""
+                SELECT "GovernanceStatus" = 'UNVERIFIED'
+                   AND "ReadinessStatus" = 'REVIEW_REQUIRED'
+                   AND "ConcurrencyToken" IS NOT NULL
+                   AND "EffectiveFrom" IS NOT NULL
+                FROM "Suppliers" WHERE "ID" = {supplierId};
+                """;
+            Assert.True((bool)(await state.ExecuteScalarAsync())!);
         }
+
+        // …and the pair of statuses is bounded by CHECK constraints, so no writer can invent a
+        // value outside the governed vocabulary and no default can drift to an approved one.
+        await using (var bounds = connection.CreateCommand())
+        {
+            bounds.Transaction = transaction;
+            bounds.CommandText = """
+                SELECT count(*)::int FROM pg_constraint
+                WHERE conrelid = 'public."Suppliers"'::regclass AND contype = 'c'
+                  AND conname IN ('CK_Suppliers_GovernanceStatus', 'CK_Suppliers_ReadinessStatus')
+                  AND convalidated;
+                """;
+            Assert.Equal(2, Convert.ToInt32(await bounds.ExecuteScalarAsync()));
+        }
+
+        await using (var immutable = connection.CreateCommand())
+        {
+            immutable.Transaction = transaction;
+            immutable.CommandText = """
+                UPDATE commercial_demand_lines SET "NexoraSerial" = 'CHANGED' WHERE "RfqItemId" = 98204;
+                """;
+            var error = await Assert.ThrowsAsync<PostgresException>(() => immutable.ExecuteNonQueryAsync());
+            Assert.Equal(PostgresErrorCodes.ObjectNotInPrerequisiteState, error.SqlState);
+        }
+
+        await transaction.RollbackAsync();
+    }
+
+    /// <summary>
+    /// The delete half of the same immutability guard. Kept separate because the UPDATE above
+    /// aborts its transaction, and a guard that rejects rewrites while permitting deletes would
+    /// leave the demand line erasable.
+    /// </summary>
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task Demand_lines_cannot_be_deleted()
+    {
+        await using var connection = await database.OpenConnectionAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+
+        await using (var seed = connection.CreateCommand())
+        {
+            seed.Transaction = transaction;
+            seed.CommandText = """
+                INSERT INTO "BusinessUnits"
+                    ("ID", "BusinessUnitCode", "BusinessUnitName", "CreatedBy", "CreatedOn")
+                VALUES (98211, 'R02-DEL', 'Release 02 backbone delete', 'qa', now());
+                INSERT INTO "RFQ"
+                    ("ID", "RFQNo", "RecDate", "CreatedBy", "CreatedDate", "BusinessUnitID", "NexoraSerial")
+                VALUES (98213, 'R02-RFQ-DEL', now(), 'qa', now(), 98211, 'NXR-R02-98213');
+                INSERT INTO "RFQItems"
+                    ("ID", "RFQID", "Quantity", "CreatedBy", "CreatedDate")
+                VALUES (98214, 98213, 2, 'qa', now());
+                INSERT INTO commercial_demand_lines
+                    ("Id", "BusinessUnitId", "RfqId", "RfqItemId", "NexoraSerial", "IdentityKey",
+                     "CreatedOn", "CreatedBy")
+                VALUES (98215, 98211, 98213, 98214, 'NXR-R02-98213', '98211:98213:98214', now(), 'qa');
+                """;
+            await seed.ExecuteNonQueryAsync();
+        }
+
+        await using (var delete = connection.CreateCommand())
+        {
+            delete.Transaction = transaction;
+            delete.CommandText = """DELETE FROM commercial_demand_lines WHERE "Id" = 98215;""";
+            var error = await Assert.ThrowsAsync<PostgresException>(() => delete.ExecuteNonQueryAsync());
+            Assert.Equal(PostgresErrorCodes.ObjectNotInPrerequisiteState, error.SqlState);
+        }
+
+        await transaction.RollbackAsync();
     }
 }

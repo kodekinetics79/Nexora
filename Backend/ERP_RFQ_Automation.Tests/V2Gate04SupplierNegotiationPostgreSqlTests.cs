@@ -21,10 +21,14 @@ public sealed class V2Gate04SupplierNegotiationPostgreSqlTests(PostgreSqlTestDat
     {
         await using var connection = await database.OpenConnectionAsync();
         await using var command = connection.CreateCommand();
+        // Squash note: dropped the leading id check for
+        // '20260729120629_V2Gate04SupplierNegotiationIntelligence'.
+        // 20260811033109_SquashedSchemaBaseline erased that id. Everything the migration was
+        // being held to — forced RLS, the policy predicate, the grant shape, the append-only and
+        // truncate-rejecting triggers, the seeded Module row, the jsonb column type, the
+        // tenant-qualified foreign key and the permission-parity rule — is asserted below.
         command.CommandText = """
             SELECT
-                (SELECT count(*) FROM "__EFMigrationsHistory"
-                 WHERE "MigrationId" = '20260729120629_V2Gate04SupplierNegotiationIntelligence') = 1,
                 (SELECT relrowsecurity AND relforcerowsecurity FROM pg_class
                  WHERE oid = 'public.supplier_negotiation_decisions'::regclass),
                 EXISTS (SELECT 1 FROM pg_policies
@@ -65,7 +69,7 @@ public sealed class V2Gate04SupplierNegotiationPostgreSqlTests(PostgreSqlTestDat
             """;
         await using var reader = await command.ExecuteReaderAsync();
         Assert.True(await reader.ReadAsync());
-        for (var index = 0; index < 9; index++)
+        for (var index = 0; index < 8; index++)
             Assert.True(reader.GetBoolean(index), $"Negotiation schema assertion {index + 1} failed.");
     }
 

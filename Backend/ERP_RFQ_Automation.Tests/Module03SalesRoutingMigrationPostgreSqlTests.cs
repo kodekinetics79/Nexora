@@ -12,9 +12,6 @@ namespace ERP_RFQ_Automation.Tests;
 [Collection(PostgreSqlIntegrationCollection.Name)]
 public sealed class Module03SalesRoutingMigrationPostgreSqlTests(PostgreSqlTestDatabase database)
 {
-    private const string PreviousMigration = "20260730222700_Module02CustomerContinuity";
-    private const string CurrentMigration = "20260730234426_Module03TenantSafeSalesRouting";
-
     [Fact]
     [Trait("Category", "PostgreSQL")]
     public async Task Concurrent_queue_assignment_returns_one_success_and_one_domain_conflict()
@@ -72,109 +69,117 @@ public sealed class Module03SalesRoutingMigrationPostgreSqlTests(PostgreSqlTestD
         }
     }
 
+    /// <summary>
+    /// SQUASH NOTE — this replaces Populated_upgrade_enforces_tenant_routing_lineage_and_reupgrades.
+    ///
+    /// That test built a database at 20260730222700_Module02CustomerContinuity, seeded a routing
+    /// decision and a work item, upgraded to 20260730234426_Module03TenantSafeSalesRouting and
+    /// asserted the routing tables came out tenant-qualified and immutable, then walked back down
+    /// (asserting the guard function disappeared and the rows did not) and up again.
+    ///
+    /// 20260811033109_SquashedSchemaBaseline erased both ids and the walk with them. Nothing the
+    /// migration INSTALLED was erased, and that is all that is asserted here — now against the
+    /// live catalogue and against real cross-tenant and rewrite attempts rather than against an
+    /// object appearing and disappearing:
+    ///
+    ///   * every foreign key out of the four routing tables carries the tenant in the key, so a
+    ///     row cannot reference another tenant's lead, owner or decision;
+    ///   * a routing decision naming another tenant's lead is refused by the database;
+    ///   * a routing decision cannot be rewritten after the fact — the audit trail of who a lead
+    ///     was routed to, and why, is append-only.
+    /// </summary>
     [Fact]
     [Trait("Category", "PostgreSQL")]
-    public async Task Populated_upgrade_enforces_tenant_routing_lineage_and_reupgrades()
+    public async Task Routing_lineage_is_tenant_qualified_and_decisions_are_immutable()
     {
-        var databaseName = $"nexora_module03_{Guid.NewGuid():N}";
-        var connection = new NpgsqlConnectionStringBuilder(database.ConnectionString) { Database = databaseName };
-        await ExecuteAdminAsync(database.ConnectionString, $"CREATE DATABASE \"{databaseName}\"");
-        try
+        await using var connection = await database.OpenConnectionAsync();
+
+        // 20 composite foreign keys across the four routing tables. Counted rather than named
+        // because the point is that NONE of them is single-column: a one-column FK to "Leads"
+        // would let a decision in tenant B cite a lead in tenant A and satisfy the constraint.
+        await using (var lineage = connection.CreateCommand())
         {
-            await using var context = database.ContextForConnectionString(connection.ConnectionString, null);
-            var migrator = context.GetService<IMigrator>();
-            await migrator.MigrateAsync(PreviousMigration);
-
-            // Raw-SQL seed: this database is pinned to an earlier migration, so the current
-            // model would name columns that do not exist there yet.
-            Seed.HistoricalBusinessUnit(context, 99_501);
-            Seed.HistoricalBusinessUnit(context, 99_502);
-            // Pinned to the rehearsal era: seeding through the CURRENT model would name
-            // every column later migrations added and fail with 42703.
-            var lead = Seed.HistoricalLead(context, 99_511, 99_501, "Routing tenant A");
-            await SeedOwnersAsync(context);
-            var decision = new LeadRoutingDecision
-            {
-                BusinessUnitId = 99_501, LeadId = lead.Id, SuggestedUserId = 99_521,
-                MatchStatus = CustomerMatchStatus.NoEvidence, Outcome = RoutingOutcome.Unassigned,
-                MatchConfidence = 0, DecisionCode = "MIGRATION_REHEARSAL", Explanation = "{}",
-                PolicyVersion = "test", CorrelationId = "module03", IdempotencyKey = "module03-decision",
-                CreatedOn = DateTime.UtcNow
-            };
-            context.Add(decision);
-            await context.SaveChangesAsync();
-            context.Add(new UnassignedWorkItem
-            {
-                BusinessUnitId = 99_501, LeadId = lead.Id, RoutingDecisionId = decision.Id,
-                ReasonCode = "NO_OWNER", RequiredAction = "Assign owner", Priority = 1,
-                EnteredOn = DateTime.UtcNow, SlaDueOn = DateTime.UtcNow.AddHours(4),
-                SuggestedUserId = 99_521, IdempotencyKey = "module03-work", Version = 1
-            });
-            await context.SaveChangesAsync();
-
-            await migrator.MigrateAsync(CurrentMigration);
-
-            var routingConstraintCount = await context.Database.SqlQueryRaw<int>("""
-                SELECT count(*)::int AS "Value"
+            lineage.CommandText = """
+                SELECT
+                    count(*) FILTER (WHERE array_length(constraint_row.conkey, 1) = 2)::int,
+                    count(*)::int
                 FROM pg_constraint constraint_row
                 JOIN pg_class table_row ON table_row.oid = constraint_row.conrelid
                 WHERE constraint_row.contype = 'f'
-                  AND table_row.relname IN ('customer_ownerships', 'lead_routing_decisions', 'lead_assignments', 'unassigned_work_items')
-                  AND array_length(constraint_row.conkey, 1) = 2
-                """).SingleAsync();
-            Assert.Equal(20, routingConstraintCount);
-
-            var crossTenantLead = await Assert.ThrowsAsync<PostgresException>(() =>
-                context.Database.ExecuteSqlRawAsync("""
-                    INSERT INTO lead_routing_decisions
-                        ("BusinessUnitId", "LeadId", "SuggestedUserId", "MatchStatus", "Outcome",
-                         "MatchConfidence", "DecisionCode", "Explanation", "PolicyVersion",
-                         "CorrelationId", "IdempotencyKey", "CreatedOn")
-                    VALUES (99502, 99511, 99522, 'NoEvidence', 'Unassigned', 0,
-                            'CROSS_TENANT', '{{}}'::jsonb, 'test', 'cross', 'cross-lead', now())
-                    """));
-            Assert.Equal(PostgresErrorCodes.ForeignKeyViolation, crossTenantLead.SqlState);
-
-            var immutable = await Assert.ThrowsAsync<PostgresException>(() =>
-                context.Database.ExecuteSqlRawAsync("""
-                    UPDATE lead_routing_decisions SET "DecisionCode" = 'CHANGED'
-                    WHERE "BusinessUnitId" = 99501 AND "IdempotencyKey" = 'module03-decision'
-                    """));
-            Assert.Equal(PostgresErrorCodes.RaiseException, immutable.SqlState);
-
-            await migrator.MigrateAsync(PreviousMigration);
-            Assert.Equal(1, await context.Database.SqlQueryRaw<int>("""
-                SELECT count(*)::int AS "Value" FROM lead_routing_decisions
-                WHERE "BusinessUnitId" = 99501
-                """).SingleAsync());
-            Assert.Equal(0, await context.Database.SqlQueryRaw<int>("""
-                SELECT count(*)::int AS "Value"
-                FROM pg_proc
-                WHERE proname = 'nexora_reject_routing_decision_mutation'
-                """).SingleAsync());
-            await migrator.MigrateAsync(CurrentMigration);
-            Assert.Equal(1, await context.Database.SqlQueryRaw<int>("""
-                SELECT count(*)::int AS "Value"
-                FROM pg_proc
-                WHERE proname = 'nexora_reject_routing_decision_mutation'
-                """).SingleAsync());
-            Assert.Equal(1, await context.Database.SqlQueryRaw<int>("""
-                SELECT count(*)::int AS "Value" FROM unassigned_work_items
-                WHERE "BusinessUnitId" = 99501
-                """).SingleAsync());
+                  AND table_row.relname IN ('customer_ownerships', 'lead_routing_decisions',
+                                            'lead_assignments', 'unassigned_work_items');
+                """;
+            await using var reader = await lineage.ExecuteReaderAsync();
+            Assert.True(await reader.ReadAsync());
+            var tenantQualified = reader.GetInt32(0);
+            var total = reader.GetInt32(1);
+            Assert.Equal(20, tenantQualified);
+            Assert.Equal(total, tenantQualified);
         }
-        finally
+
+        await using var transaction = await connection.BeginTransactionAsync();
+        await using (var seed = connection.CreateCommand())
         {
-            NpgsqlConnection.ClearAllPools();
-            await ExecuteAdminAsync(database.ConnectionString, $"DROP DATABASE IF EXISTS \"{databaseName}\" WITH (FORCE)");
+            seed.Transaction = transaction;
+            seed.CommandText = """
+                INSERT INTO "BusinessUnits"
+                    ("ID", "BusinessUnitCode", "BusinessUnitName", "CreatedBy", "CreatedOn")
+                VALUES (99501, 'M03-A', 'Routing tenant A', 'tests', now()),
+                       (99502, 'M03-B', 'Routing tenant B', 'tests', now());
+                INSERT INTO "Users"
+                    ("ID", "BUID", "FirstName", "LastName", "Email", "Password_Hash",
+                     "ImageURL", "IsActive", "CreatedBy", "CreatedOn")
+                VALUES (99521, 99501, 'owner-a', 'Test', 'owner-a@nexora.invalid', 'not-used',
+                        'n/a', true, 'tests', now()),
+                       (99522, 99502, 'owner-b', 'Test', 'owner-b@nexora.invalid', 'not-used',
+                        'n/a', true, 'tests', now());
+                INSERT INTO "Leads"
+                    ("ID", "RFQNo", "RecDate", "LeadSource", "CreatedBy", "CreatedDate", "BusinessUnitID")
+                VALUES (99511, 'M03-LEAD', now(), 'Tests', 'tests', now(), 99501);
+                INSERT INTO lead_routing_decisions
+                    ("BusinessUnitId", "LeadId", "SuggestedUserId", "MatchStatus", "Outcome",
+                     "MatchConfidence", "DecisionCode", "Explanation", "PolicyVersion",
+                     "CorrelationId", "IdempotencyKey", "CreatedOn")
+                VALUES (99501, 99511, 99521, 'NoEvidence', 'Unassigned', 0,
+                        'ROUTING_TEST', jsonb_build_object(), 'test', 'module03', 'module03-decision', now());
+                """;
+            await seed.ExecuteNonQueryAsync();
         }
+
+        // Tenant B cannot cite tenant A's lead, even from raw SQL as the owner role.
+        await transaction.SaveAsync("cross_tenant");
+        await using (var crossTenant = connection.CreateCommand())
+        {
+            crossTenant.Transaction = transaction;
+            crossTenant.CommandText = """
+                INSERT INTO lead_routing_decisions
+                    ("BusinessUnitId", "LeadId", "SuggestedUserId", "MatchStatus", "Outcome",
+                     "MatchConfidence", "DecisionCode", "Explanation", "PolicyVersion",
+                     "CorrelationId", "IdempotencyKey", "CreatedOn")
+                VALUES (99502, 99511, 99522, 'NoEvidence', 'Unassigned', 0,
+                        'CROSS_TENANT', jsonb_build_object(), 'test', 'cross', 'cross-lead', now());
+                """;
+            var error = await Assert.ThrowsAsync<PostgresException>(() => crossTenant.ExecuteNonQueryAsync());
+            Assert.Equal(PostgresErrorCodes.ForeignKeyViolation, error.SqlState);
+        }
+        await transaction.RollbackAsync("cross_tenant");
+
+        // And a decision already taken cannot be re-explained.
+        await using (var immutable = connection.CreateCommand())
+        {
+            immutable.Transaction = transaction;
+            immutable.CommandText = """
+                UPDATE lead_routing_decisions SET "DecisionCode" = 'CHANGED'
+                WHERE "BusinessUnitId" = 99501 AND "IdempotencyKey" = 'module03-decision';
+                """;
+            var error = await Assert.ThrowsAsync<PostgresException>(() => immutable.ExecuteNonQueryAsync());
+            Assert.Equal(PostgresErrorCodes.RaiseException, error.SqlState);
+        }
+
+        await transaction.RollbackAsync();
     }
 
-    /// <summary>
-    /// Owner row for tests that run against the fully migrated fixture, where the current EF
-    /// model matches the schema. The historical rehearsal must use <see cref="SeedOwnersAsync"/>
-    /// instead.
-    /// </summary>
+    /// <summary>Owner row for the tests that run against the fully migrated fixture.</summary>
     private static User User(long id, long tenant, string name) => new()
     {
         Id = id, Buid = tenant, FirstName = name, LastName = "Test", Email = $"{name}@nexora.invalid",
@@ -182,36 +187,7 @@ public sealed class Module03SalesRoutingMigrationPostgreSqlTests(PostgreSqlTestD
         CreatedBy = "tests", CreatedOn = DateTime.UtcNow
     };
 
-    /// <summary>
-    /// Seeds the owner rows the migration rehearsal needs as FK targets.
-    ///
-    /// Deliberately raw SQL rather than <c>context.Users.Add</c>: the rehearsal runs against the
-    /// schema as it stood at <see cref="PreviousMigration"/>, while the EF model is always the
-    /// current one. Inserting through the model makes every later additive column on Users
-    /// (for example DeactivatedAtUtc) fail this test with "column does not exist" even though the
-    /// migration under test is unaffected. Naming the columns that existed at that point keeps
-    /// the rehearsal pinned to the history it is meant to exercise.
-    /// </summary>
-    private static Task SeedOwnersAsync(ErpRfqAutomationContext context) =>
-        context.Database.ExecuteSqlRawAsync("""
-            INSERT INTO "Users"
-                ("ID", "BUID", "FirstName", "LastName", "Email", "Password_Hash",
-                 "ImageURL", "IsActive", "CreatedBy", "CreatedOn")
-            VALUES
-                (99521, 99501, 'owner-a', 'Test', 'owner-a@nexora.invalid', 'not-used',
-                 'n/a', true, 'tests', now()),
-                (99522, 99502, 'owner-b', 'Test', 'owner-b@nexora.invalid', 'not-used',
-                 'n/a', true, 'tests', now());
-            """);
-
     private static CommercialRoutingApplicationService Service(ErpRfqAutomationContext context) =>
         new(context, new DeterministicRoutingEngine(), new RoutingPolicy());
 
-    private static async Task ExecuteAdminAsync(string connectionString, string sql)
-    {
-        await using var connection = new NpgsqlConnection(connectionString);
-        await connection.OpenAsync();
-        await using var command = new NpgsqlCommand(sql, connection);
-        await command.ExecuteNonQueryAsync();
-    }
 }

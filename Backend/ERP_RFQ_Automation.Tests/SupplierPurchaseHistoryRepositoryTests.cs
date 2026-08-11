@@ -215,20 +215,27 @@ public sealed class SupplierPurchaseHistoryRepositoryTests
         Assert.DoesNotContain("OrderByDescending(h => h.PoDocId)", source, StringComparison.Ordinal);
     }
 
-    /// <summary>The migration must seed the sequence past every PO number already issued.</summary>
-    [Fact]
-    public void Po_document_sequence_migration_reconciles_the_persisted_high_water_mark()
-    {
-        var source = File.ReadAllText(Path.Combine(FindRepositoryRoot(),
-            "Backend/ERP_RFQ_Automation/Migrations/" +
-            "20260804180919_Module05ProcurementDeadlineAndPoNumberAuthority.cs"));
-
-        Assert.Contains("CREATE SEQUENCE IF NOT EXISTS public.nexora_supplier_po_doc_seq",
-            source, StringComparison.Ordinal);
-        Assert.Contains("setval('public.nexora_supplier_po_doc_seq'", source, StringComparison.Ordinal);
-        Assert.Contains("GRANT USAGE ON SEQUENCE public.nexora_supplier_po_doc_seq",
-            source, StringComparison.Ordinal);
-    }
+    // DELETED BY THE SQUASH — Po_document_sequence_migration_reconciles_the_persisted_high_water_mark
+    //
+    // It read the TEXT of Migrations/20260804180919_Module05ProcurementDeadlineAndPoNumberAuthority.cs
+    // off disk and asserted three substrings appeared in it: the CREATE SEQUENCE, the setval that
+    // reconciled the sequence past every PO number already issued, and the GRANT USAGE.
+    //
+    // 20260811033109_SquashedSchemaBaseline superseded that migration, and this was the last thing
+    // in the suite still reading a file under Migrations\ — so it was also the last thing keeping
+    // that folder undeletable. Two of the three assertions were never really about the migration
+    // anyway: the sequence and its USAGE-only grant are catalogue facts, and asserting them from
+    // source text meant a hand edit to the deployed schema could never fail this test.
+    //
+    // WHAT STILL COVERS IT
+    //   * The sequence's existence and its USAGE-only grant to the tenant role are asserted against
+    //     the live PostgreSQL catalogue by
+    //     ProcurementPostgreSqlTests.Rfq_and_po_document_numbers_come_from_governed_database_sequences.
+    //   * That the repository draws numbers from it, schema-qualified, rather than from an
+    //     in-process MAX-and-increment, is Po_document_numbers_come_from_a_schema_qualified_database_sequence
+    //     above.
+    //   * The setval high-water reconciliation is retired: it existed to carry PO numbers issued
+    //     before the sequence existed, and no database can be in that state again.
 
     private static async Task AssertNothingMovedAsync(TestDb database)
     {

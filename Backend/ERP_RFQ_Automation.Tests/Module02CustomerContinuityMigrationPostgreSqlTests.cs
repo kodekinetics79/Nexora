@@ -14,104 +14,121 @@ namespace ERP_RFQ_Automation.Tests;
 public sealed class Module02CustomerContinuityMigrationPostgreSqlTests(
     PostgreSqlTestDatabase database)
 {
-    private const string PreviousMigration = "20260730193414_SynchronizeSharedExtractionOccurrences";
-    private const string CurrentMigration = "20260730222700_Module02CustomerContinuity";
-
+    /// <summary>
+    /// SQUASH NOTE — this replaces
+    /// Populated_upgrade_backfills_versions_enforces_customer_numbers_and_reupgrades.
+    ///
+    /// That test built a database at 20260730193414_SynchronizeSharedExtractionOccurrences, wrote
+    /// two customers and two contacts with no ConcurrencyToken column, upgraded to
+    /// 20260730222700_Module02CustomerContinuity and asserted the backfill gave each row a distinct
+    /// non-empty token, then exercised the two uniqueness rules and walked back down and up again
+    /// counting history rows.
+    ///
+    /// 20260811033109_SquashedSchemaBaseline erased both ids and, with them, the walk. The token
+    /// BACKFILL is retired — the column is now created NOT NULL and a row without one cannot exist
+    /// — but the three rules the migration existed to install are asserted here against real
+    /// writes on the live schema, which is where they actually have to hold:
+    ///
+    ///   * every customer and contact carries a distinct, non-empty concurrency token;
+    ///   * a customer number is unique within a tenant;
+    ///   * a customer has at most ONE active primary contact, enforced by a partial unique index
+    ///     rather than by application code, so a second one is refused even from raw SQL.
+    /// </summary>
     [Fact]
     [Trait("Category", "PostgreSQL")]
-    public async Task Populated_upgrade_backfills_versions_enforces_customer_numbers_and_reupgrades()
+    public async Task Customer_identity_is_versioned_numbered_once_and_has_one_active_primary_contact()
     {
-        var databaseName = $"nexora_customer_continuity_{Guid.NewGuid():N}";
-        var rehearsal = new NpgsqlConnectionStringBuilder(database.ConnectionString)
-        {
-            Database = databaseName
-        };
+        await using var connection = await database.OpenConnectionAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
 
-        await ExecuteAdminAsync(database.ConnectionString, $"CREATE DATABASE \"{databaseName}\"");
-        try
+        await using (var seed = connection.CreateCommand())
         {
-            await using var context = database.ContextForConnectionString(rehearsal.ConnectionString, null);
-            var migrator = context.GetService<IMigrator>();
-            await migrator.MigrateAsync(PreviousMigration);
-            var historicalMigrationCount = await MigrationCountAsync(context);
-
-            await context.Database.ExecuteSqlRawAsync("""
+            seed.Transaction = transaction;
+            seed.CommandText = """
                 INSERT INTO "BusinessUnits"
                     ("ID", "BusinessUnitCode", "BusinessUnitName", "CreatedBy", "CreatedOn")
-                VALUES (99401, 'CRM-MIG', 'CRM migration', 'tests', now());
+                VALUES (99401, 'CRM-MIG', 'CRM continuity', 'tests', now());
 
                 INSERT INTO "Customers"
-                    ("ID", "DocId", "Name", "ImageURL", "BUID", "IsActive", "CreatedBy", "CreatedOn")
+                    ("ID", "DocId", "Name", "ImageURL", "BUID", "IsActive", "CreatedBy", "CreatedOn",
+                     "ConcurrencyToken")
                 VALUES
-                    (99402, 'CU00099402', 'Migration Customer A', '', 99401, true, 'tests', now()),
-                    (99403, 'CU00099403', 'Migration Customer B', '', 99401, true, 'tests', now());
+                    (99402, 'CU00099402', 'Continuity Customer A', '', 99401, true, 'tests', now(), gen_random_uuid()),
+                    (99403, 'CU00099403', 'Continuity Customer B', '', 99401, true, 'tests', now(), gen_random_uuid());
 
-                INSERT INTO "Contacts"
-                    ("ID", "BusinessUnitID", "CustomerID", "FirstName", "LastName",
-                     "IsPrimary", "IsActive", "CreatedBy", "CreatedOn")
-                VALUES
-                    (99404, 99401, 99402, 'Primary', 'Buyer', true, true, 'tests', now()),
-                    (99405, 99401, 99403, 'Other', 'Buyer', true, true, 'tests', now());
-                """);
-
-            await migrator.MigrateAsync(CurrentMigration);
-
-            var versions = await context.Database.SqlQueryRaw<Guid>("""
-                SELECT "ConcurrencyToken" AS "Value" FROM "Customers" WHERE "BUID" = 99401
-                UNION ALL
-                SELECT "ConcurrencyToken" AS "Value" FROM "Contacts" WHERE "BusinessUnitID" = 99401
-                """).ToListAsync();
-            Assert.Equal(4, versions.Count);
-            Assert.All(versions, version => Assert.NotEqual(Guid.Empty, version));
-            Assert.Equal(4, versions.Distinct().Count());
-            Assert.Equal(historicalMigrationCount + 1, await MigrationCountAsync(context));
-
-            var duplicateNumber = await Assert.ThrowsAsync<PostgresException>(() =>
-                context.Database.ExecuteSqlRawAsync("""
-                    INSERT INTO "Customers"
-                        ("DocId", "Name", "ImageURL", "BUID", "IsActive", "CreatedBy", "CreatedOn", "ConcurrencyToken")
-                    VALUES ('CU00099402', 'Duplicate number', '', 99401, true, 'tests', now(), gen_random_uuid());
-                    """));
-            Assert.Equal(PostgresErrorCodes.UniqueViolation, duplicateNumber.SqlState);
-
-            await context.Database.ExecuteSqlRawAsync("""
                 INSERT INTO "Contacts"
                     ("ID", "BusinessUnitID", "CustomerID", "FirstName", "LastName",
                      "IsPrimary", "IsActive", "CreatedBy", "CreatedOn", "ConcurrencyToken")
                 VALUES
-                    (99406, 99401, 99402, 'Former', 'Primary', true, false, 'tests', now(), gen_random_uuid());
-                """);
-            var duplicateActivePrimary = await Assert.ThrowsAsync<PostgresException>(() =>
-                context.Database.ExecuteSqlRawAsync("""
-                    INSERT INTO "Contacts"
-                        ("ID", "BusinessUnitID", "CustomerID", "FirstName", "LastName",
-                         "IsPrimary", "IsActive", "CreatedBy", "CreatedOn", "ConcurrencyToken")
-                    VALUES
-                        (99407, 99401, 99402, 'Duplicate', 'Primary', true, true, 'tests', now(), gen_random_uuid());
-                    """));
-            Assert.Equal(PostgresErrorCodes.UniqueViolation, duplicateActivePrimary.SqlState);
+                    (99404, 99401, 99402, 'Primary', 'Buyer', true, true, 'tests', now(), gen_random_uuid()),
+                    (99405, 99401, 99403, 'Other', 'Buyer', true, true, 'tests', now(), gen_random_uuid());
+                """;
+            await seed.ExecuteNonQueryAsync();
+        }
 
-            await migrator.MigrateAsync(PreviousMigration);
-            Assert.Equal(historicalMigrationCount, await MigrationCountAsync(context));
-            Assert.Equal(2, await CustomerCountAsync(context));
-
-            await migrator.MigrateAsync(CurrentMigration);
-            Assert.Equal(historicalMigrationCount + 1, await MigrationCountAsync(context));
-            Assert.Equal(2, await CustomerCountAsync(context));
-            Assert.Equal(5, await context.Database.SqlQueryRaw<int>("""
-                SELECT count(*)::int AS "Value" FROM (
+        // Four rows, four distinct non-empty tokens. An all-zero or shared token would let two
+        // concurrent edits both believe they held the current version.
+        await using (var versions = connection.CreateCommand())
+        {
+            versions.Transaction = transaction;
+            versions.CommandText = """
+                SELECT count(DISTINCT "ConcurrencyToken")::int
+                FROM (
                     SELECT "ConcurrencyToken" FROM "Customers" WHERE "BUID" = 99401
                     UNION ALL
                     SELECT "ConcurrencyToken" FROM "Contacts" WHERE "BusinessUnitID" = 99401
-                ) versions WHERE "ConcurrencyToken" <> '00000000-0000-0000-0000-000000000000'::uuid
-                """).SingleAsync());
+                ) tokens
+                WHERE "ConcurrencyToken" IS NOT NULL
+                  AND "ConcurrencyToken" <> '00000000-0000-0000-0000-000000000000'::uuid;
+                """;
+            Assert.Equal(4, Convert.ToInt32(await versions.ExecuteScalarAsync()));
         }
-        finally
+
+        await AssertUniqueViolationAsync(connection, transaction, """
+            INSERT INTO "Customers"
+                ("DocId", "Name", "ImageURL", "BUID", "IsActive", "CreatedBy", "CreatedOn", "ConcurrencyToken")
+            VALUES ('CU00099402', 'Duplicate number', '', 99401, true, 'tests', now(), gen_random_uuid());
+            """);
+
+        // A DEACTIVATED former primary is not in the index's predicate, so replacing a primary
+        // stays possible…
+        await using (var former = connection.CreateCommand())
         {
-            NpgsqlConnection.ClearAllPools();
-            await ExecuteAdminAsync(database.ConnectionString,
-                $"DROP DATABASE IF EXISTS \"{databaseName}\" WITH (FORCE)");
+            former.Transaction = transaction;
+            former.CommandText = """
+                INSERT INTO "Contacts"
+                    ("ID", "BusinessUnitID", "CustomerID", "FirstName", "LastName",
+                     "IsPrimary", "IsActive", "CreatedBy", "CreatedOn", "ConcurrencyToken")
+                VALUES (99406, 99401, 99402, 'Former', 'Primary', true, false, 'tests', now(), gen_random_uuid());
+                """;
+            Assert.Equal(1, await former.ExecuteNonQueryAsync());
         }
+
+        // …while a SECOND ACTIVE primary for the same customer is not.
+        await AssertUniqueViolationAsync(connection, transaction, """
+            INSERT INTO "Contacts"
+                ("ID", "BusinessUnitID", "CustomerID", "FirstName", "LastName",
+                 "IsPrimary", "IsActive", "CreatedBy", "CreatedOn", "ConcurrencyToken")
+            VALUES (99407, 99401, 99402, 'Duplicate', 'Primary', true, true, 'tests', now(), gen_random_uuid());
+            """);
+
+        await transaction.RollbackAsync();
+    }
+
+    /// <summary>
+    /// Each refusal runs in its own savepoint, because a rejected statement aborts the enclosing
+    /// transaction and every later assertion would otherwise fail for the wrong reason.
+    /// </summary>
+    private static async Task AssertUniqueViolationAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, string sql)
+    {
+        await transaction.SaveAsync("uniqueness");
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = sql;
+        var error = await Assert.ThrowsAsync<PostgresException>(() => command.ExecuteNonQueryAsync());
+        Assert.Equal(PostgresErrorCodes.UniqueViolation, error.SqlState);
+        await transaction.RollbackAsync("uniqueness");
     }
 
     [Fact]
@@ -258,26 +275,6 @@ public sealed class Module02CustomerContinuityMigrationPostgreSqlTests(
         Assert.Equal("After retry", persisted.Name);
         Assert.Equal("after-retry@example.test", persisted.ContactEmail);
         Assert.NotEqual(token, persisted.ConcurrencyToken);
-    }
-
-    private static Task<int> CustomerCountAsync(DbContext context) =>
-        context.Database.SqlQueryRaw<int>("""
-            SELECT count(*)::int AS "Value" FROM "Customers" WHERE "BUID" = 99401
-            """).SingleAsync();
-
-    private static Task<int> MigrationCountAsync(DbContext context) =>
-        context.Database.SqlQueryRaw<int>("""
-            SELECT count(*)::int AS "Value" FROM "__EFMigrationsHistory"
-            """).SingleAsync();
-
-    private static async Task ExecuteAdminAsync(string connectionString, string sql)
-    {
-        var builder = new NpgsqlConnectionStringBuilder(connectionString) { Database = "postgres" };
-        await using var connection = new NpgsqlConnection(builder.ConnectionString);
-        await connection.OpenAsync();
-        await using var command = connection.CreateCommand();
-        command.CommandText = sql;
-        await command.ExecuteNonQueryAsync();
     }
 
     private sealed class ThrowOnceAfterSaveInterceptor : SaveChangesInterceptor
