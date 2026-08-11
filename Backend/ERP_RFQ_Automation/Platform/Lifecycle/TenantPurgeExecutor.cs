@@ -32,7 +32,24 @@ public sealed record TenantPurgeOutcome(
     long TenantId,
     long BusinessUnitId,
     long RowsDeleted,
-    IReadOnlyList<TenantPurgeTableCount> Deleted);
+    IReadOnlyList<TenantPurgeTableCount> Deleted)
+{
+    /// <summary>
+    /// How many tables the sweep visited. Present because <see cref="Deleted"/> lists only the
+    /// tables that yielded rows, and "absent from the report" is exactly how a table the purge
+    /// failed to clear used to look. A reader can now tell "swept 196, 41 held rows" from
+    /// "swept 41".
+    /// </summary>
+    public int TablesSwept { get; init; }
+
+    /// <summary>
+    /// How many of those tables were re-counted after the deletes and proved to hold none of this
+    /// tenant's rows, inside the same transaction and before it committed. Equal to
+    /// <see cref="TablesSwept"/> on every outcome that exists, because a shortfall throws rather
+    /// than returning.
+    /// </summary>
+    public int TablesVerifiedEmpty { get; init; }
+}
 
 /// <summary>
 /// Destroys one tenant's rows. Everything of theirs, everywhere, in one transaction.
@@ -80,6 +97,51 @@ public sealed record TenantPurgeOutcome(
 /// </summary>
 public sealed class TenantPurgeExecutor(IConfiguration configuration, ILogger<TenantPurgeExecutor> logger)
 {
+    /// <summary>
+    /// The role a purge reads and deletes under, created by
+    /// <c>20260811154500_TenantPurgeExecutionRole</c>.
+    ///
+    /// <para><b>Lesson four — the owner connection is not exempt from row-level security, and
+    /// where it is not, it deletes nothing and says so to nobody.</b> This executor used to run
+    /// every statement on the bare owner connection. It has to OPEN that connection —
+    /// <c>session_replication_role</c> is superuser-restricted, and it is what suspends the
+    /// append-only guards — but issuing the DELETEs on it was the defect. 100 of the 195
+    /// tenant-plane tables a purge sweeps are declared <c>FORCE ROW LEVEL SECURITY</c>, which
+    /// makes the OWNER subject to its own policies, and every one of those policies is written
+    /// <c>TO nexora_tenant_app</c>. PostgreSQL matches a policy's role list with
+    /// <c>has_privs_of_role()</c>, and the runtime role is <c>NOINHERIT</c>
+    /// (<c>Program.cs ValidateRuntimeDatabaseRoleAsync</c>), so membership is not enough: no
+    /// policy applied, the default was deny, and <c>DELETE</c> returned 0 without raising. The
+    /// executor recorded a table only when <c>rows &gt; 0</c>, so those tables were simply absent
+    /// from the report. An offboarding could complete, report success, and leave the customer's
+    /// data in place — while <c>public."BusinessUnits"</c>, which is NOT forced, was destroyed, so
+    /// the tenant vanished from every screen at the same moment their rows became unreachable.
+    /// </para>
+    ///
+    /// <para>Making the owner INHERIT would not have fixed it: with an inheriting owner the policy
+    /// role list matches and the DELETE still returned 0, because this code never set
+    /// <c>nexora.business_unit_id</c> and the policy predicate evaluated against NULL. Both were
+    /// reproduced against postgres:16 before either was changed.</para>
+    ///
+    /// <para>So the purge now has an identity of its own. It is <c>NOBYPASSRLS</c> on purpose:
+    /// with <see cref="PurgeScopeSetting"/> unset it can see nothing at all, and with it set it
+    /// can see exactly one tenant. The database, not this file's WHERE clauses, is now what stops
+    /// a purge reaching a second customer.</para>
+    /// </summary>
+    public const string PurgeRole = "nexora_purge_app";
+
+    /// <summary>
+    /// The GUC every <c>nexora_tenant_purge</c> policy is written against. Deliberately NOT
+    /// <c>nexora.business_unit_id</c>: that one is set by <c>TenantRlsCommandInterceptor</c> on
+    /// every request, and sharing it would mean a request-path session and a destructive sweep
+    /// were distinguished by role alone. Two names make the two intents impossible to confuse in
+    /// a policy definition, in a log, or in <c>pg_stat_activity</c>.
+    /// </summary>
+    public const string PurgeScopeSetting = "nexora.purge_business_unit_id";
+
+    /// <summary>The policy name this executor requires on every RLS-enabled target.</summary>
+    private const string PurgePolicyName = "nexora_tenant_purge";
+
     /// <summary>
     /// Tables a purge must never touch, as <c>schema.table</c>.
     ///
@@ -151,25 +213,50 @@ public sealed class TenantPurgeExecutor(IConfiguration configuration, ILogger<Te
                 + "cannot be identified.");
     }
 
+    /// <summary>
+    /// What a purge would destroy, counted through the SAME identity that will destroy it.
+    ///
+    /// <para>This used to count on the bare owner connection, and on the 100 forced tables the
+    /// owner sees nothing — so every one of them counted zero and was dropped by the
+    /// <c>rows &gt; 0</c> filter below. The number on the confirmation screen an operator reads
+    /// before authorising destruction was therefore a floor, not a total, and the tables missing
+    /// from it were exactly the tables the execution was also going to miss. Preview and execute
+    /// now enter the same scope, so if one can see a row the other can delete it, and if neither
+    /// can, both refuse.</para>
+    ///
+    /// <para>The transaction exists only to hold <c>SET LOCAL ROLE</c> and the scope GUC — a
+    /// preview writes nothing and always rolls back.</para>
+    /// </summary>
     public async Task<TenantPurgePreview> PreviewAsync(
         long tenantId, long businessUnitId, CancellationToken cancellationToken)
     {
         await using var connection = await OpenOwnerConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        // Discovered as the OWNER, before the role switch. information_schema is filtered by the
+        // caller's privileges, so a sweep run as nexora_purge_app would only find the tables that
+        // role can already reach — the tables it CANNOT reach, which is the entire point of the
+        // assertion below, would silently not be targets at all.
+        var targets = await TargetsAsync(connection, transaction, cancellationToken);
+        var keyColumn = await BusinessUnitKeyColumnAsync(connection, transaction, cancellationToken);
+        await AssertPurgeReachAsync(connection, transaction, targets, cancellationToken);
+        await EnterPurgeScopeAsync(connection, transaction, businessUnitId, cancellationToken);
 
         var counts = new List<TenantPurgeTableCount>();
-        foreach (var target in await TargetsAsync(connection, null, cancellationToken))
+        foreach (var target in targets)
         {
-            var rows = await CountAsync(connection, null, target, businessUnitId, tenantId, cancellationToken);
+            var rows = await CountAsync(connection, transaction, target, businessUnitId, tenantId, cancellationToken);
             if (rows > 0) counts.Add(new TenantPurgeTableCount(target.Qualified, target.Column, rows));
         }
 
-        var keyColumn = await BusinessUnitKeyColumnAsync(connection, null, cancellationToken);
         var businessUnitRows = await ScalarAsync(
-            connection, null,
+            connection, transaction,
             $"""SELECT count(*)::bigint FROM {BusinessUnitTable} WHERE "{keyColumn}" = @scope;""",
             businessUnitId, cancellationToken);
         if (businessUnitRows > 0)
             counts.Add(new TenantPurgeTableCount(BusinessUnitTable, keyColumn, businessUnitRows));
+
+        await transaction.RollbackAsync(cancellationToken);
 
         return new TenantPurgePreview(
             tenantId, businessUnitId,
@@ -218,12 +305,30 @@ public sealed class TenantPurgeExecutor(IConfiguration configuration, ILogger<Te
 
         // Suspends the append-only guards AND the foreign-key triggers for this session only,
         // scoped to the transaction so a failure anywhere rolls back with the guards intact.
+        //
+        // ORDER MATTERS, and it is the reason this sequence works at all. The setting is
+        // superuser-restricted, so it must be issued while the session is still on the OWNER's
+        // login role; nexora_purge_app cannot set it and a SET LOCAL ROLE first would answer
+        // 42501. Verified against postgres:16: a session that enters replica mode and THEN
+        // switches role keeps replica mode for the life of the transaction, and RESET ROLE
+        // returns to the owner with it still in force.
         await using (var replica = new NpgsqlCommand(
             "SET LOCAL session_replication_role = 'replica';", connection, transaction))
             await replica.ExecuteNonQueryAsync(cancellationToken);
 
+        // Both discovered as the OWNER. See PreviewAsync for why this cannot move below the role
+        // switch: information_schema hides tables the caller holds no privilege on, so the
+        // catalogue sweep would quietly shrink to whatever the purge role could already reach.
+        var targets = await TargetsAsync(connection, transaction, cancellationToken);
+        var keyColumn = await BusinessUnitKeyColumnAsync(connection, transaction, cancellationToken);
+
+        await AssertPurgeReachAsync(connection, transaction, targets, cancellationToken);
+        await EnterPurgeScopeAsync(connection, transaction, businessUnitId, cancellationToken);
+
         var deleted = new List<TenantPurgeTableCount>();
-        foreach (var target in await TargetsAsync(connection, transaction, cancellationToken))
+        var survivors = new List<string>();
+        var verified = 0;
+        foreach (var target in targets)
         {
             await using var command = new NpgsqlCommand(
                 $"""DELETE FROM {target.Qualified} t WHERE {target.Predicate};""",
@@ -245,11 +350,24 @@ public sealed class TenantPurgeExecutor(IConfiguration configuration, ILogger<Te
             }
 
             if (rows > 0) deleted.Add(new TenantPurgeTableCount(target.Qualified, target.Column, rows));
+
+            // THE POST-CONDITION, and it is taken HERE rather than after the sweep. A table
+            // reached through a parent is selected by a subquery on that parent, and the parent is
+            // deleted LATER in this same loop (PlatformTenantDataMap orders deepest-first, so a
+            // child is deleted while the row its subquery selects through still exists). Counting
+            // such a child after the sweep would be asking how many rows hang off a parent that no
+            // longer exists — which is zero whatever happened to the child, and would be the
+            // original defect rebuilt inside its own verification.
+            var remaining = await CountAsync(
+                connection, transaction, target, businessUnitId, tenantId, cancellationToken);
+            verified++;
+            if (remaining > 0)
+                survivors.Add(
+                    $"{target.Qualified} still holds {remaining} row(s) matching \"{target.Column}\"");
         }
 
         // Last, and by primary key: the business unit is the anchor every sweep above resolved
         // against, and it is the one tenant row whose tenant column is its own id.
-        var keyColumn = await BusinessUnitKeyColumnAsync(connection, transaction, cancellationToken);
         await using (var unit = new NpgsqlCommand(
             $"""DELETE FROM {BusinessUnitTable} WHERE "{keyColumn}" = @scope;""", connection, transaction))
         {
@@ -257,6 +375,28 @@ public sealed class TenantPurgeExecutor(IConfiguration configuration, ILogger<Te
             var rows = await unit.ExecuteNonQueryAsync(cancellationToken);
             if (rows > 0) deleted.Add(new TenantPurgeTableCount(BusinessUnitTable, keyColumn, rows));
         }
+
+        var unitRemaining = await ScalarAsync(
+            connection, transaction,
+            $"""SELECT count(*)::bigint FROM {BusinessUnitTable} WHERE "{keyColumn}" = @scope;""",
+            businessUnitId, cancellationToken);
+        verified++;
+        if (unitRemaining > 0)
+            survivors.Add($"{BusinessUnitTable} still holds the tenant's own workspace row");
+
+        if (survivors.Count > 0)
+            throw new InvalidOperationException(
+                $"Purge ABORTED for business unit {businessUnitId}: the destructive transaction ran "
+                + $"to completion but {survivors.Count} table(s) still hold this tenant's rows, so "
+                + $"nothing has been committed. {string.Join("; ", survivors)}. A purge that cannot "
+                + "prove the rows are gone must not report that they are.");
+
+        // Back to the owner for the bookkeeping below: platform."TenantOffboardings" carries no
+        // row-level security and no grant to the purge role, deliberately. The record that a
+        // purge happened is the operator's, and the identity that performs destruction should not
+        // be able to write the evidence of it.
+        await using (var reset = new NpgsqlCommand("RESET ROLE;", connection, transaction))
+            await reset.ExecuteNonQueryAsync(cancellationToken);
 
         var total = deleted.Sum(d => d.Rows);
         var executedOn = DateTime.UtcNow;
@@ -288,11 +428,161 @@ public sealed class TenantPurgeExecutor(IConfiguration configuration, ILogger<Te
 
         logger.LogWarning(
             "TENANT PURGE complete for tenant {TenantId} (business unit {BusinessUnitId}): "
-            + "{Rows} row(s) destroyed across {Tables} table(s).",
-            tenantId, businessUnitId, total, deleted.Count);
+            + "{Rows} row(s) destroyed across {Tables} table(s); {Swept} table(s) swept and "
+            + "verified to hold none of this tenant's rows before commit.",
+            tenantId, businessUnitId, total, deleted.Count, verified);
 
         return new TenantPurgeOutcome(
-            tenantId, businessUnitId, total, deleted.OrderByDescending(d => d.Rows).ToList());
+            tenantId, businessUnitId, total, deleted.OrderByDescending(d => d.Rows).ToList())
+        {
+            TablesSwept = verified,
+            TablesVerifiedEmpty = verified
+        };
+    }
+
+    /// <summary>
+    /// Puts the session into the purge scope: the tenant the policies will admit, then the role
+    /// they are written for.
+    ///
+    /// <para>The GUC is set FIRST and as the owner. It is transaction-local, like everything else
+    /// here, so it lapses on commit or rollback — a leaked purge scope on a pooled connection
+    /// would be an authorisation for whatever ran next on it.</para>
+    ///
+    /// <para>A failure to enter the role is reported as a deployment fault rather than a purge
+    /// fault, because that is what it is: the role and its policies arrive together in
+    /// <c>20260811154500_TenantPurgeExecutionRole</c>, and a database that has not applied it
+    /// cannot delete a tenant correctly no matter what this code does.</para>
+    /// </summary>
+    private static async Task EnterPurgeScopeAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, long businessUnitId,
+        CancellationToken cancellationToken)
+    {
+        await using (var scope = new NpgsqlCommand(
+            $"SELECT set_config('{PurgeScopeSetting}', @scope, true);", connection, transaction))
+        {
+            scope.Parameters.AddWithValue(
+                "scope", businessUnitId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            await scope.ExecuteScalarAsync(cancellationToken);
+        }
+
+        try
+        {
+            await using var role = new NpgsqlCommand($"SET LOCAL ROLE {PurgeRole};", connection, transaction);
+            await role.ExecuteNonQueryAsync(cancellationToken);
+        }
+        catch (PostgresException exception)
+        {
+            throw new InvalidOperationException(
+                $"The purge could not assume {PurgeRole}: {exception.SqlState} {exception.MessageText}. "
+                + "That role and the nexora_tenant_purge policies it is named in are created by "
+                + "20260811154500_TenantPurgeExecutionRole, and the migration grants it to the role "
+                + "that runs migrations — which must be the same login as "
+                + "ConnectionStrings:MigrationConnection. Until that holds, a purge would delete "
+                + "nothing from any table declared FORCE ROW LEVEL SECURITY and report success.",
+                exception);
+        }
+    }
+
+    /// <summary>
+    /// Refuses to start unless every table the sweep is about to touch can actually be reached by
+    /// <see cref="PurgeRole"/>.
+    ///
+    /// <para><b>Why this is separate from the post-condition check below, and why neither is
+    /// sufficient alone.</b> A count taken through an identity that row-level security is
+    /// filtering returns zero for the same reason the DELETE affected zero rows. Verifying "no
+    /// rows remain" through such an identity is not a weak check, it is a check that CANNOT FAIL
+    /// — which is precisely the shape of the original defect, reproduced one level up. So the
+    /// reachability of every target is established from the catalogue FIRST, where row-level
+    /// security cannot lie about itself, and only then is the count taken.</para>
+    ///
+    /// <para>Three ways a target can be out of reach, all of them fatal and all of them named:
+    /// no privilege (the purge would answer 42501 mid-sweep); row-level security enabled with no
+    /// <c>nexora_tenant_purge</c> policy for this role (silent zero — the original defect, and
+    /// how a table added by a later migration would re-introduce it); and a table carrying BOTH a
+    /// <c>BusinessUnitId</c> and a <c>BUID</c>, where the sweep would emit two targets while the
+    /// policy admits only one column, so one of the two would silently match nothing. The last
+    /// does not occur in the schema today — it is asserted because the first two did not occur
+    /// either, until they did.</para>
+    /// </summary>
+    private static async Task AssertPurgeReachAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction,
+        IReadOnlyList<PurgeTarget> targets, CancellationToken cancellationToken)
+    {
+        await using (var roleExists = new NpgsqlCommand(
+            "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = @role);", connection, transaction))
+        {
+            roleExists.Parameters.AddWithValue("role", PurgeRole);
+            if (await roleExists.ExecuteScalarAsync(cancellationToken) is not true)
+                throw new InvalidOperationException(
+                    $"Purge refused: the database has no {PurgeRole} role. It is created by "
+                    + "20260811154500_TenantPurgeExecutionRole together with the "
+                    + $"{PurgePolicyName} policies that admit it. Without both, a DELETE issued on "
+                    + "the owner connection silently affects zero rows on every table declared "
+                    + "FORCE ROW LEVEL SECURITY, and the tenant is reported destroyed with their "
+                    + "data still present.");
+        }
+
+        var qualified = targets.Select(t => t.Qualified).Append(BusinessUnitTable).ToArray();
+        var unreachable = new List<string>();
+
+        await using var command = new NpgsqlCommand(
+            $"""
+            WITH requested (qualified) AS (SELECT unnest(@targets::text[])),
+            resolved AS (
+                SELECT r.qualified, c.oid, c.relrowsecurity
+                FROM requested r
+                JOIN pg_class c ON c.oid = to_regclass(r.qualified))
+            SELECT qualified
+                   || CASE WHEN NOT has_table_privilege(@role, oid, 'SELECT')
+                                  OR NOT has_table_privilege(@role, oid, 'DELETE')
+                           THEN ' (no SELECT/DELETE privilege)' ELSE '' END
+                   || CASE WHEN relrowsecurity AND NOT EXISTS (
+                                  SELECT 1 FROM pg_policy p
+                                  WHERE p.polrelid = resolved.oid
+                                    AND p.polname = @policy
+                                    AND p.polcmd = '*'
+                                    AND @role::regrole = ANY (p.polroles))
+                           THEN ' (row-level security is on and no ' || @policy || ' policy admits '
+                                || @role || ', so a DELETE here would affect zero rows and raise nothing)'
+                           ELSE '' END
+                   || CASE WHEN (SELECT count(*) FROM pg_attribute a
+                                 WHERE a.attrelid = resolved.oid AND a.attnum > 0
+                                   AND NOT a.attisdropped
+                                   AND lower(a.attname) IN ('businessunitid', 'buid')) > 1
+                           THEN ' (carries both BusinessUnitId and BUID; the sweep and the policy '
+                                || 'would disagree about which one scopes it)'
+                           ELSE '' END AS problem
+            FROM resolved
+            WHERE NOT has_table_privilege(@role, oid, 'SELECT')
+               OR NOT has_table_privilege(@role, oid, 'DELETE')
+               OR (relrowsecurity AND NOT EXISTS (
+                       SELECT 1 FROM pg_policy p
+                       WHERE p.polrelid = resolved.oid
+                         AND p.polname = @policy
+                         AND p.polcmd = '*'
+                         AND @role::regrole = ANY (p.polroles)))
+               OR (SELECT count(*) FROM pg_attribute a
+                   WHERE a.attrelid = resolved.oid AND a.attnum > 0 AND NOT a.attisdropped
+                     AND lower(a.attname) IN ('businessunitid', 'buid')) > 1
+            ORDER BY qualified;
+            """, connection, transaction);
+        command.Parameters.AddWithValue("targets", qualified);
+        command.Parameters.AddWithValue("role", PurgeRole);
+        command.Parameters.AddWithValue("policy", PurgePolicyName);
+
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+            while (await reader.ReadAsync(cancellationToken))
+                unreachable.Add(reader.GetString(0));
+
+        if (unreachable.Count == 0) return;
+
+        throw new InvalidOperationException(
+            $"Purge refused: {unreachable.Count} of {qualified.Length} target table(s) cannot be "
+            + $"reached by {PurgeRole}, so a sweep would report success having destroyed nothing "
+            + $"in them. {string.Join("; ", unreachable)}. A table added by a later migration is "
+            + "the expected cause: it needs the same GRANT and the same "
+            + $"{PurgePolicyName} policy 20260811154500_TenantPurgeExecutionRole creates from the "
+            + "catalogue.");
     }
 
     /// <summary>Which identifier a table is scoped by.</summary>
@@ -508,6 +798,13 @@ public sealed class TenantPurgeExecutor(IConfiguration configuration, ILogger<Te
     /// the request-path roles cannot suspend the append-only guards — which is the correct
     /// arrangement: a purge is not something the tenant plane should be able to perform even if
     /// every application check above it were bypassed.
+    ///
+    /// <para><b>Opening it is not the same as deleting on it, and conflating the two was the
+    /// defect.</b> The connection is opened as the owner because only the owner can enter replica
+    /// mode; the statements that touch a customer's rows then run under
+    /// <see cref="PurgeRole"/>, which the policies name and which is scoped to one tenant. The
+    /// owner's own reach over its tables is deliberately no longer what this class depends on —
+    /// on the 100 tables declared FORCE that reach is nil, and it was nil silently.</para>
     /// </summary>
     private string OwnerConnectionString() =>
         configuration.GetConnectionString("MigrationConnection")

@@ -759,17 +759,45 @@ public sealed class PostgreSqlProductionDialectTests
             """;
         Assert.Null((await forcedAiRlsCommand.ExecuteScalarAsync()) as string);
 
+        // Inverted by 20260811110019_DropAiDefaultProvisioningPolicy. This used to assert that
+        // nexora_ai_default_provisioning EXISTED. It was a second PERMISSIVE policy on a table
+        // that already had nexora_tenant_isolation, and permissive policies OR — so its nine
+        // pinned constants became an alternative route past the isolation predicate, which it
+        // did not pin BusinessUnitId in. The row it was written for is created by the
+        // SECURITY DEFINER trigger nexora_create_default_ai_policy(), where the effective role
+        // is the function owner, so the policy was never the thing admitting that write. The
+        // assertion is now that AiProcessingPolicies carries EXACTLY ONE permissive policy that a
+        // REQUEST can reach, and that it is the tenant-isolation one.
+        //
+        // The reachability filter arrived with 20260811154500_TenantPurgeExecutionRole, which adds
+        // nexora_tenant_purge TO nexora_purge_app to every tenant table so the offboarding sweep
+        // can reach the ones declared FORCE. It is a tightening, not an exemption: the hazard the
+        // dropped policy carried was that it ORed into the decision for a role a request executes
+        // under (it was TO PUBLIC). nexora_purge_app is NOLOGIN, granted only to the migration
+        // role, and none of the three execution roles is a member of it, so nothing on a request
+        // path can execute under it. A policy added TO PUBLIC or TO any request-path role still
+        // fails here, which is the whole of what this was defending.
         await using var provisioningPolicyCommand = connection.CreateCommand();
         provisioningPolicyCommand.CommandText = """
-            SELECT policy.polwithcheck IS NOT NULL
-                   AND position('ExternalProcessingAllowed' in pg_get_expr(policy.polwithcheck, policy.polrelid)) > 0
-                   AND position('tenant-provisioning' in pg_get_expr(policy.polwithcheck, policy.polrelid)) > 0
+            SELECT string_agg(policy.polname, ', ' ORDER BY policy.polname)
             FROM pg_policy policy
             JOIN pg_class table_definition ON table_definition.oid = policy.polrelid
+            JOIN pg_namespace schema_definition
+              ON schema_definition.oid = table_definition.relnamespace
+             AND schema_definition.nspname = 'public'
             WHERE table_definition.relname = 'AiProcessingPolicies'
-              AND policy.polname = 'nexora_ai_default_provisioning';
+              AND policy.polpermissive
+              AND (policy.polroles = '{0}'::oid[]
+                   OR EXISTS (
+                       SELECT 1
+                       FROM unnest(policy.polroles) AS admitted(role_oid)
+                       CROSS JOIN pg_roles request_role
+                       WHERE request_role.rolname IN (
+                                 'nexora_tenant_app', 'nexora_identity_app', 'nexora_pipeline_app')
+                         AND pg_has_role(request_role.oid, admitted.role_oid, 'USAGE')));
             """;
-        Assert.True((bool)(await provisioningPolicyCommand.ExecuteScalarAsync())!);
+        Assert.Equal("nexora_tenant_isolation",
+            (await provisioningPolicyCommand.ExecuteScalarAsync()) as string);
 
         await using var unresolvedIndexCommand = connection.CreateCommand();
         unresolvedIndexCommand.CommandText = """
