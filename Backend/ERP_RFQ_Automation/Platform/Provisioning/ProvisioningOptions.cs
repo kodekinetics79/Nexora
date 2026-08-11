@@ -41,6 +41,22 @@ public sealed class ProvisioningOptions
     public TimeSpan LeaseDuration { get; set; } = TimeSpan.FromMinutes(5);
 
     /// <summary>
+    /// How long an execution must have been SILENT before an operator may take ownership away
+    /// from the attempt that holds it.
+    ///
+    /// <para><b>Why this is not just <see cref="LeaseDuration"/>.</b> A lapsed lease is enough for
+    /// a RUNNER to reclaim work, because two runners racing is exactly what the lease exists to
+    /// prevent and a runner that reclaims a lapsed lease is the system working as designed. It is
+    /// NOT enough for a human-initiated ownership transfer, which is irreversible in the way that
+    /// matters: it declares the previous attempt dead. The heartbeat is written between steps, so
+    /// a runner inside the baseline seed can be alive and silent for the whole of that step —
+    /// recovering on a bare lease lapse would put a second runner onto a tenant the first is still
+    /// building. This grace is the margin, and the validator refuses to let it be shorter than the
+    /// lease it is a margin over.</para>
+    /// </summary>
+    public TimeSpan StaleLeaseGrace { get; set; } = TimeSpan.FromMinutes(10);
+
+    /// <summary>
     /// How many executions one sweep picks up. Provisioning is a rare, operator-driven act;
     /// a small batch keeps a burst of them from monopolising the connection pool.
     /// </summary>
@@ -101,6 +117,15 @@ internal sealed class ProvisioningOptionsValidator : IValidateOptions<Provisioni
             failures.Add("LeaseDuration must be between one minute and one hour.");
         if (options.LeaseDuration <= options.PollInterval)
             failures.Add("LeaseDuration must be longer than PollInterval, or a claim expires before it is renewed.");
+
+        // A grace shorter than the lease would let an operator declare a runner dead while its
+        // own lease is still live — the one outcome the lease exists to make impossible.
+        if (options.StaleLeaseGrace < TimeSpan.FromMinutes(1) || options.StaleLeaseGrace > TimeSpan.FromHours(24))
+            failures.Add("StaleLeaseGrace must be between one minute and twenty-four hours.");
+        if (options.StaleLeaseGrace < options.LeaseDuration)
+            failures.Add(
+                "StaleLeaseGrace must be at least LeaseDuration: an operator must never be able to "
+                + "take ownership from an attempt whose own lease has not yet lapsed.");
 
         if (options.BatchSize is < 1 or > 50)
             failures.Add("BatchSize must be between 1 and 50.");

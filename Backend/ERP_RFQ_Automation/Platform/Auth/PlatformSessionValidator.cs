@@ -49,12 +49,24 @@ public sealed class PlatformSessionValidator : IPlatformSessionValidator
                 session.PlatformUser.IsActive,
                 session.PlatformUser.PlatformRole,
                 session.PlatformUser.SessionGeneration,
-                session.MfaAuthenticatedAtUtc
+                session.MfaAuthenticatedAtUtc,
+                session.BrowserTrustId
             })
             .SingleOrDefaultAsync(ct);
 
         if (state is null || !state.IsActive || state.SessionGeneration != generation
             || !string.Equals(state.PlatformRole.ToString(), role, StringComparison.Ordinal))
+            return false;
+
+        // A session whose second factor came from a remembered browser is only as valid as that
+        // trust. Without this, revoking a browser trust would stop the NEXT sign-in and leave the
+        // current privileged session running for the rest of its lifetime — which is the exact
+        // window an operator revokes a lost laptop's trust to close.
+        if (state.BrowserTrustId is long trustId
+            && !await _context.Set<PlatformBrowserTrust>()
+                .AnyAsync(trust => trust.Id == trustId
+                                   && trust.RevokedAtUtc == null
+                                   && trust.ExpiresAtUtc > now, ct))
             return false;
 
         if (!string.Equals(mfaMethod, PlatformAuthConstants.MfaAuthenticationMethod, StringComparison.Ordinal))

@@ -94,6 +94,14 @@ export const REQUIRED_ROLE_COPY = {
    */
   platformEmail:
     'Owner only. Changing the address the product sends from — and the credentials behind it — is a privileged act, so it is deliberately not available to support.',
+  /**
+   * Owner-gated for a third reason again, and it needs its own words. Neither "irreversible"
+   * (it is not) nor "the address we send from" (it is not that either) describes turning
+   * platform MFA enforcement off — the honest description is that it is the one change that
+   * lowers the value of every other control on this plane.
+   */
+  platformAuthentication:
+    'Owner only. Relaxing platform MFA enforcement weakens every other control on this console, so it is deliberately not available to support.',
   tenantAdmin: 'Requires the Owner or SupportAdmin role.',
   billing: 'Requires the Owner or BillingAdmin role. Billing is separated from tenant operations on purpose.',
   impersonate: 'Requires the Owner or SupportAdmin role.',

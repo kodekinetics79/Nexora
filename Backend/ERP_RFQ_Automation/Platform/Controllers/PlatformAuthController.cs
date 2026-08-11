@@ -130,7 +130,11 @@ public class PlatformAuthController : ControllerBase
 
         try
         {
-            var response = await _authService.CompleteMfaChallengeAsync(request, ct);
+            // The User-Agent is passed for the trust LABEL only ("Chrome on macOS"), never as part of
+            // the security decision: a header the client controls must not be able to make a browser
+            // look trusted.
+            var response = await _authService.CompleteMfaChallengeAsync(
+                request, Request.Headers.UserAgent.ToString(), HttpContext, ct);
             await _loginThrottle.RegisterSuccessAsync(LoginPlane.Platform, response.Email, ct);
             await _loginThrottle.RegisterSuccessAsync(LoginPlane.PlatformIp, remoteIp, ct);
             var actor = new ClaimsPrincipal(new ClaimsIdentity(
@@ -139,7 +143,8 @@ public class PlatformAuthController : ControllerBase
                 new Claim("email", response.Email)
             ], PlatformAuthConstants.Scheme));
             await _audit.WriteAsync(actor, "platform.login", nameof(PlatformUser),
-                response.Id.ToString(), new { mfa = true, response.RecoveryCodeUsed },
+                response.Id.ToString(),
+                new { mfa = true, response.RecoveryCodeUsed, rememberBrowser = request.RememberBrowser },
                 httpContext: HttpContext, ct: ct);
             return Ok(response);
         }
@@ -196,6 +201,83 @@ public class PlatformAuthController : ControllerBase
         catch (InvalidOperationException ex) { return Conflict(new { error = ex.Message }); }
         catch (UnauthorizedAccessException ex) { return Unauthorized(new { error = ex.Message }); }
     }
+
+    /// <summary>
+    /// Step-up: re-enter the current platform password and stamp this session with the moment it
+    /// was proved. <c>PlatformHighRiskOperationAttribute</c> reads that stamp, so a password-only
+    /// session — reachable only while the server-authoritative policy has relaxed enforcement —
+    /// still cannot purge a tenant, export its data, release a legal hold or finalise an invoice
+    /// without the person at the keyboard proving they are still the operator who signed in.
+    ///
+    /// <para>On <see cref="PlatformPolicies.Enrollment"/> because that is the policy a password-only
+    /// session satisfies, and a session that cannot reach this endpoint could never step up at all.
+    /// It grants nothing by itself: the stamp is worthless without the Owner/TenantAdmin gate the
+    /// high-risk endpoint already carries.</para>
+    /// </summary>
+    [HttpPost("reauthenticate")]
+    [Authorize(Policy = PlatformPolicies.Enrollment)]
+    public async Task<ActionResult<PlatformReauthenticationResponse>> Reauthenticate(
+        [FromBody] PlatformReauthenticationRequest request,
+        [FromServices] PlatformMfaPolicyOptions mfaOptions,
+        CancellationToken ct)
+    {
+        if (!ModelState.IsValid) return BadRequest(ModelState);
+
+        var remoteIp = HttpContext.Connection?.RemoteIpAddress?.ToString();
+        var lockout = await _loginThrottle.CheckAsync(LoginPlane.PlatformIp, remoteIp, ct);
+        if (lockout.IsLockedOut)
+        {
+            // Same durable, IP-keyed lockout the login endpoint uses. Without it this endpoint would
+            // be an unthrottled password oracle for an already-authenticated session.
+            Response.Headers.RetryAfter = ((int)Math.Ceiling(lockout.RetryAfter.TotalSeconds)).ToString();
+            return StatusCode(StatusCodes.Status429TooManyRequests, new
+            {
+                error = "Too many failed attempts. Please try again later."
+            });
+        }
+
+        var jti = User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Jti)?.Value;
+        var provedAt = await _authService.ReauthenticateAsync(ActorId(), jti, request.CurrentPassword, ct);
+        if (provedAt is null)
+        {
+            await _loginThrottle.RegisterFailureAsync(LoginPlane.PlatformIp, remoteIp, ct);
+            await _audit.WriteAsync(User, "platform.security.reauth.failed", nameof(PlatformSession), jti,
+                new { correlationId = HttpContext.TraceIdentifier }, null, HttpContext,
+                PlatformAuditResults.Failure, ct);
+            return Unauthorized(new { error = "That password is not correct." });
+        }
+
+        await _loginThrottle.RegisterSuccessAsync(LoginPlane.PlatformIp, remoteIp, ct);
+        await _audit.WriteAsync(User, "platform.security.reauth", nameof(PlatformSession), jti,
+            new
+            {
+                provedAtUtc = provedAt,
+                windowMinutes = mfaOptions.PasswordReauthWindowMinutes,
+                environment = mfaOptions.EnvironmentName,
+                correlationId = HttpContext.TraceIdentifier
+            },
+            null, HttpContext, PlatformAuditResults.Success, ct);
+
+        return Ok(new PlatformReauthenticationResponse(
+            provedAt.Value.Add(mfaOptions.PasswordReauthWindow), mfaOptions.PasswordReauthWindowMinutes));
+    }
+
+    /// <summary>The browsers this operator has told the platform to remember. Own-account only —
+    /// there is no route that reads or revokes somebody else's.</summary>
+    [HttpGet("browser-trusts")]
+    [Authorize(Policy = PlatformPolicies.Enrollment)]
+    public async Task<ActionResult<IReadOnlyList<PlatformBrowserTrustDto>>> ListBrowserTrusts(
+        [FromServices] IPlatformBrowserTrustService trusts, CancellationToken ct)
+        => Ok(await trusts.ListAsync(ActorId(), ct));
+
+    /// <summary>Revoke one remembered browser. Effective on the very next request: the revocation is
+    /// a column that both the login redemption and <c>PlatformSessionValidator</c> read, so the
+    /// session it minted stops being valid too rather than running out its remaining lifetime.</summary>
+    [HttpDelete("browser-trusts/{id:long}")]
+    [Authorize(Policy = PlatformPolicies.Enrollment)]
+    public async Task<IActionResult> RevokeBrowserTrust(
+        long id, [FromServices] IPlatformBrowserTrustService trusts, CancellationToken ct)
+        => await trusts.RevokeAsync(ActorId(), id, User, HttpContext, ct) ? NoContent() : NotFound();
 
     // Logout revokes only the caller's OWN jti and reads nothing. Refusing a password-only
     // session here would leave an unenrolled operator unable to end the very session that

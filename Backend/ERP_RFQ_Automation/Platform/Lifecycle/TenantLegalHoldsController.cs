@@ -20,7 +20,12 @@ public sealed class TenantLegalHoldsController(
         long tenantId, [FromBody] PlaceTenantLegalHoldRequest request, CancellationToken ct) =>
         Execute(() => holds.PlaceAsync(tenantId, request, User, HttpContext, ct));
 
+    // Releasing a hold is the act that makes a tenant's data destroyable again, so it keeps the
+    // second factor even on a deployment where MFA enforcement has been relaxed — as a password
+    // re-authentication if there is no MFA-bound session to lean on. Placing one is additive and
+    // needs no step-up.
     [HttpPost("{holdId:long}/release")]
+    [PlatformHighRiskOperation("tenant.legal-hold.release")]
     public Task<ActionResult<TenantLegalHoldDto>> Release(
         long tenantId, long holdId, [FromBody] ReleaseTenantLegalHoldRequest request, CancellationToken ct) =>
         Execute(() => holds.ReleaseAsync(tenantId, holdId, request, User, HttpContext, ct));

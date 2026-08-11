@@ -76,6 +76,14 @@ public sealed class ProvisioningHarness : IDisposable
         services.AddScoped<IProvisioningStepExecutor, ProvisioningStepExecutor>();
         services.AddScoped<ITenantProvisioningService, TenantProvisioningService>();
         services.AddScoped<IProvisioningDraftService, ProvisioningDraftService>();
+
+        // The real audit service over the SAME scoped context, exactly as Program.cs registers it.
+        // A stub would let a recovery pass its test while writing no evidence, which is the one
+        // property of that operation worth proving.
+        services.AddScoped<IPlatformAuditService, PlatformAuditService>();
+        services.AddScoped<IProvisioningStepReconciler, ProvisioningStepReconciler>();
+        services.AddScoped<IProvisioningLeaseRecovery, ProvisioningLeaseRecovery>();
+
         services.AddSingleton<ITenantProvisioningRunner, TenantProvisioningRunner>();
 
         _services = services.BuildServiceProvider();

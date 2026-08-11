@@ -22,6 +22,7 @@ using ERP_RFQ_Automation.Platform.Lifecycle;
 using ERP_RFQ_Automation.Platform.Support;
 using ERP_RFQ_Automation.Platform.Notifications;
 using ERP_RFQ_Automation.Platform.DataAssets;
+using ERP_RFQ_Automation.Platform.Auth;
 using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.Models;
@@ -725,6 +726,17 @@ public partial class ErpRfqAutomationContext
             e.Property(x => x.BillingAddress).HasMaxLength(1024);
             e.Property(x => x.AccountOwnerEmail).HasMaxLength(320);
 
+            // Deployment profile. Stored as its NAME for the same reason BillingMode is: an
+            // activation decision recorded today has to stay explainable years later, and
+            // reordering the enum must never reclassify a historical LOCAL_TEST activation as a
+            // PRODUCTION one. The store default is Production so a row inserted by anything that
+            // does not know about this column — an older code path, a hand-written INSERT, a
+            // restored backup — lands on the STRICT profile rather than a relaxed one.
+            e.Property(x => x.DeploymentProfile).HasConversion<string>().HasMaxLength(16)
+                .HasDefaultValue(ERP_RFQ_Automation.Platform.Models.TenantDeploymentProfile.Production);
+            e.Property(x => x.DeploymentProfileReason).HasMaxLength(1000);
+            e.Property(x => x.DeploymentProfileApprovedBy).HasMaxLength(320);
+
             // No navigation to RateCard: the billing aggregate sits above the platform model in
             // the dependency order, so the pin is carried as a plain id and resolved by
             // BillingStatementService. Indexed because the billing run sweeps tenants by card.
@@ -799,6 +811,12 @@ public partial class ErpRfqAutomationContext
 
         // ==== Platform outbound email identity (Platform/Notifications/) ====
         modelBuilder.ApplyPlatformEmailModel();
+
+        // ==== Server-authoritative platform MFA enforcement (Platform/Auth/) ====
+        // The singleton policy row plus the browser-trust ledger. Spliced here rather than declared
+        // inline with the other platform entities above so the security module owns its own model,
+        // the same way the email and support modules do.
+        modelBuilder.ApplyPlatformMfaPolicyModel();
 
         // ==== Platform-owned tenant data-boundary inventory (Platform/DataAssets/) ====
         modelBuilder.ApplyTenantDataAssetModel();

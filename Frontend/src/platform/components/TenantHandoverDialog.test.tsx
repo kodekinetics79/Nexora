@@ -23,6 +23,8 @@ const result = (overrides: Partial<ProvisionTenantResult> = {}): ProvisionTenant
     purchaseOrderReference: null, billingContactName: null, billingContactEmail: null,
     billingAddress: null, accountOwnerEmail: null, baseCurrencyCode: 'AED', timeZoneId: null,
     locale: null, dataRegion: null,
+    deploymentProfile: 'PRODUCTION', deploymentProfileReason: null,
+    deploymentProfileApprovedBy: null, deploymentProfileApprovedOn: null,
   },
   foundingAdmin: {
     userId: '11', email: 'sam@acme.example', roleName: 'Super Administrator',

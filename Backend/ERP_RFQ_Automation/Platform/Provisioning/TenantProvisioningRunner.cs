@@ -171,6 +171,10 @@ public sealed class TenantProvisioningRunner : ITenantProvisioningRunner
             execution.LeaseOwner = _runnerId;
             execution.LeaseToken = leaseToken;
             execution.LeaseUntil = now.Add(options.LeaseDuration);
+            // The first proof of life. Without it a freshly claimed execution would carry a null
+            // heartbeat, and IProvisioningLeaseRecovery would have to fall back to LeaseUntil to
+            // decide how long it had been quiet — which is a deadline, not an observation.
+            execution.LeaseHeartbeatAt = now;
             execution.AttemptCount++;
             execution.StartedOn ??= now;
             // Cleared on the way in rather than on the way out: an execution being retried must
@@ -231,6 +235,21 @@ public sealed class TenantProvisioningRunner : ITenantProvisioningRunner
                 await MarkSkippedAsync(executionId, stepCode, ct);
                 continue;
             }
+
+            // PROBE BEFORE RETRY, and only for a step that has been attempted before.
+            //
+            // Failed and Running are the two verdicts that can be lying. Failed can mean "the work
+            // committed and the acknowledgement did not"; Running means a process died holding the
+            // step and nobody ever wrote a verdict at all. In both cases the side effect may be on
+            // the ground, and re-running is the one action capable of doing damage — a second
+            // business unit, a second live activation link for an account already in use.
+            //
+            // A Pending step is never probed: it either never ran, or an operator deliberately
+            // rewound it through RetryAsync to have it run AGAIN as a repair. Probing that would
+            // quietly refuse the repair they asked for.
+            if (step.Status is ProvisioningStepStatus.Failed or ProvisioningStepStatus.Running
+                && await TryReconcileAsync(executionId, stepCode, step.Status, ct))
+                continue;
 
             var isRetry = step.AttemptCount > 0;
             await MarkRunningAsync(executionId, stepCode, ct);
@@ -327,6 +346,118 @@ public sealed class TenantProvisioningRunner : ITenantProvisioningRunner
         return issued;
     }
 
+    /// <summary>
+    /// Asks <see cref="IProvisioningStepReconciler"/> whether a step's side effect is already on
+    /// the ground and, when it is, records the step as done WITHOUT running it.
+    ///
+    /// <para>Runs in its own transaction, on its own scope, for the same reason every other
+    /// journal write does. The probe reads and the verdict writes inside one transaction so a
+    /// concurrent change cannot land between them, and any id the probe recovered onto the
+    /// execution (a founding role, an invitation) commits with the verdict that depends on it.</para>
+    /// </summary>
+    /// <returns>True when the step was reconciled and must not be executed.</returns>
+    private async Task<bool> TryReconcileAsync(
+        long executionId, string stepCode, ProvisioningStepStatus observedStatus, CancellationToken ct)
+    {
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+        var reconciler = scope.ServiceProvider.GetRequiredService<IProvisioningStepReconciler>();
+
+        var reconciled = false;
+        var strategy = db.Database.CreateExecutionStrategy();
+        await strategy.ExecuteAsync(async () =>
+        {
+            db.ChangeTracker.Clear();
+            reconciled = false;
+            await using var tx = await db.Database.BeginTransactionAsync(ct);
+
+            var execution = await db.Set<ProvisioningExecution>()
+                .Include(e => e.Steps)
+                .FirstAsync(e => e.Id == executionId, ct);
+            var step = execution.Steps.First(s => s.StepCode == stepCode);
+
+            // Re-read inside the transaction: the snapshot that sent us here was taken on a
+            // different connection, and a step that has moved on since must not be overwritten.
+            if (step.Status is not (ProvisioningStepStatus.Failed or ProvisioningStepStatus.Running))
+                return;
+
+            var verdict = await reconciler.ProbeAsync(db, execution, stepCode, ct);
+            if (verdict is null)
+                return;
+
+            step.Status = ProvisioningStepStatus.Succeeded;
+            step.CompletedOn = DateTime.UtcNow;
+            step.FailureCode = null;
+            step.FailureReason = null;
+            // Overwritten with the probe's evidence rather than appended to the failed attempt's
+            // detail: this is what is TRUE of the step now, and the failure it replaces is still
+            // in the audit trail and in the log.
+            step.Detail = verdict.Detail;
+
+            execution.CurrentStep = stepCode;
+            execution.Version++;
+
+            await db.SaveChangesAsync(ct);
+            await AuditReconciliationAsync(scope, db, execution, verdict, observedStatus, ct);
+            await tx.CommitAsync(ct);
+
+            reconciled = true;
+
+            _log.LogWarning(
+                "Provisioning execution {ExecutionId} step {Step} was recorded as {Observed} but its "
+                + "side effect already exists, so the resume SKIPPED it instead of repeating it. {Reason}",
+                executionId, stepCode, observedStatus, verdict.Reason);
+        });
+
+        return reconciled;
+    }
+
+    /// <summary>
+    /// Records the skip as a privileged event. A resume that silently decided not to do something
+    /// is exactly the kind of decision somebody asks about months later.
+    /// </summary>
+    private async Task AuditReconciliationAsync(
+        IServiceScope scope, ErpRfqAutomationContext db, ProvisioningExecution execution,
+        ProvisioningStepReconciliation verdict, ProvisioningStepStatus observedStatus,
+        CancellationToken ct)
+    {
+        if (execution.RequestedByPlatformUserId is not long actorId || actorId <= 0)
+        {
+            _log.LogWarning(
+                "Provisioning execution {ExecutionId} reconciled step {Step} but carried no platform "
+                + "actor id, so no audit record was written.", execution.Id, verdict.StepCode);
+            return;
+        }
+
+        var principal = new ClaimsPrincipal(new ClaimsIdentity(
+        [
+            new Claim(JwtRegisteredClaimNames.Sub, actorId.ToString()),
+            new Claim("email", execution.RequestedBy)
+        ], "ProvisioningRunner"));
+
+        var audit = new PlatformAuditService(
+            db, scope.ServiceProvider.GetRequiredService<ILogger<PlatformAuditService>>());
+
+        await audit.WriteAsync(principal, ProvisioningAuditActions.StepReconciled,
+            nameof(ProvisioningExecution), execution.Id.ToString(),
+            new
+            {
+                executionId = execution.Id,
+                execution.CorrelationId,
+                execution.Slug,
+                step = verdict.StepCode,
+                observedStatus = observedStatus.ToString(),
+                recordedStatus = nameof(ProvisioningStepStatus.Succeeded),
+                verdict.Reason,
+                // The resume runs under the original request identity; recorded so the audit row
+                // itself shows the remediation did not mint a new one.
+                execution.IdempotencyKey,
+                execution.RequestFingerprint
+            },
+            actAsTenantId: execution.TenantId, httpContext: null,
+            result: PlatformAuditResults.Success, ct: ct);
+    }
+
     // ---- journal writes (always on their own scope, never inside a step transaction) ---------
 
     private async Task MarkRunningAsync(long executionId, string stepCode, CancellationToken ct)
@@ -344,6 +475,11 @@ public sealed class TenantProvisioningRunner : ITenantProvisioningRunner
             // rows, and a lease that lapses under a runner still working invites a second runner
             // onto the same tenant.
             execution.LeaseUntil = DateTime.UtcNow.Add(_options.CurrentValue.LeaseDuration);
+            // The heartbeat moves with the lease and carries the other half of the fact: the lease
+            // says how long this runner MAY hold the execution, the heartbeat says when it was last
+            // demonstrably alive. Ownership recovery needs the second, because the first is derived
+            // from a configuration value that can be edited between the write and the read.
+            execution.LeaseHeartbeatAt = DateTime.UtcNow;
         });
 
     private async Task MarkSkippedAsync(long executionId, string stepCode, CancellationToken ct)
@@ -371,14 +507,37 @@ public sealed class TenantProvisioningRunner : ITenantProvisioningRunner
         {
             var now = DateTime.UtcNow;
             var step = steps[stepCode];
-            step.Status = ProvisioningStepStatus.Failed;
 
-            step.CompletedOn = now;
-            step.DurationMs = step.StartedOn is { } started
-                ? (int)Math.Min(int.MaxValue, (now - started).TotalMilliseconds)
-                : null;
-            step.FailureCode = code;
-            step.FailureReason = reason;
+            // NEVER downgrade a step the database already records as done.
+            //
+            // The step's success verdict is written INSIDE the step's own transaction, so a
+            // Succeeded row here means that transaction COMMITTED. An exception can still reach
+            // this method afterwards — the commit acknowledgement is lost to a dropped connection,
+            // a recycled pooler backend, an evicted pod — and the old code overwrote the truthful
+            // verdict with a failure, discarding the Detail that proved the work exists. The next
+            // resume then re-ran a step whose side effect was already on the ground.
+            //
+            // The EXECUTION is still marked Failed: something did throw, and the run stopped. Only
+            // the step keeps its own answer, which the reconciler and the operator both need.
+            var alreadyDone = step.Status
+                is ProvisioningStepStatus.Succeeded or ProvisioningStepStatus.Skipped;
+            if (alreadyDone)
+                _log.LogWarning(
+                    "Provisioning execution {ExecutionId} threw at step {Step} ({FailureCode}) AFTER "
+                    + "that step had already committed as {Status}. The step keeps its verdict and its "
+                    + "detail; only the execution is marked failed. A resume will skip it rather than "
+                    + "repeat its side effect.",
+                    executionId, stepCode, code, step.Status);
+            else
+            {
+                step.Status = ProvisioningStepStatus.Failed;
+                step.CompletedOn = now;
+                step.DurationMs = step.StartedOn is { } started
+                    ? (int)Math.Min(int.MaxValue, (now - started).TotalMilliseconds)
+                    : null;
+                step.FailureCode = code;
+                step.FailureReason = reason;
+            }
 
             execution.State = ProvisioningExecutionState.Failed;
             execution.FailedStep = stepCode;
@@ -391,6 +550,7 @@ public sealed class TenantProvisioningRunner : ITenantProvisioningRunner
             execution.LeaseOwner = null;
             execution.LeaseToken = null;
             execution.LeaseUntil = null;
+            execution.LeaseHeartbeatAt = null;
         },
         // A failed provision is as much a privileged event as a successful one, and the operator
         // asking "what happened to this customer's account?" months later is asking the audit log,
@@ -441,6 +601,7 @@ public sealed class TenantProvisioningRunner : ITenantProvisioningRunner
             execution.LeaseOwner = null;
             execution.LeaseToken = null;
             execution.LeaseUntil = null;
+            execution.LeaseHeartbeatAt = null;
             execution.ResultPayload = BuildResultPayload(execution);
             execution.Version++;
 

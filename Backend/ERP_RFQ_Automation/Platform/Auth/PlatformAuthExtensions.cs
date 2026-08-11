@@ -105,6 +105,52 @@ public static class PlatformAuthExtensions
     }
 
     /// <summary>
+    /// The second-factor gate shared by every privileged platform policy.
+    ///
+    /// <para>It is satisfied by the token's <c>amr=mfa</c> claim — the ordinary path, and the ONLY
+    /// path in production. Failing that it asks the backend whether this deployment is currently
+    /// running with enforcement disabled, and that question is answered from a persisted row plus
+    /// the process's own environment classification (<see cref="PlatformMfaPolicyService"/>).</para>
+    ///
+    /// <para><b>Why an assertion and not a claim requirement.</b> A claim can only describe what the
+    /// token already says, so making enforcement configurable through the claim would have meant
+    /// stamping <c>amr=mfa</c> on a session where no second factor was ever presented. That is a
+    /// lie written into a bearer token: it would flow into <c>PlatformSession.MfaAuthenticatedAtUtc</c>,
+    /// into the audit trail, and into every downstream check that trusts it, and there would be no
+    /// way afterwards to tell a genuinely MFA-authenticated operator from a bypassed one. Asking the
+    /// server instead keeps the token honest — a bypassed session provably carries no <c>amr</c> —
+    /// and keeps the decision where it can be revoked in one place.</para>
+    ///
+    /// <para><b>Why the fallbacks are all "deny".</b> When the resource is not an
+    /// <see cref="HttpContext"/> (a unit test authorising a bare principal) or the policy provider
+    /// is not registered, the answer is the claim alone. Enforcement disabled is the exceptional
+    /// state and has to be affirmatively proven, never inferred from a missing service.</para>
+    /// </summary>
+    private static async Task<bool> SecondFactorSatisfiedAsync(AuthorizationHandlerContext context)
+    {
+        if (context.User.HasClaim(PlatformAuthConstants.AuthenticationMethodClaim,
+                PlatformAuthConstants.MfaAuthenticationMethod))
+            return true;
+
+        if (context.Resource is not HttpContext http) return false;
+
+        var policy = http.RequestServices?.GetService<IPlatformMfaPolicyProvider>();
+        if (policy is null) return false;
+
+        try
+        {
+            var effective = await policy.GetEffectiveAsync(http.RequestAborted);
+            return effective.PasswordOnlySessionsPermitted;
+        }
+        catch
+        {
+            // The platform plane fails closed if its own policy cannot be read, on the same terms as
+            // the revocation ledger in AddPlatformJwtBearer above.
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Registers the default-deny <c>PlatformScope</c> policy and role sub-policies.
     /// Every policy pins the "Platform" scheme, so a tenant token is never even
     /// authenticated against them (second + first gate combined), and requires the
@@ -129,8 +175,7 @@ public static class PlatformAuthExtensions
             .AddAuthenticationSchemes(PlatformAuthConstants.Scheme)
             .RequireAuthenticatedUser()
             .RequireClaim(PlatformAuthConstants.ScopeClaim, PlatformAuthConstants.PlatformScopeValue)
-            .RequireClaim(PlatformAuthConstants.AuthenticationMethodClaim,
-                PlatformAuthConstants.MfaAuthenticationMethod));
+            .RequireAssertion(SecondFactorSatisfiedAsync));
 
         // The one policy a password-only session satisfies: enrol, or leave. Deliberately does
         // NOT require the absence of amr=mfa — an already-enrolled operator reading their own
@@ -146,8 +191,7 @@ public static class PlatformAuthExtensions
             .RequireAuthenticatedUser()
             .RequireClaim(PlatformAuthConstants.ScopeClaim, PlatformAuthConstants.PlatformScopeValue)
             .RequireClaim(PlatformAuthConstants.PlatformRoleClaim, nameof(PlatformRole.Owner))
-            .RequireClaim(PlatformAuthConstants.AuthenticationMethodClaim,
-                PlatformAuthConstants.MfaAuthenticationMethod));
+            .RequireAssertion(SecondFactorSatisfiedAsync));
 
         options.AddPolicy(PlatformPolicies.TenantAdmin, p => p
             .AddAuthenticationSchemes(PlatformAuthConstants.Scheme)
@@ -155,8 +199,7 @@ public static class PlatformAuthExtensions
             .RequireClaim(PlatformAuthConstants.ScopeClaim, PlatformAuthConstants.PlatformScopeValue)
             .RequireClaim(PlatformAuthConstants.PlatformRoleClaim,
                 nameof(PlatformRole.Owner), nameof(PlatformRole.SupportAdmin))
-            .RequireClaim(PlatformAuthConstants.AuthenticationMethodClaim,
-                PlatformAuthConstants.MfaAuthenticationMethod));
+            .RequireAssertion(SecondFactorSatisfiedAsync));
 
         options.AddPolicy(PlatformPolicies.Billing, p => p
             .AddAuthenticationSchemes(PlatformAuthConstants.Scheme)
@@ -164,8 +207,7 @@ public static class PlatformAuthExtensions
             .RequireClaim(PlatformAuthConstants.ScopeClaim, PlatformAuthConstants.PlatformScopeValue)
             .RequireClaim(PlatformAuthConstants.PlatformRoleClaim,
                 nameof(PlatformRole.Owner), nameof(PlatformRole.BillingAdmin))
-            .RequireClaim(PlatformAuthConstants.AuthenticationMethodClaim,
-                PlatformAuthConstants.MfaAuthenticationMethod));
+            .RequireAssertion(SecondFactorSatisfiedAsync));
 
         options.AddPolicy(PlatformPolicies.Impersonate, p => p
             .AddAuthenticationSchemes(PlatformAuthConstants.Scheme)
@@ -173,14 +215,12 @@ public static class PlatformAuthExtensions
             .RequireClaim(PlatformAuthConstants.ScopeClaim, PlatformAuthConstants.PlatformScopeValue)
             .RequireClaim(PlatformAuthConstants.PlatformRoleClaim,
                 nameof(PlatformRole.Owner), nameof(PlatformRole.SupportAdmin))
-            .RequireClaim(PlatformAuthConstants.AuthenticationMethodClaim,
-                PlatformAuthConstants.MfaAuthenticationMethod));
+            .RequireAssertion(SecondFactorSatisfiedAsync));
 
         options.AddPolicy(PlatformPolicies.Mfa, p => p
             .AddAuthenticationSchemes(PlatformAuthConstants.Scheme)
             .RequireAuthenticatedUser()
             .RequireClaim(PlatformAuthConstants.ScopeClaim, PlatformAuthConstants.PlatformScopeValue)
-            .RequireClaim(PlatformAuthConstants.AuthenticationMethodClaim,
-                PlatformAuthConstants.MfaAuthenticationMethod));
+            .RequireAssertion(SecondFactorSatisfiedAsync));
     }
 }

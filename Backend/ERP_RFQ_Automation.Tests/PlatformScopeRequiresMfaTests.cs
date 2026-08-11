@@ -7,6 +7,7 @@ using ERP_RFQ_Automation.Platform.Models;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.Routing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -157,14 +158,28 @@ public sealed class PlatformScopeRequiresMfaTests
 
     private static long CurrentStep() => DateTimeOffset.UtcNow.ToUnixTimeSeconds() / PlatformTotp.StepSeconds;
 
-    // ---- the carve-out is exactly four endpoints --------------------------
+    // ---- the carve-out is exactly these endpoints -------------------------
 
     [Fact]
     public void Only_the_operators_own_second_factor_and_session_sit_on_the_enrollment_policy()
     {
         // An allow-list of one policy is only as good as what is on it. If a later change moves a
         // tenant-data endpoint onto PlatformPolicies.Enrollment "because it was 403ing", the
-        // password-only hole reopens with no other symptom. This names the four.
+        // password-only hole reopens with no other symptom. This names every member.
+        //
+        // It grew by three when server-authoritative MFA enforcement landed, and each one is on the
+        // list for the same reason the original four are — it is unreachable from anything else a
+        // password-only session can do, and refusing it would make a control unusable in exactly
+        // the state it exists for:
+        //
+        //   Reauthenticate      — the step-up itself. A session that could not reach this could
+        //                         never satisfy PlatformHighRiskOperationAttribute, so purge,
+        //                         export, legal-hold release and invoice finalisation would be
+        //                         permanently unreachable rather than protected. It grants nothing
+        //                         on its own: the stamp it writes is worthless without the
+        //                         Owner/TenantAdmin gate the high-risk endpoint already carries.
+        //   ListBrowserTrusts   — the operator's OWN remembered browsers, scoped to their user id.
+        //   RevokeBrowserTrust  — likewise, and it only ever REMOVES authority.
         var onEnrollment = typeof(PlatformAuthController)
             .GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
             .Where(method => method.GetCustomAttributes<AuthorizeAttribute>()
@@ -174,12 +189,47 @@ public sealed class PlatformScopeRequiresMfaTests
             .ToList();
 
         Assert.Equal(
-            new[] { "BeginMfaEnrollment", "ConfirmMfaEnrollment", "GetMfaStatus", "Logout" },
+            new[]
+            {
+                "BeginMfaEnrollment", "ConfirmMfaEnrollment", "GetMfaStatus", "ListBrowserTrusts",
+                "Logout", "Reauthenticate", "RevokeBrowserTrust"
+            },
             onEnrollment);
 
-        // And nothing outside PlatformAuthController may use it at all.
+        // Outside PlatformAuthController, exactly one type may use it — and it is a READ of the
+        // enforcement policy itself. With enforcement relaxed the console has to be able to ask
+        // "is it relaxed?" before it can render the banner that says so, and after a bypass expires
+        // an operator needs to be told that is why they are suddenly being challenged. The write
+        // verbs on that controller carry PlatformPolicies.Owner on top (asserted in
+        // PlatformMfaPolicyTests), so the carve-out buys a read of a mode name and nothing else.
+        // The exclusion below is a METHOD, not the type it lives on. That distinction is the whole
+        // control. PlatformMfaPolicyController carries Enrollment at CLASS level, so excluding the
+        // type would mean every method added to it in future silently inherits the password-only
+        // carve-out and this test — the one thing standing between that carve-out and creep —
+        // reports green. Found by the independent SDET reviewing exactly this allow-list.
+        //
+        // Effective is named because it is the read the console cannot do without: with enforcement
+        // relaxed it has to ask "is it relaxed?" before it can render the banner saying so. Every
+        // OTHER member of that controller must re-assert Owner on the method, and the assertion
+        // below proves it rather than trusting it.
+        var mfaPolicyControllerLeaks = typeof(ERP_RFQ_Automation.Platform.Auth.PlatformMfaPolicyController)
+            .GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+            .Where(method => method.GetCustomAttributes<HttpMethodAttribute>().Any())
+            .Where(method => method.Name != "Effective")
+            .Where(method => !method.GetCustomAttributes<AuthorizeAttribute>()
+                .Any(attribute => attribute.Policy == PlatformPolicies.Owner))
+            .Select(method => method.Name)
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .ToList();
+
+        Assert.True(mfaPolicyControllerLeaks.Count == 0,
+            "Every endpoint on PlatformMfaPolicyController except the 'Effective' read must carry " +
+            "PlatformPolicies.Owner on the method, because the class-level Enrollment policy admits a " +
+            "password-only session. Unguarded: " + string.Join(", ", mfaPolicyControllerLeaks));
+
         var elsewhere = typeof(PlatformAuthController).Assembly.GetTypes()
             .Where(type => type != typeof(PlatformAuthController))
+            .Where(type => type != typeof(ERP_RFQ_Automation.Platform.Auth.PlatformMfaPolicyController))
             .SelectMany(type => type.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
                 .SelectMany(method => method.GetCustomAttributes<AuthorizeAttribute>()
                     .Select(attribute => (Owner: $"{type.Name}.{method.Name}", attribute.Policy)))

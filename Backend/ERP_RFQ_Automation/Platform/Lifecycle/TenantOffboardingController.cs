@@ -88,6 +88,7 @@ public sealed class TenantOffboardingController(
     // POST /api/platform/tenants/{tenantId}/offboarding/export
     [HttpPost("{tenantId:long}/offboarding/export")]
     [Authorize(Policy = PlatformPolicies.Owner)]
+    [PlatformHighRiskOperation("tenant.export")]
     public async Task<IActionResult> Export(
         long tenantId, [FromBody] ExportTenantDataRequest request, CancellationToken ct)
     {
@@ -138,6 +139,7 @@ public sealed class TenantOffboardingController(
     // POST /api/platform/tenants/{tenantId}/offboarding/purge
     [HttpPost("{tenantId:long}/offboarding/purge")]
     [Authorize(Policy = PlatformPolicies.Owner)]
+    [PlatformHighRiskOperation("tenant.purge")]
     public Task<ActionResult<TenantPurgeResultDto>> Purge(
         long tenantId, [FromBody] ConfirmTenantDestructionRequest request, CancellationToken ct) =>
         Execute(() => offboarding.PurgeAsync(tenantId, request, User, HttpContext, ct));
@@ -150,6 +152,7 @@ public sealed class TenantOffboardingController(
     // POST /api/platform/tenants/{tenantId}/offboarding/erase-personal-data
     [HttpPost("{tenantId:long}/offboarding/erase-personal-data")]
     [Authorize(Policy = PlatformPolicies.Owner)]
+    [PlatformHighRiskOperation("tenant.erase-personal-data")]
     public Task<ActionResult<TenantErasureResultDto>> ErasePersonalData(
         long tenantId, [FromBody] ConfirmTenantDestructionRequest request, CancellationToken ct) =>
         Execute(() => offboarding.ErasePersonalDataAsync(tenantId, request, User, HttpContext, ct));

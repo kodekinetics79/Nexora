@@ -96,6 +96,11 @@ public sealed class PlatformSubscriptionInvoicesController(
     [HttpPost("{id:long}/finalize")]
     [Authorize(Policy = PlatformPolicies.Owner)]
     [Authorize(Policy = PlatformPolicies.Mfa)]
+    // Finalisation is irreversible and produces a document a customer is billed against. On a
+    // deployment where MFA enforcement has been relaxed the Mfa policy above is satisfied by the
+    // effective-policy assertion rather than by a second factor, so this restores an equivalent
+    // control: a password-only session must re-enter its password first.
+    [PlatformHighRiskOperation("billing.invoice.finalize")]
     public async Task<IActionResult> Finalize(long id, CancellationToken ct)
     {
         try

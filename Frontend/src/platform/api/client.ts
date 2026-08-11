@@ -1,6 +1,6 @@
 import { jwtDecode } from 'jwt-decode';
 import platformHttp from './platformHttp';
-import { BILLING_MODES } from '../types';
+import { BILLING_MODES, TENANT_DEPLOYMENT_PROFILES } from '../types';
 import type { EmailProviderCapability, MailConnectionTestResult } from '../../email/types';
 import type {
   AuditEntry,
@@ -32,7 +32,10 @@ import type {
   PlatformAuditEntry,
   PlatformAuditEntryDetail,
   PlatformConnectionTestInput,
+  PlatformEffectiveMfaPolicy,
   PlatformEmailSettings,
+  PlatformMfaPolicy,
+  ChangePlatformMfaPolicyInput,
   PlatformOperator,
   PlatformOperatorRole,
   ProvisionedBaseline,
@@ -50,6 +53,7 @@ import type {
   SavePlatformEmailSettingsInput,
   SetAccountContactInput,
   SetCommercialTermsInput,
+  SetTenantDeploymentProfileInput,
   SlugAvailability,
   SubmitProvisioningResult,
   SupportTicketDetail,
@@ -67,6 +71,8 @@ import type {
   Tenant,
   TenantAdminInvitation,
   TenantDataAsset,
+  TenantDeploymentProfile,
+  TenantProvisioningDiagnostics,
   TenantDataRecoveryEvidence,
   TenantDeletionCertificationDecision,
   TenantDeletionCertificate,
@@ -155,6 +161,8 @@ export interface PlatformApi {
   getTenant(id: string): Promise<Tenant>;
   updateTenantProfile(id: string, input: UpdateTenantProfileInput): Promise<Tenant>;
   updateTenantDataRegion(id: string, input: UpdateTenantDataRegionInput): Promise<Tenant>;
+  /** Owner-gated. The only writer of the deployment profile and its approval record. */
+  setTenantDeploymentProfile(id: string, input: SetTenantDeploymentProfileInput): Promise<Tenant>;
   listTenantAdminInvitations(id: string): Promise<TenantAdminInvitation[]>;
   resendTenantAdminInvitation(
     id: string,
@@ -235,6 +243,8 @@ export interface PlatformApi {
     options: { idempotencyKey: string; fromDraftId?: string | null },
   ): Promise<SubmitProvisioningResult>;
   getProvisioningExecution(id: string): Promise<ProvisioningExecution>;
+  /** Read-only. Why a tenant is not finished, in terms somebody can act on. */
+  getTenantProvisioningDiagnostics(tenantId: string): Promise<TenantProvisioningDiagnostics>;
   listProvisioningExecutions(query?: { state?: string; take?: number }): Promise<ProvisioningExecution[]>;
   retryProvisioning(id: string, body: { step?: string | null; reason: string }): Promise<ProvisioningExecution>;
   cancelProvisioning(id: string, reason: string): Promise<ProvisioningExecution>;
@@ -351,6 +361,11 @@ export interface PlatformApi {
     recipient: string;
     settings?: CandidatePlatformEmailSettings;
   }): Promise<TestOutboundEmailResult>;
+
+  // --- platform MFA enforcement policy ---
+  getEffectiveMfaPolicy(): Promise<PlatformEffectiveMfaPolicy>;
+  getMfaPolicy(): Promise<PlatformMfaPolicy>;
+  changeMfaPolicy(input: ChangePlatformMfaPolicyInput): Promise<PlatformMfaPolicy>;
 }
 
 // --- backend wire shapes (ids arrive as numbers) ----------------------------
@@ -398,6 +413,10 @@ type BackendTenant = {
   timeZoneId?: string | null;
   locale?: string | null;
   dataRegion?: string | null;
+  deploymentProfile?: string | null;
+  deploymentProfileReason?: string | null;
+  deploymentProfileApprovedBy?: string | null;
+  deploymentProfileApprovedOn?: string | null;
 };
 
 type BackendProvisionResult = {
@@ -456,6 +475,21 @@ const normalizeTenantStatus = (status?: string | null): Tenant['status'] => {
   if (normalized === 'pastdue' || normalized === 'past_due') return 'past_due';
   if (normalized === 'active' || normalized === 'trial' || normalized === 'suspended' || normalized === 'archived') return normalized;
   return 'provisioning';
+};
+
+/**
+ * The deployment profile, or PRODUCTION.
+ *
+ * An unrecognised or missing value reads as PRODUCTION rather than as "unknown", because the
+ * two ways of being wrong are not symmetric: rendering a strict tenant as strict costs an
+ * operator one clarifying click, and rendering a strict tenant as relaxed tells them a
+ * production control is being deferred when the server is enforcing it.
+ */
+const normalizeDeploymentProfile = (value?: string | null): TenantDeploymentProfile => {
+  const normalized = (value ?? '').trim().toUpperCase();
+  return TENANT_DEPLOYMENT_PROFILES.includes(normalized as TenantDeploymentProfile)
+    ? (normalized as TenantDeploymentProfile)
+    : 'PRODUCTION';
 };
 
 /**
@@ -523,6 +557,14 @@ const normalizeTenant = (tenant: BackendTenant): Tenant => ({
   timeZoneId: orNull(tenant.timeZoneId),
   locale: orNull(tenant.locale),
   dataRegion: orNull(tenant.dataRegion),
+
+  // The server is the authority on the profile; an unrecognised value is read as the STRICT
+  // one rather than trusted, so a console talking to an older API never renders a relaxation
+  // that the server is not applying.
+  deploymentProfile: normalizeDeploymentProfile(tenant.deploymentProfile),
+  deploymentProfileReason: orNull(tenant.deploymentProfileReason),
+  deploymentProfileApprovedBy: orNull(tenant.deploymentProfileApprovedBy),
+  deploymentProfileApprovedOn: orNull(tenant.deploymentProfileApprovedOn),
 });
 
 const normalizePlan = (plan: BackendPlan): Plan => ({ ...plan, id: String(plan.id) });
@@ -678,6 +720,20 @@ const normalizeDeletionCertificate = (wire: WireRecord): TenantDeletionCertifica
   id: asId(wire.id as string | number),
   tenantId: asId(wire.tenantId as string | number),
   evidenceIds: ((wire.evidenceIds as Array<string | number>) ?? []).map(asId),
+});
+
+const normalizeDiagnostics = (wire: WireRecord): TenantProvisioningDiagnostics => ({
+  ...(wire as unknown as TenantProvisioningDiagnostics),
+  tenantId: asIdOrNull(wire.tenantId as string | number | null),
+  executionId: asIdOrNull(wire.executionId as string | number | null),
+  deploymentProfile: normalizeDeploymentProfile(wire.deploymentProfile as string | null),
+  // Every collection is defaulted rather than trusted. A missing list must render as "none
+  // reported", never crash the one screen an operator opens when provisioning has failed.
+  steps: (wire.steps as TenantProvisioningDiagnostics['steps']) ?? [],
+  completedSteps: (wire.completedSteps as string[]) ?? [],
+  recoveryActions: (wire.recoveryActions as TenantProvisioningDiagnostics['recoveryActions']) ?? [],
+  productionBlockers: (wire.productionBlockers as TenantProvisioningDiagnostics['productionBlockers']) ?? [],
+  localTestBlockers: (wire.localTestBlockers as TenantProvisioningDiagnostics['localTestBlockers']) ?? [],
 });
 
 const normalizeExecution = (wire: WireRecord): ProvisioningExecution => ({
@@ -885,6 +941,10 @@ const httpPlatformApi: PlatformApi = {
   updateTenantDataRegion: async (id, input) =>
     normalizeTenant(
       (await platformHttp.put<BackendTenant>(`/api/platform/tenants/${id}/data-region`, input)).data,
+    ),
+  setTenantDeploymentProfile: async (id, input) =>
+    normalizeTenant(
+      (await platformHttp.put<BackendTenant>(`/api/platform/tenants/${id}/deployment-profile`, input)).data,
     ),
   listTenantAdminInvitations: async (id) =>
     (await platformHttp.get<TenantAdminInvitation[]>(`/api/platform/tenants/${id}/admin-invitations`)).data
@@ -1136,6 +1196,12 @@ const httpPlatformApi: PlatformApi = {
   getProvisioningExecution: async (id) =>
     normalizeExecution(
       (await platformHttp.get<WireRecord>(`/api/platform/provisioning/executions/${id}`)).data,
+    ),
+  getTenantProvisioningDiagnostics: async (tenantId) =>
+    normalizeDiagnostics(
+      (await platformHttp.get<WireRecord>(
+        `/api/platform/provisioning/tenants/${tenantId}/diagnostics`,
+      )).data,
     ),
   listProvisioningExecutions: async (query) =>
     (await platformHttp.get<WireRecord[]>('/api/platform/provisioning/executions', { params: query })).data.map(
@@ -1560,6 +1626,22 @@ const httpPlatformApi: PlatformApi = {
       '/api/platform/notifications/email/test-send',
       body,
     )).data,
+
+  // --- platform MFA enforcement policy --------------------------------------
+  //
+  // The effective read is reachable from a session that has NOT presented a second
+  // factor, deliberately: with enforcement relaxed the console has to be able to ask
+  // "is it relaxed?" before it can render the banner that says so. The other two are
+  // Owner-gated on the server.
+
+  getEffectiveMfaPolicy: async () =>
+    (await platformHttp.get<PlatformEffectiveMfaPolicy>('/api/platform/auth/policy/effective')).data,
+
+  getMfaPolicy: async () =>
+    (await platformHttp.get<PlatformMfaPolicy>('/api/platform/auth/policy')).data,
+
+  changeMfaPolicy: async (input) =>
+    (await platformHttp.put<PlatformMfaPolicy>('/api/platform/auth/policy', input)).data,
 };
 
 export const platformApi: PlatformApi = httpPlatformApi;

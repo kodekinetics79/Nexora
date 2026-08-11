@@ -336,6 +336,28 @@ public sealed class TenantProvisioningService : ITenantProvisioningService
                     $"A runner is working on execution {execution.Id} right now (lease held until " +
                     $"{execution.LeaseUntil:O}). Wait for it to finish or fail before retrying.");
 
+            // A RUNNING execution whose lease has merely LAPSED is refused here too, and that is a
+            // deliberate narrowing of what this method used to do.
+            //
+            // Retry answers "the cause is fixed, try again"; it has no evidence about whether the
+            // thing that held the execution is alive. Clearing ownership on nothing more than an
+            // expired timestamp is a lease STEAL wearing a repair button — the runner may be inside
+            // a step that outran its lease, and the fix for that is a longer lease, not a second
+            // runner. Taking ownership away from an attempt is a different act with different
+            // evidence (a lapsed lease AND a silent heartbeat beyond the grace) and a different
+            // audit record (before and after ownership, side by side), and it lives in
+            // IProvisioningLeaseRecovery. The runner reclaims a lapsed lease on its own anyway, so
+            // in the ordinary case nobody has to press anything at all.
+            if (execution.State == ProvisioningExecutionState.Running)
+                return new ProvisioningCommandResult(
+                    ProvisioningCommandOutcome.Busy, execution,
+                    $"Execution {execution.Id} is still marked Running and its lease lapsed at " +
+                    $"{execution.LeaseUntil:O}. A runner will reclaim it on its next sweep. If the " +
+                    "process that held it is gone, recover the lease " +
+                    $"(POST /api/platform/provisioning/executions/{execution.Id}/lease/recover) — " +
+                    "that path proves the previous attempt is dead and records who declared it so. " +
+                    "Retry deliberately will not take ownership on an expired timestamp alone.");
+
             // A cancelled execution never runs again by any route: an operator decided the attempt
             // was abandoned, and quietly resurrecting it under a retry button would undo that.
             if (execution.State == ProvisioningExecutionState.Cancelled)
