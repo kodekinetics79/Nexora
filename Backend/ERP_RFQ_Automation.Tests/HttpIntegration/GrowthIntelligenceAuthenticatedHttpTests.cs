@@ -68,6 +68,14 @@ public sealed class GrowthIntelligenceAuthenticatedHttpTests(Release01BHttpAppli
         Assert.Equal(HttpStatusCode.OK, replay.StatusCode);
         using var replayBody = JsonDocument.Parse(await replay.Content.ReadAsStringAsync());
         Assert.Equal(acknowledgedAt, replayBody.RootElement.GetProperty("acknowledgedAt").GetDateTime());
+        // The create answer is built from the entity in memory and the replay answer from the row
+        // read back, so the two only agree when the value written was already at PostgreSQL's
+        // microsecond resolution AND the column materialises as UTC. Comparing the parsed
+        // DateTimes catches the precision half; DateTime.Equals ignores Kind, so it does not catch
+        // the half where the replay loses its "Z" and a consumer reads it in local time. The raw
+        // JSON does.
+        Assert.Equal(createdBody.RootElement.GetProperty("acknowledgedAt").GetRawText(),
+            replayBody.RootElement.GetProperty("acknowledgedAt").GetRawText());
 
         var concurrentKey = $"growth-http-concurrent-{Guid.NewGuid():N}";
         var concurrentRequests = new[]

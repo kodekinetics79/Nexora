@@ -16,6 +16,38 @@ services:
     runtime: docker
     rootDir: Backend
     dockerfilePath: ./Dockerfile
+    # ---------------------------------------------------------------------------
+    # DEPLOY ONLY WHAT CI HAS ALREADY GONE GREEN ON.
+    #
+    # Render's default is `commit`: every push to the connected branch deploys,
+    # and the deploy starts BEFORE — often instead of — anyone looking at CI. That
+    # made CI advisory. It is not a theoretical exposure here: at the time this was
+    # written the last five pushes to `main` all left CI red, and all five deployed
+    # anyway. `checksPass` makes Render wait for the commit's GitHub checks and
+    # deploy only if they succeed.
+    #
+    # It is worth more on this service than on a typical one because of
+    # Database__ApplyMigrationsOnStartup below. The container applies migrations at
+    # BOOT. A migration that does not apply is therefore not a failed test, it is a
+    # service that will not start, on the running production database, with no
+    # rollback — the image cannot be rolled back to a schema that no longer exists.
+    # CI already proves the migration estate applies: the suite migrates a fresh
+    # postgres:16-alpine, walks the squashed baseline Up -> Down -> Up comparing
+    # catalogue digests, and applies it again through a NOSUPERUSER / NOBYPASSRLS
+    # owner with ManagedPostgresMigrationCommandInterceptor — the same shape and the
+    # same code path this service boots with. That proof was simply not connected to
+    # anything. This line connects it.
+    #
+    # REQUIRES the workflow's `CI green` job (.github/workflows/ci.yml) to be a
+    # required status check on `main`; see the repo-settings note there. Without a
+    # required check there is nothing for `checksPass` to wait on.
+    #
+    # If a Blueprint sync ever rejects this key, the identical setting lives at
+    # Render Dashboard -> nexora-fyjw -> Settings -> Build & Deploy -> Auto-Deploy
+    # -> "After CI Checks Pass". Do not "fix" a sync error by deleting the line and
+    # leaving auto-deploy on commit.
+    # ---------------------------------------------------------------------------
+    autoDeployTrigger: checksPass
     # LIVENESS ONLY. /ready additionally aggregates evidence-storage + malware-scanner
     # + worker heartbeats, and today the evidence-storage check reports Unhealthy for a
     # local (disk-backed) store by design — pointing the platform health check at /ready
@@ -95,6 +127,12 @@ services:
         value: "24:00:00"
       - key: ConnectionStrings__DefaultConnection
         sync: false
+      # REQUIRED WHENEVER the compatibility flag below is "true": Program.cs throws at startup
+      # ("Managed owner migration compatibility requires an explicit
+      # ConnectionStrings:MigrationConnection separate from the least-privilege runtime
+      # connection.") rather than run migrations on the runtime role. Populating only
+      # DefaultConnection and syncing this Blueprint therefore produces a deploy that fails at
+      # boot with no request ever served.
       - key: ConnectionStrings__MigrationConnection
         sync: false
       - key: Database__ApplyMigrationsOnStartup
@@ -110,8 +148,42 @@ services:
       # the credentials are re-entered — treat it like Jwt__Key.
       - key: Security__SecretProtectionKey
         sync: false
+      # REQUIRED, and DISTINCT from Jwt__Key. AddPlatformJwtBearer THROWS at startup outside
+      # Development/Testing when this is missing, and throws again when it equals Jwt__Key —
+      # the platform control plane and the tenant plane must not be able to forge each other's
+      # tokens. A deploy that syncs this Blueprint without populating it fails at boot, before
+      # the first request, with no other symptom.
       - key: Jwt__PlatformKey
         sync: false
+      # -----------------------------------------------------------------------
+      # THE FIRST PLATFORM OPERATOR. Without these two, a fresh deployment has NO
+      # platform user at all and the operator console at /platform cannot be signed
+      # into by anybody — which means no tenant can ever be provisioned, and the
+      # whole customer journey has no entry point.
+      #
+      # PlatformOwnerSeeder (Platform/Services/PlatformOwnerSeeder.cs) runs in
+      # Production deliberately, and is fail-closed in every direction:
+      #   * both unset  -> silently does nothing (this is what protects Production
+      #                    from an accidental account, and what left a fresh deploy
+      #                    locked out when these keys were absent from this file);
+      #   * one set     -> logs a warning and creates nothing;
+      #   * password < 12 chars -> refused and logged;
+      #   * ANY platform user already present -> skipped. It can only ever create
+      #     the very first account, never rotate or resurrect one, so leaving these
+      #     populated after the first boot is inert.
+      #
+      # NOT to be confused with DemoUser__Enabled + PlatformOwner__Email/Password.
+      # That is DemoUserSeeder, which REFUSES to run under ASPNETCORE_ENVIRONMENT
+      # Production (it provisions a tenant Super Admin with both tenant-isolation
+      # layers off) and will log an error and create nothing here.
+      #
+      # After the first successful boot, rotate through /api/platform/users and
+      # enroll MFA — every privileged platform policy requires a second factor.
+      - key: Platform__BootstrapOwnerEmail
+        sync: false
+      - key: Platform__BootstrapOwnerPassword
+        sync: false
+      # -----------------------------------------------------------------------
       - key: CommercialFinance__DunningProviderWebhookSecret
         sync: false
       - key: CommercialFinance__ContactVerificationSecret

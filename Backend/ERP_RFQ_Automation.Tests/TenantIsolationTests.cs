@@ -358,23 +358,69 @@ public class TenantIsolationTests
 
     private readonly record struct MigrationSource(long Id, string Name, string Text);
 
+    /// <summary>
+    /// The evidence this test reasons over is the migration SOURCE TEXT, and after the squash that
+    /// text lives in two places, only one of which ships.
+    ///
+    /// MigrationsBaseline\ is the live estate: the squashed baseline plus everything authored after
+    /// it. Its RLS statements are not in the C# — the baseline embeds them as SQL resources, so
+    /// `Sql\*.sql` is read too and attributed to the baseline's own migration id. Reading only the
+    /// legacy folder made this test assert tenant isolation against 134 files that no longer
+    /// compile, which fails in both directions: a table whose policy is declared ONLY in the
+    /// baseline reads as uncovered, and a policy DELETED from the baseline still reads as covered
+    /// because the superseded copy is sitting on disk vouching for it.
+    ///
+    /// Migrations\ is the superseded estate, excluded from compilation by `Compile Remove` in the
+    /// .csproj and documented there as deletable outright. It is still read while it exists, so
+    /// tables created before the dynamic RLS sweep keep their provenance, but its ABSENCE is not an
+    /// error — deleting it is the documented next step and must not take the suite down with it.
+    /// </summary>
     private static IReadOnlyList<MigrationSource> MigrationSources()
     {
-        var directory = Path.Combine(
-            FindRepositoryRoot(), "Backend", "ERP_RFQ_Automation", "Migrations");
-        Assert.True(Directory.Exists(directory), $"Migrations directory not found at {directory}.");
+        var backend = Path.Combine(FindRepositoryRoot(), "Backend", "ERP_RFQ_Automation");
+        var live = Path.Combine(backend, "MigrationsBaseline");
+        var superseded = Path.Combine(backend, "Migrations");
 
-        return Directory.EnumerateFiles(directory, "*.cs")
-            .Where(path => !path.EndsWith(".Designer.cs", StringComparison.Ordinal))
-            .Select(path => new
-            {
-                Name = Path.GetFileNameWithoutExtension(path),
-                Text = File.ReadAllText(path)
-            })
-            .Where(file => file.Name.Length > 14 && long.TryParse(file.Name[..14], out _))
-            .Select(file => new MigrationSource(long.Parse(file.Name[..14]), file.Name, file.Text))
-            .OrderBy(file => file.Id)
-            .ToList();
+        Assert.True(
+            Directory.Exists(live),
+            $"Live migration estate not found at {live}. If MigrationsBaseline\\ was renamed to "
+            + "Migrations\\ as the .csproj describes, update this test to match.");
+
+        var sources = new List<MigrationSource>();
+        foreach (var directory in new[] { superseded, live })
+        {
+            if (!Directory.Exists(directory)) continue;
+
+            sources.AddRange(Directory.EnumerateFiles(directory, "*.cs")
+                .Where(path => !path.EndsWith(".Designer.cs", StringComparison.Ordinal))
+                .Select(path => new
+                {
+                    Name = Path.GetFileNameWithoutExtension(path),
+                    Text = File.ReadAllText(path)
+                })
+                .Where(file => file.Name.Length > 14 && long.TryParse(file.Name[..14], out _))
+                .Select(file => new MigrationSource(long.Parse(file.Name[..14]), file.Name, file.Text)));
+        }
+
+        // The baseline's schema is SQL, not C#. Attribute it to the earliest migration id in the
+        // live folder — the baseline itself — so it is never mistaken for pre-sweep provenance.
+        var sqlDirectory = Path.Combine(live, "Sql");
+        if (Directory.Exists(sqlDirectory))
+        {
+            var baselineId = sources
+                .Where(source => source.Id > DynamicRlsSweepMigrationId)
+                .Select(source => source.Id)
+                .DefaultIfEmpty(long.MaxValue)
+                .Min();
+
+            sources.AddRange(Directory.EnumerateFiles(sqlDirectory, "*.sql")
+                .Select(path => new MigrationSource(
+                    baselineId, $"Sql/{Path.GetFileName(path)}", File.ReadAllText(path))));
+        }
+
+        Assert.True(sources.Count > 0, $"No migration sources found under {backend}.");
+
+        return sources.OrderBy(source => source.Id).ToList();
     }
 
     /// <summary>Literal `ALTER TABLE ... ENABLE/FORCE ROW LEVEL SECURITY`, or the table named as a

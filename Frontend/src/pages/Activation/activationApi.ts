@@ -91,12 +91,30 @@ export interface ActivationOutcome {
   ok: boolean;
   /** Set when the attempt failed for a reason the customer can act on. */
   state: ActivationState | null;
+  /**
+   * Whether the account can actually be signed into yet.
+   *
+   * Setting a password and being able to USE the workspace are two different
+   * facts with two different owners: the invitation goes out at the end of
+   * provisioning, and the tenant only becomes signable-into once an operator
+   * takes the authoritative activation decision. Sending the customer to
+   * /login before that produces a 403 they cannot self-repair, so the page
+   * reads this rather than assuming.
+   *
+   * Defaults to `true` when the server does not say — an older backend, or a
+   * proxy that ate the body — because that is the behaviour this page had
+   * before the field existed.
+   */
+  signInAvailable: boolean;
 }
 
 export const completeActivation = async (token: string, password: string): Promise<ActivationOutcome> => {
   try {
-    await activationHttp.post(`/api/tenant-activation/${encodeURIComponent(token)}`, { password });
-    return { ok: true, state: null };
+    const { data } = await activationHttp.post<{ signInAvailable?: boolean } | undefined>(
+      `/api/tenant-activation/${encodeURIComponent(token)}`,
+      { password },
+    );
+    return { ok: true, state: null, signInAvailable: data?.signInAvailable !== false };
   } catch (error) {
     if (!isAxiosError(error)) throw error;
     const body = error.response?.data as ChallengeBody | undefined;
@@ -105,6 +123,6 @@ export const completeActivation = async (token: string, password: string): Promi
     // else (a rejected password, a server fault) is re-thrown so the caller can
     // render the server's own reason through the error-presentation boundary.
     if (state === 'unavailable' || state === 'invalid') throw error;
-    return { ok: false, state };
+    return { ok: false, state, signInAvailable: false };
   }
 };

@@ -4,6 +4,13 @@
 -- applying all 134 pre-baseline migrations in order. Do not hand-edit:
 -- regenerate with MigrationsBaseline/regenerate-baseline-sql.py, then re-run
 -- the schema-parity diff.
+--
+-- Every statement is IDEMPOTENT. Production is still at the pre-squash head with
+-- the whole schema already materialised, and Program.cs applies migrations
+-- uncaught at boot, so a bare CREATE here is a failed deploy. Objects with no
+-- IF NOT EXISTS form are wrapped in a DO block that checks pg_catalog for that
+-- exact object - never a broader condition that could skip a policy or a
+-- constraint the database is genuinely missing.
 -- ==========================================================================
 
 --
@@ -76,77 +83,209 @@ ALTER TABLE platform."UsageMinuteAggregates" ENABLE ROW LEVEL SECURITY;
 -- Name: AccountingOutbox accounting_outbox_platform_fleet; Type: POLICY; Schema: platform; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'accounting_outbox_platform_fleet'
+      AND polrelid = to_regclass('platform."AccountingOutbox"')
+) THEN
 CREATE POLICY accounting_outbox_platform_fleet ON platform."AccountingOutbox" TO nexora_pipeline_app USING (true) WITH CHECK (true);
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: TenantDeletionCertificates deletion_certificates_platform_fleet; Type: POLICY; Schema: platform; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'deletion_certificates_platform_fleet'
+      AND polrelid = to_regclass('platform."TenantDeletionCertificates"')
+) THEN
 CREATE POLICY deletion_certificates_platform_fleet ON platform."TenantDeletionCertificates" TO nexora_pipeline_app USING (true) WITH CHECK (true);
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: PlatformAuditLogs nexora_ai_policy_audit_insert; Type: POLICY; Schema: platform; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_ai_policy_audit_insert'
+      AND polrelid = to_regclass('platform."PlatformAuditLogs"')
+) THEN
 CREATE POLICY nexora_ai_policy_audit_insert ON platform."PlatformAuditLogs" FOR INSERT TO nexora_tenant_app WITH CHECK (public.nexora_ai_policy_audit_allowed("ActAsTenantId", ("Action")::text, ("TargetType")::text, ("TargetId")::text));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: TenantDataRecoveryEvidence recovery_evidence_platform_fleet; Type: POLICY; Schema: platform; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'recovery_evidence_platform_fleet'
+      AND polrelid = to_regclass('platform."TenantDataRecoveryEvidence"')
+) THEN
 CREATE POLICY recovery_evidence_platform_fleet ON platform."TenantDataRecoveryEvidence" TO nexora_pipeline_app USING (true) WITH CHECK (true);
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: SubscriptionRevenueActions subscription_revenue_actions_platform_fleet; Type: POLICY; Schema: platform; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'subscription_revenue_actions_platform_fleet'
+      AND polrelid = to_regclass('platform."SubscriptionRevenueActions"')
+) THEN
 CREATE POLICY subscription_revenue_actions_platform_fleet ON platform."SubscriptionRevenueActions" TO nexora_pipeline_app USING (true) WITH CHECK (true);
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: SubscriptionTaxRules subscription_tax_rules_platform_fleet; Type: POLICY; Schema: platform; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'subscription_tax_rules_platform_fleet'
+      AND polrelid = to_regclass('platform."SubscriptionTaxRules"')
+) THEN
 CREATE POLICY subscription_tax_rules_platform_fleet ON platform."SubscriptionTaxRules" TO nexora_pipeline_app USING (true) WITH CHECK (true);
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: TenantMeterSourcePolicies tenant_meter_source_policies_platform_fleet; Type: POLICY; Schema: platform; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'tenant_meter_source_policies_platform_fleet'
+      AND polrelid = to_regclass('platform."TenantMeterSourcePolicies"')
+) THEN
 CREATE POLICY tenant_meter_source_policies_platform_fleet ON platform."TenantMeterSourcePolicies" TO nexora_pipeline_app USING (true) WITH CHECK (true);
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: UsageCoverageSegments usage_coverage_segments_platform_fleet; Type: POLICY; Schema: platform; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'usage_coverage_segments_platform_fleet'
+      AND polrelid = to_regclass('platform."UsageCoverageSegments"')
+) THEN
 CREATE POLICY usage_coverage_segments_platform_fleet ON platform."UsageCoverageSegments" TO nexora_pipeline_app USING (true) WITH CHECK (true);
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: UsageEventRatings usage_event_ratings_platform_fleet; Type: POLICY; Schema: platform; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'usage_event_ratings_platform_fleet'
+      AND polrelid = to_regclass('platform."UsageEventRatings"')
+) THEN
 CREATE POLICY usage_event_ratings_platform_fleet ON platform."UsageEventRatings" TO nexora_pipeline_app USING (true) WITH CHECK (true);
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: UsageEvents usage_events_platform_fleet; Type: POLICY; Schema: platform; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'usage_events_platform_fleet'
+      AND polrelid = to_regclass('platform."UsageEvents"')
+) THEN
 CREATE POLICY usage_events_platform_fleet ON platform."UsageEvents" TO nexora_pipeline_app USING (true) WITH CHECK (true);
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: UsageMinuteAggregates usage_minutes_platform_fleet; Type: POLICY; Schema: platform; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'usage_minutes_platform_fleet'
+      AND polrelid = to_regclass('platform."UsageMinuteAggregates"')
+) THEN
 CREATE POLICY usage_minutes_platform_fleet ON platform."UsageMinuteAggregates" TO nexora_pipeline_app USING (true) WITH CHECK (true);
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
@@ -1293,882 +1432,2330 @@ ALTER TABLE public.material_lots ENABLE ROW LEVEL SECURITY;
 -- Name: AiProcessingPolicies nexora_ai_default_provisioning; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_ai_default_provisioning'
+      AND polrelid = to_regclass('public."AiProcessingPolicies"')
+) THEN
 CREATE POLICY nexora_ai_default_provisioning ON public."AiProcessingPolicies" FOR INSERT WITH CHECK ((("IsEnabled" = true) AND ("ExternalProcessingAllowed" = false) AND (("AllowedPurposes")::text = 'RfqExtraction,BoqDraft'::text) AND ("AllowedProvider" IS NULL) AND ("AllowedModel" IS NULL) AND ("MonthlySoftTokenLimit" IS NULL) AND ("MonthlyHardTokenLimit" IS NULL) AND ("Version" = 1) AND (("UpdatedBy")::text = 'tenant-provisioning'::text)));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: AccountingPeriods nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."AccountingPeriods"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."AccountingPeriods" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: AgentApprovals nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."AgentApprovals"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."AgentApprovals" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: AgentAuditLogs nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."AgentAuditLogs"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."AgentAuditLogs" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: AgentMessages nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."AgentMessages"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."AgentMessages" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: AgentPolicies nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."AgentPolicies"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."AgentPolicies" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: AgentSessions nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."AgentSessions"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."AgentSessions" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: AiBudgetPeriods nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."AiBudgetPeriods"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."AiBudgetPeriods" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: AiCallAttempts nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."AiCallAttempts"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."AiCallAttempts" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: AiProcessingPolicies nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."AiProcessingPolicies"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."AiProcessingPolicies" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: AiProviderAuthorizations nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."AiProviderAuthorizations"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."AiProviderAuthorizations" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: AiRequests nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."AiRequests"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."AiRequests" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: Attachments nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."Attachments"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."Attachments" TO nexora_tenant_app USING (((("ParentType")::text = 'Lead'::text) AND (EXISTS ( SELECT 1
    FROM public."Leads" lead
   WHERE ((lead."ID" = "Attachments"."ParentID") AND (lead."BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)))))) WITH CHECK (((("ParentType")::text = 'Lead'::text) AND (EXISTS ( SELECT 1
    FROM public."Leads" lead
   WHERE ((lead."ID" = "Attachments"."ParentID") AND (lead."BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint))))));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: BankAccounts nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."BankAccounts"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."BankAccounts" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: BankAdjustmentDistributions nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."BankAdjustmentDistributions"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."BankAdjustmentDistributions" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: BankAdjustments nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."BankAdjustments"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."BankAdjustments" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: BankMatchingRules nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."BankMatchingRules"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."BankMatchingRules" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: BankStatementImports nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."BankStatementImports"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."BankStatementImports" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: BankStatementLines nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."BankStatementLines"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."BankStatementLines" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: BankStatements nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."BankStatements"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."BankStatements" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: BoqAssemblies nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."BoqAssemblies"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."BoqAssemblies" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: BoqAssemblyComponents nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."BoqAssemblyComponents"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."BoqAssemblyComponents" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: BoqDocuments nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."BoqDocuments"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."BoqDocuments" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: BoqItems nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."BoqItems"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."BoqItems" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: BoqSections nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."BoqSections"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."BoqSections" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: BusinessUnits nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."BusinessUnits"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."BusinessUnits" TO nexora_tenant_app USING (("ID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("ID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: CollectionControls nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."CollectionControls"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."CollectionControls" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: CommercialCases nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."CommercialCases"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."CommercialCases" TO nexora_tenant_app USING (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: CommercialFinanceAudits nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."CommercialFinanceAudits"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."CommercialFinanceAudits" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: CommercialMatchingPolicies nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."CommercialMatchingPolicies"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."CommercialMatchingPolicies" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: Contacts nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."Contacts"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."Contacts" TO nexora_tenant_app USING (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: Currency nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."Currency"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."Currency" TO nexora_tenant_app USING (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: CustomerAwardLineAllocations nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."CustomerAwardLineAllocations"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."CustomerAwardLineAllocations" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: CustomerAwards nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."CustomerAwards"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."CustomerAwards" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: CustomerCollectionProfiles nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."CustomerCollectionProfiles"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."CustomerCollectionProfiles" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: CustomerPayments nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."CustomerPayments"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."CustomerPayments" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: CustomerPurchaseOrderLines nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."CustomerPurchaseOrderLines"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."CustomerPurchaseOrderLines" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: CustomerPurchaseOrders nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."CustomerPurchaseOrders"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."CustomerPurchaseOrders" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: CustomerRefunds nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."CustomerRefunds"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."CustomerRefunds" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: CustomerStatementLines nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."CustomerStatementLines"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."CustomerStatementLines" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: CustomerStatements nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."CustomerStatements"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."CustomerStatements" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: Customers nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."Customers"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."Customers" TO nexora_tenant_app USING (("BUID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BUID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: DunningCases nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."DunningCases"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."DunningCases" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: DunningDeliveryAttempts nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."DunningDeliveryAttempts"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."DunningDeliveryAttempts" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: DunningNotices nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."DunningNotices"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."DunningNotices" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: DunningPolicies nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."DunningPolicies"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."DunningPolicies" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: DunningPolicySteps nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."DunningPolicySteps"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."DunningPolicySteps" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: DunningRunDecisions nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."DunningRunDecisions"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."DunningRunDecisions" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: DunningRuns nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."DunningRuns"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."DunningRuns" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: EmailIngests nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."EmailIngests"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."EmailIngests" TO nexora_tenant_app USING ((EXISTS ( SELECT 1
    FROM public."Email_Configurations" configuration
   WHERE ((configuration."ID" = "EmailIngests"."EmailConfigurationID") AND (configuration."BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint))))) WITH CHECK ((EXISTS ( SELECT 1
    FROM public."Email_Configurations" configuration
   WHERE ((configuration."ID" = "EmailIngests"."EmailConfigurationID") AND (configuration."BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)))));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: Email_Configurations nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."Email_Configurations"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."Email_Configurations" TO nexora_tenant_app USING (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: ExtractionCorpusEntries nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."ExtractionCorpusEntries"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."ExtractionCorpusEntries" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: ExtractionJobs nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."ExtractionJobs"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."ExtractionJobs" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: FinanceCommunicationContacts nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."FinanceCommunicationContacts"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."FinanceCommunicationContacts" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: FinanceOutboxMessages nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."FinanceOutboxMessages"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."FinanceOutboxMessages" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: FolderIngestionRetryStates nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."FolderIngestionRetryStates"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."FolderIngestionRetryStates" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: FxRateSnapshots nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."FxRateSnapshots"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."FxRateSnapshots" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: FxRates nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."FxRates"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."FxRates" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: IamAuditEvents nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."IamAuditEvents"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."IamAuditEvents" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: Inventory nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."Inventory"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."Inventory" TO nexora_tenant_app USING ((("Buid" IS NULL) OR ("Buid" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint))) WITH CHECK (("Buid" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: JournalEntries nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."JournalEntries"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."JournalEntries" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: JournalEntryLines nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."JournalEntryLines"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."JournalEntryLines" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: LeadIdentityAuditEvents nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."LeadIdentityAuditEvents"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."LeadIdentityAuditEvents" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: LeadIngestionBatches nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."LeadIngestionBatches"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."LeadIngestionBatches" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: LeadIngestionOccurrences nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."LeadIngestionOccurrences"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."LeadIngestionOccurrences" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: LeadItemRevisions nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."LeadItemRevisions"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."LeadItemRevisions" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: LeadItems nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."LeadItems"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."LeadItems" TO nexora_tenant_app USING ((EXISTS ( SELECT 1
    FROM public."Leads" parent
   WHERE ((parent."ID" = "LeadItems"."LeadID") AND (parent."BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint))))) WITH CHECK ((EXISTS ( SELECT 1
    FROM public."Leads" parent
   WHERE ((parent."ID" = "LeadItems"."LeadID") AND (parent."BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)))));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: LeadMatchCandidates nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."LeadMatchCandidates"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."LeadMatchCandidates" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: LeadOccurrenceDocuments nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."LeadOccurrenceDocuments"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."LeadOccurrenceDocuments" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: LeadReferenceConfigurations nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."LeadReferenceConfigurations"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."LeadReferenceConfigurations" TO nexora_tenant_app USING (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: LeadReviewAudits nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."LeadReviewAudits"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."LeadReviewAudits" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: LeadRevisionDifferences nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."LeadRevisionDifferences"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."LeadRevisionDifferences" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: LeadRevisionImpacts nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."LeadRevisionImpacts"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."LeadRevisionImpacts" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: LeadRevisions nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."LeadRevisions"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."LeadRevisions" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: LeadStatusHistories nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."LeadStatusHistories"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."LeadStatusHistories" TO nexora_tenant_app USING (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: Leads nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."Leads"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."Leads" TO nexora_tenant_app USING (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: LedgerAccounts nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."LedgerAccounts"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."LedgerAccounts" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: LedgerBooks nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."LedgerBooks"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."LedgerBooks" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: LegalDocumentCounters nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."LegalDocumentCounters"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."LegalDocumentCounters" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: MasterDataChangeEvents nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."MasterDataChangeEvents"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."MasterDataChangeEvents" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: MasterDataFieldChanges nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."MasterDataFieldChanges"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."MasterDataFieldChanges" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: MetricEvents nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."MetricEvents"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."MetricEvents" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: OrderItems nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."OrderItems"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."OrderItems" TO nexora_tenant_app USING ((EXISTS ( SELECT 1
    FROM public."Orders" parent
   WHERE ((parent."ID" = "OrderItems"."OrderID") AND (parent."BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint))))) WITH CHECK ((EXISTS ( SELECT 1
    FROM public."Orders" parent
   WHERE ((parent."ID" = "OrderItems"."OrderID") AND (parent."BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)))));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: OrderToCashAuditEvents nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."OrderToCashAuditEvents"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."OrderToCashAuditEvents" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: OrderToCashDocumentCounters nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."OrderToCashDocumentCounters"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."OrderToCashDocumentCounters" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: Orders nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."Orders"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."Orders" TO nexora_tenant_app USING (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: PaymentAllocations nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."PaymentAllocations"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."PaymentAllocations" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: ProductAttachments nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."ProductAttachments"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."ProductAttachments" TO nexora_tenant_app USING ((EXISTS ( SELECT 1
    FROM public."Products" product
   WHERE ((product."ID" = "ProductAttachments"."InventoryID") AND ((product."BUID" IS NULL) OR (product."BUID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)))))) WITH CHECK ((EXISTS ( SELECT 1
    FROM public."Products" product
   WHERE ((product."ID" = "ProductAttachments"."InventoryID") AND (product."BUID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)))));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: ProductCategories nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."ProductCategories"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."ProductCategories" TO nexora_tenant_app USING (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: ProductSubCategories nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."ProductSubCategories"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."ProductSubCategories" TO nexora_tenant_app USING (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: Products nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."Products"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."Products" TO nexora_tenant_app USING ((("BUID" IS NULL) OR ("BUID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint))) WITH CHECK (("BUID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: PromisesToPay nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."PromisesToPay"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."PromisesToPay" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: QuoteConfiguration nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."QuoteConfiguration"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."QuoteConfiguration" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: QuoteItems nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."QuoteItems"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."QuoteItems" TO nexora_tenant_app USING ((EXISTS ( SELECT 1
    FROM public."Quotes" parent
   WHERE ((parent."ID" = "QuoteItems"."QuoteID") AND (parent."BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint))))) WITH CHECK ((EXISTS ( SELECT 1
    FROM public."Quotes" parent
   WHERE ((parent."ID" = "QuoteItems"."QuoteID") AND (parent."BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)))));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: QuotePriceAttestationLines nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."QuotePriceAttestationLines"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."QuotePriceAttestationLines" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: QuotePriceAttestations nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."QuotePriceAttestations"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."QuotePriceAttestations" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: QuoteRemovalRecords nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."QuoteRemovalRecords"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."QuoteRemovalRecords" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: QuoteValidityExtensions nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."QuoteValidityExtensions"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."QuoteValidityExtensions" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: Quotes nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."Quotes"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."Quotes" TO nexora_tenant_app USING (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: RFQ nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."RFQ"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."RFQ" TO nexora_tenant_app USING (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: RFQItems nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."RFQItems"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."RFQItems" TO nexora_tenant_app USING ((EXISTS ( SELECT 1
    FROM public."RFQ" parent
   WHERE ((parent."ID" = "RFQItems"."RFQID") AND (parent."BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint))))) WITH CHECK ((EXISTS ( SELECT 1
    FROM public."RFQ" parent
   WHERE ((parent."ID" = "RFQItems"."RFQID") AND (parent."BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)))));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: ReceivableDocumentLines nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."ReceivableDocumentLines"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."ReceivableDocumentLines" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: ReceivableDocuments nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."ReceivableDocuments"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."ReceivableDocuments" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: ReceivableWriteOffs nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."ReceivableWriteOffs"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."ReceivableWriteOffs" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: ReconciliationAllocations nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."ReconciliationAllocations"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."ReconciliationAllocations" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: ReconciliationMatches nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."ReconciliationMatches"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."ReconciliationMatches" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: ReconciliationRunRules nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."ReconciliationRunRules"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."ReconciliationRunRules" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: ReconciliationRuns nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."ReconciliationRuns"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."ReconciliationRuns" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: ReportSubscriptions nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."ReportSubscriptions"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."ReportSubscriptions" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: RolePermissions nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."RolePermissions"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."RolePermissions" TO nexora_tenant_app USING (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: SetCity nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."SetCity"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."SetCity" TO nexora_tenant_app USING (("BUID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BUID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: SetCountry nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."SetCountry"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."SetCountry" TO nexora_tenant_app USING (("BUID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BUID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: SetState nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."SetState"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."SetState" TO nexora_tenant_app USING (("BUID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BUID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: Setup_Master nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."Setup_Master"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."Setup_Master" TO nexora_tenant_app USING (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: ShipmentItems nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."ShipmentItems"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."ShipmentItems" TO nexora_tenant_app USING ((EXISTS ( SELECT 1
    FROM public."Shipments" parent
   WHERE ((parent."ID" = "ShipmentItems"."ShipmentID") AND (parent."BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint))))) WITH CHECK ((EXISTS ( SELECT 1
    FROM public."Shipments" parent
   WHERE ((parent."ID" = "ShipmentItems"."ShipmentID") AND (parent."BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)))));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: ShipmentStatusHistory nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."ShipmentStatusHistory"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."ShipmentStatusHistory" TO nexora_tenant_app USING ((EXISTS ( SELECT 1
    FROM public."Shipments" shipment
   WHERE ((shipment."ID" = "ShipmentStatusHistory"."ShipmentId") AND (shipment."BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint))))) WITH CHECK ((EXISTS ( SELECT 1
    FROM public."Shipments" shipment
   WHERE ((shipment."ID" = "ShipmentStatusHistory"."ShipmentId") AND (shipment."BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)))));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: Shipments nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."Shipments"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."Shipments" TO nexora_tenant_app USING (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: SlaEvents nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."SlaEvents"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."SlaEvents" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: SlaPolicies nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."SlaPolicies"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."SlaPolicies" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: SourcingAwards nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."SourcingAwards"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."SourcingAwards" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: SupplierPurchaseHistory nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."SupplierPurchaseHistory"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."SupplierPurchaseHistory" TO nexora_tenant_app USING ((EXISTS ( SELECT 1
    FROM public."Products" product,
     public."Suppliers" supplier
@@ -2176,208 +3763,556 @@ CREATE POLICY nexora_tenant_isolation ON public."SupplierPurchaseHistory" TO nex
    FROM public."Products" product,
     public."Suppliers" supplier
   WHERE ((product."ID" = "SupplierPurchaseHistory"."ProductId") AND (supplier."ID" = "SupplierPurchaseHistory"."SupplierId") AND ((product."BUID" IS NULL) OR (product."BUID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) AND ((supplier."BUID" IS NULL) OR (supplier."BUID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) AND ((product."BUID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint) OR (supplier."BUID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint))))));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: SupplierQuotedItems nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."SupplierQuotedItems"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."SupplierQuotedItems" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: SupplierSolicitations nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."SupplierSolicitations"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."SupplierSolicitations" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: Suppliers nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."Suppliers"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."Suppliers" TO nexora_tenant_app USING (("BUID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BUID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: Taxes nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."Taxes"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."Taxes" TO nexora_tenant_app USING (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: Teams nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."Teams"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."Teams" TO nexora_tenant_app USING (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: TenantQueueStates nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."TenantQueueStates"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."TenantQueueStates" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: UserColumnPreferences nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."UserColumnPreferences"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."UserColumnPreferences" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: UserGroups nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."UserGroups"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."UserGroups" TO nexora_tenant_app USING (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: Users nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."Users"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."Users" TO nexora_tenant_app USING (("BUID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BUID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: Warehouses nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."Warehouses"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."Warehouses" TO nexora_tenant_app USING (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: WriteOffAllocations nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."WriteOffAllocations"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."WriteOffAllocations" TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: canonical_inquiries nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.canonical_inquiries')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.canonical_inquiries TO nexora_tenant_app USING ((business_unit_id = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK ((business_unit_id = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: canonical_line_items nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.canonical_line_items')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.canonical_line_items TO nexora_tenant_app USING ((business_unit_id = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK ((business_unit_id = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: commercial_activities nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.commercial_activities')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.commercial_activities TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: commercial_demand_lines nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.commercial_demand_lines')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.commercial_demand_lines TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: commercial_document_classifications nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.commercial_document_classifications')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.commercial_document_classifications TO nexora_tenant_app USING ((business_unit_id = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK ((business_unit_id = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: commercial_exception_cases nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.commercial_exception_cases')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.commercial_exception_cases TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: commercial_exception_events nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.commercial_exception_events')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.commercial_exception_events TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: commercial_exception_operations nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.commercial_exception_operations')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.commercial_exception_operations TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: commercial_exception_outbox nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.commercial_exception_outbox')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.commercial_exception_outbox TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: commercial_lifecycle_events nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.commercial_lifecycle_events')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.commercial_lifecycle_events TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: commercial_opportunity_events nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.commercial_opportunity_events')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.commercial_opportunity_events TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: commercial_opportunity_feedback nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.commercial_opportunity_feedback')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.commercial_opportunity_feedback TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: commercial_opportunity_operations nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.commercial_opportunity_operations')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.commercial_opportunity_operations TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: commercial_opportunity_outbox nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.commercial_opportunity_outbox')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.commercial_opportunity_outbox TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: commercial_opportunity_outcomes nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.commercial_opportunity_outcomes')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.commercial_opportunity_outcomes TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: commercial_opportunity_recommendations nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.commercial_opportunity_recommendations')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.commercial_opportunity_recommendations TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: custom_field_definitions nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.custom_field_definitions')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.custom_field_definitions TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: custom_field_dependencies nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.custom_field_dependencies')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.custom_field_dependencies TO nexora_tenant_app USING ((EXISTS ( SELECT 1
    FROM (public.custom_field_versions version
      JOIN public.custom_field_definitions definition ON ((definition."Id" = version."DefinitionId")))
@@ -2387,12 +4322,24 @@ CREATE POLICY nexora_tenant_isolation ON public.custom_field_dependencies TO nex
   WHERE ((version."Id" = custom_field_dependencies."VersionId") AND (definition."BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)))) AND (EXISTS ( SELECT 1
    FROM public.custom_field_definitions dependency
   WHERE ((dependency."Id" = custom_field_dependencies."DependsOnDefinitionId") AND (dependency."BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint))))));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: custom_field_options nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.custom_field_options')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.custom_field_options TO nexora_tenant_app USING ((EXISTS ( SELECT 1
    FROM (public.custom_field_versions version
      JOIN public.custom_field_definitions definition ON ((definition."Id" = version."DefinitionId")))
@@ -2400,19 +4347,43 @@ CREATE POLICY nexora_tenant_isolation ON public.custom_field_options TO nexora_t
    FROM (public.custom_field_versions version
      JOIN public.custom_field_definitions definition ON ((definition."Id" = version."DefinitionId")))
   WHERE ((version."Id" = custom_field_options."VersionId") AND (definition."BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)))));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: custom_field_records nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.custom_field_records')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.custom_field_records TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: custom_field_rules nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.custom_field_rules')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.custom_field_rules TO nexora_tenant_app USING ((EXISTS ( SELECT 1
    FROM (public.custom_field_versions version
      JOIN public.custom_field_definitions definition ON ((definition."Id" = version."DefinitionId")))
@@ -2420,486 +4391,1306 @@ CREATE POLICY nexora_tenant_isolation ON public.custom_field_rules TO nexora_ten
    FROM (public.custom_field_versions version
      JOIN public.custom_field_definitions definition ON ((definition."Id" = version."DefinitionId")))
   WHERE ((version."Id" = custom_field_rules."VersionId") AND (definition."BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)))));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: custom_field_values nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.custom_field_values')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.custom_field_values TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: custom_field_versions nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.custom_field_versions')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.custom_field_versions TO nexora_tenant_app USING ((EXISTS ( SELECT 1
    FROM public.custom_field_definitions definition
   WHERE ((definition."Id" = custom_field_versions."DefinitionId") AND (definition."BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint))))) WITH CHECK ((EXISTS ( SELECT 1
    FROM public.custom_field_definitions definition
   WHERE ((definition."Id" = custom_field_versions."DefinitionId") AND (definition."BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)))));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: customer_identifiers nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.customer_identifiers')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.customer_identifiers TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: customer_ownerships nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.customer_ownerships')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.customer_ownerships TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: customer_quote_sourcing_decisions nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.customer_quote_sourcing_decisions')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.customer_quote_sourcing_decisions TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: delivery_proof_lines nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.delivery_proof_lines')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.delivery_proof_lines TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: delivery_proofs nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.delivery_proofs')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.delivery_proofs TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: delivery_shortfall_decisions nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.delivery_shortfall_decisions')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.delivery_shortfall_decisions TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: document_corpora nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.document_corpora')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.document_corpora TO nexora_tenant_app USING ((business_unit_id = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK ((business_unit_id = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: document_pages nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.document_pages')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.document_pages TO nexora_tenant_app USING ((business_unit_id = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK ((business_unit_id = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: document_regions nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.document_regions')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.document_regions TO nexora_tenant_app USING ((business_unit_id = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK ((business_unit_id = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: evidence_retention_policies nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.evidence_retention_policies')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.evidence_retention_policies TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: extraction_dead_letter_events nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.extraction_dead_letter_events')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.extraction_dead_letter_events TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: extraction_runs nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.extraction_runs')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.extraction_runs TO nexora_tenant_app USING ((business_unit_id = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK ((business_unit_id = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: field_evidence nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.field_evidence')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.field_evidence TO nexora_tenant_app USING ((business_unit_id = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK ((business_unit_id = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: follow_up_tasks nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.follow_up_tasks')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.follow_up_tasks TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: follow_up_transition_events nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.follow_up_transition_events')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.follow_up_transition_events TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: goods_receipt_lines nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.goods_receipt_lines')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.goods_receipt_lines TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: goods_receipts nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.goods_receipts')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.goods_receipts TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: governed_artifact_events nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.governed_artifact_events')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.governed_artifact_events TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: governed_artifact_versions nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.governed_artifact_versions')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.governed_artifact_versions TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: governed_artifacts nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.governed_artifacts')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.governed_artifacts TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: human_action_events nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.human_action_events')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.human_action_events TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: human_action_items nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.human_action_items')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.human_action_items TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: inbound_logistics_policies nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.inbound_logistics_policies')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.inbound_logistics_policies TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: incoming_inventory nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.incoming_inventory')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.incoming_inventory TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: inventory_movements nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.inventory_movements')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.inventory_movements TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: inventory_reorder_alerts nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.inventory_reorder_alerts')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.inventory_reorder_alerts TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: lead_assignments nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.lead_assignments')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.lead_assignments TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: lead_customer_match_candidates nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.lead_customer_match_candidates')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.lead_customer_match_candidates TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: lead_line_commercial_resolutions nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.lead_line_commercial_resolutions')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.lead_line_commercial_resolutions TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: lead_routing_decisions nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.lead_routing_decisions')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.lead_routing_decisions TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: learning_governance_events nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.learning_governance_events')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.learning_governance_events TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: lifecycle_outbox_messages nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.lifecycle_outbox_messages')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.lifecycle_outbox_messages TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: material_lot_certificates nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.material_lot_certificates')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.material_lot_certificates TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: material_lot_consumptions nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.material_lot_consumptions')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.material_lot_consumptions TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: material_lots nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.material_lots')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.material_lots TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: ports_of_entry nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.ports_of_entry')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.ports_of_entry TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: procurement_callback_receipts nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.procurement_callback_receipts')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.procurement_callback_receipts TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: procurement_events nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.procurement_events')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.procurement_events TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: procurement_handoffs nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.procurement_handoffs')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.procurement_handoffs TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: procurement_outbox nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.procurement_outbox')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.procurement_outbox TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: product_aliases nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.product_aliases')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.product_aliases TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: product_supersessions nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.product_supersessions')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.product_supersessions TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: quote_delivery_requests nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.quote_delivery_requests')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.quote_delivery_requests TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: sales_coaching_acknowledgements nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.sales_coaching_acknowledgements')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.sales_coaching_acknowledgements TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: sales_contributions nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.sales_contributions')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.sales_contributions TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: sales_rep_profiles nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.sales_rep_profiles')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.sales_rep_profiles TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: sales_team_memberships nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.sales_team_memberships')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.sales_team_memberships TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: setUOM nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public."setUOM"')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public."setUOM" TO nexora_tenant_app USING (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitID" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: source_document_occurrences nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.source_document_occurrences')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.source_document_occurrences TO nexora_tenant_app USING ((business_unit_id = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK ((business_unit_id = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: source_documents nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.source_documents')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.source_documents TO nexora_tenant_app USING ((business_unit_id = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK ((business_unit_id = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: sourcing_case_candidates nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.sourcing_case_candidates')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.sourcing_case_candidates TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: sourcing_cases nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.sourcing_cases')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.sourcing_cases TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: stock_reservations nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.stock_reservations')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.stock_reservations TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: supplier_negotiation_decisions nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.supplier_negotiation_decisions')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.supplier_negotiation_decisions TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: supplier_purchase_order_lines nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.supplier_purchase_order_lines')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.supplier_purchase_order_lines TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: supplier_purchase_orders nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.supplier_purchase_orders')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.supplier_purchase_orders TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: supplier_quote_field_evidence nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.supplier_quote_field_evidence')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.supplier_quote_field_evidence TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: supplier_quote_lines nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.supplier_quote_lines')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.supplier_quote_lines TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: supplier_quote_review_decisions nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.supplier_quote_review_decisions')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.supplier_quote_review_decisions TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: supplier_quote_revisions nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.supplier_quote_revisions')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.supplier_quote_revisions TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: supplier_quotes nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.supplier_quotes')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.supplier_quotes TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: supplier_shipment_lines nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.supplier_shipment_lines')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.supplier_shipment_lines TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: supplier_shipments nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.supplier_shipments')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.supplier_shipments TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: tenant_governance_audit_events nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.tenant_governance_audit_events')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.tenant_governance_audit_events TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: unassigned_work_items nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.unassigned_work_items')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.unassigned_work_items TO nexora_tenant_app USING (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK (("BusinessUnitId" = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --
 -- Name: validation_findings nexora_tenant_isolation; Type: POLICY; Schema: public; Owner: -
 --
 
+DO $nexora_idem$
+BEGIN
+-- No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.
+IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polname = 'nexora_tenant_isolation'
+      AND polrelid = to_regclass('public.validation_findings')
+) THEN
 CREATE POLICY nexora_tenant_isolation ON public.validation_findings TO nexora_tenant_app USING ((business_unit_id = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint)) WITH CHECK ((business_unit_id = (NULLIF(current_setting('nexora.business_unit_id'::text, true), ''::text))::bigint));
+END IF;
+END
+$nexora_idem$;
+
 
 
 --

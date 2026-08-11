@@ -56,6 +56,33 @@ public sealed class TenantPersonalDataEraser(
 
     internal const string ErasedName = "Erased";
 
+    /// <summary>
+    /// Refuses to certify an erasure that did not fully happen.
+    ///
+    /// <para>Every write here was a per-id <c>ExecuteUpdateAsync</c> whose returned row count was
+    /// discarded, and every <see cref="TenantErasureTarget"/> then reported the count of rows
+    /// SELECTED. Those two numbers agree right up until they do not: a row deleted or moved out of
+    /// the business unit between the read and the write, or a grant / row-level-security asymmetry
+    /// on a table reached only through a parent (<c>platform."ProvisioningDrafts"</c> has no tenant
+    /// column of its own), silently updates nothing. The operator still receives a document saying
+    /// N identities were replaced — which is what a GDPR Art. 17 response is, in front of a
+    /// regulator.</para>
+    ///
+    /// <para>This throws rather than logs, deliberately, and it throws BEFORE
+    /// <c>SaveChangesAsync</c> and the caller's commit, so a shortfall rolls the whole erasure back
+    /// and leaves a state that can be retried. The same choice <c>TenantPurgeExecutor</c> made: an
+    /// incomplete destructive operation must fail loudly, never report a total it cannot prove.</para>
+    /// </summary>
+    private static void AssertCompleteErasure(string target, int selected, int written)
+    {
+        if (written >= selected) return;
+        throw new InvalidOperationException(
+            $"Tenant personal-data erasure REFUSED and rolled back: {selected - written} of {selected} "
+            + $"{target} row(s) were selected for erasure but not rewritten, so this erasure cannot be "
+            + "certified. Re-run it once the cause is understood — the usual ones are a concurrent "
+            + "delete and a missing UPDATE grant or row-level-security policy on the target table.");
+    }
+
     public async Task<IReadOnlyList<TenantErasureTarget>> EraseAsync(
         Tenant tenant, long? businessUnitId, CancellationToken cancellationToken)
     {
@@ -98,6 +125,7 @@ public sealed class TenantPersonalDataEraser(
             .ToListAsync(cancellationToken);
 
         var erasedOn = DateTime.UtcNow;
+        var erased = 0;
         foreach (var id in userIds)
         {
             // A real BCrypt hash of a discarded random value: unusable by construction, and it
@@ -106,7 +134,7 @@ public sealed class TenantPersonalDataEraser(
             // throws on one, turning every subsequent login attempt into a 500.
             var unusable = BCrypt.Net.BCrypt.HashPassword(Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N"));
 
-            await context.Users.IgnoreQueryFilters()
+            erased += await context.Users.IgnoreQueryFilters()
                 .Where(u => u.Id == id)
                 .ExecuteUpdateAsync(setters => setters
                     .SetProperty(u => u.FirstName, ErasedName)
@@ -127,8 +155,14 @@ public sealed class TenantPersonalDataEraser(
                     cancellationToken);
         }
 
+        // COUNT WHAT WAS WRITTEN, not what was selected. This is the certificate of a GDPR
+        // Art. 17 response: reporting the SELECT count means a row that moved out of the business
+        // unit, was deleted concurrently, or was refused by a grant or RLS asymmetry between the
+        // read and the write is still certified as erased. `erased` is the number of rows the
+        // database confirms it rewrote, and Assert below refuses to certify a shortfall.
+        AssertCompleteErasure(nameof(User), userIds.Count, erased);
         return new TenantErasureTarget(
-            nameof(User), userIds.Count,
+            nameof(User), erased,
             "Names, email addresses, avatars, time zones and regions replaced; credentials made "
             + "unusable and the accounts deactivated. The rows survive because leads, quotes and "
             + "approvals point at them.");
@@ -148,16 +182,18 @@ public sealed class TenantPersonalDataEraser(
             .Select(i => i.Id)
             .ToListAsync(cancellationToken);
 
+        var erased = 0;
         foreach (var id in invitationIds)
-            await context.TenantAdminInvitations
+            erased += await context.TenantAdminInvitations
                 .Where(i => i.Id == id)
                 .ExecuteUpdateAsync(setters => setters
                     .SetProperty(i => i.Email, $"erased-{id}@{ErasedEmailDomain}")
                     .SetProperty(i => i.RedeemedFromIp, (string?)null),
                     cancellationToken);
 
+        AssertCompleteErasure(nameof(TenantAdminInvitation), invitationIds.Count, erased);
         return new TenantErasureTarget(
-            nameof(TenantAdminInvitation), invitationIds.Count,
+            nameof(TenantAdminInvitation), erased,
             "Recipient addresses and redemption IPs replaced. Issue, redemption and revocation "
             + "timestamps are retained: they evidence how tenant access was granted.");
     }
@@ -196,6 +232,7 @@ public sealed class TenantPersonalDataEraser(
             .Select(e => e.Id)
             .ToListAsync(cancellationToken);
 
+        var executionsErased = 0;
         foreach (var id in executionIds)
         {
             // Same construction as the user credential above: a real BCrypt hash of a discarded
@@ -204,7 +241,7 @@ public sealed class TenantPersonalDataEraser(
             var unusable = BCrypt.Net.BCrypt.HashPassword(
                 Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N"));
 
-            await context.Set<ProvisioningExecution>()
+            executionsErased += await context.Set<ProvisioningExecution>()
                 .Where(e => e.Id == id)
                 .ExecuteUpdateAsync(setters => setters
                     .SetProperty(e => e.AdminEmail, $"erased-{id}@{ErasedEmailDomain}")
@@ -222,20 +259,23 @@ public sealed class TenantPersonalDataEraser(
                 .Select(d => d.Id)
                 .ToListAsync(cancellationToken);
 
+        var draftsErased = 0;
         foreach (var id in draftIds)
-            await context.Set<ProvisioningDraft>()
+            draftsErased += await context.Set<ProvisioningDraft>()
                 .Where(d => d.Id == id)
                 .ExecuteUpdateAsync(setters => setters
                     .SetProperty(d => d.Payload, tombstone),
                     cancellationToken);
 
+        AssertCompleteErasure(nameof(ProvisioningExecution), executionIds.Count, executionsErased);
+        AssertCompleteErasure(nameof(ProvisioningDraft), draftIds.Count, draftsErased);
         return
         [
-            new TenantErasureTarget(nameof(ProvisioningExecution), executionIds.Count,
+            new TenantErasureTarget(nameof(ProvisioningExecution), executionsErased,
                 "The founding administrator's address and the submitted request snapshot replaced; "
                 + "the provisioning attempt's own timeline and outcome are retained in the platform "
                 + "audit trail."),
-            new TenantErasureTarget(nameof(ProvisioningDraft), draftIds.Count,
+            new TenantErasureTarget(nameof(ProvisioningDraft), draftsErased,
                 "Submitted drafts' payloads replaced. A draft that was never submitted belongs to "
                 + "the operator drafting it, not to this tenant, and is untouched.")
         ];

@@ -149,6 +149,7 @@ export default function TenantDetailPage() {
         <OverviewTab
           tenant={tenant}
           offboarding={offboardingQuery.data}
+          offboardingUnavailable={offboardingQuery.isError}
           onOpenTab={openTab}
           canViewSupport={permissions.canAdministerTenants}
         />

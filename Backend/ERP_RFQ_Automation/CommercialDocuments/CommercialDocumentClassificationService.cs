@@ -76,24 +76,41 @@ public sealed class EfCommercialDocumentClassificationStore(ErpRfqAutomationCont
 
     public Task<CommercialDocumentInboxRecord?> FindInboxAsync(long businessUnitId, Guid id,
         CancellationToken cancellationToken) =>
-        InboxQuery(businessUnitId).SingleOrDefaultAsync(row => row.Classification.Id == id, cancellationToken);
+        Project(ClassificationQuery(businessUnitId).Where(row => row.Id == id))
+            .SingleOrDefaultAsync(cancellationToken);
 
+    /// <summary>
+    /// Pages the commercial-document inbox.
+    ///
+    /// <para><b>The defect this shape closes.</b> Filtering, ordering and paging used to be applied
+    /// to the PROJECTED <c>CommercialDocumentInboxRecord</c>. EF Core can see through a constructor
+    /// projection for a scalar predicate, but not for an ordering key reached through the entity the
+    /// record holds: <c>OrderByDescending(row =&gt; row.Classification.UpdatedOn)</c> failed to
+    /// translate and <c>GET /api/commercial-inbox/classifications</c> returned 500 on every call —
+    /// including the unfiltered first page, which is what the inbox screen opens with.</para>
+    ///
+    /// <para>The fix keeps the whole query server-side rather than pulling it client-side with
+    /// <c>AsEnumerable()</c>: predicate, ORDER BY and OFFSET/LIMIT are expressed against the
+    /// classification entity, and the record projection — the part that needs the joined source
+    /// document — is applied last, to the single page. Ordering an inbox in memory would have meant
+    /// loading every classification in the tenant to return twenty-five rows.</para>
+    /// </summary>
     public async Task<(IReadOnlyList<CommercialDocumentInboxRecord> Rows, int TotalCount)> SearchInboxAsync(
         long businessUnitId, CommercialDocumentInboxQuery query, CancellationToken cancellationToken)
     {
-        var rows = InboxQuery(businessUnitId);
+        var rows = ClassificationQuery(businessUnitId);
         if (query.DocumentType.HasValue)
-            rows = rows.Where(row => row.Classification.DocumentType == query.DocumentType.Value);
+            rows = rows.Where(row => row.DocumentType == query.DocumentType.Value);
         if (query.ReviewStatus.HasValue)
-            rows = rows.Where(row => row.Classification.ReviewStatus == query.ReviewStatus.Value);
+            rows = rows.Where(row => row.ReviewStatus == query.ReviewStatus.Value);
         if (query.ProjectionState.HasValue)
             rows = ApplyProjectionFilter(rows, query.ProjectionState.Value);
 
         var totalCount = await rows.CountAsync(cancellationToken);
-        var page = await rows.OrderByDescending(row => row.Classification.UpdatedOn)
-            .ThenByDescending(row => row.Classification.CreatedOn)
-            .Skip((query.Page - 1) * query.PageSize)
-            .Take(query.PageSize)
+        var page = await Project(rows.OrderByDescending(row => row.UpdatedOn)
+                .ThenByDescending(row => row.CreatedOn)
+                .Skip((query.Page - 1) * query.PageSize)
+                .Take(query.PageSize))
             .ToListAsync(cancellationToken);
         return (page, totalCount);
     }
@@ -123,55 +140,62 @@ public sealed class EfCommercialDocumentClassificationStore(ErpRfqAutomationCont
         return invalid;
     }
 
-    private IQueryable<CommercialDocumentInboxRecord> InboxQuery(long businessUnitId) =>
+    /// <summary>The tenant's classifications, unprojected — the shape every filter and ORDER BY is
+    /// expressed against, so nothing has to translate through a constructor projection.</summary>
+    private IQueryable<CommercialDocumentClassification> ClassificationQuery(long businessUnitId) =>
         context.Set<CommercialDocumentClassification>().AsNoTracking()
-            .Where(row => row.BusinessUnitId == businessUnitId)
-            .Select(row => new CommercialDocumentInboxRecord(row,
-                row.SourceDocument.OriginalFileName,
-                row.SourceDocument.DetectedMimeType,
-                row.SourceDocument.SecurityStatus,
-                row.SourceDocument.ProcessingStatus));
+            .Where(row => row.BusinessUnitId == businessUnitId);
 
-    private static IQueryable<CommercialDocumentInboxRecord> ApplyProjectionFilter(
-        IQueryable<CommercialDocumentInboxRecord> rows, SupplierQuoteProjectionState state) => state switch
+    /// <summary>Applied LAST, to an already ordered and paged query, so the join onto the source
+    /// document is the only thing the projection adds.</summary>
+    private static IQueryable<CommercialDocumentInboxRecord> Project(
+        IQueryable<CommercialDocumentClassification> rows) =>
+        rows.Select(row => new CommercialDocumentInboxRecord(row,
+            row.SourceDocument.OriginalFileName,
+            row.SourceDocument.DetectedMimeType,
+            row.SourceDocument.SecurityStatus,
+            row.SourceDocument.ProcessingStatus));
+
+    private static IQueryable<CommercialDocumentClassification> ApplyProjectionFilter(
+        IQueryable<CommercialDocumentClassification> rows, SupplierQuoteProjectionState state) => state switch
     {
         SupplierQuoteProjectionState.NotApplicable => rows.Where(row =>
-            row.Classification.DocumentType != CommercialDocumentType.SupplierQuote &&
-            row.Classification.DocumentType != CommercialDocumentType.SupplierQuoteRevision),
+            row.DocumentType != CommercialDocumentType.SupplierQuote &&
+            row.DocumentType != CommercialDocumentType.SupplierQuoteRevision),
         SupplierQuoteProjectionState.ReviewRequired => rows.Where(row =>
-            (row.Classification.DocumentType == CommercialDocumentType.SupplierQuote ||
-             row.Classification.DocumentType == CommercialDocumentType.SupplierQuoteRevision) &&
-            row.Classification.ReviewStatus == CommercialDocumentReviewStatus.ReviewRequired),
+            (row.DocumentType == CommercialDocumentType.SupplierQuote ||
+             row.DocumentType == CommercialDocumentType.SupplierQuoteRevision) &&
+            row.ReviewStatus == CommercialDocumentReviewStatus.ReviewRequired),
         SupplierQuoteProjectionState.Rejected => rows.Where(row =>
-            (row.Classification.DocumentType == CommercialDocumentType.SupplierQuote ||
-             row.Classification.DocumentType == CommercialDocumentType.SupplierQuoteRevision) &&
-            row.Classification.ReviewStatus == CommercialDocumentReviewStatus.Rejected),
+            (row.DocumentType == CommercialDocumentType.SupplierQuote ||
+             row.DocumentType == CommercialDocumentType.SupplierQuoteRevision) &&
+            row.ReviewStatus == CommercialDocumentReviewStatus.Rejected),
         SupplierQuoteProjectionState.MissingSupplierRfqMatch => Projectable(rows).Where(row =>
-            row.Classification.SupplierRfqId == null),
+            row.SupplierRfqId == null),
         SupplierQuoteProjectionState.MissingSourcingCaseMatch => Projectable(rows).Where(row =>
-            row.Classification.SupplierRfqId != null && row.Classification.SourcingCaseId == null),
+            row.SupplierRfqId != null && row.SourcingCaseId == null),
         SupplierQuoteProjectionState.MissingPriorSupplierQuoteMatch => Projectable(rows).Where(row =>
-            row.Classification.DocumentType == CommercialDocumentType.SupplierQuoteRevision &&
-            row.Classification.SupplierRfqId != null && row.Classification.SourcingCaseId != null &&
-            row.Classification.SupplierQuoteId == null),
+            row.DocumentType == CommercialDocumentType.SupplierQuoteRevision &&
+            row.SupplierRfqId != null && row.SourcingCaseId != null &&
+            row.SupplierQuoteId == null),
         SupplierQuoteProjectionState.AlreadyProjected => Projectable(rows).Where(row =>
-            row.Classification.DocumentType == CommercialDocumentType.SupplierQuote &&
-            row.Classification.SupplierQuoteId != null),
+            row.DocumentType == CommercialDocumentType.SupplierQuote &&
+            row.SupplierQuoteId != null),
         SupplierQuoteProjectionState.Ready => Projectable(rows).Where(row =>
-            row.Classification.SupplierRfqId != null && row.Classification.SourcingCaseId != null &&
-            ((row.Classification.DocumentType == CommercialDocumentType.SupplierQuote &&
-              row.Classification.SupplierQuoteId == null) ||
-             (row.Classification.DocumentType == CommercialDocumentType.SupplierQuoteRevision &&
-              row.Classification.SupplierQuoteId != null))),
+            row.SupplierRfqId != null && row.SourcingCaseId != null &&
+            ((row.DocumentType == CommercialDocumentType.SupplierQuote &&
+              row.SupplierQuoteId == null) ||
+             (row.DocumentType == CommercialDocumentType.SupplierQuoteRevision &&
+              row.SupplierQuoteId != null))),
         _ => rows.Where(_ => false)
     };
 
-    private static IQueryable<CommercialDocumentInboxRecord> Projectable(
-        IQueryable<CommercialDocumentInboxRecord> rows) => rows.Where(row =>
-        (row.Classification.DocumentType == CommercialDocumentType.SupplierQuote ||
-         row.Classification.DocumentType == CommercialDocumentType.SupplierQuoteRevision) &&
-        row.Classification.ReviewStatus != CommercialDocumentReviewStatus.ReviewRequired &&
-        row.Classification.ReviewStatus != CommercialDocumentReviewStatus.Rejected);
+    private static IQueryable<CommercialDocumentClassification> Projectable(
+        IQueryable<CommercialDocumentClassification> rows) => rows.Where(row =>
+        (row.DocumentType == CommercialDocumentType.SupplierQuote ||
+         row.DocumentType == CommercialDocumentType.SupplierQuoteRevision) &&
+        row.ReviewStatus != CommercialDocumentReviewStatus.ReviewRequired &&
+        row.ReviewStatus != CommercialDocumentReviewStatus.Rejected);
 
     public async Task<CommercialDocumentClassification> AddAsync(
         CommercialDocumentClassification classification, CancellationToken cancellationToken)

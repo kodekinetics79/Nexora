@@ -392,28 +392,44 @@ namespace ERP_RFQ_Automation.Controllers
                     "Business Unit ID is required."));
             var approvedBy = User.Identity?.Name ?? "System";
 
-            using var transaction = await _context.Database.BeginTransactionAsync();
             var quoteDelivered = false;
             try
             {
-                var quoteId = await _repository.ApproveAsync(id, approvedBy, businessUnitId, request?.CustomerId);
-
-                // ARCH-10: the quote is generated and committed regardless of whether the
-                // notification email can be sent. A missing/failed email must NOT discard
-                // the approved quote (previously it rolled the whole approval back).
-                var quote = await _context.Quotes
-                    .Include(q => q.Rfq).ThenInclude(r => r.Lead)
-                    .Include(q => q.Customer)
-                    .FirstOrDefaultAsync(q => q.Id == quoteId);
-
-                string selectedEmail = (quote?.Customer?.ContactEmail ?? quote?.Rfq?.Lead?.Clientemail ?? "").Trim();
-                if (!string.IsNullOrWhiteSpace(request?.RecipientEmail)
-                    && !string.Equals(request.RecipientEmail.Trim(), selectedEmail, StringComparison.OrdinalIgnoreCase))
+                // The approval writes are wrapped in the CONFIGURED EXECUTION STRATEGY rather than
+                // in a transaction this action opens itself. Program.cs enables retry-on-failure, so
+                // NpgsqlRetryingExecutionStrategy is installed and rejects any user-initiated
+                // transaction outside its delegate — POST /api/Rfq/{id}/approve threw "does not
+                // support user-initiated transactions" on every PostgreSQL request.
+                //
+                // The email send is now OUTSIDE the transaction, where it always belonged. ARCH-10
+                // already required the quote to survive a failed send, and the previous shape held a
+                // database transaction open across an SMTP round trip to achieve the opposite.
+                var strategy = _context.Database.CreateExecutionStrategy();
+                var approval = await strategy.ExecuteAsync(async () =>
                 {
-                    await transaction.RollbackAsync();
+                    _context.ChangeTracker.Clear();
+                    await using var transaction = await _context.Database.BeginTransactionAsync();
+                    var id2 = await _repository.ApproveAsync(id, approvedBy, businessUnitId, request?.CustomerId);
+                    var quote = await _context.Quotes
+                        .Include(q => q.Rfq).ThenInclude(r => r.Lead)
+                        .Include(q => q.Customer)
+                        .FirstOrDefaultAsync(q => q.Id == id2);
+                    var email = (quote?.Customer?.ContactEmail ?? quote?.Rfq?.Lead?.Clientemail ?? "").Trim();
+                    // Checked inside the transaction so a mismatched recipient discards the approval
+                    // rather than leaving a quote nobody asked for; the rollback is the `using`'s.
+                    if (!string.IsNullOrWhiteSpace(request?.RecipientEmail)
+                        && !string.Equals(request.RecipientEmail.Trim(), email, StringComparison.OrdinalIgnoreCase))
+                        return (QuoteId: 0L, Email: string.Empty, RecipientMismatch: true);
+                    await transaction.CommitAsync();
+                    return (QuoteId: id2, Email: email, RecipientMismatch: false);
+                });
+
+                if (approval.RecipientMismatch)
                     return BadRequest(Problem(StatusCodes.Status400BadRequest, "RFQ not approved",
                         "The recipient must match the verified customer contact for this RFQ."));
-                }
+
+                var quoteId = approval.QuoteId;
+                var selectedEmail = approval.Email;
 
                 string? emailWarning = null;
                 if (!string.IsNullOrWhiteSpace(selectedEmail) && selectedEmail.Contains("@"))
@@ -482,8 +498,6 @@ namespace ERP_RFQ_Automation.Controllers
                     emailWarning = "Quote generated, but no recipient email was found — send it manually from the quote.";
                 }
 
-                await transaction.CommitAsync();
-                await transaction.DisposeAsync();
                 if (quoteDelivered)
                 {
                     var state = await _lifecycle.GetRfqStateAsync(businessUnitId, id, default);
@@ -495,19 +509,18 @@ namespace ERP_RFQ_Automation.Controllers
                 }
                 return Ok(new { message = "RFQ approved and Quote generated successfully", quoteId, emailWarning });
             }
+            // The transaction is disposed by the `using` inside the strategy delegate, which rolls
+            // back an uncommitted attempt on the way out — so these handlers only translate.
             catch (KeyNotFoundException ex)
             {
-                try { await transaction.RollbackAsync(); } catch { /* already rolled back */ }
                 return NotFound(Problem(StatusCodes.Status404NotFound, "RFQ not found", ex.Message));
             }
             catch (InvalidOperationException ex)
             {
-                try { await transaction.RollbackAsync(); } catch { /* already rolled back */ }
                 return Conflict(Problem(StatusCodes.Status409Conflict, "RFQ not approved", ex.Message));
             }
             catch (Exception ex)
             {
-                try { await transaction.RollbackAsync(); } catch { /* already rolled back */ }
                 return InternalError(ex, "RFQ approval failed.");
             }
         }

@@ -999,26 +999,44 @@ public sealed class BankReconciliationService(ErpRfqAutomationContext context) :
             ?? throw new KeyNotFoundException("Reconciliation run not found.");
     }
 
-    private async Task<T> InSerializableTransactionAsync<T>(Func<CancellationToken, Task<T>> action,
+    /// <summary>
+    /// The serialization-conflict retry loop, wrapped in the CONNECTION-fault execution strategy.
+    ///
+    /// <para>The two retries are different failures and both are needed. The loop below retries a
+    /// 40001/40P01 the database reports on a live connection; the strategy retries a dropped or
+    /// refused connection. Program.cs configures <c>EnableRetryOnFailure</c>, so
+    /// <c>NpgsqlRetryingExecutionStrategy</c> is installed and refuses any transaction opened
+    /// outside its delegate — without this wrapper every reconciliation write threw
+    /// <c>"does not support user-initiated transactions"</c> against PostgreSQL. The strategy owns
+    /// the outside, so a whole attempt (transaction, loop and all) is the retriable unit.</para>
+    /// </summary>
+    private Task<T> InSerializableTransactionAsync<T>(Func<CancellationToken, Task<T>> action,
         CancellationToken cancellationToken)
     {
-        for (var attempt = 1; ; attempt++)
+        var strategy = _context.Database.CreateExecutionStrategy();
+        return strategy.ExecuteAsync(async () =>
         {
-            await using var transaction = await _context.Database.BeginTransactionAsync(IsolationLevel.Serializable,
-                cancellationToken);
-            try
+            // A strategy retry re-runs this delegate on the SAME DbContext, so anything the failed
+            // attempt tracked has to go before the next one reads.
+            _context.ChangeTracker.Clear();
+            for (var attempt = 1; ; attempt++)
             {
-                var result = await action(cancellationToken);
-                await transaction.CommitAsync(cancellationToken);
-                return result;
+                await using var transaction = await _context.Database.BeginTransactionAsync(
+                    IsolationLevel.Serializable, cancellationToken);
+                try
+                {
+                    var result = await action(cancellationToken);
+                    await transaction.CommitAsync(cancellationToken);
+                    return result;
+                }
+                catch (Exception ex) when (attempt < 3 && IsRetryable(ex))
+                {
+                    await transaction.RollbackAsync(cancellationToken);
+                    _context.ChangeTracker.Clear();
+                    await Task.Delay(TimeSpan.FromMilliseconds(25 * attempt), cancellationToken);
+                }
             }
-            catch (Exception ex) when (attempt < 3 && IsRetryable(ex))
-            {
-                await transaction.RollbackAsync(cancellationToken);
-                _context.ChangeTracker.Clear();
-                await Task.Delay(TimeSpan.FromMilliseconds(25 * attempt), cancellationToken);
-            }
-        }
+        });
     }
 
     private static bool IsRetryable(Exception exception)

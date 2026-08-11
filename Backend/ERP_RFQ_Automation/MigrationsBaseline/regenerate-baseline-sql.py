@@ -39,9 +39,55 @@ before it can run inside an EF migration:
     creates that table before the migration runs
   * drop COMMENT ON EXTENSION - set automatically by CREATE EXTENSION, and requires
     extension ownership that a managed-Postgres migration role may not have
+  * make every statement IDEMPOTENT (see below)
 
 Nothing else is rewritten. In particular no GRANT, POLICY, TRIGGER, RLS flag or
-CHECK constraint is touched.
+CHECK constraint is touched: idempotency is added by GUARDING a statement, never by
+changing what the statement does.
+
+IDEMPOTENCY - WHY, AND WHAT THE GUARD IS
+    A pg_dump replay assumes an empty database. The deployed database is not empty:
+    Render was serving a container 40 commits old, so production is still at the
+    PRE-squash head (134 __EFMigrationsHistory rows, full schema materialised) and
+    does NOT have 20260811033109_SquashedSchemaBaseline in its history. Program.cs
+    calls MigrateAsync() uncaught before the app serves, so EF applies the baseline
+    to a database that already has every object in it, the first bare CREATE raises
+    42P06/42P07, the process dies at boot, the deploy is marked failed and the old
+    container keeps serving. That is a deadlock the deploy cannot leave on its own.
+
+    MigrationsBaseline/stamp-existing-database.sql fixes it by rewriting the history
+    instead, and is still the cleaner route - but it needs a human holding production
+    credentials to run it at exactly the right moment. Guarding the baseline removes
+    that dependency: the deploy heals itself.
+
+    Every statement therefore ends up in one of three states, and `validate()` below
+    FAILS THE GENERATOR if a statement is in none of them:
+
+      already idempotent   SET LOCAL, GRANT, REVOKE, CREATE EXTENSION IF NOT EXISTS,
+                           ALTER TABLE ... {ENABLE,FORCE} ROW LEVEL SECURITY,
+                           ALTER TABLE ... ENABLE ALWAYS TRIGGER, INSERT ... ON
+                           CONFLICT DO NOTHING, DROP ... IF EXISTS
+      native IF NOT EXISTS CREATE TABLE / SEQUENCE / INDEX / SCHEMA, and
+                           CREATE OR REPLACE FUNCTION
+      catalogue guard      objects PostgreSQL 16 gives no IF NOT EXISTS form -
+                           constraints, foreign keys, triggers, policies and identity
+                           columns - wrapped in
+                               DO $nexora_idem$ BEGIN
+                                   IF NOT EXISTS (SELECT 1 FROM pg_catalog...) THEN
+                                       <the statement, byte for byte>;
+                                   END IF;
+                               END $nexora_idem$;
+
+    The failure mode to fear is the opposite of the one that broke the deploy: a
+    guard that silently SKIPS an object that should have been created leaves a table
+    with no RLS policy and no error. Two things hold that line. The guards key on the
+    exact identity of the object (conname+conrelid, tgname+tgrelid, polname+polrelid,
+    attname+attrelid) so a guard can only skip the object it names; and the generator
+    refuses to emit a statement it does not recognise, so a new object type cannot
+    slip through unguarded and unnoticed. The counts are asserted downstream, by
+    SquashedBaselineIdempotencyPostgreSqlTests: 232 policies, 110 FORCE, 300 triggers,
+    142 functions, 2 EXCLUDE constraints, after applying the baseline to a database
+    that already had all of them.
 """
 import re
 import sys
@@ -165,10 +211,28 @@ TOMBSTONE_SQL = """
 -- Recreate the gap so "OutputTaxRatePercent" and "SupplierInputTaxRecoverablePercent"
 -- land on attnum 11 and 12 as they do in DB_A. Purely an ordinal artefact - it has
 -- no effect on any query, since EF always names its columns.
-ALTER TABLE public."CommercialMatchingPolicies" ADD COLUMN "__squashed_baseline_ordinal_gap" boolean;
-ALTER TABLE public."CommercialMatchingPolicies" DROP COLUMN "__squashed_baseline_ordinal_gap";
-ALTER TABLE public."CommercialMatchingPolicies" ADD COLUMN "OutputTaxRatePercent" numeric(9,4) DEFAULT 15.0;
-ALTER TABLE public."CommercialMatchingPolicies" ADD COLUMN "SupplierInputTaxRecoverablePercent" numeric(9,4) DEFAULT 100.0 NOT NULL;
+--
+-- The whole block is guarded as ONE unit, on the presence of the first of the two
+-- columns, and NOT column-by-column with ADD COLUMN IF NOT EXISTS. Adding a column
+-- and dropping it again is not a no-op on a database that already has this table:
+-- it leaves a SECOND pg_attribute tombstone behind and pushes every later column's
+-- attnum along by one. On a database that already has the schema this block must do
+-- literally nothing.
+DO $nexora_tombstone$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_attribute
+        WHERE attrelid = to_regclass('public."CommercialMatchingPolicies"')
+          AND attname = 'OutputTaxRatePercent'
+          AND NOT attisdropped
+    ) THEN
+        ALTER TABLE public."CommercialMatchingPolicies" ADD COLUMN "__squashed_baseline_ordinal_gap" boolean;
+        ALTER TABLE public."CommercialMatchingPolicies" DROP COLUMN "__squashed_baseline_ordinal_gap";
+        ALTER TABLE public."CommercialMatchingPolicies" ADD COLUMN "OutputTaxRatePercent" numeric(9,4) DEFAULT 15.0;
+        ALTER TABLE public."CommercialMatchingPolicies" ADD COLUMN "SupplierInputTaxRecoverablePercent" numeric(9,4) DEFAULT 100.0 NOT NULL;
+    END IF;
+END
+$nexora_tombstone$;
 """
 
 
@@ -340,6 +404,249 @@ def apply_tombstone(body, stats):
     return out
 
 
+# =============================================================================
+# Idempotency
+# =============================================================================
+
+GUARD_TAG = '$nexora_idem$'
+
+DOLLAR_TAG_RE = re.compile(r'\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$')
+
+
+def iter_statements(text):
+    """Split SQL into top-level statements.
+
+    Yields the slices of `text` that, concatenated in order, reproduce `text`
+    exactly - so a rewriter that returns a statement unchanged is a no-op on the
+    file. A statement carries the comments and blank lines that precede it, which
+    is what keeps pg_dump's `-- Name: ...; Type: ...` header attached to the object
+    it documents.
+
+    Single quotes, double-quoted identifiers, dollar-quoted bodies ($$, $_$,
+    $nexora_tombstone$) and -- line comments are all skipped over, so a semicolon
+    inside a function body or inside a CHECK expression's string literal does not
+    end a statement.
+    """
+    i = 0
+    n = len(text)
+    start = 0
+    while i < n:
+        ch = text[i]
+        if ch == '-' and text.startswith('--', i):
+            j = text.find('\n', i)
+            i = n if j < 0 else j + 1
+            continue
+        if ch == "'":
+            i += 1
+            while i < n:
+                if text[i] == "'":
+                    if text.startswith("''", i):
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            continue
+        if ch == '"':
+            i += 1
+            while i < n and text[i] != '"':
+                i += 1
+            i += 1
+            continue
+        if ch == '$':
+            m = DOLLAR_TAG_RE.match(text, i)
+            if m:
+                tag = m.group(0)
+                j = text.find(tag, i + len(tag))
+                if j < 0:
+                    raise SystemExit(f'unterminated dollar-quoted string opened at offset {i}')
+                i = j + len(tag)
+                continue
+        if ch == ';':
+            yield start, i + 1
+            start = i + 1
+        i += 1
+    if start < n:
+        yield start, n
+
+
+def split_lead(chunk):
+    """Separate the leading comments/whitespace from the SQL of one statement."""
+    i = 0
+    n = len(chunk)
+    while i < n:
+        if chunk[i].isspace():
+            i += 1
+            continue
+        if chunk.startswith('--', i):
+            j = chunk.find('\n', i)
+            i = n if j < 0 else j + 1
+            continue
+        break
+    return chunk[:i], chunk[i:]
+
+
+def literal(name):
+    """A quoted-identifier's text as a SQL string literal."""
+    return "'" + name.replace('"', '').replace("'", "''") + "'"
+
+
+def regclass(qualified):
+    """`public."Foo"` -> `to_regclass('public."Foo"')`.
+
+    to_regclass and not `::regclass`: a missing table yields NULL, the guard then
+    matches nothing, the statement runs and PostgreSQL raises its own readable
+    "relation does not exist". A ::regclass cast would raise 42P01 from inside the
+    guard instead and name the wrong culprit.
+    """
+    return "to_regclass('" + qualified.replace("'", "''") + "')"
+
+
+def guard(lead, sql, condition, reason):
+    """Wrap one statement in an existence check, byte for byte.
+
+    The statement is NOT re-indented. Re-indenting would be safe for everything the
+    dump currently emits, but it stops being safe the moment a CHECK expression or a
+    policy predicate carries a multi-line string literal, and this file is generated
+    from whatever the catalogue holds next year too.
+    """
+    if GUARD_TAG in sql:
+        raise SystemExit(f'guard tag collides with statement text: {sql[:120]!r}')
+    return (f'{lead}DO {GUARD_TAG}\nBEGIN\n'
+            f'-- {reason}\nIF NOT EXISTS (\n    {condition}\n) THEN\n'
+            f'{sql}\n'
+            f'END IF;\nEND\n{GUARD_TAG};\n')
+
+
+ADD_CONSTRAINT_RE = re.compile(
+    r'^ALTER TABLE (?:ONLY )?(?P<table>\S+)\s+ADD CONSTRAINT (?P<name>"[^"]+"|\S+) ', re.S)
+CREATE_TRIGGER_RE = re.compile(
+    r'^CREATE (?:CONSTRAINT )?TRIGGER (?P<name>"[^"]+"|\S+)\b.*?\sON (?P<table>\S+?)(?=[\s(])', re.S)
+CREATE_POLICY_RE = re.compile(
+    r'^CREATE POLICY (?P<name>"[^"]+"|\S+) ON (?P<table>\S+?)(?=[\s;])', re.S)
+ADD_IDENTITY_RE = re.compile(
+    r'^ALTER TABLE (?:ONLY )?(?P<table>\S+) ALTER COLUMN (?P<column>"[^"]+"|\S+) ADD GENERATED ', re.S)
+
+
+def make_idempotent(text, stats):
+    """Rewrite one generated file so replaying it onto a database that already has
+    the schema changes nothing and raises nothing."""
+    out = []
+    for start, end in iter_statements(text):
+        lead, sql = split_lead(text[start:end])
+        stripped = sql.strip()
+        if not stripped:
+            out.append(text[start:end])
+            continue
+
+        # --- native IF NOT EXISTS / OR REPLACE forms --------------------------
+        if stripped.startswith('CREATE SCHEMA '):
+            sql = sql.replace('CREATE SCHEMA ', 'CREATE SCHEMA IF NOT EXISTS ', 1)
+            stats['idem_schema'] += 1
+        elif stripped.startswith('CREATE TABLE '):
+            sql = sql.replace('CREATE TABLE ', 'CREATE TABLE IF NOT EXISTS ', 1)
+            stats['idem_table'] += 1
+        elif stripped.startswith('CREATE SEQUENCE '):
+            sql = sql.replace('CREATE SEQUENCE ', 'CREATE SEQUENCE IF NOT EXISTS ', 1)
+            stats['idem_sequence'] += 1
+        elif stripped.startswith('CREATE FUNCTION '):
+            # OR REPLACE rather than a catalogue guard, deliberately. A guard would
+            # leave a drifted body in place; OR REPLACE restores the body the 134
+            # migrations produced. It keeps the OID and the ACL, so 09_privileges.sql
+            # still lands on the same function, and pg_dump output is unchanged.
+            sql = sql.replace('CREATE FUNCTION ', 'CREATE OR REPLACE FUNCTION ', 1)
+            stats['idem_function'] += 1
+        elif stripped.startswith('CREATE INDEX ') or stripped.startswith('CREATE UNIQUE INDEX '):
+            sql = sql.replace('INDEX ', 'INDEX IF NOT EXISTS ', 1)
+            stats['idem_index'] += 1
+
+        # --- catalogue guards: no IF NOT EXISTS form exists in PostgreSQL 16 --
+        elif ADD_CONSTRAINT_RE.match(stripped):
+            m = ADD_CONSTRAINT_RE.match(stripped)
+            sql = guard(
+                '', sql.rstrip('\n'),
+                f'SELECT 1 FROM pg_constraint\n'
+                f'    WHERE conname = {literal(m.group("name"))}\n'
+                f'      AND conrelid = {regclass(m.group("table"))}',
+                'No ADD CONSTRAINT IF NOT EXISTS in PostgreSQL: guarded on pg_constraint.')
+            stats['idem_constraint'] += 1
+        elif CREATE_TRIGGER_RE.match(stripped):
+            m = CREATE_TRIGGER_RE.match(stripped)
+            sql = guard(
+                '', sql.rstrip('\n'),
+                f'SELECT 1 FROM pg_trigger\n'
+                f'    WHERE tgname = {literal(m.group("name"))}\n'
+                f'      AND tgrelid = {regclass(m.group("table"))}\n'
+                f'      AND NOT tgisinternal',
+                'No CREATE TRIGGER IF NOT EXISTS in PostgreSQL: guarded on pg_trigger.')
+            stats['idem_trigger'] += 1
+        elif CREATE_POLICY_RE.match(stripped):
+            m = CREATE_POLICY_RE.match(stripped)
+            sql = guard(
+                '', sql.rstrip('\n'),
+                f'SELECT 1 FROM pg_policy\n'
+                f'    WHERE polname = {literal(m.group("name"))}\n'
+                f'      AND polrelid = {regclass(m.group("table"))}',
+                'No CREATE POLICY IF NOT EXISTS in PostgreSQL: guarded on pg_policy.')
+            stats['idem_policy'] += 1
+        elif ADD_IDENTITY_RE.match(stripped):
+            m = ADD_IDENTITY_RE.match(stripped)
+            sql = guard(
+                '', sql.rstrip('\n'),
+                f'SELECT 1 FROM pg_attribute\n'
+                f'    WHERE attrelid = {regclass(m.group("table"))}\n'
+                f'      AND attname = {literal(m.group("column"))}\n'
+                f"      AND attidentity <> ''",
+                'No ADD GENERATED ... IF NOT EXISTS in PostgreSQL: guarded on pg_attribute.')
+            stats['idem_identity'] += 1
+
+        out.append(lead + sql)
+    return ''.join(out)
+
+
+# Statements that are safe to replay as they stand. Anything a generated file
+# contains that matches NONE of these, and none of the guarded forms above, aborts
+# the generator: an unrecognised object type is exactly how a non-idempotent CREATE
+# would slip back in unnoticed.
+IDEMPOTENT_AS_IS = [
+    re.compile(r'^SET LOCAL '),
+    re.compile(r'^SELECT pg_catalog\.set_config\('),
+    re.compile(r'^SELECT setval\('),
+    re.compile(r'^CREATE EXTENSION IF NOT EXISTS '),
+    re.compile(r'^CREATE SCHEMA IF NOT EXISTS '),
+    re.compile(r'^CREATE TABLE IF NOT EXISTS '),
+    re.compile(r'^CREATE SEQUENCE IF NOT EXISTS '),
+    re.compile(r'^CREATE OR REPLACE FUNCTION '),
+    re.compile(r'^CREATE (?:UNIQUE )?INDEX IF NOT EXISTS '),
+    re.compile(r'^ALTER TABLE (?:ONLY )?\S+ (?:ENABLE|FORCE|NO FORCE|DISABLE) ROW LEVEL SECURITY;$', re.S),
+    re.compile(r'^ALTER TABLE (?:ONLY )?\S+ ENABLE (?:ALWAYS|REPLICA) TRIGGER ', re.S),
+    re.compile(r'^GRANT '),
+    re.compile(r'^REVOKE '),
+    re.compile(r'^INSERT INTO .*ON CONFLICT .*DO NOTHING;$', re.S),
+    re.compile(r'^DO \$'),
+    re.compile(r'^DROP \S+ IF EXISTS ', re.S),
+]
+
+
+def validate(fname, text):
+    """Fail the generator if any statement in a produced file is not idempotent."""
+    offenders = []
+    for start, end in iter_statements(text):
+        _, sql = split_lead(text[start:end])
+        stripped = sql.strip()
+        if not stripped:
+            continue
+        if not any(rx.match(stripped) for rx in IDEMPOTENT_AS_IS):
+            offenders.append(stripped.split('\n')[0][:140])
+    if offenders:
+        listing = '\n  '.join(offenders[:20])
+        raise SystemExit(
+            f'{fname}: {len(offenders)} statement(s) are not idempotent and are not '
+            f'guarded. Replaying this file onto the deployed database would abort the '
+            f'migration and take the boot down with it. Teach make_idempotent() how to '
+            f'guard them:\n  {listing}')
+
+
 def main():
     text = DUMP.read_text(encoding='utf-8')
     lines = text.split('\n')
@@ -380,7 +687,10 @@ def main():
             old.unlink()
 
     stats = {'restrict': 0, 'set_local': 0, 'efhistory': 0, 'ext_comment': 0,
-             'array_cast': 0, 'tombstone': 0, 'check_source': 0}
+             'array_cast': 0, 'tombstone': 0, 'check_source': 0,
+             'idem_schema': 0, 'idem_table': 0, 'idem_sequence': 0,
+             'idem_function': 0, 'idem_index': 0, 'idem_constraint': 0,
+             'idem_trigger': 0, 'idem_policy': 0, 'idem_identity': 0}
     manifest = []
 
     for fname, title, start, end in chunks:
@@ -397,10 +707,18 @@ def main():
             '-- applying all 134 pre-baseline migrations in order. Do not hand-edit:',
             '-- regenerate with MigrationsBaseline/regenerate-baseline-sql.py, then re-run',
             '-- the schema-parity diff.',
+            '--',
+            '-- Every statement is IDEMPOTENT. Production is still at the pre-squash head with',
+            '-- the whole schema already materialised, and Program.cs applies migrations',
+            '-- uncaught at boot, so a bare CREATE here is a failed deploy. Objects with no',
+            '-- IF NOT EXISTS form are wrapped in a DO block that checks pg_catalog for that',
+            '-- exact object - never a broader condition that could skip a policy or a',
+            '-- constraint the database is genuinely missing.',
             '-- ' + '=' * 74,
             '',
         ]
         content = '\n'.join(header + body).rstrip() + '\n'
+        content = make_idempotent(content, stats).rstrip() + '\n'
         (out_dir / fname).write_text(content, encoding='utf-8')
         manifest.append((fname, title, content.count('\n')))
 
@@ -411,6 +729,15 @@ def main():
     (out_dir / '10_explicit_revokes.sql').write_text(REVOKES, encoding='utf-8')
     manifest.append(('10_explicit_revokes.sql', 'Explicit REVOKEs (history table, provider secrets, audit log)',
                      REVOKES.count('\n')))
+
+    # Every file the migration replays is checked, including the two that are
+    # preserved across runs and the two that are hand-authored above. 90_down.sql is
+    # checked too: its DROPs already carry IF EXISTS and this is what keeps them that
+    # way, since the Down/Up walk test reruns Up onto whatever Down left behind.
+    for fname, _, _ in manifest:
+        validate(fname, (out_dir / fname).read_text(encoding='utf-8'))
+    for preserved in ('11_reference_data.sql', '90_down.sql'):
+        validate(preserved, (out_dir / preserved).read_text(encoding='utf-8'))
 
     print('scrub stats:', stats)
     total = 0

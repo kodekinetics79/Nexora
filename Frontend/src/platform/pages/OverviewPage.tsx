@@ -70,10 +70,20 @@ export default function OverviewPage() {
       title="Platform Overview"
       subtitle="System health and global KPIs across all tenants."
       actions={
-        <Tooltip title="Refresh">
-          <IconButton onClick={() => refetch()} sx={{ bgcolor: 'action.hover', borderRadius: 2 }} disabled={isFetching}>
-            <RefreshIcon fontSize="small" />
-          </IconButton>
+        // The span is required: MUI's disabled button swallows pointer events, so a Tooltip on a
+        // bare disabled IconButton never fires — the operator got a control that looked broken
+        // with no way to find out why. The title now says what is happening, too.
+        <Tooltip title={isFetching ? 'Refreshing…' : 'Refresh'}>
+          <span>
+            <IconButton
+              onClick={() => refetch()}
+              aria-label="Refresh platform overview"
+              sx={{ bgcolor: 'action.hover', borderRadius: 2 }}
+              disabled={isFetching}
+            >
+              <RefreshIcon fontSize="small" />
+            </IconButton>
+          </span>
         </Tooltip>
       }
     />
@@ -247,7 +257,7 @@ export default function OverviewPage() {
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={data.tenantsByPlan} margin={{ top: 8, right: 8, left: -18, bottom: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke={gridColor} vertical={false} />
-                  <XAxis dataKey="tier" stroke={axisColor} fontSize={11} tickLine={false} axisLine={false} tickFormatter={(t: string) => t[0].toUpperCase() + t.slice(1)} />
+                  <XAxis dataKey="tier" stroke={axisColor} fontSize={11} tickLine={false} axisLine={false} tickFormatter={(t: string) => (t ? t[0].toUpperCase() + t.slice(1) : '—')} />
                   <YAxis stroke={axisColor} fontSize={11} tickLine={false} axisLine={false} allowDecimals={false} />
                   <RTooltip contentStyle={tooltipStyle} cursor={{ fill: gridColor }} />
                   <Bar dataKey="count" radius={[6, 6, 0, 0]} barSize={44}>

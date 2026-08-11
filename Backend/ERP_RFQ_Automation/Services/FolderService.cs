@@ -79,7 +79,18 @@ namespace ERP_RFQ_Automation.Services
         //  Main Processing Methods
         // ============================================================
 
-        public async Task SaveFilesToSharedFolderAsync(
+        /// <summary>
+        /// Writes the uploaded files and returns HOW MANY REACHED DISK.
+        ///
+        /// <para>This used to return <c>Task</c>, and the controller answered
+        /// "{files.Count} files uploaded successfully" — the count REQUESTED, which the method
+        /// structurally could not contradict. Three paths below skip a file and carry on: an
+        /// unusable filename, a filename that resolves outside the target folder, and a zero-byte
+        /// upload (the ordinary outcome of a failed drag from a network share or a cloud-synced
+        /// placeholder, and the one that did not even log). A user who dropped five files and had
+        /// two skipped was told five arrived, and only the server log disagreed.</para>
+        /// </summary>
+        public async Task<int> SaveFilesToSharedFolderAsync(
             List<Microsoft.AspNetCore.Http.IFormFile> files,
             string folderType,
             long businessUnitId,
@@ -89,10 +100,18 @@ namespace ERP_RFQ_Automation.Services
             var targetFolder = GetTenantFolderPath(businessUnitId, folderType);
             Directory.CreateDirectory(targetFolder);
             _storage.ResolvePath(targetFolder);
-            
+
+            var saved = 0;
             foreach (var file in files)
             {
-                if (file.Length > 0)
+                if (file.Length <= 0)
+                {
+                    // Previously skipped in total silence, by an `if (file.Length > 0)` with no
+                    // else. An empty file is a real user event, not noise.
+                    _logger.LogWarning(
+                        "Skipped zero-byte upload '{FileName}' for {FolderType}.", file.FileName, folderType);
+                    continue;
+                }
                 {
                     // SEC-10: never trust the client-supplied filename. Strip any directory
                     // component, sanitize, and verify the resolved path stays inside the
@@ -142,8 +161,11 @@ namespace ERP_RFQ_Automation.Services
                         throw;
                     }
                     _logger.LogInformation("Saved file {FileName} to folder {FolderType}.", safeName, folderType);
+                    saved++;
                 }
             }
+
+            return saved;
         }
 
         public async Task<FolderProcessingReport> ProcessAllFoldersAsync(

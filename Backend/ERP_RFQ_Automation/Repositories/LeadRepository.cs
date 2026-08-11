@@ -1052,7 +1052,36 @@ namespace ERP_RFQ_Automation.Repositories
         // Loads the aggregate TRACKED (LeadItems + EmailIngests) so header/item edits, inserts and
         // deletes all flush in a single SaveChanges. Tenant ownership is enforced by the global
         // query filter; any BusinessUnitId in the payload is ignored by design.
-        public async Task<LeadResponseDTO?> SubmitLeadReviewAsync(
+        /// <summary>
+        /// Entry point for the lead review submit. The whole method — load, mutate, transaction and
+        /// commit — is the retriable unit, because the review's own transaction is opened partway
+        /// down and <c>NpgsqlRetryingExecutionStrategy</c> (Program.cs <c>EnableRetryOnFailure</c>)
+        /// refuses any transaction opened outside a strategy delegate. Without this,
+        /// <c>POST /api/Lead/{id}/review</c> threw "does not support user-initiated transactions"
+        /// on every PostgreSQL request.
+        ///
+        /// <para>The unit starts at the ENTRY, not at the transaction, because the entity graph is
+        /// loaded and mutated before the transaction opens: a retry must re-read the lead rather
+        /// than re-apply the failed attempt's edits to a stale tracked instance. Hence the
+        /// <c>ChangeTracker.Clear()</c> on every attempt.</para>
+        /// </summary>
+        public Task<LeadResponseDTO?> SubmitLeadReviewAsync(
+            long id, long businessUnitId, LeadReviewSubmitDTO review, string reviewedBy = "system")
+        {
+            // A caller that already owns a transaction owns the retriable unit too; nesting a
+            // strategy inside it would be wrong, and the core path honours the ambient transaction.
+            if (!_context.Database.IsRelational() || _context.Database.CurrentTransaction is not null)
+                return SubmitLeadReviewCoreAsync(id, businessUnitId, review, reviewedBy);
+
+            var strategy = _context.Database.CreateExecutionStrategy();
+            return strategy.ExecuteAsync(() =>
+            {
+                _context.ChangeTracker.Clear();
+                return SubmitLeadReviewCoreAsync(id, businessUnitId, review, reviewedBy);
+            });
+        }
+
+        private async Task<LeadResponseDTO?> SubmitLeadReviewCoreAsync(
             long id, long businessUnitId, LeadReviewSubmitDTO review, string reviewedBy = "system")
         {
             var lead = await _context.Leads

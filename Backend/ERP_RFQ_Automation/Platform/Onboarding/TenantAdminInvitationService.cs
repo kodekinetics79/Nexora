@@ -367,7 +367,20 @@ public sealed class TenantAdminInvitationService : ITenantAdminInvitationService
                 "Activation invitation {InvitationId} redeemed for tenant {TenantId}, user {UserId} from {ClientIp}.",
                 invitationId, invitation.TenantId, accountId, clientIp ?? "unknown");
 
-            return TenantActivationResult.Activated;
+            // Can this person actually sign in now? The invitation is issued by the LAST step of
+            // provisioning, so the ordinary case at this moment is a tenant still in
+            // TenantStatus.Provisioning, whose login AuthRepository refuses until an operator
+            // takes the governed activation decision. Read AFTER the commit — the password is set
+            // either way, and a status read must never be able to fail the redemption itself.
+            //
+            // IgnoreQueryFilters because this request is anonymous and carries no tenant scope,
+            // exactly as the user update above does.
+            var signInAvailable = await _db.Set<Tenant>().IgnoreQueryFilters().AsNoTracking()
+                .Where(t => t.Id == invitation.TenantId)
+                .Select(t => (TenantStatus?)t.Status)
+                .FirstOrDefaultAsync(ct) == TenantStatus.Active;
+
+            return TenantActivationResult.ActivatedWith(signInAvailable);
         });
     }
 

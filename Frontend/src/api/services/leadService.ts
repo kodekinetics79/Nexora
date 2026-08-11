@@ -303,6 +303,21 @@ export interface FolderSweepReportDTO {
   failed: number;
 }
 
+/**
+ * POST /api/Email/fetch — a manual mailbox poll.
+ *
+ * `mailboxes` is the load-bearing field and it is ABSENT on the "no active IMAP
+ * mailbox is configured" branch, which the server answers with 200 and an
+ * explanatory `message`. Treating that response as a success is how a tenant
+ * whose mailbox was never configured (or was deactivated) gets told their mail
+ * synchronized while nothing polled and nothing ever will.
+ */
+export interface EmailFetchReport {
+  message?: string;
+  mailboxes?: number;
+  newMessages?: number;
+}
+
 /** POST /api/Email/upload-leads-folder — the server acknowledges the write, nothing more. */
 export interface FolderUploadResultDTO {
   message?: string;
@@ -719,9 +734,19 @@ const leadService = {
     return r.data;
   },
 
-  fetchEmails: async (): Promise<any> => {
-    const r = await axiosInstance.post('/api/Email/fetch');
-    return r.data;
+  /**
+   * Manual mailbox poll.
+   *
+   * The 200 is NOT uniformly a success. `EmailController.ManualFetchAndSaveLeads`
+   * deliberately answers 200 with `mailboxes` absent when the tenant has no active
+   * IMAP mailbox configured — nothing was polled, nothing will arrive, and the
+   * sentence explaining why is in `message`. The caller has to read it: a green
+   * "synchronized successfully" over that response is the same lie the backend
+   * already removed from its own side (ING-08).
+   */
+  fetchEmails: async (): Promise<EmailFetchReport> => {
+    const r = await axiosInstance.post<EmailFetchReport>('/api/Email/fetch');
+    return r.data ?? {};
   }
 };
 

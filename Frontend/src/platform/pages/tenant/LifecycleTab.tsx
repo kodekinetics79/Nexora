@@ -40,6 +40,7 @@ import { platformApi } from '../../api/client';
 import { platformErrorMessage } from '../../api/apiError';
 import { platformKeys } from '../../api/queryKeys';
 import { usePlatformPermissions } from '../../auth/usePlatformPermissions';
+import { useStepUpReauthentication, isStepUpCancelled } from '../../auth/useStepUpReauthentication';
 import { REQUIRED_ROLE_COPY } from '../../auth/permissions';
 import type { Tenant, TenantOffboardingStatus, TenantPurgeResult } from '../../types';
 
@@ -86,6 +87,11 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
   const permissions = usePlatformPermissions();
+  // Export, purge, erasure and legal-hold release all carry [PlatformHighRiskOperation] on the
+  // server. With MFA enforcement relaxed each answers 403 "re-enter your password first" — an
+  // instruction that named an endpoint no screen called, so all four were dead. `guard` proves
+  // the password and re-runs the same request; on an MFA-bound session it does nothing at all.
+  const stepUp = useStepUpReauthentication();
 
   const [reversible, setReversible] = useState<Reversible | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
@@ -131,8 +137,12 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
     queryClient.invalidateQueries({ queryKey: platformKeys.legalHolds(tenant.id) });
   };
 
-  const fail = (fallback: string) => (error: unknown) =>
+  const fail = (fallback: string) => (error: unknown) => {
+    // Dismissing the step-up dialog is a decision not to proceed, not a failure. Reporting it
+    // as "The purge was refused" would say the server rejected something it never received.
+    if (isStepUpCancelled(error)) return;
     enqueueSnackbar(platformErrorMessage(error, fallback), { variant: 'error' });
+  };
 
   const reversibleMutation = useMutation({
     mutationFn: ({ kind, reason }: { kind: Reversible; reason: string }) => {
@@ -155,7 +165,7 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
 
   const exportMutation = useMutation({
     mutationFn: (body: { reason: string; confirmation: string }) =>
-      platformApi.exportTenantData(tenant.id, body),
+      stepUp.guard(() => platformApi.exportTenantData(tenant.id, body)),
     onSuccess: (download) => {
       // Saved through a synthetic anchor: the response is a one-shot stream the server
       // deliberately does not store, so there is no URL to send the operator to instead.
@@ -201,7 +211,8 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
   });
 
   const purgeMutation = useMutation({
-    mutationFn: (body: { reason: string; confirmation: string }) => platformApi.purgeTenant(tenant.id, body),
+    mutationFn: (body: { reason: string; confirmation: string }) =>
+      stepUp.guard(() => platformApi.purgeTenant(tenant.id, body)),
     onSuccess: (result) => {
       enqueueSnackbar(`${fmtNumber(result.rowsDeleted)} rows destroyed across ${result.tablesTouched} tables`, {
         variant: 'warning',
@@ -219,7 +230,7 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
 
   const eraseMutation = useMutation({
     mutationFn: (body: { reason: string; confirmation: string }) =>
-      platformApi.eraseTenantPersonalData(tenant.id, body),
+      stepUp.guard(() => platformApi.eraseTenantPersonalData(tenant.id, body)),
     onSuccess: (result) => {
       enqueueSnackbar(`${fmtNumber(result.identitiesErased)} identities erased`, { variant: 'warning' });
       setEraseOpen(false);
@@ -245,9 +256,9 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
   });
 
   const releaseHoldMutation = useMutation({
-    mutationFn: (reason: string) => platformApi.releaseTenantLegalHold(
+    mutationFn: (reason: string) => stepUp.guard(() => platformApi.releaseTenantLegalHold(
       tenant.id, releaseHoldId as string, reason,
-    ),
+    )),
     onSuccess: () => {
       enqueueSnackbar('Legal hold released', { variant: 'success' });
       setReleaseHoldId(null);
@@ -925,6 +936,9 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
         onClose={() => setEraseOpen(false)}
         onConfirm={(body) => eraseMutation.mutate(body)}
       />
+
+      {/* Inert until the server actually demands a step-up. */}
+      {stepUp.dialog}
     </Stack>
   );
 }

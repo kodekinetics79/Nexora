@@ -168,6 +168,18 @@ namespace ERP_RFQ_Automation.Controllers
 
                 return Ok(dto);
             }
+            // A product that does not exist in the caller's tenant is a 404, not a server error.
+            //
+            // ProductRepository.GetByIdAsync ends in `?? throw new KeyNotFoundException(...)`, so it
+            // never returns null and the `if (product == null) return NotFound()` above is
+            // unreachable. Without this handler that throw fell into the blanket catch below and
+            // GET /api/Product/{id} answered 500 for every missing id — including the very first
+            // one a fresh tenant asks for. GetStockDetails on this same controller already
+            // translates the exception; this brings the read path into line with it.
+            catch (KeyNotFoundException)
+            {
+                return NotFound();
+            }
             catch (Exception)
             {
                 return Problem(statusCode: StatusCodes.Status500InternalServerError,

@@ -755,9 +755,14 @@ export default function ProvisionTenantWizard({ open, onClose, onSubmitted }: Pr
               </Grid>
               <Grid size={{ xs: 12, md: 6 }}>
                 <TextField
-                  {...field('accountOwnerEmail', 'Account owner (internal)', {
+                  {...field('accountOwnerEmail', 'Account owner email (internal)', {
                     required: true,
-                    helper: 'The person here who answers for this account commercially.',
+                    // Says EMAIL in the label and the helper because the field only accepts one.
+                    // It used to read "Account owner (internal)" / "The person here who answers for
+                    // this account commercially", so an operator typed a name, and the only hint
+                    // that a name was wrong was "Enter a valid email address" appearing after the
+                    // fact on a field that had just asked them to name somebody.
+                    helper: 'Work email of the person here who answers for this account commercially.',
                   })}
                   type="email"
                 />

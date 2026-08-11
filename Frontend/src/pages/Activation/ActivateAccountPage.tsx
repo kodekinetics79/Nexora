@@ -85,6 +85,8 @@ export default function ActivateAccountPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
+  /** Password set, workspace not yet live. See the mutation's onSuccess. */
+  const [pendingActivation, setPendingActivation] = useState(false);
 
   const challenge = useQuery({
     queryKey: ['tenant-activation', token],
@@ -102,6 +104,15 @@ export default function ActivateAccountPage() {
         // The token was spent or withdrawn between loading the page and
         // submitting it. Re-reading it swaps the form for the right explanation.
         challenge.refetch();
+        return;
+      }
+      if (!outcome.signInAvailable) {
+        // The password is set, but the workspace has not been activated yet — the
+        // invitation goes out at the end of provisioning and going live is a
+        // separate, governed decision. Pushing this person at /login would answer
+        // them with a 403 they cannot self-repair, on their first contact with the
+        // product. Stay here and say the true thing instead.
+        setPendingActivation(true);
         return;
       }
       // LoginPage renders `authNotice` once and clears it, so the customer lands
@@ -152,7 +163,24 @@ export default function ActivateAccountPage() {
           {mode === 'dark' ? <SunIcon fontSize="small" /> : <MoonIcon fontSize="small" />}
         </IconButton>
 
-        {challenge.isLoading && state === null ? (
+        {pendingActivation ? (
+          <Stack spacing={2.5}>
+            <Typography variant="h5" component="h1" sx={{ fontWeight: 900, letterSpacing: '-0.02em' }}>
+              Your password is set
+            </Typography>
+            <Alert severity="info" sx={{ borderRadius: 2 }}>
+              <AlertTitle sx={{ fontWeight: 800 }}>Your workspace is not open yet</AlertTitle>
+              {challenge.data?.tenantName
+                ? `${challenge.data.tenantName} is still being activated. `
+                : 'This workspace is still being activated. '}
+              Nothing more is needed from you — whoever set it up will confirm when sign-in is
+              open, and the password you just chose is the one you will use.
+            </Alert>
+            <Button variant="outlined" onClick={() => navigate('/login')} sx={{ fontWeight: 700, alignSelf: 'flex-start' }}>
+              Go to sign in
+            </Button>
+          </Stack>
+        ) : challenge.isLoading && state === null ? (
           <Stack spacing={2} role="status" aria-live="polite" sx={{ alignItems: 'center', py: 6 }}>
             <CircularProgress />
             <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 600 }}>

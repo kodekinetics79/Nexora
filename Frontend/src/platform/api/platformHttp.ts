@@ -29,6 +29,25 @@ const platformHttp = axios.create({
 // must NOT be force-logged-out on a 401 — a bad password is a normal failure.
 const LOGIN_PATH = '/api/platform/auth/login';
 
+/**
+ * Endpoints where a 401 means "that credential was wrong", NOT "your session has ended".
+ *
+ * These CHECK a secret rather than being authorised by one, so treating their 401 as a dead
+ * session signs the operator out for a typo. `reauthenticate` is the step-up on a purge, an
+ * export or an invoice finalisation: one mistyped character used to close the confirmation
+ * dialog, discard the reason and the typed tenant name, and drop the operator on the sign-in
+ * screen — which reads as the console crashing, on the most dangerous screen it has. MFA
+ * enrollment confirmation returns 401 for a wrong six-digit code and had the same problem.
+ *
+ * The session is genuinely gone only when a 401 comes back from a route that was USING it.
+ */
+const CREDENTIAL_CHECK_PATHS = [
+  LOGIN_PATH,
+  '/api/platform/auth/reauthenticate',
+  '/api/platform/auth/mfa/challenge',
+  '/api/platform/auth/mfa/enrollment/confirm',
+];
+
 platformHttp.interceptors.request.use(
   (config) => {
     const url = config.url ?? '';
@@ -48,12 +67,12 @@ platformHttp.interceptors.response.use(
   (error) => {
     const status = error.response?.status;
     const url: string = error.config?.url ?? '';
-    const isLogin = url.includes(LOGIN_PATH);
+    const isCredentialCheck = CREDENTIAL_CHECK_PATHS.some((path) => url.includes(path));
 
     // A 401 on any authed platform call means the platform token is gone or
     // invalid. Clear the session; the guard re-renders the login screen in
     // place (the store emit drives it) — no navigation, no reload loop.
-    if (status === 401 && !isLogin) {
+    if (status === 401 && !isCredentialCheck) {
       clearPlatformSession();
     }
     return Promise.reject(error);

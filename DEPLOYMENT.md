@@ -18,8 +18,15 @@ Set configuration as **Render environment variables** (nothing sensitive is bake
 
 ```text
 ConnectionStrings__DefaultConnection=Host=<neon-DIRECT-endpoint>;Database=neondb;Username=neondb_owner;Password=<neon-pw>;SSL Mode=Require;Trust Server Certificate=True
+ConnectionStrings__MigrationConnection=<the same, on the owner role — see below>
 Jwt__Key=<a NEW 32+ byte random key>
+Jwt__PlatformKey=<a SECOND, DIFFERENT 32+ byte random key>
 Security__SecretProtectionKey=<base64 of 32 random bytes: openssl rand -base64 32>
+CommercialFinance__ContactVerificationSecret=<32+ byte random secret>
+CommercialFinance__DunningProviderWebhookSecret=<a different 32+ byte random secret>
+CommercialFinance__AuditActorSecret=<a third 32+ byte random secret>
+Platform__BootstrapOwnerEmail=<platform-operator-email>
+Platform__BootstrapOwnerPassword=<one-time password, 12+ chars>
 Ollama__BaseUrl=https://ollama.com/
 Ollama__ApiKey=<ollama key>
 Cors__AllowedOrigins__0=https://nexora1-ai.vercel.app
@@ -27,6 +34,21 @@ Storage__RootPath=/var/data/nexora/uploads
 Storage__RequiredMountPath=/var/data
 Storage__EnforcePersistentMount=true
 ```
+
+**Every one of the first nine fails the boot, not a request.** `Program.cs` and
+`AddPlatformJwtBearer` validate them before the host is built, so a missing or
+placeholder value produces a container that exits during startup with the reason
+on stdout and nothing in the application log. Three that are easy to miss because
+they were previously undocumented:
+
+- `Jwt__PlatformKey` must be present **and different from `Jwt__Key`** — otherwise a
+  tenant token and a platform control-plane token could be forged from each other.
+- `ConnectionStrings__MigrationConnection` is required because `render.yaml` sets
+  `Database__AllowManagedOwnerRoleMigrationCompatibility=true`; migrations run on the
+  owner role while the application serves traffic on the least-privilege runtime role,
+  and the app refuses to conflate the two.
+- `Platform__BootstrapOwnerEmail` / `Platform__BootstrapOwnerPassword` do not fail the
+  boot — they fail *silently*, which is worse: see §3.
 
 The repository includes `render.yaml` with a persistent disk mounted at `/var/data`.
 Use that Blueprint or attach an equivalent Render disk before accepting customer
@@ -87,10 +109,30 @@ Tenant app:
 Platform console:
 
 - URL: https://nexora1-ai.vercel.app/platform
-- Credentials: provision through Render secrets and distribute out of band.
+- Credentials: `Platform__BootstrapOwnerEmail` + `Platform__BootstrapOwnerPassword`, set as
+  Render secrets and distributed out of band.
 
-The seeder is disabled by default and never overwrites an existing password. For an
-explicit first-run pilot seed, temporarily provide all five settings:
+**This is the only bootstrap that works in Production, and without it nobody can sign into
+the operator console at all — which means no tenant can be provisioned and the customer
+journey has no entry point.** `PlatformOwnerSeeder` runs in Production deliberately and is
+fail-closed in every direction: with both unset it silently creates nothing; with one set it
+warns and creates nothing; a password under 12 characters is refused; and once **any**
+platform user row exists (active or not) it is skipped forever. It can only ever create the
+very first account, so leaving the two variables in place after the first boot is inert.
+
+The first thing to do after signing in is enrol MFA — every privileged platform policy
+(`PlatformScope`, `Owner`, `TenantAdmin`, `Billing`, `Impersonate`) requires a second factor,
+so a bootstrap owner who has not enrolled can reach only the enrolment endpoints. Then rotate
+the password through `/api/platform/users`.
+
+> **Do not use `DemoUser__Enabled` + `PlatformOwner__Email` / `PlatformOwner__Password` for
+> this.** Those belong to `DemoUserSeeder`, which **refuses to run** under
+> `ASPNETCORE_ENVIRONMENT=Production` (the Dockerfile and `render.yaml` both set it): it
+> provisions a tenant Super Admin from outside any HttpContext, with EF query filters and RLS
+> role selection both inert, and Production is not a place that is acceptable. On Render it
+> logs an error and creates nothing, leaving the console unreachable with no other symptom.
+
+Tenant demo login (non-Production environments only — a staging or local host):
 
 ```text
 DemoUser__Enabled=true
@@ -107,8 +149,11 @@ secrets, and rotate the credentials through the application before customer use.
 
 | Key (env form) | Purpose |
 |---|---|
-| `ConnectionStrings__DefaultConnection` | Neon Postgres connection |
+| `ConnectionStrings__DefaultConnection` | Neon Postgres connection (least-privilege runtime role) |
+| `ConnectionStrings__MigrationConnection` | Owner-role connection used **only** to apply migrations. **Required** while `Database__AllowManagedOwnerRoleMigrationCompatibility=true` (which `render.yaml` sets) — the app **refuses to start** without it rather than migrate on the runtime role. |
 | `Jwt__Key` | JWT signing key (**use a new strong key**; ≥32 bytes) |
+| `Jwt__PlatformKey` | Signing key for the **platform control plane** token. **Required outside Development/Testing and must differ from `Jwt__Key`** — the app **refuses to start** on either violation, because a shared key would let a tenant token and an operator token be forged from one another. |
+| `Platform__BootstrapOwnerEmail` / `Platform__BootstrapOwnerPassword` | The **first platform operator**. Without both, no platform user exists and `/platform` cannot be signed into by anyone — no tenant can be provisioned. Password ≥12 characters. Creates the first account only; skipped forever once any platform user exists. See §3. |
 | `Security__SecretProtectionKey` | **AES-256 key encrypting stored customer mailbox credentials at rest** (`Email_Configurations.Password`). Base64 of exactly 32 random bytes — `openssl rand -base64 32`. The API **refuses to start** without it outside Development. Losing or rotating it makes every already-encrypted mailbox password undecryptable and email polling stops until credentials are re-entered. |
 | `CommercialFinance__DunningProviderWebhookSecret` | HMAC secret for authenticated dunning delivery events (**use a distinct secret**; ≥32 bytes) |
 | `CommercialFinance__ContactVerificationSecret` | HMAC secret for trusted finance-contact verification assertions (**use a distinct secret**; ≥32 bytes) |

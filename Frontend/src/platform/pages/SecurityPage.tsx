@@ -46,9 +46,14 @@ export default function SecurityPage() {
   const { enqueueSnackbar } = useSnackbar();
   const [revokeTarget, setRevokeTarget] = useState<ImpersonationSession | null>(null);
 
+  // Not requested for a role the server will refuse. `GET /impersonation/sessions` is
+  // `Platform.Impersonate` (Owner | SupportAdmin); a BillingAdmin or ReadOnlyOps used to get a
+  // red error panel with a Retry button that could never succeed, mid-page, with nothing saying
+  // it was a permissions boundary rather than an outage.
   const sessionsQuery = useQuery({
     queryKey: platformKeys.impersonationSessions(),
     queryFn: () => platformApi.listImpersonationSessions(),
+    enabled: permissions.canImpersonate,
   });
 
   const failedLoginsQuery = useQuery({
@@ -102,10 +107,22 @@ export default function SecurityPage() {
         <Typography variant="caption" color="text.secondary">
           Active sessions plus the last 7 days. Revoking cuts a live token off immediately.
         </Typography>
-        {sessionsQuery.isLoading ? (
+        {!permissions.canImpersonate ? (
+          <EmptyState
+            title="Not visible to your role"
+            message={`Impersonation sessions name the operator, the customer and the reason. ${REQUIRED_ROLE_COPY.impersonate}`}
+            minHeight={160}
+          />
+        ) : sessionsQuery.isLoading ? (
           <LoadingState label="Loading sessions…" minHeight={160} />
         ) : sessionsQuery.isError ? (
-          <ErrorState minHeight={160} message="Impersonation sessions could not be loaded." onRetry={() => sessionsQuery.refetch()} />
+          // The server's own words. A hard-coded sentence rendered a 403 and a timeout
+          // identically, so the operator could not tell "not yours" from "it is down".
+          <ErrorState
+            minHeight={160}
+            message={platformErrorMessage(sessionsQuery.error, 'Impersonation sessions could not be loaded')}
+            onRetry={() => sessionsQuery.refetch()}
+          />
         ) : sessions.length === 0 ? (
           <EmptyState title="No impersonation sessions" message="No sessions were issued in the last 7 days." minHeight={160} />
         ) : (
@@ -179,6 +196,7 @@ export default function SecurityPage() {
         emptyMessage="No failed platform sign-in attempts are on record."
         isLoading={failedLoginsQuery.isLoading}
         isError={failedLoginsQuery.isError}
+        error={failedLoginsQuery.error}
         onRetry={() => failedLoginsQuery.refetch()}
         rows={failedLoginsQuery.data ?? []}
       />
@@ -191,6 +209,7 @@ export default function SecurityPage() {
         emptyMessage="No failed privileged actions are on record."
         isLoading={failuresQuery.isLoading}
         isError={failuresQuery.isError}
+        error={failuresQuery.error}
         onRetry={() => failuresQuery.refetch()}
         rows={failuresQuery.data ?? []}
       />
@@ -231,6 +250,7 @@ function AuditFailurePanel({
   isError,
   onRetry,
   rows,
+  error,
 }: {
   title: string;
   caption: string;
@@ -238,6 +258,7 @@ function AuditFailurePanel({
   emptyMessage: string;
   isLoading: boolean;
   isError: boolean;
+  error?: unknown;
   onRetry: () => void;
   rows: AuditEntry[];
 }) {
@@ -248,7 +269,13 @@ function AuditFailurePanel({
       {isLoading ? (
         <LoadingState label="Loading audit entries…" minHeight={140} />
       ) : isError ? (
-        <ErrorState minHeight={140} message="The audit service did not respond." onRetry={onRetry} />
+        // The server's reason, not a guess at one: "did not respond" described an outage
+        // and was rendered identically for a 403, which is not an outage and never clears.
+        <ErrorState
+          minHeight={140}
+          message={platformErrorMessage(error, 'The audit evidence could not be read')}
+          onRetry={onRetry}
+        />
       ) : rows.length === 0 ? (
         <EmptyState title={emptyTitle} message={emptyMessage} minHeight={140} />
       ) : (

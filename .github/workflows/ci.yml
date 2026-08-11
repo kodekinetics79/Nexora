@@ -1,15 +1,65 @@
 name: CI
 
+# =================================================================================================
+# THREE SETTINGS THIS FILE CANNOT SET FOR ITSELF. Until they are applied, CI is advisory: it can
+# go red on `main` and the red commit still reaches production. That is not hypothetical — at the
+# time of writing the last five pushes to `main` all left CI red and all five deployed anyway.
+#
+#  1. GITHUB -> Settings -> Rules -> New branch ruleset (or Branches -> protect `main`)
+#       Target: `main`. Enable "Require status checks to pass".
+#       Add exactly ONE check:  CI green
+#       Do NOT add "Backend (.NET 8)" or "Frontend (Node)". Those jobs are gated on
+#       dorny/paths-filter and simply do not report on a commit that did not touch their half of
+#       the tree, so requiring them leaves such PRs pending forever. The `ci-green` job at the
+#       bottom of this file exists to be that one always-reporting check.
+#
+#  2. RENDER -> the deploy already asks for this: render.yaml now sets
+#       `autoDeployTrigger: checksPass` on nexora-fyjw. Sync the Blueprint for it to take effect,
+#       or set Dashboard -> nexora-fyjw -> Settings -> Build & Deploy -> Auto-Deploy ->
+#       "After CI Checks Pass". Step 1 is a prerequisite: with no required check there is nothing
+#       for Render to wait on.
+#
+#  3. VERCEL -> there is no repo-side equivalent; Vercel has no "wait for CI" and `vercel.json`
+#       cannot express one. Project -> Settings -> Git -> Ignored Build Step -> "Custom" and use:
+#           bash -c 'gh api repos/$VERCEL_GIT_REPO_OWNER/$VERCEL_GIT_REPO_SLUG/commits/$VERCEL_GIT_COMMIT_SHA/check-runs --jq "[.check_runs[]|select(.name==\"CI green\")|.conclusion]|index(\"success\")" | grep -q . && exit 1 || exit 0'
+#       (exit 0 SKIPS the build, exit 1 proceeds — Vercel inverts the usual convention), with a
+#       read-only GH_TOKEN in the project environment. The lower-effort alternative, if that is
+#       more machinery than the frontend warrants: turn production auto-deploy off and promote
+#       from a preview once CI is green.
+# =================================================================================================
+
+# EVERY branch, not a named allowlist.
+#
+# This previously read `branches: [main, reliability-hardening]` on BOTH triggers. All work
+# happens on `wip/*` branches, so no push to the branch anyone was actually working on ever
+# ran CI — the first signal arrived at PR time, days of commits later, and a red suite then
+# has to be bisected instead of caught. The `**` glob matches any branch name including ones
+# containing `/`, so a new branch convention cannot silently opt itself out again.
+#
+# Cost is bounded, not unbounded: the `changes` job below still skips the backend suite for a
+# frontend-only push and vice versa, and the `concurrency` block cancels superseded runs on the
+# same ref, so a burst of pushes costs one run rather than one per commit.
+#
+# A push to a branch that also has an open PR does run twice (push ref and merge ref). That is
+# accepted deliberately — the merge-ref run tests the merged result, which the push run does
+# not, and suppressing one of them costs more in missed signal than it saves in minutes.
 on:
   push:
-    branches: [main, reliability-hardening]
+    branches: ['**']
   pull_request:
-    branches: [main, reliability-hardening]
+    branches: ['**']
 
-# Cancel superseded runs on the same ref to save CI minutes.
+# Cancel superseded runs on the same ref to save CI minutes — EXCEPT on the default branch.
+#
+# `cancel-in-progress: true` everywhere was safe while CI was advisory. It stops being safe the
+# moment a deploy depends on the run: a cancelled run produces no conclusion, and "no conclusion"
+# is not "green". Two pushes to main a minute apart would cancel the first run, and a deploy
+# trigger waiting on checks would either stall or — worse, if it treats a missing check as
+# permissive — ship a commit nothing ever tested. Feature branches keep the saving because
+# nothing deploys from them.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
@@ -27,6 +77,7 @@ jobs:
   changes:
     name: Detect changes
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       backend: ${{ steps.filter.outputs.backend }}
       frontend: ${{ steps.filter.outputs.frontend }}
@@ -48,11 +99,30 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.backend == 'true' }}
     runs-on: ubuntu-latest
+    # The suite runs 12-13 minutes and the whole job 16-18. 45 is generous headroom, and it is
+    # here because the default is SIX HOURS: a Testcontainers container that never becomes ready
+    # hangs, not fails, and with the workflow now triggering on every branch a single wedged run
+    # would quietly burn a day of runner minutes before anyone looked.
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: Backend
     steps:
       - uses: actions/checkout@v4
+
+      # Testcontainers is not optional infrastructure for this suite — around 528 tests, including
+      # every RLS and tenant-isolation test and the three migration lanes, start a real
+      # postgres:16-alpine. If the runner image ever ships without a Docker daemon those tests do
+      # not skip, they fail in the hundreds, twelve minutes in, with connection errors that read
+      # like application bugs. Proving the daemon exists in five seconds turns that into one
+      # legible failure at the top of the job.
+      #
+      # Pulling the image here is deliberate too: nine separate places call PostgreSqlBuilder, so
+      # the pull happens once, warm, instead of racing on first use.
+      - name: Verify Docker is available for Testcontainers
+        run: |
+          docker version --format 'Docker Engine {{.Server.Version}}'
+          docker pull --quiet postgres:16-alpine
 
       - name: Setup .NET 8
         uses: actions/setup-dotnet@v4
@@ -82,6 +152,44 @@ jobs:
           --logger "trx;LogFileName=test-results.trx"
           --results-directory ../TestResults
 
+      # A GREEN SUITE THAT RAN THE WRONG NUMBER OF TESTS IS NOT A GREEN SUITE.
+      #
+      # `dotnet test` exits 0 when every test it decided to run passed. It does not care how many
+      # it decided to run. A stray --filter, a collection fixture that throws in InitializeAsync
+      # and takes its whole collection out of the count, a [Trait] exclusion added for a local
+      # debugging session — each produces a confident green tick over a fraction of the suite.
+      # That is the failure this job is least able to notice unaided and the one that most
+      # directly makes the pipeline lie.
+      #
+      # Today: 4,466 total, 0 skipped. The floor is 4,000 rather than 4,466 so adding tests does
+      # not require editing this file, while a collapse to "only the in-memory tests ran" — which
+      # is what losing the PostgreSQL lane looks like, roughly 528 tests — trips it immediately.
+      - name: Assert the whole suite ran
+        if: ${{ always() }}
+        run: |
+          python3 - <<'PY'
+          import glob, sys, xml.etree.ElementTree as ET
+          FLOOR = 4000
+          files = glob.glob('../TestResults/**/*.trx', recursive=True)
+          if not files:
+              sys.exit('::error::No .trx was produced — the test step did not report at all.')
+          total = executed = notrun = 0
+          for path in files:
+              c = ET.parse(path).getroot().find('{*}ResultSummary/{*}Counters')
+              if c is None:
+                  sys.exit(f'::error::{path} carries no Counters element.')
+              total += int(c.get('total', 0))
+              executed += int(c.get('executed', 0))
+              notrun += int(c.get('notExecuted', 0))
+          print(f'total={total} executed={executed} notExecuted={notrun}')
+          if total < FLOOR:
+              sys.exit(f'::error::Only {total} tests were collected (floor {FLOOR}). A lane of the '
+                       'suite — most likely the PostgreSQL/Testcontainers lane — did not run.')
+          if notrun:
+              sys.exit(f'::error::{notrun} tests were skipped. This suite runs at zero skips; a '
+                       'skip is untested code wearing a green tick.')
+          PY
+
       - name: Upload test results
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
@@ -95,6 +203,7 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.frontend == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     defaults:
       run:
         working-directory: Frontend
@@ -116,6 +225,43 @@ jobs:
 
       - name: List browser acceptance suite
         run: npm run e2e:list
+
+      # SAY OUT LOUD WHETHER THE ACCEPTANCE SUITE IS ACTUALLY GUARDING ANYTHING.
+      #
+      # Everything below this point is gated on `vars.E2E_ACCEPTANCE_ENABLED == 'true'`. When the
+      # variable is unset the steps report SKIPPED, the job goes green, and the run is
+      # indistinguishable from one where the authenticated journey passed. As of this commit the
+      # repository has NO Actions variables and NO Actions secrets at all — `gh variable list` and
+      # `gh secret list` both return nothing — so the gate is OFF and every E2E_* reference in
+      # this file resolves to an empty string. The suite has never run here.
+      #
+      # This step does not turn it on; it refuses to let it be silently off. It also fails fast on
+      # the halfway state, which is the genuinely expensive one: flip the variable to true without
+      # populating the credentials and Playwright starts, navigates to the default
+      # http://127.0.0.1:5173 with nothing serving it, and reports a timeout that looks like a
+      # broken application rather than missing configuration.
+      - name: Report browser acceptance gate
+        env:
+          ENABLED: ${{ vars.E2E_ACCEPTANCE_ENABLED }}
+          BASE_URL: ${{ vars.E2E_BASE_URL }}
+          MANAGER_EMAIL: ${{ secrets.E2E_MANAGER_EMAIL }}
+          MANAGER_PASSWORD: ${{ secrets.E2E_MANAGER_PASSWORD }}
+          EDITOR_EMAIL: ${{ secrets.E2E_EDITOR_EMAIL }}
+          DENIED_EMAIL: ${{ secrets.E2E_DENIED_EMAIL }}
+        run: |
+          if [ "$ENABLED" != "true" ]; then
+            echo "::warning title=Browser acceptance suite is DISABLED::vars.E2E_ACCEPTANCE_ENABLED is '${ENABLED:-<unset>}'. The authenticated journey did NOT run. This job being green says the frontend COMPILES, nothing more. To enable: set the repository variable E2E_ACCEPTANCE_ENABLED=true plus E2E_BASE_URL and the E2E_* credentials."
+            exit 0
+          fi
+          missing=""
+          for name in BASE_URL MANAGER_EMAIL MANAGER_PASSWORD EDITOR_EMAIL DENIED_EMAIL; do
+            [ -n "${!name}" ] || missing="$missing E2E_$name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error title=Acceptance suite enabled but not configured::Missing:$missing. Playwright would fail against the default localhost base URL with a timeout that looks like an application fault. Populate these or set E2E_ACCEPTANCE_ENABLED=false."
+            exit 1
+          fi
+          echo "Browser acceptance ENABLED against $BASE_URL."
 
       - name: Install Playwright Chromium
         if: ${{ vars.E2E_ACCEPTANCE_ENABLED == 'true' }}
@@ -163,3 +309,48 @@ jobs:
             Frontend/playwright-report
             Frontend/test-results/playwright
           if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------------------------
+  # THE ONE CHECK TO REQUIRE IN BRANCH PROTECTION. Do not require "Backend (.NET 8)" directly.
+  #
+  # `changes` means a job can legitimately not exist for a given commit. GitHub's required-status
+  # rule waits for a named check to REPORT, and a job filtered out by `if:` never reports at all —
+  # so requiring "Backend (.NET 8)" would leave every frontend-only PR permanently pending, and
+  # the predictable human response to a permanently-stuck merge button is to switch the protection
+  # off. This job always runs, always reports, and decides for itself whether a non-result is
+  # acceptable: `skipped` is a legitimate pass (paths-filter said that half of the tree did not
+  # change), while `failure` and `cancelled` are not.
+  #
+  # `cancelled` matters as much as `failure`. A cancelled run has no conclusion, and a deploy
+  # trigger that reads "not failed" as "passed" would ship a commit nothing ever tested.
+  # ---------------------------------------------------------------------------------------------
+  ci-green:
+    name: CI green
+    needs: [changes, backend, frontend]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every suite to have passed or been legitimately skipped
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          BACKEND: ${{ needs.backend.result }}
+          FRONTEND: ${{ needs.frontend.result }}
+        run: |
+          echo "changes=$CHANGES  backend=$BACKEND  frontend=$FRONTEND"
+          # `changes` gates both suites, so anything other than success means the suites were
+          # never even asked to run. Reporting green on that is the exact false negative that
+          # made a PR look like it had chosen not to test itself.
+          if [ "$CHANGES" != "success" ]; then
+            echo "::error title=Change detection did not succeed::Detect changes reported '$CHANGES', so neither suite was scheduled. This is not a pass."
+            exit 1
+          fi
+          status=0
+          for suite in BACKEND FRONTEND; do
+            case "${!suite}" in
+              success) echo "  $suite passed." ;;
+              skipped) echo "  $suite did not change — not run." ;;
+              *) echo "::error title=$suite is not green::reported '${!suite}'."; status=1 ;;
+            esac
+          done
+          exit $status

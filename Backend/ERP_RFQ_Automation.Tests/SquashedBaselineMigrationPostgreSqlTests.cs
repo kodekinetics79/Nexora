@@ -25,10 +25,19 @@ namespace ERP_RFQ_Automation.Tests;
 ///
 ///   It earns its place as a COMPLETENESS check on the baseline itself. Up() replays twelve
 ///   generated SQL files; Down() drops a list that was generated separately. Nothing keeps the two
-///   in step. Add an object to the Up scripts and forget the Down script and the second Up below
-///   fails on "already exists" — the drop list, not the create list, is what this catches. It also
+///   in step. Add an object to the Up scripts and forget the Down script and the residue
+///   assertions below catch it — the drop list, not the create list, is what this catches. It also
 ///   keeps `dotnet ef migrations script` honest in the down direction, which is otherwise generated
 ///   and never executed.
+///
+///   WHERE THAT SIGNAL LIVES NOW. It used to live in the second Up failing on "already exists".
+///   It does not any more: the Up scripts were made idempotent so the deploy could apply the
+///   baseline to a database that already carried the schema (see
+///   SquashedBaselineIdempotencyPostgreSqlTests for why), and an idempotent Up steps over residue
+///   silently instead of erroring. What still catches a forgotten DROP is the block of
+///   Assert.Equal(0, afterDown.*) checks below — they run BEFORE the second Up and fail on the
+///   leftover object directly, which is a better error than "already exists" ever was. Do not
+///   weaken them into "greater than" or "roughly"; they are now the whole check.
 ///
 ///   Its value is bounded and the bound is worth stating: this proves Up and Down agree with each
 ///   other. It does not prove either agrees with the 134-migration chain — that is what

@@ -332,8 +332,20 @@ namespace ERP_RFQ_Automation.Services
                     return ServiceResult<long>.CreateFailure($"Duplicate lead detected. RFQ '{ai.Rfqno}' from '{ai.BuyersName}' already exists.");
                 }
 
-                // Use transaction to ensure atomic Lead + Items + Attachments creation
-                using var transaction = await _context.Database.BeginTransactionAsync();
+                // Use transaction to ensure atomic Lead + Items + Attachments creation.
+                //
+                // Opened INSIDE the configured execution strategy's delegate: Program.cs enables
+                // retry-on-failure, so NpgsqlRetryingExecutionStrategy is installed and refuses a
+                // user-initiated transaction opened outside one. Manual upload therefore failed on
+                // every PostgreSQL request, and the outer catch reported it as "An unexpected error
+                // occurred during processing", which names nothing.
+                //
+                // The change tracker is deliberately NOT cleared on entry: the EmailIngest row for
+                // this upload is staged above and belongs to the same unit of work.
+                var strategy = _context.Database.CreateExecutionStrategy();
+                return await strategy.ExecuteAsync(async () =>
+                {
+                await using var transaction = await _context.Database.BeginTransactionAsync();
                 try
                 {
                     DateTime recDate = ParseDate(ai.RecDate) ?? DateTime.UtcNow;
@@ -420,6 +432,7 @@ namespace ERP_RFQ_Automation.Services
                     _logger.LogError(txEx, "Transaction rolled back for manual upload.");
                     throw;
                 }
+                });
             }
             catch (Exception ex)
             {

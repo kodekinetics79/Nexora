@@ -796,8 +796,19 @@ export interface ProvisionTenantInput extends TenantCompanyProfile {
 
 export interface FoundingAdminInvitation {
   expiresAtUtc: string; // ISO
-  /** Single-use link the administrator opens to choose their own password. */
-  activationUrl: string;
+  /**
+   * Single-use link the administrator opens to choose their own password.
+   *
+   * NULL on the ordinary path. The server populates it ONLY when `emailSent` is
+   * false — a live activation link is a bearer credential, and it is put in front
+   * of an operator only when the mail did not go out and somebody has to deliver
+   * it another way. Declaring it non-nullable is what made the handover screen
+   * render an empty box under an "Activation link" heading, with a Copy button
+   * that copied `undefined`, on every successful invite.
+   */
+  activationUrl: string | null;
+  /** Whether the configured mail provider accepted the invitation for delivery. */
+  emailSent: boolean;
 }
 
 export interface FoundingAdmin {
@@ -1679,8 +1690,29 @@ export interface PlatformAuditEntry {
   tenantName: string | null;
   ip: string | null;
   result: string;
-  /** Structured JSON, already parsed by the server. Shape varies per action. */
+  /**
+   * Structured JSON, already parsed by the server. Shape varies per action.
+   *
+   * NULL means one of two very different things, and `metadataDisclosed` is the
+   * only way to tell them apart — see below.
+   */
   metadata: unknown;
+  /**
+   * False when this operator may see that the action happened but not what it
+   * carried (`PlatformAuditDisclosure` serves a payload only to a caller who
+   * could have written it).
+   *
+   * The backend models this explicitly for one reason: a console must be able to
+   * distinguish "restricted" from "this action recorded nothing", and rendering a
+   * withheld payload as an empty box tells a ReadOnlyOps operator reconstructing
+   * an incident that a `tenant.purge` carried no context at all.
+   *
+   * Optional so an older backend, or any of the several audit shapes that do not
+   * carry the gate, keeps its previous meaning: absent === disclosed.
+   */
+  metadataDisclosed?: boolean;
+  /** The policy that would unlock the payload. Shown next to the withholding. */
+  metadataPolicy?: string | null;
 }
 
 export interface PlatformAuditFieldChange {
@@ -1991,6 +2023,15 @@ export interface PlatformEffectiveMfaPolicy {
   bypassExpired: boolean;
   changedBy: string | null;
   version: number;
+}
+
+/**
+ * The receipt for a step-up password re-authentication: how long this session may now run
+ * high-risk operations for. Mirrors `PlatformReauthenticationResponse`.
+ */
+export interface PlatformReauthentication {
+  validUntilUtc: string;
+  windowMinutes: number;
 }
 
 /** The Owner read model behind the Platform Authentication screen. */
