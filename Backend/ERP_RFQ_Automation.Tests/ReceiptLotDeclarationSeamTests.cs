@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using ERP_RFQ_Automation.Controllers;
 using ERP_RFQ_Automation.Procurement;
@@ -22,6 +23,20 @@ namespace ERP_RFQ_Automation.Tests;
 /// </summary>
 public sealed class ReceiptLotDeclarationSeamTests
 {
+    /// <summary>
+    /// The receipt instant as it appears on the wire, taken from the real clock rather than pinned.
+    ///
+    /// <para>These payloads exist to prove the wire CONTRACT — the lot declaration survives
+    /// deserialisation — so the timestamp is incidental to what is being asserted, but not to
+    /// whether the request is accepted: PostGoodsReceiptAsync refuses a receipt dated before its
+    /// purchase order was issued, and that order is issued on the real clock moments earlier. The
+    /// literal 2026-08-10T09:00:00Z here was "today" when this was written and became "the day
+    /// before the order existed" at the next UTC midnight, failing two tests in a subsystem nobody
+    /// had changed.</para>
+    /// </summary>
+    private static string ReceivedOnWire =>
+        DateTime.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture);
+
     private static readonly JsonSerializerOptions Wire = new(JsonSerializerDefaults.Web);
 
     [Theory]
@@ -62,7 +77,7 @@ public sealed class ReceiptLotDeclarationSeamTests
           "purchaseOrderId": {{purchaseOrder.Id}},
           "warehouseId": {{ProcurementTestData.Warehouse}},
           "receiptNumber": "GR-SYNTHETIC-1",
-          "receivedOn": "2026-08-10T09:00:00.000Z",
+          "receivedOn": "{{ReceivedOnWire}}",
           "expectedPurchaseOrderVersion": 3,
           "lines": [
             {
@@ -122,7 +137,7 @@ public sealed class ReceiptLotDeclarationSeamTests
           "purchaseOrderId": {{purchaseOrder.Id}},
           "warehouseId": {{ProcurementTestData.Warehouse}},
           "receiptNumber": "GR-SYNTHETIC-2",
-          "receivedOn": "2026-08-10T09:00:00.000Z",
+          "receivedOn": "{{ReceivedOnWire}}",
           "expectedPurchaseOrderVersion": 3,
           "lines": [
             {
