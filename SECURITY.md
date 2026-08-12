@@ -85,12 +85,38 @@ steps.
 | --- | --- | --- | --- |
 | `Platform:Mfa:IsolatedTestInfrastructure` (`Platform__Mfa__IsolatedTestInfrastructure`) | `false` | bool | Declares a Staging/UAT deployment to be isolated test infrastructure with no customer data. It is the **only** thing that lets Staging reach `DISABLED_TEST_ONLY`. Setting it in a Production-classified environment makes the API **fail at startup**, exactly like `Jwt:Key` — a staging appsettings copied onto a production host must not boot. |
 | `Platform:Mfa:MaxBypassHours` (`Platform__Mfa__MaxBypassHours`) | `24` | 1–24 | Ceiling on how long any non-`REQUIRED` policy may run. An expiry is **mandatory** for every mode other than `REQUIRED`; the effective mode reverts to `REQUIRED` on the first read after it passes, with no job and no human involved. |
-| `Platform:Mfa:BrowserTrustHours` (`Platform__Mfa__BrowserTrustHours`) | `12` | 8–12 | "Remember this browser" window. The server stores only SHA-256 of the token the browser holds (`platform."PlatformBrowserTrusts"`); revoking is a column both the login redemption and `PlatformSessionValidator` read, so it takes effect on the next request and ends the session the trust minted. |
+| `Platform:Mfa:BrowserTrustHours` (`Platform__Mfa__BrowserTrustHours`) | `12` | 8–720 | **Seed only.** The "remember this browser" window until a policy row exists; from then on `platform."PlatformMfaPolicies"."BrowserTrustHours"` and `."BrowserTrustEnabled"` decide and this key is ignored (see below). The server stores only SHA-256 of the token the browser holds (`platform."PlatformBrowserTrusts"`); revoking is a column both the login redemption and `PlatformSessionValidator` read, so it takes effect on the next request and ends the session the trust minted. |
 | `Platform:Mfa:PasswordReauthWindowMinutes` (`Platform__Mfa__PasswordReauthWindowMinutes`) | `5` | 1–15 | How long a password re-authentication (`POST /api/platform/auth/reauthenticate`) satisfies a high-risk operation. |
 
 A value that parses but sits outside its range **throws at startup** rather than being clamped: an
 operator who wrote `MaxBypassHours: 240` believes they have ten days, and a silent clamp to 24
 leaves the belief and the system disagreeing with nobody told.
+
+**"Remember this browser" is a policy row, not a deployment setting.** `BrowserTrustEnabled` and
+`BrowserTrustHours` are columns on the singleton `platform."PlatformMfaPolicies"` row, changed only
+through `PUT /api/platform/auth/policy` — platform **Owner**, password re-authentication, typed
+confirmation, a reason, an `expectedVersion` fence and an audit row carrying the before and after
+values. `Platform:Mfa:BrowserTrustHours` seeds a deployment that has never had a policy row and is
+ignored once one exists, on the same appsettings-versus-row precedence the outbound email settings
+use.
+
+The permitted window is **8 hours to 720 hours (30 days)**, bounded by a database check constraint as
+well as by the service, so a hand-written `UPDATE` cannot install "remember forever". The ceiling was
+12 hours until an explicit product decision raised it; a month-long browser trust is a real trade —
+fewer challenges, a longer window in which a stolen laptop signs in without one — and it rests on
+three things staying true:
+
+- **`BrowserTrustEnabled` is enforced at redemption, not only at issuance.** Switching it off refuses
+  trusts that were *already* granted, at the next sign-in, rather than only stopping new ones.
+- **Revocation reaches backwards.** `RevokedAtUtc` is a predicate inside the redemption query and
+  inside `PlatformSessionValidator`, so revoking a browser both refuses the next sign-in and
+  invalidates the live session that trust already minted. An operator can revoke one browser or all
+  of them (`POST /api/platform/auth/browser-trusts/revoke-all`, own account only) from Platform Admin
+  → Security → Platform Authentication.
+- **The sign-in screen states the real window** ("Don't ask again on this browser for 30 days") and
+  does not render the checkbox at all when the switch is off — both read from the server on the
+  challenge response, because at that point the operator holds no token and cannot read the policy
+  endpoint.
 
 **Compensating controls while enforcement is relaxed.** Tenant purge, tenant export, personal-data
 erasure, legal-hold release and subscription-invoice finalisation carry

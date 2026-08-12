@@ -67,6 +67,11 @@ export const platformKeys = {
   platformAuthPolicy: () => [...platformKeys.all, 'auth', 'policy'] as const,
   platformAuthPolicyEffective: () => [...platformKeys.all, 'auth', 'policy', 'effective'] as const,
 
+  // The caller's OWN remembered browsers. No operator id in the key: the endpoint is scoped to
+  // the signed-in user server-side, and a key that carried one would imply a list that can be
+  // asked for on somebody else's behalf.
+  platformBrowserTrusts: () => [...platformKeys.all, 'auth', 'browser-trusts'] as const,
+
   supportTickets: (filter?: unknown) => [...platformKeys.all, 'support', 'tickets', filter ?? null] as const,
   supportTicket: (id: string) => [...platformKeys.all, 'support', 'ticket', id] as const,
   supportTicketTimeline: (id: string) => [...platformKeys.all, 'support', 'ticket', id, 'timeline'] as const,

@@ -12,9 +12,16 @@ public sealed record PlatformBrowserTrustGrant(long Id, string Token, DateTime E
 
 public interface IPlatformBrowserTrustService
 {
-    /// <summary>Remember this browser for the configured window. Returns the raw token exactly
-    /// once.</summary>
-    Task<PlatformBrowserTrustGrant> IssueAsync(
+    /// <summary>The window in force right now, and whether the control is switched on at all — from
+    /// the policy row, falling back to configuration when no row exists. The login screen reads this
+    /// so it can name the real duration instead of offering "remember this browser" with no number
+    /// attached, and so it can decline to offer it when the platform is not honouring it.</summary>
+    Task<PlatformBrowserTrustSettings> GetSettingsAsync(CancellationToken ct = default);
+
+    /// <summary>Remember this browser for the window the policy currently sets. Returns the raw token
+    /// exactly once, or NULL when browser trust is disabled — the caller must treat that as "no trust
+    /// was granted", never as a failure to report.</summary>
+    Task<PlatformBrowserTrustGrant?> IssueAsync(
         long platformUserId, string? userAgent, HttpContext? httpContext, CancellationToken ct = default);
 
     /// <summary>Is this browser currently trusted for this operator? Returns the row and stamps
@@ -53,15 +60,26 @@ public interface IPlatformBrowserTrustService
 /// <c>PlatformMfaRecoveryCodes</c> — a "remember me" secret is a bearer credential and has to be
 /// treated as one.</para>
 ///
-/// <para><b>Bounded, always.</b> The window comes from <c>Platform:Mfa:BrowserTrustHours</c>, which
-/// <see cref="PlatformMfaPolicyOptions"/> refuses to accept outside 8–12 hours. There is no
-/// "remember forever".</para>
+/// <para><b>Bounded, always.</b> The window comes from the singleton policy row — an Owner-set,
+/// audited, versioned column — falling back to <c>Platform:Mfa:BrowserTrustHours</c> only when no row
+/// exists. Both are refused outside 8–720 hours, by the service AND by a database check constraint.
+/// There is no "remember forever".</para>
+///
+/// <para><b>And it can be switched off entirely.</b> <c>BrowserTrustEnabled</c> is checked on BOTH
+/// paths below. Checking it only at issuance would mean an Owner who turns the control off has turned
+/// it off for the operators who never used it and left it running for everyone who did — for up to a
+/// month, with the console reporting it as off. The redemption check is what makes the switch honest.</para>
 /// </summary>
 public sealed class PlatformBrowserTrustService : IPlatformBrowserTrustService
 {
     public const string CreatedAction = "platform.mfa.browser-trust.created";
     public const string RevokedAction = "platform.mfa.browser-trust.revoked";
     public const string TargetType = nameof(PlatformBrowserTrust);
+
+    /// <summary>The revocation reason stamped on a "revoke every remembered browser" sweep. A
+    /// constant rather than a literal at the call site so the string in the row, the string in the
+    /// audit metadata and the string a test asserts on cannot drift apart.</summary>
+    public const string OperatorRevokedAllReason = "operator-revoked-all";
 
     /// <summary>Bytes of entropy in the raw token. 32 bytes is the same order as the JWT it
     /// substitutes a challenge for; anything guessable here is a second factor that can be
@@ -88,9 +106,24 @@ public sealed class PlatformBrowserTrustService : IPlatformBrowserTrustService
         _time = timeProvider ?? TimeProvider.System;
     }
 
-    public async Task<PlatformBrowserTrustGrant> IssueAsync(
+    public async Task<PlatformBrowserTrustSettings> GetSettingsAsync(CancellationToken ct = default) =>
+        _options.ResolveBrowserTrust(await LoadPolicyAsync(ct));
+
+    public async Task<PlatformBrowserTrustGrant?> IssueAsync(
         long platformUserId, string? userAgent, HttpContext? httpContext, CancellationToken ct = default)
     {
+        var settings = await GetSettingsAsync(ct);
+        if (!settings.Enabled)
+        {
+            // Not an error and not audited: the operator ticked a box that the platform no longer
+            // honours, and the honest outcome is that no trust exists. The caller returns a normal
+            // session with no token on it, so the browser stores nothing and is challenged next time.
+            _log.LogInformation(
+                "[PlatformMfa] Browser trust is disabled by policy; no trust was issued for platform user " +
+                "{PlatformUserId}.", platformUserId);
+            return null;
+        }
+
         var now = UtcNow();
         var raw = Base64UrlEncode(RandomNumberGenerator.GetBytes(TokenBytes));
         var trust = new PlatformBrowserTrust
@@ -99,7 +132,7 @@ public sealed class PlatformBrowserTrustService : IPlatformBrowserTrustService
             TokenHash = Hash(raw),
             Label = Label(userAgent),
             CreatedAtUtc = now,
-            ExpiresAtUtc = now.Add(_options.BrowserTrustDuration)
+            ExpiresAtUtc = now.Add(settings.Duration)
         };
 
         _db.Set<PlatformBrowserTrust>().Add(trust);
@@ -115,7 +148,10 @@ public sealed class PlatformBrowserTrustService : IPlatformBrowserTrustService
                 label = trust.Label,
                 createdAtUtc = trust.CreatedAtUtc,
                 expiresAtUtc = trust.ExpiresAtUtc,
-                trustHours = _options.BrowserTrustHours,
+                trustHours = settings.Hours,
+                // Which authority set that number. A reviewer reading this row a month later needs to
+                // know whether an Owner chose the window or the deployment default did.
+                trustWindowFrom = settings.FromPolicyRow ? "policy-row" : "configuration",
                 environment = _options.EnvironmentName,
                 correlationId = PlatformMfaPolicyService.CorrelationId(httpContext)
             },
@@ -128,6 +164,13 @@ public sealed class PlatformBrowserTrustService : IPlatformBrowserTrustService
         long platformUserId, string? rawToken, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(rawToken) || !IsMapped) return null;
+
+        // The switch, checked HERE and not only where trusts are minted. This is the line that makes
+        // "browser trust is off" true for the trusts that already exist: an Owner who disables it at
+        // 10am has disabled it at 10am, rather than at some point over the following month as each
+        // outstanding trust happens to expire. The rows are left alone — see
+        // PlatformMfaPolicy.BrowserTrustEnabled for why switching back on restores them.
+        if (!(await GetSettingsAsync(ct)).Enabled) return null;
 
         var now = UtcNow();
         var hash = Hash(rawToken.Trim());
@@ -237,6 +280,32 @@ public sealed class PlatformBrowserTrustService : IPlatformBrowserTrustService
     }
 
     private bool IsMapped => _db.Model.FindEntityType(typeof(PlatformBrowserTrust)) is not null;
+
+    /// <summary>
+    /// The singleton policy row, or null when there is none — which
+    /// <see cref="PlatformMfaPolicyOptions.ResolveBrowserTrust"/> reads as "use the configured seed".
+    ///
+    /// <para>Read on every issuance and every redemption rather than cached, on the same terms as
+    /// <c>PlatformMfaPolicyService.GetEffectiveAsync</c>: a cached copy is a window in which the
+    /// control is switched off and this process has not noticed, and the cost is one indexed read on
+    /// a single-row table on a path that is already doing a hash lookup.</para>
+    ///
+    /// <para>Projected rather than materialised so this never tracks the policy row into a change
+    /// tracker that is about to save a browser trust.</para>
+    /// </summary>
+    private async Task<PlatformMfaPolicy?> LoadPolicyAsync(CancellationToken ct)
+    {
+        if (_db.Model.FindEntityType(typeof(PlatformMfaPolicy)) is null) return null;
+
+        return await _db.Set<PlatformMfaPolicy>().AsNoTracking()
+            .Where(policy => policy.Id == PlatformMfaPolicy.SingletonId)
+            .Select(policy => new PlatformMfaPolicy
+            {
+                BrowserTrustEnabled = policy.BrowserTrustEnabled,
+                BrowserTrustHours = policy.BrowserTrustHours
+            })
+            .FirstOrDefaultAsync(ct);
+    }
 
     private DateTime UtcNow() => _time.GetUtcNow().UtcDateTime;
 

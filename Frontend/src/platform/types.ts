@@ -2023,6 +2023,11 @@ export interface PlatformEffectiveMfaPolicy {
   bypassExpired: boolean;
   changedBy: string | null;
   version: number;
+  /** Whether the platform honours remembered browsers at all. False means an EXISTING trust is
+   *  refused at the next sign-in, not merely that no new ones are minted. */
+  browserTrustEnabled: boolean;
+  /** How long a remembered browser suppresses a repeat challenge, in hours. */
+  browserTrustHours: number;
 }
 
 /**
@@ -2050,7 +2055,13 @@ export interface PlatformMfaPolicy extends PlatformEffectiveMfaPolicy {
   confirmationPhrases: Record<string, string>;
   maxBypassHours: number;
   minimumReasonLength: number;
-  browserTrustHours: number;
+  /** True when an Owner set the window; false when it is still the deployment's seed value. The
+   *  screen says which, because a number nobody chose looks exactly like a number somebody did. */
+  browserTrustFromPolicyRow: boolean;
+  /** The bounds the SERVER will accept, sent rather than hard-coded here so the screen cannot
+   *  offer a duration the API refuses. */
+  minBrowserTrustHours: number;
+  maxBrowserTrustHours: number;
 }
 
 export interface ChangePlatformMfaPolicyInput {
@@ -2060,4 +2071,23 @@ export interface ChangePlatformMfaPolicyInput {
   expiresAtUtc?: string | null;
   confirmation: string;
   expectedVersion?: number | null;
+  /** Omitted (or null) keeps what is stored — the server applies null-keeps, so a change that is
+   *  only about the enforcement mode cannot silently reset a control it never mentioned. */
+  browserTrustEnabled?: boolean | null;
+  browserTrustHours?: number | null;
+}
+
+/**
+ * One browser the signed-in operator has told the platform to remember.
+ *
+ * Own-account only, in both directions: the list endpoint is scoped to the caller's user id and so
+ * is every revoke. There is no route that reads or revokes somebody else's.
+ */
+export interface PlatformBrowserTrust {
+  id: number;
+  /** "Chrome on macOS" — derived from the User-Agent, never the raw header. */
+  label: string | null;
+  createdAtUtc: string;
+  expiresAtUtc: string;
+  lastUsedAtUtc: string | null;
 }

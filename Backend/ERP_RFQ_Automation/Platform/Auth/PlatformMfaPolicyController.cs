@@ -52,7 +52,12 @@ public class PlatformMfaPolicyController : ControllerBase
             passwordOnlySessionsPermitted = effective.PasswordOnlySessionsPermitted,
             bypassExpired = effective.BypassExpired,
             changedBy = effective.ChangedBy,
-            version = effective.Version
+            version = effective.Version,
+            // Carried on the NARROW read because the console needs it on screens an Owner never
+            // opens: the trust list, and the copy that tells an operator how long "remember this
+            // browser" actually lasts. Neither is a secret — the operator was offered the control.
+            browserTrustEnabled = effective.BrowserTrustEnabled,
+            browserTrustHours = effective.BrowserTrustHours
         });
     }
 

@@ -22,7 +22,9 @@ public sealed record PlatformEffectiveMfaPolicy(
     string? ChangeReason,
     long Version,
     DateTime? UpdatedAtUtc,
-    bool IsolatedTestInfrastructure)
+    bool IsolatedTestInfrastructure,
+    bool BrowserTrustEnabled,
+    int BrowserTrustHours)
 {
     /// <summary>
     /// True when a session that never presented a second factor may reach the privileged control
@@ -104,7 +106,25 @@ public sealed class PlatformMfaPolicyDto
 
     public int MinimumReasonLength { get; set; }
 
+    /// <summary>Whether the platform honours remembered browsers at all. False means an existing
+    /// trust is refused at the next sign-in, not merely that no new ones are minted.</summary>
+    public bool BrowserTrustEnabled { get; set; }
+
+    /// <summary>The window in force, in hours. It comes from the policy row once one exists; until
+    /// then it is the <c>Platform:Mfa:BrowserTrustHours</c> seed — see
+    /// <see cref="BrowserTrustFromPolicyRow"/>.</summary>
     public int BrowserTrustHours { get; set; }
+
+    /// <summary>True when an Owner set the window, false when it is still the deployment default.
+    /// The screen says which, because a number nobody chose looks exactly like a number somebody
+    /// did.</summary>
+    public bool BrowserTrustFromPolicyRow { get; set; }
+
+    /// <summary>The bounds the server will accept, sent rather than hard-coded in the console so the
+    /// two cannot drift into a screen that offers a value the API refuses.</summary>
+    public int MinBrowserTrustHours { get; set; }
+
+    public int MaxBrowserTrustHours { get; set; }
 }
 
 /// <summary>
@@ -141,6 +161,24 @@ public sealed class ChangePlatformMfaPolicyRequest
 
     /// <summary>Optimistic concurrency, on the same terms as the email settings screen.</summary>
     public long? ExpectedVersion { get; set; }
+
+    /// <summary>
+    /// Turn "remember this browser" on or off for the whole platform. NULL keeps what is stored —
+    /// the same null-keeps rule <c>PlatformEmailSettingsService.ResolveSecret</c> uses — so a caller
+    /// changing only the enforcement mode cannot silently reset a control it never mentioned.
+    ///
+    /// <para>It rides on this request, and therefore through this request's ceremony, deliberately.
+    /// Disabling browser trust is a tightening and could arguably be cheap; SETTING IT BACK ON, or
+    /// widening the window to a month, is a relaxation of the second factor for every operator at
+    /// once, and it must not be reachable by a lighter path than the one that relaxes the mode.</para>
+    /// </summary>
+    public bool? BrowserTrustEnabled { get; set; }
+
+    /// <summary>How long a remembered browser suppresses a repeat challenge, in hours. NULL keeps
+    /// what is stored. Bounded by <c>PlatformMfaPolicyOptions.Min/MaxBrowserTrustHours</c> — the
+    /// service refuses anything outside it with a 400 that names both bounds, and a check constraint
+    /// refuses it again at the table.</summary>
+    public int? BrowserTrustHours { get; set; }
 }
 
 /// <summary>Outcome of a policy change. A conflict is distinguished from a refusal because they

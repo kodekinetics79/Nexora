@@ -118,10 +118,12 @@ public sealed class PlatformMfaPolicyService : IPlatformMfaPolicyService
 
         if (expired) await RecordExpiryOnceAsync(row, now, ct);
 
+        var trust = _options.ResolveBrowserTrust(row);
         return new PlatformEffectiveMfaPolicy(
             effective, declared, _options.EnvironmentClass, _options.EnvironmentName,
             row.EffectiveFromUtc, row.ExpiresAtUtc, row.ChangedBy, row.ChangeReason,
-            row.Version, row.UpdatedAtUtc, _options.IsolatedTestInfrastructure);
+            row.Version, row.UpdatedAtUtc, _options.IsolatedTestInfrastructure,
+            trust.Enabled, trust.Hours);
     }
 
     public async Task<PlatformMfaPolicyDto> GetAsync(CancellationToken ct = default)
@@ -145,6 +147,12 @@ public sealed class PlatformMfaPolicyService : IPlatformMfaPolicyService
             ? await _db.Set<PlatformBrowserTrust>()
                 .CountAsync(trust => trust.RevokedAtUtc == null && trust.ExpiresAtUtc > now, ct)
             : 0;
+
+        // Whether the window on the screen is one an Owner chose or the deployment's default. The
+        // screen labels it, because a number nobody set looks identical to a number somebody did,
+        // and the difference decides whether "12 hours" is a decision or an oversight.
+        dto.BrowserTrustFromPolicyRow = IsMapped && await _db.Set<PlatformMfaPolicy>()
+            .AnyAsync(policy => policy.Id == PlatformMfaPolicy.SingletonId, ct);
 
         return dto;
     }
@@ -270,6 +278,14 @@ public sealed class PlatformMfaPolicyService : IPlatformMfaPolicyService
         if (!string.Equals((request.Confirmation ?? string.Empty).Trim(), expectedPhrase, StringComparison.Ordinal))
             return Refused($"Type {expectedPhrase} exactly to confirm.");
 
+        // The browser-trust window, checked before anything is written and stated in full. A 400 that
+        // says "invalid" leaves an Owner guessing which end they hit; this one names the value and
+        // both bounds. The table's check constraint says the same thing again for the UPDATE that
+        // never came through here.
+        if (request.BrowserTrustHours is { } requestedTrustHours
+            && !PlatformMfaPolicyOptions.PermitsBrowserTrustHours(requestedTrustHours))
+            return Refused(PlatformMfaPolicyOptions.ExplainBrowserTrustHours(requestedTrustHours));
+
         var now = UtcNow();
         DateTime? expiresAtUtc = null;
         if (mode != PlatformMfaMode.REQUIRED)
@@ -306,11 +322,26 @@ public sealed class PlatformMfaPolicyService : IPlatformMfaPolicyService
         var isNew = row is null;
         var previousMode = row is null ? PlatformMfaMode.REQUIRED : ParseMode(row.Mode);
         var previousExpiry = row?.ExpiresAtUtc;
+        // The BEFORE values, captured against the same precedence a reader will see: on the first
+        // ever change there is no row, so "before" is honestly the configured seed rather than a
+        // default invented at this line.
+        var previousTrust = _options.ResolveBrowserTrust(row);
         if (row is null)
         {
             row = new PlatformMfaPolicy { Id = PlatformMfaPolicy.SingletonId, CreatedAtUtc = now };
             _db.Set<PlatformMfaPolicy>().Add(row);
+            // Seeded, not defaulted. A first change that says nothing about browser trust must carry
+            // the deployment's configured window into the row it creates — otherwise the act of
+            // switching MFA to OPTIONAL for an afternoon would silently reset a configured 8-hour
+            // window to 12, and nothing on the screen or in the audit row would mention it.
+            row.BrowserTrustEnabled = previousTrust.Enabled;
+            row.BrowserTrustHours = previousTrust.Hours;
         }
+
+        // Null keeps, on the same terms as the email settings screen: a request that does not mention
+        // browser trust must not reset it.
+        row.BrowserTrustEnabled = request.BrowserTrustEnabled ?? row.BrowserTrustEnabled;
+        row.BrowserTrustHours = request.BrowserTrustHours ?? row.BrowserTrustHours;
 
         row.Mode = mode.ToString();
         row.EffectiveFromUtc = now;
@@ -341,6 +372,15 @@ public sealed class PlatformMfaPolicyService : IPlatformMfaPolicyService
             environmentClass = row.EnvironmentClass,
             isolatedTestInfrastructure = _options.IsolatedTestInfrastructure,
             maxBypassHours = _options.MaxBypassHours,
+            // Before AND after, both, on every change. A row that recorded only the new window would
+            // let a reviewer see that browser trust is 720 hours without being able to tell whether
+            // this change is what made it so.
+            browserTrustEnabled = row.BrowserTrustEnabled,
+            previousBrowserTrustEnabled = previousTrust.Enabled,
+            browserTrustHours = row.BrowserTrustHours,
+            previousBrowserTrustHours = previousTrust.Hours,
+            browserTrustChanged = row.BrowserTrustEnabled != previousTrust.Enabled
+                                  || row.BrowserTrustHours != previousTrust.Hours,
             actorEmail = user.Email,
             sessionId = SessionId(actor),
             correlationId = CorrelationId(httpContext),
@@ -400,6 +440,16 @@ public sealed class PlatformMfaPolicyService : IPlatformMfaPolicyService
                 "Reason: {Reason}",
                 row.Mode, _options.EnvironmentName, user.Email, row.ExpiresAtUtc, reason);
 
+        // Its own line, because a browser-trust change is invisible in the mode line above — an Owner
+        // can take the window from 12 hours to 30 days without the declared mode moving at all, and
+        // "why did operators stop being challenged" is the question this line answers.
+        if (row.BrowserTrustEnabled != previousTrust.Enabled || row.BrowserTrustHours != previousTrust.Hours)
+            _log.LogWarning(
+                "[PlatformMfa] Browser trust changed in {Environment} by {Actor}: enabled {WasEnabled} -> " +
+                "{IsEnabled}, window {WasHours}h -> {IsHours}h. Reason: {Reason}",
+                _options.EnvironmentName, user.Email, previousTrust.Enabled, row.BrowserTrustEnabled,
+                previousTrust.Hours, row.BrowserTrustHours, reason);
+
         return new PlatformMfaPolicyChangeResult(true, await GetAsync(ct), null);
     }
 
@@ -420,9 +470,19 @@ public sealed class PlatformMfaPolicyService : IPlatformMfaPolicyService
         return query.FirstOrDefaultAsync(x => x.Id == PlatformMfaPolicy.SingletonId, ct);
     }
 
-    private PlatformEffectiveMfaPolicy Enforced(DateTime now) => new(
-        PlatformMfaMode.REQUIRED, PlatformMfaMode.REQUIRED, _options.EnvironmentClass,
-        _options.EnvironmentName, now, null, null, null, 0, null, _options.IsolatedTestInfrastructure);
+    private PlatformEffectiveMfaPolicy Enforced(DateTime now)
+    {
+        // No row: browser trust falls back to the configured seed, exactly as it does everywhere
+        // else. It is NOT forced off here. Enforcing MFA harder than the row asks is fail-closed;
+        // refusing a control the deployment is configured for, on a deployment that has simply never
+        // been configured through the console, would break "remember this browser" on every fresh
+        // install and look like a bug in the checkbox.
+        var trust = _options.ResolveBrowserTrust(null);
+        return new PlatformEffectiveMfaPolicy(
+            PlatformMfaMode.REQUIRED, PlatformMfaMode.REQUIRED, _options.EnvironmentClass,
+            _options.EnvironmentName, now, null, null, null, 0, null,
+            _options.IsolatedTestInfrastructure, trust.Enabled, trust.Hours);
+    }
 
     /// <summary>Anything unparseable is REQUIRED. A corrupted or hand-edited mode string must not be
     /// the thing that turns enforcement off.</summary>
@@ -483,7 +543,14 @@ public sealed class PlatformMfaPolicyService : IPlatformMfaPolicyService
                 mode => mode.ToString(), PlatformMfaPolicyOptions.ConfirmationPhraseFor),
             MaxBypassHours = _options.MaxBypassHours,
             MinimumReasonLength = PlatformMfaPolicyOptions.MinimumReasonLength,
-            BrowserTrustHours = _options.BrowserTrustHours
+            // From the EFFECTIVE policy, which has already applied row-over-configuration precedence.
+            // Echoing _options here — as this line used to — reported the deployment's seed as though
+            // it were the setting in force, so an Owner who set a 30-day window read "12" back off
+            // their own screen.
+            BrowserTrustEnabled = effective.BrowserTrustEnabled,
+            BrowserTrustHours = effective.BrowserTrustHours,
+            MinBrowserTrustHours = PlatformMfaPolicyOptions.MinBrowserTrustHours,
+            MaxBrowserTrustHours = PlatformMfaPolicyOptions.MaxBrowserTrustHours
         };
     }
 

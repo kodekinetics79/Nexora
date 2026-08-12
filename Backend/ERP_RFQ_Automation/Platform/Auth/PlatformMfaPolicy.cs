@@ -129,6 +129,49 @@ public sealed class PlatformMfaPolicy
     /// a failure to write it would keep a bypass alive.</para>
     /// </summary>
     public DateTime? ExpiryRecordedAtUtc { get; set; }
+
+    /// <summary>
+    /// Whether "remember this browser" is offered at all on this platform.
+    ///
+    /// <para><b>It is enforced at REDEMPTION, not only at issuance.</b> Gating only the minting of new
+    /// trusts would mean an Owner who turns this off has turned it off for people who have not used it
+    /// yet, and left it running for everyone who has — for up to the full window. Turning it off has
+    /// to mean the trusts that already exist stop counting on the very next sign-in, which is what
+    /// <c>PlatformBrowserTrustService.RedeemAsync</c> does with it.</para>
+    ///
+    /// <para>It does not un-trust anything: the rows stay, unrevoked, and switching the control back on
+    /// restores whatever window they had left. Deleting them on a policy flip would make an Owner's
+    /// half-hour experiment cost every operator a fresh challenge cycle, which is the cost that makes
+    /// people leave a control alone.</para>
+    /// </summary>
+    public bool BrowserTrustEnabled { get; set; } = true;
+
+    /// <summary>
+    /// How many hours a remembered browser suppresses a repeat challenge for, between
+    /// <see cref="PlatformMfaPolicyOptions.MinBrowserTrustHours"/> and
+    /// <see cref="PlatformMfaPolicyOptions.MaxBrowserTrustHours"/> — a database check constraint, not
+    /// only a service-layer rule, so a hand-written UPDATE cannot install "remember forever".
+    ///
+    /// <para><b>Why it moved out of appsettings.</b> It is a customer-set security parameter, and the
+    /// same argument that put <c>Mode</c> in a row applies to it unchanged: a value in a deployment
+    /// file is changed by whoever can edit that file, leaves no record of who or why, and cannot be
+    /// changed at all by the Owner it belongs to. <c>Platform:Mfa:BrowserTrustHours</c> survives as the
+    /// SEED for a deployment that has never had a policy row — see
+    /// <c>PlatformMfaPolicyOptions.ResolveBrowserTrust</c> for the precedence.</para>
+    /// </summary>
+    public int BrowserTrustHours { get; set; } = PlatformMfaPolicyOptions.DefaultBrowserTrustHours;
+}
+
+/// <summary>
+/// The resolved answer to "are remembered browsers honoured here, and for how long" — the row's
+/// values, or the configured seed when no row has ever been written.
+/// </summary>
+/// <param name="FromPolicyRow">True when a stored policy row decided this, false when it came from
+/// <c>Platform:Mfa:BrowserTrustHours</c>. Surfaced so the screen can say which, rather than showing a
+/// number that an operator will assume they set.</param>
+public sealed record PlatformBrowserTrustSettings(bool Enabled, int Hours, bool FromPolicyRow)
+{
+    public TimeSpan Duration => TimeSpan.FromHours(Hours);
 }
 
 /// <summary>
@@ -161,8 +204,13 @@ public sealed class PlatformBrowserTrust
 
     public DateTime CreatedAtUtc { get; set; }
 
-    /// <summary>Bounded by <c>Platform:Mfa:BrowserTrustHours</c> (8–12h). A trust that outlives the
-    /// working day it was granted for is a second factor the operator no longer knows they have.</summary>
+    /// <summary>Stamped at issuance from the window in force at that moment — the policy row's
+    /// <see cref="PlatformMfaPolicy.BrowserTrustHours"/>, or the configured seed when no row exists.
+    /// Bounded to 8–720 hours by the same check constraint the policy column carries.
+    ///
+    /// <para>Deliberately NOT recomputed when the policy window changes. Shortening the platform
+    /// window does not retroactively shorten trusts already granted; the control for "these trusts
+    /// end now" is revocation, which is immediate and reaches the live sessions they minted.</para></summary>
     public DateTime ExpiresAtUtc { get; set; }
 
     public DateTime? LastUsedAtUtc { get; set; }

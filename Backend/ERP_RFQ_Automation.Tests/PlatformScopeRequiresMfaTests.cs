@@ -180,6 +180,15 @@ public sealed class PlatformScopeRequiresMfaTests
         //                         Owner/TenantAdmin gate the high-risk endpoint already carries.
         //   ListBrowserTrusts   — the operator's OWN remembered browsers, scoped to their user id.
         //   RevokeBrowserTrust  — likewise, and it only ever REMOVES authority.
+        //
+        // A fourth joined them when the browser-trust window was allowed to reach a month:
+        //
+        //   RevokeAllBrowserTrusts — the "I have lost a device and I do not know which entry it is"
+        //                         control. Scoped to the caller's own user id by ActorId(), with no
+        //                         route or body parameter that could widen it, and like the single
+        //                         revoke it only ever REMOVES authority. Widening the window is what
+        //                         makes it matter: a trust that can outlive the memory of granting it
+        //                         needs a revocation an operator can reach without an inventory.
         var onEnrollment = typeof(PlatformAuthController)
             .GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
             .Where(method => method.GetCustomAttributes<AuthorizeAttribute>()
@@ -192,7 +201,7 @@ public sealed class PlatformScopeRequiresMfaTests
             new[]
             {
                 "BeginMfaEnrollment", "ConfirmMfaEnrollment", "GetMfaStatus", "ListBrowserTrusts",
-                "Logout", "Reauthenticate", "RevokeBrowserTrust"
+                "Logout", "Reauthenticate", "RevokeAllBrowserTrusts", "RevokeBrowserTrust"
             },
             onEnrollment);
 

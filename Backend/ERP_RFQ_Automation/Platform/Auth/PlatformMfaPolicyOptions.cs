@@ -23,8 +23,11 @@ namespace ERP_RFQ_Automation.Platform.Auth;
 /// test rig's privileges.</description></item>
 /// <item><description><c>Platform:Mfa:MaxBypassHours</c> (int, default <c>24</c>, range 1–24) —
 /// the ceiling on how long any non-REQUIRED policy may run before it expires on its own.</description></item>
-/// <item><description><c>Platform:Mfa:BrowserTrustHours</c> (int, default <c>12</c>, range 8–12) —
-/// how long "remember this browser" suppresses a repeat challenge.</description></item>
+/// <item><description><c>Platform:Mfa:BrowserTrustHours</c> (int, default <c>12</c>, range 8–720) —
+/// the SEED for how long "remember this browser" suppresses a repeat challenge. It is only the seed:
+/// once a policy row exists, <c>PlatformMfaPolicies.BrowserTrustHours</c> and
+/// <c>PlatformMfaPolicies.BrowserTrustEnabled</c> decide, on the same appsettings-versus-row
+/// precedence <c>PlatformEmailSettingsService</c> uses.</description></item>
 /// <item><description><c>Platform:Mfa:PasswordReauthWindowMinutes</c> (int, default <c>5</c>,
 /// range 1–15) — how long a password re-authentication satisfies a high-risk operation.</description></item>
 /// </list>
@@ -39,11 +42,43 @@ public sealed class PlatformMfaPolicyOptions
     public const int DefaultMaxBypassHours = 24;
     public const int MinMaxBypassHours = 1;
 
-    /// <summary>Bounds from the control's own definition: a trust shorter than a working day makes
-    /// operators re-challenge mid-afternoon and teaches them to click through prompts; one longer
-    /// than a day is a second factor that outlives the person's memory of granting it.</summary>
+    /// <summary>
+    /// The permitted "remember this browser" window: 8 hours to 30 days, defaulting to 12 hours.
+    ///
+    /// <para><b>The floor has not moved and the reasoning behind it has not changed.</b> A trust
+    /// shorter than a working day makes operators re-challenge mid-afternoon and teaches them to
+    /// click through prompts, which is the reflex MFA-fatigue attacks are built on.</para>
+    ///
+    /// <para><b>The ceiling was 12 hours and was raised to 720 by an explicit product decision, not
+    /// by drift.</b> The original argument against a longer window still stands on its own terms and
+    /// is recorded here so nobody has to rediscover it: a browser trust that outlives the working day
+    /// it was granted for is a second factor that outlives the person's memory of granting it, and an
+    /// operator who cannot remember granting it will not think to revoke it. Raising the ceiling to a
+    /// month is a deliberate trade — fewer challenges, a longer blast radius on a stolen laptop — and
+    /// it is a trade, not a free win.</para>
+    ///
+    /// <para><b>What makes the trade acceptable</b>, and what has to keep being true for it to stay
+    /// acceptable:</para>
+    /// <list type="number">
+    /// <item><description>The window is no longer a deployment setting that anyone with file access
+    /// can change: it is a column on the singleton policy row, changeable only by a platform Owner,
+    /// only with a password re-authentication, a typed confirmation, a reason and an audit row that
+    /// records the before and after values.</description></item>
+    /// <item><description>Revocation is immediate and it reaches BACKWARDS. <c>RevokedAtUtc</c> is a
+    /// predicate inside the redemption query and inside <c>PlatformSessionValidator</c>, so revoking a
+    /// remembered browser both refuses the next sign-in and invalidates the live session that trust
+    /// already minted — which is the window a lost laptop's owner is racing to close.</description></item>
+    /// <item><description>There is a switch. <see cref="PlatformMfaPolicy.BrowserTrustEnabled"/> turns
+    /// browser trust off for the whole platform, and it is enforced at REDEMPTION as well as at
+    /// issuance, so it takes effect on trusts that were already granted rather than only on future
+    /// ones.</description></item>
+    /// </list>
+    ///
+    /// <para>A 30-day window with none of those three would be the defect the 12-hour ceiling was
+    /// protecting against. With them it is a supportable default the customer sets.</para>
+    /// </summary>
     public const int MinBrowserTrustHours = 8;
-    public const int MaxBrowserTrustHours = 12;
+    public const int MaxBrowserTrustHours = 720;
     public const int DefaultBrowserTrustHours = 12;
 
     public const int MinPasswordReauthWindowMinutes = 1;
@@ -86,7 +121,38 @@ public sealed class PlatformMfaPolicyOptions
 
     public TimeSpan MaxBypassDuration => TimeSpan.FromHours(MaxBypassHours);
 
+    /// <summary>The SEED window, from configuration. Callers that are deciding how long a real trust
+    /// lives must use <see cref="ResolveBrowserTrust"/> instead — this value only applies while no
+    /// policy row exists.</summary>
     public TimeSpan BrowserTrustDuration => TimeSpan.FromHours(BrowserTrustHours);
+
+    /// <summary>
+    /// The single place "how long is a remembered browser trusted, and are we honouring them at all"
+    /// is answered.
+    ///
+    /// <para><b>Precedence, and it is the codebase's existing one.</b> A stored row wins outright;
+    /// configuration answers only when there is no row — the same rule
+    /// <c>PlatformEmailSettingsService.GetAsync</c> applies, and for the same reason: an empty screen
+    /// that ignores a configured value tells the operator they have no setting when the process is
+    /// running on one, and a configuration that silently overrides a deliberate, audited row means
+    /// the operator's change did nothing and nothing said so.</para>
+    ///
+    /// <para>Both callers — issuance and redemption — resolve through here rather than each reading
+    /// the row their own way, because two answers to "is this browser still trusted" is how a
+    /// disabled control keeps working on one of the two paths.</para>
+    /// </summary>
+    public PlatformBrowserTrustSettings ResolveBrowserTrust(PlatformMfaPolicy? row) => row is null
+        ? new PlatformBrowserTrustSettings(Enabled: true, BrowserTrustHours, FromPolicyRow: false)
+        : new PlatformBrowserTrustSettings(row.BrowserTrustEnabled, row.BrowserTrustHours, FromPolicyRow: true);
+
+    /// <summary>The refusal an Owner reads when they ask for a window outside the permitted range. It
+    /// names both bounds and the value, because "invalid duration" is a support ticket.</summary>
+    public static string ExplainBrowserTrustHours(int hours) =>
+        $"A remembered browser may be trusted for between {MinBrowserTrustHours} hours and " +
+        $"{MaxBrowserTrustHours} hours ({MaxBrowserTrustHours / 24} days). {hours} is outside that range.";
+
+    public static bool PermitsBrowserTrustHours(int hours) =>
+        hours >= MinBrowserTrustHours && hours <= MaxBrowserTrustHours;
 
     public TimeSpan PasswordReauthWindow => TimeSpan.FromMinutes(PasswordReauthWindowMinutes);
 

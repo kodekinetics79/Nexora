@@ -21,9 +21,21 @@ public static class PlatformMfaPolicyModelBuilderExtensions
             // service remembers it. Two rows would not be a duplicate: they would be two answers to
             // "is MFA enforced on this platform", and the one that wins would depend on ordering.
             entity.ToTable("PlatformMfaPolicies", "platform", table =>
+            {
                 table.HasCheckConstraint(
                     "CK_PlatformMfaPolicies_Singleton",
-                    $"\"Id\" = {PlatformMfaPolicy.SingletonId}"));
+                    $"\"Id\" = {PlatformMfaPolicy.SingletonId}");
+
+                // The browser-trust window is bounded in the DATABASE and not only in the service
+                // that writes it. The service refuses an out-of-range value with a sentence an
+                // Owner can act on; this refuses the UPDATE that never went through the service —
+                // a hand-edited row, a restore, a future admin script — because "remember this
+                // browser forever" is exactly the value somebody would set by hand.
+                table.HasCheckConstraint(
+                    "CK_PlatformMfaPolicies_BrowserTrustHours",
+                    $"\"BrowserTrustHours\" BETWEEN {PlatformMfaPolicyOptions.MinBrowserTrustHours} " +
+                    $"AND {PlatformMfaPolicyOptions.MaxBrowserTrustHours}");
+            });
 
             entity.HasKey(x => x.Id);
             entity.Property(x => x.Id).ValueGeneratedNever();
@@ -40,6 +52,13 @@ public static class PlatformMfaPolicyModelBuilderExtensions
 
             entity.Property(x => x.ChangedBy).HasMaxLength(320);
             entity.Property(x => x.ChangeReason).HasMaxLength(1000);
+
+            // Store defaults on both, for the same reason Mode carries one: a row inserted by a path
+            // that does not know these columns exist gets the shipped behaviour rather than
+            // false/0 — and 0 hours would be a trust that expires before it is written.
+            entity.Property(x => x.BrowserTrustEnabled).HasDefaultValue(true);
+            entity.Property(x => x.BrowserTrustHours)
+                .HasDefaultValue(PlatformMfaPolicyOptions.DefaultBrowserTrustHours);
 
             // The UPDATE's WHERE clause, not a read-then-compare. Two Owners relaxing enforcement
             // from two tabs is exactly the situation where a silent last-write-wins would leave the
