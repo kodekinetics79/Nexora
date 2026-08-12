@@ -8,6 +8,10 @@ export const platformKeys = {
   tenant: (id: string) => [...platformKeys.all, 'tenant', id] as const,
   tenantOperations: (id: string) => [...platformKeys.all, 'tenant', id, 'operations'] as const,
   tenantInvitations: (id: string) => [...platformKeys.all, 'tenant', id, 'admin-invitations'] as const,
+  // The tenant's own staff accounts and the roles they can hold. Nested under the tenant key so
+  // a mutation on one user invalidates the roster it came from and nothing wider.
+  tenantUsers: (id: string) => [...platformKeys.all, 'tenant', id, 'users'] as const,
+  tenantRoles: (id: string) => [...platformKeys.all, 'tenant', id, 'roles'] as const,
   queue: () => [...platformKeys.all, 'queue'] as const,
   jobs: (filter?: unknown) => [...platformKeys.all, 'jobs', filter ?? null] as const,
   plans: () => [...platformKeys.all, 'plans'] as const,

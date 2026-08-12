@@ -194,6 +194,69 @@ export interface ResendTenantAdminInvitationResult {
   activationUrl: string | null;
 }
 
+/**
+ * One account inside a customer's workspace — the customer's own staff, not a platform operator.
+ * `PlatformOperator` is the other thing entirely, and the two must never be shown on one list.
+ */
+export interface TenantUser {
+  id: string;
+  firstName: string;
+  middleName: string | null;
+  lastName: string;
+  email: string;
+  roleId: string | null;
+  roleCode: string | null;
+  roleName: string | null;
+  /** Setup_Master.RoleRank. 30 = Owner, 20 = Admin, 10 = Manager, 0 = Member. */
+  roleRank: number | null;
+  isActive: boolean;
+  deactivatedAtUtc: string | null;
+  lastLogin: string | null;
+  createdOn: string;
+  /** The most recent activation invitation for this account, whatever its status. */
+  invitation: TenantAdminInvitation | null;
+  /**
+   * Invited and never redeemed: the account holds no credential anybody knows, so returning it
+   * to service does not let the person sign in. Reissuing their invitation does.
+   */
+  awaitingActivation: boolean;
+}
+
+/** An assignable role from the tenant's own Setup_Master. */
+export interface TenantRole {
+  id: string;
+  code: string | null;
+  name: string;
+  description: string | null;
+  rank: number;
+  rankLabel: string;
+  activeUserCount: number;
+  /** False when the signed-in operator's platform role is not senior enough to grant it. */
+  grantable: boolean;
+  notGrantableReason: string | null;
+}
+
+export interface CreateTenantUserInput {
+  email: string;
+  firstName: string;
+  middleName?: string | null;
+  lastName: string;
+  roleId: string;
+  timezone?: string | null;
+  /** 'invite' (default) mails a single-use link; 'password' is Owner-only and audited as such. */
+  activation?: 'invite' | 'password';
+  password?: string | null;
+  reason: string;
+}
+
+export interface CreateTenantUserResult {
+  user: TenantUser;
+  invitation: TenantAdminInvitation | null;
+  emailDispatched: boolean;
+  /** Returned exactly once, to an Owner, when the provider did not transmit the message. */
+  activationUrl: string | null;
+}
+
 export interface BillingMeterCatalogEntry {
   eventType: string;
   billingMeterKey: string;
