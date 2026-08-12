@@ -7,14 +7,22 @@ import {
   Button,
   Chip,
   Divider,
+  FormControlLabel,
   Grid,
   Paper,
   Stack,
+  Switch,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableRow,
   TextField,
   Tooltip,
   Typography,
 } from '@mui/material';
 import {
+  DevicesOutlined as DevicesIcon,
   LockOutlined as PolicyIcon,
   ReportProblemOutlined as ProblemIcon,
   VerifiedUserOutlined as EnforcedIcon,
@@ -28,7 +36,7 @@ import RoleGate from '../components/RoleGate';
 import { usePlatformPermissions } from '../auth/usePlatformPermissions';
 import { REQUIRED_ROLE_COPY } from '../auth/permissions';
 import { ErrorState, LoadingState } from '../components/States';
-import { fmtDateTime } from '../components/format';
+import { fmtDateTime, fmtTrustWindow } from '../components/format';
 import type { PlatformMfaMode } from '../types';
 
 /** What each mode means, in the words an operator needs before choosing it. Kept here rather
@@ -42,6 +50,17 @@ const MODE_COPY: Record<PlatformMfaMode, string> = {
   DISABLED_TEST_ONLY:
     'No second factor is enforced anywhere, including at sign-in for operators who have enrolled. Enrolled authenticators are kept — nobody has to re-enrol when this ends.',
 };
+
+/**
+ * The browser-trust windows worth offering as one click, in hours.
+ *
+ * Presets rather than a free number box because the meaningful choices here are few and the
+ * consequences of each are different in kind: a working day, a working week, a month. A spinner
+ * invites 719, which nobody means. The current value is always added to this list, so a window set
+ * by an earlier decision — or by configuration — is selectable rather than silently discarded the
+ * first time somebody opens this control to change something else.
+ */
+const TRUST_WINDOW_PRESETS = [12, 24 * 7, 24 * 30];
 
 /** Local-datetime-input value → the ISO instant the API wants, or null. */
 const toIsoOrNull = (localValue: string): string | null => {
@@ -70,15 +89,32 @@ export default function PlatformAuthenticationPage() {
   });
   const policy = policyQuery.data;
 
+  // The caller's OWN remembered browsers. Not Owner-gated — the endpoint is scoped to the signed-in
+  // operator server-side, and revoking your own trust is the one action here that only ever removes
+  // authority. It sits on this page because this is where the window that governs it is set.
+  const trustsQuery = useQuery({
+    queryKey: platformKeys.platformBrowserTrusts(),
+    queryFn: () => platformApi.listBrowserTrusts(),
+  });
+
   const [mode, setMode] = useState<PlatformMfaMode | ''>('');
   const [reason, setReason] = useState('');
   const [expiresAtLocal, setExpiresAtLocal] = useState('');
   const [confirmation, setConfirmation] = useState('');
   const [currentPassword, setCurrentPassword] = useState('');
+  // Null means "the operator has not touched this", which is what lets the controls track the
+  // server's value across a refetch instead of pinning whatever it happened to be on first render.
+  const [trustEnabledDraft, setTrustEnabledDraft] = useState<boolean | null>(null);
+  const [trustHoursDraft, setTrustHoursDraft] = useState<number | null>(null);
 
   const selectedMode: PlatformMfaMode = (mode || policy?.mode || 'REQUIRED') as PlatformMfaMode;
   const requiresExpiry = selectedMode !== 'REQUIRED';
   const expectedPhrase = policy?.confirmationPhrases?.[selectedMode] ?? '';
+
+  const trustEnabled = trustEnabledDraft ?? policy?.browserTrustEnabled ?? true;
+  const trustHours = trustHoursDraft ?? policy?.browserTrustHours ?? 12;
+  const trustChanged = Boolean(policy)
+    && (trustEnabled !== policy!.browserTrustEnabled || trustHours !== policy!.browserTrustHours);
 
   const changeMutation = useMutation({
     mutationFn: () =>
@@ -89,9 +125,16 @@ export default function PlatformAuthenticationPage() {
         expiresAtUtc: requiresExpiry ? toIsoOrNull(expiresAtLocal) : null,
         confirmation: confirmation.trim(),
         expectedVersion: policy?.version ?? null,
+        browserTrustEnabled: trustEnabled,
+        browserTrustHours: trustHours,
       }),
     onSuccess: (saved) => {
-      enqueueSnackbar(`MFA enforcement is now ${saved.mode}.`, { variant: 'success' });
+      enqueueSnackbar(
+        saved.browserTrustEnabled
+          ? `MFA enforcement is now ${saved.mode}. Remembered browsers last ${fmtTrustWindow(saved.browserTrustHours)}.`
+          : `MFA enforcement is now ${saved.mode}. Remembered browsers are switched off.`,
+        { variant: 'success' },
+      );
       // The password never survives a save, successful or not — it is a step-up credential and
       // has no business sitting in component state waiting for the next render.
       setCurrentPassword('');
@@ -99,6 +142,8 @@ export default function PlatformAuthenticationPage() {
       setReason('');
       setExpiresAtLocal('');
       setMode('');
+      setTrustEnabledDraft(null);
+      setTrustHoursDraft(null);
       queryClient.setQueryData(platformKeys.platformAuthPolicy(), saved);
       void queryClient.invalidateQueries({ queryKey: platformKeys.platformAuthPolicyEffective() });
     },
@@ -129,8 +174,13 @@ export default function PlatformAuthenticationPage() {
     if (!policy) return 'Loading the current policy.';
     if (!policy.availableModes.includes(selectedMode))
       return `${selectedMode} is not available in ${policy.environmentName} (classified ${policy.environmentClass}).`;
-    if (selectedMode === policy.mode && selectedMode === policy.declaredMode)
-      return `MFA enforcement is already ${selectedMode}.`;
+    // "Nothing to apply" now means nothing at all has moved. Checking only the mode blocked the
+    // one change a production Owner CAN make here — the mode is REQUIRED and stays REQUIRED, and
+    // the remembered-browser window is the thing they came to set.
+    if (!trustChanged && selectedMode === policy.mode && selectedMode === policy.declaredMode)
+      return `MFA enforcement is already ${selectedMode} and the remembered-browser settings are unchanged.`;
+    if (trustHours < policy.minBrowserTrustHours || trustHours > policy.maxBrowserTrustHours)
+      return `A remembered browser may be trusted for between ${fmtTrustWindow(policy.minBrowserTrustHours)} and ${fmtTrustWindow(policy.maxBrowserTrustHours)}.`;
     if (reason.trim().length < policy.minimumReasonLength)
       return `Give a reason of at least ${policy.minimumReasonLength} characters — it is recorded in the audit log and is what a reviewer reads months from now.`;
     if (requiresExpiry && !toIsoOrNull(expiresAtLocal))
@@ -149,7 +199,41 @@ export default function PlatformAuthenticationPage() {
     return null;
   }, [
     policy, selectedMode, reason, requiresExpiry, expiresAtLocal, confirmation, expectedPhrase, currentPassword,
+    trustChanged, trustHours,
   ]);
+
+  const revokeMutation = useMutation({
+    mutationFn: (id: number) => platformApi.revokeBrowserTrust(id),
+    onSuccess: () => {
+      // Not "will be revoked shortly". The revocation is a column both the login redemption and
+      // PlatformSessionValidator read, so it also ends the live session that trust minted.
+      enqueueSnackbar('That browser is no longer remembered, and any session it signed in is over.', {
+        variant: 'success',
+      });
+      void queryClient.invalidateQueries({ queryKey: platformKeys.platformBrowserTrusts() });
+      void queryClient.invalidateQueries({ queryKey: platformKeys.platformAuthPolicy() });
+    },
+    onError: (error) =>
+      enqueueSnackbar(platformErrorMessage(error, 'Could not revoke that browser'), { variant: 'error' }),
+  });
+
+  const revokeAllMutation = useMutation({
+    mutationFn: () => platformApi.revokeAllBrowserTrusts(),
+    onSuccess: (revoked) => {
+      enqueueSnackbar(
+        revoked === 0
+          ? 'There were no remembered browsers to revoke.'
+          : `Revoked ${revoked} remembered ${revoked === 1 ? 'browser' : 'browsers'}. Every session they signed in is over.`,
+        { variant: revoked === 0 ? 'info' : 'success' },
+      );
+      void queryClient.invalidateQueries({ queryKey: platformKeys.platformBrowserTrusts() });
+      void queryClient.invalidateQueries({ queryKey: platformKeys.platformAuthPolicy() });
+    },
+    onError: (error) =>
+      enqueueSnackbar(platformErrorMessage(error, 'Could not revoke your remembered browsers'), {
+        variant: 'error',
+      }),
+  });
 
   if (policyQuery.isLoading) return <LoadingState label="Loading platform authentication policy…" />;
   if (policyQuery.isError || !policy)
@@ -225,8 +309,104 @@ export default function PlatformAuthenticationPage() {
             value={`${policy.enrolledOperatorCount} enrolled of ${policy.activeOperatorCount} active`}
           />
           <Fact label="Active MFA-bound sessions" value={String(policy.activeMfaBoundSessionCount)} />
-          <Fact label="Remembered browsers" value={`${policy.activeBrowserTrustCount} (trust window ${policy.browserTrustHours}h)`} />
+          <Fact
+            label="Remembered browsers (all operators)"
+            value={
+              policy.browserTrustEnabled
+                ? `${policy.activeBrowserTrustCount} live, window ${fmtTrustWindow(policy.browserTrustHours)}`
+                : `${policy.activeBrowserTrustCount} stored, but browser trust is OFF — none of them are honoured`
+            }
+          />
+          <Fact
+            label="Trust window set by"
+            // A number nobody chose looks identical to a number somebody did, and the difference
+            // decides whether the current window is a decision or an oversight.
+            value={
+              policy.browserTrustFromPolicyRow
+                ? `This screen${policy.changedBy ? ` (${policy.changedBy})` : ''}`
+                : 'Deployment default — never set here'
+            }
+          />
         </Grid>
+      </Paper>
+
+      <Paper sx={{ p: { xs: 2, md: 3 }, borderRadius: 3, mb: 2.5 }}>
+        <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mb: 0.5 }}>
+          <DevicesIcon fontSize="small" color="action" />
+          <Typography variant="h6" sx={{ fontWeight: 800 }}>
+            Your remembered browsers
+          </Typography>
+        </Stack>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+          Browsers you told the platform to remember, so an ordinary day costs one challenge instead
+          of one per session. Yours only — there is no route that reads or revokes anybody else&apos;s.
+          Revoking takes effect on the next request: it refuses the next sign-in AND ends the session
+          that trust already signed in, rather than letting it run out its remaining lifetime.
+        </Typography>
+
+        {trustsQuery.isError ? (
+          <Alert severity="warning" sx={{ borderRadius: 2 }}>
+            {platformErrorMessage(trustsQuery.error, 'Could not load your remembered browsers')}
+          </Alert>
+        ) : trustsQuery.isLoading ? (
+          <LoadingState label="Loading your remembered browsers…" />
+        ) : (trustsQuery.data?.length ?? 0) === 0 ? (
+          <Alert severity="info" sx={{ borderRadius: 2 }} data-testid="platform-browser-trusts-empty">
+            No browser is currently remembered for your account. Every sign-in asks for your second
+            factor.
+          </Alert>
+        ) : (
+          <>
+            <Box sx={{ overflowX: 'auto' }}>
+              <Table size="small" data-testid="platform-browser-trusts">
+                <TableHead>
+                  <TableRow>
+                    <TableCell>Browser</TableCell>
+                    <TableCell>Remembered</TableCell>
+                    <TableCell>Last used</TableCell>
+                    <TableCell>Expires</TableCell>
+                    <TableCell align="right">Action</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {trustsQuery.data!.map((trust) => (
+                    <TableRow key={trust.id}>
+                      <TableCell sx={{ fontWeight: 600 }}>{trust.label ?? 'Unidentified browser'}</TableCell>
+                      <TableCell>{fmtDateTime(trust.createdAtUtc)}</TableCell>
+                      <TableCell>
+                        {trust.lastUsedAtUtc ? fmtDateTime(trust.lastUsedAtUtc) : 'Never since it was granted'}
+                      </TableCell>
+                      <TableCell>{fmtDateTime(trust.expiresAtUtc)}</TableCell>
+                      <TableCell align="right">
+                        <Button
+                          size="small"
+                          color="warning"
+                          disabled={revokeMutation.isPending || revokeAllMutation.isPending}
+                          onClick={() => revokeMutation.mutate(trust.id)}
+                        >
+                          Revoke
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </Box>
+            <Divider sx={{ my: 2 }} />
+            {/* The "I have lost a device and I do not know which entry it is" control. It matters
+                more the longer the window is: at 12 hours the problem expired before anyone had to
+                think about it; at 30 days it does not. */}
+            <Button
+              variant="outlined"
+              color="warning"
+              disabled={revokeAllMutation.isPending || revokeMutation.isPending}
+              onClick={() => revokeAllMutation.mutate()}
+              data-testid="platform-browser-trusts-revoke-all"
+            >
+              {revokeAllMutation.isPending ? 'Revoking…' : 'Revoke all remembered browsers'}
+            </Button>
+          </>
+        )}
       </Paper>
 
       <Paper sx={{ p: { xs: 2, md: 3 }, borderRadius: 3 }}>
@@ -249,63 +429,139 @@ export default function PlatformAuthenticationPage() {
           not a reason the relaxation is safe.
         </Alert>
 
-        {!relaxable ? (
+        {!relaxable && (
           // Production renders no disable option at all. Saying WHY beats an empty dropdown:
           // an operator who cannot find the control needs to know it does not exist here.
-          <Alert severity="info" sx={{ borderRadius: 2 }} data-testid="platform-mfa-not-relaxable">
+          //
+          // The rest of the form still renders. It used to be replaced entirely by this notice,
+          // which was correct while the only thing this screen could change was the enforcement
+          // mode — and became a defect the moment the remembered-browser window moved here, because
+          // production is precisely where an Owner needs to set it and it would have been the one
+          // environment with no control at all.
+          <Alert severity="info" sx={{ mb: 2.5, borderRadius: 2 }} data-testid="platform-mfa-not-relaxable">
             <AlertTitle sx={{ fontWeight: 800 }}>REQUIRED is the only mode available here</AlertTitle>
             {policy.environmentName} is classified {policy.environmentClass}, and a production-class
             deployment accepts REQUIRED only. There is no configuration on this screen that changes
-            that; relaxing enforcement is not reachable in production by any route.
+            that; relaxing enforcement is not reachable in production by any route. The
+            remembered-browser settings below can still be changed, under the same ceremony.
           </Alert>
-        ) : (
-          <>
-            <Grid container spacing={2}>
+        )}
+
+        <Grid container spacing={2}>
+              {relaxable && (
+                <Grid size={{ xs: 12, md: 6 }}>
+                  {/* A NATIVE select, not MUI's popover one. Two reasons, and both are about the
+                      control being real: a native <select> is operable by keyboard and screen reader
+                      with no JavaScript of ours in the path, and it is the element an automated
+                      certification of this screen can actually drive — a popover listbox is testable
+                      only by whoever knows it is a popover. */}
+                  <TextField
+                    select
+                    fullWidth
+                    label="MFA enforcement mode"
+                    value={selectedMode}
+                    onChange={(event) => {
+                      setMode(event.target.value as PlatformMfaMode);
+                      setConfirmation('');
+                    }}
+                    slotProps={{ select: { native: true }, inputLabel: { shrink: true } }}
+                    helperText={MODE_COPY[selectedMode]}
+                  >
+                    {policy.availableModes.map((available) => (
+                      <option key={available} value={available}>
+                        {available}
+                      </option>
+                    ))}
+                  </TextField>
+                </Grid>
+              )}
+
+              {relaxable && (
+                <Grid size={{ xs: 12, md: 6 }}>
+                  <TextField
+                    fullWidth
+                    type="datetime-local"
+                    // Labelled "Expires at" and not "Expires at (UTC)": a datetime-local input is
+                    // the browser's WALL CLOCK, and a label that says UTC over a control that means
+                    // local time is how an operator sets a four-hour bypass and gets a seven-hour
+                    // one. The conversion is stated in the helper text and done on submit.
+                    label="Expires at"
+                    value={expiresAtLocal}
+                    onChange={(event) => setExpiresAtLocal(event.target.value)}
+                    disabled={!requiresExpiry}
+                    slotProps={{ inputLabel: { shrink: true } }}
+                    helperText={
+                      requiresExpiry
+                        ? `Your local time, stored and audited in UTC. Mandatory, maximum ${policy.maxBypassHours} hours — enforcement returns to REQUIRED on its own when this passes, with no action from anyone.`
+                        : 'REQUIRED does not expire.'
+                    }
+                  />
+                </Grid>
+              )}
+
+              <Grid size={12}>
+                <Divider sx={{ mb: 1.5 }} />
+                <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>
+                  Remembered browsers
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  Whether an operator may skip the challenge on a browser that has already presented a
+                  second factor, and for how long. Switching it off applies to browsers that are
+                  already remembered — they stop counting at the next sign-in, not when their window
+                  happens to run out. Widening the window is a real trade: fewer challenges, and a
+                  longer period in which a stolen laptop signs in without one. Revoking a browser is
+                  immediate and also ends the session it signed in.
+                </Typography>
+              </Grid>
+
               <Grid size={{ xs: 12, md: 6 }}>
-                {/* A NATIVE select, not MUI's popover one. Two reasons, and both are about the
-                    control being real: a native <select> is operable by keyboard and screen reader
-                    with no JavaScript of ours in the path, and it is the element an automated
-                    certification of this screen can actually drive — a popover listbox is testable
-                    only by whoever knows it is a popover. */}
-                <TextField
-                  select
-                  fullWidth
-                  label="MFA enforcement mode"
-                  value={selectedMode}
-                  onChange={(event) => {
-                    setMode(event.target.value as PlatformMfaMode);
-                    setConfirmation('');
-                  }}
-                  slotProps={{ select: { native: true }, inputLabel: { shrink: true } }}
-                  helperText={MODE_COPY[selectedMode]}
-                >
-                  {policy.availableModes.map((available) => (
-                    <option key={available} value={available}>
-                      {available}
-                    </option>
-                  ))}
-                </TextField>
+                <FormControlLabel
+                  control={
+                    <Switch
+                      checked={trustEnabled}
+                      onChange={(event) => setTrustEnabledDraft(event.target.checked)}
+                      // A STABLE accessible name, because the visible label deliberately changes
+                      // with the state — "browser trust is off" is the sentence an operator needs to
+                      // read, and a control whose accessible name changes underneath it is a control
+                      // no screen reader user, and no test, can address twice.
+                      slotProps={{ input: { 'aria-label': 'Offer remembered browsers' } }}
+                    />
+                  }
+                  label={
+                    trustEnabled
+                      ? 'Offer "remember this browser"'
+                      : 'Browser trust is off — every sign-in is challenged'
+                  }
+                />
               </Grid>
 
               <Grid size={{ xs: 12, md: 6 }}>
                 <TextField
+                  select
                   fullWidth
-                  type="datetime-local"
-                  // Labelled "Expires at" and not "Expires at (UTC)": a datetime-local input is
-                  // the browser's WALL CLOCK, and a label that says UTC over a control that means
-                  // local time is how an operator sets a four-hour bypass and gets a seven-hour
-                  // one. The conversion is stated in the helper text and done on submit.
-                  label="Expires at"
-                  value={expiresAtLocal}
-                  onChange={(event) => setExpiresAtLocal(event.target.value)}
-                  disabled={!requiresExpiry}
-                  slotProps={{ inputLabel: { shrink: true } }}
+                  label="Remembered browser window"
+                  value={String(trustHours)}
+                  onChange={(event) => setTrustHoursDraft(Number(event.target.value))}
+                  disabled={!trustEnabled}
+                  slotProps={{ select: { native: true }, inputLabel: { shrink: true } }}
                   helperText={
-                    requiresExpiry
-                      ? `Your local time, stored and audited in UTC. Mandatory, maximum ${policy.maxBypassHours} hours — enforcement returns to REQUIRED on its own when this passes, with no action from anyone.`
-                      : 'REQUIRED does not expire.'
+                    trustEnabled
+                      ? `Between ${fmtTrustWindow(policy.minBrowserTrustHours)} and ${fmtTrustWindow(policy.maxBrowserTrustHours)}. Applies to browsers remembered from now on; browsers already remembered keep the window they were granted.`
+                      : 'Not applicable while browser trust is switched off.'
                   }
-                />
+                >
+                  {/* The current value is always present, so a window set earlier — or one that
+                      came from the deployment's configuration — is not silently replaced by the
+                      nearest preset the first time somebody opens this control. */}
+                  {Array.from(new Set([...TRUST_WINDOW_PRESETS, trustHours]))
+                    .filter((hours) => hours >= policy.minBrowserTrustHours && hours <= policy.maxBrowserTrustHours)
+                    .sort((a, b) => a - b)
+                    .map((hours) => (
+                      <option key={hours} value={hours}>
+                        {fmtTrustWindow(hours)}
+                      </option>
+                    ))}
+                </TextField>
               </Grid>
 
               <Grid size={12}>
@@ -344,11 +600,11 @@ export default function PlatformAuthenticationPage() {
                   helperText="Re-authentication. Your session is already signed in; this proves you are still the person at the keyboard."
                 />
               </Grid>
-            </Grid>
+        </Grid>
 
-            <Divider sx={{ my: 2.5 }} />
+        <Divider sx={{ my: 2.5 }} />
 
-            <Box>
+        <Box>
               <RoleGate allowed={permissions.isOwner} requirement={REQUIRED_ROLE_COPY.platformAuthentication}>
                 {(roleBlocked) => (
                   <Tooltip title={!roleBlocked && applyBlockedBecause ? applyBlockedBecause : ''}>
@@ -379,9 +635,7 @@ export default function PlatformAuthenticationPage() {
                   {applyBlockedBecause}
                 </Typography>
               )}
-            </Box>
-          </>
-        )}
+        </Box>
       </Paper>
     </Box>
   );

@@ -23,6 +23,7 @@ import {
 import { usePlatformAuth } from '../auth/usePlatformAuth';
 import type { PlatformMfaChallenge } from '../auth/usePlatformAuth';
 import { platformErrorMessage } from '../api/apiError';
+import { fmtTrustWindow } from './format';
 
 /**
  * The platform-owner sign-in screen. Rendered in place by `PlatformGuard` when
@@ -172,16 +173,26 @@ export default function PlatformLoginScreen() {
                   alternative — challenging every 30 minutes for a whole working day — does not make
                   an operator safer; it teaches them to approve prompts without reading them, which
                   is the reflex MFA-fatigue attacks are built on. The server bounds the window and
-                  stores only a hash of the token this produces. */}
-              <FormControlLabel
-                control={
-                  <Checkbox
-                    checked={rememberBrowser}
-                    onChange={(event) => setRememberBrowser(event.target.checked)}
-                  />
-                }
-                label="Remember this browser"
-              />
+                  stores only a hash of the token this produces.
+
+                  Two things about it are the SERVER's to say, and both arrive on the challenge
+                  response. Whether to offer it at all: a platform Owner can switch browser trust
+                  off, and a checkbox that outlived the switch would be ticked by an operator who
+                  then gets challenged again tomorrow with nothing explaining why. And how long:
+                  the window can now be set anywhere from 8 hours to 30 days, so "Remember this
+                  browser" with no number attached is asking somebody to agree to a duration
+                  neither of us named. */}
+              {challenge.browserTrustOffered && (
+                <FormControlLabel
+                  control={
+                    <Checkbox
+                      checked={rememberBrowser}
+                      onChange={(event) => setRememberBrowser(event.target.checked)}
+                    />
+                  }
+                  label={`Don't ask again on this browser for ${fmtTrustWindow(challenge.browserTrustHours)}`}
+                />
+              )}
               {error && <Alert severity="error">{error}</Alert>}
               <Button
                 type="submit"

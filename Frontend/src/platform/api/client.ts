@@ -32,6 +32,7 @@ import type {
   PlatformAuditEntry,
   PlatformAuditEntryDetail,
   PlatformConnectionTestInput,
+  PlatformBrowserTrust,
   PlatformEffectiveMfaPolicy,
   PlatformEmailSettings,
   PlatformMfaPolicy,
@@ -380,6 +381,18 @@ export interface PlatformApi {
   getEffectiveMfaPolicy(): Promise<PlatformEffectiveMfaPolicy>;
   getMfaPolicy(): Promise<PlatformMfaPolicy>;
   changeMfaPolicy(input: ChangePlatformMfaPolicyInput): Promise<PlatformMfaPolicy>;
+
+  // --- the caller's OWN remembered browsers ---
+  //
+  // These three had backends and no callers at all: the endpoints shipped, and the console never
+  // listed a remembered browser or offered to revoke one. That was survivable while a trust lasted
+  // 12 hours — it expired before anyone needed to think about it. It is not survivable now that the
+  // window can reach 30 days, because the revocation IS the compensating control for the longer
+  // window, and a control with no way to reach it is not a control.
+  listBrowserTrusts(): Promise<PlatformBrowserTrust[]>;
+  revokeBrowserTrust(id: number): Promise<void>;
+  /** Every remembered browser for the signed-in operator. Returns how many were revoked. */
+  revokeAllBrowserTrusts(): Promise<number>;
 
   /**
    * Step-up: prove the password again so this session may run a high-risk operation.
@@ -1683,6 +1696,18 @@ const httpPlatformApi: PlatformApi = {
 
   changeMfaPolicy: async (input) =>
     (await platformHttp.put<PlatformMfaPolicy>('/api/platform/auth/policy', input)).data,
+
+  listBrowserTrusts: async () =>
+    (await platformHttp.get<PlatformBrowserTrust[]>('/api/platform/auth/browser-trusts')).data,
+
+  revokeBrowserTrust: async (id) => {
+    await platformHttp.delete(`/api/platform/auth/browser-trusts/${id}`);
+  },
+
+  // POST, not DELETE: it takes no identifier, it is a command, and it must not be something a
+  // stray link or a prefetch can perform. The server scopes it to the caller's own account.
+  revokeAllBrowserTrusts: async () =>
+    (await platformHttp.post<{ revoked: number }>('/api/platform/auth/browser-trusts/revoke-all')).data.revoked,
 
   reauthenticate: async (currentPassword) =>
     (await platformHttp.post<PlatformReauthentication>(
