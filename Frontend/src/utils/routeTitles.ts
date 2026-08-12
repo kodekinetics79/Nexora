@@ -15,6 +15,7 @@ import { matchPath } from 'react-router-dom';
 /** Literal paths — matched first so they always win over parameterised ones. */
 const STATIC_ROUTE_TITLES: Readonly<Record<string, string>> = {
   '/login': 'Sign In',
+  '/forgot-password': 'Forgot Your Password',
 
   // Dashboards & intelligence
   '/dashboard': 'Dashboard',
@@ -138,6 +139,12 @@ const STATIC_ROUTE_TITLES: Readonly<Record<string, string>> = {
 
 /** Parameterised paths, tried in order after the static lookup misses. */
 const DYNAMIC_ROUTE_TITLES: ReadonlyArray<readonly [string, string]> = [
+  // Pre-authentication page. The token never reaches the title — RouteAnnouncer
+  // writes the mapped string into document.title, which browser history and
+  // screen-reader logs both keep, and a live single-use credential must not end
+  // up in either. The string is identical to the page's own useDocumentTitle
+  // call so the two title sources cannot disagree mid-navigation.
+  ['/reset-password/:token', 'Choose a New Password'],
   ['/inventory/lots/:lotId', 'Lot Traceability'],
   ['/inventory/order-trace/:orderId', 'Where-Used Trace'],
   ['/services/boq/:id', 'BOQ Editor'],

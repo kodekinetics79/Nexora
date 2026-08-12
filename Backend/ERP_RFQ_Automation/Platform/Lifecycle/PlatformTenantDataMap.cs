@@ -218,6 +218,13 @@ public static class PlatformTenantDataMap
             + "Both are the customer's personal data.",
             TenantColumn: "TenantId"),
 
+        new("PasswordResetTokens", TenantDataClass.CustomerRecord,
+            "Carries the client addresses a user's password reset was asked for and completed "
+            + "from — the customer's personal data, and the only rows in the schema an anonymous "
+            + "stranger can cause. There is no operator record here to preserve: nobody at the "
+            + "platform takes any action to produce one, so the whole row is the customer's.",
+            TenantColumn: "TenantId"),
+
         new("ProvisioningExecutions", TenantDataClass.CustomerRecord,
             "Holds the whole submitted provisioning request as jsonb — company identity, the "
             + "founding administrator's address — plus that administrator's password hash. The "

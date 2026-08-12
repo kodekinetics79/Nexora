@@ -27,6 +27,41 @@ public sealed class TenantOnboardingOptions
     public string ActivationPath { get; set; } = "activate";
 
     /// <summary>
+    /// How long a self-service password-reset link stays usable, in MINUTES.
+    ///
+    /// <para><b>Why an hour and not the invitation's 72.</b> The two links look alike and are
+    /// not alike. An invitation is caused by an operator, addressed to somebody who is expecting
+    /// it, and its long window buys the one thing that actually matters there: a customer invited
+    /// on a Friday can still activate on Monday without a resend. A reset is caused by ANYONE who
+    /// can type an address into a public form, and the person who wants it is, by definition,
+    /// sitting at the product right now. There is no Monday-morning case to serve — so the window
+    /// buys nothing and costs a bearer credential sitting in a mailbox for three days, obtainable
+    /// by anyone who reaches that mailbox in the meantime. Sixty minutes is the conventional
+    /// figure for exactly this reason, and re-requesting is one click.</para>
+    ///
+    /// <para>Minutes rather than hours so a security team can actually tighten it. An
+    /// hours-granular knob makes "fifteen minutes" unexpressible, and the deployments that ask
+    /// for a shorter reset window are the ones that ask for fifteen.</para>
+    /// </summary>
+    public int ResetLifetimeMinutes { get; set; } = 60;
+
+    /// <summary>
+    /// Configuration cannot raise the reset window past this. The clamp exists in the same
+    /// spirit as <see cref="AbsoluteMinimumPasswordLength"/>: the setting is here for teams who
+    /// want it SHORTER, and a deployment that sets it to a fortnight — by typo, or because
+    /// somebody was tired of resending — must not be able to turn a recovery link into a
+    /// standing key to every account whose mailbox is ever compromised.
+    /// </summary>
+    public const int AbsoluteMaximumResetLifetimeMinutes = 24 * 60;
+
+    /// <summary>
+    /// Frontend route the emailed reset link points at, relative to
+    /// <c>Notifications:AppBaseUrl</c>. Sibling of <see cref="ActivationPath"/> and resolved the
+    /// same way; the token rides as a path segment, matching what <c>App.tsx</c> declares.
+    /// </summary>
+    public string ResetPasswordPath { get; set; } = "reset-password";
+
+    /// <summary>
     /// Floor for the password chosen at activation. This is the credential for a tenant's
     /// most privileged account (RoleRank.Owner — every module check passes for it), so the
     /// default is well above the eight characters most products still accept.
@@ -70,6 +105,11 @@ public sealed class TenantOnboardingOptions
     public TimeSpan InvitationLifetime =>
         TimeSpan.FromHours(InvitationLifetimeHours > 0 ? InvitationLifetimeHours : 72);
 
+    /// <summary>Effective reset window after the clamp above. Never zero, never over a day.</summary>
+    public TimeSpan ResetLifetime =>
+        TimeSpan.FromMinutes(Math.Clamp(
+            ResetLifetimeMinutes > 0 ? ResetLifetimeMinutes : 60, 1, AbsoluteMaximumResetLifetimeMinutes));
+
     /// <summary>Effective floor after the clamp above.</summary>
     public int EffectiveMinimumPasswordLength =>
         Math.Max(AbsoluteMinimumPasswordLength, MinimumPasswordLength);
@@ -100,6 +140,21 @@ public sealed class TenantOnboardingOptions
 
         if (string.IsNullOrWhiteSpace(ActivationPath))
             warnings.Add("TenantOnboarding:ActivationPath is empty; falling back to 'activate'.");
+
+        if (ResetLifetimeMinutes <= 0)
+            warnings.Add(
+                $"TenantOnboarding:ResetLifetimeMinutes is {ResetLifetimeMinutes}; " +
+                "falling back to 60 minutes.");
+        else if (ResetLifetimeMinutes > AbsoluteMaximumResetLifetimeMinutes)
+            warnings.Add(
+                $"TenantOnboarding:ResetLifetimeMinutes is {ResetLifetimeMinutes}, above the " +
+                $"ceiling of {AbsoluteMaximumResetLifetimeMinutes}; the ceiling is enforced instead. " +
+                "A password-reset link is a bearer credential in a mailbox — the knob is there to " +
+                "make the window shorter, not longer.");
+
+        if (string.IsNullOrWhiteSpace(ResetPasswordPath))
+            warnings.Add(
+                "TenantOnboarding:ResetPasswordPath is empty; falling back to 'reset-password'.");
 
         return warnings;
     }

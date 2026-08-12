@@ -3,6 +3,7 @@ using System;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace ERP_RFQ_Automation.Migrations
 {
     [DbContext(typeof(ErpRfqAutomationContext))]
-    partial class ErpRfqAutomationContextModelSnapshot : ModelSnapshot
+    [Migration("20260812130000_TenantSelfServicePasswordReset")]
+    partial class TenantSelfServicePasswordReset
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -17644,16 +17647,6 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<long>("Id")
                         .HasColumnType("bigint");
 
-                    b.Property<bool>("BrowserTrustEnabled")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("boolean")
-                        .HasDefaultValue(true);
-
-                    b.Property<int>("BrowserTrustHours")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer")
-                        .HasDefaultValue(12);
-
                     b.Property<string>("ChangeReason")
                         .HasMaxLength(1000)
                         .HasColumnType("character varying(1000)");
@@ -17702,8 +17695,6 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.ToTable("PlatformMfaPolicies", "platform", t =>
                         {
-                            t.HasCheckConstraint("CK_PlatformMfaPolicies_BrowserTrustHours", "\"BrowserTrustHours\" BETWEEN 8 AND 720");
-
                             t.HasCheckConstraint("CK_PlatformMfaPolicies_Singleton", "\"Id\" = 1");
                         });
                 });

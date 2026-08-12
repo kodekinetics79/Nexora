@@ -33,45 +33,42 @@ import {
   isPasswordAcceptable,
   readPasswordStrength,
 } from '../../utils/passwordPolicy';
-import { completeActivation, inspectActivationToken, type ActivationState } from './activationApi';
+import { completePasswordReset, inspectResetToken, type ResetTokenState } from './passwordResetApi';
 
 /**
- * Copy for every way an activation link can fail.
+ * Copy for every way a reset link can fail.
  *
  * None of it confirms whether an account exists: the person holding the link
- * already knows the address they were sent, and anyone who does not must learn
+ * already knows the address it was sent to, and anyone who does not must learn
  * nothing from the response. "Expired" and "already used" are safe to name
- * because they describe the link, not the account. A withdrawn invitation says
- * only that — never who withdrew it or why.
+ * because they describe the LINK, not the account.
+ *
+ * `revoked` is the one that reads differently from its activation twin, and it
+ * has to. There is no operator on this flow — nobody at the platform can cause
+ * or cancel a reset — so the only way a link becomes superseded is that a newer
+ * one was requested for the same account. Saying "an operator withdrew it" would
+ * be false; saying "a newer link replaced it" tells the customer exactly which
+ * email in their inbox to open instead.
  */
-const REJECTION_COPY: Record<
-  Exclude<ActivationState, 'valid'>,
-  { title: string; body: string; retry: boolean; recover?: boolean }
-> = {
+const REJECTION_COPY: Record<Exclude<ResetTokenState, 'valid'>, { title: string; body: string; retry: boolean }> = {
   expired: {
-    title: 'This activation link has expired',
-    body: 'Activation links are short-lived for security. Ask whoever set up your workspace to send a new invitation.',
+    title: 'This reset link has expired',
+    body: 'Reset links are deliberately short-lived. Request a new one and use it straight away.',
     retry: false,
   },
   used: {
-    title: 'This activation link has already been used',
-    body: 'A password has already been set with this link. Sign in with it, or reset your password if you do not have it.',
-    // The one rejection whose fix is a flow rather than a phone call. This copy
-    // used to point at a "forgot password" option that did not exist anywhere in
-    // the product — the only real recovery was for somebody with database access
-    // to overwrite the hash. Now it points at /forgot-password, which is why the
-    // sentence is a link and not a suggestion.
-    recover: true,
+    title: 'This reset link has already been used',
+    body: 'A new password has already been set with this link. Sign in with it — or if that was not you, request another link now and tell whoever administers your workspace.',
     retry: false,
   },
   revoked: {
-    title: 'This invitation is no longer active',
-    body: 'The invitation was withdrawn. Contact whoever set up your workspace to have a new one issued.',
+    title: 'A newer reset link replaced this one',
+    body: 'Only the most recent link works, so that a link somebody else requested cannot stay live. Open the latest reset email, or request a new one.',
     retry: false,
   },
   invalid: {
-    title: 'This activation link is not valid',
-    body: 'The address may have been copied incompletely. Open the link directly from the invitation, or ask for a new one.',
+    title: 'This reset link is not valid',
+    body: 'The address may have been copied incompletely. Open the link directly from the email, or request a new one.',
     retry: false,
   },
   unavailable: {
@@ -81,10 +78,10 @@ const REJECTION_COPY: Record<
   },
 };
 
-const ERROR_ID = 'activation-error';
+const ERROR_ID = 'reset-password-error';
 
-export default function ActivateAccountPage() {
-  useDocumentTitle('Activate your account');
+export default function ResetPasswordPage() {
+  useDocumentTitle('Choose a New Password');
   const { token = '' } = useParams();
   const navigate = useNavigate();
   const { mode, setMode } = useAppTheme();
@@ -94,58 +91,52 @@ export default function ActivateAccountPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
-  /** Password set, workspace not yet live. See the mutation's onSuccess. */
-  const [pendingActivation, setPendingActivation] = useState(false);
 
   const challenge = useQuery({
-    queryKey: ['tenant-activation', token],
-    queryFn: () => inspectActivationToken(token),
+    queryKey: ['password-reset', token],
+    queryFn: () => inspectResetToken(token),
     enabled: token.length > 0,
     // A token verdict is deterministic; retrying only delays the explanation.
     retry: false,
     refetchOnWindowFocus: false,
   });
 
-  const activation = useMutation({
-    mutationFn: () => completeActivation(token, password),
+  const reset = useMutation({
+    mutationFn: () => completePasswordReset(token, password),
     onSuccess: (outcome) => {
       if (!outcome.ok) {
-        // The token was spent or withdrawn between loading the page and
-        // submitting it. Re-reading it swaps the form for the right explanation.
+        // The token was spent or superseded between loading the page and
+        // submitting it — which on this flow is ordinary, because requesting a
+        // second link is exactly what the previous screen tells people to do.
+        // Re-reading it swaps the form for the right explanation.
         challenge.refetch();
         return;
       }
-      if (!outcome.signInAvailable) {
-        // The password is set, but the workspace has not been activated yet — the
-        // invitation goes out at the end of provisioning and going live is a
-        // separate, governed decision. Pushing this person at /login would answer
-        // them with a 403 they cannot self-repair, on their first contact with the
-        // product. Stay here and say the true thing instead.
-        setPendingActivation(true);
-        return;
-      }
       // LoginPage renders `authNotice` once and clears it, so the customer lands
-      // on the sign-in screen already knowing why they are there.
-      sessionStorage.setItem('authNotice', 'Your password is set. Sign in to continue.');
+      // on the sign-in screen already knowing why they are there. Unlike
+      // activation there is no "is the workspace open yet?" question to ask: the
+      // account was already live — that is a precondition of having been sent a
+      // link at all — so sign-in is the correct and only next step.
+      sessionStorage.setItem('authNotice', 'Your password has been changed. Sign in to continue.');
       navigate('/login', { replace: true });
     },
     onError: (error) =>
-      setFailure(presentableErrorMessage(error, 'We could not set your password. Please try again.')),
+      setFailure(presentableErrorMessage(error, 'We could not change your password. Please try again.')),
   });
 
   const strength = readPasswordStrength(password);
   const mismatch = confirmation.length > 0 && confirmation !== password;
-  const canSubmit = isPasswordAcceptable(password) && confirmation === password && !activation.isPending;
+  const canSubmit = isPasswordAcceptable(password) && confirmation === password && !reset.isPending;
 
   const handleSubmit = (event: FormEvent) => {
     event.preventDefault();
     setSubmitted(true);
     setFailure(null);
     if (!canSubmit) return;
-    activation.mutate();
+    reset.mutate();
   };
 
-  const state: ActivationState | null = token.length === 0 ? 'invalid' : challenge.data?.state ?? null;
+  const state: ResetTokenState | null = token.length === 0 ? 'invalid' : challenge.data?.state ?? null;
 
   return (
     <Box
@@ -172,28 +163,11 @@ export default function ActivateAccountPage() {
           {mode === 'dark' ? <SunIcon fontSize="small" /> : <MoonIcon fontSize="small" />}
         </IconButton>
 
-        {pendingActivation ? (
-          <Stack spacing={2.5}>
-            <Typography variant="h5" component="h1" sx={{ fontWeight: 900, letterSpacing: '-0.02em' }}>
-              Your password is set
-            </Typography>
-            <Alert severity="info" sx={{ borderRadius: 2 }}>
-              <AlertTitle sx={{ fontWeight: 800 }}>Your workspace is not open yet</AlertTitle>
-              {challenge.data?.tenantName
-                ? `${challenge.data.tenantName} is still being activated. `
-                : 'This workspace is still being activated. '}
-              Nothing more is needed from you — whoever set it up will confirm when sign-in is
-              open, and the password you just chose is the one you will use.
-            </Alert>
-            <Button variant="outlined" onClick={() => navigate('/login')} sx={{ fontWeight: 700, alignSelf: 'flex-start' }}>
-              Go to sign in
-            </Button>
-          </Stack>
-        ) : challenge.isLoading && state === null ? (
+        {challenge.isLoading && state === null ? (
           <Stack spacing={2} role="status" aria-live="polite" sx={{ alignItems: 'center', py: 6 }}>
             <CircularProgress />
             <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 600 }}>
-              Checking your invitation…
+              Checking your link…
             </Typography>
           </Stack>
         ) : state !== 'valid' && state !== null ? (
@@ -205,21 +179,23 @@ export default function ActivateAccountPage() {
               {REJECTION_COPY[state].body}
             </Alert>
             <Stack direction="row" spacing={1.5}>
-              {REJECTION_COPY[state].retry && (
+              {REJECTION_COPY[state].retry ? (
                 <Button variant="contained" onClick={() => challenge.refetch()} sx={{ fontWeight: 700 }}>
                   Try again
                 </Button>
-              )}
-              {REJECTION_COPY[state].recover && (
-                <Button variant="contained" onClick={() => navigate('/forgot-password')} sx={{ fontWeight: 700 }}>
-                  Reset your password
+              ) : (
+                // Every non-retryable verdict has the same fix — get a new link —
+                // so the primary action goes there rather than to /login, where
+                // somebody who cannot remember their password has nothing to do.
+                <Button
+                  variant="contained"
+                  onClick={() => navigate('/forgot-password')}
+                  sx={{ fontWeight: 700 }}
+                >
+                  Request a new link
                 </Button>
               )}
-              <Button
-                variant={REJECTION_COPY[state].retry || REJECTION_COPY[state].recover ? 'outlined' : 'contained'}
-                onClick={() => navigate('/login')}
-                sx={{ fontWeight: 700 }}
-              >
+              <Button variant="outlined" onClick={() => navigate('/login')} sx={{ fontWeight: 700 }}>
                 Go to sign in
               </Button>
             </Stack>
@@ -228,12 +204,12 @@ export default function ActivateAccountPage() {
           <Stack spacing={2.5}>
             <Box>
               <Typography variant="h5" component="h1" sx={{ fontWeight: 900, letterSpacing: '-0.02em' }}>
-                Set your password
+                Choose a new password
               </Typography>
               <Typography variant="body2" color="text.secondary" sx={{ mt: 0.75 }}>
-                {challenge.data?.tenantName
-                  ? `You are the administrator of ${challenge.data.tenantName}. Choose a password and your workspace is yours.`
-                  : 'Choose a password and your workspace is yours.'}
+                {challenge.data?.firstName
+                  ? `Hi ${challenge.data.firstName} — pick a password you have not used here before.`
+                  : 'Pick a password you have not used here before.'}
               </Typography>
             </Box>
 
@@ -242,7 +218,12 @@ export default function ActivateAccountPage() {
                 <Typography variant="overline" sx={{ fontWeight: 800, color: 'text.secondary' }}>
                   Your sign-in email
                 </Typography>
-                <Typography sx={{ fontFamily: 'monospace', fontSize: '0.95rem' }}>{challenge.data.email}</Typography>
+                {/* Masked by the server, with no opt-out. A reset link is caused
+                    by whoever typed an address into a public form — possibly not
+                    the owner — so the exact string is never echoed back. */}
+                <Typography sx={{ fontFamily: 'monospace', fontSize: '0.95rem' }}>
+                  {challenge.data.email}
+                </Typography>
               </Stack>
             )}
 
@@ -250,7 +231,7 @@ export default function ActivateAccountPage() {
               <Stack spacing={2}>
                 <TextField
                   label="New password"
-                  id="activation-password"
+                  id="reset-password"
                   type={showPassword ? 'text' : 'password'}
                   autoComplete="new-password"
                   fullWidth
@@ -261,7 +242,7 @@ export default function ActivateAccountPage() {
                   slotProps={{
                     htmlInput: {
                       maxLength: PASSWORD_MAX_LENGTH,
-                      'aria-describedby': 'password-policy',
+                      'aria-describedby': 'reset-password-policy',
                     },
                     input: {
                       startAdornment: (
@@ -302,7 +283,12 @@ export default function ActivateAccountPage() {
                   </Box>
                 )}
 
-                <Box id="password-policy">
+                {/* The same checklist the activation page renders, from the same
+                    module, because the server applies literally the same policy
+                    at the same floor to both doors. Two lists would drift, and
+                    the drift would show up as a rejection the form said was
+                    fine. */}
+                <Box id="reset-password-policy">
                   <Typography variant="caption" sx={{ fontWeight: 800, color: 'text.secondary' }}>
                     Your password must contain:
                   </Typography>
@@ -326,8 +312,8 @@ export default function ActivateAccountPage() {
                 </Box>
 
                 <TextField
-                  label="Confirm password"
-                  id="activation-password-confirm"
+                  label="Confirm new password"
+                  id="reset-password-confirm"
                   type={showPassword ? 'text' : 'password'}
                   autoComplete="new-password"
                   fullWidth
@@ -340,7 +326,7 @@ export default function ActivateAccountPage() {
 
                 {failure && (
                   <Alert id={ERROR_ID} role="alert" severity="error" sx={{ borderRadius: 2 }}>
-                    <AlertTitle sx={{ fontWeight: 800 }}>We could not set your password</AlertTitle>
+                    <AlertTitle sx={{ fontWeight: 800 }}>We could not change your password</AlertTitle>
                     {failure}
                   </Alert>
                 )}
@@ -349,10 +335,10 @@ export default function ActivateAccountPage() {
                   type="submit"
                   variant="contained"
                   size="large"
-                  disabled={activation.isPending}
+                  disabled={reset.isPending}
                   sx={{ py: 1.5, fontWeight: 700 }}
                 >
-                  {activation.isPending ? <CircularProgress size={22} color="inherit" /> : 'Set password and continue'}
+                  {reset.isPending ? <CircularProgress size={22} color="inherit" /> : 'Change password and sign in'}
                 </Button>
               </Stack>
             </form>
