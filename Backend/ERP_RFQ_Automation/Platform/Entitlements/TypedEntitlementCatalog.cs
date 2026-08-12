@@ -97,6 +97,32 @@ public static class TypedEntitlementCatalog
         }
     }
 
+    /// <summary>
+    /// The same declaration with every catalogue key present — absent keys added as <c>false</c>.
+    ///
+    /// <para><b>Why a plan must never store a partial set.</b> <c>TryParse</c> accepts <c>{}</c>:
+    /// it is valid JSON, contains no unknown key, and default-deny makes every capability read as
+    /// off, so nothing about it looks wrong. But the activation control
+    /// <c>entitlements.typed-hard-limits</c> asks a different question — whether every key is
+    /// PRESENT — and a plan created without entitlements fails it forever. The tenant provisions
+    /// cleanly, every other control passes, and it cannot be activated. The only remedy was to
+    /// find the plan and re-save it, which is not a thing the error says.</para>
+    ///
+    /// <para>So absence is resolved at the point of writing, where the intent is known, rather
+    /// than left for a gate three screens away to reject. This is a completion, not a relaxation:
+    /// a key added here is <c>false</c>, the control's real requirement — positive seat, document
+    /// and extraction limits — is untouched, and an unknown or malformed declaration is still
+    /// refused by <see cref="TryParse"/> before it reaches this.</para>
+    /// </summary>
+    public static string Complete(string? json)
+    {
+        TryParse(json, out var values, out _);
+        return JsonSerializer.Serialize(Keys.Order().ToDictionary(
+            key => key,
+            key => values.TryGetValue(key, out var enabled) && enabled,
+            StringComparer.Ordinal));
+    }
+
     /// <summary>Default deny: absent, unknown and malformed values are never enabled.</summary>
     public static bool IsEnabled(string? json, string key)
         => Keys.Contains(key)

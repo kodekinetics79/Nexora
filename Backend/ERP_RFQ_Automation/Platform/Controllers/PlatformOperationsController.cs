@@ -436,6 +436,15 @@ public class PlatformOperationsController(
             return "Plan name is required.";
         if (!Entitlements.TypedEntitlementCatalog.TryParse(features, out _, out var entitlementError))
             return entitlementError;
+
+        // Stored COMPLETE, with any key the caller omitted written as false. A plan saved with no
+        // entitlements at all used to persist as "{}" — valid, default-deny, and indistinguishable
+        // from a deliberately empty package — and then failed entitlements.typed-hard-limits on
+        // every tenant that ever used it, because that control asks whether every key is PRESENT.
+        // Plan "001 / Test" was created that way, and Noor Sons could not be activated: eight of
+        // twelve controls green, provisioning succeeded, and the block pointed at a plan nobody
+        // had touched since. Completing here costs nothing and cannot enable anything.
+        features = Entitlements.TypedEntitlementCatalog.Complete(features);
         return null;
     }
 
