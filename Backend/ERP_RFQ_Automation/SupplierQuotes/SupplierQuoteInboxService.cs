@@ -257,7 +257,8 @@ public sealed class EfSupplierQuoteStore(ErpRfqAutomationContext context) : ISup
                 revision.CapturedOn,
                 revision.Lines.OrderBy(x => x.LineNumber).Select(x => new SupplierQuoteLineDetail(x.Id,
                     x.LineNumber, x.RfqItemId, x.PartNumber, x.Description, x.Quantity,
-                    x.AvailableQuantity, x.UnitPrice, x.LeadTimeDays)).ToArray(),
+                    x.AvailableQuantity, x.UnitPrice, x.LeadTimeDays, x.Warranty,
+                    x.WarrantyMonths)).ToArray(),
                 revision.Evidence.Select(x =>
                 {
                     latest.TryGetValue(x.Id, out var decision);
@@ -505,6 +506,10 @@ public sealed class SupplierQuoteInboxService
                 AvailabilityType = Trim(sourceLine.AvailabilityType, 80),
                 OriginCountry = Trim(sourceLine.OriginCountry, 120),
                 Warranty = Trim(sourceLine.Warranty, 500),
+                // Persisted exactly as supplied, beside the untouched free text. Validate() has
+                // already refused a negative or absurd figure; nothing here reads, rewrites or
+                // infers either field from the other.
+                WarrantyMonths = sourceLine.WarrantyMonths,
                 IsAlternate = sourceLine.IsAlternate,
                 Exceptions = Trim(sourceLine.Exceptions, 2000)
             };
@@ -697,10 +702,20 @@ public sealed class SupplierQuoteInboxService
         if (command.Lines.Select(x => x.LineNumber).Distinct().Count() != command.Lines.Count)
             throw new SupplierQuoteValidationException("Supplier Quote line numbers must be unique.");
         foreach (var line in command.Lines)
+        {
             if (line.LineNumber <= 0 || line.RfqItemId <= 0 || line.CommercialDemandLineId <= 0 ||
                 line.Quantity <= 0 || line.UnitPrice < 0 || line.AvailableQuantity is < 0 ||
                 line.MinimumOrderQuantity is <= 0 || line.LeadTimeDays is < 0)
                 throw new SupplierQuoteValidationException($"Supplier Quote line {line.LineNumber} contains invalid values.");
+            // Named separately from the catch-all above, because this one is worth naming: a
+            // warranty length is scored, longer is better, and a value nobody could have meant
+            // would rank an offer top of the comparison. Null stays valid — it means the period was
+            // not captured, and the scorer reports that rather than inventing a zero.
+            if (line.WarrantyMonths is < 0 or > SupplierQuoteWarranty.MaximumMonths)
+                throw new SupplierQuoteValidationException(
+                    $"Supplier Quote line {line.LineNumber} warranty months must be between 0 and "
+                    + $"{SupplierQuoteWarranty.MaximumMonths}, or left empty when the warranty period was not captured.");
+        }
         // A discount larger than the round it discounts produces a negative landed cost, and the
         // customer price is landed / (1 - margin) — so it would arrive as a negative price rather
         // than as an error anybody could see.

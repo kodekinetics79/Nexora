@@ -104,6 +104,32 @@ plus `Version`. **Defaults: Price 80 / Lead time 20 / Warranty 0 / Payment terms
 This is what makes the default set *equivalent in coverage to today's behaviour* — every offer that
 ranks today still ranks — while making the ordering configurable, which is the actual requirement.
 
+> **Second correction — the fourth criterion, and an authorised addition to this section.** This
+> section originally enumerated the gate's entire schema as `Supplier.Tier`, `Supplier.CreditDays`
+> and the weights row. A third column now exists and this contract must say so rather than let a
+> migration appear that no clause authorised.
+>
+> **`SupplierQuoteLine.WarrantyMonths` (nullable int).** Warranty was free text on the supplier quote
+> line while the scorer consumed a number nothing supplied, so FR-QTM-03's fourth criterion was
+> *permanently inert*: its weight could never be raised above zero without every offer correctly
+> reporting it could not be scored. Shipping three of four named criteria and calling the fourth a
+> "stated gap" was leaving the requirement unmet and describing it politely.
+>
+> **Typed, never parsed.** No regex, no classifier, no model reads the wording. An operator types the
+> months or there is no number. The free text stays exactly as it is and neither field derives from
+> the other in either direction — a warranty clause carries conditions no integer can hold, and
+> rewriting it to fit a score would trade a true statement for a partial one. This is the same
+> one-setting doctrine that produced `CreditDays`.
+>
+> Existing rows take `NULL`, never a backfilled `0`: `NULL` means nobody captured it, `0` asserts the
+> supplier offered no warranty, and those are different claims. Bounded `0..600` months in the
+> database, the domain and the UI — fifty years is generous for any industrial warranty, and the
+> ceiling is what stops a mistyped year becoming the longest warranty in the candidate set.
+>
+> **The default weight set does not move.** Warranty stays `0` because existing lines have no number.
+> What changes is that a customer who starts capturing it can now raise the weight and get a real
+> ranking instead of a dead control.
+
 ---
 
 ## 3. The scorer — one implementation

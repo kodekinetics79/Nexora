@@ -452,10 +452,14 @@ const CommercialPolicyPage: React.FC = () => {
 
         {warrantyWeighted && (
           <Alert severity="warning" sx={{ mt: 2, borderRadius: 2 }}>
-            Warranty is recorded as free text on supplier quotes, and a criterion with no value is
-            never scored as zero. While warranty carries weight, any offer that does not state one
-            will show "Cannot score" instead of a score — it stays awardable, but it will not be
-            ranked.
+            Warranty is scored from <strong>Warranty (months)</strong> on each supplier quote line —
+            typed when a supplier response is entered in the Sourcing workbench or a quote is
+            captured in the Supplier Quote inbox — and a longer warranty scores higher. That field is
+            new in this release, so it is blank on every line recorded before it, and a criterion
+            with no value is never scored as zero. While warranty carries weight, an offer whose line
+            has no warranty months will show "Cannot score" instead of a score — it stays awardable,
+            but it will not be ranked. Record the months on the lines you compare before giving this
+            weight.
           </Alert>
         )}
 

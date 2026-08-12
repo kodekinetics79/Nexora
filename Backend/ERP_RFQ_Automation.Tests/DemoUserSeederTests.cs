@@ -208,6 +208,12 @@ public sealed class DemoUserSeederTests : IDisposable
         Assert.Equal(0, await db.Users.CountAsync());
         Assert.Equal(0, await db.Set<PlatformUser>().CountAsync());
         Assert.Equal(0, await db.BusinessUnits.CountAsync());
+
+        // And nothing in the CONTROL PLANE either. This seeder now writes a platform.Plans row that
+        // enables every runtime-available entitlement and an Active platform.Tenants row against it,
+        // so "no logins were created" is no longer the whole of what the refusal has to guarantee.
+        Assert.Equal(0, await db.Set<Plan>().CountAsync());
+        Assert.Equal(0, await db.Set<Tenant>().IgnoreQueryFilters().CountAsync());
     }
 
     [Fact]

@@ -35,7 +35,7 @@ describe('supplier scoring weights', () => {
     expect(preset('CHEAPEST').weights).toEqual(form('100', '0', '0', '0'));
   });
 
-  it('defaults "Balanced" to price 70, lead time 20, payment terms 10, warranty 0', () => {
+  it('defaults "Balanced" to price 80, lead time 20, warranty 0, payment terms 0', () => {
     expect(preset('BALANCED').weights).toEqual(form('80', '20', '0', '0'));
   });
 
@@ -45,8 +45,27 @@ describe('supplier scoring weights', () => {
       .toBeGreaterThan(Number(preset('SPEED').weights.priceWeight));
   });
 
-  it('gives warranty zero weight in every preset, because warranty is free text today', () => {
+  it('gives warranty zero weight in every preset, because no existing line carries the months yet', () => {
+    // The months are captured per supplier quote line and are blank on every line recorded before
+    // this release, so a preset that weighted warranty would refuse to rank anything on day one.
     WEIGHT_PRESETS.forEach((candidate) => expect(candidate.weights.warrantyWeight).toBe('0'));
+  });
+
+  it('tells the truth about warranty under the weight box: a number of months, longer scores higher', () => {
+    // The screen that switches warranty scoring on used to say warranty was free text and to leave
+    // this weight at zero — advice that contradicted the field the score is now computed from.
+    const warranty = WEIGHT_CRITERIA.find((criterion) => criterion.key === 'warrantyWeight')!;
+    expect(warranty.helper).toMatch(/months/i);
+    expect(warranty.helper).toMatch(/longer/i);
+    expect(warranty.helper).not.toMatch(/free text/i);
+    // It must not tell the reader to leave the weight at zero; that is the customer's decision now.
+    expect(warranty.helper).not.toMatch(/zero/i);
+  });
+
+  it('keeps every criterion helper naming the value it is scored from', () => {
+    // A weight box with no stated input is an unexplained score waiting to happen.
+    WEIGHT_CRITERIA.forEach((criterion) => expect(criterion.helper.trim().length).toBeGreaterThan(0));
+    expect(WEIGHT_CRITERIA.find((c) => c.key === 'paymentTermsWeight')!.helper).toMatch(/credit days/i);
   });
 
   it('makes every preset total 100', () => {

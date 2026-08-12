@@ -40,7 +40,7 @@ export const WEIGHT_CRITERIA: WeightCriterion[] = [
   {
     key: 'warrantyWeight',
     label: 'Warranty',
-    helper: 'Warranty is captured as free text today, so leave this at zero until it is a number.',
+    helper: 'The warranty months recorded on the supplier quote line. A longer warranty scores higher.',
   },
   {
     key: 'paymentTermsWeight',

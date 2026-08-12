@@ -1,5 +1,21 @@
 namespace ERP_RFQ_Automation.SupplierQuotes;
 
+/// <summary>
+/// The bounds a typed warranty length has to fall inside to be persisted.
+/// </summary>
+public static class SupplierQuoteWarranty
+{
+    /// <summary>
+    /// Fifty years, in months. Chosen as a sanity bound and nothing cleverer: the longest warranties
+    /// actually sold — structural, and solar performance guarantees — run twenty-five to thirty
+    /// years, so this refuses no real offer, while it does refuse a year typed into the box by
+    /// mistake (<c>2026</c>) and the order-of-magnitude slips that would otherwise sail to the top of
+    /// a warranty-weighted ranking. It is a guardrail on a keystroke, not an attempt to know what a
+    /// plausible warranty is; the operator's number is otherwise taken as given.
+    /// </summary>
+    public const int MaximumMonths = 600;
+}
+
 public sealed record CaptureSupplierQuoteCommand(
     long BusinessUnitId,
     long SupplierId,
@@ -51,7 +67,13 @@ public sealed record CaptureSupplierQuoteLine(
     string? Warranty,
     bool IsAlternate,
     string? Exceptions,
-    IReadOnlyCollection<CaptureSupplierQuoteEvidence> Evidence);
+    IReadOnlyCollection<CaptureSupplierQuoteEvidence> Evidence,
+    // The numeric companion to the free-text Warranty above, and the reason FR-QTM-03's fourth
+    // criterion can be scored at all. Trailing and optional because null — not captured — is the
+    // honest state of every line captured before this field existed and of every line whose quote
+    // never named a period. It is TYPED, never derived from the text beside it: see
+    // SupplierQuoteLine.WarrantyMonths.
+    int? WarrantyMonths = null);
 
 public sealed record CaptureSupplierQuoteEvidence(
     string FieldName,
@@ -138,7 +160,13 @@ public sealed record SupplierQuoteLineDetail(
     decimal Quantity,
     decimal? AvailableQuantity,
     decimal UnitPrice,
-    int? LeadTimeDays);
+    int? LeadTimeDays,
+    // Both warranty facts, side by side, on the one screen where a reviewer could challenge either.
+    // The number is what the comparison is scored from; the text is what the supplier actually
+    // wrote. Showing only the number would hide the conditions; showing only the text would hide
+    // what the score was computed from.
+    string? Warranty = null,
+    int? WarrantyMonths = null);
 
 public sealed record SupplierQuoteEvidenceDetail(
     long Id,

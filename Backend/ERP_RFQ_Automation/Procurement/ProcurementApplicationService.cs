@@ -1116,7 +1116,11 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                             rfqLines[line.RfqItemId].ProductShortName ?? rfqLines[line.RfqItemId].ItemMaterialCode ??
                             $"RFQ line {line.RfqItemId}", line.Quantity, line.AvailableQuantity,
                         rfqLines[line.RfqItemId].UnitOfMeasure!, line.UnitPrice,
-                        line.MinimumOrderQuantity, line.LeadTimeDays, null, null, null, false, null, [])).ToArray(),
+                        line.MinimumOrderQuantity, line.LeadTimeDays, null, null, null, false, null, [],
+                        // The typed warranty length travels onto the canonical line, which is where
+                        // the comparison reads it from. Dropping it here would leave the workbench
+                        // the one capture door that silently discards the number the buyer entered.
+                        line.WarrantyMonths)).ToArray(),
                     [], command.IdempotencyKey, command.Actor, command.CorrelationId), ct);
             var canonicalLines = await _db.SupplierQuoteLines.AsNoTracking().Where(x =>
                     x.BusinessUnitId == command.BusinessUnitId && x.SupplierQuoteRevisionId == canonical.RevisionId)
@@ -2591,6 +2595,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             IsAlternate: canonicalLine?.IsAlternate ?? false,
             CountryOfOrigin: canonicalLine?.OriginCountry,
             Warranty: canonicalLine?.Warranty,
+            WarrantyMonths: canonicalLine?.WarrantyMonths,
             PaymentTerms: supplier?.PaymentTerms,
             CreditDays: supplier?.CreditDays,
             QuotedPaymentTerms: canonicalRevision?.PaymentTerms);
@@ -2646,9 +2651,12 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
     /// Projects a comparison line onto the governed scorer. Price is the single landed-cost figure
     /// consumed as ONE number — deliberately not decomposed into duty/freight/conformity sub-weights.
     ///
-    /// <para>Warranty is quoted as free text and is therefore never a number here. That is why the
-    /// warranty weight defaults to 0: at any other weight every offer would correctly report that it
-    /// cannot be scored, because a missing criterion is never guessed and never scored as zero.</para>
+    /// <para>Warranty is the number an operator typed on the supplier quote line, never a reading of
+    /// the free text beside it. It is null wherever nobody captured a period — which is every line
+    /// that predates the column — so the warranty weight still defaults to 0: at any other weight
+    /// those offers correctly report that they cannot be scored, because a missing criterion is never
+    /// guessed and never scored as zero. A tenant that starts capturing the number can raise the
+    /// weight and get a real ranking, with longer warranties scoring higher.</para>
     ///
     /// <para>The currency is declared so the scorer's fail-closed comparability gate is a real check
     /// and not a formality, even though the caller has already refused a mixed-currency set.</para>
@@ -2658,7 +2666,7 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
     {
         public decimal? Price => Line.LandedUnitCost;
         public double? LeadTimeDays => Line.LeadTimeDays;
-        public double? WarrantyMonths => null;
+        public double? WarrantyMonths => Line.WarrantyMonths;
         public double? CreditDays => Line.CreditDays;
         public long? PriceCurrencyId => Line.CurrencyId;
     }
@@ -2982,6 +2990,13 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             || line.OtherCost < 0 || line.TaxAmount < 0 || line.DiscountAmount < 0 || line.MinimumOrderQuantity is < 0
             || line.ReliabilitySnapshot is < 0 or > 100)
             throw new ProcurementValidationException("Quote costs, quantities, lead time, and reliability must be within valid ranges.");
+        // Refused here as well as at the canonical capture door, so the workbench says which field is
+        // wrong instead of failing later inside the supplier-quote service with a line number the
+        // caller never chose. Null remains valid throughout: it means the period was not captured.
+        if (line.WarrantyMonths is < 0 or > SupplierQuotes.SupplierQuoteWarranty.MaximumMonths)
+            throw new ProcurementValidationException(
+                $"Quote warranty months must be between 0 and {SupplierQuotes.SupplierQuoteWarranty.MaximumMonths}, "
+                + "or left empty when the warranty period was not captured.");
     }
 
     private async Task<Rfq> RequireRfqAsync(long businessUnitId, long rfqId, CancellationToken ct)

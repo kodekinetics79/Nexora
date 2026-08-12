@@ -26,6 +26,13 @@ namespace ERP_RFQ_Automation.Agent.Tools;
 /// measured outcome, and weighting it presented a typed number as performance evidence. It is still
 /// reported beside each supplier as the display-only value it always was.
 ///
+/// One recorded divergence: WARRANTY IS NOT SCORED HERE, at any weight. This tool ranks the bids an
+/// operator recorded on the RFQ line itself, and an RFQ line carries no warranty period — the typed
+/// <c>SupplierQuoteLine.WarrantyMonths</c> the governed comparison scores from lives on the canonical
+/// supplier quote, which this tool does not read. So a tenant that gives warranty a non-zero weight
+/// gets an explicit refusal to rank from this tool rather than a ranking that scores every supplier's
+/// warranty as zero. See the projection at the bottom of this file for why the alternative is worse.
+///
 /// FX contract
 /// -----------
 /// Price carries the largest default weight and is min-max normalised across the candidate set, so
@@ -48,7 +55,9 @@ public sealed class RecommendAwardTool : IAgentTool
     public string Name => AgentToolNames.RecommendAward;
     public string Description =>
         "Recommend which supplier to award an RFQ to, using the tenant's configured weighted comparison of " +
-        "total price, lead time, warranty and payment terms. Advisory only — does not place any order.";
+        "total price, lead time and payment terms. Warranty is not captured on RFQ-line bids, so when a " +
+        "tenant weights warranty this tool declines to rank instead of guessing. " +
+        "Advisory only — does not place any order.";
     public string InputJsonSchema =>
         "{\"type\":\"object\",\"properties\":{\"rfqId\":{\"type\":\"integer\"}},\"required\":[\"rfqId\"]}";
     public bool IsMutation => false;
@@ -260,8 +269,28 @@ public sealed class RecommendAwardTool : IAgentTool
         public string? ScoreUnavailableReason { get; set; }
         public IReadOnlyList<SupplierScoreContribution> Contributions { get; set; } = [];
 
-        // Projection onto the governed scorer. Warranty is not captured numerically anywhere in the
-        // RFQ line, so it is offered as "unknown" rather than as a number nobody stated.
+        // Projection onto the governed scorer.
+        //
+        // WARRANTY IS DELIBERATELY NOT SCORED ON THIS PATH, and the divergence is recorded rather
+        // than papered over. A typed warranty period does now exist — SupplierQuoteLine.WarrantyMonths
+        // — and the governed comparison and CompareSupplierQuotesTool both score from it. This tool
+        // cannot, because it does not rank those lines: its candidates are the bids an operator
+        // recorded directly on the RFQ line (Rfqitem.SupplierId + Rfqitem.UnitPrice), and the RFQ
+        // line has no warranty column of any kind. Rfqitem.SupplierQuotedItemId, the only link from
+        // here to a canonical quote, is written by nothing.
+        //
+        // Reaching the canonical column would mean a new query that resolves, per supplier, which
+        // revision of which supplier quote is current for this RFQ item — lineage logic the
+        // procurement service already owns and that would be a second, unreviewed copy here. Worse,
+        // the price beside it would still come from Rfqitem.UnitPrice, so two offers would be ranked
+        // on a warranty from one capture and a price from another. A hybrid nobody governs is a worse
+        // answer than an honest refusal.
+        //
+        // So null stands, and it means what null always means to the scorer: NOT CAPTURED, never
+        // zero. Under ruling R-F a tenant that gives warranty a non-zero weight gets "Cannot score —
+        // warranty missing" from this tool and no recommendation, while every bid stays valid and
+        // fully awardable by a human. That is a refusal to rank, not a ranking that scores every
+        // supplier's warranty as none.
         decimal? IWeightedScoreCandidate.Price => TotalPrice;
         double? IWeightedScoreCandidate.LeadTimeDays => AvgLeadTime;  // already nullable: null => unscorable
         double? IWeightedScoreCandidate.WarrantyMonths => null;

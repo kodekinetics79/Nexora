@@ -18,8 +18,9 @@ export interface SupplierScoringWeightsDTO {
   priceWeight: number;
   leadTimeWeight: number;
   /**
-   * Defaults to 0 because warranty is captured as free text today and a missing criterion is never
-   * guessed. It is a real weight the customer may raise once warranty is captured numerically.
+   * Scored from the warranty months on the supplier quote line. Defaults to 0 because that number is
+   * new in this release and is blank on every line captured before it, and a missing criterion is
+   * never guessed. The customer raises it once the months are being recorded.
    */
   warrantyWeight: number;
   paymentTermsWeight: number;

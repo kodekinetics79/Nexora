@@ -184,3 +184,92 @@ describe('the supplier comparison table', () => {
     expect(within(unscoredRow).getByRole('button', { name: 'Approve' })).toBeEnabled();
   });
 });
+
+/**
+ * The warranty column and the warranty line of the breakdown, which are the only places FR-QTM-03's
+ * fourth criterion is reachable by a buyer. The column used to show the supplier's wording alone,
+ * so a warranty the score was computed from was invisible on the row that claimed the score.
+ */
+describe('the warranty column', () => {
+  /** The warranty cell, found by its position rather than its text, so its text can be asserted. */
+  const warrantyCellOf = (row: HTMLElement) => row.querySelectorAll('td')[7];
+
+  const withWarranty = (): QuoteComparisonResult => ({
+    rfqItemId: 10,
+    lines: [
+      {
+        ...line(2, 60),
+        warranty: 'Manufacturer standard terms',
+        warrantyMonths: null,
+      },
+      {
+        ...line(3, 90),
+        warranty: 'Parts only, excludes consumables',
+        warrantyMonths: 24,
+        scoreBreakdown: [
+          { criterion: 'PRICE', label: 'Landed cost', rawValue: 1000, weight: 80, pointsEarned: 72 },
+          { criterion: 'WARRANTY', label: 'Warranty', rawValue: 24, weight: 20, pointsEarned: 18 },
+        ],
+      },
+    ],
+    recommendedSupplierQuotedItemId: 3,
+  });
+
+  const openComparison = async () => {
+    procurementService.getQuoteComparison.mockResolvedValue(withWarranty());
+    renderPage();
+    fireEvent.click(await screen.findByRole('tab', { name: /Supplier offers/ }));
+  };
+
+  it('shows the captured period in months and keeps the supplier wording beside it', async () => {
+    await openComparison();
+    const cell = warrantyCellOf((await screen.findByText('Winning Supplier')).closest('tr')!);
+    expect(cell).toHaveTextContent('24 months');
+    expect(cell).toHaveTextContent('Parts only, excludes consumables');
+  });
+
+  it('keeps the wording and names the missing period, so the row does not fight the score column', async () => {
+    await openComparison();
+    const cell = warrantyCellOf((await screen.findByText('Middle Supplier')).closest('tr')!);
+    expect(cell).toHaveTextContent('Manufacturer standard terms');
+    expect(cell).toHaveTextContent('No warranty period recorded');
+    // No "0 months", no dash standing in for a value nobody recorded.
+    expect(cell?.textContent).not.toMatch(/\d+\s*months?/i);
+  });
+
+  it('breaks the warranty down like every other criterion, so the row sums to the score', async () => {
+    await openComparison();
+    const winner = (await screen.findByText('Winning Supplier')).closest('tr')!;
+    expect(winner).toHaveTextContent('Warranty 24 months · 18 of 20');
+    expect(winner).toHaveTextContent('Landed cost SAR 1,000.00 · 72 of 80');
+    expect(winner).toHaveTextContent('Total 90 of 100');
+  });
+});
+
+/**
+ * The breakdown used to build its warranty value by hand, so a one-month warranty read "1 months".
+ * Both the column and the breakdown now say it the same way, because they are one fact.
+ */
+describe('a one-month warranty', () => {
+  it('is stated in the singular in both the column and the breakdown', async () => {
+    procurementService.getQuoteComparison.mockResolvedValue({
+      rfqItemId: 10,
+      lines: [{
+        ...line(3, 90),
+        warranty: null,
+        warrantyMonths: 1,
+        scoreBreakdown: [
+          { criterion: 'PRICE', label: 'Landed cost', rawValue: 1000, weight: 80, pointsEarned: 89 },
+          { criterion: 'WARRANTY', label: 'Warranty', rawValue: 1, weight: 20, pointsEarned: 1 },
+        ],
+      }],
+      recommendedSupplierQuotedItemId: 3,
+    });
+    renderPage();
+    fireEvent.click(await screen.findByRole('tab', { name: /Supplier offers/ }));
+    const winner = (await screen.findByText('Winning Supplier')).closest('tr')!;
+    expect(winner.querySelectorAll('td')[7]).toHaveTextContent('1 month');
+    expect(winner).toHaveTextContent('Warranty 1 month · 1 of 20');
+    expect(winner).not.toHaveTextContent('1 months');
+  });
+});

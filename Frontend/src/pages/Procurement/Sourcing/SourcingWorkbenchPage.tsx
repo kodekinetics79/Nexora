@@ -73,7 +73,15 @@ import {
   rankScoredOffers,
   recommendationTradeOff,
   roundedPoints as points,
+  warrantyComparisonCell,
 } from "../../../utils/supplierComparison";
+import {
+  WARRANTY_MONTHS_HELPER,
+  WARRANTY_WORDING_NOT_CAPTURED_HERE,
+  formatWarrantyMonths,
+  parseWarrantyMonthsInput,
+  warrantyMonthsFieldValue,
+} from "../../../utils/warrantyMonths";
 import { useAuth } from "../../../context/AuthContext";
 import commercialLearningService from "../../../api/services/commercialLearningService";
 import InboundShipmentsPanel from "./InboundShipmentsPanel";
@@ -120,7 +128,9 @@ const criterionRawValue = (
     case "LEAD_TIME":
       return `${criterion.rawValue} days`;
     case "WARRANTY":
-      return `${criterion.rawValue} months`;
+      // The same words the warranty column uses, so the raw value in the breakdown and the value
+      // in the column are recognisably the one fact rather than two renderings of it.
+      return formatWarrantyMonths(criterion.rawValue) ?? "not stated";
     case "PAYMENT_TERMS":
       return `${criterion.rawValue} credit days`;
     default:
@@ -910,6 +920,7 @@ function SourcingWorkbenchPage() {
                   (line) => line.supplierQuotedItemId === offer.id,
                 );
                 const scoreState = offerScoreState(authoritativeOffer);
+                const warrantyCell = warrantyComparisonCell(authoritativeOffer);
                 const isRecommended =
                   comparison?.recommendedSupplierQuotedItemId === offer.id;
                 const ranking = scoreRanks.get(offer.id);
@@ -956,10 +967,25 @@ function SourcingWorkbenchPage() {
                       ? "Unknown"
                       : `${authoritativeOffer.leadTimeDays} days`}
                   </TableCell>
+                  {/* The captured period leads, because it is the number the warranty points were
+                      computed from and the buyer has to be able to check the row against it. The
+                      supplier's wording stays underneath rather than being replaced — it carries
+                      the conditions the period does not. With no period captured the wording still
+                      leads, and the line beneath it says the number is missing so the row agrees
+                      with its own score column instead of contradicting it. */}
                   <TableCell>
-                    <Typography variant="caption">
-                      {authoritativeOffer?.warranty || "Not stated"}
+                    <Typography variant="caption" sx={{ display: "block" }}>
+                      {warrantyCell.headline}
                     </Typography>
+                    {warrantyCell.detail && (
+                      <Typography
+                        variant="caption"
+                        color="text.secondary"
+                        sx={{ display: "block" }}
+                      >
+                        {warrantyCell.detail}
+                      </Typography>
+                    )}
                   </TableCell>
                   <TableCell>
                     <Typography variant="caption" sx={{ display: "block" }}>
@@ -1576,6 +1602,13 @@ type ResponseLineForm = {
   otherCost: number;
   taxAmount: number;
   discountAmount: number;
+  /**
+   * Held as raw text, alone among these fields, because every other value here is coerced to a
+   * number and defaults to 0 — and 0 months is a supplier who offered no warranty, which is a
+   * different statement from nobody having recorded one. An empty string is the only way this form
+   * can say "not captured", and it is what an untouched field must stay.
+   */
+  warrantyMonths: string;
   minimumOrderQuantity: number;
 };
 
@@ -1591,6 +1624,10 @@ const responseLineDefaults = (): ResponseLineForm => ({
   otherCost: 0,
   taxAmount: 0,
   discountAmount: 0,
+  // An RFQ line arrives with no warranty recorded against it, and that is exactly what the field
+  // must show: blank. Routed through the same hydration the rest of the app uses so a future
+  // caller that does have a value cannot render a null as 0.
+  warrantyMonths: warrantyMonthsFieldValue(null),
   minimumOrderQuantity: 0,
 });
 
@@ -1629,7 +1666,7 @@ function ResponseDialog({
     }));
   const selectedForm = lineForms[rfqItemId] ?? responseLineDefaults();
   const setLine =
-    (field: keyof ResponseLineForm) =>
+    (field: Exclude<keyof ResponseLineForm, "warrantyMonths">) =>
     (event: { target: { value: unknown } }) =>
       setLineForms((current) => ({
         ...current,
@@ -1638,6 +1675,17 @@ function ResponseDialog({
           [field]: number(event.target.value),
         },
       }));
+  // Kept apart from setLine so the typed warranty is never pushed through number(), which turns an
+  // empty field into 0 and a half-typed "-" into NaN.
+  const setLineWarrantyMonths = (event: { target: { value: string } }) =>
+    setLineForms((current) => ({
+      ...current,
+      [rfqItemId]: {
+        ...(current[rfqItemId] ?? responseLineDefaults()),
+        warrantyMonths: event.target.value,
+      },
+    }));
+  const warrantyMonths = parseWarrantyMonthsInput(selectedForm.warrantyMonths);
   const includedLines = lines.filter((line: any) =>
     includedLineIds.includes(line.id),
   );
@@ -1655,7 +1703,11 @@ function ResponseDialog({
       value.otherCost >= 0 &&
       value.taxAmount >= 0 &&
       value.discountAmount >= 0 &&
-      value.minimumOrderQuantity >= 0
+      value.minimumOrderQuantity >= 0 &&
+      // Blank passes: a warranty nobody captured is a valid response. Only a value the field
+      // refuses — negative, fractional, or beyond the accepted ceiling — blocks the save, and it
+      // is checked on every included line so a bad value cannot hide on an unselected tab.
+      parseWarrantyMonthsInput(value.warrantyMonths).error === null
     );
   });
   const mutation = useMutation({
@@ -1681,6 +1733,9 @@ function ResponseDialog({
             taxAmount: value.taxAmount,
             discountAmount: value.discountAmount,
             minimumOrderQuantity: value.minimumOrderQuantity || undefined,
+            // Explicitly null rather than dropped when blank: the line is recorded as having no
+            // captured warranty, which is what the comparison needs in order to say so.
+            warrantyMonths: parseWarrantyMonthsInput(value.warrantyMonths).value,
           };
         }),
       }, idempotencyKey),
@@ -1840,6 +1895,23 @@ function ResponseDialog({
               label="Lead time (days)"
               value={selectedForm.leadTimeDays}
               onChange={setLine("leadTimeDays")}
+            />
+          </Grid>
+          <Grid size={{ xs: 6, md: 3 }}>
+            <TextField
+              fullWidth
+              type="number"
+              label="Warranty (months)"
+              value={selectedForm.warrantyMonths}
+              onChange={setLineWarrantyMonths}
+              error={Boolean(warrantyMonths.error)}
+              slotProps={{ htmlInput: { min: 0 } }}
+              // The same sentence the Supplier Quote inbox shows over the same field, plus the one
+              // clause that is only true here: this command carries the period and not the wording.
+              helperText={
+                warrantyMonths.error ??
+                `${WARRANTY_MONTHS_HELPER} ${WARRANTY_WORDING_NOT_CAPTURED_HERE}`
+              }
             />
           </Grid>
           <Grid size={{ xs: 6, md: 3 }}>

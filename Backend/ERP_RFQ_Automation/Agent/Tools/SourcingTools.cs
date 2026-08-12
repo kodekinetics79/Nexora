@@ -174,6 +174,13 @@ public sealed class CaptureSupplierQuoteTool : IAgentTool
 /// <see cref="WeightedSupplierScoring"/> with the SAME tenant weight set, so the answer the agent
 /// gives and the answer the workbench shows are the same answer.</para>
 ///
+/// <para>Same weights AND the same inputs. All four criteria are read from the columns the governed
+/// comparison reads, warranty included: the typed <c>SupplierQuoteLine.WarrantyMonths</c> on the
+/// offer's canonical line, reached through the <c>SourceSupplierQuoteLineId</c> the quoted item
+/// already carries. Offering the scorer a hardcoded null there would have re-opened the very split
+/// this gate closed — the moment a tenant weighted warranty, this tool would refuse to rank offers
+/// the workbench ranks fine.</para>
+///
 /// <para>Supplier success rate is no longer a scored criterion — it is an operator-typed
 /// spreadsheet column, never a measured outcome, and scoring it presented a typed number as
 /// performance evidence. It is still reported, as the display-only value it always was.</para>
@@ -221,7 +228,10 @@ public sealed class CompareSupplierQuotesTool : IAgentTool
                 q.RfqItemId,
                 q.LeadTimeDays,
                 q.ValidUntil,
-                q.ItemName
+                q.ItemName,
+                // The offer's canonical evidence. Carried through so the warranty an operator typed
+                // on that line can be scored here exactly as the governed comparison scores it.
+                q.SourceSupplierQuoteLineId
             })
             .ToListAsync(ct);
 
@@ -260,6 +270,24 @@ public sealed class CompareSupplierQuotesTool : IAgentTool
             .ToListAsync(ct);
         var supById = suppliers.ToDictionary(s => s.Id);
 
+        // The warranty period an operator typed on the canonical supplier-quote line — the SAME
+        // column the governed comparison scores from. Read by ids the rows above already carry, in
+        // one keyed lookup beside the supplier one, so the candidate query gains no join.
+        //
+        // It used to be offered to the scorer as a literal null, on the belief that warranty was
+        // free text and no number existed. It does now, and that null was the original two-recommender
+        // defect coming back through a side door: a tenant that weights warranty would have had this
+        // tool refuse to rank offers the workbench ranks fine, and tell the operator to capture a
+        // value that was already captured.
+        var quoteLineIds = quoted.Where(q => q.SourceSupplierQuoteLineId.HasValue)
+            .Select(q => q.SourceSupplierQuoteLineId!.Value).Distinct().ToList();
+        var warrantyMonthsByQuoteLineId = quoteLineIds.Count == 0
+            ? new Dictionary<long, int?>()
+            : await _db.Set<SupplierQuotes.SupplierQuoteLine>().AsNoTracking()
+                .Where(l => l.BusinessUnitId == ctx.BusinessUnitId && quoteLineIds.Contains(l.Id))
+                .Select(l => new { l.Id, l.WarrantyMonths })
+                .ToDictionaryAsync(l => l.Id, l => l.WarrantyMonths, ct);
+
         // The tenant's weights, not this file's opinion. A trader whose customers award on delivery
         // date and one who awards on price are not running the same comparison, and neither of them
         // should be running the one a developer typed into a constant.
@@ -287,6 +315,13 @@ public sealed class CompareSupplierQuotesTool : IAgentTool
                 // Null, not zero: a supplier whose credit days nobody has captured has not been
                 // told to us as "pays cash", and the scorer must be able to tell those apart.
                 CreditDays = sup?.CreditDays,
+                // Same distinction again. Null means nobody typed a warranty period on the canonical
+                // line — a real state, and the state of every line captured before the column existed.
+                // 0 would assert the supplier offered no warranty at all.
+                WarrantyMonths = q.SourceSupplierQuoteLineId is { } quoteLineId
+                    && warrantyMonthsByQuoteLineId.TryGetValue(quoteLineId, out var months)
+                        ? months
+                        : null,
                 SuccessRate = (double)(sup?.SuccessRate ?? 0m)
             };
             if (!byLine.TryGetValue(itemId, out var list)) { list = new(); byLine[itemId] = list; }
@@ -334,6 +369,7 @@ public sealed class CompareSupplierQuotesTool : IAgentTool
                     lineTotal = b.Price,
                     leadTimeDays = b.LeadTime,
                     creditDays = b.CreditDays,
+                    warrantyMonths = b.WarrantyMonths,
                     // Reported, never scored: an operator typed it, nothing measured it.
                     b.SuccessRate,
                     b.Score,
@@ -397,6 +433,12 @@ public sealed class CompareSupplierQuotesTool : IAgentTool
         public double LeadTime { get; set; }
         public int? CreditDays { get; set; }
 
+        /// <summary>
+        /// The typed warranty period from the canonical supplier-quote line, or null when nobody
+        /// captured one. Never derived from the supplier's free-text warranty wording.
+        /// </summary>
+        public int? WarrantyMonths { get; set; }
+
         /// <summary>Reported to the operator, deliberately not scored. See the class remarks.</summary>
         public double SuccessRate { get; set; }
 
@@ -404,12 +446,14 @@ public sealed class CompareSupplierQuotesTool : IAgentTool
         public string? ScoreUnavailableReason { get; set; }
         public IReadOnlyList<SupplierScoreContribution> Contributions { get; set; } = [];
 
-        // Projection onto the governed scorer. Warranty is quoted as free text, so there is no
-        // number to offer it: at any non-zero warranty weight this bid correctly reports that it
-        // cannot be scored rather than being credited with a warranty nobody stated.
+        // Projection onto the governed scorer, from the same columns the governed comparison reads,
+        // so both name the same winner on the same data. Warranty is the number an operator typed on
+        // the canonical quote line — never a reading of the prose beside it — and it stays null where
+        // nobody typed one, so at a non-zero warranty weight that bid reports it cannot be scored
+        // rather than being credited with a warranty nobody stated.
         decimal? IWeightedScoreCandidate.Price => Price;
         double? IWeightedScoreCandidate.LeadTimeDays => LeadTime;
-        double? IWeightedScoreCandidate.WarrantyMonths => null;
+        double? IWeightedScoreCandidate.WarrantyMonths => WarrantyMonths;
         double? IWeightedScoreCandidate.CreditDays => CreditDays;
         long? IWeightedScoreCandidate.PriceCurrencyId => CurrencyId;
     }

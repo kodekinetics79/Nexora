@@ -13,6 +13,10 @@ import supplierQuoteService, {
   type CaptureSupplierQuoteRequest, type SupplierQuoteInboxStatus, type UploadSupplierQuoteRequest,
 } from "../../../api/services/supplierQuoteService";
 import { INCOTERMS_2020 } from "../../../api/services/procurementService";
+import {
+  WARRANTY_MONTHS_HELPER, WARRANTY_WORDING_HELPER,
+  parseWarrantyMonthsInput, warrantyMonthsFieldValue,
+} from "../../../utils/warrantyMonths";
 
 const number = (value: string) => Number(value);
 const sha256 = async (value: string) => Array.from(
@@ -25,9 +29,14 @@ function CaptureDialog({ open, onClose }: { open: boolean; onClose: () => void }
     nexoraSerial: "", supplierQuoteReference: "", revisionNumber: "1", sourceIdentity: "",
     currencyId: "", validUntil: "", rfqItemId: "", demandLineId: "", partNumber: "",
     description: "", quantity: "1", availableQuantity: "", uom: "EA", unitPrice: "0",
-    leadTimeDays: "", paymentTerms: "", incoterms: "", notes: "" });
+    // Both warranty fields start blank. Blank is the honest state of a quote nobody has read a
+    // warranty out of yet, and for the months field it is also the only way to say "not captured" —
+    // a "0" default would assert that the supplier offered no warranty at all.
+    leadTimeDays: "", warranty: "", warrantyMonths: warrantyMonthsFieldValue(null),
+    paymentTerms: "", incoterms: "", notes: "" });
   const set = (key: keyof typeof form) => (event: React.ChangeEvent<HTMLInputElement>) =>
     setForm((current) => ({ ...current, [key]: event.target.value }));
+  const warrantyMonths = parseWarrantyMonthsInput(form.warrantyMonths);
   const mutation = useMutation({
     mutationFn: async () => {
       const sourceIdentity = form.sourceIdentity.trim();
@@ -46,6 +55,9 @@ function CaptureDialog({ open, onClose }: { open: boolean; onClose: () => void }
           availableQuantity: form.availableQuantity ? number(form.availableQuantity) : null,
           unitOfMeasure: form.uom.trim(), unitPrice: number(form.unitPrice),
           leadTimeDays: form.leadTimeDays ? number(form.leadTimeDays) : null,
+          // Sent side by side and independently: the wording exactly as typed, the period exactly
+          // as typed. Neither field is written from the other.
+          warranty: form.warranty.trim() || null, warrantyMonths: warrantyMonths.value,
           isAlternate: false, evidence: [] }],
       };
       return supplierQuoteService.capture(request);
@@ -84,10 +96,19 @@ function CaptureDialog({ open, onClose }: { open: boolean; onClose: () => void }
         <TextField required label="UOM" value={form.uom} onChange={set("uom")} />
         <TextField required label="Unit price" type="number" value={form.unitPrice} onChange={set("unitPrice")} />
         <TextField label="Lead time (days)" type="number" value={form.leadTimeDays} onChange={set("leadTimeDays")} />
+        {/* Both warranty facts are captured here because this command carries both. The wording box
+            says where the period goes and the period box says what it is for, so neither reads as a
+            duplicate of the other. */}
+        <TextField label="Warranty (as quoted)" value={form.warranty} onChange={set("warranty")}
+          helperText={WARRANTY_WORDING_HELPER} />
+        <TextField label="Warranty (months)" type="number" value={form.warrantyMonths}
+          onChange={set("warrantyMonths")} error={Boolean(warrantyMonths.error)}
+          slotProps={{ htmlInput: { min: 0 } }}
+          helperText={warrantyMonths.error ?? WARRANTY_MONTHS_HELPER} />
       </Box>
       {mutation.isError && <Alert severity="error">{(mutation.error as any)?.response?.data?.detail ?? "Supplier Quote capture failed."}</Alert>}
     </Stack></DialogContent>
-    <DialogActions><Button onClick={onClose}>Cancel</Button><Button variant="contained" disabled={!required || mutation.isPending} onClick={() => mutation.mutate()}>{mutation.isPending ? "Capturing..." : "Capture revision"}</Button></DialogActions>
+    <DialogActions><Button onClick={onClose}>Cancel</Button><Button variant="contained" disabled={!required || Boolean(warrantyMonths.error) || mutation.isPending} onClick={() => mutation.mutate()}>{mutation.isPending ? "Capturing..." : "Capture revision"}</Button></DialogActions>
   </Dialog>;
 }
 

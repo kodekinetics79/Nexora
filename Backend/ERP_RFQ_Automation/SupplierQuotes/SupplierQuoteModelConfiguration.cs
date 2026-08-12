@@ -102,7 +102,8 @@ public static class SupplierQuoteModelConfiguration
             entity.Property(x => x.UnitPrice).HasPrecision(18, 6);
             entity.Property(x => x.MinimumOrderQuantity).HasPrecision(18, 4);
             entity.HasCheckConstraint("CK_supplier_quote_lines_Values",
-                "\"LineNumber\" > 0 AND \"Quantity\" > 0 AND \"UnitPrice\" >= 0 AND (\"AvailableQuantity\" IS NULL OR \"AvailableQuantity\" >= 0) AND (\"MinimumOrderQuantity\" IS NULL OR \"MinimumOrderQuantity\" > 0) AND (\"LeadTimeDays\" IS NULL OR \"LeadTimeDays\" >= 0)");
+                "\"LineNumber\" > 0 AND \"Quantity\" > 0 AND \"UnitPrice\" >= 0 AND (\"AvailableQuantity\" IS NULL OR \"AvailableQuantity\" >= 0) AND (\"MinimumOrderQuantity\" IS NULL OR \"MinimumOrderQuantity\" > 0) AND (\"LeadTimeDays\" IS NULL OR \"LeadTimeDays\" >= 0) AND "
+                + $"(\"WarrantyMonths\" IS NULL OR (\"WarrantyMonths\" >= 0 AND \"WarrantyMonths\" <= {SupplierQuoteWarranty.MaximumMonths}))");
             entity.HasIndex(x => new { x.BusinessUnitId, x.SupplierQuoteRevisionId, x.LineNumber }).IsUnique();
             entity.HasOne<SupplierQuoteRevision>().WithMany(x => x.Lines)
                 .HasForeignKey(x => new { x.BusinessUnitId, x.SupplierQuoteRevisionId })

@@ -202,7 +202,12 @@ public sealed record CaptureSupplierQuoteLine(
     decimal TaxAmount,
     decimal DiscountAmount,
     decimal? MinimumOrderQuantity,
-    decimal? ReliabilitySnapshot);
+    decimal? ReliabilitySnapshot,
+    // FR-QTM-03's fourth criterion, as a number the buyer types on the workbench. Trailing and
+    // optional so every existing caller keeps working and so "not captured" stays expressible — a
+    // warranty nobody recorded is recorded as not recorded, never as zero months. It is written
+    // straight onto the canonical supplier quote line; nothing derives it from the warranty text.
+    int? WarrantyMonths = null);
 
 public sealed record RetrySolicitationCommand(
     long BusinessUnitId,
@@ -512,7 +517,15 @@ public sealed record QuoteComparisonLine(
     string? SupplierPartNumber = null,
     bool IsAlternate = false,
     string? CountryOfOrigin = null,
+    // The supplier's own warranty wording, kept because it carries the conditions the number cannot
+    // ("24 months on parts, 12 on labour").
     string? Warranty = null,
+    // The typed warranty length, and what the warranty criterion is actually scored from — longer is
+    // better. Null means the period was never captured, and under ruling R-F an offer missing a
+    // WEIGHTED criterion gets no score and the reason why, never a zero that would sort it last as
+    // if the supplier had offered no warranty at all. Shown beside Warranty so the points earned can
+    // be checked against the number they came from.
+    int? WarrantyMonths = null,
     // The supplier's master-data terms and their numeric companion — the pair the payment-terms
     // criterion is scored from, shown together so the points earned can be checked against the
     // number they were computed from.

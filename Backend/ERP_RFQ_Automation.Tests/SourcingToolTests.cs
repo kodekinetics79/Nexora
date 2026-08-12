@@ -5,6 +5,7 @@ using ERP_RFQ_Automation.Agent.Models;
 using ERP_RFQ_Automation.Agent.Tools;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Procurement;
+using ERP_RFQ_Automation.SupplierEvaluation;
 using ERP_RFQ_Automation.Tests.Support;
 
 namespace ERP_RFQ_Automation.Tests;
@@ -190,6 +191,100 @@ public sealed class SourcingToolTests
         Assert.Contains("currency", result.Error, StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// Gate 2 collapsed two recommenders into one. This holds them collapsed on the criterion that
+    /// could most easily split them again: the agent tool used to hand the scorer a hardcoded null
+    /// for warranty, so the moment a tenant gave warranty a non-zero weight the workbench ranked the
+    /// line and the agent refused to — and told the operator to capture a number that was already
+    /// captured on the canonical quote line.
+    ///
+    /// <para>Same offers, same tenant weights, same winner, and the same arithmetic behind it.</para>
+    /// </summary>
+    [Fact]
+    public async Task CompareSupplierQuotes_NamesTheSameWinnerAsTheGovernedComparison_WhenWarrantyCarriesWeight()
+    {
+        using var fixture = new ProcurementScenario();
+        await AddEligibleSupplierAsync(fixture, LongWarrantySupplierId, "Long Warranty Supplier");
+        await SetWeightsAsync(fixture, price: 30, leadTime: 10, warranty: 60, paymentTerms: 0,
+            key: "agent-warranty-weighted");
+
+        // Cheaper AND faster, but one year of warranty against five. Only the warranty weight can
+        // move the award off it, which is exactly what a tenant that weights warranty is asking for.
+        var cheapShortWarranty = await QuoteAsync(fixture, ProcurementTestData.Supplier, "cheap",
+            unitPrice: 12m, leadTimeDays: 5, warrantyMonths: 12);
+        var dearLongWarranty = await QuoteAsync(fixture, LongWarrantySupplierId, "durable",
+            unitPrice: 20m, leadTimeDays: 10, warrantyMonths: 60);
+
+        var governed = await fixture.Execute(service =>
+            service.CompareQuotesAsync(fixture.BusinessUnitId, fixture.RfqItemId));
+        Assert.Equal(dearLongWarranty, governed.RecommendedSupplierQuotedItemId);
+        var governedWinner = governed.Lines
+            .Single(x => x.SupplierQuotedItemId == dearLongWarranty);
+        var governedLoser = governed.Lines
+            .Single(x => x.SupplierQuotedItemId == cheapShortWarranty);
+
+        var line = await CompareLineAsync(fixture);
+
+        // The agent names the supplier the workbench named, not the cheapest one.
+        Assert.Equal(governedWinner.SupplierId, line.GetProperty("bestSupplierId").GetInt64());
+        Assert.Equal(LongWarrantySupplierId, line.GetProperty("bestSupplierId").GetInt64());
+
+        // …and it got there on the same numbers, not by coincidence of ordering: the warranty months
+        // are the ones the operator typed, and the scores match the governed ones.
+        var winnerBid = Bid(line, governedWinner.SupplierId);
+        var loserBid = Bid(line, governedLoser.SupplierId);
+        Assert.Equal(60, winnerBid.GetProperty("warrantyMonths").GetInt32());
+        Assert.Equal(12, loserBid.GetProperty("warrantyMonths").GetInt32());
+        Assert.Equal(governedWinner.WeightedScore!.Value, winnerBid.GetProperty("Score").GetDouble(), 2);
+        Assert.Equal(governedLoser.WeightedScore!.Value, loserBid.GetProperty("Score").GetDouble(), 2);
+    }
+
+    /// <summary>
+    /// Ruling R-F, held on the agent path too. An offer whose warranty nobody captured is not the
+    /// offer with the worst warranty — it is an offer this tool cannot rank. Scoring it zero would
+    /// have sorted the cheapest, fastest bid on the line last as though it had lost on the merits.
+    /// </summary>
+    [Fact]
+    public async Task CompareSupplierQuotes_LeavesAnUncapturedWarrantyUnscored_RatherThanScoringItZero()
+    {
+        using var fixture = new ProcurementScenario();
+        await AddEligibleSupplierAsync(fixture, LongWarrantySupplierId, "Second Supplier");
+        await AddEligibleSupplierAsync(fixture, UncapturedWarrantySupplierId, "Uncaptured Warranty Supplier");
+        await SetWeightsAsync(fixture, price: 40, leadTime: 40, warranty: 20, paymentTerms: 0,
+            key: "agent-warranty-missing");
+
+        await QuoteAsync(fixture, ProcurementTestData.Supplier, "scored",
+            unitPrice: 12m, leadTimeDays: 5, warrantyMonths: 24);
+        await QuoteAsync(fixture, LongWarrantySupplierId, "also-scored",
+            unitPrice: 15m, leadTimeDays: 9, warrantyMonths: 12);
+        // Deliberately the cheapest and the fastest offer on the line.
+        await QuoteAsync(fixture, UncapturedWarrantySupplierId, "uncaptured",
+            unitPrice: 8m, leadTimeDays: 3, warrantyMonths: null);
+
+        var line = await CompareLineAsync(fixture);
+
+        // The two captured offers are ranked, and the cheaper, faster one of them wins.
+        Assert.Equal(ProcurementTestData.Supplier, line.GetProperty("bestSupplierId").GetInt64());
+        Assert.Equal(JsonValueKind.Number, Bid(line, ProcurementTestData.Supplier).GetProperty("Score").ValueKind);
+        Assert.Equal(JsonValueKind.Number, Bid(line, LongWarrantySupplierId).GetProperty("Score").ValueKind);
+
+        // The uncaptured one carries no score and no zero, and says which criterion is missing.
+        var uncaptured = Bid(line, UncapturedWarrantySupplierId);
+        Assert.Equal(JsonValueKind.Null, uncaptured.GetProperty("Score").ValueKind);
+        Assert.Equal(JsonValueKind.Null, uncaptured.GetProperty("warrantyMonths").ValueKind);
+        var reason = uncaptured.GetProperty("scoreUnavailableReason").GetString()!;
+        Assert.Contains("Cannot score", reason, StringComparison.Ordinal);
+        Assert.Contains("warranty", reason, StringComparison.Ordinal);
+        Assert.All(uncaptured.GetProperty("scoreBreakdown").EnumerateArray(), contribution =>
+            Assert.Equal(JsonValueKind.Null, contribution.GetProperty("PointsEarned").ValueKind));
+
+        // Still listed and still quoted — it is simply sorted below the offers that could be ranked
+        // rather than mixed in among them.
+        var bids = line.GetProperty("bids").EnumerateArray().ToArray();
+        Assert.Equal(3, bids.Length);
+        Assert.Equal(UncapturedWarrantySupplierId, bids[^1].GetProperty("SupplierId").GetInt64());
+    }
+
     [Fact]
     public async Task AwardRfq_RequiresQuoteIdentity_AndRoutesSingleAward()
     {
@@ -285,6 +380,77 @@ public sealed class SourcingToolTests
         Assert.False(result.Success);
         Assert.Contains("human approval", result.Error, StringComparison.OrdinalIgnoreCase);
         Assert.Empty(service.Awards);
+    }
+
+    private const long LongWarrantySupplierId = ProcurementTestData.Supplier + 1;
+    private const long UncapturedWarrantySupplierId = ProcurementTestData.Supplier + 2;
+
+    /// <summary>
+    /// Runs <see cref="CompareSupplierQuotesTool"/> over the fixture's RFQ and returns its single
+    /// comparison line, detached from the document so the caller can read it after disposal.
+    /// </summary>
+    private static async Task<JsonElement> CompareLineAsync(ProcurementScenario fixture)
+    {
+        await using var context = fixture.Context();
+        var result = await new CompareSupplierQuotesTool(context).ExecuteAsync(
+            AgentSeed.Json($"{{\"rfqId\":{fixture.RfqId}}}"),
+            new AgentToolContext { BusinessUnitId = fixture.BusinessUnitId, UserId = 42, UserName = "tester" },
+            default);
+
+        Assert.True(result.Success, result.Error);
+        using var document = JsonDocument.Parse(JsonSerializer.Serialize(result.Data));
+        return Assert.Single(document.RootElement.GetProperty("lines").EnumerateArray()).Clone();
+    }
+
+    private static JsonElement Bid(JsonElement line, long supplierId) =>
+        Assert.Single(line.GetProperty("bids").EnumerateArray(),
+            bid => bid.GetProperty("SupplierId").GetInt64() == supplierId);
+
+    private static async Task SetWeightsAsync(ProcurementScenario fixture,
+        int price, int leadTime, int warranty, int paymentTerms, string key)
+    {
+        await using var context = fixture.Context();
+        await new SupplierComparisonWeightsService(context).UpdateAsync(
+            fixture.BusinessUnitId, 42, "qa", key,
+            new UpdateSupplierComparisonWeightsCommand(price, leadTime, warranty, paymentTerms,
+                "Agent and workbench must rank on one weight set"));
+    }
+
+    /// <summary>
+    /// A second award-eligible supplier whose governance mirrors the fixture's own, so the governed
+    /// comparison scores every offer and the two paths differ on nothing but the code under test.
+    /// </summary>
+    private static async Task AddEligibleSupplierAsync(ProcurementScenario fixture, long supplierId, string name)
+    {
+        await using var context = fixture.Context();
+        var supplier = AgentSeed.Supplier(context, supplierId, fixture.BusinessUnitId, name,
+            $"supplier-{supplierId}@example.test");
+        supplier.GovernanceStatus = SupplierGovernanceStatuses.Approved;
+        supplier.VerificationStatus = SupplierVerificationStatuses.Verified;
+        supplier.ComplianceStatus = SupplierComplianceStatuses.Cleared;
+        supplier.RiskStatus = SupplierRiskStatuses.Low;
+        supplier.ReadinessStatus = SupplierReadinessStatuses.Ready;
+        supplier.ConcurrencyToken = Guid.NewGuid();
+        await context.SaveChangesAsync();
+    }
+
+    private static async Task<long> QuoteAsync(ProcurementScenario fixture, long supplierId, string key,
+        decimal unitPrice, int leadTimeDays, int? warrantyMonths)
+    {
+        var solicitation = await fixture.Execute(service => service.CreateSolicitationAsync(
+            fixture.Solicitation($"{key}-sol") with { SupplierId = supplierId }));
+        await fixture.MarkSolicitationSentAsync(solicitation.Id);
+        var quote = await fixture.Execute(service => service.CaptureSupplierQuoteAsync(
+            fixture.Quote(solicitation.Id, $"{key}-quote") with
+            {
+                Lines = [fixture.QuoteLine() with
+                {
+                    UnitPrice = unitPrice,
+                    LeadTimeDays = leadTimeDays,
+                    WarrantyMonths = warrantyMonths
+                }]
+            }));
+        return Assert.Single(quote.LineIds);
     }
 
     private static void SeedGraph(TestDb db, bool includeSolicitation, SolicitationStatus status = SolicitationStatus.Sent,

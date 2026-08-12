@@ -5,6 +5,7 @@ import {
   orderOffersForComparison,
   rankScoredOffers,
   recommendationTradeOff,
+  warrantyComparisonCell,
 } from './supplierComparison';
 
 const offer = (
@@ -266,5 +267,56 @@ describe('offerScoreState', () => {
     const state = offerScoreState(undefined);
     expect(state.status).toBe('PENDING');
     expect(state.detail).not.toMatch(/awarded/i);
+  });
+});
+
+describe('warrantyComparisonCell', () => {
+  it('leads with the captured period, stated in months, and keeps the wording underneath', () => {
+    // The number is what the score was computed from; the wording carries the conditions. Showing
+    // only one of them either hides what was ranked or hides what was promised.
+    expect(
+      warrantyComparisonCell({ warranty: '24 months parts, 12 labour', warrantyMonths: 24 }),
+    ).toEqual({ headline: '24 months', detail: '24 months parts, 12 labour' });
+  });
+
+  it('keeps the wording but says the period is missing, so the row agrees with the score column', () => {
+    // Without the second line the row showed a warranty in this column while the score column said
+    // the warranty was missing — two statements about the same offer that contradict each other.
+    const cell = warrantyComparisonCell({
+      warranty: 'Manufacturer standard warranty applies',
+      warrantyMonths: null,
+    });
+    expect(cell).toEqual({
+      headline: 'Manufacturer standard warranty applies',
+      detail: 'No warranty period recorded, so this offer cannot be scored on warranty.',
+    });
+    // Naming the gap must not invent the number: no "0 months", no period of any length.
+    expect(`${cell.headline}${cell.detail ?? ''}`).not.toMatch(/\d+\s*months?/i);
+  });
+
+  it('never renders an uncaptured warranty as 0 months', () => {
+    expect(warrantyComparisonCell({ warranty: null, warrantyMonths: null }).headline).toBe(
+      'Not stated',
+    );
+    expect(warrantyComparisonCell(undefined).headline).toBe('Not stated');
+  });
+
+  it('does not repeat the gap under "Not stated", which already says nothing was recorded', () => {
+    expect(warrantyComparisonCell({ warranty: null, warrantyMonths: null }).detail).toBeNull();
+    expect(warrantyComparisonCell(undefined).detail).toBeNull();
+  });
+
+  it('renders a captured zero as the real answer it is', () => {
+    expect(warrantyComparisonCell({ warranty: null, warrantyMonths: 0 })).toEqual({
+      headline: '0 months',
+      detail: null,
+    });
+  });
+
+  it('treats blank wording as absent rather than printing an empty second line', () => {
+    expect(warrantyComparisonCell({ warranty: '   ', warrantyMonths: 18 })).toEqual({
+      headline: '18 months',
+      detail: null,
+    });
   });
 });

@@ -1,3 +1,5 @@
+import { formatWarrantyMonths } from './warrantyMonths';
+
 /**
  * The two facts the supplier comparison must never let drift apart: which offer is genuinely the
  * cheapest, and what the recommended offer cost relative to it.
@@ -198,6 +200,51 @@ export const orderOffersForComparison = <T extends { id: number; rfqItemId: numb
       })
       .map((row) => row.offer),
   );
+};
+
+/** The two warranty facts an offer can carry, as the comparison receives them. */
+export interface WarrantyFacts {
+  /** The supplier's own wording. Free text; nothing reads it to produce a number. */
+  warranty?: string | null;
+  /** The typed period the score is computed from. Null means nobody recorded one — never zero. */
+  warrantyMonths?: number | null;
+}
+
+/**
+ * What the warranty column says, and in which order.
+ *
+ * The number leads when there is one, because it is the fact the score was computed from and the
+ * buyer needs to be able to check the row's warranty points against it. The wording stays underneath
+ * rather than being replaced: "24 months" and "24 months on parts, 12 on labour" are not the same
+ * promise, and a screen that showed only the first would let a buyer award on a warranty they never
+ * read.
+ *
+ * When no period was captured the wording still leads, but the row says the number is missing.
+ * Nothing stands in for the absent number — no "0 months", no dash implying a value — because the
+ * offer is genuinely unscoreable on this criterion. Without that second line the row contradicted
+ * itself: a warranty in this column while the score column said the warranty was missing, which
+ * reads as a broken score rather than as a value nobody recorded.
+ */
+export interface WarrantyCell {
+  /** Always shown. */
+  headline: string;
+  /** Shown beneath the headline when it adds something the headline does not say. */
+  detail: string | null;
+}
+
+/** Said beneath wording that carries no captured period, so the row explains its own score column. */
+export const WARRANTY_PERIOD_NOT_RECORDED =
+  'No warranty period recorded, so this offer cannot be scored on warranty.';
+
+export const warrantyComparisonCell = (
+  offer: WarrantyFacts | null | undefined,
+): WarrantyCell => {
+  const wording = offer?.warranty?.trim() ? offer.warranty.trim() : null;
+  const months = formatWarrantyMonths(offer?.warrantyMonths);
+  if (months !== null) return { headline: months, detail: wording };
+  if (wording !== null) return { headline: wording, detail: WARRANTY_PERIOD_NOT_RECORDED };
+  // "Not stated" already says nothing was recorded; repeating it beneath itself adds no fact.
+  return { headline: 'Not stated', detail: null };
 };
 
 /**

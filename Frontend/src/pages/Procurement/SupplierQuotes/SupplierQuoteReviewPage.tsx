@@ -41,6 +41,7 @@ import supplierQuoteService, {
 } from "../../../api/services/supplierQuoteService";
 import CommercialProcessingEvidence from "../../../components/common/CommercialProcessingEvidence";
 import { useAuth } from "../../../context/AuthContext";
+import { formatWarrantyMonths } from "../../../utils/warrantyMonths";
 
 const formatMoney = (value: number, currencyCode?: string | null) => {
   if (!currencyCode) return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
@@ -462,7 +463,7 @@ export default function SupplierQuoteReviewPage() {
           <Typography sx={{ fontWeight: 700, mb: 1 }}>Commercial lines</Typography>
           <TableContainer>
             <Table size="small">
-              <TableHead><TableRow><TableCell>Line</TableCell><TableCell>Part / Description</TableCell><TableCell align="right">Quantity</TableCell><TableCell align="right">Available</TableCell><TableCell align="right">Unit price</TableCell><TableCell align="right">Lead time</TableCell></TableRow></TableHead>
+              <TableHead><TableRow><TableCell>Line</TableCell><TableCell>Part / Description</TableCell><TableCell align="right">Quantity</TableCell><TableCell align="right">Available</TableCell><TableCell align="right">Unit price</TableCell><TableCell align="right">Lead time</TableCell><TableCell align="right">Warranty</TableCell></TableRow></TableHead>
               <TableBody>
                 {revision.lines.map((line) => (
                   <TableRow key={line.id}>
@@ -476,6 +477,16 @@ export default function SupplierQuoteReviewPage() {
                         : `Currency ${revision.currencyId} ${line.unitPrice.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
                     </TableCell>
                     <TableCell align="right">{line.leadTimeDays == null ? "Not stated" : `${line.leadTimeDays} days`}</TableCell>
+                    {/* The reviewer is the one person positioned to challenge either warranty value,
+                        so both are shown: the period the comparison can rank, and the wording it
+                        cannot. A captured value with no reader is how a field quietly stops meaning
+                        anything. */}
+                    <TableCell align="right">
+                      {formatWarrantyMonths(line.warrantyMonths) ?? (line.warranty ? null : "Not stated")}
+                      {line.warranty && (
+                        <Typography variant="caption" sx={{ display: "block" }}>{line.warranty}</Typography>
+                      )}
+                    </TableCell>
                   </TableRow>
                 ))}
               </TableBody>

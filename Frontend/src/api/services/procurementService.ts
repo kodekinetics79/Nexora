@@ -134,6 +134,11 @@ export interface QuoteComparisonLine {
    */
   supplierTier?: string | null;
   warranty?: string | null;
+  /**
+   * The numeric companion to the free-text warranty, and the only warranty fact the score is
+   * computed from. Null means nobody captured a period — not that the supplier offered none.
+   */
+  warrantyMonths?: number | null;
   paymentTerms?: string | null;
   /** The numeric companion to the free-text payment terms. Null means NOT CONFIGURED, not zero. */
   creditDays?: number | null;
@@ -467,6 +472,11 @@ export interface CaptureSupplierResponseRequest {
     reliabilitySnapshot?: number;
     currencyId: number;
     minimumOrderQuantity?: number;
+    /**
+     * FR-QTM-03's fourth criterion, typed by the buyer. Sent as null — never omitted as 0 — when
+     * the quote states no period, so "not captured" survives the round trip.
+     */
+    warrantyMonths?: number | null;
   }>;
 }
 
