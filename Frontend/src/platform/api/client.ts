@@ -25,6 +25,7 @@ import type {
   ImpersonationTicket,
   JobStatus,
   OverviewMetrics,
+  OverviewWindow,
   PagedResult,
   PendingTenantDeletion,
   Plan,
@@ -162,7 +163,7 @@ export interface AuditExplorerQuery {
 }
 
 export interface PlatformApi {
-  getOverview(): Promise<OverviewMetrics>;
+  getOverview(windowDays: OverviewWindow): Promise<OverviewMetrics>;
   listTenants(): Promise<Tenant[]>;
   getTenant(id: string): Promise<Tenant>;
   updateTenantProfile(id: string, input: UpdateTenantProfileInput): Promise<Tenant>;
@@ -1019,7 +1020,8 @@ const decodeBlobProblem = async (error: unknown): Promise<void> => {
 };
 
 const httpPlatformApi: PlatformApi = {
-  getOverview: async () => (await platformHttp.get<OverviewMetrics>('/api/platform/overview')).data,
+  getOverview: async (windowDays) =>
+    (await platformHttp.get<OverviewMetrics>('/api/platform/overview', { params: { windowDays } })).data,
   listTenants: async () =>
     (await platformHttp.get<BackendTenant[]>('/api/platform/tenants')).data.map(normalizeTenant),
   getTenant: async (id) =>
