@@ -97,3 +97,18 @@ describe('platform dead-letter recovery', () => {
     expect(screen.queryByText(/queued for governed retry/i)).not.toBeInTheDocument();
   });
 });
+
+describe('pipeline stats on a quiet fleet', () => {
+  it('says no jobs finished rather than reporting a 0% success rate', async () => {
+    // "0.0% success" on a pipeline that simply had nothing to do is the reading an
+    // operator would escalate on. Absence of data is reported as absence.
+    vi.spyOn(platformApi, 'getQueueStats').mockResolvedValue({
+      queueDepth: 0, inFlight: 0, deadLetter: 0, processedLast24h: 0,
+      avgLatencyMs: null, successRate: null,
+    });
+    renderPage();
+
+    expect(await screen.findByText('no jobs finished in 24h')).toBeVisible();
+    expect(screen.queryByText('0.0% success')).not.toBeInTheDocument();
+  });
+});

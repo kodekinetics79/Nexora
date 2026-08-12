@@ -70,10 +70,18 @@ public class PlatformOperationsController(
                 j.Status == ExtractionStatus.Extracting || j.Status == ExtractionStatus.Persisting, ct),
             deadLetter = await jobs.CountAsync(j => j.Status == ExtractionStatus.DeadLetter, ct),
             processedLast24h = succeeded,
-            avgLatencyMs = latencies.Count == 0 ? 0 : (long)latencies.Average(j => (j.UpdatedOn - j.CreatedOn).TotalMilliseconds),
-            successRate = succeeded + failed == 0 ? 0d : (double)succeeded / (succeeded + failed),
-            successfulClaimRate = succeeded + failed == 0 ? 0d : (double)succeeded / (succeeded + failed),
-            retryRate = recentCount == 0 ? 0d : (double)retried / recentCount,
+            // NULL, not 0, when there is nothing to average or divide.
+            //
+            // A quiet 24 hours used to report "0ms average latency" and "0.0% success" — the
+            // two readings an operator would page someone over, produced by a pipeline that had
+            // simply had nothing to do. Absence of data is now reported as absence, and the
+            // console renders it as an em dash.
+            avgLatencyMs = latencies.Count == 0
+                ? (long?)null
+                : (long)latencies.Average(j => (j.UpdatedOn - j.CreatedOn).TotalMilliseconds),
+            successRate = succeeded + failed == 0 ? (double?)null : (double)succeeded / (succeeded + failed),
+            successfulClaimRate = succeeded + failed == 0 ? (double?)null : (double)succeeded / (succeeded + failed),
+            retryRate = recentCount == 0 ? (double?)null : (double)retried / recentCount,
             invalidClaimCandidates,
             reconciliationRequired = blockedCount,
             oldestBlockedAt = oldestBlocked,

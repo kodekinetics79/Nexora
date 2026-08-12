@@ -175,7 +175,15 @@ export default function PipelinePage() {
             <StatTile label="Dead-letter" value={fmtNumber(stats.deadLetter)} icon={<DeadLetterIcon />} color="#ef4444" caption="requires review" />
           </Grid>
           <Grid size={{ xs: 12, sm: 6, md: 3 }}>
-            <StatTile label="Processed 24h" value={fmtNumber(stats.processedLast24h)} icon={<ProcessedIcon />} color="#10b981" caption={`${fmtPercent(stats.successRate)} success`} />
+            <StatTile
+              label="Processed 24h"
+              value={fmtNumber(stats.processedLast24h)}
+              icon={<ProcessedIcon />}
+              color="#10b981"
+              // "0.0% success" on an idle pipeline reads as a total outage. When nothing
+              // terminated there is no rate to report, and the tile says so.
+              caption={stats.successRate == null ? 'no jobs finished in 24h' : `${fmtPercent(stats.successRate)} success`}
+            />
           </Grid>
         </Grid>
       )}

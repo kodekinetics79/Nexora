@@ -13,8 +13,15 @@ export const fmtCurrency = (n: number, compact = false): string =>
     maximumFractionDigits: compact ? 1 : 0,
   }).format(n);
 
-export const fmtPercent = (fraction: number, digits = 1): string =>
-  `${(fraction * 100).toFixed(digits)}%`;
+/**
+ * A ratio with no denominator is NOT zero.
+ *
+ * The overview reported "Extraction Success 0.0%" on a fleet that had never run a job,
+ * because the server divided by nothing and sent 0. Both ends now say "no data" instead:
+ * the server sends null, and null renders as an em dash rather than as total failure.
+ */
+export const fmtPercent = (fraction: number | null | undefined, digits = 1): string =>
+  fraction == null ? '—' : `${(fraction * 100).toFixed(digits)}%`;
 
 export const fmtDateTime = (iso: string): string =>
   new Date(iso).toLocaleString('en-US', {

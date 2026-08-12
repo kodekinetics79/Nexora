@@ -515,8 +515,10 @@ export interface QueueStats {
   inFlight: number;
   deadLetter: number;
   processedLast24h: number;
-  avgLatencyMs: number;
-  successRate: number; // 0–1
+  /** Null when nothing succeeded in the window — an idle pipeline is not a 0ms one. */
+  avgLatencyMs: number | null;
+  /** 0–1, or null when nothing reached a terminal state. Null is NOT 0%. */
+  successRate: number | null;
 }
 
 export interface ExtractionJob {
@@ -580,25 +582,82 @@ export interface ServiceHealth {
   detail: string;
 }
 
+/** Windows the overview endpoint accepts. Anything else is refused server-side. */
+export const OVERVIEW_WINDOWS = [7, 14, 30, 90] as const;
+export type OverviewWindow = (typeof OVERVIEW_WINDOWS)[number];
+
+export type TenantLifecycle = 'Provisioning' | 'Active' | 'Suspended' | 'Archived' | 'PastDue';
+
+export interface OverviewTenantActivity {
+  tenantId: number;
+  name: string;
+  slug: string;
+  status: TenantLifecycle;
+  plan: string | null;
+  docs: number;
+  failures: number;
+  rfqs: number;
+  quotes: number;
+  orders: number;
+}
+
+export interface OverviewCommercial {
+  leadsCaptured: number;
+  rfqsCaptured: number;
+  quotesIssued: number;
+  ordersWon: number;
+  /** Share of RFQs raised in the window that now carry at least one quote. Null = empty cohort. */
+  rfqsQuotedPct: number | null;
+  /** Share of quotes issued in the window that now carry at least one order. Null = empty cohort. */
+  quotesOrderedPct: number | null;
+  /** Grouped BY currency and never summed across them — a fleet total would be fiction. */
+  orderValueByCurrency: { currency: string; orders: number; amount: number }[];
+}
+
 export interface OverviewMetrics {
+  /** When the server computed these figures. */
+  asOfUtc: string;
+  windowDays: OverviewWindow;
+  windowStartUtc: string;
+
   tenantCount: number;
   activeTenants: number;
+  /** Every lifecycle bucket, zero-filled — an empty bucket and an absent one differ. */
+  tenantsByStatus: { status: TenantLifecycle; count: number }[];
+  newTenantsInWindow: number;
+
   docsProcessedMtd: number;
-  extractionSuccessRate: number; // 0–1
+  docsProcessedInWindow: number;
+  /** Jobs that terminated in Failed or DeadLetter inside the window. */
+  failuresInWindow: number;
+  /** 0–1, or null when no job has ever reached a terminal state. Null is NOT 0%. */
+  extractionSuccessRate: number | null;
+  /** 0–1 over the selected window, or null when nothing terminated inside it. */
+  extractionSuccessRateWindow: number | null;
   queueDepth: number;
   inFlight: number;
   deadLetter: number;
+  /** Age of the oldest still-pending job; null when the queue is empty. */
+  oldestPendingMinutes: number | null;
+
   llmCostMtdUsd: number;
   llmCostTrendPct: number | null; // vs prior comparable period
   /** Fleet-wide total of active tenant users across ALL business units. */
   activeUsersFleetWide: number;
+
+  commercial: OverviewCommercial;
+
+  health: { worst: HealthStatus; healthy: number; degraded: number; down: number };
   services: ServiceHealth[];
-  /** Documents processed per day for the trailing 14 days. */
+
+  /** Documents processed per day across the selected window. */
   throughput: { date: string; docs: number; failures: number }[];
-  /** LLM spend per day (USD) for the trailing 14 days. */
+  /** LLM spend per day (USD) across the selected window. */
   costTrend: { date: string; costUsd: number }[];
   /** Real plan codes present in the fleet; plan-less tenants appear as "none". */
   tenantsByPlan: { tier: PlanTier; count: number }[];
+  /** Busiest tenants in the window, most active first. */
+  topTenants: OverviewTenantActivity[];
 }
 
 // --- Impersonation ----------------------------------------------------------

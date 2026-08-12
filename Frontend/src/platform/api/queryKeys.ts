@@ -3,7 +3,14 @@
 
 export const platformKeys = {
   all: ['platform'] as const,
-  overview: () => [...platformKeys.all, 'overview'] as const,
+  // The window is part of the key: two windows are two different answers, and caching
+  // them under one key served a 90-day chart labelled 7 days. Called with no argument it
+  // returns the PREFIX, which is what invalidation after a mutation wants — every cached
+  // window goes stale when a tenant is provisioned, not just the one on screen.
+  overview: (windowDays?: number) =>
+    (windowDays == null
+      ? [...platformKeys.all, 'overview']
+      : [...platformKeys.all, 'overview', windowDays]) as readonly unknown[],
   tenants: () => [...platformKeys.all, 'tenants'] as const,
   tenant: (id: string) => [...platformKeys.all, 'tenant', id] as const,
   tenantOperations: (id: string) => [...platformKeys.all, 'tenant', id, 'operations'] as const,
