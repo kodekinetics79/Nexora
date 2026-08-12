@@ -15,7 +15,7 @@ human-governed learning.
 |---|---|---|
 | Frontend | React 19 + Vite + TypeScript + MUI 9 + TanStack Query | Data-dense SPA → deploy on Vercel |
 | Backend | ASP.NET Core 8 (modular monolith) + EF Core | REST API + hosted workers → container host |
-| Database | SQL Server → **PostgreSQL / Neon** (in migration) | `main` on SQL Server; `postgres-migration` branch ports to Npgsql |
+| Database | **PostgreSQL / Neon** | Migration complete and on `main`; the `postgres-migration` branch is gone |
 | AI / extraction | LLM behind `ILlmProvider` → **Claude** (tiered) | Non-authoritative for money; schema-constrained output |
 | Deployment | Vercel (frontend) + container host (backend) + Neon (DB) | See ADR-0004 |
 
@@ -32,6 +32,9 @@ All major architectural decisions are documented in [`docs/adr/`](docs/adr/):
 The full engineering findings ledger is in
 [`docs/PHASE0-FINDINGS.md`](docs/PHASE0-FINDINGS.md), and secrets/rotation guidance
 in [`SECURITY.md`](SECURITY.md).
+
+How work reaches `main` — one long-lived branch, PR, `CI green`, merge, delete — is
+in [`BRANCHING.md`](BRANCHING.md).
 
 ## Repository layout
 
