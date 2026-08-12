@@ -174,6 +174,67 @@ public sealed class RedTeamControlPlanePostgreSqlTests
         Assert.Equal(expected, (bool)(await command.ExecuteScalarAsync())!);
     }
 
+    // ======================================================= the password-reset table's grants
+
+    /// <summary>
+    /// The reset table, pinned in every direction — because it is the newest table an ANONYMOUS
+    /// caller can cause rows in, which makes a wrong grant here worth more to an attacker than
+    /// anywhere else in the platform schema.
+    ///
+    /// <para>The identity role needs INSERT, which the activation table deliberately withholds
+    /// from it. That difference is the one thing on this table somebody will eventually look at and
+    /// call a mistake, so it is asserted rather than left to prose: minting a RESET names an
+    /// account that already exists, creates nothing and grants nothing on its own, and the
+    /// cleartext token that would make it usable goes to that account's own mailbox. Minting an
+    /// INVITATION would let an anonymous caller invite themselves into a tenant, which is why the
+    /// two answers differ.</para>
+    ///
+    /// <para>No DELETE for the identity role: a spent row is the only forensic trace an anonymous
+    /// credential change leaves, and the flow that changes the credential must not be able to erase
+    /// it.</para>
+    /// </summary>
+    [Theory]
+    [Trait("Category", "PostgreSQL")]
+    [InlineData("nexora_identity_app", "SELECT,INSERT,UPDATE")]
+    // The purge destroys these rows — PlatformTenantDataMap classifies them as the customer's
+    // record — so the purge role must be able to see and delete them, and nothing more.
+    [InlineData("nexora_purge_app", "SELECT,DELETE")]
+    // Never the tenant plane. A reset request carries no tenant scope, so a row it could reach is
+    // a row RLS failed to hide, and nothing on the authenticated plane has any business reading
+    // who asked to reset whose password.
+    [InlineData("nexora_tenant_app", "")]
+    // The operator plane cannot cause, read or spend a reset. An operator who could would be back
+    // in possession of a route to a customer's live credential, which is the entire defect this
+    // table exists to close.
+    [InlineData("nexora_pipeline_app", "")]
+    public async Task Each_role_holds_exactly_the_privileges_the_reset_flow_needs(
+        string role, string expected)
+    {
+        await using var connection = await _database.OpenConnectionAsync();
+        var granted = await PrivilegesAsync(connection, role, "PasswordResetTokens");
+        Assert.Equal(expected, string.Join(",", granted));
+    }
+
+    /// <summary>
+    /// The sequence grant, which is the half of an INSERT that is easy to forget: without USAGE on
+    /// the identity sequence, the table grant above is present, the INSERT still fails with 42501,
+    /// and the flow reports "no such account" for every address because it is built never to say
+    /// otherwise.
+    /// </summary>
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task The_identity_role_can_actually_use_the_reset_tables_sequence()
+    {
+        await using var connection = await _database.OpenConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT has_sequence_privilege(
+                'nexora_identity_app', 'platform."PasswordResetTokens_Id_seq"', 'USAGE');
+            """;
+        Assert.True((bool)(await command.ExecuteScalarAsync())!);
+    }
+
     // ============================================================== ENABLE ALWAYS under replica
 
     /// <summary>
