@@ -3,16 +3,33 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { SnackbarProvider } from 'notistack';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { PlatformMfaPolicy } from '../types';
+import type { PlatformBrowserTrust, PlatformMfaPolicy } from '../types';
 
-const { getMfaPolicy, changeMfaPolicy, getEffectiveMfaPolicy } = vi.hoisted(() => ({
+const {
+  getMfaPolicy,
+  changeMfaPolicy,
+  getEffectiveMfaPolicy,
+  listBrowserTrusts,
+  revokeBrowserTrust,
+  revokeAllBrowserTrusts,
+} = vi.hoisted(() => ({
   getMfaPolicy: vi.fn(),
   changeMfaPolicy: vi.fn(),
   getEffectiveMfaPolicy: vi.fn(),
+  listBrowserTrusts: vi.fn(),
+  revokeBrowserTrust: vi.fn(),
+  revokeAllBrowserTrusts: vi.fn(),
 }));
 
 vi.mock('../api/client', () => ({
-  platformApi: { getMfaPolicy, changeMfaPolicy, getEffectiveMfaPolicy },
+  platformApi: {
+    getMfaPolicy,
+    changeMfaPolicy,
+    getEffectiveMfaPolicy,
+    listBrowserTrusts,
+    revokeBrowserTrust,
+    revokeAllBrowserTrusts,
+  },
 }));
 
 // Role gating itself is covered by permissions.test.ts; this file is about what the screen
@@ -61,8 +78,22 @@ const LOCAL_POLICY: PlatformMfaPolicy = {
   },
   maxBypassHours: 24,
   minimumReasonLength: 20,
+  browserTrustEnabled: true,
   browserTrustHours: 12,
+  browserTrustFromPolicyRow: true,
+  minBrowserTrustHours: 8,
+  maxBrowserTrustHours: 720,
 };
+
+const REMEMBERED_BROWSERS: PlatformBrowserTrust[] = [
+  {
+    id: 41,
+    label: 'Chrome on macOS',
+    createdAtUtc: '2026-08-09T08:00:00Z',
+    expiresAtUtc: '2026-09-08T08:00:00Z',
+    lastUsedAtUtc: '2026-08-10T07:30:00Z',
+  },
+];
 
 const PRODUCTION_POLICY: PlatformMfaPolicy = {
   ...LOCAL_POLICY,
@@ -114,6 +145,9 @@ describe('PlatformAuthenticationPage', () => {
     getMfaPolicy.mockReset().mockResolvedValue(LOCAL_POLICY);
     changeMfaPolicy.mockReset().mockResolvedValue({ ...LOCAL_POLICY, mode: 'DISABLED_TEST_ONLY' });
     getEffectiveMfaPolicy.mockReset().mockResolvedValue(LOCAL_POLICY);
+    listBrowserTrusts.mockReset().mockResolvedValue(REMEMBERED_BROWSERS);
+    revokeBrowserTrust.mockReset().mockResolvedValue(undefined);
+    revokeAllBrowserTrusts.mockReset().mockResolvedValue(1);
   });
 
   it('shows the environment, the mode, who changed it and how many operators it affects', async () => {
@@ -132,11 +166,98 @@ describe('PlatformAuthenticationPage', () => {
     renderPage();
 
     expect(await screen.findByTestId('platform-mfa-not-relaxable')).toBeInTheDocument();
-    // The control itself is absent — not present-and-disabled, which would still advertise that
-    // disabling is a thing this deployment can do.
+    // The mode control itself is absent — not present-and-disabled, which would still advertise
+    // that disabling is a thing this deployment can do.
     expect(screen.queryByLabelText(/MFA enforcement mode/i)).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /apply mfa policy/i })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/Expires at/i)).not.toBeInTheDocument();
     expect(screen.getByText(/not reachable in production by any route/i)).toBeInTheDocument();
+
+    // The rest of the ceremony stays. The whole form used to be replaced by that notice, which was
+    // right while the enforcement mode was the only thing this screen could change — and became a
+    // defect when the remembered-browser window moved here, because production would then have been
+    // the one environment where an Owner could not set it at all.
+    expect(screen.getByLabelText('Offer remembered browsers')).toBeInTheDocument();
+    expect(screen.getByLabelText(/Remembered browser window/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /apply mfa policy/i })).toBeInTheDocument();
+  });
+
+  it('offers the window presets plus whatever is currently set, and never a value the server would refuse', async () => {
+    getMfaPolicy.mockResolvedValue({ ...LOCAL_POLICY, browserTrustHours: 36 });
+    renderPage();
+
+    const select = (await screen.findByLabelText(/Remembered browser window/i)) as HTMLSelectElement;
+    expect([...select.options].map((option) => option.textContent)).toEqual([
+      '12 hours', '36 hours', '7 days', '30 days',
+    ]);
+    // The stored value is selected, not the nearest preset — opening this control to change
+    // something else must not quietly rewrite a window somebody set deliberately.
+    expect(select.value).toBe('36');
+  });
+
+  it('sends the switch and the window through the same ceremony as a mode change', async () => {
+    renderPage();
+    await screen.findByLabelText(/Remembered browser window/i);
+
+    // Nothing has moved yet, so there is nothing to apply — and the screen says exactly that
+    // rather than leaving a dead button.
+    expect(screen.getByTestId('platform-mfa-apply-blocked'))
+      .toHaveTextContent(/remembered-browser settings are unchanged/i);
+
+    fireEvent.change(screen.getByLabelText(/Remembered browser window/i), { target: { value: '720' } });
+    fireEvent.change(screen.getByLabelText(/^Reason/i), {
+      target: { value: 'Field engineers sign in from two fixed laptops all month; security approved 30 days.' },
+    });
+    fireEvent.change(screen.getByLabelText(/Confirmation phrase/i), {
+      target: { value: 'RESTORE PLATFORM MFA' },
+    });
+    fireEvent.change(screen.getByLabelText(/Current password/i), { target: { value: 'hunter2' } });
+
+    await waitFor(() => expect(screen.getByRole('button', { name: /apply mfa policy/i })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: /apply mfa policy/i }));
+
+    await waitFor(() => expect(changeMfaPolicy).toHaveBeenCalledTimes(1));
+    const sent = changeMfaPolicy.mock.calls[0][0];
+    expect(sent.browserTrustHours).toBe(720);
+    expect(sent.browserTrustEnabled).toBe(true);
+    // The same password, reason, typed confirmation and version fence a mode change demands.
+    expect(sent.currentPassword).toBe('hunter2');
+    expect(sent.confirmation).toBe('RESTORE PLATFORM MFA');
+    expect(sent.expectedVersion).toBe(3);
+  });
+
+  it('disables the duration control when browser trust is switched off, and says the trusts are not honoured', async () => {
+    getMfaPolicy.mockResolvedValue({ ...LOCAL_POLICY, browserTrustEnabled: false, activeBrowserTrustCount: 3 });
+    renderPage();
+
+    expect(await screen.findByLabelText(/Remembered browser window/i)).toBeDisabled();
+    // The count alone would read as "three browsers are trusted". They are stored; they are not
+    // honoured, and that is the fact an Owner needs from this screen.
+    expect(screen.getByText(/3 stored, but browser trust is OFF/i)).toBeInTheDocument();
+  });
+
+  it('lists the caller\'s own remembered browsers and revokes one', async () => {
+    renderPage();
+
+    expect(await screen.findByTestId('platform-browser-trusts')).toBeInTheDocument();
+    expect(screen.getByText('Chrome on macOS')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Revoke' }));
+    await waitFor(() => expect(revokeBrowserTrust).toHaveBeenCalledWith(41));
+  });
+
+  it('offers a revoke-all, which is what makes a month-long window survivable', async () => {
+    renderPage();
+
+    fireEvent.click(await screen.findByTestId('platform-browser-trusts-revoke-all'));
+    await waitFor(() => expect(revokeAllBrowserTrusts).toHaveBeenCalledTimes(1));
+  });
+
+  it('says so plainly when no browser is remembered, instead of an empty table', async () => {
+    listBrowserTrusts.mockResolvedValue([]);
+    renderPage();
+
+    expect(await screen.findByTestId('platform-browser-trusts-empty')).toBeInTheDocument();
+    expect(screen.queryByTestId('platform-browser-trusts-revoke-all')).not.toBeInTheDocument();
   });
 
   it('names every unmet precondition on screen instead of just disabling Apply', async () => {

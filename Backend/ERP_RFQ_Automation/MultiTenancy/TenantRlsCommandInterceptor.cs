@@ -289,6 +289,30 @@ public sealed class TenantRlsCommandInterceptor : DbCommandInterceptor
         if (httpContext.Request.Path.StartsWithSegments("/api/tenant-activation"))
             return IdentityRole;
 
+        // Self-service password reset is the same kind of operation as activation — a pre-tenant
+        // identity write on an anonymous request — and it is hoisted here for the same two
+        // reasons, plus one of its own.
+        //
+        // It cannot run as nexora_tenant_app. That role is RLS-constrained and this request
+        // carries no tenant scope, so nexora.business_unit_id is never set: the Users row the
+        // request path must FIND BY EMAIL, and the one the completion path must update, are both
+        // invisible to it. The visible symptom would be the flow's worst possible failure mode —
+        // every address answered as "no such account", silently, forever, because the endpoint is
+        // built never to say whether it found one. No SQLite test can see it either, since SQLite
+        // has neither roles nor row-level security.
+        //
+        // It is hoisted ABOVE the tenant check for the login branches' reason: the frontend
+        // attaches whatever bearer token it holds to every request, so a signed-in user helping a
+        // colleague, or anyone with a stale token in localStorage, would otherwise arrive with a
+        // business unit set and downgrade the role out of the privileges the flow requires.
+        //
+        // nexora_identity_app rather than the bypass-everything pipeline role: reset needs to read
+        // one user, write one password hash and touch one table, and the migration that creates
+        // PasswordResetTokens grants it precisely that — reusing the same column-scoped UPDATE on
+        // Users that cannot touch RoleId, Buid or Email.
+        if (httpContext.Request.Path.StartsWithSegments("/api/password-reset"))
+            return IdentityRole;
+
         // NOT hoisted above this line: the REST of /api/platform. nexora_pipeline_app is
         // BYPASSRLS, and an impersonation token (PlatformAuthService) is a TENANT token that
         // carries businessUnitId and no platform scope — so hoisting the whole platform prefix

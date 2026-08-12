@@ -268,7 +268,7 @@ the maintenance path — so the purge is authorised explicitly rather than by an
 *Adjudicates brief item 4.*
 
 The brief's description is accurate but incomplete. The full decision table
-(`TenantRlsCommandInterceptor.cs:235-306`):
+(`TenantRlsCommandInterceptor.cs:235-330`):
 
 | # | Condition | Role | `BYPASSRLS`? |
 |---|-----------|------|--------------|
@@ -277,6 +277,7 @@ The brief's description is accurate but incomplete. The full decision table
 | C | path `/api/platform/auth/login` | `nexora_pipeline_app` | **yes** |
 | D | path `/api/Auth/Login` | `nexora_identity_app` | **yes** |
 | E | path `/api/tenant-activation` | `nexora_identity_app` | **yes** |
+| E2 | path `/api/password-reset` | `nexora_identity_app` | **yes** |
 | F | tenant present | `nexora_tenant_app` | no |
 | G | path `/api/platform` | `nexora_pipeline_app` | **yes** |
 | H | otherwise | `nexora_tenant_app`, no GUC | no — fail-closed |

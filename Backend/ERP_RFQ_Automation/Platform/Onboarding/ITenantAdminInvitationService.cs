@@ -259,4 +259,27 @@ public interface ITenantAdminInvitationService
     /// <summary>Withdraws one live invitation. False when it does not exist or was already spent.</summary>
     Task<bool> RevokeAsync(
         long tenantId, long invitationId, string revokedBy, string reason, CancellationToken ct = default);
+
+    /// <summary>
+    /// Withdraws EVERY live invitation held by one account, on the caller's unit of work.
+    ///
+    /// <para><b>The invariant this exists to protect.</b> Redemption sets
+    /// <c>IsActive = true</c> and clears <c>DeactivatedAtUtc</c> — that is the whole point of it.
+    /// So an account that is deactivated while an activation link is still in flight can be
+    /// switched back on by whoever holds that link, silently, with no operator involved. Any
+    /// mutation that takes an account out of service therefore has to kill its outstanding links
+    /// in the SAME transaction, and this is the one place that knows what "outstanding" means.</para>
+    ///
+    /// <para>Takes the caller's context for the same reason <see cref="IssueAsync"/> does: the
+    /// revocation is half of somebody else's atomic change, so it must join their transaction and
+    /// must never begin, commit, or roll back one of its own.</para>
+    /// </summary>
+    /// <returns>How many live invitations were withdrawn.</returns>
+    Task<int> RevokeOutstandingForUserAsync(
+        ErpRfqAutomationContext unitOfWork,
+        long tenantId,
+        long userId,
+        string revokedBy,
+        string reason,
+        CancellationToken ct = default);
 }

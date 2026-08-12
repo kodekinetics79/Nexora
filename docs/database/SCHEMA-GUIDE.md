@@ -64,7 +64,7 @@ The interceptor also sets `nexora.actor_id`, `nexora.actor_signature`, and four 
 | Role | `BYPASSRLS` | `LOGIN` | Table grants | What it is for |
 |---|---|---|---|---|
 | `nexora_tenant_app` | **no** | no | 221 `public` tables (SELECT/INSERT/UPDATE/DELETE) + INSERT on `platform."PlatformAuditLogs"` | Every ordinary request. The only role RLS actually constrains. |
-| `nexora_identity_app` | yes | no | `public."LoginAttempts"` (full), `public."Users"`, `public."BusinessUnits"`, `public."Setup_Master"` (SELECT), `platform."TenantAdminInvitations"` (SELECT/UPDATE) | Pre-tenant identity work: `/api/Auth/Login`, `/api/tenant-activation`. These run before a tenant is known, so they cannot be RLS-scoped. |
+| `nexora_identity_app` | yes | no | `public."LoginAttempts"` (full), `public."Users"`, `public."BusinessUnits"`, `public."Setup_Master"` (SELECT), `platform."TenantAdminInvitations"` (SELECT/UPDATE), `platform."PasswordResetTokens"` (SELECT/INSERT/UPDATE) | Pre-tenant identity work: `/api/Auth/Login`, `/api/tenant-activation`, `/api/password-reset`. These run before a tenant is known, so they cannot be RLS-scoped. INSERT is held on the reset table and deliberately NOT on the invitation table — minting a reset names an account that already exists and mails its token to that account's own mailbox, whereas minting an invitation would let an anonymous caller invite themselves into a tenant. |
 | `nexora_pipeline_app` | yes | no | 198 `public` + 41 `platform` tables | Platform/back-office work under `/api/platform`, and background sweeps that legitimately cross tenants. |
 | table owner (`postgres` here) | superuser | yes | owns all 267 tables | Migrations only. |
 

@@ -43,6 +43,7 @@ using ERP_RFQ_Automation.AI;
 using ERP_RFQ_Automation.QuoteDelivery;
 using ERP_RFQ_Automation.Security;
 using ERP_RFQ_Automation.Security.DocumentInspection;
+using ERP_RFQ_Automation.Security.PasswordReset;
 using Microsoft.AspNetCore.HttpOverrides;
 using ERP_RFQ_Automation.Procurement;
 using ERP_RFQ_Automation.CommercialDocuments;
@@ -666,6 +667,14 @@ builder.Services.AddPlatformEmailSettings();
 // passes through the operator's hands. Registered AFTER AddNotifications — it composes its
 // invite through IEmailSender and reads Notifications:AppBaseUrl to build the link.
 builder.Services.AddTenantOnboarding(builder.Configuration);
+
+// Self-service password recovery (Security/PasswordReset): the "forgot password" flow for tenant
+// users. Registered AFTER AddTenantOnboarding, which binds the TenantOnboarding section this
+// module reads its link path, its window and — crucially — its password floor from. Until it
+// existed, a tenant user who forgot their password could only get back in by having somebody with
+// database access overwrite their hash, which is the same operator-holds-the-credential defect the
+// activation flow was built to end.
+builder.Services.AddTenantPasswordReset();
 
 // Durable tenant provisioning (Platform/Provisioning): an execution + step journal per
 // provisioning attempt, idempotency keys, reserved-address refusal, step-level retry with

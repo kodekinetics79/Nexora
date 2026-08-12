@@ -194,6 +194,69 @@ export interface ResendTenantAdminInvitationResult {
   activationUrl: string | null;
 }
 
+/**
+ * One account inside a customer's workspace — the customer's own staff, not a platform operator.
+ * `PlatformOperator` is the other thing entirely, and the two must never be shown on one list.
+ */
+export interface TenantUser {
+  id: string;
+  firstName: string;
+  middleName: string | null;
+  lastName: string;
+  email: string;
+  roleId: string | null;
+  roleCode: string | null;
+  roleName: string | null;
+  /** Setup_Master.RoleRank. 30 = Owner, 20 = Admin, 10 = Manager, 0 = Member. */
+  roleRank: number | null;
+  isActive: boolean;
+  deactivatedAtUtc: string | null;
+  lastLogin: string | null;
+  createdOn: string;
+  /** The most recent activation invitation for this account, whatever its status. */
+  invitation: TenantAdminInvitation | null;
+  /**
+   * Invited and never redeemed: the account holds no credential anybody knows, so returning it
+   * to service does not let the person sign in. Reissuing their invitation does.
+   */
+  awaitingActivation: boolean;
+}
+
+/** An assignable role from the tenant's own Setup_Master. */
+export interface TenantRole {
+  id: string;
+  code: string | null;
+  name: string;
+  description: string | null;
+  rank: number;
+  rankLabel: string;
+  activeUserCount: number;
+  /** False when the signed-in operator's platform role is not senior enough to grant it. */
+  grantable: boolean;
+  notGrantableReason: string | null;
+}
+
+export interface CreateTenantUserInput {
+  email: string;
+  firstName: string;
+  middleName?: string | null;
+  lastName: string;
+  roleId: string;
+  timezone?: string | null;
+  /** 'invite' (default) mails a single-use link; 'password' is Owner-only and audited as such. */
+  activation?: 'invite' | 'password';
+  password?: string | null;
+  reason: string;
+}
+
+export interface CreateTenantUserResult {
+  user: TenantUser;
+  invitation: TenantAdminInvitation | null;
+  emailDispatched: boolean;
+  /** Returned exactly once, to an Owner, when the provider did not transmit the message. */
+  activationUrl: string | null;
+}
+
 export interface BillingMeterCatalogEntry {
   eventType: string;
   billingMeterKey: string;
@@ -2023,6 +2086,11 @@ export interface PlatformEffectiveMfaPolicy {
   bypassExpired: boolean;
   changedBy: string | null;
   version: number;
+  /** Whether the platform honours remembered browsers at all. False means an EXISTING trust is
+   *  refused at the next sign-in, not merely that no new ones are minted. */
+  browserTrustEnabled: boolean;
+  /** How long a remembered browser suppresses a repeat challenge, in hours. */
+  browserTrustHours: number;
 }
 
 /**
@@ -2050,7 +2118,13 @@ export interface PlatformMfaPolicy extends PlatformEffectiveMfaPolicy {
   confirmationPhrases: Record<string, string>;
   maxBypassHours: number;
   minimumReasonLength: number;
-  browserTrustHours: number;
+  /** True when an Owner set the window; false when it is still the deployment's seed value. The
+   *  screen says which, because a number nobody chose looks exactly like a number somebody did. */
+  browserTrustFromPolicyRow: boolean;
+  /** The bounds the SERVER will accept, sent rather than hard-coded here so the screen cannot
+   *  offer a duration the API refuses. */
+  minBrowserTrustHours: number;
+  maxBrowserTrustHours: number;
 }
 
 export interface ChangePlatformMfaPolicyInput {
@@ -2060,4 +2134,23 @@ export interface ChangePlatformMfaPolicyInput {
   expiresAtUtc?: string | null;
   confirmation: string;
   expectedVersion?: number | null;
+  /** Omitted (or null) keeps what is stored — the server applies null-keeps, so a change that is
+   *  only about the enforcement mode cannot silently reset a control it never mentioned. */
+  browserTrustEnabled?: boolean | null;
+  browserTrustHours?: number | null;
+}
+
+/**
+ * One browser the signed-in operator has told the platform to remember.
+ *
+ * Own-account only, in both directions: the list endpoint is scoped to the caller's user id and so
+ * is every revoke. There is no route that reads or revokes somebody else's.
+ */
+export interface PlatformBrowserTrust {
+  id: number;
+  /** "Chrome on macOS" — derived from the User-Agent, never the raw header. */
+  label: string | null;
+  createdAtUtc: string;
+  expiresAtUtc: string;
+  lastUsedAtUtc: string | null;
 }

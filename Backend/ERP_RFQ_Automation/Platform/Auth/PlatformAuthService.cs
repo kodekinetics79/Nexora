@@ -134,7 +134,7 @@ public class PlatformAuthService : IPlatformAuthService
                 ? null
                 : await _browserTrust.RedeemAsync(user.Id, request.BrowserTrustToken);
             if (trust is null)
-                return withChallenge(await GetOrCreateChallengeAsync(user.Id, issuedAt));
+                return await WithChallengeAsync(await GetOrCreateChallengeAsync(user.Id, issuedAt));
 
             var trusted = IssuePlatformSession(user, issuedAt, issuedAt, trust.Id);
             trusted.BrowserTrustUsed = true;
@@ -168,15 +168,30 @@ public class PlatformAuthService : IPlatformAuthService
         _logger.LogInformation("Platform login successful for {Email} ({Role})", user.Email, user.PlatformRole);
         return response;
 
-        PlatformLoginResponse withChallenge(PlatformMfaChallenge challenge) => new()
+        // The challenge response carries the browser-trust OFFER, because this is the only moment the
+        // console can be told about it. At the challenge step the operator holds no token at all —
+        // login returned mfaRequired with no session — so GET /api/platform/auth/policy/effective is
+        // unreachable to them, Enrollment policy or not. A screen that guessed would either offer
+        // "remember this browser" on a platform that has switched it off, or claim a duration that is
+        // not the configured one; both are the console asserting a policy it does not know.
+        async Task<PlatformLoginResponse> WithChallengeAsync(PlatformMfaChallenge challenge)
         {
-            Id = user.Id,
-            Email = user.Email,
-            PlatformRole = user.PlatformRole.ToString(),
-            MfaRequired = true,
-            MfaChallengeId = challenge.Id,
-            MfaChallengeExpiresAtUtc = challenge.ExpiresAtUtc
-        };
+            var trustSettings = _browserTrust is null
+                ? new PlatformBrowserTrustSettings(Enabled: false, 0, FromPolicyRow: false)
+                : await _browserTrust.GetSettingsAsync();
+
+            return new PlatformLoginResponse
+            {
+                Id = user.Id,
+                Email = user.Email,
+                PlatformRole = user.PlatformRole.ToString(),
+                MfaRequired = true,
+                MfaChallengeId = challenge.Id,
+                MfaChallengeExpiresAtUtc = challenge.ExpiresAtUtc,
+                BrowserTrustOffered = trustSettings.Enabled,
+                BrowserTrustHours = trustSettings.Enabled ? trustSettings.Hours : 0
+            };
+        }
     }
 
     public async Task<PlatformLoginResponse> CompleteMfaChallengeAsync(
@@ -238,10 +253,17 @@ public class PlatformAuthService : IPlatformAuthService
         // then failed to consume would be a second factor granted for a code that was never accepted.
         if (request.RememberBrowser && _browserTrust is not null)
         {
+            // Null means the platform is not honouring remembered browsers at all. The sign-in
+            // still succeeds and the response simply carries no token — the client stores nothing
+            // and is challenged next time, which is what "browser trust is disabled" has to mean
+            // for someone who ticked the box before the policy changed under them.
             var grant = await _browserTrust.IssueAsync(challenge.PlatformUserId, userAgent, httpContext, ct);
-            // The one and only time this value leaves the server. The row holds its SHA-256.
-            response.BrowserTrustToken = grant.Token;
-            response.BrowserTrustExpiresAtUtc = grant.ExpiresAtUtc;
+            if (grant is not null)
+            {
+                // The one and only time this value leaves the server. The row holds its SHA-256.
+                response.BrowserTrustToken = grant.Token;
+                response.BrowserTrustExpiresAtUtc = grant.ExpiresAtUtc;
+            }
         }
 
         return response;

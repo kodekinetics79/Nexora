@@ -23,6 +23,7 @@ using ERP_RFQ_Automation.Platform.Support;
 using ERP_RFQ_Automation.Platform.Notifications;
 using ERP_RFQ_Automation.Platform.DataAssets;
 using ERP_RFQ_Automation.Platform.Auth;
+using ERP_RFQ_Automation.Security.PasswordReset;
 using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.Models;
@@ -50,6 +51,15 @@ public partial class ErpRfqAutomationContext
     /// exemption, for the same reason, as the pre-authentication login counter.
     /// </summary>
     public virtual DbSet<TenantAdminInvitation> TenantAdminInvitations { get; set; } = null!;
+
+    /// <summary>
+    /// Self-service password-reset links. Platform schema and deliberately UNFILTERED for exactly
+    /// the reasons above: the row is minted for an anonymous caller who has only typed an address,
+    /// and spent by an anonymous caller who has only a token — neither carries a tenant context a
+    /// query filter could key on, and one here would hide the only row that says which account is
+    /// being recovered.
+    /// </summary>
+    public virtual DbSet<PasswordResetToken> PasswordResetTokens { get; set; } = null!;
 
     partial void OnModelCreatingPartial(ModelBuilder modelBuilder)
     {
@@ -799,6 +809,9 @@ public partial class ErpRfqAutomationContext
 
         // ==== Founding-administrator activation (Platform/Onboarding/) ====
         modelBuilder.ApplyTenantOnboardingModel();
+
+        // ==== Self-service password recovery (Security/PasswordReset/) ====
+        modelBuilder.ApplyPasswordResetModel();
 
         // ==== Durable tenant provisioning (Platform/Provisioning/) ====
         modelBuilder.ApplyTenantProvisioningModel();

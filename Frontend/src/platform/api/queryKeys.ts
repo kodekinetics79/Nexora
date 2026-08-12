@@ -8,6 +8,10 @@ export const platformKeys = {
   tenant: (id: string) => [...platformKeys.all, 'tenant', id] as const,
   tenantOperations: (id: string) => [...platformKeys.all, 'tenant', id, 'operations'] as const,
   tenantInvitations: (id: string) => [...platformKeys.all, 'tenant', id, 'admin-invitations'] as const,
+  // The tenant's own staff accounts and the roles they can hold. Nested under the tenant key so
+  // a mutation on one user invalidates the roster it came from and nothing wider.
+  tenantUsers: (id: string) => [...platformKeys.all, 'tenant', id, 'users'] as const,
+  tenantRoles: (id: string) => [...platformKeys.all, 'tenant', id, 'roles'] as const,
   queue: () => [...platformKeys.all, 'queue'] as const,
   jobs: (filter?: unknown) => [...platformKeys.all, 'jobs', filter ?? null] as const,
   plans: () => [...platformKeys.all, 'plans'] as const,
@@ -66,6 +70,11 @@ export const platformKeys = {
   // the full model — operator counts, available modes — is only wanted on one page.
   platformAuthPolicy: () => [...platformKeys.all, 'auth', 'policy'] as const,
   platformAuthPolicyEffective: () => [...platformKeys.all, 'auth', 'policy', 'effective'] as const,
+
+  // The caller's OWN remembered browsers. No operator id in the key: the endpoint is scoped to
+  // the signed-in user server-side, and a key that carried one would imply a list that can be
+  // asked for on somebody else's behalf.
+  platformBrowserTrusts: () => [...platformKeys.all, 'auth', 'browser-trusts'] as const,
 
   supportTickets: (filter?: unknown) => [...platformKeys.all, 'support', 'tickets', filter ?? null] as const,
   supportTicket: (id: string) => [...platformKeys.all, 'support', 'ticket', id] as const,

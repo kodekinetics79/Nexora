@@ -40,6 +40,23 @@ export const fmtRelative = (iso: string | null): string => {
   return `${days}d ago`;
 };
 
+/**
+ * A browser-trust window, in the words the operator agreed to.
+ *
+ * The permitted range now spans 8 hours to 30 days, and "720 hours" is not a duration anybody
+ * reasons about — the operator ticking the box on the sign-in screen and the Owner setting the
+ * policy have to be reading the same sentence, or they are not agreeing to the same thing. Whole
+ * days are rendered as days; anything else stays in hours rather than being rounded into a lie.
+ */
+export const fmtTrustWindow = (hours: number): string => {
+  if (!Number.isFinite(hours) || hours <= 0) return 'no window';
+  if (hours % 24 === 0) {
+    const days = hours / 24;
+    return days === 1 ? '1 day' : `${days} days`;
+  }
+  return hours === 1 ? '1 hour' : `${hours} hours`;
+};
+
 export const fmtLatency = (ms: number | null): string => {
   if (ms == null) return '—';
   if (ms < 1000) return `${ms}ms`;

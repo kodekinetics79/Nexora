@@ -17644,6 +17644,16 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<long>("Id")
                         .HasColumnType("bigint");
 
+                    b.Property<bool>("BrowserTrustEnabled")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true);
+
+                    b.Property<int>("BrowserTrustHours")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(12);
+
                     b.Property<string>("ChangeReason")
                         .HasMaxLength(1000)
                         .HasColumnType("character varying(1000)");
@@ -17692,6 +17702,8 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.ToTable("PlatformMfaPolicies", "platform", t =>
                         {
+                            t.HasCheckConstraint("CK_PlatformMfaPolicies_BrowserTrustHours", "\"BrowserTrustHours\" BETWEEN 8 AND 720");
+
                             t.HasCheckConstraint("CK_PlatformMfaPolicies_Singleton", "\"Id\" = 1");
                         });
                 });
@@ -21232,6 +21244,77 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasDatabaseName("UX_LoginAttempts_Plane_AttemptKey");
 
                     b.ToTable("LoginAttempts", (string)null);
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Security.PasswordReset.PasswordResetToken", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTime>("ExpiresAtUtc")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<DateTime>("IssuedAtUtc")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<DateTime?>("LastSentAtUtc")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<DateTime?>("RedeemedAtUtc")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("RedeemedFromIp")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("RequestedFromIp")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("RevocationReason")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
+                    b.Property<DateTime?>("RevokedAtUtc")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("RevokedBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<int>("SendCount")
+                        .HasColumnType("integer");
+
+                    b.Property<long?>("TenantId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("TokenHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<long>("UserId")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ExpiresAtUtc")
+                        .HasDatabaseName("IX_PasswordResetTokens_ExpiresAtUtc");
+
+                    b.HasIndex("TenantId")
+                        .HasDatabaseName("IX_PasswordResetTokens_TenantId");
+
+                    b.HasIndex("TokenHash")
+                        .IsUnique()
+                        .HasDatabaseName("UX_PasswordResetTokens_TokenHash");
+
+                    b.HasIndex("UserId", "RedeemedAtUtc", "RevokedAtUtc")
+                        .HasDatabaseName("IX_PasswordResetTokens_UserId_Live");
+
+                    b.ToTable("PasswordResetTokens", "platform");
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.Services.FolderIngestionRetryState", b =>

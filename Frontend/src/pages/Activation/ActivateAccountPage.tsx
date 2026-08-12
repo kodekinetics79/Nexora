@@ -44,7 +44,10 @@ import { completeActivation, inspectActivationToken, type ActivationState } from
  * because they describe the link, not the account. A withdrawn invitation says
  * only that — never who withdrew it or why.
  */
-const REJECTION_COPY: Record<Exclude<ActivationState, 'valid'>, { title: string; body: string; retry: boolean }> = {
+const REJECTION_COPY: Record<
+  Exclude<ActivationState, 'valid'>,
+  { title: string; body: string; retry: boolean; recover?: boolean }
+> = {
   expired: {
     title: 'This activation link has expired',
     body: 'Activation links are short-lived for security. Ask whoever set up your workspace to send a new invitation.',
@@ -52,7 +55,13 @@ const REJECTION_COPY: Record<Exclude<ActivationState, 'valid'>, { title: string;
   },
   used: {
     title: 'This activation link has already been used',
-    body: 'A password has already been set with this link. Sign in with it, or use "forgot password" on the sign-in page if you do not have it.',
+    body: 'A password has already been set with this link. Sign in with it, or reset your password if you do not have it.',
+    // The one rejection whose fix is a flow rather than a phone call. This copy
+    // used to point at a "forgot password" option that did not exist anywhere in
+    // the product — the only real recovery was for somebody with database access
+    // to overwrite the hash. Now it points at /forgot-password, which is why the
+    // sentence is a link and not a suggestion.
+    recover: true,
     retry: false,
   },
   revoked: {
@@ -201,7 +210,16 @@ export default function ActivateAccountPage() {
                   Try again
                 </Button>
               )}
-              <Button variant={REJECTION_COPY[state].retry ? 'outlined' : 'contained'} onClick={() => navigate('/login')} sx={{ fontWeight: 700 }}>
+              {REJECTION_COPY[state].recover && (
+                <Button variant="contained" onClick={() => navigate('/forgot-password')} sx={{ fontWeight: 700 }}>
+                  Reset your password
+                </Button>
+              )}
+              <Button
+                variant={REJECTION_COPY[state].retry || REJECTION_COPY[state].recover ? 'outlined' : 'contained'}
+                onClick={() => navigate('/login')}
+                sx={{ fontWeight: 700 }}
+              >
                 Go to sign in
               </Button>
             </Stack>

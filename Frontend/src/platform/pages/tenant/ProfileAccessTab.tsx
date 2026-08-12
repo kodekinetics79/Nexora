@@ -416,6 +416,11 @@ export default function ProfileAccessTab({ tenant }: { tenant: Tenant }) {
           )}
           <Divider />
           <Typography variant="body2" color="text.secondary">
+            This panel is about the FOUNDING administrator&apos;s link and its delivery receipts.
+            Everyone else in the customer&apos;s workspace — their roles, whether they are in
+            service, and adding another person — lives on the Users tab.
+          </Typography>
+          <Typography variant="body2" color="text.secondary">
             Configure and verify the real SMTP or SendGrid transport on Platform Settings → Email. A console provider records no delivery.
           </Typography>
         </Stack>

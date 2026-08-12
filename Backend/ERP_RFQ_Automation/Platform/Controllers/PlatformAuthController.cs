@@ -279,6 +279,28 @@ public class PlatformAuthController : ControllerBase
         long id, [FromServices] IPlatformBrowserTrustService trusts, CancellationToken ct)
         => await trusts.RevokeAsync(ActorId(), id, User, HttpContext, ct) ? NoContent() : NotFound();
 
+    /// <summary>
+    /// Revoke every browser this operator has told the platform to remember — the "I have lost a
+    /// device and I do not know which entry it is" control.
+    ///
+    /// <para>Scoped to the caller's own account by <c>ActorId()</c>, with no route or body parameter
+    /// that could widen it. One operator revoking every OTHER operator's remembered browsers would be
+    /// a denial-of-service on the whole plane dressed as a security action.</para>
+    ///
+    /// <para>POST rather than DELETE: it takes no identifier, it is a command, and it must not be
+    /// something a stray link or a prefetch can perform. Idempotent either way — a second call
+    /// revokes nothing and returns zero.</para>
+    /// </summary>
+    [HttpPost("browser-trusts/revoke-all")]
+    [Authorize(Policy = PlatformPolicies.Enrollment)]
+    public async Task<ActionResult<object>> RevokeAllBrowserTrusts(
+        [FromServices] IPlatformBrowserTrustService trusts, CancellationToken ct)
+    {
+        var revoked = await trusts.RevokeAllAsync(
+            ActorId(), PlatformBrowserTrustService.OperatorRevokedAllReason, User, HttpContext, ct);
+        return Ok(new { revoked });
+    }
+
     // Logout revokes only the caller's OWN jti and reads nothing. Refusing a password-only
     // session here would leave an unenrolled operator unable to end the very session that
     // cannot do anything else — a control that only makes the hole last longer.

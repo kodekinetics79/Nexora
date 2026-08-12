@@ -706,6 +706,26 @@ const LoginPage: React.FC = () => {
                       },
                     }}
                   />
+
+                  {/* The way out for somebody who cannot get in.
+                      Rendered only on the credentials step: the business-unit
+                      selection below appears AFTER the password has already been
+                      verified, and offering "forgot password" to someone who
+                      just proved they remember it is noise.
+                      Until this page had a link, the only recovery route was for
+                      an operator to overwrite the hash in the database — and
+                      ActivateAccountPage has been telling users to "use forgot
+                      password on the sign-in page" the whole time. */}
+                  <Box sx={{ mt: -3, mb: 3, display: 'flex', justifyContent: 'flex-end' }}>
+                    <Button
+                      variant="text"
+                      size="small"
+                      onClick={() => navigate('/forgot-password')}
+                      sx={{ fontWeight: 700, textTransform: 'none' }}
+                    >
+                      Forgot password?
+                    </Button>
+                  </Box>
                 </>
               )}
 

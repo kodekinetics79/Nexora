@@ -69,6 +69,23 @@ public class PlatformLoginResponse
     /// challenged inside its trust window, rather than from a code entered now.</summary>
     public bool BrowserTrustUsed { get; set; }
 
+    /// <summary>
+    /// Whether "remember this browser" is on offer for the challenge this response carries, decided
+    /// by the server from the platform policy row.
+    ///
+    /// <para>It rides on the CHALLENGE response because that is the only place the console can learn
+    /// it. At the challenge step the operator holds no platform token, so the effective-policy
+    /// endpoint is unreachable to them; a checkbox rendered on a guess would offer a control the
+    /// platform has switched off, and the operator would tick it and be challenged again tomorrow
+    /// with nothing explaining why.</para>
+    /// </summary>
+    public bool BrowserTrustOffered { get; set; }
+
+    /// <summary>How long the offer above is good for, in hours — so the checkbox can say "don't ask
+    /// again on this browser for 30 days" rather than making a promise it has not read. Zero when
+    /// nothing is offered.</summary>
+    public int BrowserTrustHours { get; set; }
+
     [System.Text.Json.Serialization.JsonIgnore]
     public bool RecoveryCodeUsed { get; set; }
 }
@@ -412,6 +429,15 @@ public class ProvisionTenantRequest
     // customer's Super Admin -> sub accounts, and provisioning that stops at the shell
     // breaks the journey at its first step. If an operator truly needs an admin-less
     // tenant they are doing something this API should not encourage.
+    //
+    // Provisioning still creates exactly ONE account, and that remains the point: the
+    // customer's own Super Administrator is meant to staff the workspace from there. A
+    // product decision has since added a narrow platform-plane path for adding further
+    // accounts (TenantUsersController, POST /api/platform/tenants/{id}/users) for the
+    // pilot case where a second person must be in the workspace before the founding
+    // administrator has ever signed in. It is the secondary door, it invites rather than
+    // issues credentials, and it is audited as an operator reaching into a customer's
+    // tenant — see that controller for the whole reasoning.
 
     [Required, EmailAddress, StringLength(320)]
     public string AdminEmail { get; set; } = null!;

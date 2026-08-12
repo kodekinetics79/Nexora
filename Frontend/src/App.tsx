@@ -137,6 +137,13 @@ const PlatformRoutes = lazy(() => import('./platform/PlatformRoutes'));
 // because the app shell renders navigation for a workspace they cannot enter.
 const ActivateAccountPage = lazy(() => import('./pages/Activation/ActivateAccountPage'));
 
+// Self-service password recovery. Public for the same reason activation is —
+// somebody who cannot sign in cannot be asked to sign in first — and outside
+// MainLayout for the same reason: the app shell renders navigation for a
+// workspace they cannot enter yet.
+const ForgotPasswordPage = lazy(() => import('./pages/PasswordReset/ForgotPasswordPage'));
+const ResetPasswordPage = lazy(() => import('./pages/PasswordReset/ResetPasswordPage'));
+
 const PageLoader = () => (
   <Box
     role="status"
@@ -371,6 +378,11 @@ function App() {
 
       <Route path="/login" element={<LoginPage />} />
       <Route path="/activate/:token" element={<ActivateAccountPage />} />
+      {/* Path segment, not a query parameter — the emailed link is built to
+          match this exactly (TenantOnboarding:ResetPasswordPath). A mismatch
+          here 404s in the SPA and the customer sees a blank page. */}
+      <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+      <Route path="/reset-password/:token" element={<ResetPasswordPage />} />
       <Route path="*" element={<NotFoundPage />} />
     </Routes>
     </Suspense>

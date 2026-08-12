@@ -62,6 +62,18 @@ export interface PlatformMfaChallenge {
   challengeId: string;
   expiresAtUtc: string;
   email: string;
+  /**
+   * Whether the SERVER is offering "remember this browser" for this challenge, and for how long.
+   *
+   * It arrives on the challenge response because that is the only place it can. At this point the
+   * operator holds no platform token — login returned `mfaRequired` with no session — so
+   * `GET /api/platform/auth/policy/effective` is unreachable to them however permissive its policy
+   * is. A checkbox rendered on a guess would either offer a control the platform has switched off,
+   * or promise a duration nobody configured; both are the console asserting a policy it has not
+   * read. Absent or malformed means "do not offer it", which is the safe side.
+   */
+  browserTrustOffered: boolean;
+  browserTrustHours: number;
 }
 
 export type PlatformLoginResult =
@@ -126,7 +138,24 @@ export const usePlatformAuth = (): PlatformAuth => {
       const challengeId = typeof data.mfaChallengeId === 'string' ? data.mfaChallengeId : '';
       const expiresAtUtc = typeof data.mfaChallengeExpiresAtUtc === 'string' ? data.mfaChallengeExpiresAtUtc : '';
       if (!challengeId || !expiresAtUtc) throw new Error('Platform login did not return a valid MFA challenge.');
-      return { mfaRequired: true, challenge: { challengeId, expiresAtUtc, email } };
+      const browserTrustOffered = data.browserTrustOffered === true;
+      const browserTrustHours =
+        browserTrustOffered && typeof data.browserTrustHours === 'number' && data.browserTrustHours > 0
+          ? data.browserTrustHours
+          : 0;
+      return {
+        mfaRequired: true,
+        challenge: {
+          challengeId,
+          expiresAtUtc,
+          email,
+          // Offered only when the server says so AND named a duration. An offer with no number
+          // behind it is the checkbox that used to say "Remember this browser" and mean nothing in
+          // particular — the operator could not tell whether they were agreeing to a day or a month.
+          browserTrustOffered: browserTrustOffered && browserTrustHours > 0,
+          browserTrustHours,
+        },
+      };
     }
     const token = typeof data?.token === 'string' ? data.token : undefined;
     if (!token) {

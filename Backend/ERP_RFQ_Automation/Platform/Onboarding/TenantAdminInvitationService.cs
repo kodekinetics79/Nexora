@@ -444,14 +444,8 @@ public sealed class TenantAdminInvitationService : ITenantAdminInvitationService
             // Supersede first, then issue — in one transaction, so there is never an instant
             // where two links work. "Reissue" that left the old token alive would mean a
             // customer who reports a leaked invite cannot actually be made safe by resending.
-            await _db.Set<TenantAdminInvitation>()
-                .Where(i => i.UserId == supersededUserId
-                            && i.RedeemedAtUtc == null
-                            && i.RevokedAtUtc == null)
-                .ExecuteUpdateAsync(s => s
-                    .SetProperty(i => i.RevokedAtUtc, (DateTime?)now)
-                    .SetProperty(i => i.RevokedBy, supersededBy)
-                    .SetProperty(i => i.RevocationReason, "Superseded by a reissued invitation."), ct);
+            await RevokeOutstandingForUserAsync(_db, tenantId, supersededUserId,
+                supersededBy ?? "platform", "Superseded by a reissued invitation.", ct);
 
             issued = await IssueAsync(_db, new TenantAdminInvitationRequest
             {
@@ -490,6 +484,35 @@ public sealed class TenantAdminInvitationService : ITenantAdminInvitationService
                 .SetProperty(i => i.RevocationReason, why), ct);
 
         return revoked == 1;
+    }
+
+    public Task<int> RevokeOutstandingForUserAsync(
+        ErpRfqAutomationContext unitOfWork,
+        long tenantId,
+        long userId,
+        string revokedBy,
+        string reason,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(unitOfWork);
+
+        var now = UtcNow();
+        var actor = Truncate(revokedBy, 256);
+        var why = Truncate(reason, 1000);
+
+        // TenantId is in the predicate for the same reason it is in RevokeAsync's: the caller
+        // supplies both ids, and an account id that does not belong to this tenant must change
+        // nothing rather than reach across the boundary. Conditional update, on the caller's
+        // context, so this enlists in their transaction and no separate read can race it.
+        return unitOfWork.Set<TenantAdminInvitation>()
+            .Where(i => i.TenantId == tenantId
+                        && i.UserId == userId
+                        && i.RedeemedAtUtc == null
+                        && i.RevokedAtUtc == null)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(i => i.RevokedAtUtc, (DateTime?)now)
+                .SetProperty(i => i.RevokedBy, actor)
+                .SetProperty(i => i.RevocationReason, why), ct);
     }
 
     // ==== internals ==============================================================================

@@ -13,7 +13,6 @@ import { platformApi } from '../../api/client';
 import { platformErrorMessage } from '../../api/apiError';
 import { platformKeys } from '../../api/queryKeys';
 import type { RegisterTenantDataAssetInput, Tenant, TenantDataAsset, VerifyTenantDataAssetInput } from '../../types';
-import ActivationPolicyPanel from './ActivationPolicyPanel';
 import DataRecoveryPanel from './DataRecoveryPanel';
 
 const LOGICAL_KEY = 'postgresql.primary' as const;
@@ -106,8 +105,13 @@ export default function DataStorageTab({ tenant }: { tenant: Tenant }) {
 
   return (
     <Stack spacing={2.5}>
-      <ActivationPolicyPanel tenant={tenant} />
-
+      {/*
+        The activation panel moved to the Lifecycle tab, where activation is looked for. It is not
+        rendered in both places on purpose: two Activate buttons on two tabs is two ways to fire the
+        same one-way transition, and the second one is always the one nobody tested.
+        What stays here is the data control the panel DEPENDS on — "data.residency-isolation" is
+        satisfied from this screen, and the decision below still says so.
+      */}
       <Paper sx={{ p: 3, borderRadius: 3 }}>
         <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" spacing={2}>
           <Box>
