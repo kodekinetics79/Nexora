@@ -1,3 +1,33 @@
+# =============================================================================
+# THIS FILE IS NOT WHAT IS RUNNING. Read this before trusting anything below.
+#
+# The production web service was created by hand in the Render dashboard, not
+# from this Blueprint, and nothing syncs the two. Every value here is a
+# DESCRIPTION of intent; the dashboard is the configuration. Confirmed against
+# the Render API on 2026-08-12 — the live service and this file already disagree
+# in three places:
+#
+#     this file            live service (GET /v1/services/srv-d9csjhe1a83c739phue0)
+#     name: nexora-fyjw    name: Nexora
+#     rootDir: Backend     rootDir: ""   (dockerContext Backend, dockerfilePath Backend/Dockerfile)
+#     autoDeployTrigger    was `commit` until it was set to `checksPass` BY HAND
+#
+# That third line is why this warning exists rather than a tidier comment. The
+# `autoDeployTrigger: checksPass` block below was added on 2026-08-11 to stop
+# red commits deploying, it was reviewed, merged, and it changed nothing at all
+# for a day: Render never read it. The deploy gate existed only in this file.
+# It was believed to be live, and it was quoted as live, until somebody asked
+# the API instead of reading the YAML.
+#
+# So: a change here has NO effect until either it is applied in the dashboard or
+# this service is linked to the Blueprint. If you link it, delete this banner and
+# reconcile the three rows above first — a sync would otherwise rename the
+# service and move its root directory.
+#
+# Verify, do not assume:
+#   curl -H "Authorization: Bearer $RENDER_API_KEY" \
+#     https://api.render.com/v1/services/srv-d9csjhe1a83c739phue0
+# =============================================================================
 services:
   # ---------------------------------------------------------------------------
   # NOTE: the ClamAV private service is intentionally NOT deployed right now.
