@@ -391,6 +391,47 @@ export type ActivationControlDisposition =
   /** Deferred: the prerequisite belongs to a third party. Still a production blocker. */
   | 'EXTERNALLY_BLOCKED';
 
+/** The console screen that owns the fix. Mirrors `ActivationRemediationSurfaces`. */
+export type ActivationRemediationSurface =
+  | 'tenant.activation'
+  | 'tenant.profile-access'
+  | 'tenant.commercial'
+  | 'tenant.data-storage'
+  | 'platform.plans';
+
+/** The existing edit to take. Mirrors `ActivationRemediationActions`. */
+export type ActivationRemediationAction =
+  | 'tenant.profile-identity'
+  | 'tenant.plan-assignment'
+  | 'tenant.account-contact'
+  | 'tenant.rate-card-pin'
+  | 'tenant.commercial-terms'
+  | 'tenant.data-asset-boundary'
+  | 'tenant.activation-evidence'
+  | 'platform.plan-entitlements';
+
+/**
+ * The server policy that will decide the remedy request. Mirrors
+ * `ActivationRemediationAuthorities`, and the console gates its Resolve button on it rather
+ * than guessing which role owns which control.
+ */
+export type ActivationRemediationAuthority = 'Owner' | 'Billing' | 'TenantAdmin' | 'OwnerMfa';
+
+/**
+ * Where an operator goes to fix one blocking control.
+ *
+ * The activation decision used to name its blockers as bare codes and left the operator to
+ * work out which of eleven tabs owned each one. Every endpoint behind these already existed;
+ * this is the sentence saying where.
+ */
+export interface ActivationControlRemediation {
+  surface: ActivationRemediationSurface;
+  action: ActivationRemediationAction;
+  label: string;
+  requiredAuthority: ActivationRemediationAuthority;
+  hint: string;
+}
+
 export interface ActivationControlDecision {
   code: string;
   satisfied: boolean;
@@ -403,6 +444,12 @@ export interface ActivationControlDecision {
   deferralKey: string | null;
   /** What production actually needs. Rendered verbatim next to a deferred control. */
   productionRequirement: string | null;
+  /**
+   * Null for a satisfied control — nothing to fix — and for the four controls that have no
+   * resolver by design, where the server records the reason rather than leaving the absence to
+   * be read as an oversight.
+   */
+  remediation: ActivationControlRemediation | null;
 }
 
 export interface DeploymentPrerequisiteStatus {

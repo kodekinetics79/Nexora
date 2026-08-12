@@ -37,7 +37,46 @@ public sealed record ActivationControlDecision(
     public string? DeferralKey { get; init; }
 
     public string? ProductionRequirement { get; init; }
+
+    /// <summary>
+    /// Where an operator goes to fix this control, from
+    /// <see cref="ActivationControlRemediationCatalog"/>. Null both for a satisfied control — there
+    /// is nothing to fix — and for the four controls that have no resolver by design.
+    ///
+    /// <para>Purely navigational. It is populated AFTER every control has already been evaluated
+    /// and classified, it is read by nothing on this side, and no value of it can move a control
+    /// from BLOCKING to anything else.</para>
+    /// </summary>
+    public ActivationControlRemediation? Remediation { get; init; }
 }
+
+/// <summary>
+/// The screen that owns the fix for one blocking control, and who has to be signed in to use it.
+///
+/// <para>The activation decision used to name its blockers as bare codes — "commercial.rate-card",
+/// "billing.account-recipient" — and left the operator to work out, from eleven tabs, which one
+/// owned each. It is what turned a provisioning run into eleven form submissions across twelve
+/// surfaces and left a real tenant unactivatable for three days. Every endpoint behind these was
+/// already there; the sentence saying where was not.</para>
+/// </summary>
+/// <param name="Surface">One of <see cref="ActivationRemediationSurfaces"/>. The console screen.</param>
+/// <param name="Action">One of <see cref="ActivationRemediationActions"/>. The existing edit to take.</param>
+/// <param name="Label">The operator-facing verb for the control on that screen.</param>
+/// <param name="RequiredAuthority">
+/// One of <see cref="ActivationRemediationAuthorities"/>, named after the server policy that will
+/// decide. The console gates its Resolve button on this instead of guessing, so an operator is
+/// never offered a button that is certain to 403 and never denied one they could have used.
+/// </param>
+/// <param name="Hint">
+/// One or two sentences of what the fix actually is, including what it deliberately will NOT do.
+/// Rendered verbatim.
+/// </param>
+public sealed record ActivationControlRemediation(
+    string Surface,
+    string Action,
+    string Label,
+    string RequiredAuthority,
+    string Hint);
 
 /// <param name="Ready">
 /// Whether the tenant may be activated UNDER ITS OWN PROFILE. For a PRODUCTION tenant this is

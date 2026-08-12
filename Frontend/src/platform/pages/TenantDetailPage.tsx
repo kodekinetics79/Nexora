@@ -16,6 +16,7 @@ import CommercialTab from './tenant/CommercialTab';
 import SupportTab from './tenant/SupportTab';
 import AuditTab from './tenant/AuditTab';
 import LifecycleTab from './tenant/LifecycleTab';
+import ActivationPolicyPanel from './tenant/ActivationPolicyPanel';
 import AiGovernanceTab from './tenant/AiGovernanceTab';
 import EntitlementsTab from './tenant/EntitlementsTab';
 import DataStorageTab from './tenant/DataStorageTab';
@@ -25,6 +26,17 @@ import UsersTab from './tenant/UsersTab';
 
 const TABS = [
   { key: 'overview', label: 'Overview' },
+  // Second, and named after what the operator came to do.
+  //
+  // Activation used to render inside Lifecycle — the tab you open to DELETE a tenant, ninth of
+  // eleven — because activation is technically the first lifecycle transition. That is true from
+  // the inside and useless from the outside: an operator with a tenant stuck in Provisioning does
+  // not go looking for it under the destructive verbs, and one sat unactivatable for three days
+  // with every provisioning step recorded Succeeded because the only screen naming the blockers,
+  // and carrying the only Activate button, was filed there. It is deliberately not on Lifecycle
+  // as well: two Activate buttons on two tabs is two ways to fire the same one-way transition,
+  // and the second one is always the one nobody tested.
+  { key: 'activation', label: 'Activation' },
   { key: 'profile-access', label: 'Profile & access' },
   // Next to Profile & access because they answer adjacent questions — who this customer is,
   // and who inside it can sign in. TenantAdmin-gated, like the founding-administrator panel it
@@ -160,6 +172,7 @@ export default function TenantDetailPage() {
           canViewSupport={permissions.canAdministerTenants}
         />
       )}
+      {tab === 'activation' && <ActivationPolicyPanel tenant={tenant} />}
       {tab === 'profile-access' && permissions.canAdministerTenants && <ProfileAccessTab tenant={tenant} />}
       {tab === 'users' && permissions.canAdministerTenants && <UsersTab tenant={tenant} />}
       {tab === 'provisioning' && <ProvisioningDiagnosticsTab tenant={tenant} />}

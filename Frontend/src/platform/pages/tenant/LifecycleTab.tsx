@@ -42,7 +42,6 @@ import { platformKeys } from '../../api/queryKeys';
 import { usePlatformPermissions } from '../../auth/usePlatformPermissions';
 import { useStepUpReauthentication, isStepUpCancelled } from '../../auth/useStepUpReauthentication';
 import { REQUIRED_ROLE_COPY } from '../../auth/permissions';
-import ActivationPolicyPanel from './ActivationPolicyPanel';
 import type { Tenant, TenantOffboardingStatus, TenantPurgeResult } from '../../types';
 
 /**
@@ -300,14 +299,14 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
   return (
     <Stack spacing={2.5}>
       {/*
-        Activation is the FIRST lifecycle transition a tenant makes, so this is where an operator
-        looks for it. It used to render only on "Data & storage", next to the data-asset registry
-        that satisfies one of its controls — defensible from the inside, and invisible from the
-        outside. A tenant sat in Provisioning with every provisioning step succeeded because the
-        one screen naming the blockers, and carrying the only Activate button, was filed under a
-        tab nobody opens to activate anything.
+        Activation used to render here, on the grounds that it is the first lifecycle transition a
+        tenant makes. That reasoning was right and the placement was still wrong: this is the tab
+        an operator opens to DELETE a customer, and it is ninth of eleven. Somebody with a tenant
+        stuck in Provisioning does not go looking for the Activate button underneath Purge and
+        Erase. It now has its own tab, second in the row, immediately after Overview — and it is
+        NOT rendered here as well, because two Activate buttons on two tabs is two ways to fire the
+        same one-way transition and the second one is always the one nobody tested.
       */}
-      <ActivationPolicyPanel tenant={tenant} />
 
       {status.stage === 'Purged' && (
         <Alert severity="error" sx={{ borderRadius: 2 }}>
