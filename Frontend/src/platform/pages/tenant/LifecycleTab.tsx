@@ -42,6 +42,7 @@ import { platformKeys } from '../../api/queryKeys';
 import { usePlatformPermissions } from '../../auth/usePlatformPermissions';
 import { useStepUpReauthentication, isStepUpCancelled } from '../../auth/useStepUpReauthentication';
 import { REQUIRED_ROLE_COPY } from '../../auth/permissions';
+import ActivationPolicyPanel from './ActivationPolicyPanel';
 import type { Tenant, TenantOffboardingStatus, TenantPurgeResult } from '../../types';
 
 /**
@@ -298,6 +299,16 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
 
   return (
     <Stack spacing={2.5}>
+      {/*
+        Activation is the FIRST lifecycle transition a tenant makes, so this is where an operator
+        looks for it. It used to render only on "Data & storage", next to the data-asset registry
+        that satisfies one of its controls — defensible from the inside, and invisible from the
+        outside. A tenant sat in Provisioning with every provisioning step succeeded because the
+        one screen naming the blockers, and carrying the only Activate button, was filed under a
+        tab nobody opens to activate anything.
+      */}
+      <ActivationPolicyPanel tenant={tenant} />
+
       {status.stage === 'Purged' && (
         <Alert severity="error" sx={{ borderRadius: 2 }}>
           <AlertTitle sx={{ fontWeight: 800 }}>This tenant has been purged</AlertTitle>

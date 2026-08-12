@@ -6,18 +6,34 @@ import {
 } from '@mui/material';
 import { useSnackbar } from 'notistack';
 import Stack from '../../components/Flex';
+import RoleGate from '../../components/RoleGate';
 import { ErrorState, LoadingState } from '../../components/States';
 import { SoftChip } from '../../components/StatusChip';
 import { fmtDateTime } from '../../components/format';
 import { platformApi } from '../../api/client';
 import { platformErrorMessage } from '../../api/apiError';
 import { platformKeys } from '../../api/queryKeys';
+import { usePlatformPermissions } from '../../auth/usePlatformPermissions';
 import type {
-  RecordActivationControlEvidenceInput, Tenant,
+  RecordActivationControlEvidenceInput, Tenant, TenantDeploymentProfile,
 } from '../../types';
+import { TENANT_DEPLOYMENT_PROFILES } from '../../types';
 import { isAbsoluteHttpUrl, isActivationEvidenceValid, isSha256 } from './dataGovernanceValidation';
 
 const EVIDENCE_CONTROLS = new Set(['security.privileged-mfa-policy', 'integrations.mandatory']);
+
+/**
+ * The server refuses a profile change off PRODUCTION with a reason shorter than this, and says so
+ * in prose. Mirroring the bound here turns that 400 into a disabled button, which is the difference
+ * between "the form told me" and "the server told me after I filled it in".
+ */
+const MINIMUM_PROFILE_REASON_LENGTH = 15; // TenantsController.MinimumDataRegionReasonLength
+
+const PROFILE_COPY: Record<TenantDeploymentProfile, string> = {
+  PRODUCTION: 'Every activation control is a hard gate. Nothing is deferrable.',
+  LOCAL_TEST: 'A developer machine. Infrastructure prerequisites that no laptop can stand up are deferred.',
+  DEMO: 'A demonstration tenant with no customer data. Externally-supplied prerequisites are deferred, and stay recorded as production blockers.',
+};
 const localNow = () => {
   const now = new Date();
   return new Date(now.getTime() - now.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
@@ -47,8 +63,11 @@ const newEvidence = (controlCode: string): EvidenceDraft => ({
 export default function ActivationPolicyPanel({ tenant }: { tenant: Tenant }) {
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
+  const { isOwner: canChangeProfile } = usePlatformPermissions();
   const [evidence, setEvidence] = useState<EvidenceDraft | null>(null);
   const [confirmActivation, setConfirmActivation] = useState(false);
+  const [profileDraft, setProfileDraft] = useState<TenantDeploymentProfile | null>(null);
+  const [profileReason, setProfileReason] = useState('');
   const decisionQuery = useQuery({
     queryKey: platformKeys.tenantActivationDecision(tenant.id),
     queryFn: () => platformApi.getTenantActivationDecision(tenant.id),
@@ -76,6 +95,22 @@ export default function ActivationPolicyPanel({ tenant }: { tenant: Tenant }) {
       enqueueSnackbar('Activation evidence recorded', { variant: 'success' });
     },
     onError: (error) => enqueueSnackbar(platformErrorMessage(error, 'Evidence was refused'), { variant: 'error' }),
+  });
+  const profileMutation = useMutation({
+    mutationFn: (profile: TenantDeploymentProfile) => platformApi.setTenantDeploymentProfile(tenant.id, {
+      profile,
+      // PRODUCTION needs no justification — tightening a gate never does — and the server
+      // enforces that asymmetry, so send null rather than an empty string it would have to parse.
+      reason: profile === 'PRODUCTION' ? null : profileReason.trim(),
+    }),
+    onSuccess: () => {
+      setProfileDraft(null);
+      setProfileReason('');
+      refresh();
+      enqueueSnackbar('Deployment profile recorded', { variant: 'success' });
+    },
+    onError: (error) => enqueueSnackbar(
+      platformErrorMessage(error, 'The deployment profile change was refused'), { variant: 'error' }),
   });
 
   if (decisionQuery.isLoading) return <LoadingState label="Evaluating the authoritative activation policy…" />;
@@ -133,6 +168,47 @@ export default function ActivationPolicyPanel({ tenant }: { tenant: Tenant }) {
       )}
       {decision.warnings.map((warning) => <Alert severity="warning" sx={{ mt: 1 }} key={warning}>{warning}</Alert>)}
 
+      {/*
+        The deployment profile had a server endpoint, a request DTO, a frontend type and a client
+        method — and no control anywhere in the console. The activation policy's own warning text
+        told the operator to "set the profile through PUT /api/platform/tenants/{id}/deployment-
+        profile", which is an instruction to open a terminal. Since the profile is what decides
+        whether an externally-supplied prerequisite blocks activation or is recorded as deferred,
+        a demo tenant had no reachable path to activation at all.
+
+        Deliberately NOT a shortcut around the gate: a deferred control still reports as a
+        production blocker, the reason is mandatory and audited, and the server refuses the change
+        once the tenant has left Provisioning.
+      */}
+      <Paper variant="outlined" sx={{ p: 2, mt: 2 }}>
+        <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" spacing={1.5}>
+          <Box>
+            <Stack direction="row" spacing={1} alignItems="center">
+              <Typography sx={{ fontWeight: 800 }}>Deployment profile</Typography>
+              <SoftChip label={decision.deploymentProfile} tone={decision.deploymentProfile === 'PRODUCTION' ? 'neutral' : 'warning'} />
+            </Stack>
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+              {decision.deploymentProfileDetail || PROFILE_COPY[decision.deploymentProfile]}
+            </Typography>
+            {decision.deferredControls.length + decision.externallyBlockedControls.length > 0 && (
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
+                Deferred under this profile: {[...decision.deferredControls, ...decision.externallyBlockedControls].join(' · ')}
+              </Typography>
+            )}
+          </Box>
+          <RoleGate allowed={canChangeProfile} requirement="Only the platform Owner can change a deployment profile.">
+            {(disabled) => (
+              <Button
+                variant="outlined"
+                disabled={disabled || tenant.status !== 'provisioning'}
+                onClick={() => { setProfileDraft(decision.deploymentProfile); setProfileReason(''); }}>
+                Change profile
+              </Button>
+            )}
+          </RoleGate>
+        </Stack>
+      </Paper>
+
       <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ mt: 2 }}>
         <SoftChip label={`Commercial ${decision.commercialState}`} tone="neutral" dot={false} />
         <SoftChip label={`Access ${decision.accessState}`} tone="neutral" dot={false} />
@@ -175,6 +251,46 @@ export default function ActivationPolicyPanel({ tenant }: { tenant: Tenant }) {
         <Button color="inherit" onClick={() => setConfirmActivation(false)}>Cancel</Button>
         <Button variant="contained" disabled={!canActivate || activateMutation.isPending} onClick={() => activateMutation.mutate()}>
           Activate under policy
+        </Button>
+      </DialogActions>
+    </Dialog>
+
+    <Dialog open={Boolean(profileDraft)} onClose={() => setProfileDraft(null)} fullWidth maxWidth="sm">
+      <DialogTitle sx={{ fontWeight: 800 }}>Deployment profile for {tenant.name}</DialogTitle>
+      <DialogContent dividers>{profileDraft && <Stack spacing={2}>
+        <Alert severity="warning">
+          A non-PRODUCTION profile defers prerequisites that this side cannot stand up; it does not satisfy
+          them. Every deferred control keeps reporting as a production blocker, and this tenant cannot be
+          certified production-ready while any of them is deferred.
+        </Alert>
+        <FormControl fullWidth>
+          <InputLabel id="tenant-deployment-profile">Profile</InputLabel>
+          <Select labelId="tenant-deployment-profile" label="Profile" value={profileDraft}
+            onChange={(event) => setProfileDraft(event.target.value as TenantDeploymentProfile)}>
+            {TENANT_DEPLOYMENT_PROFILES.map((profile) => (
+              <MenuItem key={profile} value={profile}>{profile}</MenuItem>
+            ))}
+          </Select>
+        </FormControl>
+        <Typography variant="body2" color="text.secondary">{PROFILE_COPY[profileDraft]}</Typography>
+        {profileDraft !== 'PRODUCTION' && (
+          <TextField
+            required multiline minRows={2} label="Reason" value={profileReason}
+            error={Boolean(profileReason) && profileReason.trim().length < MINIMUM_PROFILE_REASON_LENGTH}
+            helperText={`On what basis this tenant may defer a production control. At least ${MINIMUM_PROFILE_REASON_LENGTH} characters; recorded in the audit trail.`}
+            onChange={(event) => setProfileReason(event.target.value)} />
+        )}
+      </Stack>}</DialogContent>
+      <DialogActions>
+        <Button color="inherit" onClick={() => setProfileDraft(null)}>Cancel</Button>
+        <Button
+          variant="contained"
+          disabled={
+            !profileDraft || profileMutation.isPending
+            || (profileDraft !== 'PRODUCTION' && profileReason.trim().length < MINIMUM_PROFILE_REASON_LENGTH)
+          }
+          onClick={() => profileDraft && profileMutation.mutate(profileDraft)}>
+          Record profile
         </Button>
       </DialogActions>
     </Dialog>

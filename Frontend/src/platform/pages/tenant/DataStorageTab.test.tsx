@@ -77,40 +77,9 @@ describe('DataStorageTab', () => {
     expect(screen.queryByText(/GB|capacity|storage total/i)).not.toBeInTheDocument();
   });
 
-  it('shows the full activation blockers and never enables a client-side override', async () => {
-    vi.spyOn(platformApi, 'listTenantDataAssets').mockResolvedValue([]);
-    vi.spyOn(platformApi, 'getTenantActivationDataDecision').mockResolvedValue(blocked);
-    renderTab();
-    expect(await screen.findByText('Authoritative tenant activation')).toBeVisible();
-    expect(screen.getAllByText('security.privileged-mfa-policy')).toHaveLength(2);
-    expect(screen.getByRole('button', { name: 'Activate tenant' })).toBeDisabled();
-    expect(screen.getByText(/server transition changes tenant state/i)).toBeVisible();
-  });
-
-  it('requires real evidence metadata before recording an activation attestation', async () => {
-    vi.spyOn(platformApi, 'listTenantDataAssets').mockResolvedValue([]);
-    vi.spyOn(platformApi, 'getTenantActivationDataDecision').mockResolvedValue(blocked);
-    const recordEvidence = vi.spyOn(platformApi, 'recordTenantActivationEvidence').mockResolvedValue({
-      tenantId: '9', controlCode: 'security.privileged-mfa-policy', disposition: 'approved',
-      evidenceReference: 'https://evidence.example/mfa/9', effectiveFromUtc: '2026-08-08T12:00:00Z',
-      effectiveToUtc: null, policyVersion: activationBlocked.policyVersion,
-    });
-    renderTab();
-    fireEvent.click(await screen.findByRole('button', { name: 'Record evidence' }));
-    const evidenceDialog = within(await screen.findByRole('dialog', { name: 'Record activation control evidence' }));
-    const submit = evidenceDialog.getByRole('button', { name: 'Record immutable evidence' });
-    expect(submit).toBeDisabled();
-    fireEvent.change(await evidenceDialog.findByLabelText(/Evidence URL/), { target: { value: 'not-a-url' } });
-    fireEvent.change(evidenceDialog.getByLabelText(/Evidence SHA-256/), { target: { value: 'bad' } });
-    fireEvent.change(evidenceDialog.getByLabelText(/Approval reason/), { target: { value: 'Independent policy review completed' } });
-    expect(submit).toBeDisabled();
-
-    fireEvent.change(evidenceDialog.getByLabelText(/Evidence URL/), { target: { value: 'https://evidence.example/mfa/9' } });
-    fireEvent.change(evidenceDialog.getByLabelText(/Evidence SHA-256/), { target: { value: 'a'.repeat(64) } });
-    fireEvent.click(submit);
-    await waitFor(() => expect(recordEvidence).toHaveBeenCalledWith('9', 'security.privileged-mfa-policy',
-      expect.objectContaining({ disposition: 'approved', evidenceSha256: 'a'.repeat(64) })));
-  });
+  // The two activation-panel tests that were here moved to ActivationPolicyPanel.test.tsx along
+  // with the panel itself, which now renders on the Lifecycle tab. They render the panel directly
+  // rather than through a host tab, and that file also pins the placement.
 
   it('renders unknown deletion state as a blocker and exposes no certificate mutation', async () => {
     vi.spyOn(platformApi, 'listTenantDataAssets').mockResolvedValue([]);
