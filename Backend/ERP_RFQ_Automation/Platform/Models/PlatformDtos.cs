@@ -429,6 +429,15 @@ public class ProvisionTenantRequest
     // customer's Super Admin -> sub accounts, and provisioning that stops at the shell
     // breaks the journey at its first step. If an operator truly needs an admin-less
     // tenant they are doing something this API should not encourage.
+    //
+    // Provisioning still creates exactly ONE account, and that remains the point: the
+    // customer's own Super Administrator is meant to staff the workspace from there. A
+    // product decision has since added a narrow platform-plane path for adding further
+    // accounts (TenantUsersController, POST /api/platform/tenants/{id}/users) for the
+    // pilot case where a second person must be in the workspace before the founding
+    // administrator has ever signed in. It is the secondary door, it invites rather than
+    // issues credentials, and it is audited as an operator reaching into a customer's
+    // tenant — see that controller for the whole reasoning.
 
     [Required, EmailAddress, StringLength(320)]
     public string AdminEmail { get; set; } = null!;

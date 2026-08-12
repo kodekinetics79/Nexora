@@ -21,10 +21,15 @@ import EntitlementsTab from './tenant/EntitlementsTab';
 import DataStorageTab from './tenant/DataStorageTab';
 import ProfileAccessTab from './tenant/ProfileAccessTab';
 import ProvisioningDiagnosticsTab from './tenant/ProvisioningDiagnosticsTab';
+import UsersTab from './tenant/UsersTab';
 
 const TABS = [
   { key: 'overview', label: 'Overview' },
   { key: 'profile-access', label: 'Profile & access' },
+  // Next to Profile & access because they answer adjacent questions — who this customer is,
+  // and who inside it can sign in. TenantAdmin-gated, like the founding-administrator panel it
+  // sits beside: reading and staffing a customer's roster is the same class of authority.
+  { key: 'users', label: 'Users' },
   // Deliberately high in the order and visible to every platform role: it is read-only, and it
   // is the screen somebody opens when a tenant is stuck. Burying it behind the money tabs is
   // how "Provisioning failed." stayed the whole story for as long as it did.
@@ -48,6 +53,7 @@ export default function TenantDetailPage() {
     () => TABS.filter((entry) =>
       (entry.key !== 'support' || permissions.canAdministerTenants)
       && (entry.key !== 'profile-access' || permissions.canAdministerTenants)
+      && (entry.key !== 'users' || permissions.canAdministerTenants)
       && (entry.key !== 'ai-governance' || permissions.isOwner)
       && (entry.key !== 'data-storage' || permissions.isOwner)),
     [permissions.canAdministerTenants, permissions.isOwner],
@@ -155,6 +161,7 @@ export default function TenantDetailPage() {
         />
       )}
       {tab === 'profile-access' && permissions.canAdministerTenants && <ProfileAccessTab tenant={tenant} />}
+      {tab === 'users' && permissions.canAdministerTenants && <UsersTab tenant={tenant} />}
       {tab === 'provisioning' && <ProvisioningDiagnosticsTab tenant={tenant} />}
       {tab === 'commercial' && <CommercialTab tenant={tenant} />}
       {tab === 'entitlements' && <EntitlementsTab tenant={tenant} />}

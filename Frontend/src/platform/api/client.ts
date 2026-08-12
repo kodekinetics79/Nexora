@@ -72,6 +72,10 @@ import type {
   ActivationControlEvidenceReceipt,
   Tenant,
   TenantAdminInvitation,
+  TenantUser,
+  TenantRole,
+  CreateTenantUserInput,
+  CreateTenantUserResult,
   TenantDataAsset,
   TenantDeploymentProfile,
   TenantProvisioningDiagnostics,
@@ -183,6 +187,27 @@ export interface PlatformApi {
     invitationId: string,
     reason: string,
   ): Promise<void>;
+
+  // --- the tenant's own staff accounts --------------------------------------
+  //
+  // The primary way a customer is staffed is still their own Super Administrator using the
+  // tenant application; these six exist because a pilot customer routinely needs a second
+  // person in the workspace before the founding administrator has ever signed in. Creating
+  // INVITES — the person chooses their own password from a single-use link — so no operator
+  // ever holds a working credential for a customer's employee.
+  listTenantUsers(tenantId: string): Promise<TenantUser[]>;
+  /** The tenant's assignable roles. `grantable` mirrors the server's rank ceiling. */
+  listTenantRoles(tenantId: string): Promise<TenantRole[]>;
+  createTenantUser(tenantId: string, input: CreateTenantUserInput): Promise<CreateTenantUserResult>;
+  deactivateTenantUser(tenantId: string, userId: string, reason: string): Promise<TenantUser>;
+  reactivateTenantUser(tenantId: string, userId: string, reason: string): Promise<TenantUser>;
+  /** Owner-gated on the server: assigning a role inside a customer's tenant is a privilege grant. */
+  changeTenantUserRole(
+    tenantId: string,
+    userId: string,
+    input: { roleId: string; reason: string },
+  ): Promise<TenantUser>;
+
   markTenantPastDue(id: string, reason: string): Promise<Tenant>;
   resolveTenantPastDue(id: string, reason: string): Promise<Tenant>;
   listTenantDataAssets(tenantId: string): Promise<TenantDataAsset[]>;
@@ -714,6 +739,29 @@ type WireRecord = Record<string, unknown>;
 
 const num = (value: unknown): number => (typeof value === 'number' ? value : Number(value ?? 0));
 
+const normalizeTenantAdminInvitation = (wire: WireRecord): TenantAdminInvitation => ({
+  ...(wire as unknown as TenantAdminInvitation),
+  id: asId(wire.id as string | number),
+  userId: asId(wire.userId as string | number),
+});
+
+/**
+ * A tenant's own staff account. The nested invitation goes through the same normaliser the
+ * invitations list uses, so a user row and that list can never disagree about what an
+ * invitation id is — which is what makes "resend the link on this row" reach the right record.
+ */
+const normalizeTenantUser = (wire: WireRecord): TenantUser => ({
+  ...(wire as unknown as TenantUser),
+  id: asId(wire.id as string | number),
+  roleId: asIdOrNull(wire.roleId as string | number | null),
+  invitation: wire.invitation ? normalizeTenantAdminInvitation(wire.invitation as WireRecord) : null,
+});
+
+const normalizeTenantRole = (wire: WireRecord): TenantRole => ({
+  ...(wire as unknown as TenantRole),
+  id: asId(wire.id as string | number),
+});
+
 const normalizeTenantDataAsset = (wire: WireRecord): TenantDataAsset => ({
   ...(wire as unknown as TenantDataAsset),
   id: asId(wire.id as string | number),
@@ -1009,6 +1057,45 @@ const httpPlatformApi: PlatformApi = {
       `/api/platform/tenants/${id}/admin-invitations/${invitationId}/revoke`, { reason },
     );
   },
+
+  // --- the tenant's own staff accounts --------------------------------------
+  listTenantUsers: async (tenantId) =>
+    (await platformHttp.get<WireRecord[]>(`/api/platform/tenants/${tenantId}/users`))
+      .data.map(normalizeTenantUser),
+  listTenantRoles: async (tenantId) =>
+    (await platformHttp.get<WireRecord[]>(`/api/platform/tenants/${tenantId}/roles`))
+      .data.map(normalizeTenantRole),
+  createTenantUser: async (tenantId, input) => {
+    const wire = (await platformHttp.post<WireRecord>(
+      `/api/platform/tenants/${tenantId}/users`,
+      // roleId travels as a number: it is a Setup_Master primary key, and the console carries
+      // every id as a string only so React keys and route params stay simple.
+      { ...input, roleId: Number(input.roleId) },
+    )).data;
+    return {
+      user: normalizeTenantUser(wire.user as WireRecord),
+      invitation: wire.invitation
+        ? normalizeTenantAdminInvitation(wire.invitation as WireRecord)
+        : null,
+      emailDispatched: Boolean(wire.emailDispatched),
+      // Present only when the provider did not transmit and the operator is an Owner. Shown
+      // once and never fetched again — there is nothing to re-read it from.
+      activationUrl: (wire.activationUrl as string | null) ?? null,
+    };
+  },
+  deactivateTenantUser: async (tenantId, userId, reason) =>
+    normalizeTenantUser((await platformHttp.post<WireRecord>(
+      `/api/platform/tenants/${tenantId}/users/${userId}/deactivate`, { reason },
+    )).data),
+  reactivateTenantUser: async (tenantId, userId, reason) =>
+    normalizeTenantUser((await platformHttp.post<WireRecord>(
+      `/api/platform/tenants/${tenantId}/users/${userId}/reactivate`, { reason },
+    )).data),
+  changeTenantUserRole: async (tenantId, userId, input) =>
+    normalizeTenantUser((await platformHttp.put<WireRecord>(
+      `/api/platform/tenants/${tenantId}/users/${userId}/role`,
+      { roleId: Number(input.roleId), reason: input.reason },
+    )).data),
   markTenantPastDue: async (id, reason) =>
     normalizeTenant((await platformHttp.post<BackendTenant>(`/api/platform/tenants/${id}/mark-past-due`, { reason })).data),
   resolveTenantPastDue: async (id, reason) =>
