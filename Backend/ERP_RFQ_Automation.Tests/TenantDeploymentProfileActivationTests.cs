@@ -29,16 +29,35 @@ namespace ERP_RFQ_Automation.Tests;
 public sealed class TenantDeploymentProfileActivationTests
 {
     /// <summary>
-    /// The four controls that the six catalogued prerequisites explain. Every one of them is a real
-    /// third-party or infrastructure dependency; none of them is a defect in the tenant record.
+    /// The controls that the catalogued prerequisites explain AND that still gate activation. Every
+    /// one of them is a real third-party or infrastructure dependency; none is a defect in the
+    /// tenant record.
     /// </summary>
     private static readonly string[] DeferrableControls =
     [
-        "billing.currency-tax",          // tax.production-certification
-        "security.privileged-mfa-policy", // identity.enterprise-sso-scim
-        "data.residency-isolation",      // storage.client-supplied + backup.production-pitr
-        "integrations.mandatory"         // integration.erp-accounting
+        "billing.currency-tax",     // tax.production-certification
+        "data.residency-isolation", // storage.client-supplied + backup.production-pitr
+        "integrations.mandatory"    // integration.erp-accounting
     ];
+
+    /// <summary>
+    /// The control that is catalogued, still owed to production, and is NOT an activation gate on
+    /// any profile — including PRODUCTION.
+    ///
+    /// <para>It moved because it could never be a gate honestly: the tenant identity plane persists
+    /// no MFA assurance and the policy service refuses to infer it from a password or from
+    /// platform-operator MFA, so every activation was gated on an Owner attesting to a capability
+    /// that does not exist. The tests below pin the half that must NOT have moved with it — it
+    /// still blocks production, and certification is still impossible without it.</para>
+    /// </summary>
+    private static readonly string[] CertificationOnlyControls =
+    [
+        "security.privileged-mfa-policy" // identity.enterprise-sso-scim
+    ];
+
+    /// <summary>Everything production is still owed, whichever gate it stands at.</summary>
+    private static readonly string[] ProductionOwedControls =
+        [.. DeferrableControls, .. CertificationOnlyControls];
 
     [Fact]
     public async Task A_deferred_external_dependency_activates_a_local_test_tenant()
@@ -69,6 +88,18 @@ public sealed class TenantDeploymentProfileActivationTests
             Assert.False(string.IsNullOrWhiteSpace(control.DeferralKey));
         }
 
+        // The certification-only control is unsatisfied here too, and is reported as what it is
+        // rather than borrowing the profile's deferral vocabulary — it would read identically on a
+        // PRODUCTION tenant, which is the whole point of it not being a gate.
+        foreach (var code in CertificationOnlyControls)
+        {
+            var control = decision.Controls.Single(x => x.Code == code);
+            Assert.False(control.Satisfied);
+            Assert.Equal(ActivationControlDispositions.CertificationOnly, control.Disposition);
+            Assert.True(control.BlocksProduction);
+            Assert.False(string.IsNullOrWhiteSpace(control.ProductionRequirement));
+        }
+
         // The activation actually goes through — this is the point of the profile.
         var activated = await ActivateAsync(harness, tenantId);
         Assert.True(activated.Ready);
@@ -96,12 +127,28 @@ public sealed class TenantDeploymentProfileActivationTests
             Assert.Contains(code, decision.BlockingControls);
         }
 
+        // PRODUCTION gets no discount on the certification-only control either: it reads exactly as
+        // it does on LOCAL_TEST, because it is not the profile that took it off the gate.
+        foreach (var code in CertificationOnlyControls)
+        {
+            var control = decision.Controls.Single(x => x.Code == code);
+            Assert.Equal(ActivationControlDispositions.CertificationOnly, control.Disposition);
+            Assert.DoesNotContain(code, decision.BlockingControls);
+            Assert.Contains(code, decision.CertificationOnlyControls);
+            // Not a discount: it is still on the list production has to clear.
+            Assert.Contains(code, decision.ProductionBlockingControls);
+        }
+
         Assert.Empty(decision.DeferredControls);
         Assert.Empty(decision.ExternallyBlockedControls);
 
-        // The pre-profile contract, unchanged: on a production tenant "blocking" is exactly
-        // "unsatisfied", with no subset and no exception.
-        Assert.Equal(decision.Controls.Where(x => !x.Satisfied).Select(x => x.Code),
+        // On a production tenant "blocking" is exactly "unsatisfied and not certification-only".
+        // The exception is named rather than implicit: growing it is a decision about what can be
+        // switched on unproven, and it should cost a test edit.
+        Assert.Equal(
+            decision.Controls
+                .Where(x => !x.Satisfied && x.Disposition != ActivationControlDispositions.CertificationOnly)
+                .Select(x => x.Code),
             decision.BlockingControls);
 
         var refusal = await Assert.ThrowsAsync<TenantActivationBlockedException>(
@@ -122,9 +169,10 @@ public sealed class TenantDeploymentProfileActivationTests
 
         var decision = await EvaluateAsync(harness, tenantId);
 
-        // Activatable here, and still owing production every single one of them.
+        // Activatable here, and still owing production every single one of them — the deferrable
+        // ones and the certification-only one alike.
         Assert.True(decision.Ready);
-        foreach (var code in DeferrableControls)
+        foreach (var code in ProductionOwedControls)
         {
             Assert.Contains(code, decision.ProductionBlockingControls);
             Assert.True(decision.Controls.Single(x => x.Code == code).BlocksProduction);
@@ -166,16 +214,23 @@ public sealed class TenantDeploymentProfileActivationTests
         Assert.False(decision.Ready);
         Assert.Empty(decision.DeferredControls);
         Assert.Empty(decision.ExternallyBlockedControls);
-        Assert.Equal(decision.Controls.Where(x => !x.Satisfied).Select(x => x.Code), decision.BlockingControls);
+        Assert.Equal(
+            decision.Controls
+                .Where(x => !x.Satisfied && x.Disposition != ActivationControlDispositions.CertificationOnly)
+                .Select(x => x.Code),
+            decision.BlockingControls);
         Assert.Contains(decision.Warnings, warning => warning.Contains("no recorded Owner approval"));
 
-        // With the approval the audited endpoint writes, the same tenant defers exactly the four.
+        // With the approval the audited endpoint writes, the same tenant defers exactly the three
+        // that still gate activation. The certification-only control is in neither list because the
+        // profile never had anything to do with it.
         await SetProfileAsync(harness, tenantId, TenantDeploymentProfile.Demo,
             "Sales demonstration workspace for the Riyadh pilot.");
         var approved = await EvaluateAsync(harness, tenantId);
         Assert.True(approved.Ready);
         Assert.Equal(DeferrableControls.Length,
             approved.DeferredControls.Count + approved.ExternallyBlockedControls.Count);
+        Assert.Equal(CertificationOnlyControls, approved.CertificationOnlyControls);
         Assert.False(approved.ProductionReadiness.Certifiable);
     }
 

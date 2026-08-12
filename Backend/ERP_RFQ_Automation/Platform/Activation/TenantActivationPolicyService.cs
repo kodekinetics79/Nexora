@@ -31,13 +31,27 @@ public interface ITenantActivationPolicyService
 /// existing three-argument construction in tests and in any partially wired host keeps working —
 /// the loss is a certification that cannot pass, never an activation that wrongly does.
 /// </param>
+/// <param name="integrations">
+/// What integrations THIS tenant is configured to depend on. OPTIONAL, and a null one is "cannot
+/// look", which keeps <c>integrations.mandatory</c> on its old evidence-demanding behaviour. That
+/// asymmetry is deliberate and matches <paramref name="posture"/>: an unwired inventory may cost a
+/// tenant an evidence form it did not need, and must never buy one a pass it did not earn.
+/// </param>
 public sealed class TenantActivationPolicyService(
     ErpRfqAutomationContext db,
     IPlatformAuditService audit,
     ITenantAccessService tenantAccess,
-    IPlatformDeploymentPosture? posture = null) : ITenantActivationPolicyService
+    IPlatformDeploymentPosture? posture = null,
+    ITenantMandatoryIntegrationInventory? integrations = null) : ITenantActivationPolicyService
 {
     private const long ActivationAdvisorySalt = unchecked((long)0x4E45584F52414143UL); // NEXORAAC
+
+    /// <summary>
+    /// The one control that is evaluated for the panel and for certification but is NOT an
+    /// activation gate. Named once, here, so "which control is this?" has a single answer and
+    /// adding a second is a deliberate edit rather than a condition someone widened.
+    /// </summary>
+    private const string CertificationOnlyControl = "security.privileged-mfa-policy";
     public async Task<TenantActivationDecision?> EvaluateAsync(long tenantId, CancellationToken ct = default)
     {
         var now = DateTime.UtcNow;
@@ -125,10 +139,33 @@ public sealed class TenantActivationPolicyService(
         Add("audit.health", auditHealthy,
             "At least one persisted successful privileged tenant audit occurrence is required.", $"platform-audit:tenant:{tenant.Id}");
 
+        // VACUOUS WHEN NOTHING IS MANDATORY, and only then.
+        //
+        // The defect: this control demanded current health evidence — or a dated, Owner-attested
+        // "deferral" — from every tenant unconditionally, including the overwhelming majority with
+        // no integration configured at all. There was nothing to be healthy, so the only way to
+        // activate was to file an attestation about something that did not exist. A gate that can
+        // only be passed by writing something untrue is a gate that teaches operators the forms are
+        // paperwork.
+        //
+        // "This tenant has no mandatory integration" is established by reading the same
+        // configuration the procurement callback endpoint authenticates against, so the gate and
+        // the endpoint cannot disagree. A null inventory is "could not look", which keeps the old
+        // behaviour: an absence nobody established is not a fact.
+        var mandatoryIntegrations = integrations?.ForBusinessUnit(tenant.PrimaryBusinessUnitId);
         var integrationEvidence = await ActiveEvidenceAsync(tenantId, "integrations.mandatory", now, ct);
-        Add("integrations.mandatory", integrationEvidence is { Disposition: "approved" or "deferred" },
-            "Mandatory integration health requires current evidence or an explicit effective deferral.",
-            integrationEvidence?.EvidenceReference);
+        if (mandatoryIntegrations is { Count: 0 })
+            Add("integrations.mandatory", true,
+                "No mandatory integration is configured for this tenant, so there is nothing whose "
+                + "health could be evidenced. Configuring one makes this control demand evidence again.",
+                $"tenant:{tenant.Id}:integrations:none");
+        else
+            Add("integrations.mandatory", integrationEvidence is { Disposition: "approved" or "deferred" },
+                mandatoryIntegrations is { Count: > 0 }
+                    ? "Mandatory integration health requires current evidence or an explicit effective "
+                      + "deferral for: " + string.Join(", ", mandatoryIntegrations.Select(x => x.Key)) + "."
+                    : "Mandatory integration health requires current evidence or an explicit effective deferral.",
+                integrationEvidence?.EvidenceReference);
 
         var provisioningComplete = tenant.PrimaryBusinessUnitId is not null &&
             (await db.Set<ProvisioningExecution>().AsNoTracking().AnyAsync(x =>
@@ -177,6 +214,31 @@ public sealed class TenantActivationPolicyService(
 
             var prerequisite = DeploymentPrerequisiteCatalog.ForControl(control.Code);
 
+            // CERTIFICATION-ONLY, in every profile including PRODUCTION.
+            //
+            // The defect: this control gated every activation on an attestation about a capability
+            // that does not exist. Its own comment above says the tenant identity plane persists no
+            // MFA assurance and that the control must not infer it from a password or from
+            // platform-operator MFA — which is exactly right, and is precisely why it could never be
+            // satisfied by anything the system knows. The only route past it was an Owner signing,
+            // on an MFA-bound session, for something no system could confirm, on every tenant.
+            //
+            // It is not deleted and it is not weakened. BlocksProduction stays true below, the
+            // identity.enterprise-sso-scim prerequisite that has always pointed at it stays unmet,
+            // certification stays impossible, the panel still renders it, and the Owner+MFA evidence
+            // endpoint that clears it is untouched. What changes is which gate it stands at:
+            // production readiness, where an attestation is the honest instrument, rather than
+            // switch-on, where it was a toll.
+            if (control.Code == CertificationOnlyControl)
+                return control with
+                {
+                    Disposition = ActivationControlDispositions.CertificationOnly,
+                    BlocksProduction = true,
+                    DeferralKey = prerequisite?.Key,
+                    ProductionRequirement = prerequisite?.ProductionRequirement,
+                    Remediation = remediation
+                };
+
             // BLOCKING for a PRODUCTION tenant, always — deferralPermitted is false there and
             // there is no branch that can make it true. BLOCKING also for anything outside the
             // catalogue in every profile, which is why a missing plan or an unactivated founding
@@ -217,8 +279,17 @@ public sealed class TenantActivationPolicyService(
         var externallyBlocked = classified
             .Where(x => x.Disposition == ActivationControlDispositions.ExternallyBlocked)
             .Select(x => x.Code).ToArray();
+        var certificationOnly = classified
+            .Where(x => x.Disposition == ActivationControlDispositions.CertificationOnly)
+            .Select(x => x.Code).ToArray();
 
         var warnings = new List<string>();
+        if (certificationOnly.Length > 0)
+            warnings.Add(
+                $"{certificationOnly.Length} control(s) do not gate activation and are certification "
+                + "requirements: " + string.Join(", ", certificationOnly) + ". They remain production "
+                + "blockers, so this tenant cannot be certified production-ready until each carries a "
+                + "current Owner-approved attestation.");
         if (tenant.Status == TenantStatus.Active)
             warnings.Add("Tenant is already Active; this is a current-state reassessment, not transition evidence.");
         if (deferred.Length + externallyBlocked.Length > 0)
@@ -245,6 +316,7 @@ public sealed class TenantActivationPolicyService(
             ProductionBlockingControls = productionBlockers,
             DeferredControls = deferred,
             ExternallyBlockedControls = externallyBlocked,
+            CertificationOnlyControls = certificationOnly,
             ProductionReadiness = CertifyProductionReadiness(classified, productionBlockers)
         };
     }

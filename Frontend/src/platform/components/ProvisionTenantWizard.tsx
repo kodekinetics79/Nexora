@@ -977,7 +977,7 @@ export default function ProvisionTenantWizard({ open, onClose, onSubmitted }: Pr
           <Stack spacing={2.5}>
             <SectionHeading
               title="Check this before it becomes real"
-              detail="Submitting queues eight steps that create the workspace, its baseline configuration and its first administrator. Each commits separately and you watch them run — nothing here can be un-created afterwards without a destructive lifecycle operation."
+              detail="Submitting queues nine steps that create the workspace, its baseline configuration, its data boundaries and its first administrator. Each commits separately and you watch them run — nothing here can be un-created afterwards without a destructive lifecycle operation."
             />
 
             <ReviewSection title="Company identity" onEdit={() => setStep(STEP_COMPANY)}>

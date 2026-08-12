@@ -389,7 +389,15 @@ export type ActivationControlDisposition =
   /** Deferred: something this side could stand up and has not. Still a production blocker. */
   | 'DEFERRED'
   /** Deferred: the prerequisite belongs to a third party. Still a production blocker. */
-  | 'EXTERNALLY_BLOCKED';
+  | 'EXTERNALLY_BLOCKED'
+  /**
+   * Not an activation gate in ANY profile, including PRODUCTION, and still a production blocker.
+   * The tenant identity plane persists no MFA assurance, so `security.privileged-mfa-policy` gated
+   * every switch-on on an attestation about a capability that does not exist. It is now a
+   * certification requirement: the tenant can be activated without it and cannot be called
+   * production-ready without it.
+   */
+  | 'CERTIFICATION_ONLY';
 
 /** The console screen that owns the fix. Mirrors `ActivationRemediationSurfaces`. */
 export type ActivationRemediationSurface =
@@ -490,6 +498,12 @@ export interface TenantActivationDecision {
   productionBlockingControls: string[];
   deferredControls: string[];
   externallyBlockedControls: string[];
+  /**
+   * Controls that do not gate activation in any profile but do block certification. Overlaps
+   * `productionBlockingControls` on purpose: "does not stop switch-on" and "stops certification"
+   * are different answers and the panel needs both.
+   */
+  certificationOnlyControls: string[];
   productionReadiness: ProductionReadinessCertification;
 }
 

@@ -290,7 +290,9 @@ test.describe.serial('visible Google Chrome Platform Admin certification', () =>
 
     const progress = page.getByRole('dialog', { name: new RegExp(`Provisioning ${journeyTenant.name}`) });
     await expect(progress.getByText(/Every step committed/)).toBeVisible({ timeout: 45_000 });
-    await expect(progress.getByText('8 of 8 steps')).toBeVisible();
+    // Nine since the data-boundary step landed: the tenant's PostgreSQL scope is registered and
+    // verified from the platform manifest instead of being typed into a form afterwards.
+    await expect(progress.getByText('9 of 9 steps')).toBeVisible();
     await progress.getByRole('button', { name: 'Close' }).click();
 
     await fillVisible(page.getByLabel('Search tenants'), journeyTenant.name);

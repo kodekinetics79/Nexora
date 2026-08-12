@@ -2,6 +2,7 @@ using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.MultiTenancy;
 using ERP_RFQ_Automation.Notifications;
 using ERP_RFQ_Automation.Notifications.Providers;
+using ERP_RFQ_Automation.Platform.DataAssets;
 using ERP_RFQ_Automation.Platform.Models;
 using ERP_RFQ_Automation.Platform.Onboarding;
 using ERP_RFQ_Automation.Platform.Provisioning;
@@ -10,6 +11,7 @@ using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -37,8 +39,25 @@ public sealed class ProvisioningHarness : IDisposable
     private readonly SqliteConnection _connection;
     private readonly ServiceProvider _services;
 
-    public ProvisioningHarness()
+    /// <summary>
+    /// The deployment configuration this harness was built with. Exposed because the activation
+    /// gate reads two things out of configuration now — the platform data-boundary manifest and
+    /// whether the tenant has a procurement connector — and a test that wants to assert on either
+    /// has to hand the policy service the SAME configuration the provisioning run used.
+    /// </summary>
+    public IConfiguration Configuration { get; }
+
+    /// <param name="configuration">
+    /// Extra deployment settings, e.g. <c>Platform:DataBoundaries:*</c>. Null (the default) is a
+    /// deployment that has declared nothing, which is exactly the state every existing test was
+    /// written against and must keep observing.
+    /// </param>
+    public ProvisioningHarness(IReadOnlyDictionary<string, string?>? configuration = null)
     {
+        Configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(configuration ?? new Dictionary<string, string?>())
+            .Build();
+
         _connection = new SqliteConnection("Data Source=:memory:");
         _connection.Open();
 
@@ -83,6 +102,16 @@ public sealed class ProvisioningHarness : IDisposable
         services.AddScoped<IPlatformAuditService, PlatformAuditService>();
         services.AddScoped<IProvisioningStepReconciler, ProvisioningStepReconciler>();
         services.AddScoped<IProvisioningLeaseRecovery, ProvisioningLeaseRecovery>();
+
+        // The data-boundary step, wired exactly as AddTenantDataAssetRegistry wires it. Registered
+        // unconditionally rather than only when a manifest is supplied: the no-manifest path — the
+        // step running and correctly registering nothing — is a behaviour worth exercising on every
+        // existing test rather than one only a dedicated test ever sees.
+        services.AddSingleton<IConfiguration>(Configuration);
+        services.AddScoped<TenantDataAssetRegistryService>();
+        services.AddSingleton<IPlatformDataBoundaryManifest, PlatformDataBoundaryManifest>();
+        services.AddScoped<ITenantPostgreSqlScopeProbe, TenantPostgreSqlScopeProbe>();
+        services.AddScoped<IPlatformDataBoundaryProvisioner, PlatformDataBoundaryProvisioner>();
 
         services.AddSingleton<ITenantProvisioningRunner, TenantProvisioningRunner>();
 
@@ -145,7 +174,8 @@ public sealed class ProvisioningHarness : IDisposable
     }
 
     public static ProvisionTenantRequest Request(
-        string slug, string email, long planId, string? activation = null, string? password = null)
+        string slug, string email, long planId, string? activation = null, string? password = null,
+        string? dataRegion = null)
         => new()
         {
             Name = $"Tenant {slug}",
@@ -153,6 +183,9 @@ public sealed class ProvisioningHarness : IDisposable
             PlanId = planId,
             BaseCurrencyCode = "USD",
             CountryCode = "SA",
+            // Null by default, matching every existing fixture: a tenant with no contractual data
+            // region is exactly the tenant data.residency-isolation is supposed to refuse.
+            DataRegion = dataRegion,
             AdminEmail = email,
             AdminFirstName = "Ada",
             AdminLastName = "Lovelace",

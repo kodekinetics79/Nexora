@@ -39,6 +39,28 @@ public static class ActivationControlDispositions
     /// Still a production blocker; still fatal to certification.
     /// </summary>
     public const string ExternallyBlocked = "EXTERNALLY_BLOCKED";
+
+    /// <summary>
+    /// The control fails and is NOT an activation gate in any profile, including PRODUCTION. It is
+    /// a production-readiness certification requirement, and it blocks certification absolutely.
+    ///
+    /// <para><b>Why this is not a weakening.</b> A gate must assert something the system can be
+    /// held to. <c>security.privileged-mfa-policy</c> could not: the code says in its own comment
+    /// that the tenant identity plane persists NO MFA assurance and must not infer it from a
+    /// password or from platform-operator MFA — so the control gated every activation on an
+    /// attestation about a capability that does not exist. The only way past it was for an Owner to
+    /// attest, on an MFA-bound session, to something no system could confirm, on every tenant,
+    /// forever. That is not a control; it is a signature collected as a toll.</para>
+    ///
+    /// <para><b>Where it went.</b> Nowhere it was not already. <c>DeploymentPrerequisiteCatalog</c>
+    /// has always carried <c>identity.enterprise-sso-scim</c> pointing at this control, and
+    /// production-readiness certification has always read it. This disposition removes the
+    /// activation gate and keeps everything else: <c>BlocksProduction</c> stays true, the
+    /// prerequisite stays unmet, <c>Certifiable</c> stays false, the panel still shows the control,
+    /// and the Owner+MFA evidence endpoint that clears it is untouched. A tenant can be switched on
+    /// without it; a tenant cannot be called production-ready without it.</para>
+    /// </summary>
+    public const string CertificationOnly = "CERTIFICATION_ONLY";
 }
 
 /// <summary>
