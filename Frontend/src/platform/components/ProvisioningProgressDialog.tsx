@@ -294,10 +294,29 @@ export default function ProvisioningProgressDialog({ executionId, submission, on
                 </Alert>
               )}
 
+              {/*
+                THIS BANNER USED TO SAY "Workspace ready … is active and {admin} can sign in."
+                Both clauses were false, and between them they cost three days on the first real
+                tenant. The runner sets Status = Provisioning explicitly
+                (TenantProvisioningRunner.cs), and a tenant in Provisioning is refused access by
+                design — ITenantAccessService.IsAccessDenied lists it first. On the DEFAULT invite
+                path the founding admin row is written IsActive = false and stays that way until
+                the invitee redeems, so "can sign in" was false a second time over.
+
+                An operator who reads "ready" stops here. There is no reason to go looking for an
+                activation screen you have just been told you do not need — which is why the real
+                blockers were not seen for days, on a tab nobody had opened.
+              */}
               {execution.state === 'Succeeded' && (
-                <Alert severity="success" sx={{ borderRadius: 2 }}>
-                  <AlertTitle sx={{ fontWeight: 800 }}>Workspace ready</AlertTitle>
-                  Every step committed. {execution.name} is active and {execution.adminEmail} can sign in.
+                <Alert severity="info" sx={{ borderRadius: 2 }}>
+                  <AlertTitle sx={{ fontWeight: 800 }}>Provisioned — not yet active</AlertTitle>
+                  Every step committed, and {execution.name} now exists. It is in{' '}
+                  <strong>Provisioning</strong>, which denies tenant access by design, and it stays there
+                  until an Owner activates it.
+                  {submission?.generatedPassword
+                    ? ` ${execution.adminEmail} has a password but cannot sign in until the tenant is active.`
+                    : ` ${execution.adminEmail} has been invited and must redeem the link before they can sign in — that is one of the activation controls.`}
+                  {' '}Open the tenant's <strong>Activation</strong> tab to see what is still outstanding.
                 </Alert>
               )}
 
