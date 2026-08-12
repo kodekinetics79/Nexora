@@ -33,6 +33,9 @@ const activationBlocked: TenantActivationDecision = {
     code: 'security.privileged-mfa-policy', satisfied: false,
     detail: 'Owner-approved privileged MFA evidence is required.', evidenceReferences: [],
     disposition: 'BLOCKING', blocksProduction: true, deferralKey: null, productionRequirement: null,
+    // This tab does not render the activation panel; the field is here because the contract
+    // requires it, not because anything on this screen reads it.
+    remediation: null,
   }],
   // A PRODUCTION tenant: nothing is deferrable, so blocking and production-blocking agree.
   deploymentProfile: 'PRODUCTION',

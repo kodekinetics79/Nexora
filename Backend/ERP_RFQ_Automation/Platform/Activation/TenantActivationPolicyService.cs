@@ -168,6 +168,13 @@ public sealed class TenantActivationPolicyService(
                     Disposition = ActivationControlDispositions.Satisfied, BlocksProduction = false
                 };
 
+            // Where the operator goes to fix it, for the controls that a person can fix. Attached
+            // only to a FAILING control: a Resolve button beside a control that already passes is
+            // an invitation to edit a customer's record for no reason. Null here also covers the
+            // four controls that have no resolver by design — see the catalogue, which records the
+            // reason for each rather than leaving the absence to be read as an oversight.
+            var remediation = ActivationControlRemediationCatalog.ForControl(control.Code);
+
             var prerequisite = DeploymentPrerequisiteCatalog.ForControl(control.Code);
 
             // BLOCKING for a PRODUCTION tenant, always — deferralPermitted is false there and
@@ -180,7 +187,8 @@ public sealed class TenantActivationPolicyService(
                 {
                     Disposition = ActivationControlDispositions.Blocking,
                     BlocksProduction = true,
-                    ProductionRequirement = prerequisite?.ProductionRequirement
+                    ProductionRequirement = prerequisite?.ProductionRequirement,
+                    Remediation = remediation
                 };
 
             return control with
@@ -191,7 +199,11 @@ public sealed class TenantActivationPolicyService(
                 // certification impossible.
                 BlocksProduction = true,
                 DeferralKey = prerequisite.Key,
-                ProductionRequirement = prerequisite.ProductionRequirement
+                ProductionRequirement = prerequisite.ProductionRequirement,
+                // Carried on a deferred control too. A deferral says the prerequisite is absent
+                // today, not that it stopped being worth fixing — and the operator who eventually
+                // fixes it needs the same address as the one who could not.
+                Remediation = remediation
             };
         }).ToList();
 

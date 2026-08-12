@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Alert, AlertTitle, Box, Button, Dialog, DialogActions, DialogContent, DialogTitle,
@@ -14,13 +15,62 @@ import { platformApi } from '../../api/client';
 import { platformErrorMessage } from '../../api/apiError';
 import { platformKeys } from '../../api/queryKeys';
 import { usePlatformPermissions } from '../../auth/usePlatformPermissions';
+import { REQUIRED_ROLE_COPY } from '../../auth/permissions';
 import type {
+  ActivationControlDecision, ActivationControlDisposition, ActivationControlRemediation,
+  ActivationRemediationAuthority, ActivationRemediationSurface,
   RecordActivationControlEvidenceInput, Tenant, TenantDeploymentProfile,
 } from '../../types';
 import { TENANT_DEPLOYMENT_PROFILES } from '../../types';
 import { isAbsoluteHttpUrl, isActivationEvidenceValid, isSha256 } from './dataGovernanceValidation';
+import ActivationResolverDialog, {
+  isResolvableInline, type InlineResolverAction,
+} from './ActivationResolvers';
 
 const EVIDENCE_CONTROLS = new Set(['security.privileged-mfa-policy', 'integrations.mandatory']);
+
+/**
+ * The chip used to render `satisfied ? 'Pass' : 'Block'`, which is a different question from the
+ * one the operator is asking. Under an approved DEMO profile the four deferrable controls are
+ * unsatisfied and NOT blocking — the server says so in `disposition` — yet every one of them
+ * showed a red "Block" indistinguishable from the ten that really do stop the activation. An
+ * operator reading fourteen red rows, four of which are noise, has no way to tell which four.
+ *
+ * So the chip renders the disposition the server actually returned. `satisfied` is still the
+ * strict answer and is still what the production-blocker list is built from; this is what the
+ * failure MEANS on this profile.
+ */
+const DISPOSITION_COPY: Record<ActivationControlDisposition, { label: string; tone: 'success' | 'error' | 'warning' }> = {
+  SATISFIED: { label: 'Pass', tone: 'success' },
+  BLOCKING: { label: 'Blocking', tone: 'error' },
+  DEFERRED: { label: 'Deferred', tone: 'warning' },
+  EXTERNALLY_BLOCKED: { label: 'Externally blocked', tone: 'warning' },
+};
+
+/**
+ * Who the operator would have to be, per authority the server will actually apply.
+ *
+ * Not `REQUIRED_ROLE_COPY.owner`: that sentence was written for tenant deletion and says the
+ * action is irreversible. Registering a data boundary is versioned, audited and correctable, and
+ * telling an operator it is irreversible is how they learn that the tooltip is boilerplate — the
+ * next one they dismiss is the one that mattered.
+ */
+const AUTHORITY_COPY: Record<ActivationRemediationAuthority, string> = {
+  Owner: 'Owner only. This control is satisfied from a screen that records a governed claim about '
+    + 'where a customer\'s data lives, which support may operate around and may not restate.',
+  Billing: REQUIRED_ROLE_COPY.billing,
+  TenantAdmin: REQUIRED_ROLE_COPY.tenantAdmin,
+  OwnerMfa: 'Owner only, and the server additionally requires an MFA-bound session: this records an '
+    + 'attestation that an auditor will read as the platform\'s own word.',
+};
+
+/** Where each surface lives in the console. Tenant surfaces are tabs on this page. */
+const SURFACE_TAB: Record<Exclude<ActivationRemediationSurface, 'platform.plans'>, string> = {
+  'tenant.activation': 'activation',
+  'tenant.profile-access': 'profile-access',
+  'tenant.commercial': 'commercial',
+  'tenant.data-storage': 'data-storage',
+};
 
 /**
  * The server refuses a profile change off PRODUCTION with a reason shorter than this, and says so
@@ -62,9 +112,12 @@ const newEvidence = (controlCode: string): EvidenceDraft => ({
 
 export default function ActivationPolicyPanel({ tenant }: { tenant: Tenant }) {
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const { enqueueSnackbar } = useSnackbar();
-  const { isOwner: canChangeProfile } = usePlatformPermissions();
+  const permissions = usePlatformPermissions();
+  const canChangeProfile = permissions.isOwner;
   const [evidence, setEvidence] = useState<EvidenceDraft | null>(null);
+  const [resolver, setResolver] = useState<InlineResolverAction | null>(null);
   const [confirmActivation, setConfirmActivation] = useState(false);
   const [profileDraft, setProfileDraft] = useState<TenantDeploymentProfile | null>(null);
   const [profileReason, setProfileReason] = useState('');
@@ -124,6 +177,41 @@ export default function ActivationPolicyPanel({ tenant }: { tenant: Tenant }) {
   const decision = decisionQuery.data;
   const evidenceValid = Boolean(evidence && isActivationEvidenceValid(evidence));
   const canActivate = tenant.status === 'provisioning' && decision.ready;
+
+  /**
+   * Whether this operator can take the remedy, decided by the same policy the server will apply.
+   * OwnerMfa collapses to Owner here: the session's MFA binding is proven at request time by the
+   * server, so treating an Owner as unable would hide a control they very likely can use — and
+   * `RoleGate` disables rather than hides, so the operator who cannot is still told who can.
+   */
+  const authorityAllows = (authority: ActivationRemediationAuthority): boolean => {
+    if (authority === 'Billing') return permissions.canAdministerBilling;
+    if (authority === 'TenantAdmin') return permissions.canAdministerTenants;
+    return permissions.isOwner;
+  };
+
+  /**
+   * Take the remedy where it lives. Four of them are dialogs over the same endpoints the owning
+   * tab calls; the rest open that tab, because assigning a plan or repricing the plan catalogue
+   * moves money for tenants other than this one and belongs where that blast radius is visible.
+   */
+  const resolve = (control: ActivationControlDecision, remediation: ActivationControlRemediation) => {
+    if (remediation.action === 'tenant.activation-evidence') {
+      setEvidence(newEvidence(control.code));
+      return;
+    }
+    if (isResolvableInline(remediation.action)) {
+      setResolver(remediation.action);
+      return;
+    }
+    if (remediation.surface === 'platform.plans') {
+      navigate('/platform/plans');
+      return;
+    }
+    // The tab lives in the URL on this page already, so navigating to it is a link an operator
+    // can also paste into a ticket — which is what they do with it.
+    navigate(`/platform/tenants/${tenant.id}?tab=${SURFACE_TAB[remediation.surface]}`);
+  };
 
   const submitEvidence = () => {
     if (!evidence || !evidenceValid) return;
@@ -222,16 +310,77 @@ export default function ActivationPolicyPanel({ tenant }: { tenant: Tenant }) {
             <Box>
               <Stack direction="row" spacing={1} alignItems="center">
                 <Typography sx={{ fontWeight: 800 }}>{control.code}</Typography>
-                <SoftChip label={control.satisfied ? 'Pass' : 'Block'} tone={control.satisfied ? 'success' : 'error'} />
+                <SoftChip
+                  label={DISPOSITION_COPY[control.disposition].label}
+                  tone={DISPOSITION_COPY[control.disposition].tone}
+                />
               </Stack>
               <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>{control.detail}</Typography>
+              {/* What production needs, next to a control this profile is letting through. A
+                  deferral is an activation on this profile and nothing else. */}
+              {control.productionRequirement && control.disposition !== 'BLOCKING' && !control.satisfied && (
+                <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
+                  Production still requires: {control.productionRequirement}
+                </Typography>
+              )}
+              {control.remediation && (
+                <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
+                  {control.remediation.hint}
+                </Typography>
+              )}
+              {/*
+                No button, and the reason said out loud. These four are consequences of system
+                state or assertions that are not the operator's to make, and the platform
+                deliberately offers nothing that would satisfy them from here — a button that
+                cannot honestly change the fact would teach an operator that the other ten are
+                decorative too.
+              */}
+              {!control.satisfied && !control.remediation && (
+                <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
+                  No console action satisfies this control. It records a fact about the system or
+                  about the customer, and the platform will not offer a button that asserts one on
+                  their behalf.
+                  {control.code === 'admin.first-activated' && (
+                    <> The founding administrator has to redeem their invitation and sign in; the
+                    link is reissued or withdrawn on Profile &amp; access.</>
+                  )}
+                </Typography>
+              )}
               {control.evidenceReferences.length > 0 && (
                 <Typography variant="caption" sx={{ overflowWrap: 'anywhere' }}>
                   Evidence: {control.evidenceReferences.join(' · ')}
                 </Typography>
               )}
             </Box>
-            {EVIDENCE_CONTROLS.has(control.code) && (
+            {/*
+              The remedy, gated on the authority the SERVER will apply rather than on a guess.
+              Labelled with what it does rather than "Resolve": ten identical Resolve buttons down
+              one column is the same dead end as the bare control codes this replaced.
+              Deliberately absent on a satisfied control — there is nothing to fix, and an edit
+              button beside a passing control is an invitation to change a customer's record for
+              no reason.
+            */}
+            {control.remediation && !control.satisfied && (
+              <RoleGate
+                allowed={authorityAllows(control.remediation.requiredAuthority)}
+                requirement={AUTHORITY_COPY[control.remediation.requiredAuthority]}
+              >
+                {(disabled) => (
+                  <Button
+                    variant="outlined"
+                    disabled={disabled}
+                    sx={{ flexShrink: 0, alignSelf: { md: 'flex-start' } }}
+                    onClick={() => control.remediation && resolve(control, control.remediation)}
+                  >
+                    {control.remediation?.label}
+                  </Button>
+                )}
+              </RoleGate>
+            )}
+            {/* The evidence form stays reachable on a SATISFIED attestation control — an
+                attestation expires, and re-recording it before it does is the whole point — and
+                as the fallback when a server has not sent a remediation for it at all. */}
+            {EVIDENCE_CONTROLS.has(control.code) && (control.satisfied || !control.remediation) && (
               <Button variant="outlined" onClick={() => setEvidence(newEvidence(control.code))}>Record evidence</Button>
             )}
           </Stack>
@@ -328,5 +477,18 @@ export default function ActivationPolicyPanel({ tenant }: { tenant: Tenant }) {
         <Button variant="contained" disabled={!evidenceValid || evidenceMutation.isPending} onClick={submitEvidence}>Record immutable evidence</Button>
       </DialogActions>
     </Dialog>
+
+    {/*
+      The inline remedies. Each is the same HTTP call, under the same policy, audited under the
+      same action as the edit the owning tab makes — no new privileged endpoint exists for any of
+      them. `refresh` re-evaluates the policy afterwards so the operator sees the control turn on
+      the screen they fixed it from, rather than having to go back and look.
+    */}
+    <ActivationResolverDialog
+      tenant={tenant}
+      action={resolver}
+      onClose={() => setResolver(null)}
+      onResolved={refresh}
+    />
   </>;
 }
