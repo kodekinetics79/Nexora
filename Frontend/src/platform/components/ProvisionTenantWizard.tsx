@@ -59,6 +59,7 @@ import {
 } from './localeData';
 import { PASSWORD_MAX_LENGTH, passwordProblem, readPasswordStrength } from '../../utils/passwordPolicy';
 import {
+  BILLABLE_CURRENCY,
   draftFromRequestBody,
   emptyDraft,
   reviewAdvisories,
@@ -790,7 +791,9 @@ export default function ProvisionTenantWizard({ open, onClose, onSubmitted }: Pr
                       label="Base currency"
                       required
                       error={Boolean(errorFor('baseCurrencyCode'))}
-                      helperText={errorFor('baseCurrencyCode') ?? 'The currency the tenant quotes and reports in.'}
+                      helperText={errorFor('baseCurrencyCode')
+                        ?? `The currency the tenant quotes, reports and is invoiced in. v1 billing is `
+                          + `${BILLABLE_CURRENCY}-only, and this cannot be changed after provisioning.`}
                     />
                   )}
                 />
