@@ -75,9 +75,19 @@ public sealed class SourcingToolTests
         Assert.Equal(1, document.RootElement.GetProperty("lineCount").GetInt32());
         var line = Assert.Single(document.RootElement.GetProperty("lines").EnumerateArray());
         Assert.Equal(7001, line.GetProperty("rfqItemId").GetInt64());
-        Assert.Equal(SupplierId, line.GetProperty("bestSupplierId").GetInt64());
+
+        // The lineage this test is about: one line, one bid, from the seeded supplier.
         var bid = Assert.Single(line.GetProperty("bids").EnumerateArray());
+        Assert.Equal(SupplierId, bid.GetProperty("SupplierId").GetInt64());
         Assert.Equal(2m, bid.GetProperty("LandedUnitCost").GetDecimal());
+
+        // …and it is NOT crowned. A weighted score ranks offers against each other, and there is
+        // only one offer here: min-max normalisation over a set of one gave it the full weight of
+        // every criterion and named it "best" on a perfect score it was never compared for. It is
+        // reported, it is quoted, and a human may still award it — it simply is not ranked.
+        Assert.Equal(JsonValueKind.Null, line.GetProperty("bestSupplierId").ValueKind);
+        Assert.Contains("one comparable offer",
+            line.GetProperty("bestUnavailableReason").GetString()!, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -281,7 +291,11 @@ public sealed class SourcingToolTests
         bool includeQuote = false)
     {
         using var seed = db.ContextFor(null);
-        AgentSeed.Supplier(seed, SupplierId, Bu1, "Bolt Traders", "sales@bolts.example");
+        // Credit days captured, so this supplier is scorable against the default weight set (payment
+        // terms carries 10 of the 100). Without it the comparison tool correctly declines to rank —
+        // a weighted criterion with no value is never imputed and never scored as zero — which is
+        // its own test below rather than a precondition of every other one.
+        AgentSeed.Supplier(seed, SupplierId, Bu1, "Bolt Traders", "sales@bolts.example").CreditDays = 45;
         // The cap is denominated in the same USD the quotes below are, so these tests exercise
         // cap ARITHMETIC without also exercising conversion. The currency is now mandatory: a
         // policy with none cannot auto-execute at all (see AgentSpendCapCurrencyTests).

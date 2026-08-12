@@ -14,9 +14,11 @@ import {
   LocationOn as LocationIcon,
   Payments as PaymentIcon,
   Tag as TagIcon,
+  History as HistoryIcon,
 } from '@mui/icons-material';
-import supplierService from '../../api/services/supplierService';
+import supplierService, { supplierTierLabel } from '../../api/services/supplierService';
 import SupplierFormDialog from './SupplierFormDialog';
+import ChangeHistoryPanel from '../../components/common/ChangeHistoryPanel';
 import { useAuth } from '../../context/AuthContext';
 import { useSnackbar } from 'notistack';
 
@@ -216,6 +218,16 @@ const SupplierDetailPage: React.FC = () => {
 
             <Section title="Financial" icon={<PaymentIcon sx={{ fontSize: 16 }} />}>
               <InfoRow label="Currency" value={supplier.currencyName} />
+              {/* Tier sits here, with the commercial terms, and deliberately NOT beside the
+                  governance verdicts below. It says who you choose to buy from first; it does not
+                  say whether this supplier is approved, and it never blocks a dispatch. */}
+              <InfoRow label="Tier" value={supplierTierLabel(supplier.tier)} />
+              {/* Blank is not zero. An uncaptured credit term has to read as uncaptured, because
+                  payment terms can carry weight in the supplier comparison and a supplier with no
+                  number is not the same as one that demands payment on the day. */}
+              <InfoRow label="Credit days" value={supplier.creditDays === null || supplier.creditDays === undefined
+                ? <Typography component="span" sx={{ fontSize: '0.875rem', color: 'text.secondary' }}>Not captured</Typography>
+                : `${supplier.creditDays} days`} />
               <InfoRow label="Governance reviewed" value={supplier.governanceReviewedOn ? new Date(supplier.governanceReviewedOn).toLocaleString() : null} />
             </Section>
 
@@ -228,6 +240,20 @@ const SupplierDetailPage: React.FC = () => {
               <InfoRow label="Reviewed by" value={supplier.governanceReviewedBy} />
             </Section>
           </Box>
+        </Grid>
+
+        {/* FR-MDM-05 · the record's own before/after trail. Suppliers carried the endpoint and the
+            descriptor already; only Customers and Products ever showed it. Tier and credit days are
+            master-data fields a buyer acts on, so "who changed this, from what, and why" has to be
+            answerable on the screen that displays them. */}
+        <Grid size={{ xs: 12 }}>
+          <Section title="Change history" icon={<HistoryIcon sx={{ fontSize: 16 }} />}>
+            <ChangeHistoryPanel
+              entityType="Supplier"
+              entityId={Number(id)}
+              emptyMessage="No changes have been recorded for this supplier since audit capture began."
+            />
+          </Section>
         </Grid>
       </Grid>
 

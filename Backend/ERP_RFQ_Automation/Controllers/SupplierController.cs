@@ -155,6 +155,11 @@ namespace ERP_RFQ_Automation.Controllers
                     // counterparty. Format is already validated by the DTO attribute.
                     TaxRegistrationNumber = ERP_RFQ_Automation.Tax.TaxRegistrationNumbers
                         .Normalize(request.TaxRegistrationNumber),
+                    // Canonicalised for the same reason: "tier 1 partner" and "TIER_1_PARTNER" are
+                    // one classification, and the CHECK constraint only knows the canonical spelling.
+                    // The value itself is already validated by the DTO attribute.
+                    Tier = SupplierTierInput.Normalize(request.Tier),
+                    CreditDays = request.CreditDays,
                     Buid = businessUnitId,
                     IsActive = true,
                     CreatedBy = actor,
@@ -209,6 +214,10 @@ namespace ERP_RFQ_Automation.Controllers
                 existing.CurrencyId = request.CurrencyId;
                 existing.TaxRegistrationNumber = ERP_RFQ_Automation.Tax.TaxRegistrationNumbers
                     .Normalize(request.TaxRegistrationNumber);
+                // Tier is master data, not governance: changing it does not re-open the governance
+                // review below, and it enters no eligibility check.
+                existing.Tier = SupplierTierInput.Normalize(request.Tier);
+                existing.CreditDays = request.CreditDays;
                 // Activation is exclusively controlled by Supplier governance.
                 existing.ModifiedBy = GetAuthenticatedActor();
                 existing.ModifiedOn = DateTime.UtcNow;
@@ -299,6 +308,8 @@ namespace ERP_RFQ_Automation.Controllers
                 CurrencyId = supplier.CurrencyId,
                 CurrencyName = supplier.Currency != null ? supplier.Currency.CurrencyName : null,
                 TaxRegistrationNumber = supplier.TaxRegistrationNumber,
+                Tier = supplier.Tier,
+                CreditDays = supplier.CreditDays,
                 Buid = supplier.Buid,
                 BusinessUnitName = supplier.Bu != null ? supplier.Bu.BusinessUnitName : null,
                 IsActive = supplier.IsActive,
@@ -319,18 +330,36 @@ namespace ERP_RFQ_Automation.Controllers
             };
         }
 
+        /// <summary>
+        /// FR-QTM-01. The supplier list a sales engineer dispatches a Supplier RFQ from, optionally
+        /// narrowed to one tier and always ordered Tier 1 → Tier 2 → Tier 3 → unclassified.
+        ///
+        /// <para>The tier is validated through the one canonicaliser the request DTOs and the bulk
+        /// importer already share, so "tier 1 partner" and <c>TIER-1-PARTNER</c> filter the same way
+        /// the supplier form stores them, and an unknown tier is refused here rather than silently
+        /// returning an empty list that reads as "no suppliers".</para>
+        ///
+        /// <para>Ruling R-A: this is a view filter. Supplier RFQ eligibility is decided by the
+        /// governance/verification/compliance/risk/readiness gate and by nothing else — filtering the
+        /// list changes what is displayed, never who may be dispatched to.</para>
+        /// </summary>
         [HttpGet("search")]
         [RequireModulePermission("Suppliers", PermissionAction.View)]
         public async Task<ActionResult<List<SupplierSearchResultDTO>>> Search(
             [FromQuery] string? searchTerm,
-            [FromQuery] string? productCategory)
+            [FromQuery] string? productCategory,
+            [FromQuery] string? tier = null)
         {
+            if (!SupplierTierInput.TryCanonicalize(tier, "Tier", out var tierFilter, out var tierError))
+                return BadRequest(Problem(StatusCodes.Status400BadRequest, "Invalid supplier tier", tierError!));
+
             try
             {
                 if (!TryGetAuthenticatedTenant(out var businessUnitId))
                     return Forbid();
 
-                var suppliers = await _repository.SearchSuppliersAsync(searchTerm, productCategory, businessUnitId);
+                var suppliers = await _repository.SearchSuppliersAsync(
+                    searchTerm, productCategory, businessUnitId, tierFilter);
                 return Ok(suppliers);
             }
             catch (Exception)

@@ -78,6 +78,9 @@ public partial class ErpRfqAutomationContext
         modelBuilder.ConfigureBankReconciliation();
         modelBuilder.ConfigureOrderToCash();
         modelBuilder.ConfigureLeadIdentity();
+        // Gate 2 — supplier tier column and the per-tenant comparison weight set. Carries its own
+        // query filter in the partial, alongside the entity it protects.
+        ConfigureSupplierEvaluationModel(modelBuilder);
 
         // Commercial documents (non-nullable BusinessUnitId).
         modelBuilder.Entity<Lead>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);

@@ -32,7 +32,16 @@ import productService from '../../../api/services/productService';
 import rfqService from '../../../api/services/rfqService';
 import type { RfqCreatePayload, RfqResponseDTO } from '../../../api/services/rfqService';
 import customerService from '../../../api/services/customerService';
-import supplierService from '../../../api/services/supplierService';
+import supplierService, { supplierTierLabel } from '../../../api/services/supplierService';
+import {
+  DEFAULT_DISPATCH_TIERS,
+  DISPATCH_TIER_OPTIONS,
+  dispatchTierQueryHint,
+  filterSuppliersByTier,
+  suppliersHiddenByTier,
+  toggleDispatchTier,
+  type DispatchTier,
+} from '../../../utils/supplierTierFilter';
 import { useAuth } from '../../../context/AuthContext';
 import { presentableErrorMessage, toPresentableError } from '../../../utils/apiErrors';
 import { parseMoneyInput } from '../../../utils/currency';
@@ -757,7 +766,7 @@ Best regards`;
   );
 };
 
-const ItemDetailsDialog: React.FC<{
+export const ItemDetailsDialog: React.FC<{
   item: ProcessItem | null;
   open: boolean;
   onClose: () => void;
@@ -775,6 +784,12 @@ const ItemDetailsDialog: React.FC<{
   const [searchQuery, setSearchQuery] = useState('');
   const [suppliers, setSuppliers] = useState<any[]>([]);
   const [loadingSuppliers, setLoadingSuppliers] = useState(false);
+  /**
+   * FR-QTM-01. Which tiers the buyer is looking at right now. Tier 1, Tier 2 and the suppliers
+   * nobody has tiered yet start selected; Tier 3 is one visible button away and the row below the
+   * buttons says so. This shortens a list — it never decides who may be sent an RFQ.
+   */
+  const [selectedTiers, setSelectedTiers] = useState<DispatchTier[]>(DEFAULT_DISPATCH_TIERS);
 
   useEffect(() => {
     if (item && searchQuery === '') {
@@ -787,7 +802,8 @@ const ItemDetailsDialog: React.FC<{
     if (open && showSupplierSearch && item) {
       setLoadingSuppliers(true);
       if (searchTab === 0) {
-        supplierService.searchSuppliers(searchQuery, '', businessUnitId)
+        supplierService.searchSuppliers(searchQuery, '', businessUnitId,
+          dispatchTierQueryHint(selectedTiers))
           .then(res => {
             if (active) setSuppliers(res || []);
           })
@@ -811,7 +827,7 @@ const ItemDetailsDialog: React.FC<{
       }
     }
     return () => { active = false; };
-  }, [open, showSupplierSearch, searchTab, searchQuery, item]);
+  }, [open, showSupplierSearch, searchTab, searchQuery, item, selectedTiers]);
 
   useEffect(() => {
     if (open && item && !showSupplierSearch) {
@@ -836,6 +852,17 @@ const ItemDetailsDialog: React.FC<{
       setIsLoadingMatch(false);
     }
   };
+
+  // The tier only narrows suppliers held in our own master data. Internet results carry no tier
+  // set by anyone here, so the buttons do not apply to them and nothing is hidden on that tab.
+  const visibleSuppliers = searchTab === 0
+    ? filterSuppliersByTier(suppliers, selectedTiers)
+    : suppliers;
+  const hiddenByTier = searchTab === 0
+    ? suppliersHiddenByTier(suppliers, selectedTiers)
+    : 0;
+  const showEveryTier = () =>
+    setSelectedTiers(DISPATCH_TIER_OPTIONS.map((option) => option.value));
 
   if (!item) return null;
 
@@ -879,19 +906,73 @@ const ItemDetailsDialog: React.FC<{
                   }}
                 />
 
+                {/* FR-QTM-01. The tier a person set on the supplier record, used to shorten this
+                    list. Tier 3 is where spot suppliers sit — the people a trader calls for an
+                    obsolete or single-source part — so it is always one click from here and the
+                    line underneath says what is currently being left out. Nothing on this row
+                    stops a supplier being sent an RFQ. */}
+                {searchTab === 0 && (
+                  <Box sx={{ mt: 2 }}>
+                    <Box sx={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 0.75 }}>
+                      <Typography variant="caption" sx={{ fontWeight: 800, color: '#555', mr: 0.5 }}>
+                        Supplier tier
+                      </Typography>
+                      {DISPATCH_TIER_OPTIONS.map((option) => {
+                        const included = selectedTiers.includes(option.value);
+                        return (
+                          <Chip
+                            key={option.value}
+                            size="small"
+                            label={option.label}
+                            aria-pressed={included}
+                            onClick={() =>
+                              setSelectedTiers((current) => toggleDispatchTier(current, option.value))
+                            }
+                            color={included ? 'primary' : 'default'}
+                            variant={included ? 'filled' : 'outlined'}
+                            sx={{ fontWeight: 700, fontSize: '0.7rem', borderRadius: 1 }}
+                          />
+                        );
+                      })}
+                    </Box>
+                    <Typography variant="caption" sx={{ display: 'block', mt: 0.75, color: '#888' }}>
+                      {selectedTiers.length === 0
+                        ? 'Showing every supplier — no tier is being left out.'
+                        : `Showing ${DISPATCH_TIER_OPTIONS.filter((option) => selectedTiers.includes(option.value)).map((option) => option.label).join(', ')}. Turn on a tier to include it — a supplier's tier never stops you sending them an RFQ.`}
+                    </Typography>
+                    {hiddenByTier > 0 && (
+                      <Alert
+                        severity="info"
+                        sx={{ mt: 1, py: 0, fontSize: '0.75rem' }}
+                        action={
+                          <Button size="small" onClick={showEveryTier} sx={{ textTransform: 'none', fontWeight: 800 }}>
+                            Show every tier
+                          </Button>
+                        }
+                      >
+                        {hiddenByTier === 1
+                          ? '1 supplier matches this search but is in a tier you have turned off.'
+                          : `${hiddenByTier} suppliers match this search but are in tiers you have turned off.`}
+                      </Alert>
+                    )}
+                  </Box>
+                )}
+
                 {loadingSuppliers ? (
                   <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
                     <CircularProgress size={24} />
                   </Box>
-                ) : suppliers.length === 0 ? (
+                ) : visibleSuppliers.length === 0 ? (
                   <Typography variant="body2" sx={{ color: '#888', py: 3, textAlign: 'center' }}>
-                    {searchTab === 0
-                      ? 'No results found in internal database.'
-                      : 'No results found on the internet.'}
+                    {searchTab !== 0
+                      ? 'No results found on the internet.'
+                      : hiddenByTier > 0
+                        ? 'Every supplier matching this search is in a tier you have turned off.'
+                        : 'No results found in internal database.'}
                   </Typography>
                 ) : (
                   <List sx={{ mt: 2 }}>
-                    {suppliers.map((s, idx) => (
+                    {visibleSuppliers.map((s, idx) => (
                       <ListItem
                         key={s.id || idx}
                         sx={{ border: '1px solid #f0f0f0', borderRadius: 2, mb: 1, p: 2, alignItems: 'flex-start' }}
@@ -917,9 +998,15 @@ const ItemDetailsDialog: React.FC<{
                           secondary={
                             <Box sx={{ mt: 0.5 }}>
                               <Typography variant="caption" sx={{ display: 'block', color: '#888', fontWeight: 600 }}>{s.contactEmail || s.email || 'No email'}</Typography>
-                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 0.5 }}>
+                              <Box sx={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 1, mt: 0.5 }}>
                                 <Typography variant="caption" sx={{ color: '#888' }}>{s.cityName || s.city || 'No Location'}</Typography>
                                 <Chip label={searchTab === 0 ? "Internal DB" : "External Source"} size="small" sx={{ height: 16, fontSize: '0.5rem', fontWeight: 900, borderRadius: 1, bgcolor: searchTab === 0 ? '#ede7f6' : '#e3f2fd', color: searchTab === 0 ? '#512da8' : '#1976d2' }} />
+                                {/* The tier a person set, said in full. "Not classified" is a real
+                                    answer here and reads as one — it is not Tier 3 and must never
+                                    be shown as one. */}
+                                {searchTab === 0 && (
+                                  <Chip label={supplierTierLabel(s.tier)} size="small" variant="outlined" sx={{ height: 16, fontSize: '0.5rem', fontWeight: 900, borderRadius: 1 }} />
+                                )}
                               </Box>
                             </Box>
                           }

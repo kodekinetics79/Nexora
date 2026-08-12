@@ -1,3 +1,5 @@
+using ERP_RFQ_Automation.SupplierEvaluation;
+
 namespace ERP_RFQ_Automation.Procurement;
 
 public interface IProcurementApplicationService
@@ -484,7 +486,42 @@ public sealed record QuoteComparisonLine(
     // recorded is perfectly awardable — it is just probably underpriced, and the buyer is the only
     // one who can say. Defaulted so a caller that constructs a line without warnings gets an empty
     // list rather than a null to dereference.
-    IReadOnlyCollection<string>? CostWarnings = null);
+    IReadOnlyCollection<string>? CostWarnings = null,
+
+    // FR-QTM-03. The tenant's weighted score out of SupplierScoringWeights.MaximumScore, or no
+    // score and the reason there is none — never a zero, because a zero is indistinguishable from
+    // "worst offer in the set" and that confusion is how a missing value becomes a wrong award. An
+    // offer with no score stays exactly as awardable as it was: the score ranks and explains, the
+    // human awards, and Eligible/Blockers alone decide what may be awarded.
+    double? WeightedScore = null,
+    // Per-criterion raw value, weight and points earned. Rendered in the row, not behind a hover:
+    // a recommendation whose arithmetic the operator cannot check is a black box.
+    IReadOnlyCollection<SupplierScoreContribution>? ScoreBreakdown = null,
+    string? ScoreUnavailableReason = null,
+
+    // Facts this line already had in hand and dropped. Every one of them comes from the Supplier or
+    // the canonical SupplierQuoteRevision that ToComparisonLine is already given — no extra query,
+    // no extra join. Without them the comparison table cannot name the supplier it is recommending,
+    // and the buyer cannot see that the cheapest row is an alternate part from a different origin.
+    string? SupplierName = null,
+    // Master data, not governance. Tier annotates and orders; it never gates — award eligibility
+    // stays entirely with Blockers/Eligible.
+    string? SupplierTier = null,
+    string? Manufacturer = null,
+    string? PartNumber = null,
+    string? SupplierPartNumber = null,
+    bool IsAlternate = false,
+    string? CountryOfOrigin = null,
+    string? Warranty = null,
+    // The supplier's master-data terms and their numeric companion — the pair the payment-terms
+    // criterion is scored from, shown together so the points earned can be checked against the
+    // number they were computed from.
+    string? PaymentTerms = null,
+    int? CreditDays = null,
+    // What this quote itself said about payment, which is not always what the supplier record says.
+    // Kept separate rather than merged into PaymentTerms: a row that silently mixed two sources
+    // would show a figure the score was not computed from.
+    string? QuotedPaymentTerms = null);
 
 public sealed class ProcurementValidationException : InvalidOperationException
 {

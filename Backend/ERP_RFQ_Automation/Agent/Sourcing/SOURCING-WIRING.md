@@ -13,16 +13,20 @@ were modified except the Agent-owned `RecommendAwardTool` (refactored to share s
 | `send_rfq_to_suppliers` | ✅ | Dispatch an RFQ to many suppliers at once; records a tracked `SupplierSolicitation` (Sent) per supplier and emails each via `INotificationService.SendRfqToSupplierAsync`. Returns a per-recipient summary. |
 | `list_solicitations` | — | Read: who an RFQ was solicited to and each solicitation's status. |
 | `capture_supplier_quote` | ✅ | Persist a supplier's returned quote as `SupplierQuotedItem` rows and mark the matching solicitation `Responded`. Lets a demo close the loop without inbound email parsing. |
-| `compare_supplier_quotes` | — | Read: per-line comparison matrix across suppliers with a shared multi-criteria score (price 50% / lead time 25% / success rate 25%); best per line + overall recommendation. |
+| `compare_supplier_quotes` | — | Read: per-line comparison matrix across suppliers with a shared multi-criteria score computed from the tenant's `SupplierComparisonWeights` (price / lead time / warranty / payment terms); best per line + overall recommendation. |
 | `award_rfq` | ✅ | Record the award decision as `SourcingAward` rows. Carries the award total for the value cap. |
 
 `dispatch_rfq_to_supplier` (single-supplier) is **kept** — `send_rfq_to_suppliers` is the
 multi-supplier, tracked superset. Both remain registered.
 
-Shared scoring was factored out of `RecommendAwardTool` into
-`Agent/Sourcing/SupplierScoring.cs` (`IScoreCandidate` + `SupplierScoring.ScoreInPlace`).
-`RecommendAwardTool` and `CompareSupplierQuotesTool` both consume it — one formula, no
-duplication.
+Shared scoring now lives in `SupplierEvaluation/WeightedSupplierScoring.cs`
+(`IWeightedScoreCandidate` + `WeightedSupplierScoring.Score`), outside this BRD-excluded
+namespace, with the weights read per tenant from `SupplierComparisonWeights`.
+`RecommendAwardTool`, `CompareSupplierQuotesTool` and the authoritative
+`ProcurementApplicationService.CompareQuotesAsync` all consume it — one formula and one
+recommendation, no duplication. The former `Agent/Sourcing/SupplierScoring.cs` (fixed weights
+price 0.5 / lead time 0.25 / success rate 0.25) is deleted; success rate is no longer scored,
+because it is an operator-typed column rather than a measured outcome.
 
 ## New entities + migration
 

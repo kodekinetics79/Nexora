@@ -12,7 +12,11 @@ namespace ERP_RFQ_Automation.Interfaces
         Task AddAsync(Supplier supplier);
         Task UpdateAsync(Supplier supplier, long businessUnitId);
         Task DeleteAsync(long id, long businessUnitId);
-        Task<List<SupplierSearchResultDTO>> SearchSuppliersAsync(string? searchTerm, string? productCategory, long businessUnitId);
+        /// <summary>
+        /// <paramref name="tier"/> is an optional, already-canonicalised view filter (FR-QTM-01).
+        /// It narrows and orders the list; it never gates who may be dispatched to (ruling R-A).
+        /// </summary>
+        Task<List<SupplierSearchResultDTO>> SearchSuppliersAsync(string? searchTerm, string? productCategory, long businessUnitId, string? tier = null);
     }
 
     public interface ISupplierNumberGenerator

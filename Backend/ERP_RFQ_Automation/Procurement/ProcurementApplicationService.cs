@@ -1206,17 +1206,47 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
                 suppliers.GetValueOrDefault(row.SupplierId),
                 canonicalRevisions.GetValueOrDefault(row.SourceSupplierQuoteRevisionId ?? 0),
                 rfqItem.RequiredDesiredDate))
-            .OrderBy(x => x.LandedUnitCost ?? decimal.MaxValue).ToArray();
+            .ToArray();
         var eligible = lines.Where(x => x.Eligible).ToArray();
         var currencies = eligible.Select(x => x.CurrencyId).Distinct().ToArray();
         if (currencies.Length > 1)
+            // Every line is blocked here, so ScoreComparisonLines never runs and no line would
+            // otherwise receive a reason at all — the operator would read an empty score cell on
+            // every row with nothing to explain it. The refusal itself is unchanged: this states it.
             lines = lines.Select(line => line.Eligible
-                ? line with { Blockers = line.Blockers.Append("currency not comparable without approved FX evidence").ToArray(), Eligible = false }
-                : line).ToArray();
+                ? line with
+                {
+                    Blockers = line.Blockers.Append("currency not comparable without approved FX evidence").ToArray(),
+                    Eligible = false,
+                    ScoreUnavailableReason = MixedCurrencyScoreUnavailableReason
+                }
+                : line with { ScoreUnavailableReason = UnawardableScoreUnavailableReason }).ToArray();
         eligible = lines.Where(x => x.Eligible).ToArray();
         currencies = eligible.Select(x => x.CurrencyId).Distinct().ToArray();
+        // FR-QTM-03. Scored AFTER the mixed-currency disqualification above and only over the
+        // offers that survived it, so a score can never paper over it: when the set spans
+        // currencies every line has just been blocked, nothing is scorable, and the comparison
+        // still refuses rather than ranking 900 EUR above 1,000 USD as bare decimals.
+        if (eligible.Length > 0 && currencies.Length == 1)
+            lines = ScoreComparisonLines(lines,
+                await new SupplierEvaluation.SupplierComparisonWeightsService(_db)
+                    .ResolveAsync(businessUnitId, ct));
+        // Display order: best weighted score first, offers that could not be scored below the ones
+        // that could — never mixed in among them as if they had lost on the numbers — and landed
+        // cost as it always was to separate the rest.
+        lines = lines
+            .OrderByDescending(x => x.WeightedScore.HasValue)
+            .ThenByDescending(x => x.WeightedScore ?? 0d)
+            .ThenBy(x => x.LandedUnitCost ?? decimal.MaxValue)
+            .ThenBy(x => x.SupplierQuotedItemId).ToArray();
+        // Coverage stays the FIRST tiebreak — it is not one of the four weighted criteria — and the
+        // weighted score decides between offers that cover equally. An offer with no score is not
+        // ranked ahead of one that has one, but it is still here, still eligible and still
+        // awardable: the score annotates, the human awards.
         var recommended = eligible.Length > 0 && currencies.Length == 1
-            ? eligible.OrderByDescending(x => Math.Min(x.Quantity, x.AvailableQuantity ?? 0m) >= remainingRequirement)
+            ? lines.Where(x => x.Eligible)
+                .OrderByDescending(x => Math.Min(x.Quantity, x.AvailableQuantity ?? 0m) >= remainingRequirement)
+                .ThenByDescending(x => x.WeightedScore.HasValue).ThenByDescending(x => x.WeightedScore ?? 0d)
                 .ThenBy(x => x.LandedUnitCost).ThenBy(x => x.LeadTimeDays)
                 .ThenBy(x => x.SupplierQuotedItemId).First().SupplierQuotedItemId
             : (long?)null;
@@ -2517,12 +2547,16 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         Supplier? supplier, SupplierQuotes.SupplierQuoteRevision? canonicalRevision, DateTime? requiredOn)
     {
         var blockers = new List<string>();
+        // The offer's own description of what is being quoted. Read once here and carried onto the
+        // comparison line: it was already in hand and dropped, so the buyer could not see that the
+        // cheapest row was an alternate part from a different origin.
+        var canonicalLine = canonicalRevision?.Lines
+            .FirstOrDefault(x => x.Id == row.SourceSupplierQuoteLineId);
         if (canonicalRevision is null || !HasCurrentCanonicalLineage(row, canonicalRevision))
             blockers.Add("canonical evidence missing or unresolved");
         else
         {
-            var canonicalLine = canonicalRevision.Lines.Single(x => x.Id == row.SourceSupplierQuoteLineId);
-            if (canonicalLine.IsAlternate &&
+            if (canonicalLine!.IsAlternate &&
                 !HasAcceptedAlternateAuthorization(canonicalRevision, canonicalLine.Id))
                 blockers.Add("alternate approval is unresolved");
         }
@@ -2545,7 +2579,88 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             blockers.Add("delivery date missed");
         return new QuoteComparisonLine(row.Id, row.SupplierId, row.Quantity, row.AvailableQuantity, row.UnitPrice ?? 0,
             row.LandedUnitCost, row.CurrencyId ?? 0, row.LeadTimeDays, row.ReliabilitySnapshot, row.ValidUntil, blockers,
-            blockers.Count == 0, CostCompletenessWarnings(row, canonicalRevision));
+            blockers.Count == 0, CostCompletenessWarnings(row, canonicalRevision),
+            // Scored later, by CompareQuotesAsync, once the whole candidate set is known: min-max
+            // normalisation has no meaning for one offer in isolation, and the award path builds a
+            // single line whose score would be a meaningless 100 out of 100.
+            SupplierName: supplier?.Name,
+            SupplierTier: supplier?.Tier,
+            Manufacturer: canonicalLine?.Manufacturer,
+            PartNumber: canonicalLine?.PartNumber,
+            SupplierPartNumber: canonicalLine?.SupplierPartNumber,
+            IsAlternate: canonicalLine?.IsAlternate ?? false,
+            CountryOfOrigin: canonicalLine?.OriginCountry,
+            Warranty: canonicalLine?.Warranty,
+            PaymentTerms: supplier?.PaymentTerms,
+            CreditDays: supplier?.CreditDays,
+            QuotedPaymentTerms: canonicalRevision?.PaymentTerms);
+    }
+
+    /// <summary>
+    /// FR-QTM-03. Annotates the comparison with the tenant's weighted score.
+    ///
+    /// <para>Only ELIGIBLE offers are scored, and scoring changes nothing about eligibility: an
+    /// offer that cannot be scored keeps its <c>Eligible</c> flag and its empty blocker list, and an
+    /// offer that scores badly is no less awardable for it. Ruling R-G — the score ranks and
+    /// explains, the human awards.</para>
+    ///
+    /// <para>Blocked offers are not scored at all. Ranking an offer that cannot be awarded would put
+    /// a number on a choice nobody can make, so they carry a plain reason instead and their blockers
+    /// say the rest.</para>
+    /// </summary>
+    /// <summary>
+    /// Why no line in a mixed-currency comparison carries a score. Ranking 900 EUR above 1,000 USD
+    /// as bare decimals is a wrong award wearing the authority of a recommendation, so the
+    /// comparison refuses — and says so, rather than leaving the cell blank.
+    /// </summary>
+    internal const string MixedCurrencyScoreUnavailableReason =
+        "Not scored — these offers are quoted in more than one currency, so they cannot be ranked "
+        + "against each other until an approved FX comparison converts them to one";
+
+    /// <summary>Why an offer that cannot be awarded as it stands carries no score.</summary>
+    internal const string UnawardableScoreUnavailableReason =
+        "Not scored — this offer cannot be awarded as it stands";
+
+    private static QuoteComparisonLine[] ScoreComparisonLines(
+        QuoteComparisonLine[] lines, SupplierEvaluation.SupplierScoringWeights weights)
+    {
+        var scorable = lines.Where(x => x.Eligible).ToArray();
+        if (scorable.Length == 0) return lines;
+        var results = SupplierEvaluation.WeightedSupplierScoring.Score(
+            scorable.Select(x => new ComparisonScoreCandidate(x)).ToArray(), weights);
+        var byQuotedItemId = scorable
+            .Select((line, index) => (line.SupplierQuotedItemId, Result: results[index]))
+            .ToDictionary(x => x.SupplierQuotedItemId, x => x.Result);
+        return lines.Select(line => byQuotedItemId.TryGetValue(line.SupplierQuotedItemId, out var result)
+            ? line with
+            {
+                WeightedScore = result.Score,
+                ScoreBreakdown = result.Contributions,
+                ScoreUnavailableReason = result.UnavailableReason
+            }
+            : line with { ScoreUnavailableReason = UnawardableScoreUnavailableReason })
+            .ToArray();
+    }
+
+    /// <summary>
+    /// Projects a comparison line onto the governed scorer. Price is the single landed-cost figure
+    /// consumed as ONE number — deliberately not decomposed into duty/freight/conformity sub-weights.
+    ///
+    /// <para>Warranty is quoted as free text and is therefore never a number here. That is why the
+    /// warranty weight defaults to 0: at any other weight every offer would correctly report that it
+    /// cannot be scored, because a missing criterion is never guessed and never scored as zero.</para>
+    ///
+    /// <para>The currency is declared so the scorer's fail-closed comparability gate is a real check
+    /// and not a formality, even though the caller has already refused a mixed-currency set.</para>
+    /// </summary>
+    private sealed record ComparisonScoreCandidate(QuoteComparisonLine Line)
+        : SupplierEvaluation.IWeightedScoreCandidate
+    {
+        public decimal? Price => Line.LandedUnitCost;
+        public double? LeadTimeDays => Line.LeadTimeDays;
+        public double? WarrantyMonths => null;
+        public double? CreditDays => Line.CreditDays;
+        public long? PriceCurrencyId => Line.CurrencyId;
     }
 
     /// <summary>

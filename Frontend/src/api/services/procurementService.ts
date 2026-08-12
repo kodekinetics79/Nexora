@@ -77,6 +77,31 @@ export interface SupplierOffer {
   incoterm?: string | null;
 }
 
+/**
+ * One weighted criterion's contribution to an offer's score, as the server computed it.
+ *
+ * Both halves are load-bearing. `rawValue` is the fact a buyer can check against the supplier's
+ * quote; `points` is what that fact was worth once the tenant's weights were applied. Showing only
+ * the points would be an unexplained score, and showing only the raw value would not add up to
+ * anything. `weight` is the ceiling for `points`, so the row can state "18 of 20" rather than a
+ * bare number whose scale nobody can see.
+ */
+export interface QuoteScoreCriterion {
+  /** PRICE | LEAD_TIME | WARRANTY | PAYMENT_TERMS. Decides the unit the raw value is shown in. */
+  criterion: string;
+  /** The criterion in plain words, exactly as the unavailability reason names it. */
+  label: string;
+  /** The offer's own value: landed cost, days, warranty months, credit days. Null when not captured. */
+  rawValue?: number | null;
+  /** 0-100. The tenant's configured weight for this criterion, and the ceiling for `pointsEarned`. */
+  weight: number;
+  /**
+   * Points out of `weight`, already rounded server-side so the contributions sum EXACTLY to the
+   * score beside them. Null only when the offer has no score at all — never 0 in that case.
+   */
+  pointsEarned?: number | null;
+}
+
 export interface QuoteComparisonLine {
   supplierQuotedItemId: number;
   supplierId: number;
@@ -94,6 +119,24 @@ export interface QuoteComparisonLine {
   // quote recording no import duty, for instance. Kept apart from blockers so a warning can never
   // be mistaken for a refusal, or a refusal softened into a warning.
   costWarnings?: string[] | null;
+  /**
+   * 0-100, or null when the offer could not be scored. Null is never rendered as zero: a missing
+   * criterion is an absence of information, not a bad offer, and the offer stays awardable.
+   */
+  weightedScore?: number | null;
+  /** Per-criterion contributions. Present whenever `weightedScore` is. */
+  scoreBreakdown?: QuoteScoreCriterion[] | null;
+  /** Why no score exists — "Cannot score — lead time missing". Present only when unscored. */
+  scoreUnavailableReason?: string | null;
+  /**
+   * The supplier's customer-set tier. Annotation only: tier never gates dispatch, never enters the
+   * weighted score, and is never derived from governance status.
+   */
+  supplierTier?: string | null;
+  warranty?: string | null;
+  paymentTerms?: string | null;
+  /** The numeric companion to the free-text payment terms. Null means NOT CONFIGURED, not zero. */
+  creditDays?: number | null;
 }
 
 export interface QuoteComparisonResult {

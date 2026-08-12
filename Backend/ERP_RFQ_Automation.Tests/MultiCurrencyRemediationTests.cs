@@ -2,13 +2,13 @@ using System.Text.Json;
 using ERP_RFQ_Automation.Agent;
 using ERP_RFQ_Automation.Agent.Guardrails;
 using ERP_RFQ_Automation.Agent.Models;
-using ERP_RFQ_Automation.Agent.Sourcing;
 using ERP_RFQ_Automation.Agent.Tools;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using ERP_RFQ_Automation.CommercialIntelligence.Sales;
 using ERP_RFQ_Automation.Fx;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Repositories;
+using ERP_RFQ_Automation.SupplierEvaluation;
 using ERP_RFQ_Automation.SupplierQuotes;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
@@ -164,8 +164,12 @@ public sealed class MultiCurrencyRemediationTests
             // the inversion the old scorer produced.
             seed.FxRates.Add(ApprovedRate(Eur, Aed, 4.30m));
             seed.FxRates.Add(ApprovedRate(Usd, Aed, 3.6725m));
-            AgentSeed.Supplier(seed, 9_501, Bu, "Euro Supplier");
-            AgentSeed.Supplier(seed, 9_502, Bu, "Dollar Supplier");
+            // Identical credit days on both: the payment-terms weight separates nothing here, so
+            // the ranking still turns on the converted price, which is what this test is about.
+            // They are set because the tenant weights payment terms, and an offer missing a
+            // weighted criterion is deliberately not scored at all rather than scored as zero.
+            AgentSeed.Supplier(seed, 9_501, Bu, "Euro Supplier").CreditDays = 30;
+            AgentSeed.Supplier(seed, 9_502, Bu, "Dollar Supplier").CreditDays = 30;
             AgentSeed.Rfq(seed, 9_600, Bu);
             Bid(seed, 9_601, 9_600, 9_501, Eur, quantity: 10, unitPrice: 100m, leadTime: 5);
             Bid(seed, 9_602, 9_600, 9_502, Usd, quantity: 10, unitPrice: 120m, leadTime: 5);
@@ -243,8 +247,8 @@ public sealed class MultiCurrencyRemediationTests
         await using (var seed = database.ContextFor(null))
         {
             SeedCurrencies(seed); // deliberately no FxRate rows at all
-            AgentSeed.Supplier(seed, 9_501, Bu, "Cheap Supplier");
-            AgentSeed.Supplier(seed, 9_502, Bu, "Dear Supplier");
+            AgentSeed.Supplier(seed, 9_501, Bu, "Cheap Supplier").CreditDays = 30;
+            AgentSeed.Supplier(seed, 9_502, Bu, "Dear Supplier").CreditDays = 30;
             AgentSeed.Rfq(seed, 9_600, Bu);
             Bid(seed, 9_601, 9_600, 9_501, Usd, quantity: 10, unitPrice: 100m, leadTime: 5);
             Bid(seed, 9_602, 9_600, 9_502, Usd, quantity: 10, unitPrice: 120m, leadTime: 5);
@@ -265,27 +269,28 @@ public sealed class MultiCurrencyRemediationTests
     [Fact]
     public void Shared_scorer_refuses_a_candidate_set_that_still_spans_currencies()
     {
-        var bids = new IScoreCandidate[]
+        var bids = new IWeightedScoreCandidate[]
         {
-            new StubCandidate { Price = 1_000m, LeadTime = 5, SuccessRate = 90, PriceCurrencyId = Eur },
-            new StubCandidate { Price = 1_200m, LeadTime = 5, SuccessRate = 90, PriceCurrencyId = Usd }
+            new StubCandidate { Price = 1_000m, LeadTimeDays = 5, CreditDays = 30, PriceCurrencyId = Eur },
+            new StubCandidate { Price = 1_200m, LeadTimeDays = 5, CreditDays = 30, PriceCurrencyId = Usd }
         };
 
-        var error = Assert.Throws<InvalidOperationException>(() => SupplierScoring.ScoreInPlace(bids));
+        var error = Assert.Throws<InvalidOperationException>(
+            () => WeightedSupplierScoring.Score(bids, SupplierScoringWeights.Defaults));
         Assert.Contains("span 2 currencies", error.Message, StringComparison.Ordinal);
-        Assert.All(bids, bid => Assert.Equal(0d, bid.Score)); // nothing was scored
     }
 
     [Fact]
     public void Shared_scorer_refuses_a_set_where_only_some_candidates_declare_a_currency()
     {
-        var bids = new IScoreCandidate[]
+        var bids = new IWeightedScoreCandidate[]
         {
-            new StubCandidate { Price = 1_000m, LeadTime = 5, SuccessRate = 90, PriceCurrencyId = Usd },
-            new StubCandidate { Price = 1_200m, LeadTime = 5, SuccessRate = 90, PriceCurrencyId = null }
+            new StubCandidate { Price = 1_000m, LeadTimeDays = 5, CreditDays = 30, PriceCurrencyId = Usd },
+            new StubCandidate { Price = 1_200m, LeadTimeDays = 5, CreditDays = 30, PriceCurrencyId = null }
         };
 
-        var error = Assert.Throws<InvalidOperationException>(() => SupplierScoring.ScoreInPlace(bids));
+        var error = Assert.Throws<InvalidOperationException>(
+            () => WeightedSupplierScoring.Score(bids, SupplierScoringWeights.Defaults));
         Assert.Contains("others carry none", error.Message, StringComparison.Ordinal);
     }
 
@@ -589,12 +594,12 @@ public sealed class MultiCurrencyRemediationTests
         IdempotencyKey = Guid.NewGuid().ToString("N")
     };
 
-    private sealed class StubCandidate : IScoreCandidate
+    private sealed class StubCandidate : IWeightedScoreCandidate
     {
-        public decimal Price { get; init; }
-        public double LeadTime { get; init; }
-        public double SuccessRate { get; init; }
-        public double Score { get; set; }
+        public decimal? Price { get; init; }
+        public double? LeadTimeDays { get; init; }
+        public double? WarrantyMonths { get; init; }
+        public double? CreditDays { get; init; }
         public long? PriceCurrencyId { get; init; }
     }
 

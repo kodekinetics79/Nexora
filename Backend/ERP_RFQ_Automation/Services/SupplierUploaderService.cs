@@ -1,9 +1,11 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using ERP_RFQ_Automation.DTOs.SupplierDTOs;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -32,6 +34,8 @@ namespace ERP_RFQ_Automation.Services
             // by column number and tenants keep filled-in copies of this template; a new field goes
             // on the end. Column 11 = Tax Registration Number (added with the input-VAT evidence
             // work — a supplier with none cannot have its input tax treated as recoverable).
+            // Columns 12-13 = Tier and Credit Days, the two master-data fields the supplier
+            // comparison reads.
             string[] headers = {
                 "Supplier Name*", "Contact Email", "Payment Terms",
                 "Address Line 1", "Address Line 2", "Postal Code",
@@ -39,7 +43,12 @@ namespace ERP_RFQ_Automation.Services
                 // The KSA format is stated in the header rather than demonstrated in the sample
                 // row: a plausible-looking VAT number in a shipped template is the kind of value
                 // that ends up copied into a real supplier record.
-                "Tax Registration Number (KSA VAT: 15 digits, first and last digit 3)"
+                "Tax Registration Number (KSA VAT: 15 digits, first and last digit 3)",
+                // The permitted spellings are stated here because the importer refuses anything
+                // else rather than guessing, and an operator should not have to discover the exact
+                // strings from a rejection message.
+                $"Tier ({SupplierTierInput.PermittedValues}; blank = not yet classified)",
+                "Credit Days (whole days, blank = not configured, 0 = cash on delivery)"
             };
 
             for (int i = 0; i < headers.Length; i++)
@@ -59,6 +68,11 @@ namespace ERP_RFQ_Automation.Services
             ws.Cells[2, 7].Value = 95;
             ws.Cells[2, 8].Value = 2;
             ws.Cells[2, 9].Value = "electronics, wholesale";
+            // The numeric companion to "Net 30" in column 3, shown together so the sample makes the
+            // point that the free text keeps the human wording and this column carries the number.
+            // The tier cell is left blank on purpose: blank is "not yet classified", and a tier is
+            // a commercial classification only the customer can make.
+            ws.Cells[2, 13].Value = 30;
 
             ws.Cells.AutoFitColumns();
             return await package.GetAsByteArrayAsync();
@@ -149,6 +163,26 @@ namespace ERP_RFQ_Automation.Services
                         continue;
                     }
 
+                    // Column 12, appended. Same fail-closed rule: an unrecognised tier is REJECTED,
+                    // not nulled. Nulling it would import the supplier as "not yet classified" and
+                    // report success, discarding the one value the operator filled the column in to
+                    // set — and nothing downstream could tell the two states apart afterwards.
+                    if (!SupplierTierInput.TryCanonicalize(
+                            ws.Cells[row, 12].Text, "Tier", out var tier, out var tierError))
+                    {
+                        rejectedRows.Add($"Row {row} ({name}): {tierError}");
+                        continue;
+                    }
+
+                    // Column 13. Rejected rather than nulled for the same reason: null means NOT
+                    // CONFIGURED, so a discarded "45" is indistinguishable from a column left empty.
+                    if (!TryReadCreditDays(
+                            ws.Cells[row, 13].Text, out var creditDays, out var creditDaysError))
+                    {
+                        rejectedRows.Add($"Row {row} ({name}): {creditDaysError}");
+                        continue;
+                    }
+
                     var supplier = new Supplier
                     {
                         DocId = "SU" + (nextNum++).ToString("D8"),
@@ -163,6 +197,8 @@ namespace ERP_RFQ_Automation.Services
                         Tags = ws.Cells[row, 9].Text?.Trim(),
                         Comments = ws.Cells[row, 10].Text?.Trim(),
                         TaxRegistrationNumber = taxRegistrationNumber,
+                        Tier = tier,
+                        CreditDays = creditDays,
                         ImageUrl = string.Empty, // Required in model
                         Buid = businessUnitId,
                         IsActive = true,
@@ -197,6 +233,36 @@ namespace ERP_RFQ_Automation.Services
             }
         }
 
+        /// <summary>
+        /// Reads the credit-days cell. Blank is valid and means NOT CONFIGURED. Excel hands back a
+        /// numeric cell's formatted text, so "30.00" is the same 30 days a user typed as "30";
+        /// a fractional or negative value is refused with the rule stated rather than truncated.
+        /// </summary>
+        private static bool TryReadCreditDays(string? value, out int? creditDays, out string? error)
+        {
+            creditDays = null;
+            error = null;
+            var text = value?.Trim();
+            if (string.IsNullOrEmpty(text)) return true;
+
+            if (!decimal.TryParse(text, NumberStyles.Number, CultureInfo.InvariantCulture, out var parsed)
+                || parsed != decimal.Truncate(parsed)
+                || parsed > int.MaxValue)
+            {
+                error = $"Credit days '{text}' is not a whole number of days. "
+                        + "Leave it blank if the supplier's credit period is not configured.";
+                return false;
+            }
+            if (parsed < 0)
+            {
+                error = $"Credit days '{text}' cannot be negative. Use 0 for a supplier paid on delivery.";
+                return false;
+            }
+
+            creditDays = (int)parsed;
+            return true;
+        }
+
         public async Task<byte[]> ExportSuppliersAsync(long businessUnitId)
         {
             ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
@@ -208,10 +274,12 @@ namespace ERP_RFQ_Automation.Services
             using var package = new ExcelPackage();
             var ws = package.Workbook.Worksheets.Add("Suppliers");
 
-            // Append-only, same as the import template: column 9 = Tax Registration Number.
+            // Append-only, same as the import template: column 9 = Tax Registration Number,
+            // columns 10-11 = Tier and Credit Days. A field the export omits is a field an operator
+            // cannot review outside the app, so this list tracks the import template.
             string[] headers = {
                 "ID", "Supplier Name", "Contact Email", "Payment Terms", "Address", "Success Rate (%)", "Status", "Created On",
-                "Tax Registration Number"
+                "Tax Registration Number", "Tier", "Credit Days"
             };
 
             for (int i = 0; i < headers.Length; i++)
@@ -235,6 +303,10 @@ namespace ERP_RFQ_Automation.Services
                 ws.Cells[row, 7].Value = (s.IsActive ?? true) ? "Active" : "Inactive";
                 ws.Cells[row, 8].Value = s.CreatedOn.ToString("yyyy-MM-dd HH:mm");
                 ws.Cells[row, 9].Value = s.TaxRegistrationNumber;
+                // The canonical tier, so an exported sheet can be corrected and re-imported without
+                // the operator having to re-derive the spelling the importer accepts.
+                ws.Cells[row, 10].Value = s.Tier;
+                ws.Cells[row, 11].Value = s.CreditDays;
                 row++;
             }
 

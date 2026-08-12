@@ -84,7 +84,15 @@ namespace ERP_RFQ_Automation.Repositories
             // Apply pagination
             query = query.OrderBy(x => x.Supplier.Name).ThenBy(x => x.Supplier.Id)
                 .Skip((pageNumber - 1) * pageSize).Take(pageSize);
-            // Project to SupplierResponseDTO
+            // Project to SupplierResponseDTO.
+            //
+            // THIS IS THE SECOND OF TWO MAPPING SITES. SupplierController.MapToResponse is the
+            // other, and it maps the same DTO from a loaded entity. A field added to only one of
+            // them is not a compile error and not a test failure — it is simply null on half the
+            // API. TaxRegistrationNumber was assigned in MapToResponse and never here, so it came
+            // back null on EVERY list response while the detail response carried it; the supplier
+            // grid could not show whether a counterparty's input tax was recoverable. Anything
+            // added below must be added there too, and the reverse.
             var suppliers = await query.Select(x => new SupplierResponseDTO
             {
                 Id = x.Supplier.Id,
@@ -106,6 +114,9 @@ namespace ERP_RFQ_Automation.Repositories
                 Comments = x.Supplier.Comments,
                 CurrencyId = x.Supplier.CurrencyId,
                 CurrencyName = x.CurrencyName,
+                TaxRegistrationNumber = x.Supplier.TaxRegistrationNumber,
+                Tier = x.Supplier.Tier,
+                CreditDays = x.Supplier.CreditDays,
                 Buid = x.Supplier.Buid,
                 BusinessUnitName = x.BusinessUnitName,
                 IsActive = x.Supplier.IsActive,
@@ -297,7 +308,21 @@ namespace ERP_RFQ_Automation.Repositories
                 "Supplier records preserve commercial lineage and cannot be deleted. Use the governed inactive decision instead.");
         }
 
-        public async Task<List<SupplierSearchResultDTO>> SearchSuppliersAsync(string? searchTerm, string? productCategory, long businessUnitId)
+        /// <summary>
+        /// FR-QTM-01, tier-targeted dispatch. The governance/verification/compliance/risk/readiness
+        /// predicate below is the ONLY gate on this list and is deliberately untouched: under ruling
+        /// R-A a tier annotates, orders and pre-selects, and never decides who may be dispatched to.
+        ///
+        /// <para><paramref name="tier"/> is optional. Supplied, it narrows the list a sales engineer
+        /// is looking at; omitted, every eligible supplier comes back including the unclassified
+        /// ones, which is every supplier that existed before this gate. The value arrives already
+        /// canonicalised by <c>SupplierTierInput</c> — the permitted set is never restated here.</para>
+        ///
+        /// <para>Tier orders the result ahead of the existing name ordering, so the closest
+        /// relationships surface first. Unclassified sorts last, because "not yet classified" is not
+        /// a claim about the relationship and must not be presented as one.</para>
+        /// </summary>
+        public async Task<List<SupplierSearchResultDTO>> SearchSuppliersAsync(string? searchTerm, string? productCategory, long businessUnitId, string? tier = null)
         {
             var query = _context.Suppliers
                 .AsNoTracking()
@@ -329,7 +354,18 @@ namespace ERP_RFQ_Automation.Repositories
                 query = query.Where(s => s.Tags != null && s.Tags.ToLower().Contains(productCategory.ToLower()));
             }
 
-            var suppliers = await query.OrderBy(s => s.Name).ThenBy(s => s.Id)
+            if (!string.IsNullOrWhiteSpace(tier))
+            {
+                // A view filter applied AFTER the eligibility predicate, never folded into it.
+                query = query.Where(s => s.Tier == tier);
+            }
+
+            var suppliers = await query
+                .OrderBy(s => s.Tier == SupplierTiers.Tier1Partner ? 0
+                    : s.Tier == SupplierTiers.Tier2Extended ? 1
+                    : s.Tier == SupplierTiers.Tier3OutOfNetwork ? 2
+                    : 3)
+                .ThenBy(s => s.Name).ThenBy(s => s.Id)
                 .Take(20)
                 .Select(s => new SupplierSearchResultDTO
                 {
@@ -343,6 +379,7 @@ namespace ERP_RFQ_Automation.Repositories
                     SuccessRate = s.SuccessRate,
                     AvgResponseTime = s.AvgResponseTime,
                     Tags = s.Tags,
+                    Tier = s.Tier,
                     GovernanceStatus = s.GovernanceStatus,
                     VerificationStatus = s.VerificationStatus,
                     ComplianceStatus = s.ComplianceStatus,

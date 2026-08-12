@@ -2,12 +2,17 @@ import React from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Alert, Box, Button, Chip, CircularProgress, Divider, FormControlLabel, Grid,
-  InputAdornment, Paper, Stack, Switch, TextField, Typography,
+  InputAdornment, Paper, Radio, RadioGroup, Stack, Switch, TextField, Typography,
 } from '@mui/material';
 import { AccountBalance as PolicyIcon, Save as SaveIcon } from '@mui/icons-material';
 import { toast } from 'react-hot-toast';
 import commercialPolicyService, { type CommercialPolicyDTO } from '../../../api/services/commercialPolicyService';
+import supplierScoringWeightsService, { type SupplierScoringWeightsDTO } from '../../../api/services/supplierScoringWeightsService';
 import { presentableErrorMessage } from '../../../utils/apiErrors';
+import {
+  WEIGHT_CRITERIA, WEIGHT_PRESETS, WEIGHT_TOTAL, matchingPreset, parseWeight, sameWeights,
+  weightFieldError, weightTotal, weightTotalError, type SupplierWeightsForm,
+} from '../../../utils/supplierScoringWeights';
 import { useAuth } from '../../../context/AuthContext';
 
 const MAX_REASON = 1000;
@@ -45,6 +50,28 @@ const rangeError = (raw: string, min: number, max: number, unit: string): string
   return null;
 };
 
+const toWeightsForm = (weights: SupplierScoringWeightsDTO): SupplierWeightsForm => ({
+  priceWeight: String(weights.priceWeight),
+  leadTimeWeight: String(weights.leadTimeWeight),
+  warrantyWeight: String(weights.warrantyWeight),
+  paymentTermsWeight: String(weights.paymentTermsWeight),
+});
+
+/**
+ * The tolerance half of the save committed and the weights half did not. Two governed rows behind
+ * one button means this outcome is real, and a message that only named the failure would leave the
+ * user reapplying a change that is already saved.
+ */
+class PartialPolicySaveError extends Error {
+  readonly inner: unknown;
+
+  constructor(inner: unknown) {
+    super('The commercial policy saved and the supplier comparison weights did not.');
+    this.name = 'PartialPolicySaveError';
+    this.inner = inner;
+  }
+}
+
 /**
  * Commercial Policy — the tenant-settable numbers behind every landed cost and every customer
  * price.
@@ -59,6 +86,7 @@ const CommercialPolicyPage: React.FC = () => {
   const queryClient = useQueryClient();
   const { userData, hasPermission } = useAuth();
   const [form, setForm] = React.useState<FormState | null>(null);
+  const [weights, setWeights] = React.useState<SupplierWeightsForm | null>(null);
   const [reason, setReason] = React.useState('');
 
   // The API mirrors SlaController: reading is open to the tenant, writing is manager/admin.
@@ -70,31 +98,80 @@ const CommercialPolicyPage: React.FC = () => {
     queryFn: () => commercialPolicyService.getPolicy(),
   });
 
+  const { data: scoringWeights, isLoading: weightsLoading } = useQuery({
+    queryKey: ['supplier-scoring-weights'],
+    queryFn: () => supplierScoringWeightsService.getWeights(),
+  });
+
   React.useEffect(() => {
     if (policy) setForm(toForm(policy));
   }, [policy]);
 
+  React.useEffect(() => {
+    if (scoringWeights) setWeights(toWeightsForm(scoringWeights));
+  }, [scoringWeights]);
+
+  // A tenant still on the server defaults has no row and no audit trail yet, so the first save is
+  // always a real change even when the operator retyped nothing: it is what makes the values theirs.
+  const policyDirty = !policy || !form || policy.isDefault
+    || JSON.stringify(toForm(policy)) !== JSON.stringify(form);
+  const weightsDirty = !scoringWeights || !weights || scoringWeights.isDefault
+    || !sameWeights(toWeightsForm(scoringWeights), weights);
+
   const saveMutation = useMutation({
-    mutationFn: (next: FormState) => commercialPolicyService.updatePolicy({
-      supplierInputTaxRecoverablePercent: numberOrNull(next.supplierInputTaxRecoverablePercent),
-      outputTaxRatePercent: next.outputTaxRateStated ? numberOrNull(next.outputTaxRatePercent) : null,
-      clearOutputTaxRate: !next.outputTaxRateStated,
-      priceTolerancePercent: numberOrNull(next.priceTolerancePercent),
-      priceToleranceMinimumAmount: numberOrNull(next.priceToleranceMinimumAmount),
-      quantityTolerancePercent: numberOrNull(next.quantityTolerancePercent),
-      reason: reason.trim(),
-    }),
+    mutationFn: async (next: { policy: FormState; weights: SupplierWeightsForm }) => {
+      // Two governed rows, one reason. Each is written only when it actually differs from what was
+      // loaded, so editing a tolerance does not stamp a weights audit entry that changed nothing —
+      // an audit trail full of no-op rows is harder to read than one with fewer, truer rows.
+      let policyCommitted = false;
+      if (policyDirty) {
+        await commercialPolicyService.updatePolicy({
+          supplierInputTaxRecoverablePercent: numberOrNull(next.policy.supplierInputTaxRecoverablePercent),
+          outputTaxRatePercent: next.policy.outputTaxRateStated ? numberOrNull(next.policy.outputTaxRatePercent) : null,
+          clearOutputTaxRate: !next.policy.outputTaxRateStated,
+          priceTolerancePercent: numberOrNull(next.policy.priceTolerancePercent),
+          priceToleranceMinimumAmount: numberOrNull(next.policy.priceToleranceMinimumAmount),
+          quantityTolerancePercent: numberOrNull(next.policy.quantityTolerancePercent),
+          reason: reason.trim(),
+        });
+        policyCommitted = true;
+      }
+      if (weightsDirty) {
+        try {
+          await supplierScoringWeightsService.updateWeights({
+            priceWeight: numberOrNull(next.weights.priceWeight) ?? 0,
+            leadTimeWeight: numberOrNull(next.weights.leadTimeWeight) ?? 0,
+            warrantyWeight: numberOrNull(next.weights.warrantyWeight) ?? 0,
+            paymentTermsWeight: numberOrNull(next.weights.paymentTermsWeight) ?? 0,
+            reason: reason.trim(),
+          });
+        } catch (error) {
+          throw policyCommitted ? new PartialPolicySaveError(error) : error;
+        }
+      }
+    },
     onSuccess: () => {
       setReason('');
       toast.success('Commercial policy saved');
+    },
+    onError: (error: unknown) => toast.error(
+      error instanceof PartialPolicySaveError
+        ? `Tax and tolerances were saved. The supplier comparison weights were not: ${presentableErrorMessage(error.inner)}`
+        : presentableErrorMessage(error),
+    ),
+    // Runs after success and after a partial failure alike, so the version chips and the fields
+    // always show what the server actually holds rather than what was attempted.
+    onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ['commercial-policy'] });
+      queryClient.invalidateQueries({ queryKey: ['supplier-scoring-weights'] });
       // Prices and landed costs everywhere are computed from this row.
       queryClient.invalidateQueries({ queryKey: ['quotes'] });
+      // The weights decide which supplier offer the comparison recommends.
+      queryClient.invalidateQueries({ queryKey: ['procurement-quote-comparisons'] });
     },
-    onError: (error: unknown) => toast.error(presentableErrorMessage(error)),
   });
 
-  if (isLoading || !form) {
+  if (isLoading || weightsLoading || !form || !weights) {
     return (
       <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '60vh' }}>
         <CircularProgress />
@@ -104,6 +181,19 @@ const CommercialPolicyPage: React.FC = () => {
 
   const setField = (key: keyof FormState, value: string | boolean) =>
     setForm({ ...form, [key]: value } as FormState);
+
+  const setWeight = (key: keyof SupplierWeightsForm, value: string) =>
+    setWeights({ ...weights, [key]: value });
+
+  const total = weightTotal(weights);
+  const weightErrors = WEIGHT_CRITERIA.map(({ key }) => weightFieldError(weights[key]));
+  const totalError = weightTotalError(weights);
+  const selectedPreset = matchingPreset(weights);
+  const warrantyWeighted = (parseWeight(weights.warrantyWeight) ?? 0) > 0;
+  // Same trap as warranty, and the reason both default to zero: Credit days ships with this release,
+  // so it is empty on every supplier that already exists. Weighting payment terms before anyone has
+  // filled it in does not tilt the ranking — it stops the ranking happening at all.
+  const paymentTermsWeighted = (parseWeight(weights.paymentTermsWeight) ?? 0) > 0;
 
   const recoverableError = rangeError(form.supplierInputTaxRecoverablePercent, 0, 100, '%');
   const outputRateError = form.outputTaxRateStated
@@ -115,8 +205,9 @@ const CommercialPolicyPage: React.FC = () => {
     ? 'Cannot be negative.' : null;
 
   const hasError = [recoverableError, outputRateError, priceToleranceError, quantityToleranceError,
-    minimumAmountError].some((error) => error !== null);
-  const canSave = canConfigure && !hasError && reason.trim().length > 0 && !saveMutation.isPending;
+    minimumAmountError, totalError, ...weightErrors].some((error) => error !== null);
+  const canSave = canConfigure && !hasError && reason.trim().length > 0 && !saveMutation.isPending
+    && (policyDirty || weightsDirty);
 
   const recoverablePercent = numberOrNull(form.supplierInputTaxRecoverablePercent) ?? 0;
 
@@ -129,9 +220,10 @@ const CommercialPolicyPage: React.FC = () => {
         </Typography>
       </Stack>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-        The tax and tolerance numbers behind every cost and every price in this business unit.
-        Changing them re-bases every landed cost and every tax figure calculated afterwards, so each
-        change is recorded against your name with the reason you give.
+        The tax and tolerance numbers behind every cost and every price in this business unit, and
+        the weights behind every supplier recommendation. Changing them re-bases every landed cost
+        and every tax figure calculated afterwards, and changes which supplier offer the comparison
+        puts first, so each change is recorded against your name with the reason you give.
       </Typography>
 
       {policy?.isDefault && (
@@ -267,6 +359,117 @@ const CommercialPolicyPage: React.FC = () => {
         </Grid>
 
         <Divider sx={{ my: 3 }} />
+        <Typography sx={{ fontWeight: 900, fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '0.03em', color: 'text.secondary', mb: 2 }}>
+          Supplier comparison
+        </Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+          How supplier offers for the same RFQ line are ranked against each other. The four weights
+          total 100, so every offer carries a score out of 100 that a buyer can check against the
+          quote in front of them. The score orders the list and explains itself — it never awards
+          anything, and it never blocks an offer from being awarded.
+        </Typography>
+
+        {scoringWeights?.isDefault && (
+          <Alert severity="info" sx={{ mb: 2, borderRadius: 2 }}>
+            No weights have been set for this business unit yet, so supplier offers are ranked on the
+            starting values below. Saving once makes them yours and starts the audit trail.
+          </Alert>
+        )}
+
+        <RadioGroup
+          value={selectedPreset?.id ?? 'CUSTOM'}
+          onChange={(e) => {
+            const preset = WEIGHT_PRESETS.find((candidate) => candidate.id === e.target.value);
+            // "Custom" is where the numbers already are; choosing it changes nothing but the label.
+            if (preset) setWeights(preset.weights);
+          }}
+          sx={{ mb: 2 }}
+        >
+          {WEIGHT_PRESETS.map((preset) => (
+            <FormControlLabel
+              key={preset.id}
+              value={preset.id}
+              disabled={!canConfigure}
+              control={<Radio size="small" />}
+              sx={{ alignItems: 'flex-start', mb: 0.5, '& .MuiRadio-root': { pt: 0.25 } }}
+              label={(
+                <Box>
+                  <Typography sx={{ fontWeight: 800, fontSize: '0.9rem' }}>{preset.label}</Typography>
+                  <Typography variant="caption" color="text.secondary">{preset.caption}</Typography>
+                </Box>
+              )}
+            />
+          ))}
+          <FormControlLabel
+            value="CUSTOM"
+            disabled={!canConfigure}
+            control={<Radio size="small" />}
+            sx={{ alignItems: 'flex-start', '& .MuiRadio-root': { pt: 0.25 } }}
+            label={(
+              <Box>
+                <Typography sx={{ fontWeight: 800, fontSize: '0.9rem' }}>Custom</Typography>
+                <Typography variant="caption" color="text.secondary">
+                  Type the four numbers yourself. Selected automatically when they match no preset.
+                </Typography>
+              </Box>
+            )}
+          />
+        </RadioGroup>
+
+        <Grid container spacing={2.5}>
+          {WEIGHT_CRITERIA.map(({ key, label, helper }, index) => (
+            <Grid key={key} size={{ xs: 12, sm: 6, md: 3 }}>
+              <TextField
+                fullWidth type="number" size="small"
+                label={label}
+                value={weights[key]}
+                disabled={!canConfigure}
+                onChange={(e) => setWeight(key, e.target.value)}
+                error={weightErrors[index] !== null}
+                helperText={weightErrors[index] ?? helper}
+                slotProps={{
+                  input: { endAdornment: <InputAdornment position="end">%</InputAdornment> },
+                  htmlInput: { min: 0, max: 100, step: 1 },
+                }}
+              />
+            </Grid>
+          ))}
+        </Grid>
+
+        <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center', mt: 2 }}>
+          <Chip
+            size="small"
+            color={total === WEIGHT_TOTAL ? 'success' : 'error'}
+            variant={total === WEIGHT_TOTAL ? 'filled' : 'outlined'}
+            label={`Total ${total} of 100`}
+          />
+          {totalError && (
+            <Typography variant="caption" color="error.main" sx={{ fontWeight: 700 }}>
+              {totalError}
+            </Typography>
+          )}
+        </Stack>
+
+        {warrantyWeighted && (
+          <Alert severity="warning" sx={{ mt: 2, borderRadius: 2 }}>
+            Warranty is recorded as free text on supplier quotes, and a criterion with no value is
+            never scored as zero. While warranty carries weight, any offer that does not state one
+            will show "Cannot score" instead of a score — it stays awardable, but it will not be
+            ranked.
+          </Alert>
+        )}
+
+        {paymentTermsWeighted && (
+          <Alert severity="warning" sx={{ mt: 2, borderRadius: 2 }}>
+            Payment terms are scored from each supplier's <strong>Credit days</strong>, which is new in
+            this release and is empty until someone fills it in. While payment terms carry weight, an
+            offer from a supplier with no Credit days will show "Cannot score" instead of a score — it
+            stays awardable, but it will not be ranked. Set Credit days on the suppliers you compare
+            most often before giving this weight.
+          </Alert>
+        )}
+
+        <Divider sx={{ my: 3 }} />
         <TextField
           fullWidth multiline minRows={2} required
           label="Reason for this change"
@@ -284,12 +487,15 @@ const CommercialPolicyPage: React.FC = () => {
               </Typography>
             )}
             {policy && !policy.isDefault && <Chip size="small" label={`version ${policy.version}`} />}
+            {scoringWeights && !scoringWeights.isDefault && (
+              <Chip size="small" label={`weights version ${scoringWeights.version}`} />
+            )}
           </Stack>
           <Button
             variant="contained"
             startIcon={saveMutation.isPending ? <CircularProgress size={18} color="inherit" /> : <SaveIcon />}
             disabled={!canSave}
-            onClick={() => form && saveMutation.mutate(form)}
+            onClick={() => form && weights && saveMutation.mutate({ policy: form, weights })}
             sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
           >
             Save policy
