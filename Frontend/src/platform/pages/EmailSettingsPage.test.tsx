@@ -148,6 +148,8 @@ describe('platform email settings', () => {
     renderPage();
     await screen.findByLabelText(/^password$/i);
 
+    // An unrelated edit — the case that must not wipe the credential.
+    fireEvent.change(screen.getByLabelText(/^port$/i), { target: { value: '587' } });
     fireEvent.change(screen.getByLabelText(/why are you changing this/i), {
       target: { value: 'Switching the send port' },
     });
@@ -244,16 +246,34 @@ describe('platform email settings', () => {
     );
   });
 
+  it('reports a stored configuration as saved instead of demanding a reason for nothing', async () => {
+    // THE reported defect. The credential boxes are write-only and the audit reason is cleared
+    // after every save, so a screen with no dirty check greeted the operator with a red "enter
+    // why you are changing this" and a dead Save button EVERY time they opened it — including
+    // when the configuration was stored and working. Leaving the module and coming back showed
+    // it again, which reads as "it did not save, it is asking me again".
+    renderPage();
+    await screen.findByLabelText(/^host$/i);
+
+    expect(screen.getByText(/^saved$/i)).toBeInTheDocument();
+    expect(
+      screen.queryByText(/enter why you are changing this before saving/i),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /save email settings/i })).toBeDisabled();
+    expect(screen.getByText(/already saved\. change something above/i)).toBeInTheDocument();
+  });
+
   it('says why Save is unavailable instead of just disabling it', async () => {
     renderPage();
     await screen.findByLabelText(/^host$/i);
 
-    // THE reported defect. The audit reason has always been mandatory, but the only evidence
-    // was a button that did not respond — no asterisk, no error, no tooltip. An operator who
-    // filled in the whole form, clicked, and saw nothing happen could only conclude that the
-    // screen does not save. The precondition has to be readable without hovering anything.
+    // Once something HAS changed, the mandatory audit reason must be named on screen rather than
+    // evidenced only by a button that does not respond — no asterisk, no error, no tooltip is
+    // indistinguishable from a screen that does not save.
+    fireEvent.change(screen.getByLabelText(/^port$/i), { target: { value: '587' } });
+
     const save = screen.getByRole('button', { name: /save email settings/i });
-    expect(save).toBeDisabled();
+    await waitFor(() => expect(save).toBeDisabled());
     expect(screen.getByText(/enter why you are changing this before saving/i)).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText(/why are you changing this/i), {
@@ -268,13 +288,13 @@ describe('platform email settings', () => {
     renderPage();
     const port = await screen.findByLabelText(/^port$/i);
 
-    fireEvent.change(screen.getByLabelText(/why are you changing this/i), {
-      target: { value: 'Correcting the port' },
-    });
-
     // `Number('')` is 0, which the server refuses with a raw [Range(1,65535)] message. Clearing
     // the box to retype it is an ordinary act and must not produce an opaque "Save failed".
     fireEvent.change(port, { target: { value: '' } });
+
+    fireEvent.change(screen.getByLabelText(/why are you changing this/i), {
+      target: { value: 'Correcting the port' },
+    });
 
     await waitFor(() =>
       expect(screen.getByRole('button', { name: /save email settings/i })).toBeDisabled(),
