@@ -128,6 +128,60 @@ public sealed class TypedEntitlementCatalogTests
                 .Order());
     }
 
+    /// <summary>
+    /// The activation control asks whether every key is PRESENT, not whether any is enabled — so a
+    /// plan stored as "{}" parses cleanly, reads as all-off, and then blocks activation forever for
+    /// every tenant on it. Plan "001 / Test" was created exactly that way and tenant 3 sat
+    /// unactivatable behind it with provisioning fully succeeded.
+    /// </summary>
+    [Fact]
+    public void Complete_fills_every_absent_key_with_false_so_a_plan_can_never_block_activation()
+    {
+        var completed = TypedEntitlementCatalog.Complete("{}");
+
+        Assert.True(TypedEntitlementCatalog.TryParse(completed, out var values, out var error), error);
+        // This is the exact predicate TenantActivationPolicyService evaluates.
+        Assert.True(TypedEntitlementCatalog.Keys.All(values.ContainsKey));
+        Assert.All(values, pair => Assert.False(pair.Value));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void Complete_treats_an_absent_declaration_as_all_off_rather_than_as_nothing(string? json)
+    {
+        Assert.True(TypedEntitlementCatalog.TryParse(TypedEntitlementCatalog.Complete(json), out var values, out _));
+        Assert.True(TypedEntitlementCatalog.Keys.All(values.ContainsKey));
+    }
+
+    /// <summary>
+    /// The completion must never GRANT anything: a declared capability keeps its value, and the
+    /// keys it adds are false. If this ever inverts, a plan that deliberately withheld a module
+    /// would start handing it out on the next save.
+    /// </summary>
+    [Fact]
+    public void Complete_preserves_declared_values_and_grants_nothing_new()
+    {
+        var completed = TypedEntitlementCatalog.Complete(
+            $$"""{"{{TypedEntitlementCatalog.Rfq}}":true,"{{TypedEntitlementCatalog.Sso}}":false}""");
+
+        Assert.True(TypedEntitlementCatalog.TryParse(completed, out var values, out _));
+        Assert.True(values[TypedEntitlementCatalog.Rfq]);
+        Assert.False(values[TypedEntitlementCatalog.Sso]);
+        // Everything the caller did not mention is off.
+        Assert.All(values.Where(pair => pair.Key != TypedEntitlementCatalog.Rfq),
+            pair => Assert.False(pair.Value));
+    }
+
+    /// <summary>Idempotent — completing a completed declaration changes nothing.</summary>
+    [Fact]
+    public void Complete_is_idempotent()
+    {
+        var once = TypedEntitlementCatalog.Complete($$"""{"{{TypedEntitlementCatalog.Ai}}":true}""");
+        Assert.Equal(once, TypedEntitlementCatalog.Complete(once));
+    }
+
     private sealed class FixedAccess(TenantAccessSnapshot snapshot) : ITenantAccessService
     {
         public Task<TenantAccessSnapshot> GetAccessAsync(
