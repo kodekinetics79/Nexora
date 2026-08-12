@@ -89,6 +89,17 @@ export const STEP_REVIEW = 3;
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const SLUG = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
 
+/**
+ * The only base currency a tenant can be activated on, because it is the only currency a rate
+ * card can be created in: `PlatformBillingController` refuses anything else on create AND update
+ * with "v1 billing is USD-only" — plan base prices are `MonthlyPriceUsd` and statement math has
+ * no FX conversion, so a second currency on one statement would be a silent mix.
+ *
+ * Named rather than inlined so the day multi-currency lands, the compiler lists every place that
+ * assumed one.
+ */
+export const BILLABLE_CURRENCY = 'USD';
+
 const trimmed = (value: string) => value.trim();
 const isBlank = (value: string) => trimmed(value).length === 0;
 
@@ -152,10 +163,24 @@ export const emptyDraft = (defaults: Partial<ProvisionDraft> = {}): ProvisionDra
   billingContactEmail: '',
   billingAddress: '',
   accountOwnerEmail: '',
-  // KSA-first defaults. A new tenant is far more likely to trade in SAR than USD, and
-  // `en-SA` keeps Latin digits (the UI is English-only, with no RTL support) while using
-  // Saudi regional conventions. Both remain fully editable per tenant.
-  baseCurrencyCode: 'SAR',
+  // WAS 'SAR', on KSA-first reasoning, and that default made every tenant created with it
+  // PERMANENTLY UNACTIVATABLE. The chain, every link verified:
+  //   1. `commercial.rate-card` requires card.Currency == tenant.BaseCurrencyCode
+  //      (TenantActivationPolicyService.cs:76).
+  //   2. Every rate card is forced to USD on create AND update — "v1 billing is USD-only"
+  //      (PlatformBillingController.cs:955).
+  //   3. BaseCurrencyCode has no update path. It is written only at provisioning; the console
+  //      itself calls it "Permanently immutable" (ProfileAccessTab.tsx).
+  //   4. `commercial.rate-card` is NOT in DeploymentPrerequisiteCatalog, so it blocks under
+  //      LOCAL_TEST and approved DEMO exactly as under PRODUCTION.
+  // So a tenant accepting this default could never be activated, in any profile, by any
+  // operator, and nothing in the console said so — the blocking message reads "A pinned,
+  // effective rate card with at least one priced meter is required", which sends the operator
+  // to build rate cards that can never match.
+  //
+  // The default is now the only value v1 can actually activate. `locale` stays en-SA: it is a
+  // display convention and carries none of this.
+  baseCurrencyCode: 'USD',
   timeZoneId: '',
   locale: 'en-SA',
   dataRegion: '',
@@ -275,6 +300,16 @@ function validateCommercial(draft: ProvisionDraft): FieldErrors {
   if (isBlank(draft.baseCurrencyCode)) errors.baseCurrencyCode = 'Select the base currency.';
   else if (!/^[A-Za-z]{3}$/.test(trimmed(draft.baseCurrencyCode))) {
     errors.baseCurrencyCode = 'Use a three-letter ISO-4217 code, for example USD.';
+  } else if (trimmed(draft.baseCurrencyCode).toUpperCase() !== BILLABLE_CURRENCY) {
+    // Refused HERE rather than discovered at activation, because at activation it is too late:
+    // the column is written once at provisioning and has no update endpoint, so a tenant created
+    // in any other currency can never satisfy commercial.rate-card and can never be activated —
+    // in any deployment profile. Letting the wizard submit it produces an unrecoverable tenant
+    // whose only remedy is to delete and recreate it, which is not what its error message says.
+    errors.baseCurrencyCode =
+      `v1 billing is ${BILLABLE_CURRENCY}-only, and this value can never be changed after the tenant is `
+      + `created. A tenant on any other currency cannot be pinned to a rate card and therefore cannot `
+      + `be activated at all. Use ${BILLABLE_CURRENCY}.`;
   }
 
   if (isBlank(draft.timeZoneId)) errors.timeZoneId = 'Select the tenant time zone.';
@@ -402,7 +437,9 @@ export const draftFromRequestBody = (payload: ProvisionTenantRequestBody): Provi
     billingContactEmail: asText(payload.billingContactEmail),
     billingAddress: asText(payload.billingAddress),
     accountOwnerEmail: asText(payload.accountOwnerEmail),
-    baseCurrencyCode: asText(payload.baseCurrencyCode).toUpperCase() || 'SAR',
+    // A resumed draft written before the USD default keeps whatever it stored; validate() refuses
+    // it on the way out, so the operator is told rather than silently corrected.
+    baseCurrencyCode: asText(payload.baseCurrencyCode).toUpperCase() || BILLABLE_CURRENCY,
     timeZoneId: asText(payload.timeZoneId),
     locale: asText(payload.locale) || 'en-SA',
     dataRegion: asText(payload.dataRegion),
