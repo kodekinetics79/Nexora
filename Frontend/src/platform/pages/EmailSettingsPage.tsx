@@ -143,6 +143,31 @@ const splitList = (value: string): string[] =>
     .filter(Boolean);
 
 /**
+ * The form reduced to what would actually be SENT, so two states that save identically compare
+ * equal. Whitespace and list separators are normalised here for the same reason the server
+ * normalises them: `smtp.host.com ` and `smtp.host.com` are not a change an operator made, and a
+ * screen that calls them one is a screen that can never report itself as saved.
+ */
+const comparable = (form: FormState) => ({
+  provider: form.provider,
+  fromAddress: form.fromAddress.trim(),
+  fromName: form.fromName.trim(),
+  replyToAddress: form.replyToAddress.trim(),
+  appBaseUrl: form.appBaseUrl.trim(),
+  smtpHost: form.smtpHost.trim(),
+  smtpPort: form.smtpPort,
+  smtpUsername: form.smtpUsername.trim(),
+  smtpEnableSsl: form.smtpEnableSsl,
+  smtpTimeoutMs: form.smtpTimeoutMs,
+  sendGridApiBaseUrl: form.sendGridApiBaseUrl.trim(),
+  outboundGuardMode: form.outboundGuardMode,
+  outboundGuardRedirectTo: form.outboundGuardRedirectTo.trim(),
+  outboundGuardAllowedRecipients: splitList(form.outboundGuardAllowedRecipients),
+  outboundGuardAllowedDomains: splitList(form.outboundGuardAllowedDomains),
+  outboundGuardSubjectTag: form.outboundGuardSubjectTag.trim(),
+});
+
+/**
  * The TLS mode the runtime will actually use, derived exactly as `SmtpEmailSender` derives
  * it — implicit on 465, STARTTLS on everything else, none when encryption is off.
  *
@@ -346,6 +371,31 @@ export default function EmailSettingsPage() {
   const isSendGrid = form.provider === 'sendgrid';
   const tls = effectiveTls(form.smtpPort, form.smtpEnableSsl);
 
+  /**
+   * Nothing has ever been stored — the screen is showing the appsettings fallback, so there IS
+   * something to save even before the operator touches a field. `version` is null on exactly that
+   * read and on no other.
+   */
+  const neverConfigured = settings == null || settings.version == null;
+
+  /**
+   * Whether this form differs from what is stored.
+   *
+   * <b>Why the screen needs this at all.</b> The audit reason is mandatory and is deliberately
+   * cleared after every save, and the credential boxes are write-only and therefore always render
+   * empty. Without a dirty check those two facts combine into a screen that greets an operator
+   * with a red "enter why you are changing this" and a dead Save button EVERY time they open it —
+   * including when they have changed nothing and the configuration is stored and working. The
+   * operator reads that as "it did not save, it is asking me again", navigates away, comes back,
+   * and is asked again. Comparing against the loaded settings is what lets the screen say the true
+   * thing instead: these settings are stored, there is nothing to do.
+   */
+  const dirty =
+    neverConfigured ||
+    smtpPassword.length > 0 ||
+    sendGridApiKey.length > 0 ||
+    JSON.stringify(comparable(form)) !== JSON.stringify(comparable(toForm(settings!)));
+
   // Mirrors the server's [Range] attributes on SavePlatformEmailSettingsRequest.
   const portInRange = Number.isFinite(form.smtpPort) && form.smtpPort >= 1 && form.smtpPort <= 65535;
   const timeoutInRange =
@@ -360,8 +410,9 @@ export default function EmailSettingsPage() {
    * form, clicked, and saw nothing happen had no way to reach any other conclusion than "this
    * screen does not save". Every precondition is now named on screen before it is enforced.
    */
-  const saveBlockedBecause =
-    reason.trim().length === 0
+  const saveBlockedBecause = !dirty
+    ? 'These settings are already saved. Change something above to enable Save.'
+    : reason.trim().length === 0
       ? 'Enter why you are changing this before saving — the reason is recorded in the audit log.'
       : reason.trim().length < 3
         ? 'The reason must be at least 3 characters.'
@@ -797,18 +848,48 @@ export default function EmailSettingsPage() {
 
       {/* ---- save ---------------------------------------------------------- */}
       <Paper sx={{ p: 3, borderRadius: 3, mb: 2.5 }}>
+        {/*
+          Said before the reason box, because the reason box is the thing that used to read as an
+          unfinished save. An operator returning to this screen sees that their configuration is
+          stored — and, when it is not, sees exactly what is still only typed in.
+        */}
+        <Stack direction="row" spacing={1} sx={{ mb: 2, alignItems: 'center', flexWrap: 'wrap', gap: 1 }}>
+          <Chip
+            size="small"
+            color={dirty ? 'warning' : 'success'}
+            variant={dirty ? 'filled' : 'outlined'}
+            icon={dirty ? <ProblemIcon /> : <VerifiedIcon />}
+            label={
+              neverConfigured
+                ? 'Not saved yet — this screen is showing the deployment’s fallback configuration'
+                : dirty
+                  ? 'Unsaved changes on this screen'
+                  : 'Saved'
+            }
+          />
+          {!dirty && !neverConfigured && (
+            <Typography variant="caption" color="text.secondary">
+              These settings are stored on the server. The password box is blank because the
+              credential is never sent back to this screen, not because it was lost.
+            </Typography>
+          )}
+        </Stack>
+
         <TextField
-          required
+          required={dirty}
           fullWidth
           size="small"
           label="Why are you changing this?"
           value={reason}
           onChange={(event) => setReason(event.target.value)}
-          error={reason.length > 0 && reason.trim().length < 3}
+          disabled={!dirty}
+          error={dirty && reason.length > 0 && reason.trim().length < 3}
           helperText={
-            reason.length > 0 && reason.trim().length < 3
-              ? 'At least 3 characters. Save stays unavailable until this is filled in.'
-              : 'Required. Recorded in the audit log — changing the product’s sending identity is a privileged act.'
+            !dirty
+              ? 'Needed only when you change something. Nothing is pending.'
+              : reason.length > 0 && reason.trim().length < 3
+                ? 'At least 3 characters. Save stays unavailable until this is filled in.'
+                : 'Required. Recorded in the audit log — changing the product’s sending identity is a privileged act.'
           }
         />
         {settings?.updatedAtUtc && (
@@ -839,7 +920,13 @@ export default function EmailSettingsPage() {
               the same as no explanation at all, and this is the exact spot where the previous
               build looked broken. */}
           {permissions.isOwner && saveBlockedBecause && (
-            <Typography variant="caption" color="error" sx={{ display: 'block', mt: 1 }}>
+            // Neutral when there is simply nothing to do. Red on a screen an operator only came
+            // back to LOOK at is what taught them the screen was broken.
+            <Typography
+              variant="caption"
+              color={dirty ? 'error' : 'text.secondary'}
+              sx={{ display: 'block', mt: 1 }}
+            >
               {saveBlockedBecause}
             </Typography>
           )}

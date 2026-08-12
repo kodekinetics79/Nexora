@@ -200,10 +200,11 @@ public sealed class PlatformEmailSettingsService : IPlatformEmailSettingsService
         ArgumentNullException.ThrowIfNull(request);
 
         if (!IsMapped)
-            return new PlatformEmailSaveResult(false, null,
+            return await RefuseAsync(actor, httpContext,
                 "The platform email settings table is not present in this deployment yet. Apply the " +
                 "PlatformEmailSettings migration, then save again. Outbound mail is currently taking its " +
-                "configuration from the Notifications section of appsettings.");
+                "configuration from the Notifications section of appsettings.",
+                conflict: false, ct);
 
         var provider = (request.Provider ?? "console").Trim().ToLowerInvariant();
         var guardMode = NormalizeGuardMode(request.OutboundGuardMode);
@@ -214,9 +215,9 @@ public sealed class PlatformEmailSettingsService : IPlatformEmailSettingsService
         // than a DbUpdateConcurrencyException surfacing as a 500. The concurrency token on Version
         // is still the real guarantee — this is the readable half of it.
         if (row is not null && request.ExpectedVersion is { } expected && expected != row.Version)
-            return new PlatformEmailSaveResult(false, null,
+            return await RefuseAsync(actor, httpContext,
                 "These settings were changed by someone else while you were editing. Reload and reapply your change.",
-                Conflict: true);
+                conflict: true, ct);
 
         var isNew = row is null;
         if (row is null)
@@ -235,8 +236,10 @@ public sealed class PlatformEmailSettingsService : IPlatformEmailSettingsService
         {
             // Detach an entity that was added for a save that is not happening, or the next
             // SaveChanges on this scoped context — the audit write, for instance — would persist it.
+            // Nothing has been assigned to `row` yet at this point, so an EXISTING row carries no
+            // pending edit for the refusal audit to accidentally commit.
             if (isNew) _db.Entry(row).State = EntityState.Detached;
-            return new PlatformEmailSaveResult(false, null, refusal);
+            return await RefuseAsync(actor, httpContext, refusal, conflict: false, ct);
         }
 
         var secretsChanged =
@@ -310,9 +313,13 @@ public sealed class PlatformEmailSettingsService : IPlatformEmailSettingsService
         }
         catch (DbUpdateConcurrencyException)
         {
-            return new PlatformEmailSaveResult(false, null,
+            // The UPDATE matched no row, so nothing committed. The tracker still holds the edit that
+            // just failed; clearing it is what stops the refusal audit below from re-issuing — and
+            // re-failing on — the same statement.
+            _db.ChangeTracker.Clear();
+            return await RefuseAsync(actor, httpContext,
                 "These settings were changed by someone else while you were editing. Reload and reapply your change.",
-                Conflict: true);
+                conflict: true, ct);
         }
 
         // Take effect now, in this process. Other instances converge on the resolver's revalidation
@@ -327,6 +334,48 @@ public sealed class PlatformEmailSettingsService : IPlatformEmailSettingsService
             row.UpdatedBy, row.Provider, row.OutboundGuardMode, row.Version, row.UpdateReason);
 
         return new PlatformEmailSaveResult(true, ToDto(row), null);
+    }
+
+    /// <summary>
+    /// Records a save that did NOT happen, then returns the refusal.
+    ///
+    /// <para><b>Why a refusal is worth a row.</b> Until this existed, <c>platform.email.configure</c>
+    /// only ever held successes: a validation refusal and a version conflict both returned to the
+    /// console and left the server with no trace that anybody had tried. An operator reporting "the
+    /// email screen will not save" could be answered only by inspecting an empty settings table,
+    /// which says the save never landed but not why — the difference between "the button was
+    /// disabled", "the host was rejected" and "somebody else was editing" was unrecoverable after
+    /// the fact. Each of those needs a different reply, so each now leaves evidence.</para>
+    ///
+    /// <para>The failure record carries the refusal TEXT and no submitted values. The reason for the
+    /// change is the operator's own words and is safe; the transport fields are not recorded here
+    /// because a refused save is exactly the case where they may be half-typed nonsense, and the
+    /// credentials are never recorded anywhere on any path.</para>
+    ///
+    /// <para>The audit write is best-effort. <see cref="PlatformAuditService"/> rethrows, and turning
+    /// a refusal an operator can act on ("that SMTP host cannot be used") into a 500 they cannot
+    /// would trade a diagnosable failure for an opaque one — the precise trade this module has
+    /// already had to unwind once.</para>
+    /// </summary>
+    private async Task<PlatformEmailSaveResult> RefuseAsync(
+        ClaimsPrincipal actor, HttpContext? httpContext, string refusal, bool conflict, CancellationToken ct)
+    {
+        try
+        {
+            await _audit.WriteAsync(actor, ConfigureAction, "PlatformEmailSettings",
+                PlatformEmailSettings.SingletonId.ToString(),
+                new { refused = refusal, conflict },
+                actAsTenantId: null, httpContext,
+                ERP_RFQ_Automation.Platform.Models.PlatformAuditResults.Failure, ct);
+        }
+        catch (Exception exception)
+        {
+            _log.LogError(exception,
+                "[Notifications] A refused platform email save could not be audited. The refusal still " +
+                "stands and was returned to the operator: {Refusal}", refusal);
+        }
+
+        return new PlatformEmailSaveResult(false, null, refusal, Conflict: conflict);
     }
 
     // ==== verify ====================================================================================

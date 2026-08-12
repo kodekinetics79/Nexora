@@ -246,6 +246,46 @@ public class PlatformEmailSettingsTests : IDisposable
         Assert.False(await context.Set<PlatformEmailSettings>().AnyAsync());
     }
 
+    [Fact]
+    public async Task A_refused_save_is_audited_as_a_failure_so_it_is_not_invisible_afterwards()
+    {
+        // Nothing in the settings table and nothing in the audit log is what "the email screen will
+        // not save" used to look like from the server — indistinguishable from an operator who
+        // never pressed the button. The refusal is the only thing that can tell those apart.
+        var request = ValidRequest();
+        request.SmtpHost = null; // provider 'smtp' with no host
+
+        var result = await _harness.Service.SaveAsync(request, _harness.Owner, null);
+        Assert.False(result.Succeeded);
+
+        var recorded = Assert.Single(_harness.Audit.Entries);
+        Assert.Equal(PlatformEmailSettingsService.ConfigureAction, recorded.Action);
+        Assert.Equal(PlatformAuditResults.Failure, recorded.Result);
+
+        // The refusal text is what an operator needs read back to them. The credential is not in it,
+        // and is not anywhere else on this path either.
+        var metadata = JsonSerializer.Serialize(recorded.Metadata);
+        Assert.Contains("requires an SMTP host", metadata, StringComparison.Ordinal);
+        Assert.DoesNotContain("s3cret-mail-password", metadata, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_conflict_is_audited_as_a_failure_too()
+    {
+        var first = await _harness.Service.SaveAsync(ValidRequest(), _harness.Owner, null);
+        _harness.Audit.Entries.Clear();
+
+        var stale = ValidRequest();
+        stale.ExpectedVersion = first.Settings!.Version - 1;
+
+        var result = await _harness.Service.SaveAsync(stale, _harness.Owner, null);
+        Assert.True(result.Conflict);
+
+        var recorded = Assert.Single(_harness.Audit.Entries);
+        Assert.Equal(PlatformAuditResults.Failure, recorded.Result);
+        Assert.Contains("conflict", JsonSerializer.Serialize(recorded.Metadata), StringComparison.OrdinalIgnoreCase);
+    }
+
     // ==== status readout =============================================================================
 
     [Fact]
