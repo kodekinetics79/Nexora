@@ -1,5 +1,10 @@
 using System.Reflection;
+using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Tests.Support;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
+using Microsoft.EntityFrameworkCore.Migrations.Internal;
 
 namespace ERP_RFQ_Automation.Tests;
 
@@ -19,18 +24,55 @@ public sealed class MigrationDiscoveryTests
         .Where(type => typeof(Migration).IsAssignableFrom(type) && !type.IsAbstract)
         .ToList();
 
+    /// <summary>
+    /// Asks EF's own <see cref="IMigrationsAssembly"/> which migrations it can see, rather than
+    /// reflecting over attributes and hoping that is the same question.
+    ///
+    /// <para>The first version of this test DID reflect over attributes — it asserted every
+    /// migration type carries <c>[Migration]</c> — and it passed while
+    /// <c>20260812150000_CompleteTypedPlanEntitlements</c> was invisible to EF, shipped to
+    /// production, and left the database untouched. <c>MigrationsAssembly.GetMigrations()</c>
+    /// filters on <c>[DbContext(typeof(TContext))]</c> FIRST and only then reads the id, so a
+    /// migration missing that second attribute is not rejected, it is never enumerated. Nothing
+    /// logs, because there is nothing to log about a type that was filtered out.</para>
+    ///
+    /// <para>So the assertion is now "EF sees every migration I compiled", which is the property
+    /// that actually matters and the only one that would have caught it.</para>
+    /// </summary>
     [Fact]
-    public void Every_compiled_migration_is_discoverable_by_EF()
+    public void EF_can_see_every_compiled_migration()
     {
-        var undiscoverable = MigrationTypes()
-            .Where(type => type.GetCustomAttribute<MigrationAttribute>() is null)
-            .Select(type => type.Name)
+        using var context = new ErpRfqAutomationContext(
+            new DbContextOptionsBuilder<ErpRfqAutomationContext>()
+                .UseNpgsql("Host=localhost;Database=discovery-only;Username=none;Password=none")
+                .Options,
+            new StubTenant(null));
+
+        var seenByEf = context.GetService<IMigrationsAssembly>().Migrations.Keys
+            .ToHashSet(StringComparer.Ordinal);
+
+        var invisible = MigrationTypes()
+            .Select(type => new
+            {
+                type.Name,
+                Id = type.GetCustomAttribute<MigrationAttribute>()?.Id,
+                HasContext = type.GetCustomAttribute<DbContextAttribute>()?.ContextType
+                    == typeof(ErpRfqAutomationContext),
+            })
+            .Where(migration => migration.Id is null || !seenByEf.Contains(migration.Id))
+            .Select(migration => migration.Id is null
+                ? $"{migration.Name} (no [Migration] attribute)"
+                : $"{migration.Name} (id {migration.Id}, "
+                  + $"[DbContext] {(migration.HasContext ? "present" : "MISSING — this is the usual cause")})")
             .Order()
             .ToList();
 
-        Assert.True(undiscoverable.Count == 0,
-            "These migration types carry no [Migration] attribute, so EF will never apply them: "
-            + string.Join(", ", undiscoverable));
+        Assert.True(invisible.Count == 0,
+            "EF cannot see these compiled migrations, so it will never apply them and will report "
+            + "nothing pending: " + string.Join("; ", invisible));
+
+        // Guards the inverse: a test that discovers nothing would pass the check above vacuously.
+        Assert.NotEmpty(seenByEf);
     }
 
     /// <summary>

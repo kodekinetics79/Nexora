@@ -1,3 +1,5 @@
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
@@ -38,6 +40,22 @@ namespace ERP_RFQ_Automation.Migrations
     /// <para>Idempotent: re-running rewrites the same object, so it is safe on a database that has
     /// already been repaired and on one created after the code fix.</para>
     /// </summary>
+    /// <remarks>
+    /// BOTH attributes are load-bearing, and the second one is the trap. EF's
+    /// <c>MigrationsAssembly.GetMigrations()</c> filters on
+    /// <c>t.GetCustomAttribute&lt;DbContextAttribute&gt;()?.ContextType == contextType</c> BEFORE it
+    /// reads the migration id, so a migration carrying only <c>[Migration]</c> is not rejected — it
+    /// is never seen. It compiles, it reviews, it merges, it deploys, and the migrator reports
+    /// nothing pending. This one shipped that way: the file was in the image, the database was
+    /// untouched, and no log line said so, because there is nothing to log about a migration that
+    /// was filtered out before enumeration.
+    ///
+    /// <para>Generated migrations get both from the <c>.Designer.cs</c>. A hand-written one has to
+    /// carry them itself. <c>MigrationDiscoveryTests</c> now asks EF's own
+    /// <c>IMigrationsAssembly</c> rather than reflecting over attributes, because the first version
+    /// of that test checked for <c>[Migration]</c> alone and passed while this was invisible.</para>
+    /// </remarks>
+    [DbContext(typeof(ERP_RFQ_Automation.Models.ErpRfqAutomationContext))]
     [Migration("20260812150000_CompleteTypedPlanEntitlements")]
     public partial class CompleteTypedPlanEntitlements : Migration
     {
