@@ -98,7 +98,7 @@ public sealed class FinanceOutboxDispatcherTests
             harness.TenantScope);
 
         await dispatcher.StartAsync(default);
-        await store.Transitioned.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        await store.Transitioned.Task.WaitAsync(TestWaits.Liveness);
         await dispatcher.StopAsync(default);
 
         Assert.Equal(publisherFails ? 0 : 1, store.Completed);

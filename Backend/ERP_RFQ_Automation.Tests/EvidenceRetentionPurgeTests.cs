@@ -632,7 +632,7 @@ public sealed class EvidenceRetentionPurgeTests(PostgreSqlTestDatabase database)
             var purgeTask = purgeService.RunPurgeAsync(tenantId, 9, "deletion-wins-race",
                 new EvidenceRetentionPurgeCommand(false, "Exercise legal-hold deletion fencing."), default);
 
-            await storage.DeleteEntered.WaitAsync(TimeSpan.FromSeconds(10));
+            await storage.DeleteEntered.WaitAsync(TestWaits.Liveness);
 
             await using var holdDb = database.ContextFor(null);
             var holdService = new TenantLegalHoldService(holdDb,
@@ -650,8 +650,8 @@ public sealed class EvidenceRetentionPurgeTests(PostgreSqlTestDatabase database)
                 "Hold placement must wait while irreversible evidence deletion owns the shared fence.");
 
             storage.AllowDelete();
-            var purge = await purgeTask.WaitAsync(TimeSpan.FromSeconds(10));
-            var hold = await holdTask.WaitAsync(TimeSpan.FromSeconds(10));
+            var purge = await purgeTask.WaitAsync(TestWaits.Liveness);
+            var hold = await holdTask.WaitAsync(TestWaits.Liveness);
 
             Assert.Equal(1, purge.Purged);
             Assert.True(hold.IsActive);

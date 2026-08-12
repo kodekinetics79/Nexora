@@ -84,8 +84,29 @@ public static class TenantAccessGrantContract
     /// exist (a database that never ran the grant hardening) or when the platform tables are not
     /// present yet.
     /// </summary>
-    /// <param name="connectionString">A PostgreSQL connection. Any role may run this — the
-    /// privilege functions are asked ABOUT a role by name, they do not require being it.</param>
+    /// <param name="connectionString">A PostgreSQL connection. Any role may run this, including one
+    /// with no privileges at all on the <c>platform</c> schema.
+    ///
+    /// <para>That last clause used to read "the privilege functions are asked ABOUT a role by name,
+    /// they do not require being it" — true, and beside the point. Asking about another role does
+    /// not need that role's privileges, but NAMING THE TABLE needs the caller's own. Both
+    /// <c>to_regclass('platform."Tenants"')</c> and the text-table overload of
+    /// <c>has_column_privilege</c> resolve the identifier in the CALLER's context, and that
+    /// resolution requires USAGE on the schema before any privilege question is evaluated.</para>
+    ///
+    /// <para>Production has exactly the shape that breaks: the login role <c>nexora_runtime</c> is
+    /// NOINHERIT and holds no ambient rights — it is a member of the execution roles and reaches the
+    /// tenant plane only by SET ROLE, which the interceptor issues per command. USAGE on
+    /// <c>platform</c> is granted to the four <c>*_app</c> roles and deliberately NOT to the login
+    /// role. So this check, which opens a raw connection and issues no SET ROLE, died on its first
+    /// statement with <c>42501: permission denied for schema platform</c>, taking the process down
+    /// with it (Program.cs, exit 139) on every boot. The grants it exists to verify were correct the
+    /// whole time; the verification could not see them.</para>
+    ///
+    /// <para>Resolved by looking the tables up in <c>pg_catalog</c> — readable by every role without
+    /// schema USAGE — and passing the resulting OID to the <c>regclass</c> overload, which performs
+    /// no name resolution. The check now asserts the same thing while requiring nothing of whoever
+    /// runs it, which is what the original comment claimed and what a boot contract should be.</para></param>
     public static async Task AssertReadableAsync(
         string connectionString, ILogger logger, CancellationToken ct = default)
     {
@@ -106,7 +127,9 @@ public static class TenantAccessGrantContract
             return;
         }
 
-        if (!await PlatformTablesExistAsync(connection, ct))
+        // One catalogue lookup per distinct table, reused for every role/column pair below.
+        var tableOids = await ResolveTableOidsAsync(connection, ct);
+        if (tableOids.Count < RequiredColumns.Select(c => c.QualifiedTable).Distinct().Count())
         {
             logger.LogInformation(
                 "Tenant-access grant contract: the platform tables are not present yet, so the "
@@ -117,7 +140,7 @@ public static class TenantAccessGrantContract
         var missing = new List<string>();
         foreach (var role in roles)
             foreach (var column in RequiredColumns)
-                if (!await CanSelectAsync(connection, role, column, ct))
+                if (!await CanSelectAsync(connection, role, tableOids[column.QualifiedTable], column, ct))
                     missing.Add($"GRANT SELECT (\"{column.Column}\") ON TABLE {column.QualifiedTable} TO {role};");
 
         if (missing.Count == 0)
@@ -156,27 +179,54 @@ public static class TenantAccessGrantContract
         return present;
     }
 
-    private static async Task<bool> PlatformTablesExistAsync(
+    /// <summary>
+    /// Maps each required table to its OID, via <c>pg_catalog</c> rather than <c>to_regclass</c>.
+    ///
+    /// <para>The catalogue is readable by every role and needs no USAGE on the schema being
+    /// described, so this succeeds on the NOINHERIT login role that <c>to_regclass</c> refused. A
+    /// table absent from the result is simply not there yet — the same "not migrated" case the old
+    /// existence probe reported, now per table.</para>
+    /// </summary>
+    private static async Task<IReadOnlyDictionary<string, uint>> ResolveTableOidsAsync(
         NpgsqlConnection connection, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(
             """
-            SELECT to_regclass('platform."Tenants"') IS NOT NULL
-               AND to_regclass('platform."Plans"') IS NOT NULL;
+            SELECT n.nspname, c.relname, c.oid
+            FROM pg_catalog.pg_class c
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'platform' AND c.relname = ANY(@names);
             """, connection);
-        return await command.ExecuteScalarAsync(ct) is true;
+        command.Parameters.AddWithValue("names", RequiredColumns
+            .Select(c => UnqualifiedName(c.QualifiedTable)).Distinct().ToArray());
+
+        var oids = new Dictionary<string, uint>(StringComparer.Ordinal);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            oids[$"{reader.GetString(0)}.\"{reader.GetString(1)}\""] = reader.GetFieldValue<uint>(2);
+        return oids;
     }
 
+    /// <summary>Turns <c>platform."Tenants"</c> into <c>Tenants</c> for a catalogue lookup.</summary>
+    private static string UnqualifiedName(string qualifiedTable)
+        => qualifiedTable[(qualifiedTable.IndexOf('.') + 1)..].Trim('"');
+
     private static async Task<bool> CanSelectAsync(
-        NpgsqlConnection connection, string role, RequiredColumn column, CancellationToken ct)
+        NpgsqlConnection connection, string role, uint tableOid, RequiredColumn column,
+        CancellationToken ct)
     {
-        // has_column_privilege raises 42703 for a column that does not exist at all, which is a
-        // different defect (the projection names a column the schema does not have) but has the
+        // The regclass (OID) overload, NOT the text one. The text overload resolves the table name
+        // in the caller's context and therefore needs USAGE on the schema — which is exactly what
+        // the login role does not have, and what took the boot down with 42501.
+        //
+        // has_column_privilege still raises 42703 for a column that does not exist at all, which is
+        // a different defect (the projection names a column the schema does not have) but has the
         // same consequence, so it is reported the same way rather than crashing the boot check.
         await using var command = new NpgsqlCommand(
-            "SELECT has_column_privilege(@role, @table, @column, 'SELECT');", connection);
+            "SELECT has_column_privilege(@role, @table::oid::regclass, @column, 'SELECT');",
+            connection);
         command.Parameters.AddWithValue("role", role);
-        command.Parameters.AddWithValue("table", column.QualifiedTable);
+        command.Parameters.AddWithValue("table", (long)tableOid);
         command.Parameters.AddWithValue("column", column.Column);
 
         try

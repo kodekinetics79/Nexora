@@ -35,13 +35,34 @@ public sealed class ExtractionWorkerLeaseTests
             services.GetRequiredService<Microsoft.Extensions.Logging.ILogger<ExtractionWorker>>(),
             new TenantScopeAccessor());
 
-        var startedAt = DateTime.UtcNow;
         await worker.StartAsync(CancellationToken.None);
         try
         {
-            await queue.RenewalStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
-            await extractor.CancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(10));
-            Assert.InRange(DateTime.UtcNow - startedAt, TimeSpan.Zero, TimeSpan.FromSeconds(6));
+            // Liveness only. The heartbeat hangs forever by construction, so if the deadline
+            // never fires the extractor's infinite delay never returns and this is the wait
+            // that reports it. See TestWaits.
+            await queue.RenewalStarted.Task.WaitAsync(TestWaits.Liveness);
+            await extractor.CancellationObserved.Task.WaitAsync(TestWaits.Liveness);
+
+            // The actual contract, and the one this test is named for: work is cancelled by the
+            // deadline of the lease the worker KNOWS it holds. Measure from the lease expiry the
+            // queue handed out, NOT from the start of the test.
+            //
+            // Anchoring to test start was the defect. It folds in everything that happens before
+            // the lease clock starts — BackgroundService.StartAsync, the Task.Run dispatch of the
+            // worker loop, the first ClaimAsync — none of which the lease deadline governs, and
+            // all of which stretch without bound when the thread pool is saturated. That made a
+            // green assertion a statement about runner load.
+            var leaseExpiresAt = Assert.NotNull(queue.LeaseExpiresAtUtc);
+            var cancelledAt = Assert.NotNull(extractor.CancellationObservedAt);
+
+            // Lower bound has teeth too: cancelling BEFORE the lease expires would mean the
+            // worker abandoned work it still owned. Two seconds of slack below covers the
+            // CancelAfter timer firing marginally early; ten above covers a starved pool
+            // delivering the cancellation callback late, while still failing any build that
+            // does not bind cancellation to the deadline at all (those never cancel, and are
+            // caught by the liveness wait above).
+            Assert.InRange(cancelledAt - leaseExpiresAt, TimeSpan.FromSeconds(-2), TimeSpan.FromSeconds(10));
         }
         finally
         {
@@ -79,8 +100,8 @@ public sealed class ExtractionWorkerLeaseTests
         await worker.StartAsync(CancellationToken.None);
         try
         {
-            await reader.Observed.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            await queue.Failed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await reader.Observed.Task.WaitAsync(TestWaits.Liveness);
+            await queue.Failed.Task.WaitAsync(TestWaits.Liveness);
             Assert.Null(queue.TenantAtClaim);
             Assert.Equal(businessUnitId, reader.TenantAtRead);
             Assert.Equal(businessUnitId, queue.TenantAtFailure);
@@ -119,11 +140,15 @@ public sealed class ExtractionWorkerLeaseTests
 
         public TaskCompletionSource RenewalStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        /// <summary>The deadline handed to the worker, and the clock the test measures against.</summary>
+        public DateTime? LeaseExpiresAtUtc { get; private set; }
+
         public Task<ExtractionJob?> ClaimAsync(string workerId, TimeSpan leaseDuration, int perTenantCap, CancellationToken ct = default)
         {
             if (Interlocked.Exchange(ref _claimed, 1) != 0)
                 return Task.FromResult<ExtractionJob?>(null);
             _job.LeaseExpiresAt = DateTime.UtcNow.Add(_leaseDuration);
+            LeaseExpiresAtUtc = _job.LeaseExpiresAt;
             return Task.FromResult<ExtractionJob?>(_job);
         }
 
@@ -164,6 +189,10 @@ public sealed class ExtractionWorkerLeaseTests
     {
         public TaskCompletionSource CancellationObserved { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        /// <summary>When the work actually saw its token cancelled. Stamped before the TCS is
+        /// completed, so it reflects the worker's deadline and not the test's scheduling.</summary>
+        public DateTime? CancellationObservedAt { get; private set; }
+
         public Task<ChunkedExtractionOutcome> ExtractAsync(DocumentExtractionInput input, CancellationToken ct = default)
             => ExtractUnstructuredAsync(input, ct);
 
@@ -176,6 +205,7 @@ public sealed class ExtractionWorkerLeaseTests
             }
             catch (OperationCanceledException)
             {
+                CancellationObservedAt = DateTime.UtcNow;
                 CancellationObserved.TrySetResult();
                 throw;
             }
