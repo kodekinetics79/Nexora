@@ -2,7 +2,7 @@
 
 One long-lived branch. Everything else is short-lived and deleted on merge.
 
-```
+```text
 main ──●──●──●──●──●──►        the only permanent branch; what Render deploys
         \        /
          ●──●──●              a change: branch, PR, CI green, merge, delete
@@ -51,8 +51,21 @@ Recover one with `git checkout -b <name> archive/<name>-<date>`.
 ## The gate
 
 `CI green` (`.github/workflows/ci.yml`) is a required status check on `main`, and
-`render.yaml` sets `autoDeployTrigger: checksPass` so Render only ships a commit
-whose checks passed.
+the Render service is set to auto-deploy only **after CI checks pass**, so Render
+only ships a commit whose checks passed.
+
+Both halves are set, and both were verified by making them fail rather than by
+reading configuration:
+
+- a direct `git push` to `main` is refused — `GH013 ... Required status check
+  "CI green" is expected. Changes must be made through a pull request.`
+- `GET /v1/services/{id}` reports `autoDeployTrigger: checksPass`.
+
+**The deploy trigger lives in the Render dashboard, not in `render.yaml`.** That
+service was created by hand and is not linked to the Blueprint, so the file is a
+description and the dashboard is the configuration — see the banner at the top of
+`render.yaml`. The `checksPass` line sat in that file for a day, reviewed and
+merged, doing nothing, because Render never read it.
 
 That pairing is the point, and it is worth stating why it is not ceremony. This
 service applies migrations at boot (`Database__ApplyMigrationsOnStartup=true`), so
