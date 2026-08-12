@@ -320,11 +320,12 @@ public sealed class ProcurementIntegrationService(
 
     private ConnectorConfiguration ResolveConnector(long businessUnitId)
     {
-        var section = configuration.GetSection($"ProcurementIntegration:Tenants:{businessUnitId}");
-        var source = section["SourceSystem"]?.Trim();
-        var secret = section["SharedSecret"];
-        var configured = !string.IsNullOrWhiteSpace(source) && source.Length <= 100
-            && !string.IsNullOrWhiteSpace(secret) && secret.Length >= 32;
+        // The predicate itself lives in ProcurementIntegrationConfiguration because the activation
+        // gate now asks the same question — "does this tenant have an ERP connector at all?" — and
+        // two copies of "configured" that could drift by one length check is how a tenant ends up
+        // activated as having no integration while the callback endpoint happily authenticates one.
+        var configured = ProcurementIntegrationConfiguration.TryResolve(
+            configuration, businessUnitId, out var source, out var secret);
         return new ConnectorConfiguration(configured, configured ? $"procurement:{businessUnitId}" : "not-integrated",
             configured ? source! : "Not integrated", configured ? secret : null);
     }

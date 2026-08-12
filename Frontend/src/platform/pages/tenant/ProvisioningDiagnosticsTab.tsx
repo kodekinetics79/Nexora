@@ -71,6 +71,10 @@ const DISPOSITION_TONE: Record<ActivationControlDisposition, 'success' | 'error'
   BLOCKING: 'error',
   DEFERRED: 'warning',
   EXTERNALLY_BLOCKED: 'info',
+  // Does not stop the activation this tab is diagnosing; does stop certification. Info rather
+  // than error, for the same reason EXTERNALLY_BLOCKED is: a red chip on a row that is not
+  // holding anything up is how an operator learns to stop reading the red chips.
+  CERTIFICATION_ONLY: 'info',
 };
 
 const STEP_TONE: Record<string, 'success' | 'error' | 'warning' | 'info' | 'neutral'> = {

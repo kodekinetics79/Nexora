@@ -48,9 +48,24 @@ public sealed class TenantActivationPolicyTests
         Assert.Equal("RESTRICTED", decision.AccessState);
         Assert.Contains("identity.legal-customer", decision.BlockingControls);
         Assert.Contains("entitlements.typed-hard-limits", decision.BlockingControls);
-        Assert.Contains("security.privileged-mfa-policy", decision.BlockingControls);
         Assert.Contains("integrations.mandatory", decision.BlockingControls);
-        Assert.Equal(decision.Controls.Where(x => !x.Satisfied).Select(x => x.Code), decision.BlockingControls);
+
+        // security.privileged-mfa-policy is unsatisfied and does NOT block activation: the tenant
+        // identity plane persists no MFA assurance, so gating switch-on on an attestation about a
+        // capability that does not exist was collecting a signature, not checking anything. It is
+        // still owed to production and still makes certification impossible.
+        var mfa = decision.Controls.Single(x => x.Code == "security.privileged-mfa-policy");
+        Assert.False(mfa.Satisfied);
+        Assert.Equal(ActivationControlDispositions.CertificationOnly, mfa.Disposition);
+        Assert.DoesNotContain("security.privileged-mfa-policy", decision.BlockingControls);
+        Assert.Contains("security.privileged-mfa-policy", decision.ProductionBlockingControls);
+        Assert.False(decision.ProductionReadiness.Certifiable);
+
+        Assert.Equal(
+            decision.Controls
+                .Where(x => !x.Satisfied && x.Disposition != ActivationControlDispositions.CertificationOnly)
+                .Select(x => x.Code),
+            decision.BlockingControls);
     }
 
     /// <summary>
@@ -175,10 +190,15 @@ public sealed class TenantActivationPolicyTests
         var decision = await service.EvaluateAsync(9972);
 
         Assert.NotNull(decision);
-        Assert.Equal("tenant-activation/2026-08-10.v2", decision!.PolicyVersion);
+        Assert.Equal("tenant-activation/2026-08-12.v3", decision!.PolicyVersion);
         Assert.False(decision.Ready);
-        // Every unsatisfied control still blocks, whether or not it has somewhere to be fixed.
-        Assert.Equal(decision.Controls.Where(x => !x.Satisfied).Select(x => x.Code), decision.BlockingControls);
+        // Every unsatisfied control still blocks activation, whether or not it has somewhere to be
+        // fixed — except the one that is explicitly a certification requirement rather than a gate.
+        Assert.Equal(
+            decision.Controls
+                .Where(x => !x.Satisfied && x.Disposition != ActivationControlDispositions.CertificationOnly)
+                .Select(x => x.Code),
+            decision.BlockingControls);
         Assert.All(decision.Controls.Where(x => !x.Satisfied), control => Assert.True(control.BlocksProduction));
         Assert.False(decision.ProductionReadiness.Certifiable);
         // A satisfied control carries no remediation: there is nothing to fix, and a Resolve

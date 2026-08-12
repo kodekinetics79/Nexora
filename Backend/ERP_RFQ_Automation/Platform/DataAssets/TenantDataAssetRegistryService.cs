@@ -80,10 +80,30 @@ public sealed class TenantDataAssetRegistryService(
                 $"Asset region '{region}' does not match the tenant's contractual data region '{tenant.DataRegion}'.");
 
         var createdBy = Actor(actor);
+
+        // A caller that ALREADY owns a transaction registers inside it rather than beside it.
+        //
+        // The provisioning step that registers this boundary automatically runs inside the step
+        // transaction the runner opened, and two things break if this method insists on its own:
+        // EF refuses a nested BeginTransaction outright, and ChangeTracker.Clear() would detach
+        // the execution entity the step is still recording ids on — the same hazard that keeps the
+        // invitation step from delegating to ReissueAsync. Joining the caller's unit of work is
+        // also the stronger guarantee: the asset row, its audit record and the step's own verdict
+        // commit together or not at all.
+        if (context.Database.CurrentTransaction is not null)
+            return await RegisterCoreAsync();
+
         return await context.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
         {
             context.ChangeTracker.Clear();
             await using var tx = await context.Database.BeginTransactionAsync(ct);
+            var dto = await RegisterCoreAsync();
+            await tx.CommitAsync(ct);
+            return dto;
+        });
+
+        async Task<TenantDataAssetDto> RegisterCoreAsync()
+        {
             var existing = await context.Set<TenantDataAsset>().SingleOrDefaultAsync(
                 x => x.TenantId == tenantId && x.LogicalKey == logicalKey, ct);
             if (existing is not null)
@@ -127,9 +147,8 @@ public sealed class TenantDataAssetRegistryService(
                     row.BackupPolicyVersion,
                     reason
                 }, tenantId, httpContext, ct);
-            await tx.CommitAsync(ct);
             return ToDto(row);
-        });
+        }
     }
 
     public async Task<TenantDataAssetDto> VerifyAsync(
@@ -156,10 +175,21 @@ public sealed class TenantDataAssetRegistryService(
             throw new TenantDataAssetValidationException(
                 $"Observed business-unit scope {request.ObservedBusinessUnitId} does not match tenant scope {expectedScope}.");
 
+        // Joins the caller's transaction when there is one, for the reasons set out on RegisterAsync.
+        if (context.Database.CurrentTransaction is not null)
+            return await VerifyCoreAsync();
+
         return await context.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
         {
             context.ChangeTracker.Clear();
             await using var tx = await context.Database.BeginTransactionAsync(ct);
+            var dto = await VerifyCoreAsync();
+            await tx.CommitAsync(ct);
+            return dto;
+        });
+
+        async Task<TenantDataAssetDto> VerifyCoreAsync()
+        {
             var row = await context.Set<TenantDataAsset>().SingleOrDefaultAsync(
                           x => x.Id == assetId && x.TenantId == tenantId, ct)
                       ?? throw new TenantDataAssetNotFoundException("The tenant data asset was not found.");
@@ -202,9 +232,8 @@ public sealed class TenantDataAssetRegistryService(
                     row.VerificationVersion,
                     reason
                 }, tenantId, httpContext, ct);
-            await tx.CommitAsync(ct);
             return ToDto(row);
-        });
+        }
     }
 
     public async Task<TenantActivationDataDecisionDto> ActivationDataDecisionAsync(

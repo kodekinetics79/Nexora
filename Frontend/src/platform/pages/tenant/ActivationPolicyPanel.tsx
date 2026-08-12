@@ -45,6 +45,14 @@ const DISPOSITION_COPY: Record<ActivationControlDisposition, { label: string; to
   BLOCKING: { label: 'Blocking', tone: 'error' },
   DEFERRED: { label: 'Deferred', tone: 'warning' },
   EXTERNALLY_BLOCKED: { label: 'Externally blocked', tone: 'warning' },
+  /**
+   * Not an activation gate on ANY profile, and still a production blocker. Warning rather than
+   * error for the same reason DEFERRED is: a red "Blocking" chip beside a control that does not
+   * block the button the operator is about to press is noise, and noise is what taught them to
+   * stop reading the chips. The row keeps its Resolve button — recording the attestation is what
+   * clears it for certification — and the server's warning banner says so in words.
+   */
+  CERTIFICATION_ONLY: { label: 'Certification only', tone: 'warning' },
 };
 
 /**
@@ -281,6 +289,18 @@ export default function ActivationPolicyPanel({ tenant }: { tenant: Tenant }) {
             {decision.deferredControls.length + decision.externallyBlockedControls.length > 0 && (
               <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
                 Deferred under this profile: {[...decision.deferredControls, ...decision.externallyBlockedControls].join(' · ')}
+              </Typography>
+            )}
+            {/*
+              Listed separately from the deferrals, and deliberately NOT under the profile heading's
+              influence: these read identically on PRODUCTION. The profile did not take them off the
+              activation gate, so an operator must not learn to expect that switching to PRODUCTION
+              would put them back on it.
+            */}
+            {decision.certificationOnlyControls.length > 0 && (
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
+                Certification requirements, not activation gates, on every profile:{' '}
+                {decision.certificationOnlyControls.join(' · ')}
               </Typography>
             )}
           </Box>

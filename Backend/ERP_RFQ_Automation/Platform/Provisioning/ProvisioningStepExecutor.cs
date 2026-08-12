@@ -1,8 +1,11 @@
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
 using System.Text.Json;
 using ERP_RFQ_Automation.AI;
 using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Platform.DataAssets;
 using ERP_RFQ_Automation.Platform.Models;
 using ERP_RFQ_Automation.Platform.Onboarding;
 using ERP_RFQ_Automation.Platform.Services;
@@ -61,7 +64,7 @@ public sealed record ProvisioningStepContext(
 }
 
 /// <summary>
-/// The eight steps, as ordinary methods on a scoped service.
+/// The nine steps, as ordinary methods on a scoped service.
 ///
 /// <para><b>Every step is written to be run twice.</b> Not because retries are expected, but
 /// because they are unavoidable: EF's <c>EnableRetryOnFailure</c> execution strategy re-invokes
@@ -88,12 +91,21 @@ public sealed class ProvisioningStepExecutor : IProvisioningStepExecutor
 {
     private readonly ITenantBaselineSeeder _baseline;
     private readonly ITenantAdminInvitationService _invitations;
+    private readonly IPlatformDataBoundaryProvisioner? _dataBoundaries;
 
+    /// <param name="dataBoundaries">
+    /// OPTIONAL, and a null one degrades to today's manual data-boundary registration rather than
+    /// to a silent pass. Optional so the existing two-argument construction in any partially wired
+    /// host keeps working; the loss is an activation control that stays blocking until an operator
+    /// registers the boundary by hand, never an automatic pass on something nobody looked at.
+    /// </param>
     public ProvisioningStepExecutor(
-        ITenantBaselineSeeder baseline, ITenantAdminInvitationService invitations)
+        ITenantBaselineSeeder baseline, ITenantAdminInvitationService invitations,
+        IPlatformDataBoundaryProvisioner? dataBoundaries = null)
     {
         _baseline = baseline;
         _invitations = invitations;
+        _dataBoundaries = dataBoundaries;
     }
 
     public Task<string?> ExecuteAsync(
@@ -106,6 +118,7 @@ public sealed class ProvisioningStepExecutor : IProvisioningStepExecutor
         ProvisioningStepCodes.FoundingRole => CreateFoundingRoleAsync(context, ct),
         ProvisioningStepCodes.FoundingAdmin => CreateFoundingAdminAsync(context, ct),
         ProvisioningStepCodes.BaselineSeed => SeedBaselineAsync(context, ct),
+        ProvisioningStepCodes.DataBoundaries => RegisterDataBoundariesAsync(context, ct),
         ProvisioningStepCodes.Invitation => IssueInvitationAsync(context, ct),
         _ => throw new ProvisioningStepException(
             $"'{stepCode}' is not a provisioning step this server knows how to run.", isTerminal: true)
@@ -508,7 +521,104 @@ public sealed class ProvisioningStepExecutor : IProvisioningStepExecutor
         }
     }
 
-    // ---- 8. the activation invitation -----------------------------------------------------
+    // ---- 8. the tenant's data boundaries ---------------------------------------------------
+
+    /// <summary>
+    /// Registers this deployment's declared data boundaries against the tenant, and verifies the
+    /// one boundary the platform can actually observe: its own PostgreSQL tenant scope.
+    ///
+    /// <para><b>The defect this closes.</b> A Nexora-hosted tenant could not reach Active until an
+    /// operator had typed the platform's own provider reference, region and backup-policy version
+    /// into a form and hand-hashed an evidence document about a database Nexora runs itself.
+    /// Deletion certification then asked for the same thing nine times, once per boundary type.
+    /// None of it was a fact the operator was in a position to know better than the platform.</para>
+    ///
+    /// <para><b>Why it can fail, and must.</b> The verification is a real probe — the tenant's
+    /// primary business unit, the business-unit row it names, the isolation layer actually in force
+    /// for tenant-scoped tables, and the region the manifest declares against the region the
+    /// contract records. A disagreement fails the step and leaves <c>data.residency-isolation</c>
+    /// blocking, which is the correct outcome: a residency control that passed on an unobserved
+    /// fact would be worse than the manual form it replaced, because nobody would ever look
+    /// again.</para>
+    /// </summary>
+    private async Task<string?> RegisterDataBoundariesAsync(ProvisioningStepContext context, CancellationToken ct)
+    {
+        var (_, execution, _, _, _) = context;
+
+        if (_dataBoundaries is null)
+            return Detail(new
+            {
+                configured = false,
+                reason = "No platform data-boundary provisioner is wired up, so boundaries stay on "
+                         + "the manual registration path."
+            });
+
+        if (execution.TenantId is not long tenantId)
+            throw new ProvisioningStepException(
+                "The tenant step has not completed, so there are no data boundaries to register.",
+                isTerminal: false);
+
+        // Attributed to system:provisioning so no reader can mistake a probe for a person, but
+        // carrying the SUBMITTING operator's platform user id, because PlatformAuditService is
+        // right to refuse an anonymous privileged write and the human who asked for this tenant is
+        // the honest answer to "on whose authority". Without that id there can be no audit record,
+        // and an automated registration nobody can see afterwards is exactly what this step must
+        // not produce — so it fails instead.
+        if (execution.RequestedByPlatformUserId is not long actorId || actorId <= 0)
+            throw new ProvisioningStepException(
+                "This execution carries no platform actor id, so an automated data-boundary "
+                + "registration could not be audited. Register the boundaries from the tenant's "
+                + "Data & storage tab instead.",
+                isTerminal: true, failureCode: "data-boundary-unauditable");
+
+        var actor = new ClaimsPrincipal(new ClaimsIdentity(
+        [
+            new Claim(JwtRegisteredClaimNames.Sub, actorId.ToString()),
+            new Claim("email", PlatformAutomationActors.Provisioning)
+        ], "ProvisioningStepExecutor"));
+
+        PlatformDataBoundaryProvisionResult result;
+        try
+        {
+            result = await _dataBoundaries.EnsureAsync(tenantId, actor, ct);
+        }
+        catch (TenantDataAssetValidationException exception)
+        {
+            // The manifest disagrees with something the registry will not bend on — most often the
+            // tenant's contractual data region. Terminal: no number of retries reconciles a
+            // deployment's declared region with a contract that says somewhere else.
+            throw new ProvisioningStepException(
+                $"The platform data-boundary manifest was refused: {exception.Message}",
+                isTerminal: true, failureCode: "data-boundary-manifest");
+        }
+        catch (TenantDataAssetConflictException exception)
+        {
+            throw new ProvisioningStepException(
+                $"This tenant already carries a different data boundary: {exception.Message}",
+                isTerminal: true, failureCode: "data-boundary-conflict");
+        }
+
+        if (result.Failure is { Length: > 0 } failure)
+            throw new ProvisioningStepException(failure,
+                isTerminal: false, failureCode: "data-boundary-probe");
+
+        return Detail(new
+        {
+            configured = result.Configured,
+            primaryScope = result.PrimaryScopeState,
+            evidenceReference = result.EvidenceReference,
+            evidenceSha256 = result.EvidenceSha256,
+            registered = result.RegisteredLogicalKeys,
+            alreadyRegistered = result.AlreadyRegisteredLogicalKeys,
+            // Named rather than counted: an undeclared boundary type is still a deletion-certification
+            // blocker, and the operator needs to know WHICH one to describe.
+            undeclaredAssetTypes = result.UndeclaredAssetTypes,
+            manifestDefects = result.ManifestDefects,
+            actor = PlatformAutomationActors.Provisioning
+        });
+    }
+
+    // ---- 9. the activation invitation -----------------------------------------------------
 
     private async Task<string?> IssueInvitationAsync(ProvisioningStepContext context, CancellationToken ct)
     {

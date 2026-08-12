@@ -1,6 +1,7 @@
 using System.Text.Json;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Platform.DataAssets;
 using ERP_RFQ_Automation.Platform.Models;
 using ERP_RFQ_Automation.Platform.Onboarding;
 using Microsoft.EntityFrameworkCore;
@@ -75,6 +76,7 @@ public sealed class ProvisioningStepReconciler : IProvisioningStepReconciler
             ProvisioningStepCodes.AiPolicy => ProbeAiPolicyAsync(db, execution, ct),
             ProvisioningStepCodes.FoundingRole => ProbeFoundingRoleAsync(db, execution, ct),
             ProvisioningStepCodes.FoundingAdmin => ProbeFoundingAdminAsync(db, execution, ct),
+            ProvisioningStepCodes.DataBoundaries => ProbeDataBoundariesAsync(db, execution, ct),
             ProvisioningStepCodes.Invitation => ProbeInvitationAsync(db, execution, ct),
 
             // Idempotent by construction; see the class remarks. Re-running IS the reconciliation.
@@ -208,7 +210,61 @@ public sealed class ProvisioningStepReconciler : IProvisioningStepReconciler
             new { userId = existing.Id, existing.IsActive });
     }
 
-    // ---- 8. the activation invitation ---------------------------------------------------------
+    // ---- 8. the tenant's data boundaries ------------------------------------------------------
+
+    /// <summary>
+    /// Reconciles only on the one artefact that proves the step committed: a VERIFIED primary
+    /// PostgreSQL scope whose verified business unit is this execution's own.
+    ///
+    /// <para><b>Why a probe at all, when registration is idempotent.</b> Registration is — it
+    /// returns the existing row on identical values — but VERIFICATION is not: every call bumps
+    /// <c>VerificationVersion</c> and rewrites the evidence reference with a freshly hashed
+    /// observation. Re-running a step that had already committed would therefore churn the
+    /// verification history of a boundary nothing was wrong with, and make the audit trail read as
+    /// though the platform had doubted itself.</para>
+    ///
+    /// <para><b>Deliberately does NOT reconcile a merely-Registered asset.</b> Registered-but-
+    /// unverified is precisely the state the step exists to get past. Treating it as evidence the
+    /// step had completed would leave <c>data.residency-isolation</c> blocking with a green tick
+    /// beside it — the worst of both, and unexplainable from the console.</para>
+    ///
+    /// <para><b>Also does not reconcile the no-manifest case.</b> A deployment that declares
+    /// nothing has no asset to find, so the probe returns null and the step re-runs — which costs
+    /// one configuration read and correctly records that nothing was registered.</para>
+    /// </summary>
+    private static async Task<ProvisioningStepReconciliation?> ProbeDataBoundariesAsync(
+        ErpRfqAutomationContext db, ProvisioningExecution execution, CancellationToken ct)
+    {
+        if (execution.TenantId is not long tenantId
+            || execution.ProvisionedBusinessUnitId is not long businessUnitId)
+            return null;
+
+        var asset = await db.Set<TenantDataAsset>().AsNoTracking()
+            .Where(x => x.TenantId == tenantId
+                        && x.LogicalKey == TenantDataAssetRegistryService.PostgreSqlLogicalKey
+                        && x.Status == TenantDataAssetStatuses.Verified
+                        && x.VerifiedBusinessUnitId == businessUnitId
+                        && x.VerificationVersion > 0)
+            .Select(x => new { x.Id, x.Region, x.VerificationEvidenceReference, x.VerificationVersion })
+            .FirstOrDefaultAsync(ct);
+        if (asset is null)
+            return null;
+
+        return Reconciled(ProvisioningStepCodes.DataBoundaries,
+            $"The primary PostgreSQL tenant scope is already registered in region '{asset.Region}' and "
+            + $"verified against business unit {businessUnitId}, so the data-boundary step committed. "
+            + "Re-running it would re-probe and rewrite the verification evidence of a boundary "
+            + "nothing is wrong with.",
+            new
+            {
+                tenantDataAssetId = asset.Id,
+                asset.Region,
+                evidenceReference = asset.VerificationEvidenceReference,
+                asset.VerificationVersion
+            });
+    }
+
+    // ---- 9. the activation invitation ---------------------------------------------------------
 
     private static async Task<ProvisioningStepReconciliation?> ProbeInvitationAsync(
         ErpRfqAutomationContext db, ProvisioningExecution execution, CancellationToken ct)

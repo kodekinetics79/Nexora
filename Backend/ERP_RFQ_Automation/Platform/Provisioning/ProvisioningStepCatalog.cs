@@ -4,11 +4,11 @@ namespace ERP_RFQ_Automation.Platform.Provisioning;
 /// What each step is called, where it sits, and — the part that matters operationally — whether
 /// re-running it is safe.
 ///
-/// <para><b>Retriability is a property of the step, not of the failure.</b> Seven of the eight
+/// <para><b>Retriability is a property of the step, not of the failure.</b> Eight of the nine
 /// steps re-read their own state before they write, so a retry that follows a rolled-back attempt
 /// simply does the work again and a retry that follows a COMMITTED attempt finds its rows already
-/// there and does nothing. The eighth cannot work that way and is documented below, because a
-/// console that offered an identical retry button for all eight would, on that one, quietly
+/// there and does nothing. The ninth cannot work that way and is documented below, because a
+/// console that offered an identical retry button for all nine would, on that one, quietly
 /// create a second live activation link.</para>
 /// </summary>
 public static class ProvisioningStepCatalog
@@ -52,6 +52,17 @@ public static class ProvisioningStepCatalog
             "The seeder is idempotent by check-then-insert and never overwrites, so a re-run long " +
             "after go-live fills gaps without restoring a default over something the customer edited."),
 
+        // Registers this deployment's declared data boundaries for the tenant and verifies the one
+        // the platform can genuinely observe — its own PostgreSQL scope. A no-op where no manifest
+        // is configured, which is what keeps the manual path intact for a deployment that has not
+        // described its estate.
+        new(ProvisioningStepCodes.DataBoundaries, 7, "Register and verify data boundaries", true,
+            "Re-run is a no-op once the boundaries are registered: registration is idempotent on " +
+            "identical values and refuses a conflicting one rather than overwriting it, and the " +
+            "PostgreSQL scope is re-verified only when its verified scope no longer matches what " +
+            "the probe observes. A re-run always re-probes, so it can newly FAIL — which is the " +
+            "point: an estate that has changed under a tenant should stop being certified."),
+
         // The one that is NOT re-runnable on its own terms, and the reason the compensation seam
         // exists at all.
         //
@@ -66,7 +77,7 @@ public static class ProvisioningStepCatalog
         // transaction, so there is no instant at which two links work. That compensation is what
         // makes IsRetriable true here — the flag describes the step's behaviour, not the raw
         // service call underneath it.
-        new(ProvisioningStepCodes.Invitation, 7, "Issue activation invitation", true,
+        new(ProvisioningStepCodes.Invitation, 8, "Issue activation invitation", true,
             "Never re-issued blindly: the step revokes every live invitation for this " +
             "administrator and issues exactly one replacement, in one transaction, so two working " +
             "links can never coexist. The new link is emailed and is never returned in an API " +

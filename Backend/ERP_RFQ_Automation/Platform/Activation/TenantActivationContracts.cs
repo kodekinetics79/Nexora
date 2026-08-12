@@ -3,12 +3,24 @@ namespace ERP_RFQ_Automation.Platform.Activation;
 public static class TenantActivationPolicy
 {
     /// <summary>
-    /// Bumped from <c>2026-08-08.v1</c> when the deployment profile landed. The controls
-    /// themselves and the PRODUCTION verdict are unchanged — what changed is that a decision now
-    /// records WHICH profile it was taken under, so a decision read back later cannot be mistaken
-    /// for a production one.
+    /// Bumped from <c>2026-08-10.v2</c> because the ACTIVATION GATE itself changed, which v2 and v1
+    /// never did. Two controls decide differently now and one of them decides for a different gate,
+    /// so a v3 decision must not be compared with a v2 one as though the same thing had been asked:
+    ///
+    /// <list type="bullet">
+    /// <item><c>security.privileged-mfa-policy</c> is CERTIFICATION_ONLY. It no longer stops an
+    /// activation; it still blocks production certification and is still cleared only by a current
+    /// Owner-approved attestation.</item>
+    /// <item><c>integrations.mandatory</c> passes vacuously for a tenant with no mandatory
+    /// integration configured, and demands evidence again the moment one is.</item>
+    /// <item><c>data.residency-isolation</c> is unchanged as a rule and is now satisfiable without
+    /// an operator, from a recorded probe — the control still reads exactly the same asset state.</item>
+    /// </list>
+    ///
+    /// <para>Bumped from <c>2026-08-08.v1</c> at v2, when the deployment profile landed and a
+    /// decision began recording which profile it was taken under.</para>
     /// </summary>
-    public const string Version = "tenant-activation/2026-08-10.v2";
+    public const string Version = "tenant-activation/2026-08-12.v3";
 }
 
 /// <param name="Satisfied">
@@ -114,6 +126,14 @@ public sealed record TenantActivationDecision(
     public IReadOnlyList<string> DeferredControls { get; init; } = [];
 
     public IReadOnlyList<string> ExternallyBlockedControls { get; init; } = [];
+
+    /// <summary>
+    /// Controls that are NOT activation gates in any profile and are production-readiness
+    /// requirements instead. Still counted in <see cref="ProductionBlockingControls"/> — the two
+    /// lists overlap on purpose, because "does not stop switch-on" and "stops certification" are
+    /// different questions and a reader needs both answered.
+    /// </summary>
+    public IReadOnlyList<string> CertificationOnlyControls { get; init; } = [];
 
     /// <summary>
     /// The strict verdict, evaluated the same way for every profile. A deferring profile can be

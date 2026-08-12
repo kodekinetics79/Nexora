@@ -50,7 +50,7 @@ public enum ProvisioningStepStatus
 }
 
 /// <summary>
-/// The eight things provisioning does, in the order it does them.
+/// The nine things provisioning does, in the order it does them.
 ///
 /// <para><b>Why constants and not an enum.</b> These codes are the contract between the server
 /// and the console's progress list, and they appear verbatim in audit metadata and in the
@@ -81,6 +81,15 @@ public static class ProvisioningStepCodes
     /// <summary>Currencies, units of measure, quote configuration, starter roles and grants.</summary>
     public const string BaselineSeed = "baseline-seed";
 
+    /// <summary>
+    /// The tenant's data boundaries, registered from the platform manifest and — for the primary
+    /// PostgreSQL scope only — verified against a recorded probe of the running system.
+    ///
+    /// <para>A no-op on a deployment that declares no manifest, which is how the manual
+    /// register-then-verify path survives untouched where nobody has described their estate.</para>
+    /// </summary>
+    public const string DataBoundaries = "data-boundaries";
+
     /// <summary>The single-use activation link. Skipped on the password path.</summary>
     public const string Invitation = "invitation";
 
@@ -92,7 +101,7 @@ public static class ProvisioningStepCodes
     public static readonly IReadOnlyList<string> Ordered =
     [
         Tenant, BusinessUnit, LifecycleStatuses, AiPolicy,
-        FoundingRole, FoundingAdmin, BaselineSeed, Invitation
+        FoundingRole, FoundingAdmin, BaselineSeed, DataBoundaries, Invitation
     ];
 
     public static bool IsKnown(string? code)

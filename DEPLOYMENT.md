@@ -69,6 +69,39 @@ recoverable legacy files and rewrite absolute `Attachments.FilePath` values to p
   reachable ClamAV daemon**.
 - The app URL is `https://nexora-fyjw.onrender.com`.
 
+### Data-boundary manifest (optional, but it is what stops the retyping)
+
+`Platform:DataBoundaries:*` describes **this deployment's own estate**, per tenant
+data-boundary type. Provisioning reads it and registers each declared boundary against
+every new tenant, and verifies the one boundary the platform can genuinely observe — its
+own PostgreSQL tenant scope — from a recorded probe. Without it, an operator has to hand-type
+the platform's provider reference, region and backup policy into a form for every tenant,
+and hand-hash an evidence document about a database the platform runs itself.
+
+```ini
+Platform__DataBoundaries__PostgreSqlTenantScope__OpaqueProviderReference=neon-project-nexora-prod
+Platform__DataBoundaries__PostgreSqlTenantScope__Region=us-east-1
+Platform__DataBoundaries__PostgreSqlTenantScope__BackupPolicyReference=neon-pitr-7d
+Platform__DataBoundaries__PostgreSqlTenantScope__BackupPolicyVersion=3
+```
+
+Repeat per type: `PostgreSqlTenantScope`, `ObjectStorage`, `SearchIndex`, `EmbeddingStore`,
+`Cache`, `QueuePayload`, `GeneratedExport`, `AiOcrProvider`, `Subprocessor`. Optional
+per-type overrides: `LogicalKey`, `Classification`, `Disposition`.
+
+- **`Region` must equal every tenant's contractual `DataRegion`.** They disagree, the probe
+  fails, the provisioning step fails, nothing is registered and `data.residency-isolation`
+  stays blocking. That is the intended behaviour, not a bug to configure around.
+- **`OpaqueProviderReference` is an opaque identifier** — never a URL, connection string or
+  credential. The registry refuses anything containing `://`, `@`, `=` or `?`.
+- **A type declared with a missing field is refused**, logged, and left on the manual path.
+  Nothing is defaulted; a guessed provider reference would be a residency claim nobody made.
+- **Set nothing and nothing changes.** An absent section is the pre-existing manual behaviour,
+  exactly.
+- Only `PostgreSqlTenantScope` is *verified*. The rest are *registered*, which is what
+  deletion certification needs from them, and is not a claim that anything about a
+  subprocessor has been checked.
+
 ### Malware scanning (required)
 
 `render.yaml` declares a second Render service, `nexora-clamav` — a **private

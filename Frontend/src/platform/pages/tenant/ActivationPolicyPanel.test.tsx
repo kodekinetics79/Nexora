@@ -66,6 +66,7 @@ const activationBlocked: TenantActivationDecision = {
   productionBlockingControls: ['security.privileged-mfa-policy'],
   deferredControls: [],
   externallyBlockedControls: [],
+  certificationOnlyControls: [],
   productionReadiness: {
     certifiable: false,
     blockingControls: ['security.privileged-mfa-policy'],
