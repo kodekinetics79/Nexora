@@ -47,6 +47,7 @@ import { platformKeys } from '../api/queryKeys';
 import { usePlatformPermissions } from '../auth/usePlatformPermissions';
 import { REQUIRED_ROLE_COPY } from '../auth/permissions';
 import type {
+  BillingMeterCatalogEntry,
   BillingStatement,
   RateCard,
   RateCardLineInput,
@@ -67,7 +68,15 @@ const fmtMoney = (amount: number, currency: string) =>
 
 const fmtUsd = (amount: number) => fmtMoney(amount, 'USD');
 
-type LineForm = RateCardLineInput;
+/** Sentinel for the last option in the meter dropdown. Not a meter key, never submitted. */
+const CUSTOM_METER = '__custom__';
+
+/**
+ * `customMeter` is form state, not wire state — it records that the operator deliberately chose
+ * "Custom…", which is otherwise indistinguishable from a new empty line. It is deliberately NOT
+ * on `RateCardLineInput`: the request body is built field by field on submit, so it cannot leak.
+ */
+type LineForm = RateCardLineInput & { customMeter?: boolean };
 
 interface RateCardForm {
   code: string;
@@ -169,6 +178,46 @@ export default function BillingPage() {
     queryFn: () => platformApi.listRateCards(),
     enabled: permissions.canAdministerBilling,
   });
+
+  // The meter catalogue is CLOSED and lives on the server: ValidateRateCardShape refuses any
+  // MeterKey that is not BILLING_CERTIFIED, and only four of the sixteen are. The field used to
+  // be free text, so the only way to discover any of that was to type something, save, and read
+  // a 400 — "Meter 'Test-001' is not BILLING_CERTIFIED and cannot be placed on a rate card",
+  // which reads like a certification workflow exists and is the wrong thing to go looking for.
+  // The endpoint, the type, the client method and the query key all already existed; nothing
+  // called them.
+  const meterCatalogQuery = useQuery({
+    queryKey: platformKeys.billingMeterCatalog(),
+    queryFn: () => platformApi.listBillingMeterCatalog(),
+    enabled: permissions.canAdministerBilling,
+    staleTime: 60 * 60 * 1000, // A compiled-in constant. It cannot change without a deploy.
+  });
+
+  // Keyed by the BILLING meter key, because that — not eventType — is what a rate card line
+  // carries and what the server matches on. Several event types collapse onto one billing key.
+  const meterOptions = useMemo(() => {
+    const byKey = new Map<string, BillingMeterCatalogEntry>();
+    for (const entry of meterCatalogQuery.data ?? []) {
+      if (!byKey.has(entry.billingMeterKey)) byKey.set(entry.billingMeterKey, entry);
+    }
+    const all = [...byKey.values()];
+    return {
+      certified: all.filter((m) => m.certification === 'BillingCertified')
+        .sort((a, b) => a.billingMeterKey.localeCompare(b.billingMeterKey)),
+      rest: all.filter((m) => m.certification !== 'BillingCertified')
+        .sort((a, b) => a.billingMeterKey.localeCompare(b.billingMeterKey)),
+      keys: new Set(byKey.keys()),
+    };
+  }, [meterCatalogQuery.data]);
+
+  /**
+   * Custom when the operator asked for it, and also when an EXISTING card carries a key the
+   * catalogue does not have — an older card, or one written before a meter was retired. Without
+   * the second clause the Select would silently render blank and an unrelated save would rewrite
+   * a meter key nobody touched.
+   */
+  const isCustomMeter = (line: LineForm) =>
+    line.customMeter ?? (line.meterKey !== '' && !meterOptions.keys.has(line.meterKey));
 
   const invalidateBilling = () => {
     queryClient.invalidateQueries({ queryKey: [...platformKeys.all, 'billing'] });
@@ -900,14 +949,58 @@ export default function BillingPage() {
             </Stack>
             {cardForm.lines.map((line, index) => (
               <Stack key={index} direction={{ xs: 'column', md: 'row' }} spacing={1.5} alignItems={{ md: 'center' }}>
+                {/*
+                  Selecting a meter also fills the Unit, because the catalogue is where the unit
+                  is defined — a hand-typed "tokens" against ai.tokens.external prices the line in
+                  a unit the meter does not emit, and nothing downstream would say so.
+                  CUSTOM stays available: the catalogue is compiled in, so a meter added to the
+                  server before this console ships must still be reachable. It is last, and it is
+                  the only path that can produce the 400 above.
+                */}
                 <TextField
+                  select={!isCustomMeter(line)}
                   size="small"
                   label="Meter key"
                   value={line.meterKey}
-                  onChange={(e) => setLine(index, { meterKey: e.target.value })}
+                  onChange={(e) => {
+                    if (!isCustomMeter(line) && e.target.value === CUSTOM_METER) {
+                      setLine(index, { customMeter: true, meterKey: '', unit: '' });
+                      return;
+                    }
+                    const picked = [...meterOptions.certified, ...meterOptions.rest]
+                      .find((m) => m.billingMeterKey === e.target.value);
+                    setLine(index, picked
+                      ? { meterKey: picked.billingMeterKey, unit: picked.unit }
+                      : { meterKey: e.target.value });
+                  }}
+                  helperText={isCustomMeter(line)
+                    ? 'Custom — the server refuses anything not BILLING_CERTIFIED.'
+                    : undefined}
                   sx={{ flex: 1.4 }}
                   required
-                />
+                >
+                  {!isCustomMeter(line) && [
+                    ...meterOptions.certified.map((m) => (
+                      <MenuItem key={m.billingMeterKey} value={m.billingMeterKey}>
+                        <Box component="code" sx={{ fontSize: 12.5, fontWeight: 700 }}>{m.billingMeterKey}</Box>
+                        <Typography variant="caption" color="text.secondary" sx={{ ml: 1 }}>per {m.unit}</Typography>
+                      </MenuItem>
+                    )),
+                    // Shown and disabled rather than hidden. "Where did pages.processed go?" is a
+                    // worse question than seeing it greyed out next to the reason.
+                    ...meterOptions.rest.map((m) => (
+                      <MenuItem key={m.billingMeterKey} value={m.billingMeterKey} disabled>
+                        <Box component="code" sx={{ fontSize: 12.5 }}>{m.billingMeterKey}</Box>
+                        <Typography variant="caption" color="text.secondary" sx={{ ml: 1 }}>
+                          {m.certification === 'Blocked' ? 'blocked — not billable' : 'not implemented'}
+                        </Typography>
+                      </MenuItem>
+                    )),
+                    <MenuItem key={CUSTOM_METER} value={CUSTOM_METER}>
+                      <Typography variant="body2" sx={{ fontStyle: 'italic' }}>Custom…</Typography>
+                    </MenuItem>,
+                  ]}
+                </TextField>
                 <TextField
                   size="small"
                   label="Included qty"
