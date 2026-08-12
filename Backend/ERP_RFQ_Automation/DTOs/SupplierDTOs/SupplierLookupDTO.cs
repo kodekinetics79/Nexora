@@ -5,6 +5,15 @@ namespace ERP_RFQ_Automation.DTOs.SupplierDTOs
     {
         public string? SearchTerm { get; set; }
         public string? ProductCategory { get; set; }
+
+        /// <summary>
+        /// FR-QTM-01. Optional: narrows the results to one tier when the sales engineer targets
+        /// dispatch at it. It is a view filter and nothing else — under ruling R-A a tier never
+        /// enters the eligibility predicate, so a supplier left out of a tier-filtered list is
+        /// exactly as dispatchable as it was before the filter was applied.
+        /// </summary>
+        public string? Tier { get; set; }
+
         public long BusinessUnitId { get; set; }
     }
 
@@ -21,6 +30,13 @@ namespace ERP_RFQ_Automation.DTOs.SupplierDTOs
         public decimal? SuccessRate { get; set; }
         public int? AvgResponseTime { get; set; }
         public string? Tags { get; set; }
+
+        /// <summary>
+        /// The customer's commercial classification, or null for a supplier nobody has classified
+        /// yet. Annotation only: it sits beside the governance columns below, never among them.
+        /// </summary>
+        public string? Tier { get; set; }
+
         public string GovernanceStatus { get; set; } = null!;
         public string VerificationStatus { get; set; } = null!;
         public string ComplianceStatus { get; set; } = null!;

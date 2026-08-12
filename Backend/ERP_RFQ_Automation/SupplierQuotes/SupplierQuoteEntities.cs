@@ -125,7 +125,25 @@ public sealed class SupplierQuoteLine
     public int? LeadTimeDays { get; set; }
     public string? AvailabilityType { get; set; }
     public string? OriginCountry { get; set; }
+    /// <summary>
+    /// The supplier's own wording — "24 months on parts, 12 on labour". Kept verbatim: it carries
+    /// conditions no single number can, and it is never rewritten from
+    /// <see cref="WarrantyMonths"/> nor read to produce one.
+    /// </summary>
     public string? Warranty { get; set; }
+
+    /// <summary>
+    /// The warranty length in whole months, as an operator TYPED IT. Null means not captured, which
+    /// is a real state and the state every line that predates this column is in.
+    ///
+    /// <para>Nothing derives this from <see cref="Warranty"/>. No regex, no classifier, no model —
+    /// a warranty clause is prose with conditions in it, and a number guessed from prose would be
+    /// presented beside a weighted score as if a person had asserted it. Under FR-QTM-03 warranty is
+    /// one of four scored criteria, and under ruling R-F a criterion with no value is never scored
+    /// as zero: a line with no number here reports that it cannot be scored, and stays awardable.</para>
+    /// </summary>
+    public int? WarrantyMonths { get; set; }
+
     public bool IsAlternate { get; set; }
     public string? Exceptions { get; set; }
     public ICollection<SupplierQuoteFieldEvidence> Evidence { get; set; } = new List<SupplierQuoteFieldEvidence>();

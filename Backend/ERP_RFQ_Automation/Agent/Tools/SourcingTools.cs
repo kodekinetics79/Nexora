@@ -3,9 +3,9 @@ using System.Text;
 using System.Text.Json;
 using ERP_RFQ_Automation.Agent.Guardrails;
 using ERP_RFQ_Automation.Agent.Models;
-using ERP_RFQ_Automation.Agent.Sourcing;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Procurement;
+using ERP_RFQ_Automation.SupplierEvaluation;
 using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.Agent.Tools;
@@ -166,6 +166,24 @@ public sealed class CaptureSupplierQuoteTool : IAgentTool
 /// Read-only per-line comparison matrix of captured supplier quotes for an RFQ, with a
 /// shared multi-criteria score per supplier per line and an overall recommendation.
 /// Reads authoritative quotes captured through the authenticated procurement workflow.
+///
+/// <para><b>One recommender.</b> This tool used to rank on weights hardcoded at price 0.5 /
+/// lead time 0.25 / success rate 0.25, while the comparison a human actually awards from
+/// (<c>ProcurementApplicationService.CompareQuotesAsync</c>) ranked on coverage then landed cost.
+/// Two recommenders could name different winners on the same line. Both now score through
+/// <see cref="WeightedSupplierScoring"/> with the SAME tenant weight set, so the answer the agent
+/// gives and the answer the workbench shows are the same answer.</para>
+///
+/// <para>Same weights AND the same inputs. All four criteria are read from the columns the governed
+/// comparison reads, warranty included: the typed <c>SupplierQuoteLine.WarrantyMonths</c> on the
+/// offer's canonical line, reached through the <c>SourceSupplierQuoteLineId</c> the quoted item
+/// already carries. Offering the scorer a hardcoded null there would have re-opened the very split
+/// this gate closed — the moment a tenant weighted warranty, this tool would refuse to rank offers
+/// the workbench ranks fine.</para>
+///
+/// <para>Supplier success rate is no longer a scored criterion — it is an operator-typed
+/// spreadsheet column, never a measured outcome, and scoring it presented a typed number as
+/// performance evidence. It is still reported, as the display-only value it always was.</para>
 /// </summary>
 public sealed class CompareSupplierQuotesTool : IAgentTool
 {
@@ -175,7 +193,8 @@ public sealed class CompareSupplierQuotesTool : IAgentTool
     public string Name => AgentToolNames.CompareSupplierQuotes;
     public string Description =>
         "Compare commercially eligible supplier quotes for an RFQ line-by-line, scoring authoritative landed cost, " +
-        "lead time and success rate, and highlighting the best option per line plus an overall recommendation.";
+        "lead time, warranty and payment terms against the tenant's configured comparison weights, and highlighting " +
+        "the best option per line plus an overall recommendation.";
     public string InputJsonSchema =>
         "{\"type\":\"object\",\"properties\":{\"rfqId\":{\"type\":\"integer\"}},\"required\":[\"rfqId\"]}";
     public bool IsMutation => false;
@@ -209,7 +228,10 @@ public sealed class CompareSupplierQuotesTool : IAgentTool
                 q.RfqItemId,
                 q.LeadTimeDays,
                 q.ValidUntil,
-                q.ItemName
+                q.ItemName,
+                // The offer's canonical evidence. Carried through so the warranty an operator typed
+                // on that line can be scored here exactly as the governed comparison scores it.
+                q.SourceSupplierQuoteLineId
             })
             .ToListAsync(ct);
 
@@ -244,9 +266,33 @@ public sealed class CompareSupplierQuotesTool : IAgentTool
         var supplierIds = quoted.Select(q => q.SupplierId).Distinct().ToList();
         var suppliers = await _db.Set<Supplier>().AsNoTracking()
             .Where(s => supplierIds.Contains(s.Id))
-            .Select(s => new { s.Id, s.Name, s.SuccessRate })
+            .Select(s => new { s.Id, s.Name, s.SuccessRate, s.CreditDays })
             .ToListAsync(ct);
         var supById = suppliers.ToDictionary(s => s.Id);
+
+        // The warranty period an operator typed on the canonical supplier-quote line — the SAME
+        // column the governed comparison scores from. Read by ids the rows above already carry, in
+        // one keyed lookup beside the supplier one, so the candidate query gains no join.
+        //
+        // It used to be offered to the scorer as a literal null, on the belief that warranty was
+        // free text and no number existed. It does now, and that null was the original two-recommender
+        // defect coming back through a side door: a tenant that weights warranty would have had this
+        // tool refuse to rank offers the workbench ranks fine, and tell the operator to capture a
+        // value that was already captured.
+        var quoteLineIds = quoted.Where(q => q.SourceSupplierQuoteLineId.HasValue)
+            .Select(q => q.SourceSupplierQuoteLineId!.Value).Distinct().ToList();
+        var warrantyMonthsByQuoteLineId = quoteLineIds.Count == 0
+            ? new Dictionary<long, int?>()
+            : await _db.Set<SupplierQuotes.SupplierQuoteLine>().AsNoTracking()
+                .Where(l => l.BusinessUnitId == ctx.BusinessUnitId && quoteLineIds.Contains(l.Id))
+                .Select(l => new { l.Id, l.WarrantyMonths })
+                .ToDictionaryAsync(l => l.Id, l => l.WarrantyMonths, ct);
+
+        // The tenant's weights, not this file's opinion. A trader whose customers award on delivery
+        // date and one who awards on price are not running the same comparison, and neither of them
+        // should be running the one a developer typed into a constant.
+        var scoringWeights = await new SupplierComparisonWeightsService(_db)
+            .ResolveAsync(ctx.BusinessUnitId, ct);
 
         // Build per-line bids.
         var byLine = new Dictionary<long, List<LineBid>>();
@@ -263,8 +309,19 @@ public sealed class CompareSupplierQuotesTool : IAgentTool
                 Price = q.LandedUnitCost!.Value * requestedQuantity,
                 UnitPrice = q.UnitPrice ?? 0m,
                 LandedUnitCost = q.LandedUnitCost.Value,
+                CurrencyId = q.CurrencyId,
                 Quantity = requestedQuantity,
                 LeadTime = q.LeadTimeDays!.Value,
+                // Null, not zero: a supplier whose credit days nobody has captured has not been
+                // told to us as "pays cash", and the scorer must be able to tell those apart.
+                CreditDays = sup?.CreditDays,
+                // Same distinction again. Null means nobody typed a warranty period on the canonical
+                // line — a real state, and the state of every line captured before the column existed.
+                // 0 would assert the supplier offered no warranty at all.
+                WarrantyMonths = q.SourceSupplierQuoteLineId is { } quoteLineId
+                    && warrantyMonthsByQuoteLineId.TryGetValue(quoteLineId, out var months)
+                        ? months
+                        : null,
                 SuccessRate = (double)(sup?.SuccessRate ?? 0m)
             };
             if (!byLine.TryGetValue(itemId, out var list)) { list = new(); byLine[itemId] = list; }
@@ -276,17 +333,32 @@ public sealed class CompareSupplierQuotesTool : IAgentTool
         var lineResults = new List<object>();
         foreach (var (itemId, bids) in byLine.OrderBy(kv => kv.Key))
         {
-            SupplierScoring.ScoreInPlace(bids);
-            var ranked = bids.OrderByDescending(b => b.Score).ToList();
-            var best = ranked[0];
-            lineWins[best.SupplierId] = lineWins.GetValueOrDefault(best.SupplierId) + 1;
+            var scored = WeightedSupplierScoring.Score(bids, scoringWeights);
+            for (var i = 0; i < bids.Count; i++)
+            {
+                bids[i].Score = scored[i].Score;
+                bids[i].ScoreUnavailableReason = scored[i].UnavailableReason;
+                bids[i].Contributions = scored[i].Contributions;
+            }
+
+            // A bid with no score is not the worst bid; it is a bid whose weighted criteria are not
+            // all captured. It ranks below the scored ones and it is still listed, still quoted and
+            // still awardable by a human — it is simply not something this tool can rank.
+            var ranked = bids
+                .OrderByDescending(b => b.Score.HasValue).ThenByDescending(b => b.Score ?? 0d)
+                .ThenBy(b => b.Price).ThenBy(b => b.SupplierId).ToList();
+            var best = ranked[0].Score.HasValue ? ranked[0] : null;
+            if (best is not null)
+                lineWins[best.SupplierId] = lineWins.GetValueOrDefault(best.SupplierId) + 1;
 
             lineResults.Add(new
             {
                 rfqItemId = itemId,
                 itemName = lineNames.GetValueOrDefault(itemId),
-                bestSupplierId = best.SupplierId,
-                bestSupplierName = best.SupplierName,
+                bestSupplierId = best?.SupplierId,
+                bestSupplierName = best?.SupplierName,
+                // Says why there is no winner rather than presenting the first row as one.
+                bestUnavailableReason = best is null ? ranked[0].ScoreUnavailableReason : null,
                 bids = ranked.Select(b => new
                 {
                     b.SupplierId,
@@ -296,47 +368,94 @@ public sealed class CompareSupplierQuotesTool : IAgentTool
                     b.Quantity,
                     lineTotal = b.Price,
                     leadTimeDays = b.LeadTime,
+                    creditDays = b.CreditDays,
+                    warrantyMonths = b.WarrantyMonths,
+                    // Reported, never scored: an operator typed it, nothing measured it.
                     b.SuccessRate,
                     b.Score,
-                    isBest = b.SupplierId == best.SupplierId
+                    scoreOutOf = SupplierScoringWeights.MaximumScore,
+                    scoreUnavailableReason = b.ScoreUnavailableReason,
+                    scoreBreakdown = b.Contributions,
+                    isBest = best is not null && b.SupplierId == best.SupplierId
                 })
             });
         }
 
-        // Overall: supplier winning most lines, tiebreak by lowest aggregate priced total.
+        // Overall: supplier winning most lines, tiebreak by lowest aggregate priced total. Only
+        // lines with a scored winner count — a line nothing could be scored on elects nobody.
         var totalsBySupplier = quoted
             .GroupBy(q => q.SupplierId)
             .ToDictionary(g => g.Key, g => g.Sum(x =>
                 x.LandedUnitCost!.Value * requestedByLine[x.RfqItemId!.Value]));
-        var overall = lineWins
+        long? overall = lineWins.Count == 0 ? null : lineWins
             .OrderByDescending(kv => kv.Value)
             .ThenBy(kv => totalsBySupplier.GetValueOrDefault(kv.Key))
             .Select(kv => kv.Key)
-            .FirstOrDefault();
+            .First();
 
         return AgentToolResult.Ok(new
         {
             rfqId = rfqId.Value,
-            weights = SupplierScoring.Weights,
+            weights = new
+            {
+                price = scoringWeights.Price,
+                leadTime = scoringWeights.LeadTime,
+                warranty = scoringWeights.Warranty,
+                paymentTerms = scoringWeights.PaymentTerms,
+                outOf = SupplierScoringWeights.MaximumScore
+            },
             lineCount = byLine.Count,
             recommendedSupplierId = overall,
-            recommendedSupplierName = supById.TryGetValue(overall, out var ov) ? ov.Name : null,
-            rationale = $"Supplier {overall} wins {lineWins.GetValueOrDefault(overall)} of {byLine.Count} line(s) on the weighted score (price 50%, lead time 25%, success rate 25%).",
+            recommendedSupplierName = overall is not null && supById.TryGetValue(overall.Value, out var ov)
+                ? ov.Name : null,
+            rationale = overall is null
+                ? $"No supplier is recommended for RFQ {rfqId}: none of the {byLine.Count} line(s) could be "
+                  + "scored against the tenant's comparison weights. The quotes below are still valid and "
+                  + "still awardable — capture the missing values, or move the weight off the criterion "
+                  + "that is not captured, and the ranking will follow."
+                : $"Supplier {overall} wins {lineWins.GetValueOrDefault(overall.Value)} of {byLine.Count} line(s) "
+                  + $"on the tenant's weighted score (price {scoringWeights.Price}, lead time {scoringWeights.LeadTime}, "
+                  + $"warranty {scoringWeights.Warranty}, payment terms {scoringWeights.PaymentTerms}, "
+                  + $"out of {SupplierScoringWeights.MaximumScore}).",
             lines = lineResults
         });
     }
 
-    private sealed class LineBid : IScoreCandidate
+    private sealed class LineBid : IWeightedScoreCandidate
     {
         public long SupplierId { get; set; }
         public string SupplierName { get; set; } = string.Empty;
         public decimal Price { get; set; }
         public decimal UnitPrice { get; set; }
         public decimal LandedUnitCost { get; set; }
+        public long? CurrencyId { get; set; }
         public decimal Quantity { get; set; }
         public double LeadTime { get; set; }
+        public int? CreditDays { get; set; }
+
+        /// <summary>
+        /// The typed warranty period from the canonical supplier-quote line, or null when nobody
+        /// captured one. Never derived from the supplier's free-text warranty wording.
+        /// </summary>
+        public int? WarrantyMonths { get; set; }
+
+        /// <summary>Reported to the operator, deliberately not scored. See the class remarks.</summary>
         public double SuccessRate { get; set; }
-        public double Score { get; set; }
+
+        public double? Score { get; set; }
+        public string? ScoreUnavailableReason { get; set; }
+        public IReadOnlyList<SupplierScoreContribution> Contributions { get; set; } = [];
+
+        // Projection onto the governed scorer, from the same columns the governed comparison reads,
+        // so both name the same winner on the same data. Warranty is the number an operator typed on
+        // the canonical quote line — never a reading of the prose beside it — and it stays null where
+        // nobody typed one, so at a non-zero warranty weight that bid reports it cannot be scored
+        // rather than being credited with a warranty nobody stated.
+        decimal? IWeightedScoreCandidate.Price => Price;
+        double? IWeightedScoreCandidate.LeadTimeDays => LeadTime;
+        double? IWeightedScoreCandidate.WarrantyMonths => WarrantyMonths;
+        double? IWeightedScoreCandidate.CreditDays => CreditDays;
+        long? IWeightedScoreCandidate.PriceCurrencyId => CurrencyId;
     }
 }
 

@@ -104,7 +104,15 @@ public static class DemoUserSeeder
                 lifecycleStatuses, businessUnit.Id);
         }
 
-        await EnsureGovernedPlatformTenantAsync(db, businessUnit, logger, now);
+        // Without this the demo tenant owns no control-plane record, so every
+        // [RequiresEntitlement] action answers 403 and the pilot cannot walk the journey the
+        // tenant exists to demonstrate. See GovernedPlatformTenantSeeder for the whole argument;
+        // GoldenCommercialJourneySeeder calls the same helper for the same reason.
+        await GovernedPlatformTenantSeeder.EnsureAsync(
+            db, businessUnit, DemoPlanCode, "Local Demo", "system:demo-seed",
+            "Local demo/pilot tenant seeded by DemoUserSeeder; never invoiced. Recorded so the "
+            + "unconfigured-tenant allowance can tell a deliberate exemption from an oversight.",
+            logger, now);
 
         var role = await db.SetupMasters
             .Where(ERP_RFQ_Automation.Authorization.SetupTypes.IsRoleRow)
@@ -235,123 +243,15 @@ public static class DemoUserSeeder
         logger.LogInformation("Ensured platform owner login user {Email}.", platformEmail);
     }
 
-    /// <summary>The demo plan's code. Stable so a re-run converges on the same row.</summary>
-    private const string DemoPlanCode = "demo-local";
-
     /// <summary>
-    /// Makes the demo business unit a GOVERNED PLATFORM TENANT: a <c>platform.Plans</c> row that
-    /// enables every runtime-available entitlement, and a <c>platform.Tenants</c> row that is Active
-    /// and points at the business unit.
+    /// The demo plan's code. Stable so a re-run converges on the same row.
     ///
-    /// <para><b>The gap this closes.</b> This seeder created a BusinessUnit, an AI policy, lifecycle
-    /// statuses, a role and a Super Admin user — and no control-plane record at all.
-    /// <c>TenantAccessService.CoreQuery</c> resolves a business unit's entitlements through
-    /// <c>Tenant.PrimaryBusinessUnitId</c>, so with no Tenant row every
-    /// <c>[RequiresEntitlement]</c> action answered 403 <i>"Entitlement 'module.rfq' is unavailable
-    /// because no governed platform tenant owns this business unit"</i>. Reproduced against
-    /// PostgreSQL on 2026-08-12: sign in as the demo user, <c>GET /api/Rfq</c> → 403 with exactly
-    /// that detail. Thirty-five client-portal routes are behind those attributes, which is the whole
-    /// RFQ → quote → order journey — so the demo tenant could not walk the journey it exists to
-    /// demonstrate until somebody hand-inserted a plan and a tenant row.</para>
-    ///
-    /// <para><b>This does not weaken the check.</b> Nothing about
-    /// <c>EntitlementService.CheckFeatureAsync</c> changes: it still demands a tenant, still demands
-    /// a plan, and still reads the plan's own feature map. This seeds the data the check asks for,
-    /// which is the same data <c>TenantProvisioningRunner</c> writes on the real provisioning path.
-    /// A tenant seeded here is indistinguishable to the enforcement code from a provisioned one.</para>
-    ///
-    /// <para>Only entitlements with a real server execution boundary
-    /// (<c>TypedEntitlementCatalog.RuntimeAvailableKeys</c>) are enabled. Turning on a packaging
-    /// flag for an unimplemented capability would advertise a surface that does not exist — and
-    /// runtime authorization denies it anyway — so the demo plan says exactly what the product can
-    /// currently do. Same class of gap, and same fix, as the LifecycleStatusCatalog.EnsureAsync call
-    /// above: a demo tenant that cannot raise a quote is not a demo.</para>
-    ///
-    /// <para>Idempotent by natural key and NEVER by overwrite: an existing plan's features and an
-    /// existing tenant's status are left exactly as they are, because by the second run an operator
-    /// may have suspended the tenant or narrowed the plan deliberately, and re-imposing a default
-    /// over that would be an unlogged reversal of their decision. The one exception is a Tenant row
-    /// with no plan at all, which is not a decision — it is the gap.</para>
+    /// <para>The governed-tenant seeding this code names used to live here in full. It now lives in
+    /// <see cref="GovernedPlatformTenantSeeder"/> because the golden E2E seeder needs exactly the
+    /// same control-plane record and copying it would have created a second, divergent copy of a
+    /// control-plane seeder. Every guarantee that comment made — idempotent by natural key, never
+    /// overwriting an existing plan's features or an existing tenant's status, runtime-available
+    /// entitlements only — is stated and enforced there.</para>
     /// </summary>
-    private static async Task EnsureGovernedPlatformTenantAsync(
-        ErpRfqAutomationContext db, BusinessUnit businessUnit, ILogger logger, DateTime now)
-    {
-        var plan = await db.Set<Plan>().FirstOrDefaultAsync(p => p.Code == DemoPlanCode);
-        if (plan is null)
-        {
-            plan = new Plan
-            {
-                Code = DemoPlanCode,
-                Name = "Local Demo",
-                Weight = 5,
-                MaxConcurrentExtractionJobs = 4,
-                MaxDocsPerMonth = 5000,
-                MaxSeats = 25,
-                Features = DemoPlanFeaturesJson(),
-                MonthlyPriceUsd = null,
-                IsActive = true,
-                CreatedOn = now
-            };
-            db.Set<Plan>().Add(plan);
-            await db.SaveChangesAsync();
-            logger.LogInformation("Seeded demo plan '{PlanCode}'.", DemoPlanCode);
-        }
-
-        var tenant = await db.Set<Tenant>().IgnoreQueryFilters()
-            .FirstOrDefaultAsync(t => t.PrimaryBusinessUnitId == businessUnit.Id);
-        if (tenant is null)
-        {
-            // The slug is derived from the business unit code the same way the provisioning wizard
-            // derives the code from the slug, so the demo tenant reads like a provisioned one.
-            var slug = businessUnit.BusinessUnitCode.ToLowerInvariant();
-            db.Set<Tenant>().Add(new Tenant
-            {
-                Name = businessUnit.BusinessUnitName,
-                Slug = slug,
-                Status = TenantStatus.Active,
-                PlanId = plan.Id,
-                PrimaryBusinessUnitId = businessUnit.Id,
-                BillingMode = TenantBillingMode.Internal,
-                BillingModeReason =
-                    "Local demo/pilot tenant seeded by DemoUserSeeder; never invoiced. Recorded so the "
-                    + "unconfigured-tenant allowance can tell a deliberate exemption from an oversight.",
-                CreatedBy = "system:demo-seed",
-                CreatedOn = now
-            });
-            await db.SaveChangesAsync();
-            logger.LogInformation(
-                "Ensured governed platform tenant '{Slug}' (Active, plan '{PlanCode}') for demo business unit {BusinessUnitId}.",
-                slug, DemoPlanCode, businessUnit.Id);
-            return;
-        }
-
-        // A tenant with no plan cannot be entitled to anything; attach the demo plan and say so.
-        // Everything else about an existing tenant is left untouched.
-        if (tenant.PlanId is null)
-        {
-            tenant.PlanId = plan.Id;
-            tenant.ModifiedBy = "system:demo-seed";
-            tenant.ModifiedOn = now;
-            await db.SaveChangesAsync();
-            logger.LogInformation(
-                "Attached demo plan '{PlanCode}' to existing platform tenant {TenantId}, which had none.",
-                DemoPlanCode, tenant.Id);
-        }
-    }
-
-    /// <summary>
-    /// The demo plan's feature map: every catalogue key present and explicitly true/false, so an
-    /// absent key can never be mistaken for an intentional grant. True exactly for the entitlements
-    /// the server can actually execute.
-    /// </summary>
-    private static string DemoPlanFeaturesJson()
-    {
-        var features = ERP_RFQ_Automation.Platform.Entitlements.TypedEntitlementCatalog.Keys
-            .OrderBy(key => key, StringComparer.Ordinal)
-            .ToDictionary(
-                key => key,
-                ERP_RFQ_Automation.Platform.Entitlements.TypedEntitlementCatalog.IsRuntimeAvailable,
-                StringComparer.Ordinal);
-        return System.Text.Json.JsonSerializer.Serialize(features);
-    }
+    internal const string DemoPlanCode = "demo-local";
 }

@@ -161,6 +161,7 @@ log "Starting backend (migrations + golden seed) on $BACKEND_URL."
   CommercialFinance__ContactVerificationSecret="$APP_SECRET" \
   CommercialFinance__DunningProviderWebhookSecret="$APP_SECRET" \
   CommercialFinance__AuditActorSecret="$APP_SECRET" \
+  Observability__Prometheus__ScrapeKey="$APP_SECRET" \
   GoldenJourneySeed__Enabled=true \
   GoldenJourneySeed__Password="$E2E_PASSWORD" \
   GoldenJourneySeed__ManifestPath="$MANIFEST" \

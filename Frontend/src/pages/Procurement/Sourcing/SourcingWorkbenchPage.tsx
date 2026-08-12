@@ -51,7 +51,9 @@ import procurementService, {
   INCOTERMS_2020,
   type Incoterm,
   type PurchaseOrderLineTradeTerms,
+  type QuoteComparisonLine,
   type QuoteComparisonResult,
+  type QuoteScoreCriterion,
   type SupplierAcknowledgementStatus,
   type SupplierOffer,
   type SupplierPurchaseOrder,
@@ -63,6 +65,23 @@ import currencyService, {
 import warehouseService, {
   type WarehouseDTO,
 } from "../../../api/services/warehouseService";
+import { supplierTierLabel } from "../../../api/services/supplierService";
+import {
+  cheapestEligibleOffer,
+  offerScoreState,
+  orderOffersForComparison,
+  rankScoredOffers,
+  recommendationTradeOff,
+  roundedPoints as points,
+  warrantyComparisonCell,
+} from "../../../utils/supplierComparison";
+import {
+  WARRANTY_MONTHS_HELPER,
+  WARRANTY_WORDING_NOT_CAPTURED_HERE,
+  formatWarrantyMonths,
+  parseWarrantyMonthsInput,
+  warrantyMonthsFieldValue,
+} from "../../../utils/warrantyMonths";
 import { useAuth } from "../../../context/AuthContext";
 import commercialLearningService from "../../../api/services/commercialLearningService";
 import InboundShipmentsPanel from "./InboundShipmentsPanel";
@@ -90,6 +109,35 @@ const errorMessage = (error: any, fallback: string) =>
   error?.message ||
   error?.response?.data?.title ||
   fallback;
+const cheapestEligible = (comparison?: QuoteComparisonResult): QuoteComparisonLine | null =>
+  cheapestEligibleOffer(comparison?.lines ?? []);
+
+/**
+ * The offer's own number for one criterion, in the unit a buyer would say it in. The scorer sends
+ * a bare double; showing "1240" where a landed cost belongs, or "14" where days belong, would make
+ * the row unreadable as evidence.
+ */
+const criterionRawValue = (
+  criterion: QuoteScoreCriterion,
+  currencyCode: string,
+): string => {
+  if (criterion.rawValue == null) return "not stated";
+  switch (criterion.criterion) {
+    case "PRICE":
+      return money(criterion.rawValue, currencyCode);
+    case "LEAD_TIME":
+      return `${criterion.rawValue} days`;
+    case "WARRANTY":
+      // The same words the warranty column uses, so the raw value in the breakdown and the value
+      // in the column are recognisably the one fact rather than two renderings of it.
+      return formatWarrantyMonths(criterion.rawValue) ?? "not stated";
+    case "PAYMENT_TERMS":
+      return `${criterion.rawValue} credit days`;
+    default:
+      return String(criterion.rawValue);
+  }
+};
+
 const localCalendarDate = (value: Date) =>
   `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
 const receiptTimestamp = (calendarDate: string, now = new Date()) =>
@@ -417,6 +465,37 @@ function SourcingWorkbenchPage() {
     },
     enabled: comparisonLineIds.length > 0,
   });
+
+  /**
+   * Rank within the RFQ line, so "82" is never presented without the field it beat. Only scored
+   * offers are ranked: an offer with a missing weighted value has no score, and inventing a last
+   * place for it would be the same as scoring it zero.
+   */
+  const scoreRanks = useMemo(() => {
+    const ranks = new Map<number, { rank: number; of: number }>();
+    Object.values(comparisonsQuery.data ?? {}).forEach((comparison) => {
+      rankScoredOffers(comparison.lines).forEach((rank, id) => ranks.set(id, rank));
+    });
+    return ranks;
+  }, [comparisonsQuery.data]);
+
+  /**
+   * The rows in the order the comparison ranked them: best score first, then offers that are
+   * awardable but have no score, then offers that cannot be awarded. Rendering the raw API order
+   * would leave a buyer changing the weights and watching nothing move.
+   *
+   * This is the order of the rows and nothing else. Which offers can be awarded is decided by
+   * `Eligible` on each line, exactly as before.
+   */
+  const orderedOffers = useMemo(
+    () =>
+      orderOffersForComparison(workbench?.offers ?? [], (offer) =>
+        comparisonsQuery.data?.[offer.rfqItemId]?.lines.find(
+          (line) => line.supplierQuotedItemId === offer.id,
+        ),
+      ),
+    [workbench?.offers, comparisonsQuery.data],
+  );
 
   const remainingRequirement = (lineId: number) => {
     const line = workbench?.lines.find((candidate) => candidate.id === lineId);
@@ -819,24 +898,35 @@ function SourcingWorkbenchPage() {
               <TableRow>
                 <TableCell>Supplier / reference</TableCell>
                 <TableCell>RFQ line</TableCell>
+                <TableCell>Tier</TableCell>
                 <TableCell align="right">Available</TableCell>
                 <TableCell align="right">Unit price</TableCell>
                 <TableCell align="right">Landed cost</TableCell>
                 <TableCell align="right">Lead time</TableCell>
+                <TableCell>Warranty</TableCell>
+                <TableCell>Payment terms</TableCell>
                 <TableCell align="right">Reliability</TableCell>
+                <TableCell align="right">Weighted score</TableCell>
+                <TableCell>How the score is made up</TableCell>
                 <TableCell>Evidence</TableCell>
                 <TableCell align="right">Still to source</TableCell>
                 <TableCell align="right">Decision</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
-              {workbench.offers.map((offer) => {
+              {orderedOffers.map((offer) => {
                 const comparison = comparisonsQuery.data?.[offer.rfqItemId];
                 const authoritativeOffer = comparison?.lines.find(
                   (line) => line.supplierQuotedItemId === offer.id,
                 );
+                const scoreState = offerScoreState(authoritativeOffer);
+                const warrantyCell = warrantyComparisonCell(authoritativeOffer);
                 const isRecommended =
                   comparison?.recommendedSupplierQuotedItemId === offer.id;
+                const ranking = scoreRanks.get(offer.id);
+                const cheapest = cheapestEligible(comparison);
+                const isCheapest =
+                  cheapest?.supplierQuotedItemId === offer.id;
                 const award = workbench.awards.find((item) => item.supplierQuotedItemId === offer.id);
                 const quoteLine = workbench.customerQuoteDraft?.lines.find((item) => item.rfqItemId === offer.rfqItemId);
                 return (
@@ -851,6 +941,13 @@ function SourcingWorkbenchPage() {
                     </Typography>
                   </TableCell>
                   <TableCell>#{offer.rfqItemId}</TableCell>
+                  {/* Tier annotates and orders; it never gates. It is shown as plain text, apart
+                      from the eligibility chips, so it cannot be read as an approval. */}
+                  <TableCell>
+                    <Typography variant="caption">
+                      {supplierTierLabel(authoritativeOffer?.supplierTier)}
+                    </Typography>
+                  </TableCell>
                   <TableCell align="right">
                     {offer.availableQuantity ?? "Unknown"}
                   </TableCell>
@@ -870,10 +967,117 @@ function SourcingWorkbenchPage() {
                       ? "Unknown"
                       : `${authoritativeOffer.leadTimeDays} days`}
                   </TableCell>
+                  {/* The captured period leads, because it is the number the warranty points were
+                      computed from and the buyer has to be able to check the row against it. The
+                      supplier's wording stays underneath rather than being replaced — it carries
+                      the conditions the period does not. With no period captured the wording still
+                      leads, and the line beneath it says the number is missing so the row agrees
+                      with its own score column instead of contradicting it. */}
+                  <TableCell>
+                    <Typography variant="caption" sx={{ display: "block" }}>
+                      {warrantyCell.headline}
+                    </Typography>
+                    {warrantyCell.detail && (
+                      <Typography
+                        variant="caption"
+                        color="text.secondary"
+                        sx={{ display: "block" }}
+                      >
+                        {warrantyCell.detail}
+                      </Typography>
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    <Typography variant="caption" sx={{ display: "block" }}>
+                      {authoritativeOffer?.paymentTerms || "Not stated"}
+                    </Typography>
+                    {/* Blank is not zero: an uncaptured credit term means payment terms cannot be
+                        scored for this supplier, and saying "0 days" would invent an agreement. */}
+                    <Typography variant="caption" color="text.secondary">
+                      {authoritativeOffer?.creditDays == null
+                        ? "No credit days captured"
+                        : `${authoritativeOffer.creditDays} credit days`}
+                    </Typography>
+                  </TableCell>
+                  {/* Kept as a display-only column. It is an operator-typed spreadsheet value, not
+                      a measured outcome, so it carries no weight in the score. */}
                   <TableCell align="right">
                     {authoritativeOffer?.reliability == null
                       ? "Unknown"
                       : `${authoritativeOffer.reliability}%`}
+                  </TableCell>
+                  <TableCell align="right">
+                    {scoreState.status === "SCORED" ? (
+                      <Stack spacing={0.25} sx={{ alignItems: "flex-end" }}>
+                        <Typography sx={{ fontWeight: 800 }}>
+                          {scoreState.headline}
+                        </Typography>
+                        {ranking && (
+                          <Typography variant="caption" color="text.secondary">
+                            Rank {ranking.rank} of {ranking.of}
+                          </Typography>
+                        )}
+                      </Stack>
+                    ) : (
+                      // Two different silences, told apart. R-F: a missing value is never scored as
+                      // zero, and that offer stays awardable — the Approve button is gated on
+                      // eligibility alone, never on the score. A BLOCKED offer is also unscored,
+                      // but for the opposite reason, and it is never dressed as the first case.
+                      <Typography
+                        variant="caption"
+                        color={
+                          scoreState.status === "NOT_SCORED"
+                            ? "warning.main"
+                            : "text.secondary"
+                        }
+                        sx={{ fontWeight: scoreState.status === "PENDING" ? 400 : 700 }}
+                      >
+                        {scoreState.headline}
+                      </Typography>
+                    )}
+                  </TableCell>
+                  {/* Every criterion's raw value AND the points it earned, in the row and not
+                      behind a hover: a score a buyer cannot add up is a black box, and the last
+                      line of this cell is the sum they can check. */}
+                  <TableCell>
+                    {scoreState.status !== "SCORED" || !authoritativeOffer ? (
+                      <Typography
+                        variant="caption"
+                        color={
+                          scoreState.status === "BLOCKED"
+                            ? "warning.main"
+                            : "text.secondary"
+                        }
+                      >
+                        {scoreState.detail}
+                      </Typography>
+                    ) : (
+                      <Stack spacing={0.25}>
+                        {(authoritativeOffer.scoreBreakdown ?? []).map((criterion) => (
+                          <Typography key={criterion.criterion} variant="caption">
+                            <Box component="span" sx={{ fontWeight: 700 }}>
+                              {criterion.label}
+                            </Box>{" "}
+                            {criterionRawValue(criterion, offer.currencyCode)} ·{" "}
+                            {criterion.pointsEarned == null
+                              ? "no points"
+                              : points(criterion.pointsEarned)}{" "}
+                            of {criterion.weight}
+                          </Typography>
+                        ))}
+                        <Typography
+                          variant="caption"
+                          sx={{
+                            fontWeight: 800,
+                            borderTop: "1px solid",
+                            borderColor: "divider",
+                            pt: 0.25,
+                          }}
+                        >
+                          Total {points(scoreState.score)} of 100
+                        </Typography>
+                      </Stack>
+                    )}
                   </TableCell>
                   <TableCell>
                     {!authoritativeOffer ? (
@@ -914,11 +1118,43 @@ function SourcingWorkbenchPage() {
                   </TableCell>
                   <TableCell align="right">
                     <Stack spacing={0.5} sx={{ alignItems: "flex-end" }}>
-                      {isRecommended && (
+                      {/* The score chip sits BESIDE the landed-cost fact and never replaces it.
+                          When the recommendation is not the cheapest offer, it says what the
+                          preference cost and what it bought, and the plain "Lowest landed cost"
+                          chip stays on the offer that actually is cheapest. */}
+                      {isRecommended && authoritativeOffer?.weightedScore != null ? (
                         <Chip
                           size="small"
                           color="info"
-                          label="Lowest eligible landed cost"
+                          sx={{
+                            height: "auto",
+                            "& .MuiChip-label": {
+                              whiteSpace: "normal",
+                              display: "block",
+                              py: 0.5,
+                              textAlign: "right",
+                            },
+                          }}
+                          label={`Best weighted score ${points(authoritativeOffer.weightedScore)} — ${recommendationTradeOff(
+                            authoritativeOffer,
+                            cheapest,
+                            (value) => money(value, offer.currencyCode),
+                          )}`}
+                        />
+                      ) : (
+                        isRecommended && (
+                          <Chip
+                            size="small"
+                            color="info"
+                            label="Lowest eligible landed cost"
+                          />
+                        )
+                      )}
+                      {isCheapest && !isRecommended && (
+                        <Chip
+                          size="small"
+                          variant="outlined"
+                          label="Lowest landed cost"
                         />
                       )}
                       <Button
@@ -1366,6 +1602,13 @@ type ResponseLineForm = {
   otherCost: number;
   taxAmount: number;
   discountAmount: number;
+  /**
+   * Held as raw text, alone among these fields, because every other value here is coerced to a
+   * number and defaults to 0 — and 0 months is a supplier who offered no warranty, which is a
+   * different statement from nobody having recorded one. An empty string is the only way this form
+   * can say "not captured", and it is what an untouched field must stay.
+   */
+  warrantyMonths: string;
   minimumOrderQuantity: number;
 };
 
@@ -1381,6 +1624,10 @@ const responseLineDefaults = (): ResponseLineForm => ({
   otherCost: 0,
   taxAmount: 0,
   discountAmount: 0,
+  // An RFQ line arrives with no warranty recorded against it, and that is exactly what the field
+  // must show: blank. Routed through the same hydration the rest of the app uses so a future
+  // caller that does have a value cannot render a null as 0.
+  warrantyMonths: warrantyMonthsFieldValue(null),
   minimumOrderQuantity: 0,
 });
 
@@ -1419,7 +1666,7 @@ function ResponseDialog({
     }));
   const selectedForm = lineForms[rfqItemId] ?? responseLineDefaults();
   const setLine =
-    (field: keyof ResponseLineForm) =>
+    (field: Exclude<keyof ResponseLineForm, "warrantyMonths">) =>
     (event: { target: { value: unknown } }) =>
       setLineForms((current) => ({
         ...current,
@@ -1428,6 +1675,17 @@ function ResponseDialog({
           [field]: number(event.target.value),
         },
       }));
+  // Kept apart from setLine so the typed warranty is never pushed through number(), which turns an
+  // empty field into 0 and a half-typed "-" into NaN.
+  const setLineWarrantyMonths = (event: { target: { value: string } }) =>
+    setLineForms((current) => ({
+      ...current,
+      [rfqItemId]: {
+        ...(current[rfqItemId] ?? responseLineDefaults()),
+        warrantyMonths: event.target.value,
+      },
+    }));
+  const warrantyMonths = parseWarrantyMonthsInput(selectedForm.warrantyMonths);
   const includedLines = lines.filter((line: any) =>
     includedLineIds.includes(line.id),
   );
@@ -1445,7 +1703,11 @@ function ResponseDialog({
       value.otherCost >= 0 &&
       value.taxAmount >= 0 &&
       value.discountAmount >= 0 &&
-      value.minimumOrderQuantity >= 0
+      value.minimumOrderQuantity >= 0 &&
+      // Blank passes: a warranty nobody captured is a valid response. Only a value the field
+      // refuses — negative, fractional, or beyond the accepted ceiling — blocks the save, and it
+      // is checked on every included line so a bad value cannot hide on an unselected tab.
+      parseWarrantyMonthsInput(value.warrantyMonths).error === null
     );
   });
   const mutation = useMutation({
@@ -1471,6 +1733,9 @@ function ResponseDialog({
             taxAmount: value.taxAmount,
             discountAmount: value.discountAmount,
             minimumOrderQuantity: value.minimumOrderQuantity || undefined,
+            // Explicitly null rather than dropped when blank: the line is recorded as having no
+            // captured warranty, which is what the comparison needs in order to say so.
+            warrantyMonths: parseWarrantyMonthsInput(value.warrantyMonths).value,
           };
         }),
       }, idempotencyKey),
@@ -1630,6 +1895,23 @@ function ResponseDialog({
               label="Lead time (days)"
               value={selectedForm.leadTimeDays}
               onChange={setLine("leadTimeDays")}
+            />
+          </Grid>
+          <Grid size={{ xs: 6, md: 3 }}>
+            <TextField
+              fullWidth
+              type="number"
+              label="Warranty (months)"
+              value={selectedForm.warrantyMonths}
+              onChange={setLineWarrantyMonths}
+              error={Boolean(warrantyMonths.error)}
+              slotProps={{ htmlInput: { min: 0 } }}
+              // The same sentence the Supplier Quote inbox shows over the same field, plus the one
+              // clause that is only true here: this command carries the period and not the wording.
+              helperText={
+                warrantyMonths.error ??
+                `${WARRANTY_MONTHS_HELPER} ${WARRANTY_WORDING_NOT_CAPTURED_HERE}`
+              }
             />
           </Grid>
           <Grid size={{ xs: 6, md: 3 }}>

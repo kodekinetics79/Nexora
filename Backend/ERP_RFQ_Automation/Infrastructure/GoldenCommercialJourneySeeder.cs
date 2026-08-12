@@ -66,10 +66,7 @@ public static class GoldenCommercialJourneySeeder
         var sales = scope.ServiceProvider.GetRequiredService<ISalesApplicationService>();
         var now = DateTime.UtcNow;
 
-        // Tenant A is the journey. Tenant B exists ONLY so cross-tenant denial can be proven
-        // against a real second tenant rather than a fabricated id.
-        var tenantA = await EnsureBusinessUnitAsync(db, "E2E-GOLDEN-A", "E2E Golden Tenant A", now);
-        var tenantB = await EnsureBusinessUnitAsync(db, "E2E-GOLDEN-B", "E2E Golden Tenant B", now);
+        var (tenantA, tenantB) = await EnsureGovernedTenantsAsync(db, logger, now);
 
         var adminRoleA = await EnsureRoleAsync(db, tenantA.Id, "SUPER_ADMIN", "Golden Admin", now);
         var salesRoleA = await EnsureRoleAsync(db, tenantA.Id, "SUPER_ADMIN", "Golden Salesperson", now);
@@ -330,6 +327,54 @@ public static class GoldenCommercialJourneySeeder
     };
 
     // ------------------------------------------------------------------ idempotent helpers
+
+    /// <summary>The golden plan's code. Stable so a re-run converges on the same row.</summary>
+    internal const string GoldenPlanCode = "e2e-golden";
+
+    internal const string TenantACode = "E2E-GOLDEN-A";
+    internal const string TenantBCode = "E2E-GOLDEN-B";
+
+    /// <summary>
+    /// The two golden business units AND the control-plane records that make them usable.
+    ///
+    /// <para><b>The defect this closes.</b> This seeder created two BusinessUnits and no
+    /// <c>platform.Tenants</c> row at all, so <c>TenantAccessService</c> resolved no entitlements
+    /// and every <c>[RequiresEntitlement]</c> action refused: <c>GET /api/Rfq</c> as the seeded
+    /// golden salesperson answered 403 <i>"Entitlement 'module.rfq' is unavailable because no
+    /// governed platform tenant owns this business unit"</i> (reproduced against PostgreSQL on
+    /// 2026-08-12). That is the whole RFQ → quote → order journey, so the golden scenario could not
+    /// walk the journey it exists to prove and <c>Frontend/e2e/phase1-base-journey.spec.ts</c>
+    /// failed for that reason rather than for a product defect.</para>
+    ///
+    /// <para><b>Tenant B is governed too, deliberately.</b> Tenant B exists ONLY so cross-tenant
+    /// denial can be proven against a real second tenant rather than a fabricated id. An UNGOVERNED
+    /// tenant B would make every cross-tenant assertion pass for the wrong reason — the request
+    /// would be refused because tenant B is unentitled, not because isolation held — and a test
+    /// that passes for the wrong reason is worse than one that fails, because nobody looks at
+    /// it again. Both tenants share one plan row: the plan is a control-plane record, not a
+    /// tenant-owned one, and giving them separate plans would invite the two to drift apart.</para>
+    ///
+    /// <para>Internal to the assembly so the portable test lane can drive exactly this path rather
+    /// than a re-implementation of it.</para>
+    /// </summary>
+    internal static async Task<(BusinessUnit TenantA, BusinessUnit TenantB)> EnsureGovernedTenantsAsync(
+        ErpRfqAutomationContext db, ILogger logger, DateTime now)
+    {
+        // Tenant A is the journey. Tenant B exists ONLY so cross-tenant denial can be proven
+        // against a real second tenant rather than a fabricated id.
+        var tenantA = await EnsureBusinessUnitAsync(db, TenantACode, "E2E Golden Tenant A", now);
+        var tenantB = await EnsureBusinessUnitAsync(db, TenantBCode, "E2E Golden Tenant B", now);
+
+        foreach (var businessUnit in new[] { tenantA, tenantB })
+            await GovernedPlatformTenantSeeder.EnsureAsync(
+                db, businessUnit, GoldenPlanCode, "E2E Golden Journey", Actor,
+                "Local E2E golden journey tenant seeded by GoldenCommercialJourneySeeder; never "
+                + "invoiced. Recorded so the unconfigured-tenant allowance can tell a deliberate "
+                + "exemption from an oversight.",
+                logger, now);
+
+        return (tenantA, tenantB);
+    }
 
     private static async Task<BusinessUnit> EnsureBusinessUnitAsync(ErpRfqAutomationContext db, string code, string name, DateTime now)
     {

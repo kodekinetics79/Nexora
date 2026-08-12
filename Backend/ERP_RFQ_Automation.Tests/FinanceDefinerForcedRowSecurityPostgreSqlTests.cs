@@ -481,7 +481,13 @@ public sealed class FinanceDefinerForcedRowSecurityPostgreSqlTests(ForcedRowSecu
 
         // The fix is additive: nexora_tenant_isolation is still on every table it was on, and the
         // new policies never replace it.
-        Assert.Equal(220L, await CountAsync("pg_policy", "polname = 'nexora_tenant_isolation'"));
+        //
+        // 220 -> 221 with Gate 2's SupplierComparisonWeights. A census like this is meant to move
+        // when a tenant-owned table is legitimately added, and moving it is the point: had the Gate 2
+        // migration created that table WITHOUT its policy, this number would have stayed at 220 and
+        // said so. It going up by exactly one is the evidence the policy reached real PostgreSQL,
+        // which no portable test can establish.
+        Assert.Equal(221L, await CountAsync("pg_policy", "polname = 'nexora_tenant_isolation'"));
         Assert.Equal(300L, await CountAsync("pg_policy",
             "polname IN ('nexora_definer_tenant_read','nexora_definer_tenant_insert','nexora_definer_tenant_update')"));
 

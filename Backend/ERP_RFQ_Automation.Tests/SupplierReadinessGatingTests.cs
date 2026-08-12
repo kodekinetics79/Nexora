@@ -192,6 +192,7 @@ public sealed class SupplierReadinessGatingTests
         public Task DeleteAsync(long id, long businessUnitId) => Task.CompletedTask;
 
         public Task<List<SupplierSearchResultDTO>> SearchSuppliersAsync(string? searchTerm,
-            string? productCategory, long businessUnitId) => Task.FromResult(new List<SupplierSearchResultDTO>());
+            string? productCategory, long businessUnitId, string? tier = null)
+            => Task.FromResult(new List<SupplierSearchResultDTO>());
     }
 }

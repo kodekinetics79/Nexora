@@ -313,7 +313,8 @@ public sealed class Release02SupplierGovernanceTests
         public Task<List<SupplierSearchResultDTO>> SearchSuppliersAsync(
             string? searchTerm,
             string? productCategory,
-            long businessUnitId)
+            long businessUnitId,
+            string? tier = null)
         {
             SearchTenant = businessUnitId;
             return Task.FromResult(new List<SupplierSearchResultDTO>());

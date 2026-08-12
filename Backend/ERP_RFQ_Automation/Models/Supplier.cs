@@ -48,6 +48,35 @@ public partial class Supplier
 
     public string ReadinessStatus { get; set; } = SupplierReadinessStatuses.ReviewRequired;
 
+    /// <summary>
+    /// The customer's commercial classification of this supplier — one of
+    /// <see cref="SupplierTiers"/>. Null means NOT YET CLASSIFIED, which is the state every existing
+    /// supplier starts in and a legitimate resting state; the CHECK constraint permits it.
+    ///
+    /// <para>Tier annotates, orders and pre-selects. It NEVER gates: dispatch eligibility stays with
+    /// the governance check in <c>SupplierNegotiationService</c>, and tier enters no blocker list, no
+    /// eligibility predicate and no award guard. The two are different axes — a compliant brand-new
+    /// supplier is legitimately Tier 3, and a Tier 1 partner with a lapsed CR is legitimately
+    /// blocked — and collapsing them would make a commercial preference read as a compliance
+    /// verdict.</para>
+    ///
+    /// <para>Customer-set. Nothing derives it: no spend bands, no auto-promotion, no sync with
+    /// <see cref="GovernanceStatus"/>. It also never enters the weighted comparison score.</para>
+    /// </summary>
+    public string? Tier { get; set; }
+
+    /// <summary>
+    /// The numeric companion to the free-text <see cref="PaymentTerms"/>: how many days of credit
+    /// this supplier extends. The customer types <c>30</c>; the free text keeps the human wording
+    /// ("30 days net from invoice date").
+    ///
+    /// <para>Null means NOT CONFIGURED, not zero. Zero is the positive assertion "this supplier is
+    /// cash on delivery" and is spelled 0. The weighted supplier comparison treats a missing value
+    /// as unscorable rather than imputing one — a number a person typed beats a number a model
+    /// guessed.</para>
+    /// </summary>
+    public int? CreditDays { get; set; }
+
     public DateTime? EffectiveFrom { get; set; }
 
     public string? GovernanceReviewedBy { get; set; }
@@ -99,6 +128,36 @@ public static class SupplierGovernanceStatuses
     public const string Restricted = "RESTRICTED";
     public const string Blocked = "BLOCKED";
     public const string Inactive = "INACTIVE";
+}
+
+/// <summary>
+/// The customer's commercial classification of a supplier (FR-MDM-03, first clause). Three values,
+/// set by a master-data administrator and derived by nothing.
+///
+/// <para>Deliberately NOT a governance axis. <see cref="SupplierGovernanceStatuses"/> answers "may
+/// we trade with them"; this answers "how close is the relationship". Keeping them apart is what
+/// lets a Tier 1 partner be blocked for a lapsed commercial registration without the tier being
+/// silently downgraded, and a brand-new compliant supplier be Tier 3 without being blocked.</para>
+/// </summary>
+public static class SupplierTiers
+{
+    /// <summary>A partner we hold a standing commercial relationship with.</summary>
+    public const string Tier1Partner = "TIER_1_PARTNER";
+
+    /// <summary>Approved for trade, outside the partner set.</summary>
+    public const string Tier2Extended = "TIER_2_EXTENDED";
+
+    /// <summary>Traded with on exception, outside the intended supplier network.</summary>
+    public const string Tier3OutOfNetwork = "TIER_3_OUT_OF_NETWORK";
+
+    /// <summary>
+    /// Every permitted value, in tier order. The CHECK constraint, the API and the tier select on
+    /// the supplier form all read the list from here so none of them can drift from the others.
+    /// </summary>
+    public static readonly IReadOnlyList<string> All = [Tier1Partner, Tier2Extended, Tier3OutOfNetwork];
+
+    /// <summary>Null (not yet classified) is permitted; anything else must be a listed tier.</summary>
+    public static bool IsValid(string? tier) => tier is null || All.Contains(tier);
 }
 
 public static class SupplierReadinessStatuses

@@ -2,10 +2,10 @@ import React, { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Dialog, DialogTitle, DialogContent, DialogActions,
-  Button, TextField, Grid,
+  Button, TextField, Grid, MenuItem,
   Divider, Typography, CircularProgress,
 } from '@mui/material';
-import supplierService, { type SupplierDTO } from '../../api/services/supplierService';
+import supplierService, { SUPPLIER_TIERS, type SupplierDTO } from '../../api/services/supplierService';
 import { useAuth } from '../../context/AuthContext';
 import { useSnackbar } from 'notistack';
 
@@ -18,7 +18,7 @@ interface Props {
 const empty = {
   name: '', contactEmail: '', paymentTerms: '', addressLine1: '', addressLine2: '',
   postalCode: '', tags: '', comments: '', cityId: '', countryId: '', currencyId: '',
-  taxRegistrationNumber: '', concurrencyToken: '',
+  taxRegistrationNumber: '', tier: '', creditDays: '', concurrencyToken: '',
 };
 
 /**
@@ -37,6 +37,20 @@ const trnError = (value: string): string | undefined => {
   if (!/^[A-Z0-9./]+$/.test(trn)) return "Use only letters, digits, '.' and '/'.";
   if (/^3\d*$/.test(trn) && !/^3\d{13}3$/.test(trn))
     return 'A KSA VAT number is exactly 15 digits, beginning with 3 and ending with 3. For a non-Saudi registration, include its country prefix.';
+  return undefined;
+};
+
+/**
+ * Blank is a valid answer and means "not captured". Anything typed has to be a whole, non-negative
+ * number of days, bounded well above any real credit term so a mistyped year cannot become one.
+ */
+const creditDaysMessage = (value: string): string | undefined => {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return undefined;
+  const days = Number(trimmed);
+  if (!Number.isFinite(days) || !Number.isInteger(days)) return 'Enter a whole number of days.';
+  if (days < 0) return 'Credit days cannot be negative.';
+  if (days > 365) return 'Credit terms longer than a year are not supported. Record them in the free-text payment terms.';
   return undefined;
 };
 
@@ -60,6 +74,7 @@ const SupplierFormDialog: React.FC<Props> = ({ open, onClose, supplierId }) => {
   const emailInvalid = normalizedEmail.length > 0 && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail);
   const nameInvalid = form.name.trim().length === 0;
   const taxRegistrationError = trnError(form.taxRegistrationNumber);
+  const creditDaysError = creditDaysMessage(form.creditDays);
 
   const { data: editData } = useQuery({
     queryKey: ['supplier-detail', supplierId],
@@ -82,6 +97,12 @@ const SupplierFormDialog: React.FC<Props> = ({ open, onClose, supplierId }) => {
         countryId: editData.countryId ? String(editData.countryId) : '',
         currencyId: editData.currencyId ? String(editData.currencyId) : '',
         taxRegistrationNumber: editData.taxRegistrationNumber ?? '',
+        tier: editData.tier ?? '',
+        // Null credit days means NOT CONFIGURED. It hydrates to blank, never to 0 — "we have not
+        // captured this supplier's terms" and "this supplier demands payment on the day" are
+        // different facts and the form must not turn the first into the second.
+        creditDays: editData.creditDays === null || editData.creditDays === undefined
+          ? '' : String(editData.creditDays),
         concurrencyToken: editData.concurrencyToken ?? '',
       });
     }
@@ -105,7 +126,7 @@ const SupplierFormDialog: React.FC<Props> = ({ open, onClose, supplierId }) => {
   const handleClose = () => { setForm(empty); onClose(); };
 
   const handleSave = () => {
-    if (nameInvalid || emailInvalid || taxRegistrationError) return;
+    if (nameInvalid || emailInvalid || taxRegistrationError || creditDaysError) return;
     const fd = new FormData();
     Object.entries(form).forEach(([k, v]) => {
       if (v !== '' && v !== null && v !== undefined) fd.append(k, String(v));
@@ -135,6 +156,37 @@ const SupplierFormDialog: React.FC<Props> = ({ open, onClose, supplierId }) => {
           </Grid>
           <Grid size={{ xs: 12, sm: 6 }}>
             <TextField fullWidth label="Tags" value={form.tags} onChange={f('tags')} placeholder="e.g. electronics, preferred" />
+          </Grid>
+          {/* Tier and credit days are master data, deliberately not part of the Governance Review
+              dialog. A tier is a commercial relationship you choose; approval, compliance and risk
+              are verdicts about the supplier. Putting them together would read as one axis and let
+              a Tier 3 supplier look non-compliant, or a Tier 1 one look pre-approved. */}
+          <Grid size={{ xs: 12, sm: 6 }}>
+            <TextField
+              select fullWidth
+              label="Tier"
+              value={form.tier}
+              onChange={f('tier')}
+              helperText="Who you buy from first. Tier orders and pre-selects suppliers for an RFQ; it never blocks one, and it never affects the weighted comparison score."
+            >
+              <MenuItem value="">Not classified</MenuItem>
+              {SUPPLIER_TIERS.map((option) => (
+                <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+              ))}
+            </TextField>
+          </Grid>
+          <Grid size={{ xs: 12, sm: 6 }}>
+            <TextField
+              fullWidth type="number"
+              label="Credit days"
+              value={form.creditDays}
+              onChange={f('creditDays')}
+              error={!!creditDaysError}
+              placeholder="e.g. 30"
+              slotProps={{ htmlInput: { min: 0, max: 365, step: 1 } }}
+              helperText={creditDaysError
+                ?? 'The number behind the payment terms above, used when payment terms carry weight in the supplier comparison. Leave blank if you have not agreed terms — blank is not zero.'}
+            />
           </Grid>
           <Grid size={{ xs: 12 }}>
             <TextField fullWidth multiline rows={2} label="Comments" value={form.comments} onChange={f('comments')} />
@@ -169,7 +221,7 @@ const SupplierFormDialog: React.FC<Props> = ({ open, onClose, supplierId }) => {
       </DialogContent>
       <DialogActions sx={{ p: 2 }}>
         <Button onClick={handleClose} color="inherit">Cancel</Button>
-        <Button variant="contained" onClick={handleSave} disabled={saveMutation.isPending || nameInvalid || emailInvalid || !!taxRegistrationError} disableElevation sx={{ px: 4, fontWeight: 700 }}>
+        <Button variant="contained" onClick={handleSave} disabled={saveMutation.isPending || nameInvalid || emailInvalid || !!taxRegistrationError || !!creditDaysError} disableElevation sx={{ px: 4, fontWeight: 700 }}>
           {saveMutation.isPending ? <CircularProgress size={22} /> : (isEdit ? 'Update Supplier' : 'Create Supplier')}
         </Button>
       </DialogActions>

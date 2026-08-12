@@ -17,7 +17,7 @@ import {
   Visibility as ViewIcon,
 } from '@mui/icons-material';
 import { Stack } from '@mui/material';
-import supplierService, { type SupplierDTO } from '../../api/services/supplierService';
+import supplierService, { supplierTierLabel, type SupplierDTO } from '../../api/services/supplierService';
 import contactService, { type ContactDTO } from '../../api/services/contactService';
 import currencyService from '../../api/services/currencyService';
 import countryService from '../../api/services/countryService';
@@ -36,6 +36,10 @@ const emptySupplier = {
   addressLine1: '', addressLine2: '', postalCode: '',
   tags: '', comments: '', isActive: true,
   cityId: '' as any, countryId: '' as any, currencyId: '' as any,
+  // Carried through this dialog although it edits neither: the supplier update replaces every
+  // field it receives, so a value this form did not send back would be erased by an unrelated
+  // edit. Tier and credit days are set in SupplierFormDialog and must survive a grid edit.
+  tier: '', creditDays: '' as any,
   concurrencyToken: '',
 };
 
@@ -252,6 +256,8 @@ const SuppliersPage: React.FC = () => {
       addressLine2: record.addressLine2 ?? '', postalCode: record.postalCode ?? '',
       tags: record.tags ?? '', comments: record.comments ?? '', isActive: record.isActive ?? true,
       cityId: record.cityId ?? '', countryId: record.countryId ?? '', currencyId: record.currencyId ?? '',
+      tier: record.tier ?? '',
+      creditDays: record.creditDays === null || record.creditDays === undefined ? '' : record.creditDays,
       concurrencyToken: record.concurrencyToken ?? '',
     });
     setShowContactForm(false);
@@ -331,6 +337,9 @@ const SuppliersPage: React.FC = () => {
     { field: 'countryName', headerName: t('country'), width: 120, renderCell: (p) => p.value ?? '—' },
     { field: 'currencyName', headerName: t('currency'), width: 100, renderCell: (p) => p.value ?? '—' },
     { field: 'paymentTerms', headerName: t('payment_terms'), width: 140, renderCell: (p) => p.value ?? '—' },
+    // Tier is a commercial classification, not a status: rendered as plain text next to the status
+    // chips rather than as a chip of its own, so it cannot be read as an approval verdict.
+    { field: 'tier', headerName: 'Tier', width: 175, renderCell: (p) => supplierTierLabel(p.value) },
     { field: 'governanceStatus', headerName: 'Approval', width: 145, renderCell: (p) => <Chip label={(p.value || 'UNVERIFIED').replaceAll('_', ' ')} size="small" variant="outlined" /> },
     { field: 'readinessStatus', headerName: 'RFQ readiness', width: 145, renderCell: (p) => <Chip label={(p.value || 'REVIEW_REQUIRED').replaceAll('_', ' ')} size="small" variant="outlined" /> },
     { field: 'isActive', headerName: t('status'), width: 100, renderCell: (p) => <Chip label={p.value ? 'Active' : 'Inactive'} color={p.value ? 'success' : 'error'} size="small" variant="outlined" /> },

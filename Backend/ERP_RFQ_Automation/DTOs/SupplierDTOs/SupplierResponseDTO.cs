@@ -26,6 +26,18 @@
         /// which is what makes this supplier's input tax non-recoverable.
         /// </summary>
         public string? TaxRegistrationNumber { get; set; }
+        /// <summary>
+        /// The customer's commercial classification — one of <c>SupplierTiers</c>. Null means "not
+        /// yet classified", which is a legitimate resting state and not a defect in the record.
+        /// Tier annotates and orders; it never gates dispatch eligibility.
+        /// </summary>
+        public string? Tier { get; set; }
+        /// <summary>
+        /// Days of credit this supplier extends — the numeric companion to the free-text
+        /// <see cref="PaymentTerms"/>. Null means NOT CONFIGURED; 0 is the positive assertion
+        /// "cash on delivery".
+        /// </summary>
+        public int? CreditDays { get; set; }
         public long? Buid { get; set; }
         public string? BusinessUnitName { get; set; }
         public bool? IsActive { get; set; }

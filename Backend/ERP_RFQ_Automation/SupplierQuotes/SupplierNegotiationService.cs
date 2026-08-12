@@ -406,6 +406,7 @@ public sealed class SupplierNegotiationService(ErpRfqAutomationContext context)
                 AvailabilityType = sourceLine.AvailabilityType,
                 OriginCountry = sourceLine.OriginCountry,
                 Warranty = sourceLine.Warranty,
+                WarrantyMonths = sourceLine.WarrantyMonths,
                 IsAlternate = sourceLine.IsAlternate,
                 Exceptions = sourceLine.Exceptions,
                 Evidence = sourceLine.Evidence.ToList()
@@ -484,6 +485,15 @@ public sealed class SupplierNegotiationService(ErpRfqAutomationContext context)
             case "AVAILABILITYTYPE": line.AvailabilityType = value; break;
             case "ORIGINCOUNTRY": line.OriginCountry = value; break;
             case "WARRANTY": line.Warranty = value; break;
+            // A reviewer correcting the number corrects the number and leaves the supplier's wording
+            // alone — the two are independent facts, and a correction to one is not evidence about
+            // the other. Out-of-range corrections fall through unapplied, exactly as an unparseable
+            // quantity does, rather than writing a value the CHECK constraint would reject on save.
+            case "WARRANTYMONTHS" when int.TryParse(value, NumberStyles.Integer,
+                    CultureInfo.InvariantCulture, out var warrantyMonths)
+                && warrantyMonths >= 0 && warrantyMonths <= SupplierQuoteWarranty.MaximumMonths:
+                line.WarrantyMonths = warrantyMonths;
+                break;
             case "ISALTERNATE" when bool.TryParse(value, out var alternate): line.IsAlternate = alternate; break;
         }
     }

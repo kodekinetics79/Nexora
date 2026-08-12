@@ -16216,6 +16216,9 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<DateTime>("CreatedOn")
                         .HasColumnType("timestamp without time zone");
 
+                    b.Property<int?>("CreditDays")
+                        .HasColumnType("integer");
+
                     b.Property<long?>("CurrencyId")
                         .HasColumnType("bigint")
                         .HasColumnName("CurrencyID");
@@ -16301,6 +16304,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasMaxLength(50)
                         .HasColumnType("character varying(50)");
 
+                    b.Property<string>("Tier")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
                     b.Property<string>("VerificationStatus")
                         .IsRequired()
                         .ValueGeneratedOnAdd()
@@ -16354,6 +16361,8 @@ namespace ERP_RFQ_Automation.Migrations
                             t.HasCheckConstraint("CK_Suppliers_RiskStatus", "\"RiskStatus\" IN ('UNKNOWN','LOW','MEDIUM','HIGH','BLOCKED')");
 
                             t.HasCheckConstraint("CK_Suppliers_TaxRegistrationNumber", "\"TaxRegistrationNumber\" IS NULL OR (\"TaxRegistrationNumber\" ~ '^[A-Z0-9./]{5,50}$' AND (\"TaxRegistrationNumber\" !~ '^3[0-9]*$' OR \"TaxRegistrationNumber\" ~ '^3[0-9]{13}3$'))");
+
+                            t.HasCheckConstraint("CK_Suppliers_Tier", "\"Tier\" IS NULL OR \"Tier\" IN ('TIER_1_PARTNER','TIER_2_EXTENDED','TIER_3_OUT_OF_NETWORK')");
 
                             t.HasCheckConstraint("CK_Suppliers_VerificationStatus", "\"VerificationStatus\" IN ('UNKNOWN','PENDING','VERIFIED','FAILED','EXPIRED')");
                         });
@@ -21495,6 +21504,68 @@ namespace ERP_RFQ_Automation.Migrations
                     b.ToTable("SlaPolicies", (string)null);
                 });
 
+            modelBuilder.Entity("ERP_RFQ_Automation.SupplierEvaluation.SupplierComparisonWeights", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<long>("BusinessUnitId")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTime>("CreatedOn")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp without time zone")
+                        .HasDefaultValueSql("now()");
+
+                    b.Property<int>("LeadTimeWeight")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(20);
+
+                    b.Property<string>("ModifiedBy")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<DateTime?>("ModifiedOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<int>("PaymentTermsWeight")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(0);
+
+                    b.Property<int>("PriceWeight")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(80);
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(1L);
+
+                    b.Property<int>("WarrantyWeight")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(0);
+
+                    b.HasKey("Id");
+
+                    b.HasAlternateKey("BusinessUnitId", "Id");
+
+                    b.HasIndex("BusinessUnitId")
+                        .IsUnique();
+
+                    b.ToTable("SupplierComparisonWeights", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_SupplierComparisonWeights_Total", "\"PriceWeight\" >= 0 AND \"LeadTimeWeight\" >= 0 AND \"WarrantyWeight\" >= 0 AND \"PaymentTermsWeight\" >= 0 AND (\"PriceWeight\" + \"LeadTimeWeight\" + \"WarrantyWeight\" + \"PaymentTermsWeight\") = 100");
+                        });
+                });
+
             modelBuilder.Entity("ERP_RFQ_Automation.SupplierQuotes.CustomerQuoteSourcingDecision", b =>
                 {
                     b.Property<long>("Id")
@@ -21953,6 +22024,9 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasMaxLength(500)
                         .HasColumnType("character varying(500)");
 
+                    b.Property<int?>("WarrantyMonths")
+                        .HasColumnType("integer");
+
                     b.HasKey("Id");
 
                     b.HasIndex("BusinessUnitId", "CommercialDemandLineId");
@@ -21962,7 +22036,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.ToTable("supplier_quote_lines", null, t =>
                         {
-                            t.HasCheckConstraint("CK_supplier_quote_lines_Values", "\"LineNumber\" > 0 AND \"Quantity\" > 0 AND \"UnitPrice\" >= 0 AND (\"AvailableQuantity\" IS NULL OR \"AvailableQuantity\" >= 0) AND (\"MinimumOrderQuantity\" IS NULL OR \"MinimumOrderQuantity\" > 0) AND (\"LeadTimeDays\" IS NULL OR \"LeadTimeDays\" >= 0)");
+                            t.HasCheckConstraint("CK_supplier_quote_lines_Values", "\"LineNumber\" > 0 AND \"Quantity\" > 0 AND \"UnitPrice\" >= 0 AND (\"AvailableQuantity\" IS NULL OR \"AvailableQuantity\" >= 0) AND (\"MinimumOrderQuantity\" IS NULL OR \"MinimumOrderQuantity\" > 0) AND (\"LeadTimeDays\" IS NULL OR \"LeadTimeDays\" >= 0) AND (\"WarrantyMonths\" IS NULL OR (\"WarrantyMonths\" >= 0 AND \"WarrantyMonths\" <= 600))");
                         });
                 });
 
@@ -26705,6 +26779,15 @@ namespace ERP_RFQ_Automation.Migrations
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.Retention.EvidenceRetentionPolicy", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Models.BusinessUnit", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.SupplierEvaluation.SupplierComparisonWeights", b =>
                 {
                     b.HasOne("ERP_RFQ_Automation.Models.BusinessUnit", null)
                         .WithMany()

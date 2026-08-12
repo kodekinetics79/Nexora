@@ -303,6 +303,7 @@ builder.Services.AddScoped<SupplierQuoteCommercialService>();
 // The write path for the per-tenant commercial policy (input-tax recoverability, output tax rate,
 // PO tolerances). The read path is an extension method on the DbContext and needs no registration.
 builder.Services.AddScoped<ERP_RFQ_Automation.OrderToCash.CommercialMatchingPolicyService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.SupplierEvaluation.SupplierComparisonWeightsService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.CommercialLearning.CommercialLearningService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.CommercialLearning.LearningGovernanceService>();
 builder.Services.AddScoped<SupplierQuoteDocumentIntakeService>();

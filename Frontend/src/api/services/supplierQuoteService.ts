@@ -40,6 +40,14 @@ export interface SupplierQuoteLine {
   availableQuantity: number | null;
   unitPrice: number;
   leadTimeDays: number | null;
+  /**
+   * What the supplier wrote about warranty, and the number a person read out of it — carried here so
+   * the review screen can show back what capture recorded. A value that can be captured and never
+   * seen again is the wiring gap this codebase keeps paying for: the reviewer is the one person
+   * positioned to challenge either field, and they cannot challenge what the screen does not show.
+   */
+  warranty: string | null;
+  warrantyMonths: number | null;
 }
 
 export type NegotiationDisposition = "PREPARED" | "DEFERRED" | "DISMISSED";
@@ -242,6 +250,11 @@ export interface CaptureSupplierQuoteLine {
   availabilityType?: string | null;
   originCountry?: string | null;
   warranty?: string | null;
+  /**
+   * The numeric companion to the free-text warranty above. It is typed, never parsed out of the
+   * wording, and null means nobody recorded a period rather than a stated zero months.
+   */
+  warrantyMonths?: number | null;
   isAlternate: boolean;
   exceptions?: string | null;
   evidence: never[];
