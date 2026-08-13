@@ -33,8 +33,16 @@ public enum EmailInquiryAssemblyStatus
     /// <summary>Components passed inspection and are with extraction.</summary>
     Extracting = 2,
 
-    /// <summary>Every expected component reached a terminal state. The message is ready to be
-    /// merged into one or more canonical Leads, and NOT before.</summary>
+    /// <summary>
+    /// Every expected component reached a terminal state AND at least one of them durably
+    /// captured commercial content.
+    ///
+    /// <para>The second half of that sentence is load-bearing and was missing. An earlier
+    /// draft reached this state whenever the expected count was zero, which made "we captured
+    /// nothing" indistinguishable from "we captured everything" — the empty message would have
+    /// gone on to produce an empty Lead. A message becomes commercially assemblable because
+    /// content was captured, never because nothing was outstanding.</para>
+    /// </summary>
     ReadyForAssembly = 3,
 
     /// <summary>Merged. One canonical Lead exists per genuine commercial inquiry in this
@@ -54,7 +62,19 @@ public enum EmailInquiryAssemblyStatus
 
     /// <summary>A component was refused on security grounds and the message cannot proceed.
     /// Terminal. The raw evidence is retained for the security record.</summary>
-    RejectedSecurity = 7
+    RejectedSecurity = 7,
+
+    /// <summary>
+    /// The message carried no commercial content to capture at all: no fresh body text and no
+    /// parts. Terminal, and deliberately NOT the same state as a message whose parts were all
+    /// unsupported — that one is <see cref="NeedsReview"/>, because a human may recognise an
+    /// inquiry the pipeline could not read.
+    ///
+    /// <para>This is the triage outcome expressed on the aggregate. It exists so that
+    /// <see cref="ReadyForAssembly"/> can mean what it says; without it, "nothing to do" and
+    /// "everything is done" were the same state and an empty Lead was one merge away.</para>
+    /// </summary>
+    NoInquiry = 8
 }
 
 /// <summary>What a component of the message physically is.</summary>

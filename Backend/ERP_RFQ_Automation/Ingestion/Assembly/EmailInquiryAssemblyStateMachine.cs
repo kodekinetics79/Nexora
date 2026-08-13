@@ -33,9 +33,10 @@ public static class EmailInquiryAssemblyStateMachine
             [EmailInquiryAssemblyStatus.Captured] = new[]
             {
                 EmailInquiryAssemblyStatus.Inspecting,
-                // A message with nothing enqueuable (no fresh body, no supported attachment)
-                // has zero expected components and is ready the moment it is captured.
-                EmailInquiryAssemblyStatus.ReadyForAssembly,
+                // A message that carried nothing to capture is NOT ready — it has no inquiry.
+                // ReadyForAssembly is deliberately absent from this row: it is unreachable
+                // without at least one component completing, which cannot have happened yet.
+                EmailInquiryAssemblyStatus.NoInquiry,
                 EmailInquiryAssemblyStatus.FailedRecoverable,
                 EmailInquiryAssemblyStatus.RejectedSecurity
             },
@@ -43,12 +44,15 @@ public static class EmailInquiryAssemblyStateMachine
             {
                 EmailInquiryAssemblyStatus.Extracting,
                 EmailInquiryAssemblyStatus.ReadyForAssembly,
+                // Every part was refused or unsupported: a human may still recognise an inquiry.
+                EmailInquiryAssemblyStatus.NeedsReview,
                 EmailInquiryAssemblyStatus.FailedRecoverable,
                 EmailInquiryAssemblyStatus.RejectedSecurity
             },
             [EmailInquiryAssemblyStatus.Extracting] = new[]
             {
                 EmailInquiryAssemblyStatus.ReadyForAssembly,
+                EmailInquiryAssemblyStatus.NeedsReview,
                 EmailInquiryAssemblyStatus.FailedRecoverable,
                 EmailInquiryAssemblyStatus.RejectedSecurity
             },
@@ -56,6 +60,9 @@ public static class EmailInquiryAssemblyStateMachine
             {
                 EmailInquiryAssemblyStatus.Assembled,
                 EmailInquiryAssemblyStatus.NeedsReview,
+                // The merge can find that what was captured carries no commercial content
+                // after all — a delivery receipt whose body extracted cleanly and said nothing.
+                EmailInquiryAssemblyStatus.NoInquiry,
                 // Assembly itself can hit an infrastructure fault.
                 EmailInquiryAssemblyStatus.FailedRecoverable
             },
@@ -69,14 +76,26 @@ public static class EmailInquiryAssemblyStateMachine
             [EmailInquiryAssemblyStatus.NeedsReview] = new[]
             {
                 EmailInquiryAssemblyStatus.Assembled,
-                EmailInquiryAssemblyStatus.Extracting
+                EmailInquiryAssemblyStatus.Extracting,
+                // The reviewer's verdict can be "this was never an inquiry".
+                EmailInquiryAssemblyStatus.NoInquiry
             },
             [EmailInquiryAssemblyStatus.FailedRecoverable] = new[]
             {
                 EmailInquiryAssemblyStatus.Inspecting,
                 EmailInquiryAssemblyStatus.Extracting,
                 EmailInquiryAssemblyStatus.ReadyForAssembly,
+                EmailInquiryAssemblyStatus.NeedsReview,
+                EmailInquiryAssemblyStatus.NoInquiry,
                 EmailInquiryAssemblyStatus.RejectedSecurity
+            },
+            // Terminal, but reversible by an explicit human act: "reprocess as inquiry" already
+            // exists in the product, and a triage outcome a human overrules must be able to
+            // re-enter the pipeline through the SAME assembly rather than forking a second one.
+            [EmailInquiryAssemblyStatus.NoInquiry] = new[]
+            {
+                EmailInquiryAssemblyStatus.Inspecting,
+                EmailInquiryAssemblyStatus.Extracting
             },
             [EmailInquiryAssemblyStatus.RejectedSecurity] = Array.Empty<EmailInquiryAssemblyStatus>()
         };
@@ -119,7 +138,7 @@ public static class EmailInquiryAssemblyStateMachine
         if (componentStatuses.Contains(EmailInquiryComponentStatus.RefusedSecurity))
             return new EmailInquiryAssemblyEvaluation(
                 EmailInquiryAssemblyStatus.RejectedSecurity,
-                CompletedCount(componentStatuses),
+                CompletedCount(componentStatuses), CapturedCount(componentStatuses),
                 "A component of this message was refused by the malware scanner.");
 
         // A missing component row counts as outstanding. The barrier must not be satisfiable
@@ -128,7 +147,7 @@ public static class EmailInquiryAssemblyStateMachine
         if (missing > 0)
             return new EmailInquiryAssemblyEvaluation(
                 EmailInquiryAssemblyStatus.FailedRecoverable,
-                CompletedCount(componentStatuses),
+                CompletedCount(componentStatuses), CapturedCount(componentStatuses),
                 $"{missing} expected part(s) of this message have no record yet; it is held for replay.");
 
         // An infrastructure hold anywhere holds the WHOLE message. This is the rule that stops
@@ -137,37 +156,81 @@ public static class EmailInquiryAssemblyStateMachine
         if (componentStatuses.Contains(EmailInquiryComponentStatus.FailedRecoverable))
             return new EmailInquiryAssemblyEvaluation(
                 EmailInquiryAssemblyStatus.FailedRecoverable,
-                CompletedCount(componentStatuses),
+                CompletedCount(componentStatuses), CapturedCount(componentStatuses),
                 "Part of this message could not be processed because a required service was "
                 + "unavailable. It is held and will resume without re-reading the mailbox.");
 
         if (componentStatuses.Any(s => s is EmailInquiryComponentStatus.Inspecting))
             return new EmailInquiryAssemblyEvaluation(
-                EmailInquiryAssemblyStatus.Inspecting, CompletedCount(componentStatuses), null);
+                EmailInquiryAssemblyStatus.Inspecting, CompletedCount(componentStatuses),
+                CapturedCount(componentStatuses), null);
 
         if (componentStatuses.Any(s => s is EmailInquiryComponentStatus.Pending
                 or EmailInquiryComponentStatus.Extracting))
             return new EmailInquiryAssemblyEvaluation(
-                EmailInquiryAssemblyStatus.Extracting, CompletedCount(componentStatuses), null);
+                EmailInquiryAssemblyStatus.Extracting, CompletedCount(componentStatuses),
+                CapturedCount(componentStatuses), null);
 
-        // Everything expected is terminal. Only now may the message become commercial fact.
-        //
-        // Note this includes the all-Skipped case: a message whose every part was unsupported
-        // is READY, not held. There is nothing to wait for and nothing to recover — the
-        // reviewer needs to see it with its reasons, which is what NeedsReview downstream is
-        // for, not a permanent hold that no operator will ever clear.
+        // Everything expected is terminal. What the message IS now depends on whether anything
+        // was actually captured — three outcomes, deliberately distinct, because collapsing
+        // them is how an empty Lead gets created.
+        var captured = CapturedCount(componentStatuses);
+
+        // (1) Something was captured. Only now may the message become commercial fact.
+        if (captured > 0)
+            return new EmailInquiryAssemblyEvaluation(
+                EmailInquiryAssemblyStatus.ReadyForAssembly,
+                CompletedCount(componentStatuses), captured, null);
+
+        // (2) There were no parts to capture in the first place: no fresh body, no attachments.
+        // A terminal triage outcome, NOT an assemblable inquiry. This is the case that used to
+        // return ReadyForAssembly and would have produced a Lead with nothing in it.
+        if (expectedComponentCount == 0)
+            return new EmailInquiryAssemblyEvaluation(
+                EmailInquiryAssemblyStatus.NoInquiry, 0, 0,
+                "This message carried no body text and no attachments to process.");
+
+        // (3) Parts existed and every one of them was refused or unsupported. Distinct from (2)
+        // because a human may well recognise an inquiry in a file the pipeline cannot read — a
+        // CAD drawing, an unusual archive, a format we do not support yet. It goes to a person
+        // with its reasons attached; it never becomes an empty Lead and it is never silently
+        // discarded.
         return new EmailInquiryAssemblyEvaluation(
-            EmailInquiryAssemblyStatus.ReadyForAssembly, CompletedCount(componentStatuses), null);
+            EmailInquiryAssemblyStatus.NeedsReview, CompletedCount(componentStatuses), 0,
+            "No part of this message could be read. Its attachments were refused or are "
+            + "unsupported; the original is retained for review.");
     }
 
+    /// <summary>
+    /// Components that reached ANY terminal state. This is the barrier's progress counter and
+    /// what <c>EmailInquiryAssembly.CompletedComponentCount</c> stores — "how many are we still
+    /// waiting for", not "how much did we get".
+    /// </summary>
     private static int CompletedCount(IReadOnlyCollection<EmailInquiryComponentStatus> statuses)
         => statuses.Count(s => s is EmailInquiryComponentStatus.Completed
             or EmailInquiryComponentStatus.Skipped
             or EmailInquiryComponentStatus.RefusedSecurity);
+
+    /// <summary>
+    /// Components that durably captured commercial content. Only <c>Completed</c> counts:
+    /// Skipped and RefusedSecurity are terminal but carry nothing. This is the number that
+    /// decides whether a message is an inquiry at all, and keeping it separate from
+    /// <see cref="CompletedCount"/> is the whole correction — the two were conflated, so
+    /// "everything finished" read as "we have something".
+    /// </summary>
+    private static int CapturedCount(IReadOnlyCollection<EmailInquiryComponentStatus> statuses)
+        => statuses.Count(s => s == EmailInquiryComponentStatus.Completed);
 }
 
 /// <param name="Status">What the message as a whole now is.</param>
-/// <param name="CompletedComponentCount">How many expected components are terminal.</param>
+/// <param name="CompletedComponentCount">
+/// How many expected components reached ANY terminal state — the barrier's progress counter.
+/// </param>
+/// <param name="CapturedComponentCount">
+/// How many components durably captured commercial content. Deliberately separate from
+/// <paramref name="CompletedComponentCount"/>: conflating the two is what let "everything
+/// finished" read as "we have something", and an empty message reach an empty Lead.
+/// </param>
 /// <param name="Reason">
 /// Operator-readable explanation, or null when the state needs none. Never carries a bucket
 /// name, endpoint, credential or provider exception type.
@@ -175,4 +238,5 @@ public static class EmailInquiryAssemblyStateMachine
 public readonly record struct EmailInquiryAssemblyEvaluation(
     EmailInquiryAssemblyStatus Status,
     int CompletedComponentCount,
+    int CapturedComponentCount,
     string? Reason);

@@ -79,26 +79,78 @@ public class EmailInquiryAssemblyStateMachineTests
         Assert.Contains("no record yet", result.Reason);
     }
 
+    // ---- "nothing to do" must never read as "everything is done" --------------------------
+
     [Fact]
-    public void A_message_with_nothing_enqueuable_is_ready_immediately_not_held_forever()
+    public void A_message_that_carried_nothing_is_NoInquiry_not_ready()
     {
-        // No fresh body, no supported attachment. There is nothing to wait for and nothing to
-        // recover; a permanent hold here would be a queue entry no operator can ever clear.
+        // No fresh body, no attachments. This returned ReadyForAssembly in the first draft,
+        // which made "we captured nothing" and "we captured everything" the same state — one
+        // merge away from a Lead with nothing in it.
         var result = Evaluate(0);
 
-        Assert.Equal(EmailInquiryAssemblyStatus.ReadyForAssembly, result.Status);
-        Assert.Equal(0, result.CompletedComponentCount);
+        Assert.Equal(EmailInquiryAssemblyStatus.NoInquiry, result.Status);
+        Assert.Equal(0, result.CapturedComponentCount);
     }
 
     [Fact]
-    public void A_message_whose_every_part_was_skipped_is_ready_with_its_reasons_not_held()
+    public void A_message_whose_every_part_was_refused_or_unsupported_goes_to_a_human()
     {
+        // Distinct from the empty message: a person may well recognise an inquiry in a file the
+        // pipeline cannot read. It must never become an empty Lead and never be discarded.
         var result = Evaluate(2,
             EmailInquiryComponentStatus.Skipped,
             EmailInquiryComponentStatus.Skipped);
 
-        Assert.Equal(EmailInquiryAssemblyStatus.ReadyForAssembly, result.Status);
+        Assert.Equal(EmailInquiryAssemblyStatus.NeedsReview, result.Status);
         Assert.Equal(2, result.CompletedComponentCount);
+        Assert.Equal(0, result.CapturedComponentCount);
+        Assert.Contains("retained for review", result.Reason);
+    }
+
+    [Fact]
+    public void An_empty_message_and_an_all_refused_message_are_not_the_same_state()
+    {
+        // The two cases have different operator consequences: one is noise, the other is a
+        // capability gap worth knowing about. Collapsing them hides the second forever.
+        Assert.NotEqual(
+            Evaluate(0).Status,
+            Evaluate(1, EmailInquiryComponentStatus.Skipped).Status);
+    }
+
+    [Fact]
+    public void ReadyForAssembly_requires_captured_content_not_merely_an_empty_expectation()
+    {
+        // The invariant, stated directly: every route to ReadyForAssembly has at least one
+        // component that durably captured something.
+        foreach (var statuses in new[]
+                 {
+                     Array.Empty<EmailInquiryComponentStatus>(),
+                     new[] { EmailInquiryComponentStatus.Skipped },
+                     new[] { EmailInquiryComponentStatus.Skipped, EmailInquiryComponentStatus.Skipped }
+                 })
+        {
+            var result = EmailInquiryAssemblyStateMachine.Evaluate(statuses.Length, statuses);
+            Assert.NotEqual(EmailInquiryAssemblyStatus.ReadyForAssembly, result.Status);
+        }
+
+        var withContent = Evaluate(2,
+            EmailInquiryComponentStatus.Completed,
+            EmailInquiryComponentStatus.Skipped);
+        Assert.Equal(EmailInquiryAssemblyStatus.ReadyForAssembly, withContent.Status);
+        Assert.Equal(1, withContent.CapturedComponentCount);
+    }
+
+    [Fact]
+    public void A_valid_body_with_an_unsupported_attachment_still_processes_normally()
+    {
+        // The ordinary case that must NOT be dragged into review: the customer wrote a real
+        // inquiry and attached their company logo.
+        var result = Evaluate(2,
+            EmailInquiryComponentStatus.Completed,
+            EmailInquiryComponentStatus.Skipped);
+
+        Assert.Equal(EmailInquiryAssemblyStatus.ReadyForAssembly, result.Status);
     }
 
     // ---- infrastructure faults hold; they do not decide -----------------------------------
@@ -172,7 +224,10 @@ public class EmailInquiryAssemblyStateMachineTests
 
     [Theory]
     [InlineData(EmailInquiryAssemblyStatus.Captured, EmailInquiryAssemblyStatus.Inspecting)]
-    [InlineData(EmailInquiryAssemblyStatus.Captured, EmailInquiryAssemblyStatus.ReadyForAssembly)]
+    [InlineData(EmailInquiryAssemblyStatus.Captured, EmailInquiryAssemblyStatus.NoInquiry)]
+    [InlineData(EmailInquiryAssemblyStatus.Inspecting, EmailInquiryAssemblyStatus.NeedsReview)]
+    [InlineData(EmailInquiryAssemblyStatus.Extracting, EmailInquiryAssemblyStatus.NeedsReview)]
+    [InlineData(EmailInquiryAssemblyStatus.NoInquiry, EmailInquiryAssemblyStatus.Extracting)]
     [InlineData(EmailInquiryAssemblyStatus.Inspecting, EmailInquiryAssemblyStatus.Extracting)]
     [InlineData(EmailInquiryAssemblyStatus.Extracting, EmailInquiryAssemblyStatus.ReadyForAssembly)]
     [InlineData(EmailInquiryAssemblyStatus.ReadyForAssembly, EmailInquiryAssemblyStatus.Assembled)]
@@ -181,10 +236,18 @@ public class EmailInquiryAssemblyStateMachineTests
         EmailInquiryAssemblyStatus from, EmailInquiryAssemblyStatus to)
         => Assert.True(EmailInquiryAssemblyStateMachine.CanTransition(from, to));
 
+    [Fact]
+    public void Captured_cannot_jump_straight_to_ReadyForAssembly()
+        // Nothing has completed yet, so there is nothing captured; the only way out of Captured
+        // for a message with no parts is NoInquiry.
+        => Assert.False(EmailInquiryAssemblyStateMachine.CanTransition(
+            EmailInquiryAssemblyStatus.Captured, EmailInquiryAssemblyStatus.ReadyForAssembly));
+
     [Theory]
     [InlineData(EmailInquiryAssemblyStatus.Captured, EmailInquiryAssemblyStatus.Assembled)]
     [InlineData(EmailInquiryAssemblyStatus.Inspecting, EmailInquiryAssemblyStatus.Assembled)]
     [InlineData(EmailInquiryAssemblyStatus.Extracting, EmailInquiryAssemblyStatus.Assembled)]
+    [InlineData(EmailInquiryAssemblyStatus.NoInquiry, EmailInquiryAssemblyStatus.Assembled)]
     public void A_message_cannot_reach_Assembled_without_passing_the_barrier(
         EmailInquiryAssemblyStatus from, EmailInquiryAssemblyStatus to)
     {
@@ -203,6 +266,7 @@ public class EmailInquiryAssemblyStateMachineTests
     [InlineData(EmailInquiryAssemblyStatus.Assembled)]
     [InlineData(EmailInquiryAssemblyStatus.NeedsReview)]
     [InlineData(EmailInquiryAssemblyStatus.FailedRecoverable)]
+    [InlineData(EmailInquiryAssemblyStatus.NoInquiry)]
     public void RejectedSecurity_is_absorbing(EmailInquiryAssemblyStatus to)
     {
         // A refusal must not be walked back by a retry or a replay. Reversing it is a human act
