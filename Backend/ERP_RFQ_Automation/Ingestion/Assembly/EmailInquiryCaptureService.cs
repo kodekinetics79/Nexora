@@ -167,6 +167,7 @@ public sealed class EmailInquiryCaptureService : IEmailInquiryCaptureService
             RecipientsJson = SerializeRecipients(message),
             Subject = Truncate(message.Subject, 1000),
             ReceivedAtUtc = message.Date,
+            ManifestContractVersion = manifest.ContractVersion,
             ExpectedComponentCount = manifest.ExpectedComponentCount,
             CompletedComponentCount = 0,
             Status = EmailInquiryAssemblyStatus.Captured,

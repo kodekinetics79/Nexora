@@ -295,3 +295,41 @@ pollers mint two jobs for one attachment and produce two Leads for one email par
 `IRawEmailEvidenceReader` are **not registered in `Program.cs`** — the entire assembly package is
 unreachable at this SHA. That is consistent with "PARTIAL/not wired" in the ledger, but it means
 no runtime behaviour has ever executed this code.
+
+---
+
+## Section A — data and migration integrity. COMPLETE
+
+| Gate | Evidence |
+| --- | --- |
+| `ManifestContractVersion` added by focused follow-up migration | `20260813200929_EmailInquiryManifestContractVersion` — tool-generated, Designer + snapshot consistent |
+| `20260813134002` unchanged | `git diff --stat 700312b -- …20260813134002_EmailInquiryAssembly.cs` = **empty (0 lines)** |
+| Migrations apply to an empty PostgreSQL database | `PostgreSqlProductionDialectTests.AllMigrationsApplyToAnEmptyPostgreSqlDatabase` green |
+| RLS ENABLE **and** FORCE on both tables | asserted on `pg_class.relrowsecurity` / `relforcerowsecurity` — applied, not grepped |
+| `nexora_tenant_isolation` + `nexora_tenant_purge` on both tables | asserted on `pg_policy` |
+| Tenant role table access | `has_table_privilege` SELECT/INSERT/UPDATE/DELETE = true |
+| Sequences USAGE-only | `has_sequence_privilege` USAGE = true, SELECT = **false**, UPDATE = **false** |
+| Purge role reach | `has_table_privilege('nexora_purge_app', …, 'SELECT, DELETE')` = true on both |
+| Cross-tenant negative | raw SQL as `nexora_tenant_app` with the tenant GUC set to another business unit, EF bypassed entirely → **0 rows** |
+| Model drift | none |
+| Purge / lifecycle / forced-RLS / dialect suites | Failed: 0, Passed: 98 |
+| New isolation suite | Failed: 0, Passed: 6 |
+| Affected email suites | Failed: 0, Passed: 147 |
+
+### Findings closed in section A
+
+| Finding | Closure | Evidence |
+| --- | --- | --- |
+| **SME4 EA-8** (Critical, disputed) | **CLOSED — REJECTED, conclusively** | Applied assertion on a migrated container: RLS is ENABLED and FORCED and both policies exist. Closed by automated evidence, not reviewer confirmation — marked honestly. |
+| **SME3 EIA-06** (Medium) | CLOSED | Follow-up migration used; original untouched, gate proven |
+| **SME3 EIA-07(a)** (Medium, partial) | CLOSED | The migration's comment is stale but the file is frozen by the EIA-06 gate, so the correction is recorded in `EmailInquiryAssemblyModelBuilderExtensions` — where a reader looking for the filter actually goes — and states plainly that RLS is the boundary and the pipeline role is `BYPASSRLS`. |
+| **SME2 M4** / **SME4 EA-4** / **SME3 EIA-03** (High ×3) | **PARTIALLY closed** | `Version` → `ConcurrencyVersion` (removing the trap of passing the concurrency counter into manifest verification), and `EmailInquiryConcurrencyStamp` now increments it in both `SaveChanges` overrides so the token is no longer inert. **The concurrency BEHAVIOUR test is still owed** — see section C. Not closed until two concurrent completions are proven to converge. |
+
+### Open from EIA-07(b), carried forward
+
+`EmailInquiryComponents.ExtractionJobId` and `.SourceDocumentOccurrenceId` still have no FK and no
+tenant-composite FK. Owner: section D. Consequence if unfixed: a component can cite another
+tenant's occurrence or job id with nothing refusing it.
+
+**Next: section B — canonical MIME correctness (M2 decode-before-limit, M3 verifier completeness,
+M5 inline classifier, M6 containers, M7 recursion).**

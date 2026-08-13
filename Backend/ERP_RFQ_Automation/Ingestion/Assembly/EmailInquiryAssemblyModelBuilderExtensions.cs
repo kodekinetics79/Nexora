@@ -2,6 +2,23 @@ using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.Ingestion.Assembly;
 
+/// <summary>
+/// Schema for the email-assembly aggregate.
+///
+/// <para><b>Where tenant isolation actually lives.</b> The RLS policies, role grants and the
+/// tenant-purge policy are in migration <c>20260813134002_EmailInquiryAssembly</c> as hand-written
+/// SQL; the EF query filters are NOT here — they are declared with the other tenant entities in
+/// <c>ErpRfqAutomationContext.Tenancy.cs</c>. That migration's comment says the filter is "added
+/// alongside" the policies, which reads as though it is in this file. It is not, and a reviewer
+/// looking here concluded no filter existed at all. The migration is left byte-identical on this
+/// branch because it carries governed SQL no model diff can reproduce, so the correction is
+/// recorded here instead and the migration comment is fixed by the next change that legitimately
+/// edits that file.</para>
+///
+/// <para>RLS is the boundary; the query filter is a convenience. The pipeline role is
+/// <c>BYPASSRLS</c>, so on the worker path the explicit <c>BusinessUnitId</c> predicate in each
+/// query is the only thing between tenants — write it every time.</para>
+/// </summary>
 public static class EmailInquiryAssemblyModelBuilderExtensions
 {
     public static void ConfigureEmailInquiryAssembly(this ModelBuilder modelBuilder)
@@ -27,6 +44,7 @@ public static class EmailInquiryAssemblyModelBuilderExtensions
             e.HasIndex(x => new { x.BusinessUnitId, x.Status, x.UpdatedAtUtc });
 
             e.Property(x => x.MessageKey).HasMaxLength(255).IsRequired();
+            e.Property(x => x.ManifestContractVersion).HasDefaultValue(1);
             e.Property(x => x.RawEvidenceUri).HasMaxLength(1024);
             e.Property(x => x.RawEvidenceSha256).HasMaxLength(64).IsFixedLength();
             e.Property(x => x.RawEvidenceVersionId).HasMaxLength(256);
@@ -36,7 +54,7 @@ public static class EmailInquiryAssemblyModelBuilderExtensions
             e.Property(x => x.Status).HasConversion<string>().HasMaxLength(32);
             e.Property(x => x.StatusReason).HasMaxLength(1000);
             e.Property(x => x.SkippedPartsJson).HasColumnType("jsonb");
-            e.Property(x => x.Version).IsConcurrencyToken();
+            e.Property(x => x.ConcurrencyVersion).IsConcurrencyToken();
 
             e.HasOne(x => x.EmailIngest)
                 .WithOne()
@@ -72,7 +90,7 @@ public static class EmailInquiryAssemblyModelBuilderExtensions
             e.Property(x => x.EvidenceUri).HasMaxLength(1024);
             e.Property(x => x.ReasonCode).HasMaxLength(64);
             e.Property(x => x.ReasonDetail).HasMaxLength(1000);
-            e.Property(x => x.Version).IsConcurrencyToken();
+            e.Property(x => x.ConcurrencyVersion).IsConcurrencyToken();
 
             e.HasOne(x => x.Assembly)
                 .WithMany(x => x.Components)

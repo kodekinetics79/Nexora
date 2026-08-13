@@ -199,6 +199,20 @@ public class EmailInquiryAssembly
     /// reports is a visible hole rather than an early finalize.
     /// </summary>
 
+    /// <summary>
+    /// <see cref="EmailInquiryManifestPlanner.ContractVersion"/> in force when this message was
+    /// planned.
+    ///
+    /// <para>Persisted, not inferred. Recovery re-plans the stored bytes and compares against
+    /// THIS value, so a planner whose rules changed while a message was mid-flight is detected
+    /// instead of silently reinterpreting evidence. Passing the planner's current constant here
+    /// would make the comparison tautological, and passing
+    /// <see cref="ConcurrencyVersion"/> — an easy mistake when both were called "Version" —
+    /// would report a mismatch on essentially every recovery while swallowing the real
+    /// component differences behind the version short-circuit.</para>
+    /// </summary>
+    public int ManifestContractVersion { get; set; }
+
     public int ExpectedComponentCount { get; set; }
 
     /// <summary>How many expected components have reached a terminal state.</summary>
@@ -214,9 +228,18 @@ public class EmailInquiryAssembly
     /// user-visible record of partial loss.</summary>
     public string? SkippedPartsJson { get; set; }
 
-    /// <summary>Optimistic concurrency. Two workers finishing sibling components at the same
-    /// instant must not both believe they were the last one in.</summary>
-    public int Version { get; set; }
+    /// <summary>
+    /// Optimistic concurrency token. Named <c>ConcurrencyVersion</c> rather than <c>Version</c>
+    /// because a plain "Version" next to <see cref="ManifestContractVersion"/> invites passing
+    /// the wrong one into manifest verification, which would fail every recovery for the wrong
+    /// reason and hide the real differences.
+    ///
+    /// <para>It is incremented explicitly in <c>ErpRfqAutomationContext.SaveChanges</c>: Npgsql
+    /// does NOT auto-generate <c>int</c> tokens, so a token that is only declared and never
+    /// incremented stays 0 forever and every concurrent update matches — the protection reads
+    /// as present and does nothing.</para>
+    /// </summary>
+    public int ConcurrencyVersion { get; set; }
 
     public DateTimeOffset CreatedAtUtc { get; set; }
 
@@ -299,7 +322,8 @@ public class EmailInquiryComponent
     /// </summary>
     public int NestingDepth { get; set; }
 
-    public int Version { get; set; }
+    /// <inheritdoc cref="EmailInquiryAssembly.ConcurrencyVersion"/>
+    public int ConcurrencyVersion { get; set; }
 
     public DateTimeOffset CreatedAtUtc { get; set; }
 
