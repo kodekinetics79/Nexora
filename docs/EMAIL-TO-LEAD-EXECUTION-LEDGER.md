@@ -365,6 +365,28 @@ limit.
 
 Focused: **Failed: 0, Passed: 34** (decoder + planner). **Closes SME2 M2 (High).**
 
+### B1 exact-boundary proof. COMPLETE
+
+Three-point boundary confirmed with **no off-by-one false rejection**: `limit − 1` accepted,
+**exactly `limit` accepted**, `limit + 1` refused. A very large input observes ≤ `limit + 1`.
+
+Declared-size hostility covered as a `Theory` over `1, 0, −1, −999_999, long.MinValue` — none can
+authorise an oversized decode; an honest oversized declaration refuses without reading the body;
+a declaration of exactly the limit does not pre-reject a legal file (the early check is strictly
+greater-than). Refusals return no bytes at all, so a fragment can never be hashed or persisted as
+whole content. Cancellation propagates and disposes.
+
+**One test premise was wrong and is recorded rather than papered over.** The requested
+"non-seekable body" case is *unreachable in this pipeline*: `MimeKit.MimeContent`'s constructor
+throws `ArgumentException("The stream does not support seeking")`, so a `MimePart`'s content is
+seekable by construction. That constraint is now asserted directly — if a future MimeKit relaxes
+it, the test fails and tells the next reader to add the streaming case for real. The genuinely
+non-seekable stream in this design is the **destination**: the decoder writes into a forward-only,
+write-only sink that cannot be rewound or measured, which is what every boundary number above
+actually exercises.
+
+Focused: **Failed: 0, Passed: 24** (decoder + boundary).
+
 ### B2–B5 — OUTSTANDING
 
 | Item | Finding | Status |
