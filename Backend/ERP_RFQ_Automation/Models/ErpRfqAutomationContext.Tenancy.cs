@@ -10,6 +10,7 @@ using ERP_RFQ_Automation.OrderToCash;
 using ERP_RFQ_Automation.GeneralLedger;
 using ERP_RFQ_Automation.BankReconciliation;
 using ERP_RFQ_Automation.LeadIdentity;
+using ERP_RFQ_Automation.Ingestion.Assembly;
 using ERP_RFQ_Automation.QuoteDelivery;
 using ERP_RFQ_Automation.CommercialIntelligence.Sales;
 using ERP_RFQ_Automation.Inventory.Commercial;
@@ -61,6 +62,16 @@ public partial class ErpRfqAutomationContext
     /// </summary>
     public virtual DbSet<PasswordResetToken> PasswordResetTokens { get; set; } = null!;
 
+    /// <summary>
+    /// One row per received email message. The commercial gate in front of Lead creation:
+    /// see <see cref="EmailInquiryAssembly"/> for why a message-level aggregate had to exist.
+    /// </summary>
+    public virtual DbSet<EmailInquiryAssembly> EmailInquiryAssemblies { get; set; } = null!;
+
+    /// <summary>The body, attachments and embedded messages of an
+    /// <see cref="EmailInquiryAssembly"/>, with per-part provenance and reasons.</summary>
+    public virtual DbSet<EmailInquiryComponent> EmailInquiryComponents { get; set; } = null!;
+
     partial void OnModelCreatingPartial(ModelBuilder modelBuilder)
     {
         if (Database.IsNpgsql())
@@ -78,6 +89,14 @@ public partial class ErpRfqAutomationContext
         modelBuilder.ConfigureBankReconciliation();
         modelBuilder.ConfigureOrderToCash();
         modelBuilder.ConfigureLeadIdentity();
+        // The message-level aggregate that makes one email one coherent Lead. Configured
+        // alongside LeadIdentity because it is the gate in front of it: nothing reconciles a
+        // Lead for an emailed message until the assembly says every expected part is terminal.
+        modelBuilder.ConfigureEmailInquiryAssembly();
+        modelBuilder.Entity<ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssembly>()
+            .HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponent>()
+            .HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         // Gate 2 — supplier tier column and the per-tenant comparison weight set. Carries its own
         // query filter in the partial, alongside the entity it protects.
         ConfigureSupplierEvaluationModel(modelBuilder);
