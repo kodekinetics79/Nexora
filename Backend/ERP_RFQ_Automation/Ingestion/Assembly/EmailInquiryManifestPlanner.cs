@@ -175,8 +175,20 @@ public static class EmailInquiryManifestPlanner
         Action<long> addTotal,
         CancellationToken ct)
     {
+        // MimeKit's `Attachments` is NOT the MIME tree — it yields only entities whose
+        // Content-Disposition says "attachment". An embedded message/rfc822 inside a
+        // multipart/mixed frequently carries NO disposition header at all, which is how a
+        // forwarded enquiry arrives from Outlook and Gmail, and it was therefore invisible to
+        // any planner built on `Attachments`. The old enqueuer had the same blind spot.
+        //
+        // BodyParts walks every leaf, so the candidates are selected here instead: an embedded
+        // message always counts, a named or attachment-dispositioned part counts, and the
+        // text/* parts that ARE the body are excluded because the body is planned separately
+        // from the quote-stripped text.
+        var candidates = message.BodyParts.Where(IsCandidatePart).ToList();
+
         var index = 0;
-        foreach (var entity in message.Attachments)
+        foreach (var entity in candidates)
         {
             ct.ThrowIfCancellationRequested();
             index++;
@@ -190,7 +202,7 @@ public static class EmailInquiryManifestPlanner
             // make the refusal itself the denial of service it is defending against.
             if (components.Count >= limits.MaxComponents)
             {
-                var remaining = message.Attachments.Count() - index + 1;
+                var remaining = candidates.Count - index + 1;
                 components.Add(Refused(key, EmailInquiryComponentKind.Attachment, ordinal(),
                     NameOf(entity, index), depth,
                     EmailInquirySkipReasons.ComponentLimitExceeded,
@@ -364,6 +376,26 @@ public static class EmailInquiryManifestPlanner
             key, EmailInquiryComponentKind.EmbeddedMessage, ordinal(),
             EmbeddedName(embedded, index), "message/rfc822", bytes.Length, Sha256(bytes),
             EmailInquiryComponentDisposition.Process, null, null, depth + 1, bytes));
+    }
+
+    /// <summary>
+    /// Whether a leaf of the MIME tree is a candidate component.
+    ///
+    /// <para>An embedded message always is. A part is when it names a file or declares itself
+    /// an attachment. Everything else that is <c>text/plain</c> or <c>text/html</c> is the
+    /// message body, which is planned separately from the quote-stripped text and must not be
+    /// counted twice. Anything else non-text is treated as a candidate so that an unnamed
+    /// binary part is RECORDED as unnamed rather than silently vanishing — the whole point of
+    /// the manifest is that a part cannot disappear without a row.</para>
+    /// </summary>
+    private static bool IsCandidatePart(MimeEntity entity)
+    {
+        if (entity is MessagePart) return true;
+        if (entity is not MimePart part) return false;
+        if (part.ContentDisposition?.IsAttachment == true) return true;
+        if (!string.IsNullOrWhiteSpace(part.FileName)) return true;
+        return !part.ContentType.IsMimeType("text", "plain")
+               && !part.ContentType.IsMimeType("text", "html");
     }
 
     private static EmailInquiryComponentPlan Refused(
