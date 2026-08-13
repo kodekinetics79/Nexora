@@ -25,6 +25,9 @@ public static class EmailInquirySkipReasons
 
     /// <summary>The one reason that does NOT send the message to review.</summary>
     public const string NonCommercialInlineAsset = "non_commercial_inline_asset";
+
+    /// <summary>A forwarded message whose children carry the commercial content.</summary>
+    public const string StructuralContainer = "structural_container";
 }
 
 /// <summary>Whether a planned component will be handed to inspection and extraction.</summary>
@@ -39,11 +42,22 @@ public enum EmailInquiryComponentDisposition
     Skip = 1,
 
     /// <summary>
-    /// A deterministically classified non-commercial inline asset. Recorded, terminal, and the
-    /// ONLY disposition that does not force review — see
-    /// <see cref="EmailInquiryManifestPlanner.IsIgnorableInlineAsset"/>.
+    /// A deterministically classified non-commercial inline asset. Recorded, terminal, and one of
+    /// only two dispositions that do not force review — see <see cref="InlineAssetClassifier"/>.
     /// </summary>
-    IgnoreInlineAsset = 2
+    IgnoreInlineAsset = 2,
+
+    /// <summary>
+    /// A <c>message/rfc822</c> container: recorded for presence, raw identity and subtree
+    /// relationship, but NOT sent to commercial extraction.
+    ///
+    /// <para>Its children are planned as their own components and they carry the commercial
+    /// content. Extracting the container as well would put the same body and the same attachments
+    /// through extraction twice — <c>EmailContainerReader</c> unwraps an <c>.eml</c> internally —
+    /// producing duplicated line items on one inquiry and provenance that names two sources for
+    /// one physical document.</para>
+    /// </summary>
+    StructuralContainer = 3
 }
 
 /// <summary>
@@ -389,33 +403,71 @@ public static class EmailInquiryManifestPlanner
             return;
         }
 
+        // Serialized ONLY to compute a stable identity hash for the container, then released.
+        //
+        // The per-component ceiling deliberately does NOT gate this. That ceiling bounds bytes we
+        // RETAIN, and a structural container retains none; applying it here made a forward whose
+        // envelope happened to exceed the ceiling refuse the whole subtree, hiding the very
+        // attachments the recursion exists to find. The message-wide budget still bounds the
+        // work, so a hostile forward cannot spend unbounded memory being hashed.
         var serialized = await BoundedComponentDecoder.SerializeAsync(
-            embedded.Message, budget.ComponentLimit, budget.RemainingBytes, budget.CancellationToken);
+            embedded.Message, Math.Max(budget.RemainingBytes, 1), budget.RemainingBytes,
+            budget.CancellationToken);
 
-        if (serialized.Outcome != BoundedDecodeOutcome.Decoded || serialized.Bytes.Length == 0)
-        {
-            var (reason, detail) = serialized.Outcome switch
-            {
-                BoundedDecodeOutcome.ExceedsComponentLimit =>
-                    (EmailInquirySkipReasons.AttachmentOversize,
-                     $"This forwarded message is larger than the {budget.ComponentLimit / (1024 * 1024)} MB limit."),
-                BoundedDecodeOutcome.ExceedsMessageBudget =>
-                    (EmailInquirySkipReasons.TotalSizeLimitExceeded,
-                     "This message exceeds the total size one message may contain."),
-                _ => (EmailInquirySkipReasons.EmbeddedMessageUnreadable,
-                     "This forwarded message could not be read.")
-            };
-            components.Add(Refused(key, EmailInquiryComponentKind.EmbeddedMessage, ordinal(),
-                EmbeddedName(embedded, segment), nestedDepth, reason, detail));
-            return;
-        }
+        var containerHash = serialized.Outcome == BoundedDecodeOutcome.Decoded
+            ? Sha256(serialized.Bytes)
+            : string.Empty;
+        var containerSize = serialized.Outcome == BoundedDecodeOutcome.Decoded
+            ? serialized.Bytes.Length
+            : serialized.ObservedBytes;
 
-        budget.ChargeBytes(serialized.Bytes.Length);
+        // STRUCTURAL ONLY — no bytes carried, no extraction job, no byte charge.
+        //
+        // The container is recorded so the forward is visible and its raw identity (hash + size)
+        // is durable, but its children below are the commercial components. Carrying the
+        // serialized .eml as content would send it to extraction, where EmailContainerReader
+        // unwraps it and re-extracts the very body and attachments the recursion is about to
+        // plan separately — the same lines twice on one inquiry, with provenance naming two
+        // sources for one physical document.
+        //
+        // Not charging the budget is the other half of that contract: the bytes are hashed and
+        // released rather than retained, so charging for them would deduct an allowance nothing
+        // is holding and starve the children that genuinely do carry content.
         components.Add(new EmailInquiryComponentPlan(
             key, EmailInquiryComponentKind.EmbeddedMessage, ordinal(),
             EmbeddedName(embedded, segment), "message/rfc822",
-            serialized.Bytes.Length, Sha256(serialized.Bytes),
-            EmailInquiryComponentDisposition.Process, null, null, nestedDepth, serialized.Bytes));
+            containerSize, containerHash,
+            EmailInquiryComponentDisposition.StructuralContainer,
+            EmailInquirySkipReasons.StructuralContainer,
+            "A forwarded message. Its contents are listed separately below.",
+            nestedDepth, ReadOnlyMemory<byte>.Empty));
+
+        // The forwarded message's OWN words. Without this a body-only forward — the commonest
+        // way an RFQ reaches a distributor — loses its enquiry completely: the container carries
+        // no content by contract, and the walk below only plans attachments.
+        //
+        // Routed through EmailBodyNormalizer, the same quote-stripper the outer body uses, so the
+        // two cannot drift into disagreeing about what the sender actually wrote.
+        var nestedBody = ERP_RFQ_Automation.Ingestion.Triage.EmailBodyNormalizer.Normalize(
+            embedded.Message.TextBody ?? embedded.Message.HtmlBody ?? string.Empty);
+        if (!string.IsNullOrWhiteSpace(nestedBody.Fresh) && budget.TryTakeComponent())
+        {
+            var nestedDocument =
+                $"Subject: {embedded.Message.Subject}\nFrom: {embedded.Message.From}\n"
+                + $"Date: {embedded.Message.Date:yyyy-MM-dd}\n\n{nestedBody.Fresh}";
+            var nestedBytes = Encoding.UTF8.GetBytes(nestedDocument);
+            budget.ChargeBytes(nestedBytes.Length);
+            components.Add(new EmailInquiryComponentPlan(
+                $"email:{messageKey}:part:{segment}.body",
+                EmailInquiryComponentKind.Body,
+                ordinal(),
+                $"{SanitizeFileName(embedded.Message.Subject ?? "forwarded")}_body.txt",
+                "text/plain",
+                nestedBytes.Length,
+                Sha256(nestedBytes),
+                EmailInquiryComponentDisposition.Process,
+                null, null, nestedDepth, nestedBytes));
+        }
 
         // The SAME budget instance descends. A nested level never receives a fresh allowance —
         // three forwards each carrying 90 MB must not each pass a "100 MB total" check.

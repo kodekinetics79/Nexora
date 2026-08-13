@@ -138,7 +138,18 @@ public enum EmailInquiryComponentStatus
     /// wrongly ignoring a part produces a Lead priced against content nobody saw, while wrongly
     /// reviewing one costs a few seconds of a human's attention.</para>
     /// </summary>
-    Ignored = 7
+    Ignored = 7,
+
+    /// <summary>
+    /// Terminal. A <c>message/rfc822</c> container whose CHILDREN carry the commercial content.
+    ///
+    /// <para>It is represented so the forward is visible, its raw identity is recorded, and the
+    /// barrier counts it — but it produces no extraction job of its own, because its children are
+    /// planned separately and extracting both would duplicate every line the forward contains.
+    /// Distinct from <see cref="Ignored"/>: nothing here was judged unimportant, the content is
+    /// simply accounted for one level down.</para>
+    /// </summary>
+    StructuralOnly = 8
 }
 
 /// <summary>
@@ -334,7 +345,12 @@ public class EmailInquiryComponent
     /// <summary>True when this component can no longer change on its own.</summary>
     public bool IsTerminal => Status is EmailInquiryComponentStatus.Completed
         or EmailInquiryComponentStatus.Skipped
-        or EmailInquiryComponentStatus.RefusedSecurity;
+        or EmailInquiryComponentStatus.RefusedSecurity
+        // Ignored and StructuralOnly are terminal at capture and were previously omitted here
+        // while CompletedCount already counted them. The disagreement let a replayed report
+        // overwrite an Ignored logo with Skipped and drag a clean message into review.
+        or EmailInquiryComponentStatus.Ignored
+        or EmailInquiryComponentStatus.StructuralOnly;
 
     /// <summary>
     /// True when the component is holding the message open for an infrastructure reason.

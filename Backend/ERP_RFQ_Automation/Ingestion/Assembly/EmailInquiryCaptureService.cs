@@ -203,6 +203,7 @@ public sealed class EmailInquiryCaptureService : IEmailInquiryCaptureService
                 {
                     EmailInquiryComponentDisposition.Process => EmailInquiryComponentStatus.Pending,
                     EmailInquiryComponentDisposition.IgnoreInlineAsset => EmailInquiryComponentStatus.Ignored,
+                    EmailInquiryComponentDisposition.StructuralContainer => EmailInquiryComponentStatus.StructuralOnly,
                     _ => EmailInquiryComponentStatus.Skipped
                 },
                 ReasonCode = plan.ReasonCode,

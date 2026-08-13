@@ -445,6 +445,51 @@ because customers forward bounces asking what went wrong and that forward is a r
 
 Affected suites: **Failed: 0, Passed: 162**. Model drift: none.
 
+### B2 duplication gate — TWO DEFECTS FOUND BY THE MATRIX, BOTH IN MY CODE
+
+The reviewer-mandated ownership contract exposed a real double-extraction bug and a second
+defect the fix uncovered. Neither was visible in the 162 inherited tests.
+
+**Defect 1 — double extraction.** The embedded `message/rfc822` was planned as a `Process`
+component carrying its serialized bytes AND its children were planned as `Process` components.
+`EmailContainerReader` unwraps an `.eml` internally, so the same body and the same attachments
+went through extraction twice: duplicated line items on one inquiry, and provenance naming two
+sources for one physical document.
+
+**Fix:** a new `StructuralContainer` disposition / `StructuralOnly` component status. The
+container is recorded (presence, raw SHA-256, size, subtree relationship) and counted by the
+barrier, but carries no content and produces no extraction job. Its children are the commercial
+components. Byte budget is charged **once**, by the children — the container's bytes are hashed
+and released, so charging for them would deduct an allowance nothing is holding.
+
+**Defect 2 — the fix hid entire forwards.** With the container structural, a *body-only* forward
+produced **no commercial component at all**: the container carries nothing by contract and the
+walk only plans attachments. A forwarded body-only RFQ — the commonest way an enquiry reaches a
+distributor — lost its content completely. Fixed by planning the nested message's own body,
+routed through `EmailBodyNormalizer`, the same quote-stripper the outer body uses, so the two
+cannot drift.
+
+**Defect 3 — the per-component ceiling refused whole subtrees.** Applying `MaxComponentBytes` to
+the container made a forward whose envelope exceeded the ceiling refuse its entire subtree,
+hiding the attachments the recursion exists to find. That ceiling bounds bytes we RETAIN and a
+structural container retains none, so it is now bounded by the message-wide budget only.
+
+Also closed here: **SME3 EIA-08** — `IsTerminal` omitted `Ignored` while `CompletedCount` counted
+it, so a replayed report could overwrite an `Ignored` logo with `Skipped` and drag a clean message
+into review. `IsTerminal` now includes `Ignored` and `StructuralOnly`.
+
+B2 matrix: **Failed: 0, Passed: 15** — duplication gate, one-body-per-forward, one-evidence-item-
+once, duplicate filenames across forwards, no cross-level collision, key/ordinal stability across
+re-plan, dense ordinals, depth 0/1/max+1, shared component budget across siblings, shared byte
+budget, per-component ceiling inside a forward, malformed embedded message, and 50-level nesting
+terminating at the declared depth without exhausting the stack.
+
+Cumulative affected: **Failed: 0, Passed: 177**.
+
+Two further planner tests encoded the superseded contract and were corrected, not deleted:
+`An_embedded_message_becomes_a_processable_eml_component` asserted the double-extraction
+behaviour directly.
+
 **B5 inventory (done):** the repository has **no** existing reader for TNEF, S/MIME, calendar or
 DSN. MimeKit 4.16 supplies `TnefPart.ExtractAttachments()` (safe wiring, no new parser) and
 `ApplicationPkcs7Mime`. Decrypting S/MIME needs a `SecureMimeContext` with keys, which this

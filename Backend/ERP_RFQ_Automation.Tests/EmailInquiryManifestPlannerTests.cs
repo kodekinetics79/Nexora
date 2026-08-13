@@ -249,10 +249,13 @@ public class EmailInquiryManifestPlannerTests
     // ---- embedded messages -----------------------------------------------------------------
 
     [Fact]
-    public async Task An_embedded_message_becomes_a_processable_eml_component()
+    public async Task An_embedded_message_becomes_a_structural_component_not_a_processable_one()
     {
         // It used to be recorded as "embedded email message is not ingested" and dropped, so a
-        // forwarded enquiry was invisible to the pipeline.
+        // forwarded enquiry was invisible to the pipeline. It is now REPRESENTED — but as a
+        // structural container, not a processable one: its children are planned separately and
+        // extracting the container as well would put the same body and attachments through
+        // extraction twice, because EmailContainerReader unwraps an .eml internally.
         var inner = new MimeMessage();
         inner.From.Add(new MailboxAddress("Original", "original@customer.example"));
         inner.To.Add(new MailboxAddress("Buyer", "buyer@customer.example"));
@@ -263,13 +266,19 @@ public class EmailInquiryManifestPlannerTests
 
         var embedded = Assert.Single(manifest.Components,
             c => c.Kind == EmailInquiryComponentKind.EmbeddedMessage);
-        Assert.Equal(EmailInquiryComponentDisposition.Process, embedded.Disposition);
+        Assert.Equal(EmailInquiryComponentDisposition.StructuralContainer, embedded.Disposition);
         Assert.EndsWith(".eml", embedded.FileName);
         Assert.Equal("message/rfc822", embedded.MimeType);
         Assert.Equal(1, embedded.NestingDepth);
-        // Serialized, so it goes through the same inspection boundary as any other file.
+        // Identity is still recorded — presence, raw hash and size — so the forward is visible
+        // and traceable even though it carries no content into extraction.
         Assert.True(embedded.ByteSize > 0);
         Assert.NotEmpty(embedded.ContentHash);
+        Assert.True(embedded.Content.IsEmpty);
+
+        // The forwarded message's OWN words are what carry the commercial content.
+        Assert.Contains(manifest.Processable,
+            c => c.Kind == EmailInquiryComponentKind.Body && c.NestingDepth == 1);
     }
 
     [Fact]

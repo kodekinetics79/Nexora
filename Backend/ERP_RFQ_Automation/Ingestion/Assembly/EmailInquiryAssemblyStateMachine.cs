@@ -226,7 +226,8 @@ public static class EmailInquiryAssemblyStateMachine
         => statuses.Count(s => s is EmailInquiryComponentStatus.Completed
             or EmailInquiryComponentStatus.Skipped
             or EmailInquiryComponentStatus.RefusedSecurity
-            or EmailInquiryComponentStatus.Ignored);
+            or EmailInquiryComponentStatus.Ignored
+            or EmailInquiryComponentStatus.StructuralOnly);
 
     /// <summary>
     /// Parts the sender attached that this system did NOT read and cannot prove were
