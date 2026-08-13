@@ -83,12 +83,21 @@ public sealed record EmailInquiryLimits
     public long MaxTotalBytes { get; init; } = 100L * 1024 * 1024;
 
     /// <summary>
-    /// Ceiling below which a cid-referenced inline image may be treated as decoration rather
-    /// than content. 64 KB comfortably covers signature logos and icons; a pasted screenshot of
-    /// a requirements table does not fit in it, and anything above falls through to normal
-    /// extraction.
+    /// Ceiling below which a cid-referenced inline image may be treated as decoration.
+    ///
+    /// <para><b>16 KB, and the number is doing real work.</b> Outlook names BOTH a signature
+    /// logo and a pasted screenshot <c>image001.png</c>, both inline, both cid-referenced, both
+    /// image parts — so the filename and the headers cannot separate them and size is the only
+    /// honest discriminator left. Signature logos and icons are typically 2–15 KB; a screenshot
+    /// of a requirements table is rarely under 20 KB.</para>
+    ///
+    /// <para>It was 64 KB, which exempted a 30 KB pasted requirements table — a Lead priced
+    /// against a document nobody opened. The ceiling is deliberately set below the ambiguous
+    /// band so that everything uncertain is processed, because the two errors are not
+    /// comparable: a wrongly-processed logo costs one empty extraction job, a wrongly-ignored
+    /// screenshot costs the enquiry.</para>
     /// </summary>
-    public long InlineAssetMaxBytes { get; init; } = 64L * 1024;
+    public long InlineAssetMaxBytes { get; init; } = 16L * 1024;
 
     public static EmailInquiryLimits Default { get; } = new();
 }
@@ -278,7 +287,7 @@ public static class EmailInquiryManifestPlanner
 
             if (!budget.TryTakeComponent()) return;
 
-            var classification = InlineAssetClassifier.Classify(part, cidReferences, budget);
+            var classification = await InlineAssetClassifier.ClassifyAsync(part, cidReferences, budget);
             if (classification == InlineAssetVerdict.Decorative)
             {
                 components.Add(new EmailInquiryComponentPlan(

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading.Tasks;
 using MimeKit;
 
 namespace ERP_RFQ_Automation.Ingestion.Assembly;
@@ -45,7 +46,7 @@ public static class InlineAssetClassifier
     /// HTML body, inline rather than attachment intent, a measurable size within the decoration
     /// ceiling, and no contradictory commercial signal in the filename.
     /// </summary>
-    public static InlineAssetVerdict Classify(
+    public static async Task<InlineAssetVerdict> ClassifyAsync(
         MimePart part, IReadOnlySet<string> htmlCidReferences, EmailInquiryBudget budget)
     {
         ArgumentNullException.ThrowIfNull(part);
@@ -74,35 +75,24 @@ public static class InlineAssetClassifier
         if (HasCommercialFileName(part.FileName))
             return InlineAssetVerdict.ProcessAsContent;
 
-        // MEASURED, not declared. Encoded length is a safe upper bound on the decoded size for
-        // base64 and quoted-printable, and it is read without decoding anything.
-        var measured = MeasureEncodedLength(part);
-        if (measured is null || measured > budget.InlineAssetMaxBytes)
+        // MEASURED DECODED SIZE, via a bounded probe that reads at most the decoration
+        // threshold plus one byte. Encoded length would be a safe upper bound but rejects
+        // legitimate logos unnecessarily — base64 inflates by a third, so a 50 KB logo measures
+        // 67 KB encoded and loses its exemption for arithmetic reasons rather than commercial
+        // ones. The probe costs at most InlineAssetMaxBytes + 1 bytes, which is the same bound
+        // B1 established, so this cannot reintroduce the OOM vector.
+        var probe = await BoundedComponentDecoder.DecodeAsync(
+            part, budget.InlineAssetMaxBytes + 1, budget.InlineAssetMaxBytes + 1,
+            budget.CancellationToken);
+
+        // Anything the probe could not settle — too big for the threshold, or unreadable —
+        // resolves to processing. Uncertainty must never produce Ignored.
+        if (!probe.IsDecoded || probe.Bytes.Length > budget.InlineAssetMaxBytes)
             return InlineAssetVerdict.ProcessAsContent;
 
         return InlineAssetVerdict.Decorative;
     }
 
-    /// <summary>
-    /// Upper bound on the part's size taken from the encoded stream, without decoding.
-    ///
-    /// <para>Base64 inflates by 4/3, so the encoded length always over-states the decoded size;
-    /// using it means the classifier can only ever be too cautious, never too permissive. Null
-    /// when the length cannot be established, which resolves to processing.</para>
-    /// </summary>
-    private static long? MeasureEncodedLength(MimePart part)
-    {
-        try
-        {
-            var stream = part.Content?.Stream;
-            if (stream is null || !stream.CanSeek) return null;
-            return stream.Length;
-        }
-        catch (NotSupportedException)
-        {
-            return null;
-        }
-    }
 
     /// <summary>Words that make an image commercially significant regardless of placement.</summary>
     private static bool HasCommercialFileName(string? fileName)
@@ -112,7 +102,11 @@ public static class InlineAssetClassifier
         [
             "rfq", "quote", "quotation", "boq", "bill", "spec", "requirement", "drawing",
             "tender", "enquiry", "inquiry", "schedule", "pricing", "price", "scope", "qty",
-            "screenshot", "screen shot", "table", "list"
+            "screenshot", "screen shot", "table", "list",
+            // A QR code in commercial mail encodes a portal link or a reference number. It is
+            // small and inline like an icon, so only the name distinguishes it — and a sender
+            // who names it that is telling us it carries information.
+            "qr"
         ];
         foreach (var signal in signals)
             if (fileName.Contains(signal, StringComparison.OrdinalIgnoreCase))

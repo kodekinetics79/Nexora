@@ -495,3 +495,54 @@ DSN. MimeKit 4.16 supplies `TnefPart.ExtractAttachments()` (safe wiring, no new 
 `ApplicationPkcs7Mime`. Decrypting S/MIME needs a `SecureMimeContext` with keys, which this
 deployment does not have — so encrypted S/MIME must be classified security-gated and surfaced as
 `NeedsReview`, never represented as extracted. No new parsers are to be written.
+
+
+### B4 — inline assets. MATRIX COMPLETE
+
+Classification now uses a **bounded decoded-size probe** through `BoundedComponentDecoder`,
+reading at most `InlineAssetMaxBytes + 1` bytes. Encoded length was a safe upper bound but
+rejected legitimate logos for arithmetic reasons — base64 inflates by a third, so a 50 KB logo
+measures 67 KB encoded and loses its exemption without any commercial justification.
+
+**The decoration ceiling moved from 64 KB to 16 KB, and the matrix is why.** Two cases failed on
+first run — a 30 KB `image001.png` requirements screenshot and a QR code were both being
+exempted. Outlook names BOTH a signature logo and a pasted screenshot `image001.png`, both inline,
+both cid-referenced, both image parts, so filename and headers cannot separate them and **size is
+the only honest discriminator**. Signature logos are typically 2–15 KB; a screenshot of a
+requirements table is rarely under 20 KB. The ceiling now sits below the ambiguous band, so
+everything uncertain is processed. `qr` was added to the commercial filename signals: a QR code in
+commercial mail encodes a portal link or reference number, and a sender who names it that is
+telling us it carries information.
+
+`Decorative` requires **all** of: image media type · non-attachment intent · a Content-Id · an
+actual `cid:` reference in the HTML body · no commercial filename signal · measured decoded size
+within the ceiling. Anything short of that is `Process`.
+
+| Case | Outcome |
+| --- | --- |
+| ordinary cid signature logo | Ignored |
+| logo with no declared size (Gmail/Apple/Outlook/Exchange) | Ignored |
+| logo just under the ceiling | Ignored |
+| logo + genuine BOQ | logo Ignored, BOQ Process, **no Skip anywhere** |
+| repeated inline asset | both Ignored, distinct keys |
+| **small generic `image001.png` screenshot** | **Process — not discarded** |
+| commercially named inline image, perfect logo headers | Process (filename wins) |
+| image explicitly marked attachment | Process |
+| cid image the HTML never references | Process |
+| oversized inline image | Process |
+| QR code | Process |
+| dishonest declared size on a large image | Process |
+| unnamed inline cid image within ceiling | Ignored — **not** an `attachment_unnamed` Skip |
+| unnamed inline image above ceiling | Process — not refused for lacking a name |
+
+The last two matter commercially: before the classifier fired, an unnamed inline part became
+`attachment_unnamed`, which is a Skip, which sends the **whole message** to review — so every
+message carrying a signature would have been reviewed.
+
+B4 matrix: **Failed: 0, Passed: 14**. Cumulative affected: **Failed: 0, Passed: 200**.
+
+### Still outstanding for Section B exit
+
+B5 matrix · B3 typed verifier · B2 carried safeguards (StructuralOnly lifecycle, raw-message
+bounds, nested-body normalization) · full backend regression · PG suites · drift · exact-diff
+MIME/security/SDET review.
