@@ -16,11 +16,18 @@ import {
   Inbox as InboxIcon,
   OpenInNew as OpenIcon,
 } from '@mui/icons-material';
-import leadService, { type GovernedUploadJobDTO } from '../../api/services/leadService';
+import leadService, {
+  readUploadPausedProblem,
+  type GovernedUploadJobDTO,
+} from '../../api/services/leadService';
 import { useAuth } from '../../context/AuthContext';
 import { useSnackbar } from 'notistack';
 import { presentableErrorMessage } from '../../utils/apiErrors';
-import { explainIntakeError, isRecoverableIntakeErrorCode } from '../../utils/intakeErrors';
+import {
+  explainIntakeError,
+  explainStoragePause,
+  isRecoverableIntakeErrorCode,
+} from '../../utils/intakeErrors';
 
 const MAX_FILE_BYTES = 25 * 1024 * 1024;
 const MAX_BATCH_BYTES = 200 * 1024 * 1024;
@@ -56,8 +63,22 @@ const ManualUploadLeadsPage: React.FC = () => {
   // Retained after an all-failed upload so the tray survives and the batch stays reachable.
   const [failedJobs, setFailedJobs] = useState<GovernedUploadJobDTO[]>([]);
   const [batchId, setBatchId] = useState<string | null>(null);
+  /**
+   * The storage refusal (503 evidence_storage_unavailable). Held separately from `failedJobs`
+   * because it is not a verdict about any file — it is the store failing — and offering a retry per
+   * file would repeat the 2026-08-12 defect. `accepted` is the server's count of documents that
+   * genuinely reached durable storage before it failed, which can be more than zero.
+   */
+  const [storagePaused, setStoragePaused] = useState<{ isConfigurationFault: boolean; accepted: number } | null>(null);
   const canCreateLeads = hasPermission('Leads', 'create');
   const heldByScanner = failedJobs.some((job) => isRecoverableIntakeErrorCode(job.errorCode));
+  const storageExplanation = storagePaused === null
+    ? null
+    : explainStoragePause(storagePaused.isConfigurationFault);
+  // Only a misconfigured store is guaranteed to refuse the next attempt. An unreachable one may
+  // already be back, and disabling the button on it would dress a thirty-second blip as something
+  // only an administrator can fix.
+  const storagePausedBlocksRetry = storagePaused?.isConfigurationFault === true;
 
   const uploadMutation = useMutation({
     mutationFn: (fd: FormData) => leadService.uploadGoverned(fd),
@@ -98,6 +119,36 @@ const ManualUploadLeadsPage: React.FC = () => {
       navigate(`/procurement/leads/ingestion/${encodeURIComponent(result.batchId)}`);
     },
     onError: (error: unknown) => {
+      /*
+        The batch-wide storage refusal arrives here rather than in onSuccess, because the server
+        answers 503 instead of accepting files it cannot durably store. Its generic sibling copy
+        below — "your files were not sent — try again" — is true but useless for this one: retrying
+        is the single thing that cannot work while the store is unwritable.
+      */
+      const paused = readUploadPausedProblem(error);
+      if (paused) {
+        /*
+          `jobs` carries every row the batch decided before the outage — quarantined, rejected and
+          held files as well as stored ones — so its length is not a count of accepted work. Reading
+          it as one reported a malware quarantine as "stored and processing normally", in the banner
+          written to end exactly that kind of falsehood. The server sends its own `accepted` count;
+          the filter is the fallback for a payload that predates it.
+        */
+        const rows = paused.jobs ?? [];
+        const stopped = rows.filter((job) => STOPPED_OUTCOMES.includes(job.outcome));
+        setStoragePaused({
+          isConfigurationFault: paused.isConfigurationFault === true,
+          accepted: paused.accepted ?? rows.length - stopped.length,
+        });
+        // Files the batch had already REFUSED keep their tray rows and their real outcomes.
+        // Clearing them would hide a malware verdict behind a storage outage.
+        setFailedJobs(stopped);
+        setBatchId(paused.batchId ?? null);
+        enqueueSnackbar('Uploads are paused — document storage is unavailable. Your files have been kept.',
+          { variant: 'error' });
+        return;
+      }
+
       enqueueSnackbar(
         presentableErrorMessage(error, 'The upload could not be completed. Your files were not sent — try again.'),
         { variant: 'error' },
@@ -125,6 +176,7 @@ const ManualUploadLeadsPage: React.FC = () => {
 
     setSelectionError(null);
     setFailedJobs([]);
+    setStoragePaused(null);
     setFiles(combined);
   };
 
@@ -139,9 +191,10 @@ const ManualUploadLeadsPage: React.FC = () => {
   };
 
   const handleUpload = () => {
-    if (files.length === 0 || uploading || !canCreateLeads) return;
+    if (files.length === 0 || uploading || !canCreateLeads || storagePausedBlocksRetry) return;
     setUploading(true);
     setFailedJobs([]);
+    setStoragePaused(null);
     const fd = new FormData();
     files.forEach(f => fd.append('files', f));
     uploadMutation.mutate(fd);
@@ -228,6 +281,56 @@ const ManualUploadLeadsPage: React.FC = () => {
           {selectionError && <Alert severity="warning" sx={{ mb: 3 }}>{selectionError}</Alert>}
 
           {/*
+            Document storage is unwritable, so nothing further was accepted. ONE banner, not one row
+            per file: every remaining file failed for the same reason, and the reason is ours to fix
+            rather than the operator's. The files stay in the tray below — losing a selection to an
+            outage the operator did not cause would be a second insult.
+
+            `explainStoragePause` supplies the next action, which differs by fault: a misconfigured
+            store will refuse the next attempt identically and the Queue button stays withheld, while
+            an unreachable one may already be back and retrying is honest.
+          */}
+          {storagePaused && storageExplanation && (
+            <Alert
+              severity="error"
+              icon={<OfflineIcon fontSize="inherit" />}
+              sx={{ mb: 3, borderLeft: 4, borderColor: 'error.main' }}
+              action={storagePausedBlocksRetry ? (
+                <Button
+                  color="inherit"
+                  size="small"
+                  onClick={() => setStoragePaused(null)}
+                >
+                  Storage restored? Try again
+                </Button>
+              ) : undefined}
+            >
+              <AlertTitle sx={{ fontWeight: 800 }}>{storageExplanation.title}</AlertTitle>
+              <Typography variant="body2" sx={{ mb: 1 }}>
+                {storageExplanation.whatHappened}
+              </Typography>
+              <Typography variant="body2" sx={{ fontWeight: 700 }}>
+                {storageExplanation.nextAction}
+              </Typography>
+              {/*
+                Work that really was stored before the store failed is still running and will surface
+                as leads. Saying so is the difference between an honest refusal and one the operator
+                will be contradicted by later.
+              */}
+              {storagePaused.accepted > 0 && (
+                <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+                  {storagePaused.accepted} file
+                  {storagePaused.accepted === 1 ? ' was' : 's were'} stored before storage stopped
+                  responding and {storagePaused.accepted === 1 ? 'is' : 'are'} processing normally.
+                </Typography>
+              )}
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+                Your {files.length === 1 ? 'file is' : 'files are'} still selected below.
+              </Typography>
+            </Alert>
+          )}
+
+          {/*
             All-failed upload. The files stay in the tray below, so "Queue for reconciliation"
             retries the exact same selection in one click — no re-picking.
           */}
@@ -250,12 +353,22 @@ const ManualUploadLeadsPage: React.FC = () => {
               <AlertTitle sx={{ fontWeight: 800 }}>
                 {heldByScanner
                   ? 'Malware scanning is offline'
-                  : `No document was processed (${failedJobs.length} file${failedJobs.length === 1 ? '' : 's'})`}
+                  /*
+                    "No document was processed" is only true when this tray IS the whole outcome.
+                    Alongside a storage pause these are the files the batch had already decided
+                    before the store failed, and others may have been accepted — so the heading
+                    counts them instead of speaking for the batch.
+                  */
+                  : storagePaused
+                    ? `${failedJobs.length} file${failedJobs.length === 1 ? '' : 's'} stopped before storage failed`
+                    : `No document was processed (${failedJobs.length} file${failedJobs.length === 1 ? '' : 's'})`}
               </AlertTitle>
               <Typography variant="body2" sx={{ mb: 1 }}>
                 {heldByScanner
                   ? 'Your files are held safely and will process automatically when scanning recovers. They are still selected below — press Queue for reconciliation to retry now.'
-                  : 'Your files are still selected below, so you can fix and retry without choosing them again.'}
+                  : storagePaused
+                    ? 'These files were stopped on their own merits, not by the storage outage above.'
+                    : 'Your files are still selected below, so you can fix and retry without choosing them again.'}
               </Typography>
               <Stack spacing={0.75}>
                 {failedJobs.map((job) => {
@@ -320,7 +433,12 @@ const ManualUploadLeadsPage: React.FC = () => {
             <Button
               fullWidth
               variant="contained"
-              disabled={files.length === 0 || uploading || !canCreateLeads}
+              // Disabled only for a MISCONFIGURED store, and then deliberately rather than
+              // relabelled: the banner above says retrying cannot work, and an enabled "Retry 4
+              // files" underneath it would be the same contradiction the incident shipped. The
+              // banner's own action clears it. An unreachable store leaves the button live —
+              // waiting out a blip is the user's call, not ours to forbid.
+              disabled={files.length === 0 || uploading || !canCreateLeads || storagePausedBlocksRetry}
               onClick={handleUpload}
               sx={{
                 height: 52,
@@ -337,9 +455,11 @@ const ManualUploadLeadsPage: React.FC = () => {
             >
               {uploading
                 ? 'Queueing documents...'
-                : failedJobs.length > 0
-                  ? `Retry ${files.length} file${files.length === 1 ? '' : 's'}`
-                  : 'Queue for reconciliation'}
+                : storagePausedBlocksRetry
+                  ? 'Uploads paused — document storage is unavailable'
+                  : failedJobs.length > 0 || storagePaused
+                    ? `Retry ${files.length} file${files.length === 1 ? '' : 's'}`
+                    : 'Queue for reconciliation'}
             </Button>
           </Box>
         </Box>

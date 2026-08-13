@@ -199,6 +199,20 @@ public sealed class MaterialTraceabilityController(
         {
             return BadRequest(Problem(StatusCodes.Status400BadRequest, "Invalid traceability request", exception.Message));
         }
+        catch (ERP_RFQ_Automation.Infrastructure.Storage.EvidenceStorageUnavailableException exception)
+        {
+            // Lot certificates are written to the same immutable evidence store as every other
+            // upload, so a dead store must answer the same way here. It has to be caught HERE and
+            // not left to EvidenceStorageProblemFilter: the catch-all below handles the exception
+            // first, and an MVC exception filter only ever sees UNHANDLED ones. Without this the
+            // QA operator filing a mill certificate gets "the material traceability request could
+            // not be completed" — the 2026-08-12 shrug, one screen over.
+            logger.LogError(exception,
+                "Material traceability request refused: durable evidence storage is unavailable "
+                + "(configuration fault: {IsConfigurationFault}). CorrelationId={CorrelationId}",
+                exception.IsConfigurationFault, SafeCorrelationId());
+            return ERP_RFQ_Automation.Infrastructure.Storage.EvidenceStorageProblemFilter.ToResult(exception);
+        }
         catch (Exception exception)
         {
             logger.LogError(exception, "Material traceability request failed. CorrelationId={CorrelationId}",
