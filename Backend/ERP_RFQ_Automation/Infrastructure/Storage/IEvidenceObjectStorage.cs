@@ -1,5 +1,6 @@
 using System.Net;
 using System.Security.Cryptography;
+using Amazon.Runtime;
 using Amazon.S3;
 using Amazon.S3.Model;
 using Microsoft.Extensions.Options;
@@ -235,6 +236,13 @@ public sealed class S3EvidenceStorageOptions
 public sealed class S3EvidenceObjectStorage : IEvidenceObjectStorage, IDisposable
 {
     private readonly S3EvidenceStorageOptions _options;
+
+    /// <summary>
+    /// Set once, the first time this endpoint answers a conditional write with 501. See
+    /// <see cref="PutAsync"/>: the fallback is a property of the STORE, so it is remembered
+    /// for the process rather than rediscovered — and paid for — on every upload.
+    /// </summary>
+    private volatile bool _conditionalWritesUnsupported;
     private readonly AmazonS3Client _client;
 
     public S3EvidenceObjectStorage(IOptions<S3EvidenceStorageOptions> options)
@@ -254,8 +262,70 @@ public sealed class S3EvidenceObjectStorage : IEvidenceObjectStorage, IDisposabl
             {
                 ServiceURL = _options.ServiceUrl,
                 AuthenticationRegion = string.IsNullOrWhiteSpace(_options.Region) ? "auto" : _options.Region,
-                ForcePathStyle = _options.ForcePathStyle
+                ForcePathStyle = _options.ForcePathStyle,
+
+                // AWS SDK v4 attaches a CRC32 integrity checksum to every upload by default,
+                // which means an x-amz-sdk-checksum-algorithm header on requests that do not
+                // require one. AWS implements it; S3-COMPATIBLE stores largely do not, and
+                // Backblaze B2 answers the whole request with 501 "A header you provided
+                // implies functionality that is not implemented".
+                //
+                // That failed the evidence write, which fails ingestion, which meant every
+                // uploaded RFQ was refused — reported to the operator as a per-file queueing
+                // fault they were told to retry. The endpoint was configured correctly; only
+                // the header was wrong. Requesting checksums only where the operation
+                // genuinely requires them keeps AWS behaviour intact and stops assuming every
+                // S3 endpoint is AWS.
+                //
+                // Deliberately set here rather than left to AWS_REQUEST_CHECKSUM_CALCULATION /
+                // AWS_RESPONSE_CHECKSUM_VALIDATION: an unset environment variable would
+                // silently restore the failure on a fresh deployment.
+                RequestChecksumCalculation = RequestChecksumCalculation.WHEN_REQUIRED,
+                ResponseChecksumValidation = ResponseChecksumValidation.WHEN_REQUIRED
             });
+    }
+
+    /// <summary>
+    /// Puts an object, tolerating a store that does not implement conditional writes.
+    ///
+    /// <para><c>If-None-Match: *</c> — "create only if absent" — is an S3 feature AWS added in
+    /// late 2024. Backblaze B2 and several other S3-compatible stores do not implement it, and
+    /// answer the WHOLE request with 501 rather than ignoring the header. That took out the
+    /// evidence write, which ingestion performs before it queues anything, so every uploaded
+    /// RFQ was refused and the operator was told the file had failed while queueing and to try
+    /// again. Nothing about the file was wrong.</para>
+    ///
+    /// <para>Dropping the precondition on such a store is safe HERE specifically, and would not
+    /// be in general. The key is content-addressed — it contains the SHA-256 of the bytes, see
+    /// <see cref="LocalEvidenceObjectStorage.BuildKey"/> — and the caller has already resolved
+    /// an existing object through <c>TryHeadAsync</c>. The precondition only closes the narrow
+    /// race between that HEAD and this PUT, and the loser of that race writes byte-identical
+    /// content to a key derived from those same bytes. What is lost is belt over braces, not
+    /// the guarantee itself.</para>
+    /// </summary>
+    private async Task<PutObjectResponse> PutAsync(PutObjectRequest request, CancellationToken ct)
+    {
+        if (_conditionalWritesUnsupported)
+        {
+            request.IfNoneMatch = null;
+            return await _client.PutObjectAsync(request, ct);
+        }
+
+        try
+        {
+            return await _client.PutObjectAsync(request, ct);
+        }
+        catch (AmazonS3Exception ex) when (ex.StatusCode == HttpStatusCode.NotImplemented)
+        {
+            _conditionalWritesUnsupported = true;
+            request.IfNoneMatch = null;
+            // The SDK read the stream to send the failed attempt; rewind or the retry stores
+            // zero bytes under a key that claims their hash. Both call sites pass a seekable
+            // MemoryStream with AutoCloseStream disabled, which is what makes this safe.
+            if (request.InputStream is { CanSeek: true } stream)
+                stream.Position = 0;
+            return await _client.PutObjectAsync(request, ct);
+        }
     }
 
     public bool IsDurable => true;
@@ -281,7 +351,7 @@ public sealed class S3EvidenceObjectStorage : IEvidenceObjectStorage, IDisposabl
                 IfNoneMatch = "*"
             };
             put.Metadata["sha256"] = digest;
-            await _client.PutObjectAsync(put, ct);
+            await PutAsync(put, ct);
 
             using var stored = await _client.GetObjectAsync(new GetObjectRequest
             {
@@ -328,7 +398,7 @@ public sealed class S3EvidenceObjectStorage : IEvidenceObjectStorage, IDisposabl
 
         try
         {
-            var response = await _client.PutObjectAsync(request, ct);
+            var response = await PutAsync(request, ct);
             return new EvidenceObject(ToUri(key, response.VersionId), _options.Bucket!, key,
                 response.VersionId ?? sha256, response.ETag, content.Length);
         }
