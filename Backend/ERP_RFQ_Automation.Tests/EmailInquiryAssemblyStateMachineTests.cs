@@ -134,23 +134,75 @@ public class EmailInquiryAssemblyStateMachineTests
             Assert.NotEqual(EmailInquiryAssemblyStatus.ReadyForAssembly, result.Status);
         }
 
+        // Captured content is necessary but no longer sufficient: nothing the sender attached
+        // may have gone unread either.
         var withContent = Evaluate(2,
             EmailInquiryComponentStatus.Completed,
-            EmailInquiryComponentStatus.Skipped);
+            EmailInquiryComponentStatus.Ignored);
         Assert.Equal(EmailInquiryAssemblyStatus.ReadyForAssembly, withContent.Status);
         Assert.Equal(1, withContent.CapturedComponentCount);
     }
 
+    // ---- an unread attachment outranks a cleanly extracted body ----------------------------
+
     [Fact]
-    public void A_valid_body_with_an_unsupported_attachment_still_processes_normally()
+    public void See_attached_quotation_plus_an_unreadable_attachment_goes_to_a_human()
     {
-        // The ordinary case that must NOT be dragged into review: the customer wrote a real
-        // inquiry and attached their company logo.
+        // THE case that killed the earlier rule. The body extracts perfectly and says "please
+        // see the attached quotation"; the attachment is a format we cannot read. Treating this
+        // as a clean body-only Lead prices a deal against a document nobody opened.
+        //
+        // An earlier version returned ReadyForAssembly here, reasoning that the unread part was
+        // probably a company logo. Sometimes it is. Sometimes it is the bill of quantities, and
+        // at this layer the two are indistinguishable.
         var result = Evaluate(2,
             EmailInquiryComponentStatus.Completed,
             EmailInquiryComponentStatus.Skipped);
 
-        Assert.Equal(EmailInquiryAssemblyStatus.ReadyForAssembly, result.Status);
+        Assert.Equal(EmailInquiryAssemblyStatus.NeedsReview, result.Status);
+        Assert.Equal(1, result.CapturedComponentCount);
+        Assert.Contains("may be incomplete", result.Reason);
+    }
+
+    [Fact]
+    public void One_unread_attachment_among_several_good_ones_still_goes_to_a_human()
+    {
+        var result = Evaluate(4,
+            EmailInquiryComponentStatus.Completed,
+            EmailInquiryComponentStatus.Completed,
+            EmailInquiryComponentStatus.Completed,
+            EmailInquiryComponentStatus.Skipped);
+
+        Assert.Equal(EmailInquiryAssemblyStatus.NeedsReview, result.Status);
+    }
+
+    [Fact]
+    public void A_provable_inline_asset_is_the_ONLY_thing_that_may_go_unread_silently()
+    {
+        // A signature logo must not drag a real inquiry into review on every message that
+        // carries one — but it is the sole exception, and it is reached only by a
+        // deterministic classifier, never by a judgement about importance.
+        var withLogo = Evaluate(2,
+            EmailInquiryComponentStatus.Completed,
+            EmailInquiryComponentStatus.Ignored);
+        Assert.Equal(EmailInquiryAssemblyStatus.ReadyForAssembly, withLogo.Status);
+
+        // Same shape, but the part was merely unreadable rather than provably decorative.
+        var withUnknown = Evaluate(2,
+            EmailInquiryComponentStatus.Completed,
+            EmailInquiryComponentStatus.Skipped);
+        Assert.Equal(EmailInquiryAssemblyStatus.NeedsReview, withUnknown.Status);
+    }
+
+    [Fact]
+    public void A_message_of_nothing_but_inline_assets_is_NoInquiry_not_ready()
+    {
+        var result = Evaluate(2,
+            EmailInquiryComponentStatus.Ignored,
+            EmailInquiryComponentStatus.Ignored);
+
+        Assert.Equal(EmailInquiryAssemblyStatus.NoInquiry, result.Status);
+        Assert.Equal(0, result.CapturedComponentCount);
     }
 
     // ---- infrastructure faults hold; they do not decide -----------------------------------
@@ -227,7 +279,6 @@ public class EmailInquiryAssemblyStateMachineTests
     [InlineData(EmailInquiryAssemblyStatus.Captured, EmailInquiryAssemblyStatus.NoInquiry)]
     [InlineData(EmailInquiryAssemblyStatus.Inspecting, EmailInquiryAssemblyStatus.NeedsReview)]
     [InlineData(EmailInquiryAssemblyStatus.Extracting, EmailInquiryAssemblyStatus.NeedsReview)]
-    [InlineData(EmailInquiryAssemblyStatus.NoInquiry, EmailInquiryAssemblyStatus.Extracting)]
     [InlineData(EmailInquiryAssemblyStatus.Inspecting, EmailInquiryAssemblyStatus.Extracting)]
     [InlineData(EmailInquiryAssemblyStatus.Extracting, EmailInquiryAssemblyStatus.ReadyForAssembly)]
     [InlineData(EmailInquiryAssemblyStatus.ReadyForAssembly, EmailInquiryAssemblyStatus.Assembled)]
@@ -278,15 +329,47 @@ public class EmailInquiryAssemblyStateMachineTests
     [Theory]
     [InlineData(EmailInquiryAssemblyStatus.Inspecting)]
     [InlineData(EmailInquiryAssemblyStatus.Extracting)]
-    [InlineData(EmailInquiryAssemblyStatus.ReadyForAssembly)]
-    public void Recovery_re_enters_the_same_assembly(EmailInquiryAssemblyStatus to)
+    public void Recovery_re_enters_the_pipeline(EmailInquiryAssemblyStatus to)
         => Assert.True(EmailInquiryAssemblyStateMachine.CanTransition(
             EmailInquiryAssemblyStatus.FailedRecoverable, to));
 
     [Fact]
-    public void An_amendment_re_opens_an_assembled_message_rather_than_forking_one()
-        => Assert.True(EmailInquiryAssemblyStateMachine.CanTransition(
+    public void Recovery_may_NOT_declare_a_held_message_ready()
+    {
+        // A held message has components that never reached a terminal state. Letting recovery
+        // jump to ReadyForAssembly would walk straight past the barrier this aggregate exists
+        // to impose — recovery re-inspects and re-extracts, and the barrier decides again.
+        Assert.False(EmailInquiryAssemblyStateMachine.CanTransition(
+            EmailInquiryAssemblyStatus.FailedRecoverable, EmailInquiryAssemblyStatus.ReadyForAssembly));
+        Assert.Throws<InvalidOperationException>(() => EmailInquiryAssemblyStateMachine.EnsureTransition(
+            EmailInquiryAssemblyStatus.FailedRecoverable, EmailInquiryAssemblyStatus.ReadyForAssembly));
+    }
+
+    [Fact]
+    public void An_amendment_may_NOT_re_open_an_assembled_message()
+    {
+        // An amendment is a different email: its own Message-Id, its own EmailIngest, its own
+        // assembly, reconciled onto the same commercial Lead by ILeadIdentityApplicationService.
+        // Re-opening this assembly would mutate the durable record of what the FIRST message
+        // contained, and the revision history would then describe a message that never arrived
+        // in that form.
+        Assert.False(EmailInquiryAssemblyStateMachine.CanTransition(
             EmailInquiryAssemblyStatus.Assembled, EmailInquiryAssemblyStatus.Extracting));
+        Assert.False(EmailInquiryAssemblyStateMachine.CanTransition(
+            EmailInquiryAssemblyStatus.NeedsReview, EmailInquiryAssemblyStatus.Extracting));
+    }
+
+    [Theory]
+    [InlineData(EmailInquiryAssemblyStatus.Inspecting)]
+    [InlineData(EmailInquiryAssemblyStatus.Extracting)]
+    [InlineData(EmailInquiryAssemblyStatus.ReadyForAssembly)]
+    [InlineData(EmailInquiryAssemblyStatus.Assembled)]
+    public void NoInquiry_is_absorbing_until_audited_reprocessing_exists(EmailInquiryAssemblyStatus to)
+        // Re-opening it needs a recorded actor, a reason and an idempotency key. None of that
+        // exists yet, so the honest behaviour is to refuse rather than allow a silent,
+        // unattributed reopen.
+        => Assert.False(EmailInquiryAssemblyStateMachine.CanTransition(
+            EmailInquiryAssemblyStatus.NoInquiry, to));
 
     [Fact]
     public void Re_declaring_the_current_state_is_idempotent()

@@ -163,6 +163,71 @@ public class EmailInquiryManifestPlannerTests
         }
     }
 
+    // ---- the inline-asset exception ---------------------------------------------------------
+
+    private static MimePart InlineImage(
+        string name = "logo.png", string? contentId = "logo@sig", long? size = 4096,
+        string disposition = ContentDisposition.Inline, string mime = "image/png")
+    {
+        var slash = mime.IndexOf('/');
+        var part = new MimePart(mime[..slash], mime[(slash + 1)..])
+        {
+            FileName = name,
+            Content = new MimeContent(new MemoryStream(Encoding.UTF8.GetBytes("img"))),
+            ContentDisposition = new ContentDisposition(disposition)
+        };
+        if (size.HasValue) part.ContentDisposition.Size = size;
+        if (contentId is not null) part.ContentId = contentId;
+        return part;
+    }
+
+    [Fact]
+    public async Task A_small_cid_referenced_inline_image_is_ignored_without_review()
+    {
+        var manifest = await Plan(Message("RFQ", InlineImage()));
+
+        var asset = Assert.Single(manifest.Components,
+            c => c.Disposition == EmailInquiryComponentDisposition.IgnoreInlineAsset);
+        Assert.Equal(EmailInquirySkipReasons.NonCommercialInlineAsset, asset.ReasonCode);
+    }
+
+    [Theory]
+    // No Content-Id: a genuine document attachment has no reason to carry one, so its absence
+    // means this is not an embedded body image.
+    [InlineData(null, 4096L, ContentDisposition.Inline, "image/png")]
+    // Marked as an attachment: the sender is telling us it is content.
+    [InlineData("logo@sig", 4096L, ContentDisposition.Attachment, "image/png")]
+    // Not an image.
+    [InlineData("doc@sig", 4096L, ContentDisposition.Inline, "application/pdf")]
+    // Above the ceiling — a pasted screenshot of a priced table is structurally identical to a
+    // logo and distinguishable ONLY by being big.
+    [InlineData("shot@sig", 900_000L, ContentDisposition.Inline, "image/png")]
+    // Undeclared size: unknown never means ignorable.
+    [InlineData("logo@sig", null, ContentDisposition.Inline, "image/png")]
+    public async Task Anything_short_of_a_provable_inline_asset_is_handled_normally(
+        string? contentId, long? size, string disposition, string mime)
+    {
+        var manifest = await Plan(Message("RFQ",
+            InlineImage("thing.png", contentId, size, disposition, mime)));
+
+        Assert.DoesNotContain(manifest.Components,
+            c => c.Disposition == EmailInquiryComponentDisposition.IgnoreInlineAsset);
+    }
+
+    [Fact]
+    public async Task An_oversized_inline_image_is_extracted_rather_than_ignored()
+    {
+        // It falls through to normal handling, where images are a supported type. The
+        // classifier removes decorations from consideration; it never removes something that
+        // could plausibly carry a requirement.
+        var manifest = await Plan(Message("RFQ",
+            InlineImage("requirements.png", "shot@sig", 900_000)));
+
+        Assert.Contains(manifest.Components,
+            c => c.FileName == "requirements.png"
+                 && c.Disposition == EmailInquiryComponentDisposition.Process);
+    }
+
     // ---- embedded messages -----------------------------------------------------------------
 
     [Fact]

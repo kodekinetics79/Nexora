@@ -44,8 +44,9 @@ public static class EmailInquiryAssemblyStateMachine
             {
                 EmailInquiryAssemblyStatus.Extracting,
                 EmailInquiryAssemblyStatus.ReadyForAssembly,
-                // Every part was refused or unsupported: a human may still recognise an inquiry.
+                // A part went unread, or every part was refused: a human decides.
                 EmailInquiryAssemblyStatus.NeedsReview,
+                EmailInquiryAssemblyStatus.NoInquiry,
                 EmailInquiryAssemblyStatus.FailedRecoverable,
                 EmailInquiryAssemblyStatus.RejectedSecurity
             },
@@ -53,6 +54,7 @@ public static class EmailInquiryAssemblyStateMachine
             {
                 EmailInquiryAssemblyStatus.ReadyForAssembly,
                 EmailInquiryAssemblyStatus.NeedsReview,
+                EmailInquiryAssemblyStatus.NoInquiry,
                 EmailInquiryAssemblyStatus.FailedRecoverable,
                 EmailInquiryAssemblyStatus.RejectedSecurity
             },
@@ -66,37 +68,40 @@ public static class EmailInquiryAssemblyStateMachine
                 // Assembly itself can hit an infrastructure fault.
                 EmailInquiryAssemblyStatus.FailedRecoverable
             },
+            // A reviewer can pull an assembled message back for attention. It can NOT re-enter
+            // extraction: an amendment is a different email, with its own Message-Id, its own
+            // EmailIngest and its own assembly, reconciled onto the same commercial Lead by
+            // ILeadIdentityApplicationService. Re-opening this assembly instead would mutate
+            // the durable record of what message #1 contained, and the revision history would
+            // then describe a message that never arrived in that form.
             [EmailInquiryAssemblyStatus.Assembled] = new[]
             {
-                // A reviewer can pull an assembled message back for attention; an amendment
-                // arriving later re-opens extraction through the SAME assembly.
-                EmailInquiryAssemblyStatus.NeedsReview,
-                EmailInquiryAssemblyStatus.Extracting
+                EmailInquiryAssemblyStatus.NeedsReview
             },
             [EmailInquiryAssemblyStatus.NeedsReview] = new[]
             {
                 EmailInquiryAssemblyStatus.Assembled,
-                EmailInquiryAssemblyStatus.Extracting,
                 // The reviewer's verdict can be "this was never an inquiry".
                 EmailInquiryAssemblyStatus.NoInquiry
             },
+            // Recovery re-enters the PIPELINE, never the finish line. ReadyForAssembly is
+            // deliberately absent: a held message has components that never reached a terminal
+            // state, and letting recovery declare it ready would walk straight past the barrier
+            // this whole aggregate exists to impose. Recovery re-inspects and re-extracts, and
+            // the barrier decides — again — whether the message is ready.
             [EmailInquiryAssemblyStatus.FailedRecoverable] = new[]
             {
                 EmailInquiryAssemblyStatus.Inspecting,
                 EmailInquiryAssemblyStatus.Extracting,
-                EmailInquiryAssemblyStatus.ReadyForAssembly,
                 EmailInquiryAssemblyStatus.NeedsReview,
                 EmailInquiryAssemblyStatus.NoInquiry,
                 EmailInquiryAssemblyStatus.RejectedSecurity
             },
-            // Terminal, but reversible by an explicit human act: "reprocess as inquiry" already
-            // exists in the product, and a triage outcome a human overrules must be able to
-            // re-enter the pipeline through the SAME assembly rather than forking a second one.
-            [EmailInquiryAssemblyStatus.NoInquiry] = new[]
-            {
-                EmailInquiryAssemblyStatus.Inspecting,
-                EmailInquiryAssemblyStatus.Extracting
-            },
+            // Both terminal and absorbing. Re-opening either would need explicit, audited,
+            // idempotent reprocessing semantics — a recorded actor, a reason, and an
+            // idempotency key — and none of that exists yet. Until it does, the honest
+            // behaviour is to refuse rather than to allow a silent, unattributed reopen.
+            [EmailInquiryAssemblyStatus.NoInquiry] = Array.Empty<EmailInquiryAssemblyStatus>(),
             [EmailInquiryAssemblyStatus.RejectedSecurity] = Array.Empty<EmailInquiryAssemblyStatus>()
         };
 
@@ -171,34 +176,45 @@ public static class EmailInquiryAssemblyStateMachine
                 EmailInquiryAssemblyStatus.Extracting, CompletedCount(componentStatuses),
                 CapturedCount(componentStatuses), null);
 
-        // Everything expected is terminal. What the message IS now depends on whether anything
-        // was actually captured — three outcomes, deliberately distinct, because collapsing
-        // them is how an empty Lead gets created.
+        // Everything expected is terminal. What the message IS now depends on what was actually
+        // captured AND on whether anything the sender attached went unread.
         var captured = CapturedCount(componentStatuses);
+        var unread = UnreadCount(componentStatuses);
 
-        // (1) Something was captured. Only now may the message become commercial fact.
+        // (1) A part the sender attached could not be processed. THE MESSAGE GOES TO A HUMAN,
+        // even when the body extracted perfectly and even when other attachments succeeded.
+        //
+        // This outranks capture deliberately. "Please see the attached quotation" plus an
+        // attachment nobody could read is not a body-only inquiry — it is an inquiry whose
+        // commercial content is missing, and a clean Lead built from the covering note alone is
+        // a price quoted against a document that was never opened. An earlier version of this
+        // method returned ReadyForAssembly here on the grounds that the unread part was
+        // probably a company logo. Sometimes it is. Sometimes it is the bill of quantities, and
+        // the two are indistinguishable at this layer — which is exactly why the only parts
+        // allowed to be invisible here are the ones a deterministic classifier has already
+        // proven to be non-commercial (see EmailInquiryComponentStatus.Ignored).
+        if (unread > 0)
+            return new EmailInquiryAssemblyEvaluation(
+                EmailInquiryAssemblyStatus.NeedsReview,
+                CompletedCount(componentStatuses), captured,
+                captured > 0
+                    ? $"{unread} attached part(s) of this message could not be read, so the "
+                      + "inquiry may be incomplete. The original is retained for review."
+                    : "No part of this message could be read. Its attachments were refused or "
+                      + "are unsupported; the original is retained for review.");
+
+        // (2) Everything the sender attached was either read or provably non-commercial. Only
+        // now may the message become commercial fact.
         if (captured > 0)
             return new EmailInquiryAssemblyEvaluation(
                 EmailInquiryAssemblyStatus.ReadyForAssembly,
                 CompletedCount(componentStatuses), captured, null);
 
-        // (2) There were no parts to capture in the first place: no fresh body, no attachments.
-        // A terminal triage outcome, NOT an assemblable inquiry. This is the case that used to
-        // return ReadyForAssembly and would have produced a Lead with nothing in it.
-        if (expectedComponentCount == 0)
-            return new EmailInquiryAssemblyEvaluation(
-                EmailInquiryAssemblyStatus.NoInquiry, 0, 0,
-                "This message carried no body text and no attachments to process.");
-
-        // (3) Parts existed and every one of them was refused or unsupported. Distinct from (2)
-        // because a human may well recognise an inquiry in a file the pipeline cannot read — a
-        // CAD drawing, an unusual archive, a format we do not support yet. It goes to a person
-        // with its reasons attached; it never becomes an empty Lead and it is never silently
-        // discarded.
+        // (3) Nothing to capture and nothing unread: no fresh body, and no parts beyond inline
+        // assets. A terminal triage outcome, NOT an assemblable inquiry.
         return new EmailInquiryAssemblyEvaluation(
-            EmailInquiryAssemblyStatus.NeedsReview, CompletedCount(componentStatuses), 0,
-            "No part of this message could be read. Its attachments were refused or are "
-            + "unsupported; the original is retained for review.");
+            EmailInquiryAssemblyStatus.NoInquiry, CompletedCount(componentStatuses), 0,
+            "This message carried no body text and no readable attachments.");
     }
 
     /// <summary>
@@ -209,7 +225,19 @@ public static class EmailInquiryAssemblyStateMachine
     private static int CompletedCount(IReadOnlyCollection<EmailInquiryComponentStatus> statuses)
         => statuses.Count(s => s is EmailInquiryComponentStatus.Completed
             or EmailInquiryComponentStatus.Skipped
-            or EmailInquiryComponentStatus.RefusedSecurity);
+            or EmailInquiryComponentStatus.RefusedSecurity
+            or EmailInquiryComponentStatus.Ignored);
+
+    /// <summary>
+    /// Parts the sender attached that this system did NOT read and cannot prove were
+    /// non-commercial. One is enough to send the message to a human.
+    ///
+    /// <para><see cref="EmailInquiryComponentStatus.Ignored"/> is excluded and is the only
+    /// exclusion: those parts were classified deterministically as inline assets, not merely
+    /// judged unimportant.</para>
+    /// </summary>
+    private static int UnreadCount(IReadOnlyCollection<EmailInquiryComponentStatus> statuses)
+        => statuses.Count(s => s == EmailInquiryComponentStatus.Skipped);
 
     /// <summary>
     /// Components that durably captured commercial content. Only <c>Completed</c> counts:

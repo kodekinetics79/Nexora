@@ -105,9 +105,17 @@ public enum EmailInquiryComponentStatus
     /// <summary>Terminal. Extraction produced a result that is now part of the message.</summary>
     Completed = 3,
 
-    /// <summary>Terminal. Deliberately not processed for a reason that is a property of the
-    /// FILE — unsupported type, empty, oversized, unnamed, beyond nesting limits. A commercial
-    /// decision can still be made without it, and the reason is durable.</summary>
+    /// <summary>
+    /// Terminal, and COMMERCIALLY SIGNIFICANT. A part the sender attached that this system
+    /// could not process — unsupported type, empty, oversized, unnamed, unreadable, beyond a
+    /// declared limit.
+    ///
+    /// <para>One of these anywhere sends the message to <see cref="EmailInquiryAssemblyStatus.NeedsReview"/>,
+    /// even when the body extracted perfectly. "Please see the attached quotation" plus an
+    /// attachment we could not read is not a body-only inquiry — it is an inquiry whose
+    /// commercial content we do not have, and a clean Lead built from the covering note alone
+    /// is a quotation priced against a document nobody read.</para>
+    /// </summary>
     Skipped = 4,
 
     /// <summary>Terminal. The scanner refused it. The whole assembly goes to
@@ -118,7 +126,19 @@ public enum EmailInquiryComponentStatus
     /// storage down, scanner unreachable — leaves the component here, which HOLDS the assembly
     /// in <see cref="EmailInquiryAssemblyStatus.FailedRecoverable"/> instead of letting the
     /// remaining components finalize a misleading body-only Lead.</summary>
-    FailedRecoverable = 6
+    FailedRecoverable = 6,
+
+    /// <summary>
+    /// Terminal and commercially INSIGNIFICANT: a deterministically classified non-commercial
+    /// inline asset — a signature logo, a tracking pixel, a social icon.
+    ///
+    /// <para>The ONLY status that lets a message stay clean despite a part not being read, and
+    /// it is deliberately hard to reach — see <c>EmailInquiryManifestPlanner.IsIgnorableInlineAsset</c>.
+    /// Every judgement call in that classifier errs toward <see cref="Skipped"/>, because
+    /// wrongly ignoring a part produces a Lead priced against content nobody saw, while wrongly
+    /// reviewing one costs a few seconds of a human's attention.</para>
+    /// </summary>
+    Ignored = 7
 }
 
 /// <summary>

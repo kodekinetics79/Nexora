@@ -22,6 +22,9 @@ public static class EmailInquirySkipReasons
     public const string ComponentLimitExceeded = "component_limit_exceeded";
     public const string TotalSizeLimitExceeded = "total_size_limit_exceeded";
     public const string EmbeddedMessageUnreadable = "embedded_message_unreadable";
+
+    /// <summary>The one reason that does NOT send the message to review.</summary>
+    public const string NonCommercialInlineAsset = "non_commercial_inline_asset";
 }
 
 /// <summary>Whether a planned component will be handed to inspection and extraction.</summary>
@@ -31,8 +34,16 @@ public enum EmailInquiryComponentDisposition
     Process = 0,
 
     /// <summary>Recorded with its reason and immediately terminal. Never silently dropped —
-    /// the row exists so the loss is visible on the message it arrived with.</summary>
-    Skip = 1
+    /// the row exists so the loss is visible on the message it arrived with, and one of these
+    /// sends the whole message to review.</summary>
+    Skip = 1,
+
+    /// <summary>
+    /// A deterministically classified non-commercial inline asset. Recorded, terminal, and the
+    /// ONLY disposition that does not force review — see
+    /// <see cref="EmailInquiryManifestPlanner.IsIgnorableInlineAsset"/>.
+    /// </summary>
+    IgnoreInlineAsset = 2
 }
 
 /// <summary>
@@ -56,6 +67,14 @@ public sealed record EmailInquiryLimits
     /// <summary>Ceiling on the sum of all planned components — the zip-bomb analogue for mail:
     /// fifty separately-legal attachments are not a legal message.</summary>
     public long MaxTotalBytes { get; init; } = 100L * 1024 * 1024;
+
+    /// <summary>
+    /// Ceiling below which a cid-referenced inline image may be treated as decoration rather
+    /// than content. 64 KB comfortably covers signature logos and icons; a pasted screenshot of
+    /// a requirements table does not fit in it, and anything above falls through to normal
+    /// extraction.
+    /// </summary>
+    public long InlineAssetMaxBytes { get; init; } = 64L * 1024;
 
     public static EmailInquiryLimits Default { get; } = new();
 }
@@ -215,6 +234,23 @@ public static class EmailInquiryManifestPlanner
             {
                 await PlanEmbeddedAsync(embedded, messageKey, components, limits, depth,
                     path, index, key, ordinal, total, addTotal, ct);
+                continue;
+            }
+
+            // Before any refusal reason is attached, ask whether this part is provably a
+            // non-commercial inline asset. Only these may go unread without sending the message
+            // to a human, so the test is deliberately narrow and every uncertain case falls
+            // through to normal handling.
+            if (entity is MimePart inlineCandidate && IsIgnorableInlineAsset(inlineCandidate, limits))
+            {
+                components.Add(new EmailInquiryComponentPlan(
+                    key, EmailInquiryComponentKind.Attachment, ordinal(),
+                    inlineCandidate.FileName, inlineCandidate.ContentType?.MimeType, 0, string.Empty,
+                    EmailInquiryComponentDisposition.IgnoreInlineAsset,
+                    EmailInquirySkipReasons.NonCommercialInlineAsset,
+                    "A small inline image referenced by the message body — a signature logo or "
+                    + "similar. Not treated as commercial content.",
+                    depth, ReadOnlyMemory<byte>.Empty));
                 continue;
             }
 
@@ -388,6 +424,46 @@ public static class EmailInquiryManifestPlanner
     /// binary part is RECORDED as unnamed rather than silently vanishing — the whole point of
     /// the manifest is that a part cannot disappear without a row.</para>
     /// </summary>
+    /// <summary>
+    /// Whether a part is provably a non-commercial inline asset — a signature logo, a tracking
+    /// pixel, a social icon — and may therefore go unread WITHOUT sending the message to a
+    /// human.
+    ///
+    /// <para>This is the single exception to "an unread attachment means review", so it is
+    /// built to be hard to satisfy. ALL of the following must hold:</para>
+    /// <list type="bullet">
+    ///   <item>the part declares <c>Content-Disposition: inline</c> — a sender who marks
+    ///   something an attachment is telling us it is content;</item>
+    ///   <item>it carries a <c>Content-Id</c>, which is what an HTML body uses to reference an
+    ///   embedded image and what a genuine document attachment has no reason to have;</item>
+    ///   <item>its media type is <c>image/*</c>;</item>
+    ///   <item>it is under <see cref="EmailInquiryLimits.InlineAssetMaxBytes"/>.</item>
+    /// </list>
+    ///
+    /// <para>The size ceiling is the load-bearing one. A pasted screenshot of a priced
+    /// requirements table is inline, has a Content-Id, and is an image — structurally identical
+    /// to a logo. It is distinguishable only by being big, so anything above the ceiling falls
+    /// through to normal handling, where images are a supported type and get extracted. The
+    /// classifier therefore removes small decorations from consideration and never removes
+    /// something that could plausibly carry a requirement.</para>
+    /// </summary>
+    internal static bool IsIgnorableInlineAsset(MimePart part, EmailInquiryLimits limits)
+    {
+        if (part.ContentDisposition is null) return false;
+        if (part.ContentDisposition.IsAttachment) return false;
+        if (!string.Equals(part.ContentDisposition.Disposition, ContentDisposition.Inline,
+                StringComparison.OrdinalIgnoreCase)) return false;
+        if (string.IsNullOrWhiteSpace(part.ContentId)) return false;
+        if (part.ContentType?.MediaType is not { } media
+            || !media.Equals("image", StringComparison.OrdinalIgnoreCase)) return false;
+
+        // Size is read from the declared disposition rather than by decoding: the classifier
+        // runs before any decode so that a hostile "inline image" cannot force one. A part that
+        // does not declare its size is NOT ignorable — unknown size falls through to review.
+        var declared = part.ContentDisposition.Size;
+        return declared is > 0 && declared <= limits.InlineAssetMaxBytes;
+    }
+
     private static bool IsCandidatePart(MimeEntity entity)
     {
         if (entity is MessagePart) return true;

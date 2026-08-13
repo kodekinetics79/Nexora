@@ -193,9 +193,17 @@ public sealed class EmailInquiryCaptureService : IEmailInquiryCaptureService
                 // A part that will not be processed is terminal the moment it is recorded, with
                 // its reason. It still occupies a row so that "dropped" and "never there" stay
                 // different observations.
-                Status = plan.Disposition == EmailInquiryComponentDisposition.Process
-                    ? EmailInquiryComponentStatus.Pending
-                    : EmailInquiryComponentStatus.Skipped,
+                //
+                // Skipped and Ignored are BOTH terminal and differ only in what they mean for
+                // the message: Skipped is a part the sender attached that we could not read, and
+                // one of those sends the whole message to review; Ignored is a provable inline
+                // decoration and costs the message nothing.
+                Status = plan.Disposition switch
+                {
+                    EmailInquiryComponentDisposition.Process => EmailInquiryComponentStatus.Pending,
+                    EmailInquiryComponentDisposition.IgnoreInlineAsset => EmailInquiryComponentStatus.Ignored,
+                    _ => EmailInquiryComponentStatus.Skipped
+                },
                 ReasonCode = plan.ReasonCode,
                 ReasonDetail = Truncate(plan.ReasonDetail, 1000),
                 NestingDepth = plan.NestingDepth,
@@ -247,6 +255,9 @@ public sealed class EmailInquiryCaptureService : IEmailInquiryCaptureService
 
     private static string? SerializeSkips(EmailInquiryManifest manifest)
     {
+        // Inline assets are deliberately excluded: this list is the record of what the message
+        // LOST, and a signature logo is not a loss. Recording it here would put a decoration in
+        // front of a reviewer on every message that carries one.
         var skips = manifest.Components
             .Where(c => c.Disposition == EmailInquiryComponentDisposition.Skip)
             .Select(c => new { file = c.FileName, reasonCode = c.ReasonCode, reason = c.ReasonDetail })
