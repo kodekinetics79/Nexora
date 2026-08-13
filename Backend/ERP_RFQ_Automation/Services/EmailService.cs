@@ -453,7 +453,8 @@ namespace ERP_RFQ_Automation.Services
                     pollSocket.Dispose();
                     throw;
                 }
-                await client.AuthenticateAsync(config.EmailAddress, config.Password);
+                await client.AuthenticateAsync(
+                    ERP_RFQ_Automation.Mailbox.MailboxLoginIdentity.ForInbound(config), config.Password);
                 var inbox = client.Inbox;
                 await inbox.OpenAsync(FolderAccess.ReadWrite);
                 var query = BuildRFQSearchQuery(window.SinceUtc);
@@ -512,7 +513,8 @@ namespace ERP_RFQ_Automation.Services
                                 reconnectSocket.Dispose();
                                 throw;
                             }
-                            await client.AuthenticateAsync(config.EmailAddress, config.Password);
+                            await client.AuthenticateAsync(
+                    ERP_RFQ_Automation.Mailbox.MailboxLoginIdentity.ForInbound(config), config.Password);
                             await client.Inbox.OpenAsync(FolderAccess.ReadWrite);
                         }
 
@@ -2042,6 +2044,15 @@ namespace ERP_RFQ_Automation.Services
                 using var socket = await ERP_RFQ_Automation.Security.MailEndpointPolicy
                     .ConnectAsync(config.Host, config.Port, CancellationToken.None);
                 await client.ConnectAsync(socket, config.Host, config.Port, config.UseSsl ? SecureSocketOptions.Auto : SecureSocketOptions.StartTls);
+                // DELIBERATELY the address, not MailboxLoginIdentity.ForOutbound.
+                //
+                // This quote-delivery send has always authenticated as EmailAddress, while
+                // OutboundSmtpTransport and SmtpEmailSender authenticate as Username. That
+                // disagreement is pre-existing and is NOT this change's to settle: routing this
+                // line through ForOutbound would swap the credential on a live sending path to
+                // tidy up a naming inconsistency, and the first anyone would know is quotes
+                // failing to reach customers. Left exactly as it was, and named so the next
+                // reader sees a decision rather than an oversight.
                 await client.AuthenticateAsync(config.EmailAddress, config.Password);
                 await client.SendAsync(message);
                 await client.DisconnectAsync(true);

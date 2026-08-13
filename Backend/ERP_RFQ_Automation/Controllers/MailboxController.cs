@@ -154,7 +154,7 @@ public sealed class MailboxController(
         deadline.CancelAfter(TestDeadline);
 
         var result = await tester.TestAsync(
-            TestRequestFor(protocol, request.Host, request.Port, request.Username, password, request.UseSsl),
+            TestRequestFor(protocol, request.Host, request.Port, request.EmailAddress ?? string.Empty, request.Username, password, request.UseSsl),
             deadline.Token);
 
         // Audited because it makes this server open a socket to an operator-chosen host. The
@@ -184,7 +184,7 @@ public sealed class MailboxController(
         if (request.VerifyBeforeSave)
         {
             var verification = await VerifyAsync(protocol, request.Host, request.Port,
-                request.Username, request.Password, request.UseSsl);
+                request.EmailAddress, request.Username, request.Password, request.UseSsl);
             if (verification is not null) return verification;
         }
 
@@ -245,7 +245,7 @@ public sealed class MailboxController(
         if (request.VerifyBeforeSave)
         {
             var verification = await VerifyAsync(row.Protocol, request.Host, request.Port,
-                request.Username, effectivePassword, request.UseSsl);
+                request.EmailAddress, request.Username, effectivePassword, request.UseSsl);
             if (verification is not null) return verification;
         }
 
@@ -376,13 +376,14 @@ public sealed class MailboxController(
     /// settings are good. Saving a mailbox that cannot connect produces a screen that looks
     /// configured while silently ingesting nothing.</summary>
     private async Task<ActionResult?> VerifyAsync(
-        string protocol, string host, int port, string username, string password, bool useSsl)
+        string protocol, string host, int port, string emailAddress, string username,
+        string password, bool useSsl)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(HttpContext.RequestAborted);
         deadline.CancelAfter(TestDeadline);
 
         var result = await tester.TestAsync(
-            TestRequestFor(protocol, host, port, username, password, useSsl), deadline.Token);
+            TestRequestFor(protocol, host, port, emailAddress, username, password, useSsl), deadline.Token);
 
         return result.Succeeded
             ? null
@@ -406,17 +407,31 @@ public sealed class MailboxController(
     /// remedies when it fails.</para>
     /// </summary>
     private static MailConnectionTestRequest TestRequestFor(
-        string protocol, string host, int port, string username, string password, bool useSsl)
+        string protocol, string host, int port, string emailAddress, string username,
+        string password, bool useSsl)
     {
         var smtp = IsSmtp(protocol);
         var tls = useSsl
             ? MailTlsMode.Implicit
             : smtp ? MailTlsMode.StartTls : MailTlsMode.None;
 
+        // THE login identity, resolved by the same rule the runtime uses — not by whichever
+        // column this screen happens to collect.
+        //
+        // This endpoint used to send Username for both directions while the INBOUND poller
+        // signed in as EmailAddress. Those are independent columns, so wherever a tenant's UPN
+        // differs from the mailbox address — the normal case for shared and enterprise
+        // mailboxes — a green "Test Connection" proved nothing about the poller at all. It is
+        // the exact failure EmailBackgroundService records having already happened: the door
+        // shut for seven days with every human-facing surface reporting healthy.
+        var login = smtp
+            ? username
+            : (string.IsNullOrWhiteSpace(emailAddress) ? username : emailAddress);
+
         return new MailConnectionTestRequest(
             smtp ? MailDirection.Outbound : MailDirection.Inbound,
             smtp ? MailTransport.Smtp : MailTransport.Imap,
-            host, port, tls, username, password,
+            host, port, tls, login, password,
             EmailProviderCatalog.InferKeyFromHost(host));
     }
 
