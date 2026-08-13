@@ -401,6 +401,475 @@ public sealed class AiExternalProviderAllowListTests
         Assert.Empty(await db.AiBudgetPeriods.IgnoreQueryFilters().ToListAsync());
     }
 
+    // ---- the read-only readiness pre-flight -------------------------------
+    //
+    // Five controls in three layers, each discoverable only by fixing the previous one and
+    // resubmitting, is what dead-lettered every document the 2026-08 pilot sent. These pin
+    // that the pre-flight reports ALL of them at once and never disagrees with the gate.
+
+    [Fact]
+    public async Task Readiness_ReportsEveryClosedControlAtOnce_NotJustTheFirst()
+    {
+        using var fixture = new Fixture(externalProcessingAllowed: false);
+        fixture.MutatePolicy(policy =>
+        {
+            policy.EgressPolicy = AiEgressPolicies.RedactedFieldsOnly;
+            policy.AllowedModel = "Deepseek-V4-Pro"; // one capital letter, in a different layer
+        });
+
+        var report = await fixture.Readiness().EvaluateAsync(fixture.TenantId, default);
+
+        Assert.False(report.Ready);
+        var closed = report.Checks
+            .Where(check => check.Status == AiReadinessStatus.Fail)
+            .Select(check => check.Code).ToArray();
+        Assert.Contains(AiReadinessCodes.ExternalProcessingAllowed, closed);
+        Assert.Contains(AiReadinessCodes.AuthorizationPresent, closed);
+        Assert.Contains(AiReadinessCodes.EgressPolicyWholeDocument, closed);
+        Assert.Contains(AiReadinessCodes.PolicyModelAllowed, closed);
+        Assert.Equal(closed.Length, report.BlockingCount);
+
+        // The enforcing gate can only ever name the first of them; that is the whole defect.
+        var decision = await fixture.Trust.EvaluateAsync(
+            fixture.TenantId, fixture.Descriptor, AiPurposes.RfqExtraction, true, default);
+        Assert.Equal(decision.Reason, report.FirstBlockingReason);
+    }
+
+    [Fact]
+    public async Task Readiness_NeverDisagreesWithTheEnforcingGate()
+    {
+        using (var noGrant = new Fixture())
+            await AssertNoDrift(noGrant);
+
+        using (var structuredOnly = new Fixture())
+        {
+            await structuredOnly.AuthorizeAsync(unstructuredAllowed: false);
+            await AssertNoDrift(structuredOnly);
+        }
+
+        using (var egressClosed = new Fixture())
+        {
+            await egressClosed.AuthorizeAsync(unstructuredAllowed: true);
+            egressClosed.MutatePolicy(policy => policy.EgressPolicy = "whatever the operator typed");
+            await AssertNoDrift(egressClosed);
+        }
+
+        using (var disabled = new Fixture())
+        {
+            await disabled.AuthorizeAsync(unstructuredAllowed: true);
+            disabled.MutatePolicy(policy => policy.IsEnabled = false);
+            await AssertNoDrift(disabled);
+        }
+
+        using (var expired = new Fixture())
+        {
+            await expired.AuthorizeAsync(unstructuredAllowed: true);
+            expired.ExpireAuthorizations();
+            await AssertNoDrift(expired);
+        }
+
+        using (var open = new Fixture())
+        {
+            await open.AuthorizeAsync(unstructuredAllowed: true);
+            await AssertNoDrift(open);
+        }
+    }
+
+    [Fact]
+    public async Task Readiness_WritesNothingAtAll()
+    {
+        using var fixture = new Fixture();
+
+        var report = await fixture.Readiness().EvaluateAsync(fixture.TenantId, default);
+        Assert.False(report.Ready);
+
+        using var db = fixture.Database.ContextFor(null);
+        Assert.Empty(await db.AiRequests.IgnoreQueryFilters().ToListAsync());
+        Assert.Empty(await db.AiBudgetPeriods.IgnoreQueryFilters().ToListAsync());
+        Assert.Empty(await db.AiExternalProviderAuthorizations.IgnoreQueryFilters().ToListAsync());
+        Assert.Empty(await db.TenantGovernanceAuditEvents.IgnoreQueryFilters().ToListAsync());
+    }
+
+    [Fact]
+    public async Task Readiness_SpellsOutTheCaseSensitiveModelComparison_WithTheStringToCopy()
+    {
+        using var fixture = new Fixture();
+        await fixture.AuthorizeAsync(unstructuredAllowed: true);
+        fixture.MutatePolicy(policy => policy.AllowedModel = "Deepseek-V4-Pro");
+
+        var report = await fixture.Readiness().EvaluateAsync(fixture.TenantId, default);
+        var model = report.Checks.Single(check => check.Code == AiReadinessCodes.PolicyModelAllowed);
+
+        Assert.Equal(AiReadinessStatus.Fail, model.Status);
+        Assert.Equal("model_denied", model.DenialReason);
+        Assert.Contains("CASE-SENSITIVE", model.Detail, StringComparison.Ordinal);
+        Assert.Contains(AuthorizedModel, model.RequiredValue, StringComparison.Ordinal);
+        Assert.Contains("ai-policy", model.SetItIn, StringComparison.Ordinal);
+
+        // The allow-list gate above it says the document may go — which is exactly why the
+        // pre-flight has to report this layer too.
+        var decision = await fixture.Trust.EvaluateAsync(
+            fixture.TenantId, fixture.Descriptor, AiPurposes.RfqExtraction, true, default);
+        Assert.True(decision.Allowed);
+        Assert.False(report.Ready);
+        Assert.Equal("model_denied", report.FirstBlockingReason);
+
+        // The provider name directly above it is NOT case-sensitive.
+        fixture.MutatePolicy(policy =>
+        {
+            policy.AllowedProvider = "OLLAMA";
+            policy.AllowedModel = AuthorizedModel;
+        });
+        Assert.True((await fixture.Readiness().EvaluateAsync(fixture.TenantId, default)).Ready);
+    }
+
+    [Fact]
+    public async Task Readiness_ClosesOnAZeroMonthlyBudget_WhichThePolicyEndpointAccepts()
+    {
+        // MonthlyHardTokenLimit = 0 is a legal policy value — the update endpoint rejects only
+        // negatives — and it refuses every reservation in the ledger, below every control the
+        // rest of this report covers. Omitting it would recreate the whole defect: an operator
+        // opening every lock above, being told READY, and watching every document dead-letter
+        // under a code that appeared in no row.
+        using var fixture = new Fixture();
+        await fixture.AuthorizeAsync(unstructuredAllowed: true);
+        Assert.True((await fixture.Readiness().EvaluateAsync(fixture.TenantId, default)).Ready);
+
+        fixture.MutatePolicy(policy => policy.MonthlyHardTokenLimit = 0);
+
+        var report = await fixture.Readiness().EvaluateAsync(fixture.TenantId, default);
+        var budget = report.Checks.Single(check => check.Code == AiReadinessCodes.MonthlyHardBudget);
+        Assert.False(report.Ready);
+        Assert.Equal(AiReadinessStatus.Fail, budget.Status);
+        Assert.Equal("hard_budget_exceeded", budget.DenialReason);
+        Assert.Equal("hard_budget_exceeded", report.FirstBlockingReason);
+        Assert.Contains("ai-policy", budget.SetItIn, StringComparison.Ordinal);
+
+        // Every lock above it still says the document may go, and the ledger still refuses it.
+        var decision = await fixture.Trust.EvaluateAsync(
+            fixture.TenantId, fixture.Descriptor, AiPurposes.RfqExtraction, true, default);
+        Assert.True(decision.Allowed);
+        var denied = await Assert.ThrowsAsync<AiPolicyDeniedException>(() => fixture.Governance.ReserveAsync(
+            new AiCallContext(fixture.TenantId, AiPurposes.RfqExtraction, "zero-budget", "test-v1",
+                ProviderClass: AiProviderClass.External),
+            fixture.Descriptor.Provider, fixture.Descriptor.Model, "external", 32, 10, 1, default));
+        Assert.Equal("hard_budget_exceeded", denied.Code);
+    }
+
+    [Fact]
+    public async Task Readiness_ClosesWhenTheMonthRunsOut_NotOnlyWhenTheLimitIsZero()
+    {
+        // Ordinary mid-month exhaustion reaches the identical state, so the row is read from
+        // the period ledger and not merely from the policy's number.
+        using var fixture = new Fixture();
+        await fixture.AuthorizeAsync(unstructuredAllowed: true);
+        fixture.MutatePolicy(policy => policy.MonthlyHardTokenLimit = 43);
+
+        // 32 input bytes + 10 output tokens over one attempt reserves 42 of the 43.
+        await fixture.Governance.ReserveAsync(
+            new AiCallContext(fixture.TenantId, AiPurposes.RfqExtraction, "spends-the-month", "test-v1",
+                ProviderClass: AiProviderClass.External),
+            fixture.Descriptor.Provider, fixture.Descriptor.Model, "external", 32, 10, 1, default);
+
+        var report = await fixture.Readiness().EvaluateAsync(fixture.TenantId, default);
+        var budget = report.Checks.Single(check => check.Code == AiReadinessCodes.MonthlyHardBudget);
+        Assert.False(report.Ready);
+        Assert.Equal("hard_budget_exceeded", budget.DenialReason);
+        Assert.Contains("42", budget.CurrentValue, StringComparison.Ordinal);
+
+        var denied = await Assert.ThrowsAsync<AiPolicyDeniedException>(() => fixture.Governance.ReserveAsync(
+            new AiCallContext(fixture.TenantId, AiPurposes.RfqExtraction, "one-too-many", "test-v1",
+                ProviderClass: AiProviderClass.External),
+            fixture.Descriptor.Provider, fixture.Descriptor.Model, "external", 32, 10, 1, default));
+        Assert.Equal("hard_budget_exceeded", denied.Code);
+    }
+
+    [Fact]
+    public async Task Readiness_WithNoMonthlyCeiling_DoesNotInventAConstraint()
+    {
+        // The limit is nullable and unset means unlimited. A budget row reported as blocking
+        // because nobody set a number would send operators to change a control that is not shut.
+        using var fixture = new Fixture();
+        await fixture.AuthorizeAsync(unstructuredAllowed: true);
+
+        var budget = (await fixture.Readiness().EvaluateAsync(fixture.TenantId, default)).Checks
+            .Single(check => check.Code == AiReadinessCodes.MonthlyHardBudget);
+
+        Assert.Equal(AiReadinessStatus.Pass, budget.Status);
+        Assert.Null(budget.DenialReason);
+    }
+
+    [Fact]
+    public async Task Readiness_OnALocalDeployment_GreysTheEgressControls_ButStillTestsThePolicyRow()
+    {
+        using var fixture = new Fixture();
+        var loopback = new AiProviderEndpointResolver(
+            new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Ollama:BaseUrl"] = "http://127.0.0.1:11434/",
+                ["Ollama:Model"] = "qwen2.5:14b"
+            }).Build(),
+            new NoopLogger<AiProviderEndpointResolver>());
+
+        var report = await fixture.Readiness(loopback).EvaluateAsync(fixture.TenantId, default);
+
+        Assert.Equal(AiProviderClass.Local, report.ResolvedProvider.ProviderClass);
+        foreach (var code in new[]
+                 {
+                     AiReadinessCodes.ExternalProcessingAllowed, AiReadinessCodes.AuthorizationPresent,
+                     AiReadinessCodes.AuthorizationLive, AiReadinessCodes.AuthorizationPurpose,
+                     AiReadinessCodes.EgressPolicyWholeDocument, AiReadinessCodes.AuthorizationUnstructured,
+                     AiReadinessCodes.DependencyCeiling
+                 })
+        {
+            var greyed = report.Checks.Single(check => check.Code == code);
+            Assert.Equal(AiReadinessStatus.NotApplicable, greyed.Status);
+            Assert.Null(greyed.DenialReason);
+            Assert.Equal(string.Empty, greyed.RequiredValue);
+            Assert.Equal(string.Empty, greyed.SetItIn);
+        }
+
+        // The policy row's own purpose/provider/model tests still run for a LOCAL reservation,
+        // so they are still reported: this fixture's AllowedModel names the external model.
+        Assert.Equal(AiReadinessStatus.Pass,
+            report.Checks.Single(check => check.Code == AiReadinessCodes.PolicyEnabled).Status);
+        Assert.Equal(AiReadinessStatus.Pass,
+            report.Checks.Single(check => check.Code == AiReadinessCodes.PolicyProviderAllowed).Status);
+        var model = report.Checks.Single(check => check.Code == AiReadinessCodes.PolicyModelAllowed);
+        Assert.Equal(AiReadinessStatus.Fail, model.Status);
+        Assert.Equal("model_denied", model.DenialReason);
+    }
+
+    [Fact]
+    public async Task Readiness_RefusesToReportOnAnotherTenant()
+    {
+        using var fixture = new Fixture();
+        await fixture.AuthorizeAsync(unstructuredAllowed: true);
+
+        var report = await fixture.Readiness().EvaluateAsync(Fixture.OtherTenantId, default);
+
+        Assert.False(report.Ready);
+        Assert.Equal(AiExternalProviderTrustReasons.TenantMismatch, report.FirstBlockingReason);
+    }
+
+    [Fact]
+    public async Task Readiness_IsSafeToPasteIntoATicket()
+    {
+        using var fixture = new Fixture();
+        await fixture.AuthorizeAsync(unstructuredAllowed: true);
+
+        var json = System.Text.Json.JsonSerializer.Serialize(
+            await fixture.Readiness().EvaluateAsync(fixture.TenantId, default));
+
+        Assert.DoesNotContain("DPA-2026-14", json, StringComparison.Ordinal);        // justification
+        Assert.DoesNotContain("data protection officer", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("apikey", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("password", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Data Source", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("buyer: Acme", json, StringComparison.Ordinal);        // document content
+    }
+
+    [Fact]
+    public async Task Readiness_AtShippedSecureDefaults_IsNotReady_AndNamesExternalProcessing()
+    {
+        // A tenant on the day it is provisioned. Its first document died with
+        // external_processing_denied and nothing else — the first of several closed controls,
+        // with no hint that more were queued behind it. That is what cost the 2026-08 pilot
+        // its days: one lock revealed per submission.
+        using var fixture = new Fixture();
+        fixture.ResetToShippedSecureDefaults();
+
+        var report = await fixture.Readiness().EvaluateAsync(fixture.TenantId, default);
+
+        Assert.False(report.Ready);
+        var external = report.Checks.Single(check => check.Code == AiReadinessCodes.ExternalProcessingAllowed);
+        Assert.Equal(AiReadinessStatus.Fail, external.Status);
+        Assert.Equal(AiExternalProviderTrustReasons.PolicyExternalProcessingDenied, external.DenialReason);
+        Assert.Equal("ExternalProcessingAllowed = false", external.CurrentValue);
+        Assert.Equal("ExternalProcessingAllowed = true", external.RequiredValue);
+        Assert.Contains("ai-policy", external.SetItIn, StringComparison.Ordinal);
+        Assert.Equal(AiExternalProviderTrustReasons.PolicyExternalProcessingDenied, report.FirstBlockingReason);
+
+        // The controls the shipped defaults leave OPEN must stay open. A report that reddened
+        // rows nobody has to touch would send operators to change working settings, which is
+        // the failure mode a diagnostic tool is least forgiven for.
+        Assert.Equal(AiReadinessStatus.Pass,
+            report.Checks.Single(check => check.Code == AiReadinessCodes.PolicyPresent).Status);
+        Assert.Equal(AiReadinessStatus.Pass,
+            report.Checks.Single(check => check.Code == AiReadinessCodes.PolicyEnabled).Status);
+        Assert.Equal(AiReadinessStatus.Pass,
+            report.Checks.Single(check => check.Code == AiReadinessCodes.PolicyPurposeAllowed).Status);
+    }
+
+    [Fact]
+    public async Task Readiness_AfterOpeningOnlyExternalProcessing_StillNamesTheAllowListAndTheEgressPolicy()
+    {
+        // The defining symptom, reproduced: opening external processing is the obvious first
+        // move, and under the old behaviour the NEXT document died on the allow-list and the
+        // one after that on the egress policy. The report must name every remaining lock now,
+        // not merely the next one — that property is the entire point of the pre-flight.
+        using var fixture = new Fixture();
+        fixture.ResetToShippedSecureDefaults();
+        fixture.MutatePolicy(policy => policy.ExternalProcessingAllowed = true);
+
+        var report = await fixture.Readiness().EvaluateAsync(fixture.TenantId, default);
+
+        Assert.False(report.Ready);
+        Assert.Equal(AiReadinessStatus.Pass,
+            report.Checks.Single(check => check.Code == AiReadinessCodes.ExternalProcessingAllowed).Status);
+
+        var grant = report.Checks.Single(check => check.Code == AiReadinessCodes.AuthorizationPresent);
+        Assert.Equal(AiReadinessStatus.Fail, grant.Status);
+        Assert.Equal(AiExternalProviderTrustReasons.NotAuthorized, grant.DenialReason);
+        Assert.Contains("ai-providers", grant.SetItIn, StringComparison.Ordinal);
+
+        var egress = report.Checks.Single(check => check.Code == AiReadinessCodes.EgressPolicyWholeDocument);
+        Assert.Equal(AiReadinessStatus.Fail, egress.Status);
+        Assert.Equal(AiExternalProviderTrustReasons.EgressPolicyForbidsWholeDocuments, egress.DenialReason);
+        Assert.Equal($"EgressPolicy = \"{AiEgressPolicies.RedactedFieldsOnly}\"", egress.CurrentValue);
+        Assert.Equal($"EgressPolicy = \"{AiEgressPolicies.FullDocument}\"", egress.RequiredValue);
+        Assert.Contains("ai-policy", egress.SetItIn, StringComparison.Ordinal);
+
+        // Two distinct locks in two different layers, reported together and reachable in one
+        // submission. The enforcing gate can still only ever name the first of them.
+        Assert.True(report.BlockingCount >= 2);
+        var decision = await fixture.Trust.EvaluateAsync(
+            fixture.TenantId, fixture.Descriptor, AiPurposes.RfqExtraction, true, default);
+        Assert.Equal(AiExternalProviderTrustReasons.NotAuthorized, decision.Reason);
+        Assert.Equal(decision.Reason, report.FirstBlockingReason);
+    }
+
+    [Fact]
+    public async Task Readiness_OnAFullyConfiguredTenant_IsReady()
+    {
+        using var fixture = new Fixture();
+        await fixture.AuthorizeAsync(unstructuredAllowed: true);
+
+        var report = await fixture.Readiness().EvaluateAsync(fixture.TenantId, default);
+
+        Assert.True(report.Ready);
+        Assert.Null(report.FirstBlockingReason);
+        Assert.Equal(0, report.BlockingCount);
+        Assert.DoesNotContain(report.Checks, check => check.Status == AiReadinessStatus.Fail);
+
+        // Ready is a report and never an enforcement input, so the gate has to agree on its
+        // own: a green chain that the gate then refuses is the defect running backwards.
+        var decision = await fixture.Trust.EvaluateAsync(
+            fixture.TenantId, fixture.Descriptor, AiPurposes.RfqExtraction, true, default);
+        Assert.True(decision.Allowed);
+    }
+
+    [Fact]
+    public async Task RefactoredGate_StillRefusesEveryUnauthorizedUnstructuredCall_WithItsOriginalReasonCode()
+    {
+        // THE regression. Making the chain reportable meant threading a lock list through the
+        // enforcing method and replacing its early returns with a derived verdict. If that
+        // moved a return, softened a comparison, or let one closed lock fall through, a
+        // document egresses that never could before — and no amount of diagnostics is worth
+        // that. Every closed lock is driven through the REAL extraction path here, not the
+        // evaluator, and must still refuse with the identical code and zero provider calls.
+
+        await AssertTheExtractionPathStillRefuses(
+            AiExternalProviderTrustReasons.PolicyMissing,
+            fixture =>
+            {
+                using var db = fixture.Database.ContextFor(null);
+                db.AiProcessingPolicies.RemoveRange(db.AiProcessingPolicies.IgnoreQueryFilters()
+                    .Where(x => x.BusinessUnitId == fixture.TenantId));
+                db.SaveChanges();
+                return Task.CompletedTask;
+            });
+
+        await AssertTheExtractionPathStillRefuses(
+            AiExternalProviderTrustReasons.PolicyDisabled,
+            async fixture =>
+            {
+                await fixture.AuthorizeAsync(unstructuredAllowed: true);
+                fixture.MutatePolicy(policy => policy.IsEnabled = false);
+            });
+
+        await AssertTheExtractionPathStillRefuses(
+            AiExternalProviderTrustReasons.PolicyExternalProcessingDenied,
+            async fixture =>
+            {
+                await fixture.AuthorizeAsync(unstructuredAllowed: true);
+                fixture.MutatePolicy(policy => policy.ExternalProcessingAllowed = false);
+            });
+
+        await AssertTheExtractionPathStillRefuses(
+            AiExternalProviderTrustReasons.NotAuthorized, _ => Task.CompletedTask);
+
+        await AssertTheExtractionPathStillRefuses(
+            AiExternalProviderTrustReasons.Revoked,
+            async fixture =>
+            {
+                var granted = await fixture.AuthorizeAsync(unstructuredAllowed: true);
+                await fixture.Trust.RevokeAsync(fixture.TenantId, 4242, Guid.NewGuid().ToString("N"),
+                    new RevokeAiExternalProviderCommand(granted.Authorization.Id, "Contract ended."), default);
+            });
+
+        await AssertTheExtractionPathStillRefuses(
+            AiExternalProviderTrustReasons.Expired,
+            async fixture =>
+            {
+                await fixture.AuthorizeAsync(unstructuredAllowed: true);
+                fixture.ExpireAuthorizations();
+            });
+
+        await AssertTheExtractionPathStillRefuses(
+            AiExternalProviderTrustReasons.PurposeNotAuthorized,
+            fixture => fixture.Trust.AuthorizeAsync(fixture.TenantId, 4242, Guid.NewGuid().ToString("N"),
+                new AuthorizeAiExternalProviderCommand(
+                    "Ollama", "https://ollama.com/", AuthorizedModel, AiPurposes.BoqDraft,
+                    true, "DPA-2026-14 signed; approved by the data protection officer.", null),
+                default));
+
+        await AssertTheExtractionPathStillRefuses(
+            AiExternalProviderTrustReasons.EgressPolicyForbidsWholeDocuments,
+            async fixture =>
+            {
+                await fixture.AuthorizeAsync(unstructuredAllowed: true);
+                fixture.MutatePolicy(policy => policy.EgressPolicy = AiEgressPolicies.RedactedFieldsOnly);
+            });
+
+        await AssertTheExtractionPathStillRefuses(
+            AiExternalProviderTrustReasons.UnstructuredNotAuthorized,
+            fixture => fixture.AuthorizeAsync(unstructuredAllowed: false));
+    }
+
+    /// <summary>
+    /// Closes one lock, submits a real document down the enforcing path, and pins that it
+    /// died with that lock's own code having reached no provider and opened no reservation.
+    /// </summary>
+    private static async Task AssertTheExtractionPathStillRefuses(
+        string expectedReason, Func<Fixture, Task> closeTheLock)
+    {
+        using var fixture = new Fixture();
+        await closeTheLock(fixture);
+
+        var llm = new GovernedStubLlm(fixture.Descriptor, fixture.Governance,
+            Ext.Result(Ext.Items(2, 0.9), 0.9));
+        var outcome = await fixture.Extractor(llm).ExtractUnstructuredAsync(Doc(fixture.TenantId, 2));
+
+        Assert.Equal(ExtractionOutcomeStatus.Failed, outcome.Status);
+        Assert.Equal(0, llm.CallCount); // not one byte of the document left the process
+        Assert.Contains(expectedReason, outcome.ReviewReason);
+
+        using var db = fixture.Database.ContextFor(null);
+        Assert.Empty(await db.AiRequests.IgnoreQueryFilters().ToListAsync());
+        Assert.Empty(await db.AiBudgetPeriods.IgnoreQueryFilters().ToListAsync());
+    }
+
+    private static async Task AssertNoDrift(Fixture fixture)
+    {
+        var decision = await fixture.Trust.EvaluateAsync(
+            fixture.TenantId, fixture.Descriptor, AiPurposes.RfqExtraction, true, default);
+        var report = await fixture.Readiness().EvaluateAsync(fixture.TenantId, default);
+
+        Assert.Equal(decision.Allowed, report.Ready);
+        Assert.Equal(decision.Allowed ? null : decision.Reason, report.FirstBlockingReason);
+    }
+
     // ---- endpoint normalisation ------------------------------------------
 
     [Theory]
@@ -461,6 +930,14 @@ public sealed class AiExternalProviderAllowListTests
         public AiExternalProviderTrustService Trust { get; }
         public IAiGovernanceService Governance { get; }
         public AiProviderDescriptor Descriptor { get; }
+        public IAiProviderEndpointResolver Resolver { get; }
+
+        /// <summary>
+        /// The read-only pre-flight over the SAME database and the SAME gate the extraction
+        /// path uses, so a disagreement between report and enforcement is a test failure.
+        /// </summary>
+        public AiExtractionReadinessService Readiness(IAiProviderEndpointResolver? resolver = null) =>
+            new(_trustDb, Trust, resolver ?? Resolver);
 
         public Fixture(bool externalProcessingAllowed = true)
             : this(new TestDb(), DefaultTenantId, externalProcessingAllowed, ownsDatabase: true)
@@ -508,6 +985,7 @@ public sealed class AiExternalProviderAllowListTests
             }).Build();
             var resolver = new AiProviderEndpointResolver(
                 configuration, new NoopLogger<AiProviderEndpointResolver>());
+            Resolver = resolver;
             Descriptor = resolver.Current;
 
             _trustDb = Database.ContextFor(tenantId);
@@ -567,11 +1045,38 @@ public sealed class AiExternalProviderAllowListTests
             db.SaveChanges();
         }
 
-        public void SetDependencyCeilingPercent(decimal percent)
+        public void SetDependencyCeilingPercent(decimal percent) =>
+            MutatePolicy(policy => policy.ExternalDependencyCeilingPercent = percent);
+
+        /// <summary>
+        /// Undoes the constructor's convenience opens, leaving exactly what
+        /// <see cref="AiProcessingPolicy.CreateSecureDefault"/> ships. Taken FROM that factory
+        /// rather than restated here, so a future change to the shipped posture reaches these
+        /// tests instead of being quietly contradicted by a hardcoded copy of the old one.
+        /// </summary>
+        public void ResetToShippedSecureDefaults()
+        {
+            var shipped = AiProcessingPolicy.CreateSecureDefault(TenantId, "test", DateTime.UtcNow);
+            MutatePolicy(policy =>
+            {
+                policy.IsEnabled = shipped.IsEnabled;
+                policy.ExternalProcessingAllowed = shipped.ExternalProcessingAllowed;
+                policy.AllowedPurposes = shipped.AllowedPurposes;
+                policy.AllowedProvider = shipped.AllowedProvider;
+                policy.AllowedModel = shipped.AllowedModel;
+                policy.EgressPolicy = shipped.EgressPolicy;
+                policy.ExternalDependencyCeilingPercent = shipped.ExternalDependencyCeilingPercent;
+                policy.MonthlySoftTokenLimit = shipped.MonthlySoftTokenLimit;
+                policy.MonthlyHardTokenLimit = shipped.MonthlyHardTokenLimit;
+            });
+        }
+
+        /// <summary>Edits the tenant's policy row out of band, as an Owner would.</summary>
+        public void MutatePolicy(Action<AiProcessingPolicy> change)
         {
             using var db = Database.ContextFor(null);
             var policy = db.AiProcessingPolicies.IgnoreQueryFilters().Single(x => x.BusinessUnitId == TenantId);
-            policy.ExternalDependencyCeilingPercent = percent;
+            change(policy);
             db.SaveChanges();
         }
 

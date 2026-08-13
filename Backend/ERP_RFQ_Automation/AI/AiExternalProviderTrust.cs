@@ -161,6 +161,32 @@ public sealed record AiExternalProviderDecision(
             provider.Endpoint, provider.Model);
 }
 
+/// <summary>
+/// The verdict PLUS the state of every lock the chain visited. Internal on purpose: the
+/// decision is the enforcement contract, and the lock list is diagnostic material for the
+/// readiness report. Nothing may enforce on the lock list.
+/// </summary>
+internal sealed record AiExternalProviderEvaluation(
+    AiExternalProviderDecision Decision,
+    IReadOnlyList<AiTrustLockOutcome> Locks);
+
+/// <summary>
+/// One control, as the chain found it. <paramref name="CurrentValue"/> and
+/// <paramref name="RequiredValue"/> are rendered CONFIGURATION values only — never an API
+/// key, a connection string, a justification or a byte of document text.
+/// </summary>
+/// <param name="Code">An <see cref="AiReadinessCodes"/> value: stable and machine-matchable.</param>
+/// <param name="DenialReason">
+/// The exact <see cref="AiExternalProviderTrustReasons"/> code the enforcing layer emits for
+/// this lock. Null unless the lock is closed, so a report can never invent a refusal.
+/// </param>
+internal sealed record AiTrustLockOutcome(
+    string Code,
+    AiReadinessStatus Status,
+    string? DenialReason,
+    string CurrentValue,
+    string RequiredValue);
+
 /// <summary>Operator-facing projection of an authorization row.</summary>
 public sealed record AiExternalProviderAuthorizationView(
     long Id, string Provider, string Endpoint, string Model, string AllowedPurposes,

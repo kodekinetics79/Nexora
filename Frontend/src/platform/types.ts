@@ -1480,6 +1480,43 @@ export interface AiProviderTrustView {
   authorizations: AiProviderAuthorization[];
 }
 
+/**
+ * How one control in the extraction chain stands.
+ *
+ * `NotApplicable` is deliberately not a pass: it means the control cannot bite in this
+ * configuration (a loopback deployment egresses nothing) or that an earlier closed control
+ * removed the thing it tests. It neither blocks nor counts as ready.
+ */
+export type AiReadinessStatus = 'Pass' | 'Fail' | 'NotApplicable';
+
+export interface AiExtractionReadinessCheck {
+  order: number;
+  code: string;
+  title: string;
+  status: AiReadinessStatus;
+  /** The exact code the enforcing layer emits, so a row can be matched against a dead-lettered job. */
+  denialReason: string | null;
+  currentValue: string;
+  requiredValue: string;
+  setItIn: string;
+  detail: string;
+}
+
+/**
+ * Every control that must agree before an unstructured RFQ document can be read by AI, in the
+ * order it fires. Read-only: the server evaluates and reports, and never remediates.
+ */
+export interface AiExtractionReadinessReport {
+  resolvedProvider: AiProviderTrustView['resolvedProvider'];
+  purpose: string;
+  unstructuredPayload: boolean;
+  ready: boolean;
+  firstBlockingReason: string | null;
+  blockingCount: number;
+  evaluatedOnUtc: string;
+  checks: AiExtractionReadinessCheck[];
+}
+
 export interface AuthorizeAiProviderInput {
   provider: string;
   endpoint: string;

@@ -1,10 +1,22 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { SnackbarProvider } from 'notistack';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { platformApi } from '../../api/client';
-import type { Tenant, TenantAiPolicy } from '../../types';
+import type {
+  AiExtractionReadinessCheck, AiExtractionReadinessReport, Tenant, TenantAiPolicy,
+} from '../../types';
 import AiGovernanceTab from './AiGovernanceTab';
+
+/**
+ * The panel that replaced "resubmit and find out".
+ *
+ * Five controls in three layers, each discoverable only by opening the previous one and sending
+ * another document, is what dead-lettered every RFQ the 2026-08 pilot submitted. The tests below
+ * assert the things a single denial code could never say: which controls are closed, all of them
+ * at once, what to set each one to, where, and — for the one comparison that is case-sensitive —
+ * a value the operator copies rather than retypes.
+ */
 
 const policy: TenantAiPolicy = {
   businessUnitId: '4', isEnabled: true, externalProcessingAllowed: false,
@@ -19,33 +31,212 @@ const policy: TenantAiPolicy = {
   updatedOn: '2026-08-08T12:00:00Z', updatedBy: 'owner@nexora.local',
 };
 
+const resolvedProvider = {
+  provider: 'Ollama', endpoint: 'https://ollama.example', model: 'deepseek-v4-pro',
+  providerClass: 'External', classificationReason: 'non_loopback_endpoint', isResolved: true,
+};
+
+const check = (
+  order: number,
+  code: string,
+  title: string,
+  overrides: Partial<AiExtractionReadinessCheck> = {},
+): AiExtractionReadinessCheck => ({
+  order,
+  code,
+  title,
+  status: 'Pass',
+  denialReason: null,
+  currentValue: 'satisfied',
+  requiredValue: '',
+  setItIn: '',
+  detail: `Why ${code} exists.`,
+  ...overrides,
+});
+
+const readiness = (
+  overrides: Partial<AiExtractionReadinessReport> = {},
+): AiExtractionReadinessReport => ({
+  resolvedProvider,
+  purpose: 'RfqExtraction',
+  unstructuredPayload: true,
+  ready: false,
+  firstBlockingReason: 'external_processing_denied',
+  blockingCount: 3,
+  evaluatedOnUtc: '2026-08-12T09:00:00Z',
+  checks: [
+    check(1, 'endpoint_resolved', 'Inference endpoint resolves'),
+    check(2, 'policy_present', 'AI processing policy exists'),
+    check(3, 'policy_enabled', 'AI processing is enabled'),
+    check(4, 'external_processing_allowed', 'External processing is consented to', {
+      status: 'Fail',
+      denialReason: 'external_processing_denied',
+      currentValue: 'ExternalProcessingAllowed = false',
+      requiredValue: 'ExternalProcessingAllowed = true',
+      setItIn: 'PUT /api/platform/tenants/{id}/ai-policy (platform Owner, second factor required)',
+      detail: 'Ships FALSE by default and stays false until a named Owner turns it on.',
+    }),
+    check(8, 'egress_policy_whole_document', 'Egress policy permits whole documents', {
+      status: 'Fail',
+      denialReason: 'egress_policy_forbids_whole_documents',
+      currentValue: 'EgressPolicy = "RedactedFieldsOnly"',
+      requiredValue: 'EgressPolicy = "FullDocument"',
+      setItIn: 'PUT /api/platform/tenants/{id}/ai-policy (platform Owner, second factor required)',
+      detail: 'Exactly "FullDocument" opts in, compared trimmed and case-insensitively.',
+    }),
+    check(12, 'policy_model_allowed', 'Policy allows this model', {
+      status: 'Fail',
+      denialReason: 'model_denied',
+      currentValue: 'AllowedModel = "Deepseek-V4-Pro"',
+      requiredValue: 'AllowedModel = "deepseek-v4-pro" (or unset)',
+      setItIn: 'PUT /api/platform/tenants/{id}/ai-policy (platform Owner, second factor required)',
+      detail: 'AllowedModel is compared ORDINAL — CASE-SENSITIVE — while AllowedProvider is not.',
+    }),
+  ],
+  ...overrides,
+});
+
+/** One control's card, addressed the way an operator finds it: by the control's own title. */
+const row = (title: string) => screen.getByText(title).closest('.MuiPaper-root') as HTMLElement;
+
+const verdict = () =>
+  screen.getByText(/Documents will/).closest('.MuiAlert-root') as HTMLElement;
+
+const renderTab = () => render(
+  <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+    <SnackbarProvider><AiGovernanceTab tenant={{ id: '9', name: 'Acme' } as Tenant} /></SnackbarProvider>
+  </QueryClientProvider>,
+);
+
 beforeEach(() => {
   vi.restoreAllMocks();
   vi.spyOn(platformApi, 'getTenantAiPolicy').mockResolvedValue(policy);
   vi.spyOn(platformApi, 'getTenantAiProviders').mockResolvedValue({
-    resolvedProvider: {
-      provider: 'Ollama', endpoint: 'https://ollama.example', model: 'llama3',
-      providerClass: 'External', classificationReason: 'non_loopback_endpoint', isResolved: true,
-    },
+    resolvedProvider,
     resolvedProviderIsAuthorizedForUnstructured: false,
     resolvedProviderDecisionReason: 'external_endpoint_not_authorized',
     authorizations: [],
   });
+  vi.spyOn(platformApi, 'getTenantAiReadiness').mockResolvedValue(readiness());
 });
 
 describe('AiGovernanceTab', () => {
   it('renders policy evidence and the resolved provider with Owner controls', async () => {
-    render(
-      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-        <SnackbarProvider><AiGovernanceTab tenant={{ id: '9', name: 'Acme' } as Tenant} /></SnackbarProvider>
-      </QueryClientProvider>,
-    );
+    renderTab();
 
     expect(await screen.findByText('Effective AI policy')).toBeVisible();
-    expect(screen.getByText(/https:\/\/ollama\.example/)).toBeVisible();
+    expect(screen.getAllByText(/https:\/\/ollama\.example/).length).toBeGreaterThan(0);
     expect(screen.getByRole('button', { name: 'Edit policy' })).toBeVisible();
     expect(screen.getByRole('button', { name: 'Authorize provider' })).toBeVisible();
     expect(platformApi.getTenantAiPolicy).toHaveBeenCalledWith('9');
     expect(platformApi.getTenantAiProviders).toHaveBeenCalledWith('9');
+  });
+});
+
+describe('extraction pre-flight', () => {
+  it('answers whether documents extract before anything has to be read', async () => {
+    renderTab();
+
+    // The verdict, the count, and the code the next submitted document actually comes back with.
+    expect(await screen.findByText(/Documents will not extract — 3 controls blocking/)).toBeVisible();
+    expect(within(verdict()).getByText('external_processing_denied')).toBeVisible();
+    expect(within(verdict()).getByText(/fixing one reveals the next/i)).toBeVisible();
+    expect(platformApi.getTenantAiReadiness).toHaveBeenCalledWith('9');
+  });
+
+  it('names every blocking control at once, with what to set and where', async () => {
+    renderTab();
+
+    await screen.findByText(/Documents will not extract/);
+
+    // Three closed controls in three different layers, each carrying the code the layer that
+    // refuses actually emits. The gate itself can only ever report the first of them.
+    const closed: [string, string, string][] = [
+      ['External processing is consented to', 'external_processing_denied', 'ExternalProcessingAllowed = true'],
+      ['Egress policy permits whole documents', 'egress_policy_forbids_whole_documents', 'EgressPolicy = "FullDocument"'],
+      ['Policy allows this model', 'model_denied', 'AllowedModel = "deepseek-v4-pro" (or unset)'],
+    ];
+    for (const [title, denial, required] of closed) {
+      const card = row(title);
+      expect(within(card).getByText('Blocking')).toBeVisible();
+      expect(within(card).getByText(denial)).toBeVisible();
+      expect(within(card).getByText(required)).toBeVisible();
+      expect(within(card).getByText(/Set it in: PUT \/api\/platform\/tenants/)).toBeVisible();
+    }
+
+    // A satisfied control states its verdict and gives nothing to act on.
+    const satisfied = row('AI processing is enabled');
+    expect(within(satisfied).getByText('Satisfied')).toBeVisible();
+    expect(within(satisfied).queryByText('Required value')).not.toBeInTheDocument();
+  });
+
+  it('offers copy rather than retyping for the case-sensitive model comparison', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+
+    renderTab();
+
+    await screen.findByText(/Documents will not extract/);
+    const model = row('Policy allows this model');
+    expect(within(model).getByText(/CASE-SENSITIVE/)).toBeVisible();
+
+    fireEvent.click(within(model).getByRole('button', { name: 'Copy' }));
+
+    // Byte for byte, including the lower-cased id the ORDINAL comparison demands.
+    expect(writeText).toHaveBeenCalledWith('AllowedModel = "deepseek-v4-pro" (or unset)');
+    expect(await within(model).findByText('Copied exactly as shown.')).toBeVisible();
+  });
+
+  it('offers no control that would open a lock, only the audited requests that do', async () => {
+    renderTab();
+
+    await screen.findByText(/Documents will not extract/);
+
+    // Diagnosis only. Letting document text leave the tenant stays an explicit, attributable act
+    // with a justification and an expiry, made through the two dialogs further down this tab.
+    const buttons = screen.getAllByRole('button').map((button) => button.textContent ?? '');
+    expect(buttons.filter((label) => /fix|allow|enable|open|remediate|apply/i.test(label))).toEqual([]);
+    expect(screen.getByText(/never changes anything and offers no control that would/i)).toBeVisible();
+  });
+
+  it('greys the egress controls on a local deployment instead of ticking them', async () => {
+    vi.spyOn(platformApi, 'getTenantAiReadiness').mockResolvedValue(readiness({
+      resolvedProvider: {
+        ...resolvedProvider, endpoint: 'http://127.0.0.1:11434', model: 'qwen2.5:14b',
+        providerClass: 'Local', classificationReason: 'loopback_endpoint',
+      },
+      ready: true,
+      firstBlockingReason: null,
+      blockingCount: 0,
+      checks: [
+        check(3, 'policy_enabled', 'AI processing is enabled'),
+        check(8, 'egress_policy_whole_document', 'Egress policy permits whole documents', {
+          status: 'NotApplicable',
+          currentValue: 'Provider class Local (loopback_endpoint) — nothing egresses',
+          detail: 'Not applicable to this deployment: it neither blocks nor counts as ready.',
+        }),
+      ],
+    }));
+
+    renderTab();
+
+    expect(await screen.findByText('Documents will extract')).toBeVisible();
+    const egress = row('Egress policy permits whole documents');
+    expect(within(egress).getByText('Not applicable')).toBeVisible();
+    expect(within(egress).getByText(/nothing egresses/)).toBeVisible();
+    expect(within(egress).queryByText('Satisfied')).not.toBeInTheDocument();
+  });
+
+  it('says the pre-flight is unknown rather than ready when it cannot be read, and still edits', async () => {
+    vi.spyOn(platformApi, 'getTenantAiReadiness').mockRejectedValue(new Error('gateway timeout'));
+
+    renderTab();
+
+    await waitFor(() =>
+      expect(screen.getByText('The pre-flight could not be read')).toBeVisible());
+    expect(screen.getByText(/not the same as them being ready/i)).toBeVisible();
+    // The operator can still act; they simply are not told what to act on.
+    expect(screen.getByRole('button', { name: 'Edit policy' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Authorize provider' })).toBeVisible();
   });
 });

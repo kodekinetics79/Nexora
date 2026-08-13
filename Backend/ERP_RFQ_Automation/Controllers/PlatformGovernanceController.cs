@@ -16,6 +16,7 @@ public sealed class PlatformGovernanceController(
     HumanActionService actions,
     AiTrustCenterService aiTrust,
     IAiExternalProviderTrust externalProviderTrust,
+    AiExtractionReadinessService aiReadiness,
     CommercialDocumentArchiveService archive,
     EvidenceRetentionService retention,
     QualityAnalyticsService quality) : ControllerBase
@@ -102,6 +103,18 @@ public sealed class PlatformGovernanceController(
     [RequireModulePermission("Users", PermissionAction.View)]
     public Task<AiExternalProviderTrustView> GetExternalProviders(CancellationToken ct) =>
         externalProviderTrust.GetAsync(TenantId(), ct);
+
+    /// <summary>
+    /// Why this tenant's documents are (or are not) being read by AI: every control in the
+    /// extraction chain, in firing order, with the exact value to set and where. Read-only
+    /// and carries no new authority — the remedies it names are platform Owner mutations, so
+    /// a tenant admin can diagnose a dead-lettering pipeline without holding the authority to
+    /// open an egress path.
+    /// </summary>
+    [HttpGet("ai-trust/readiness")]
+    [RequireModulePermission("Users", PermissionAction.View)]
+    public Task<AiExtractionReadinessReport> GetAiReadiness(CancellationToken ct) =>
+        aiReadiness.EvaluateAsync(TenantId(), ct);
 
     [HttpGet("archive")]
     [RequireModulePermission("Users", PermissionAction.View)]

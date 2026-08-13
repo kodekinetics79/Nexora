@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
-  Alert, Box, Button, Checkbox, Dialog, DialogActions, DialogContent, DialogTitle,
-  FormControlLabel, Grid, Switch, Table, TableBody, TableCell, TableHead, TableRow,
+  Alert, AlertTitle, Box, Button, Checkbox, Dialog, DialogActions, DialogContent, DialogTitle,
+  FormControlLabel, Grid, Paper, Switch, Table, TableBody, TableCell, TableHead, TableRow,
   TextField, Typography,
 } from '@mui/material';
 import { useSnackbar } from 'notistack';
@@ -15,9 +15,176 @@ import { fmtDateTime } from '../../components/format';
 import { platformApi } from '../../api/client';
 import { platformErrorMessage } from '../../api/apiError';
 import { platformKeys } from '../../api/queryKeys';
-import type { AuthorizeAiProviderInput, Tenant, TenantAiPolicy } from '../../types';
+import type {
+  AiExtractionReadinessCheck, AiExtractionReadinessReport, AiReadinessStatus,
+  AuthorizeAiProviderInput, Tenant, TenantAiPolicy,
+} from '../../types';
 
 const optionalNumber = (value: string): number | null => value.trim() === '' ? null : Number(value);
+
+/**
+ * The extraction pre-flight.
+ *
+ * <b>The defect this closes.</b> Five controls in three layers must all agree before an
+ * unstructured document is read, they refuse with different reason codes, and each one is
+ * discoverable only by fixing the previous one and resubmitting. The 2026-08 pilot dead-lettered
+ * every document it sent for days doing exactly that, one lock per deploy, while the extraction
+ * log said the call had been allowed right up to the token ledger refusing it for a capital
+ * letter. This panel reports all of them at once, in the order they fire.
+ *
+ * <b>It diagnoses and nothing else.</b> There is deliberately no button here that opens a
+ * control. Letting a customer's document text leave their infrastructure stays an explicit,
+ * attributable human act with a written justification and an expiry — the two Owner controls
+ * further down this tab, which each row names.
+ */
+
+const STATUS_TONE: Record<AiReadinessStatus, 'success' | 'error' | 'neutral'> = {
+  Pass: 'success',
+  Fail: 'error',
+  // Grey, never green: a control that cannot bite here has not been satisfied, and a tick would
+  // tell a reader that a local deployment had passed an egress check it never ran.
+  NotApplicable: 'neutral',
+};
+
+const STATUS_LABEL: Record<AiReadinessStatus, string> = {
+  Pass: 'Satisfied',
+  Fail: 'Blocking',
+  NotApplicable: 'Not applicable',
+};
+
+/**
+ * A value that has to reach a form field byte for byte — the normalised endpoint origin, and the
+ * model id, which AllowedModel compares ORDINAL. Rendered selectable and copyable rather than as
+ * something to retype, because one capital letter refuses every document the tenant submits.
+ */
+function ExactValue({ label, value }: { label: string; value: string }) {
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const copy = () => {
+    if (!navigator.clipboard?.writeText) {
+      setNotice('Copying is unavailable in this browser — select the value and copy it manually.');
+      return;
+    }
+    navigator.clipboard.writeText(value)
+      .then(() => setNotice('Copied exactly as shown.'))
+      .catch(() => setNotice('Copy failed — select the value and copy it manually.'));
+  };
+
+  return (
+    <Box sx={{ mt: 0.75 }}>
+      <Typography variant="caption" color="text.secondary">{label}</Typography>
+      <Stack direction="row" spacing={1} alignItems="center" sx={{ flexWrap: 'wrap' }}>
+        <Box
+          component="code"
+          sx={{
+            px: 1, py: 0.5, borderRadius: 1, bgcolor: 'action.hover', fontFamily: 'monospace',
+            fontSize: '0.8rem', fontWeight: 700, userSelect: 'all', overflowWrap: 'anywhere',
+          }}
+        >
+          {value}
+        </Box>
+        <Button size="small" onClick={copy}>Copy</Button>
+      </Stack>
+      {notice && <Typography variant="caption" color="text.secondary">{notice}</Typography>}
+    </Box>
+  );
+}
+
+function ReadinessCheckRow({ check }: { check: AiExtractionReadinessCheck }) {
+  const blocking = check.status === 'Fail';
+  return (
+    <Paper
+      variant="outlined"
+      sx={{
+        p: blocking ? 2 : 1.25,
+        borderColor: blocking ? 'error.main' : undefined,
+        opacity: check.status === 'NotApplicable' ? 0.75 : 1,
+      }}
+    >
+      <Stack direction="row" spacing={1} alignItems="center" sx={{ flexWrap: 'wrap' }}>
+        <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 800, minWidth: 18 }}>
+          {check.order}
+        </Typography>
+        <Typography sx={{ fontWeight: 700 }}>{check.title}</Typography>
+        <SoftChip label={STATUS_LABEL[check.status]} tone={STATUS_TONE[check.status]} dot={false} />
+        {check.denialReason && (
+          <>
+            <Typography variant="caption" color="text.secondary">refuses with</Typography>
+            {/* Selectable, and the exact string the enforcing layer emits, so this row can be
+                matched against a dead-lettered job's stored error. */}
+            <Box
+              component="code"
+              sx={{ fontFamily: 'monospace', fontSize: '0.78rem', fontWeight: 700, color: 'error.main', userSelect: 'all' }}
+            >
+              {check.denialReason}
+            </Box>
+          </>
+        )}
+      </Stack>
+      <Typography variant="body2" color="text.secondary" sx={{ overflowWrap: 'anywhere' }}>
+        Now: {check.currentValue}
+      </Typography>
+      {blocking && (
+        <>
+          <ExactValue label="Required value" value={check.requiredValue} />
+          <Typography variant="body2" sx={{ mt: 0.75, fontWeight: 650, overflowWrap: 'anywhere' }}>
+            Set it in: {check.setItIn}
+          </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>{check.detail}</Typography>
+        </>
+      )}
+    </Paper>
+  );
+}
+
+function ReadinessReport({ report }: { report: AiExtractionReadinessReport }) {
+  const resolved = report.resolvedProvider;
+  return (
+    <>
+      <Alert severity={report.ready ? 'success' : 'error'}>
+        <AlertTitle sx={{ fontWeight: 800 }}>
+          {report.ready
+            ? 'Documents will extract'
+            : `Documents will not extract — ${report.blockingCount} control${report.blockingCount === 1 ? '' : 's'} blocking`}
+        </AlertTitle>
+        {report.ready ? (
+          <Typography variant="body2">
+            Every control in the chain is open for unstructured {report.purpose} on this tenant.
+          </Typography>
+        ) : (
+          <>
+            <Typography variant="body2">
+              A document submitted now is refused with{' '}
+              <Box component="code" sx={{ fontFamily: 'monospace', fontWeight: 700, userSelect: 'all' }}>
+                {report.firstBlockingReason}
+              </Box>
+              .
+            </Typography>
+            {/* The whole point of the panel: the gate can only ever name the first refusal, so an
+                operator who fixes it and resubmits meets the next one, and the next. */}
+            <Typography variant="body2" sx={{ mt: 1 }}>
+              That is only the first one. Every control marked blocking below has to be opened —
+              fixing one reveals the next, which is what cost the pilot its first week.
+            </Typography>
+          </>
+        )}
+      </Alert>
+
+      {resolved.endpoint && <ExactValue label="Endpoint origin a grant must name, exactly" value={resolved.endpoint} />}
+      {resolved.model && <ExactValue label="Model id, compared case-sensitively" value={resolved.model} />}
+
+      <Stack spacing={1} sx={{ mt: 2 }}>
+        {report.checks.map((check) => <ReadinessCheckRow key={check.code} check={check} />)}
+      </Stack>
+
+      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1.5 }}>
+        Evaluated {fmtDateTime(report.evaluatedOnUtc)} against provider {resolved.provider || 'Unknown'}.
+        This report reads; it never changes anything and offers no control that would. Every value is
+        set through the audited Owner requests each row names.
+      </Typography>
+    </>
+  );
+}
 
 export default function AiGovernanceTab({ tenant }: { tenant: Tenant }) {
   const client = useQueryClient();
@@ -39,6 +206,10 @@ export default function AiGovernanceTab({ tenant }: { tenant: Tenant }) {
     queryKey: platformKeys.tenantAiProviders(tenant.id),
     queryFn: () => platformApi.getTenantAiProviders(tenant.id),
   });
+  const readinessQuery = useQuery({
+    queryKey: platformKeys.tenantAiReadiness(tenant.id),
+    queryFn: () => platformApi.getTenantAiReadiness(tenant.id),
+  });
 
   useEffect(() => {
     if (policyQuery.data) setDraft(policyQuery.data);
@@ -47,6 +218,9 @@ export default function AiGovernanceTab({ tenant }: { tenant: Tenant }) {
   const invalidate = () => {
     client.invalidateQueries({ queryKey: platformKeys.tenantAiPolicy(tenant.id) });
     client.invalidateQueries({ queryKey: platformKeys.tenantAiProviders(tenant.id) });
+    // The verdict is the policy and the grants combined, so it is stale the moment either
+    // changes — and a stale "will not extract" is what sends an operator round the loop again.
+    client.invalidateQueries({ queryKey: platformKeys.tenantAiReadiness(tenant.id) });
   };
   const fail = (fallback: string) => (error: unknown) =>
     enqueueSnackbar(platformErrorMessage(error, fallback), { variant: 'error' });
@@ -109,6 +283,27 @@ export default function AiGovernanceTab({ tenant }: { tenant: Tenant }) {
   return (
     <Stack spacing={2.5}>
       <Alert severity="info">Owner authority only. Changes are version-checked, attributed, and written to the platform audit trail.</Alert>
+
+      <PageSection
+        title="Will documents extract?"
+        subtitle="Every control that must agree before an unstructured RFQ document can be read by AI, in the order it fires. Read-only."
+      >
+        {readinessQuery.isLoading && <LoadingState label="Running the extraction pre-flight…" minHeight={120} />}
+        {/* An unreadable pre-flight never hides the policy and grant editors below it: the
+            operator can still act, they just do not get told what to act on. */}
+        {readinessQuery.isError && (
+          <Alert
+            severity="warning"
+            action={<Button color="inherit" size="small" onClick={() => readinessQuery.refetch()}>Retry</Button>}
+          >
+            <AlertTitle sx={{ fontWeight: 800 }}>The pre-flight could not be read</AlertTitle>
+            {platformErrorMessage(readinessQuery.error, 'The extraction readiness report could not be read.')}
+            {' '}Nothing can be said about whether documents will extract — this is not the same as them being ready.
+          </Alert>
+        )}
+        {readinessQuery.data && <ReadinessReport report={readinessQuery.data} />}
+      </PageSection>
+
       <PageSection title="Effective AI policy" actions={<Button variant="outlined" onClick={() => { setDraft(policy); setPolicyReason(''); setPolicyOpen(true); }}>Edit policy</Button>}>
         <Grid container spacing={2}>
           <Grid size={{ xs: 12, md: 4 }}>{field('Processing', policy.isEnabled ? 'Enabled' : 'Emergency shutdown')}</Grid>

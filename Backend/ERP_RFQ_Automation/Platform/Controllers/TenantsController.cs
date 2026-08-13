@@ -1217,6 +1217,34 @@ public class TenantsController : ControllerBase
             .GetAsync(businessUnitId.Value, ct));
     }
 
+    /// <summary>
+    /// Read-only. Every control that must agree before an unstructured RFQ document can be
+    /// read by AI, in the order it fires, with the exact value an operator has to set and
+    /// where to set it.
+    ///
+    /// <para>Five controls in three layers, failing with different reason codes, with no
+    /// single place to see which one was closed, is what left the 2026-08 pilot
+    /// dead-lettering every document it submitted for days. This is that place.</para>
+    ///
+    /// <para>It reports; it never remediates. Letting customer document text leave the
+    /// tenant's infrastructure stays an explicit, attributable human act with a written
+    /// justification and an expiry — the two Owner mutations below it points at.</para>
+    /// </summary>
+    [HttpGet("{id:long}/ai-readiness")]
+    [Authorize(Policy = PlatformPolicies.Owner)]
+    public async Task<ActionResult<AiExtractionReadinessReport>> GetAiReadiness(long id, CancellationToken ct)
+    {
+        var businessUnitId = await PrimaryBusinessUnitIdAsync(id, ct);
+        if (businessUnitId is null) return NotFound();
+        // The push is mandatory, not stylistic: the allow-list chain refuses to evaluate a
+        // tenant that is not the ambient one, which is exactly the guard that keeps a
+        // background caller from reading another tenant's egress authorizations.
+        using var tenantScope = _tenantScope.Push(businessUnitId.Value);
+        using var scope = _scopeFactory.CreateScope();
+        return Ok(await scope.ServiceProvider.GetRequiredService<AiExtractionReadinessService>()
+            .EvaluateAsync(businessUnitId.Value, ct));
+    }
+
     [HttpPost("{id:long}/ai-providers")]
     [Authorize(Policy = PlatformPolicies.Owner)]
     public async Task<ActionResult<AiExternalProviderMutationResult>> AuthorizeAiProvider(

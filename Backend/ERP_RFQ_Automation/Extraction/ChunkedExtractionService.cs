@@ -400,14 +400,25 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
                     permanent: true);
             }
 
+            // This line used to say ALLOWED, and it was wrong twice. It describes the
+            // allow-list gate only: the governance reservation below re-tests the policy row's
+            // AllowedProvider and AllowedModel in a different layer and can still kill the
+            // document with provider_denied/model_denied — which triages as a generic
+            // extraction failure, not an authorization one, because this gate was reached. It
+            // also promised redaction, and nothing in this build redacts; a control named in a
+            // log line but absent from the code is the one an auditor stops looking for. The
+            // whole chain is now reportable up front: GET /api/platform/tenants/{id}/ai-readiness.
             _log.LogWarning(
-                "Unstructured extraction ALLOWED to an EXTERNAL provider for tenant {Tenant} under "
-                + "allow-list authorization {AuthorizationId}. {Descriptor} document={Document}. "
-                + "Redaction, token budget, injection boundary and count conservation still apply.",
+                "Unstructured extraction PASSED THE ALLOW-LIST GATE for tenant {Tenant} under authorization "
+                + "{AuthorizationId}. {Descriptor} document={Document}. Nothing has egressed yet: the governance "
+                + "reservation still re-tests AllowedProvider (case-insensitive) and AllowedModel (ORDINAL, "
+                + "case-sensitive) and can still refuse this document with provider_denied/model_denied. "
+                + "Token budget, injection boundary and count conservation still apply; nothing in this build redacts.",
                 input.BusinessUnitId, decision.AuthorizationId, descriptor, input.SourceDocumentName);
             diagnostics.Add(
                 $"External provider authorized for unstructured extraction (authorization #{decision.AuthorizationId}, "
-                + $"endpoint {decision.Endpoint}, model {decision.Model}).");
+                + $"endpoint {decision.Endpoint}, model {decision.Model}). "
+                + "The governance reservation has not run yet.");
         }
 
         if (expected == 0)
