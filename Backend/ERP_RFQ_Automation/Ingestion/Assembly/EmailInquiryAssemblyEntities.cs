@@ -198,6 +198,7 @@ public class EmailInquiryAssembly
     /// the parsed MIME tree. The barrier compares against it, so a component that never
     /// reports is a visible hole rather than an early finalize.
     /// </summary>
+
     public int ExpectedComponentCount { get; set; }
 
     /// <summary>How many expected components have reached a terminal state.</summary>

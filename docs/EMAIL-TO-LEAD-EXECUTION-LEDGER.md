@@ -49,7 +49,7 @@ approval — an entry of `—` means no independent review has happened yet.
 | 9 | Test Connection uses the poller login identity | DONE | 77 | n/a | — | `244f4a9` | Pinned by **source-text** assertion — must become behavioural, see #19 |
 | 10 | PR #26 storage-failure contract cherry-picked whole | PARTIAL | 79 | n/a | — | `151f6ca` | Not reconciled against PR #26's *current* head — see #20 |
 | 11 | Assembly coordinator (single writer after capture) | PARTIAL | 0 | n/a | — | `1e69acd` | **Not wired.** Illegal transition is logged and swallowed — see #14 |
-| 12 | Collapse fan-out: enqueuer → thin manifest adapter; delete `message.Attachments` walk | TODO | — | — | — | — | **Blocking.** Two MIME walks disagree; wiring as-is stalls every message at the barrier |
+| 12 | Collapse fan-out: enqueuer → thin manifest adapter; delete `message.Attachments` walk | IN PROGRESS | 132 affected green | — | — | groundwork `<this commit>` | Adapter drafted and reverted twice for context safety; walk still present |
 | 13 | `CaptureComplete` vs `SafeToAcknowledge` split | TODO | — | — | — | — | Acknowledging on capture alone can lose a message whose scheduling failed |
 | 14 | Coordinator returns persisted state, never an unpersisted calculation | TODO | — | — | — | — | A caller could create a Lead from a `ReadyForAssembly` that was never committed |
 | 15 | Durable idempotent scheduling (DB-enforced job uniqueness, attempt identity) | TODO | — | — | — | — | `ExtractionJobId != null` alone is not idempotency |
@@ -58,6 +58,10 @@ approval — an entry of `—` means no independent review has happened yet.
 | 18 | Deterministic bounded message identity + DB uniqueness | TODO | — | — | — | — | Fallback digest inherited from `ResolveIngestKey`, untested at the assembly boundary |
 | 19 | Behavioural Test Connection proof (injected resolver, observed auth args) | TODO | — | — | — | — | Replaces the brittle source-text test added in `244f4a9` |
 | 20 | PR #26 reconciliation vs its final head + reuse/exclude matrix | TODO | — | — | — | — | Cherry-pick may be superseded |
+| 12a | Planner `ContractVersion` + manifest carries it | DONE | 132 | — | — | groundwork | Not yet persisted — see #12b |
+| 12b | Persist `ManifestVersion` on the assembly | TODO | — | — | — | — | Needs migration regeneration + RLS/grant block re-paste |
+| 12c | `EmailComponentManifestVerifier` (key/ordinal/kind/hash/size/version) | DONE | 0 direct | — | — | groundwork | **No direct tests yet** — must be covered before #12 closes |
+| 12d | Typed ownership fields on `ExtractionJobMetadata` | DONE | — | — | — | groundwork | Sidecar is best-effort by contract, so these are hints only — #16 must use the DB row |
 | 21 | End-to-end nested MIME limits (one shared budget across the tree) | TODO | — | — | — | — | Current test only proves `MaxNestingDepth = 0` |
 | 22 | Direct capture-service tests (outage, crash, replay, race, hash corruption) | TODO | — | — | — | — | Capture has **zero** direct tests today |
 | 23 | Poller wiring (Milestone 2) | TODO | — | — | — | — | Depends on #12–#16 |
@@ -94,45 +98,61 @@ Approved resolution (product owner, this program): collapse onto the planner as 
 
 ## Exact next task
 
-**Task #12.** In `Backend/ERP_RFQ_Automation/Ingestion/Triage/EmailIngestEnqueuer.cs`:
+**#12, continued.** Groundwork is committed and green. What remains is one bounded increment
+that must land together, because deleting the walk breaks both callers at compile time:
 
-1. Delete `EnqueueAsync` and its `foreach (var att in message.Attachments)` loop entirely — not
-   behind a flag, not as a fallback.
-2. Replace with a thin `ScheduleAsync` that performs **no MIME traversal and generates no
-   identities**. It iterates the **persisted** `EmailInquiryComponent` rows in `Ordinal` order:
-   * skip `Skipped` / `Ignored` / `RefusedSecurity` — already terminal, no job by design;
-   * skip any component already carrying a verified durable job (idempotent replay);
-   * schedule the rest under the **persisted** `ComponentKey`.
-3. Bytes come from the in-memory manifest on first capture, and on recovery from re-planning the
-   raw `.eml` read back out of `IEvidenceObjectStorage` and hash-verified. The planner is
-   deterministic, so a re-plan yields identical keys; a persisted component with no counterpart
-   in the re-plan is a `manifest_mismatch` hold — never a silent drop, replace or reorder.
-4. `BatchId` must be **derived** from `(AssemblyId, MessageKey)` via a documented stable hash
-   (never `Guid.NewGuid()`, never `GetHashCode()`), and is grouping only — not the uniqueness
-   boundary.
-5. Do **not** overload `SourceOccurrenceId` unless its existing semantic contract genuinely is
-   "stable source occurrence"; otherwise add typed assembly/component metadata fields.
+1. **#12b — persist `ManifestVersion`.** Add `public int ManifestVersion { get; set; }` to
+   `EmailInquiryAssembly`, `e.Property(x => x.ManifestVersion).HasDefaultValue(1);` to the model
+   builder, and `ManifestVersion = manifest.ContractVersion,` in `EmailInquiryCaptureService`.
+   Then regenerate the migration — the branch keeps ONE migration and it has never been applied:
 
-Callers to update in the same increment:
-`Services/EmailService.cs` (the `EnqueueEmailForExtractionAsync` call) and
-`Ingestion/Triage/EmailTriageService.cs` (manual reprocess — must route through the same
-coordinator and barrier, per the architecture rule).
+   ```
+   git checkout ae6a376 -- Backend/ERP_RFQ_Automation/MigrationsBaseline/ErpRfqAutomationContextModelSnapshot.cs
+   rm Backend/ERP_RFQ_Automation/MigrationsBaseline/20260813134002_EmailInquiryAssembly*.cs
+   cd Backend/ERP_RFQ_Automation && mv Migrations Migrations.tmp-hidden
+   ../../scratchpad/ef.sh migrations add EmailInquiryAssembly --no-build
+   mv Migrations.tmp-hidden Migrations
+   ```
 
-`EmailIngestEnqueuerTests` asserts the walk being deleted and must be rewritten against the
-manifest contract.
+   **Then re-paste the RLS + grant + purge-policy SQL block** into the regenerated migration's
+   `Up`/`Down` — it is NOT regenerated and its loss silently removes tenant isolation. Copy it
+   verbatim from commit `5afe445` (`git show 5afe445 -- '*EmailInquiryAssembly.cs'`). It
+   contains: `ENABLE`/`FORCE ROW LEVEL SECURITY` + `nexora_tenant_isolation` on both tables;
+   `GRANT SELECT, INSERT, UPDATE, DELETE ... TO nexora_tenant_app`; `GRANT USAGE ON SEQUENCE`
+   (**never** `SELECT`/`UPDATE` — `PostgreSqlProductionDialectTests` enforces this globally);
+   the `nexora_purge_app` grant + `nexora_tenant_purge` policy guarded on the role existing.
 
-Command to re-verify after the increment:
+2. **#12 — replace the walk.** Rewrite `EmailIngestEnqueuer` as the thin adapter. The full
+   drafted implementation is in this session's history; its shape:
+   `ScheduleAsync(assembly, persistedComponents, plan, ingest, clientEmail, ingestion, triage,
+   coordinator, logger, ct)` → verify via `EmailComponentManifestVerifier` FIRST and hold every
+   non-terminal component on any mismatch; then iterate persisted rows by `Ordinal`, skipping
+   `IsTerminal` and any row already carrying a job; schedule under the persisted `ComponentKey`;
+   `DeriveBatchId` = SHA-256 over `"nexora:email-assembly-batch:v1:{assemblyId}:{messageKey}"`.
+   Delete `EnqueueAsync` and the `foreach (var att in message.Attachments)` loop outright.
+
+3. **Update both callers** — `Services/EmailService.cs:913` and
+   `Ingestion/Triage/EmailTriageService.cs:240`. Both must obtain the assembly + persisted
+   components + plan from `IEmailInquiryCaptureService`, then call `ScheduleAsync`. The manual
+   reprocess path must use the SAME coordinator and must not reopen an absorbing terminal
+   assembly.
+
+4. **Rewrite `EmailIngestEnqueuerTests`** — it asserts the walk being deleted.
+
+5. **Add direct `EmailComponentManifestVerifier` tests** (#12c has none): each mismatch kind,
+   and the case where skipped/ignored components carry no hash or size and must NOT be reported
+   as mismatched.
+
+Acknowledgement semantics stay as they are until #13; do not claim `SafeToAcknowledge` yet.
+
+Verify with:
 
 ```
 cd Backend && dotnet build ERP_RFQ_Automation.sln -v q --nologo
+dotnet test ERP_RFQ_Automation.Tests/ERP_RFQ_Automation.Tests.csproj \
+  --filter "FullyQualifiedName~EmailInquiry|FullyQualifiedName~EmailIngestEnqueuer|FullyQualifiedName~EmailTriage" --nologo
 dotnet test ERP_RFQ_Automation.Tests/ERP_RFQ_Automation.Tests.csproj --nologo -v q
 ```
-
-Design-time EF helper (throwaway values, never secrets):
-`scratchpad/ef.sh migrations has-pending-model-changes --no-build`
-(run with `Migrations/` temporarily renamed — `MigrationsBaseline/` is the live lineage).
-
----
 
 ## Standing constraints
 

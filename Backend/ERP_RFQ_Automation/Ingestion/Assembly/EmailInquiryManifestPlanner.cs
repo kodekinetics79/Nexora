@@ -111,7 +111,8 @@ public sealed record EmailInquiryComponentPlan(
 public sealed record EmailInquiryManifest(
     string MessageKey,
     IReadOnlyList<EmailInquiryComponentPlan> Components,
-    bool QuotedOnlyBody)
+    bool QuotedOnlyBody,
+    int ContractVersion)
 {
     public int ExpectedComponentCount => Components.Count;
 
@@ -136,6 +137,18 @@ public sealed record EmailInquiryManifest(
 /// </summary>
 public static class EmailInquiryManifestPlanner
 {
+    /// <summary>
+    /// Version of the planning CONTRACT — which parts count as components, how they are
+    /// ordered, and how their keys are formed.
+    ///
+    /// <para>It is persisted on every assembly so that a future change to this planner cannot
+    /// silently reinterpret a message captured under the old rules. Recovery re-plans the raw
+    /// bytes and compares; a version difference is a manifest mismatch to be looked at, not a
+    /// migration to be guessed at. Bump it whenever component identity, ordering or disposition
+    /// changes — never for an internal refactor that leaves those three alone.</para>
+    /// </summary>
+    public const int ContractVersion = 1;
+
     public static async Task<EmailInquiryManifest> PlanAsync(
         MimeMessage message,
         string messageKey,
@@ -179,7 +192,7 @@ public static class EmailInquiryManifestPlanner
             path: string.Empty, ordinal: () => ordinal++, total: () => totalBytes,
             addTotal: b => totalBytes += b, ct);
 
-        return new EmailInquiryManifest(messageKey, components, quotedOnly);
+        return new EmailInquiryManifest(messageKey, components, quotedOnly, ContractVersion);
     }
 
     private static async Task WalkAsync(
