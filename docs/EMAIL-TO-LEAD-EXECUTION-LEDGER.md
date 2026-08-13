@@ -546,3 +546,46 @@ B4 matrix: **Failed: 0, Passed: 14**. Cumulative affected: **Failed: 0, Passed: 
 B5 matrix · B3 typed verifier · B2 carried safeguards (StructuralOnly lifecycle, raw-message
 bounds, nested-body normalization) · full backend regression · PG suites · drift · exact-diff
 MIME/security/SDET review.
+
+---
+
+# SCOPE FROZEN — DRIVE TO THE SCREEN
+
+Product owner, final directive. All architecture exploration, broad review waves, optional MIME
+work and edge-case optimisation are **stopped**. Current design decisions are frozen. Any unusual
+or unfinished email format **fails safely to NeedsReview** — no further TNEF, S/MIME, ICS, DSN,
+AppleDouble or decorative-image work before the screen test.
+
+**Authorized outcome, and nothing else:** real GoDaddy email → Poll Now → durable capture →
+body/attachment processing → message-level assembly → Lead or NeedsReview → visible Email Intake
+screen → open the resulting Lead.
+
+## Ordered work — do not reorder, commit green at each step
+
+| # | Step | State |
+| --- | --- | --- |
+| 1 | Minimum verifier + safety tests to prevent document loss, duplicate extraction, unbounded memory | B1/B2/B4 done; **B3 typed outcomes = the minimum remaining** |
+| 2 | Durable canonical scheduler over `SourceDocumentOccurrence` + `ExtractionQueue`, idempotency key from `ComponentKey` | TODO |
+| 3 | Split `CaptureComplete` from `SafeToAcknowledge` | TODO |
+| 4 | Authoritative persisted job/component ownership + tenant validation | TODO |
+| 5 | Coordinator concurrency + persisted-state return | TODO |
+| 6 | Register the complete runtime dependency graph | TODO |
+| 7 | Wire the real `EmailService` poller | TODO |
+| 8 | Wire `ExtractionWorker` to the message-level barrier | TODO |
+| 9 | Remove the legacy direct-email/component-to-Lead path | TODO |
+| 10 | Minimum live API/UI: mailbox config, behavioural Test Connection, Poll Now, Email Intake list/detail, component statuses, assembly outcome/reason, Lead link, Lead provenance | TODO |
+| 11 | Automated A (body-only → 1 Lead), B (body+PDF/XLSX → 1 combined Lead), C (unsupported attachment → NeedsReview, no partial Lead) | TODO |
+| 12 | Start the real app, open visible Chrome for acceptance | TODO |
+
+**No mocks, fixtures, hardcoded statuses, manual DB insertion or upload substitution anywhere in
+the acceptance path.**
+
+## Deferred until after A–C acceptance
+
+Medium/Low findings · advanced container handling · retention purge · scenarios D–H · production
+deployment · unrelated modules · B5 matrix · B2 carried safeguards · full five-reviewer re-review.
+
+Dropped from Section B by this directive: the B5 container matrix and the B2 carried safeguards
+(StructuralOnly lifecycle, raw-message bounds, nested-body normalization tests). The *behaviour*
+they would have tested is already implemented and frozen; only their dedicated proofs are
+deferred. Recorded here so the gap is visible rather than forgotten.
