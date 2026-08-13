@@ -54,7 +54,7 @@
  * no-raw-object gate every other server string in the product passes through.
  */
 
-import { presentableServerText } from './apiErrors';
+import { DOCUMENT_STORAGE_UNAVAILABLE, presentableServerText } from './apiErrors';
 
 /**
  * Why a file stopped.
@@ -180,6 +180,36 @@ const INTAKE_ERRORS: Record<string, IntakeErrorEntry> = {
     isRetryable: false,
     serverReasonWins: false,
   },
+  // Backend/ERP_RFQ_Automation/Infrastructure/Storage/IEvidenceObjectStorage.cs —
+  // EvidenceStorageUnavailableException.ErrorCode, the same string SecurityScanRecoveryService
+  // already emits for the read side.
+  //
+  // Nexora stores every source immutably before it queues anything, so when the store refuses a
+  // write the document was not accepted — and, if the store is misconfigured, it will refuse the
+  // next attempt for the same reason. On 2026-08-12 this fault wore `ingestion_failed`'s copy
+  // instead, and four .doc files were each answered with "upload this file again" while the
+  // readiness probe already knew the bucket did not exist.
+  //
+  // `whatHappened` says nothing about the rest of the batch: a store can fail PART WAY through
+  // one, and only the caller knows how much it accepted first. Claiming "nothing was accepted"
+  // here would have the banner deny work that is already running.
+  //
+  // `nextAction` is the neutral fallback for a bare code. When the caller knows which fault it is,
+  // `explainStoragePause` replaces it — the two faults need opposite instructions.
+  //
+  // Absent from RECOVERABLE_INTAKE_ERROR_CODES deliberately: the security sweep replays stored
+  // sources, and here there is no stored source to replay.
+  evidence_storage_unavailable: {
+    title: 'Uploads are paused — document storage is unavailable',
+    whatHappened:
+      'Nexora stores every document before it starts processing, and document storage cannot be written right now. Anything it could not store was refused outright rather than half-accepted.',
+    nextAction:
+      'The fault is in Nexora document storage, not in your documents. Your administrator can see its cause on the service health page.',
+    category: 'infrastructure',
+    isRetryable: false,
+    // The code IS the cause. The server's companion sentence is one clause of the copy above.
+    serverReasonWins: false,
+  },
   // Controllers/ExtractionController.cs — the ingest boundary's poison-file isolation, so one bad
   // file never fails the whole batch. Not a scanner hold, so the recovery sweep cannot replay it:
   // the way forward is uploading the file again.
@@ -253,6 +283,25 @@ export const explainIntakeError = (
     : INTAKE_ERRORS[normalized] ?? UNKNOWN_INTAKE_ERROR;
   return resolve(entry, serverReason);
 };
+
+/**
+ * The storage pause, told the way the fault actually behaves.
+ *
+ * A misspelled bucket and a provider that blinked produce the same refusal but opposite remedies,
+ * and the static entry above can only pick one. It picked "do not upload these files again", which
+ * is right for a typo and wrong for a thirty-second outage — dressing a blip as something only an
+ * administrator can fix is the 2026-08-12 defect inverted, and just as expensive to the person
+ * holding the documents.
+ *
+ * `isRetryable` follows the same split, so a caller can decide whether to offer the action at all.
+ */
+export const explainStoragePause = (isConfigurationFault: boolean): IntakeErrorExplanation => ({
+  ...resolve(INTAKE_ERRORS[DOCUMENT_STORAGE_UNAVAILABLE]),
+  nextAction: isConfigurationFault
+    ? 'Document storage is not configured correctly. Waiting will not clear this — an administrator has to correct the storage settings, and uploading these files again before then will be refused the same way.'
+    : 'Document storage is not responding. This can clear on its own — try again shortly, and tell your administrator if it persists.',
+  isRetryable: !isConfigurationFault,
+});
 
 /** True when this code has explicit copy, rather than falling through to the generic explanation. */
 export const hasIntakeErrorExplanation = (code: string | null | undefined): boolean => {

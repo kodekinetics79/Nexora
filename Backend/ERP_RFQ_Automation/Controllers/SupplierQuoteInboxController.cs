@@ -141,6 +141,17 @@ public sealed class SupplierQuoteInboxController(
         {
             return BadRequest(Problem(StatusCodes.Status400BadRequest, "Invalid Supplier Quote", exception.Message));
         }
+        catch (ERP_RFQ_Automation.Infrastructure.Storage.EvidenceStorageUnavailableException exception)
+        {
+            // Must precede the catch-all: a document store that cannot be written is not a
+            // "Supplier Quote request failed", and answering 500 sends the supplier back to
+            // re-attach a quotation that will be refused identically every time.
+            logger.LogError(exception,
+                "Supplier Quote document intake refused: durable evidence storage is unavailable "
+                + "(configuration fault: {IsConfigurationFault}). CorrelationId={CorrelationId}",
+                exception.IsConfigurationFault, SafeCorrelationId());
+            return ERP_RFQ_Automation.Infrastructure.Storage.EvidenceStorageProblemFilter.ToResult(exception);
+        }
         catch (Exception exception)
         {
             logger.LogError(exception, "Supplier Quote Inbox request failed. CorrelationId={CorrelationId}",

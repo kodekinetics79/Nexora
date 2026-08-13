@@ -7,6 +7,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using ERP_RFQ_Automation.Extraction;
+using ERP_RFQ_Automation.Infrastructure.Storage;
 using ERP_RFQ_Automation.Models;
 using Microsoft.Extensions.Logging;
 using MimeKit;
@@ -85,6 +86,11 @@ public static class EmailIngestEnqueuer
                 fileName, ingest.Id, reason);
         }
 
+        // Set once durable evidence storage refuses a write. Every later attachment would fail
+        // identically — the store is what is down, not the file — so they are recorded as
+        // skipped for the same, true reason instead of each paying a doomed upload.
+        EvidenceStorageUnavailableException? storageOutage = null;
+
         // 1) Attachments first, so the body job's provenance can carry the complete skip list.
         var attachmentOrdinal = 0;
         foreach (var att in message.Attachments)
@@ -107,6 +113,11 @@ public static class EmailIngestEnqueuer
             if (!ERP_RFQ_Automation.Services.EmailService.IsSupportedExtension(ext))
             {
                 RecordSkippedAttachment(part.FileName, $"unsupported file type '{ext}'");
+                continue;
+            }
+            if (storageOutage is not null)
+            {
+                RecordSkippedAttachment(part.FileName, "document storage is unavailable");
                 continue;
             }
 
@@ -152,6 +163,17 @@ public static class EmailIngestEnqueuer
                 logger.LogInformation("Enqueued attachment {FileName} as job {JobId} ({Outcome}) for ingest {IngestId}.",
                     part.FileName, attachmentResult.JobId, attachmentResult.Outcome, ingest.Id);
             }
+            catch (EvidenceStorageUnavailableException ex)
+            {
+                // Storage, not the attachment. The reason recorded here is durable and rendered
+                // in the triage UI, so it must name a cause the reader can act on and nothing else.
+                storageOutage = ex;
+                RecordSkippedAttachment(part.FileName, "document storage is unavailable");
+                logger.LogError(ex,
+                    "Durable evidence storage is unavailable while enqueueing attachment {FileName} for ingest "
+                    + "{IngestId} (configuration fault: {IsConfigurationFault}); remaining attachments were not attempted.",
+                    part.FileName, ingest.Id, ex.IsConfigurationFault);
+            }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 // Poison-attachment isolation: continue with the remaining documents.
@@ -160,7 +182,11 @@ public static class EmailIngestEnqueuer
                 // recorded nothing, so a transient storage failure on the single attachment
                 // carrying the BoQ left a Queued ingest, a body-only lead, and a log line — the
                 // exact loss the ING-06 note below describes, reintroduced through the catch.
-                RecordSkippedAttachment(part.FileName, $"could not be queued ({ex.GetType().Name})");
+                //
+                // The reason is durable AND user-visible, so it must not carry the exception type
+                // name: that field used to publish "AmazonS3Exception" straight onto the triage
+                // screen. The type belongs in the log line underneath, with the rest of it.
+                RecordSkippedAttachment(part.FileName, "it could not be queued");
                 logger.LogError(ex, "Failed to enqueue attachment {FileName} for ingest {IngestId}.",
                     part.FileName, ingest.Id);
             }
@@ -201,6 +227,13 @@ public static class EmailIngestEnqueuer
                 logger.LogInformation("Enqueued email body as job {JobId} ({Outcome}) for ingest {IngestId}.",
                     bodyResult.JobId, bodyResult.Outcome, ingest.Id);
             }
+        }
+        catch (EvidenceStorageUnavailableException ex)
+        {
+            logger.LogError(ex,
+                "Durable evidence storage is unavailable while enqueueing the email body for ingest {IngestId} "
+                + "(configuration fault: {IsConfigurationFault}). No job was created; the message stays unprocessed "
+                + "and is not lost.", ingest.Id, ex.IsConfigurationFault);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

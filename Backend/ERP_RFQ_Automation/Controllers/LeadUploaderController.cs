@@ -83,6 +83,15 @@ namespace ERP_RFQ_Automation.Controllers
                 // P2-A10: one canonical problem+json shape/base URI for typed denials.
                 return Platform.Entitlements.EntitlementProblemFilter.ToResult(ex);
             }
+            catch (Infrastructure.Storage.EvidenceStorageUnavailableException ex)
+            {
+                // Same refusal as every other intake door: the template was not accepted, and
+                // the caller is told the one fixable thing rather than "internal server error".
+                _logger.LogError(ex,
+                    "Template upload refused for tenant {BusinessUnitId}: durable evidence storage is unavailable "
+                    + "(configuration fault: {IsConfigurationFault}).", targetBUId, ex.IsConfigurationFault);
+                return Infrastructure.Storage.EvidenceStorageProblemFilter.ToResult(ex);
+            }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error uploading lead template.");

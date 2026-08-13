@@ -158,6 +158,102 @@ public sealed class EvidenceObjectStorageTests : IDisposable
                 " 3sL4kqtJlcpXroDTDmJ+rmSpXd3dIbrHY+MTRCxf3vjVBH40Nr8X8gdRQBpUMLUo "));
     }
 
+    /// <summary>
+    /// The 2026-08-12 split. Everything a write can raise that is NOT a verdict about the document
+    /// in hand is the store failing, and must reach the caller as one batch-wide refusal rather
+    /// than as N invitations to retry N files.
+    /// </summary>
+    [Theory]
+    // The incident itself, plus the other ways a deployment is simply pointed at the wrong place.
+    [InlineData("NoSuchBucket", true, true)]
+    [InlineData("AccessDenied", true, true)]
+    [InlineData("InvalidAccessKeyId", true, true)]
+    [InlineData("SignatureDoesNotMatch", true, true)]
+    [InlineData("PermanentRedirect", true, true)]
+    // A provider that is merely having a bad day: unavailable, but not misconfigured.
+    [InlineData("InternalError", true, false)]
+    [InlineData("SlowDown", true, false)]
+    [InlineData("ServiceUnavailable", true, false)]
+    public void EvidenceStorageFaults_SeparatesMisconfigurationFromAnUnreachableProvider(
+        string errorCode, bool expectedUnavailable, bool expectedConfiguration)
+    {
+        var exception = new AmazonS3Exception("provider detail") { ErrorCode = errorCode };
+
+        Assert.Equal(expectedUnavailable,
+            EvidenceStorageFaults.IsStoreUnavailable(exception, CancellationToken.None));
+        Assert.Equal(expectedConfiguration, EvidenceStorageFaults.IsConfigurationFault(exception));
+    }
+
+    [Fact]
+    public void EvidenceStorageFaults_TreatsPerDocumentVerdictsAsTheDocumentsOwn()
+    {
+        // A content-address conflict, a bad extension and an unresolvable per-object race are
+        // facts about ONE file. Flattening them into "storage is down" would stop a whole batch
+        // for one poison document — the mirror image of the bug being fixed.
+        foreach (var perDocument in new Exception[]
+                 {
+                     new InvalidDataException("An existing evidence object conflicts with its content address."),
+                     new ArgumentException("The evidence extension is invalid."),
+                     new ArgumentOutOfRangeException("businessUnitId"),
+                     new InvalidOperationException(EvidenceStorageFaults.UnresolvableRaceMessage)
+                 })
+        {
+            Assert.True(EvidenceStorageFaults.IsPerDocumentFault(perDocument));
+            Assert.False(EvidenceStorageFaults.IsStoreUnavailable(perDocument, CancellationToken.None));
+        }
+    }
+
+    [Fact]
+    public void EvidenceStorageFaults_LeavesACallerCancellationAsACancellation()
+    {
+        // A client that hung up mid-upload is not a storage outage, and reporting it as one would
+        // pause uploads for everyone else.
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+
+        Assert.False(EvidenceStorageFaults.IsStoreUnavailable(
+            new OperationCanceledException(cancelled.Token), cancelled.Token));
+        // The same exception WITHOUT the caller having cancelled is the provider not answering.
+        Assert.True(EvidenceStorageFaults.IsStoreUnavailable(
+            new TaskCanceledException("The request timed out."), CancellationToken.None));
+    }
+
+    [Fact]
+    public void EvidenceStorageUnavailableException_KeepsProviderDetailOutOfItsMessage()
+    {
+        var inner = new AmazonS3Exception("The specified bucket does not exist: NexoraB2")
+        {
+            ErrorCode = "NoSuchBucket"
+        };
+
+        var wrapped = EvidenceStorageFaults.Unavailable(inner);
+
+        Assert.True(wrapped.IsConfigurationFault);
+        Assert.Equal("Document storage is not configured, so uploads are paused.", wrapped.Message);
+        Assert.DoesNotContain("NexoraB2", wrapped.Message);
+        // Nothing is swallowed: the provider's own account is still there for the server log.
+        Assert.Same(inner, wrapped.InnerException);
+    }
+
+    [Fact]
+    public async Task UnconfiguredStore_RefusesEveryWriteInsteadOfFailingDependencyInjection()
+    {
+        // An S3 block with no bucket used to throw out of the DI factory, so every upload answered
+        // an unhandled 500 — worse than the incident, because a 500 names nothing at all.
+        var storage = new UnconfiguredEvidenceObjectStorage(
+            new InvalidOperationException("S3 evidence storage requires service URL, credentials, and bucket."));
+        var bytes = Encoding.UTF8.GetBytes("rfq");
+
+        var refusal = await Assert.ThrowsAsync<EvidenceStorageUnavailableException>(() =>
+            storage.WriteImmutableAsync(17, "quarantine", Sha256(bytes), ".csv", bytes));
+
+        Assert.True(refusal.IsConfigurationFault);
+        // Reported durable so readiness fails on the probe, rather than claiming the deployment
+        // chose local ephemeral storage — a different and untrue diagnosis.
+        Assert.True(storage.IsDurable);
+        await Assert.ThrowsAsync<EvidenceStorageUnavailableException>(() => storage.ProbeAsync());
+    }
+
     private LocalEvidenceObjectStorage CreateStorage() =>
         new(new LocalFileStorage(_root, _root));
 

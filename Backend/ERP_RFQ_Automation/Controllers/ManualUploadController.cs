@@ -66,9 +66,10 @@ namespace ERP_RFQ_Automation.Controllers
                 return BadRequest(new { success = false, message = "No files uploaded." });
             }
 
+            // Declared outside the try so a refusal can still report what it accepted first.
+            var accepted = new List<object>();
             try
             {
-                var accepted = new List<object>();
                 foreach (var file in files)
                 {
                     if (file.Length == 0 || file.Length > 25L * 1024 * 1024)
@@ -94,6 +95,23 @@ namespace ERP_RFQ_Automation.Controllers
             {
                 _logger.LogWarning("Upload denied for tenant {BusinessUnitId}: {Reason}", targetBUId, ex.Message);
                 return EntitlementProblem(ex);
+            }
+            catch (EvidenceStorageUnavailableException ex)
+            {
+                // Nexora stores the immutable source before it queues anything, so a store it
+                // cannot write means nothing further can be accepted — for this file or the next
+                // one. A generic 500 would send the caller looking at their documents; this names
+                // the one thing that is actually broken. Specifics stay in the log line.
+                //
+                // `accepted` is not thrown away with the exception: whatever was stored earlier in
+                // this same loop is already processing, and a refusal that hid it would report a
+                // half-run batch as a clean rejection.
+                _logger.LogError(ex,
+                    "Upload refused for tenant {BusinessUnitId}: durable evidence storage is unavailable "
+                    + "(configuration fault: {IsConfigurationFault}). {Accepted} file(s) were accepted first.",
+                    targetBUId, ex.IsConfigurationFault, accepted.Count);
+                return EvidenceStorageProblemFilter.ToResult(ex,
+                    new Dictionary<string, object?>(StringComparer.Ordinal) { ["accepted"] = accepted });
             }
             catch (Exception ex)
             {
@@ -164,6 +182,13 @@ namespace ERP_RFQ_Automation.Controllers
             {
                 _logger.LogWarning("RFQ Excel upload denied for tenant {BusinessUnitId}: {Reason}", targetBUId, ex.Message);
                 return EntitlementProblem(ex);
+            }
+            catch (EvidenceStorageUnavailableException ex)
+            {
+                _logger.LogError(ex,
+                    "RFQ spreadsheet upload refused for tenant {BusinessUnitId}: durable evidence storage is "
+                    + "unavailable (configuration fault: {IsConfigurationFault}).", targetBUId, ex.IsConfigurationFault);
+                return EvidenceStorageProblemFilter.ToResult(ex);
             }
             catch (Exception ex)
             {

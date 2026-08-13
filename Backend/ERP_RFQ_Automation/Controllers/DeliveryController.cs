@@ -191,6 +191,19 @@ public sealed class DeliveryController(
             return BadRequest(Problem(StatusCodes.Status400BadRequest, "Invalid delivery request",
                 exception.Message));
         }
+        catch (ERP_RFQ_Automation.Infrastructure.Storage.EvidenceStorageUnavailableException exception)
+        {
+            // Proof-of-delivery evidence lands in the same immutable store as every other upload.
+            // Caught HERE rather than left to EvidenceStorageProblemFilter, because the catch-all
+            // below would handle it first and an MVC exception filter only sees UNHANDLED ones —
+            // a warehouse operator capturing a signed POD would get "the delivery request could
+            // not be completed", retry, and file a ticket for a cause the product already knows.
+            logger.LogError(exception,
+                "Delivery request refused: durable evidence storage is unavailable "
+                + "(configuration fault: {IsConfigurationFault}). CorrelationId={CorrelationId}",
+                exception.IsConfigurationFault, HttpContext.TraceIdentifier);
+            return ERP_RFQ_Automation.Infrastructure.Storage.EvidenceStorageProblemFilter.ToResult(exception);
+        }
         catch (Exception exception)
         {
             logger.LogError(exception, "Delivery request failed. CorrelationId={CorrelationId}",

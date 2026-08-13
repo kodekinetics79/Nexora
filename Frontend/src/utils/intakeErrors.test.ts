@@ -3,6 +3,7 @@ import {
   RECOVERABLE_INTAKE_ERROR_CODES,
   explainIntakeError,
   explainIntakeItem,
+  explainStoragePause,
   hasIntakeErrorExplanation,
   isInfrastructureHold,
   isRecoverableIntakeErrorCode,
@@ -31,6 +32,7 @@ describe('backend contract alignment', () => {
       'unsupported_format',
       'security_scan_cleared',
       'ingestion_failed',
+      'evidence_storage_unavailable',
     ]) {
       expect(hasIntakeErrorExplanation(code)).toBe(true);
     }
@@ -361,5 +363,33 @@ describe('the presentability gate still blocks unsafe server text', () => {
     expect(explanation.whatHappened).toBe(
       'This workbook contains macros (embedded VBA code), which Nexora does not accept.',
     );
+  });
+});
+
+/*
+  The storage pause has two faults wearing one code. Telling someone to wait out a misspelled
+  bucket was the 2026-08-12 defect; telling someone a thirty-second blip needs an administrator is
+  the same defect inverted, and the static entry could only ever say one of them.
+*/
+describe('explainStoragePause', () => {
+  it('forbids a retry, and says so, when the store is misconfigured', () => {
+    const explanation = explainStoragePause(true);
+    expect(explanation.isRetryable).toBe(false);
+    expect(explanation.nextAction).toContain('administrator');
+    expect(explanation.nextAction).not.toContain('try again shortly');
+  });
+
+  it('offers the retry when the store is merely unreachable', () => {
+    const explanation = explainStoragePause(false);
+    expect(explanation.isRetryable).toBe(true);
+    expect(explanation.nextAction).toContain('can clear on its own');
+    expect(explanation.nextAction).not.toContain('Waiting will not clear this');
+  });
+
+  it('never claims the batch was refused wholesale — a store can fail part way through one', () => {
+    for (const explanation of [explainStoragePause(true), explainStoragePause(false)]) {
+      expect(explanation.whatHappened).not.toContain('Nothing was accepted');
+      expect(explanation.category).toBe('infrastructure');
+    }
   });
 });

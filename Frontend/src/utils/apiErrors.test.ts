@@ -344,3 +344,47 @@ describe('toPresentableError — RFC 7807 ProblemDetails', () => {
     expect(result.message).toBe('This RFQ was modified by another user. Reload before saving.');
   });
 });
+
+/*
+  2026-08-12: evidence storage was repointed at a misspelled bucket and four uploads were each
+  answered "upload this file again". A 503 normally means "we blinked, try again shortly", so the
+  status-derived copy discarded the server's diagnosis and restored that advice at every door the
+  upload page had not hand-wired.
+*/
+describe('toPresentableError — the document-storage refusal outranks its 503', () => {
+  const refusal = (isConfigurationFault: boolean) => ({
+    type: 'https://nexora.app/problems/document-storage-unavailable',
+    title: 'Uploads are paused — document storage is unavailable',
+    detail: isConfigurationFault
+      ? 'Document storage is not configured, so uploads are paused. Retrying will not help until an administrator corrects the document storage settings.'
+      : 'Document storage is unavailable, so uploads are paused. This can clear on its own — try again shortly, and tell an administrator if it persists.',
+    status: 503,
+    errorCode: 'evidence_storage_unavailable',
+    isConfigurationFault,
+  });
+
+  it('renders the server sentence instead of the generic 503 copy', () => {
+    const result = toPresentableError(axiosError({ status: 503, data: refusal(true) }));
+    expect(result.message).toContain('Document storage is not configured');
+    expect(result.message).not.toContain('try again shortly');
+    expect(result.title).toBe('Uploads are paused — document storage is unavailable');
+  });
+
+  it('refuses to call a configuration fault retryable', () => {
+    expect(toPresentableError(axiosError({ status: 503, data: refusal(true) })).isRetryable).toBe(false);
+  });
+
+  it('still allows a retry when the store is merely unreachable', () => {
+    const result = toPresentableError(axiosError({ status: 503, data: refusal(false) }));
+    expect(result.isRetryable).toBe(true);
+    expect(result.message).toContain('can clear on its own');
+  });
+
+  it('never renders a sentence that leaked infrastructure detail', () => {
+    const leaky = { ...refusal(true), detail: 'The specified bucket does not exist: NexoraB2 (AmazonS3Exception)' };
+    const result = toPresentableError(axiosError({ status: 503, data: leaky }));
+    expect(result.message).not.toContain('NexoraB2');
+    expect(result.message).not.toContain('AmazonS3Exception');
+    expect(result.message).toContain('document storage');
+  });
+});

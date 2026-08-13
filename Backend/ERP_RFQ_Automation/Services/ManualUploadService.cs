@@ -492,6 +492,29 @@ namespace ERP_RFQ_Automation.Services
                     else
                         queued++;
                 }
+                catch (EvidenceStorageUnavailableException ex)
+                {
+                    // The store, not the file. Continuing would produce one skip per remaining
+                    // document and then the "check the file types" message below — which blamed
+                    // the operator's .doc files for a misspelled bucket on 2026-08-12. Stop and
+                    // name the real, fixable cause; specifics stay in this log line.
+                    _logger.LogError(ex,
+                        "Manual upload batch {BatchId} stopped for tenant {BusinessUnitId}: durable evidence storage "
+                        + "is unavailable (configuration fault: {IsConfigurationFault}). {Queued} document(s) were stored first.",
+                        batchId, businessUnitId, ex.IsConfigurationFault, queued);
+                    // What was already stored keeps processing and WILL surface as leads, so the
+                    // refusal reports it. Answering "nothing was accepted, so nothing was lost"
+                    // after two of four files were queued contradicts the log line directly above
+                    // it, and leaves the operator disowning work that is already in flight.
+                    var storedAlready = queued + duplicates;
+                    var acceptedSoFar = storedAlready == 0
+                        ? "Nothing was accepted, so nothing was lost."
+                        : $"{storedAlready} document(s) were accepted before it failed and keep processing; "
+                          + "the rest were not accepted.";
+                    return ServiceResult<long>.CreateFailure(
+                        $"{ex.Message} {acceptedSoFar} {ex.OperatorNextAction}",
+                        EvidenceStorageUnavailableException.ErrorCode);
+                }
                 catch (Exception ex)
                 {
                     // Poison-file isolation: one bad file never fails the batch.

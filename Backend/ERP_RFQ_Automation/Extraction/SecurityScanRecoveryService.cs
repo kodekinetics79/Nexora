@@ -226,7 +226,7 @@ public sealed class SecurityScanRecoveryService : ISecurityScanRecoveryService
                 else
                 {
                     items.Add(new(candidate.Occurrence.Id, metadata.FileName,
-                        "AwaitingSecurityScan", "evidence_storage_unavailable", null));
+                        "AwaitingSecurityScan", EvidenceStorageUnavailableException.ErrorCode, null));
                 }
                 continue;
             }
@@ -250,6 +250,22 @@ public sealed class SecurityScanRecoveryService : ISecurityScanRecoveryService
                     exception.Inspection.IsRetryable ? "AwaitingSecurityScan" : "Rejected",
                     exception.Inspection.ErrorCode,
                     null));
+            }
+            catch (EvidenceStorageUnavailableException exception)
+            {
+                // The READ side above already answers a dead store with evidence_storage_unavailable
+                // and leaves the occurrence replayable; the re-INGEST side used to let the same
+                // fault escape and abort the sweep mid-way, so the candidates after this one were
+                // neither retried nor reported. Same code, same replayable status, and the sweep
+                // stops deliberately — every remaining candidate would fail identically.
+                _log?.LogError(exception,
+                    "Security-scan recovery stopped for business unit {BusinessUnitId}: durable evidence storage is "
+                    + "unavailable (configuration fault: {IsConfigurationFault}). {Recovered} of {Eligible} candidate(s) "
+                    + "were replayed; the rest stay replayable.",
+                    businessUnitId, exception.IsConfigurationFault, items.Count, eligible.Length);
+                items.Add(new(candidate.Occurrence.Id, metadata.FileName,
+                    "AwaitingSecurityScan", EvidenceStorageUnavailableException.ErrorCode, null));
+                break;
             }
         }
 

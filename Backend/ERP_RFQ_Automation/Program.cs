@@ -110,6 +110,11 @@ builder.Services.AddControllers()
         options.JsonSerializerOptions.NumberHandling = JsonNumberHandling.AllowReadingFromString;
     });
 
+// Safety net for intake doors that do not catch it themselves: a durable-storage outage
+// renders as the one honest 503 refusal instead of a bare 500 that names nothing.
+builder.Services.Configure<Microsoft.AspNetCore.Mvc.MvcOptions>(
+    options => options.Filters.Add<EvidenceStorageProblemFilter>());
+
 // Keep the host alive if a BackgroundService throws — a transient failure in the
 // email poller must not tear down the whole API. (DATA-01)
 builder.Services.Configure<HostOptions>(options =>
@@ -141,9 +146,28 @@ builder.Services.Configure<MalwareVerdictPolicyOptions>(
 builder.Services.AddSingleton<IEvidenceObjectStorage>(services =>
 {
     var options = services.GetRequiredService<Microsoft.Extensions.Options.IOptions<S3EvidenceStorageOptions>>();
-    return string.Equals(options.Value.Provider, "S3", StringComparison.OrdinalIgnoreCase)
-        ? new S3EvidenceObjectStorage(options)
-        : new LocalEvidenceObjectStorage(services.GetRequiredService<IFileStorage>());
+    if (!string.Equals(options.Value.Provider, "S3", StringComparison.OrdinalIgnoreCase))
+        return new LocalEvidenceObjectStorage(services.GetRequiredService<IFileStorage>());
+
+    try
+    {
+        return new S3EvidenceObjectStorage(options);
+    }
+    catch (InvalidOperationException exception)
+    {
+        // An S3 block missing its bucket, credentials or a usable endpoint used to throw out of
+        // THIS factory, so resolving any intake controller failed and every upload answered an
+        // unhandled 500 — the 2026-08-12 defect one degree worse, since a 500 names nothing at
+        // all. Hand back a store that refuses honestly instead: readiness goes Unhealthy, every
+        // door returns the one "document storage is not configured" outcome, and the reason a
+        // human can act on is logged here, once, where infrastructure detail belongs.
+        services.GetRequiredService<ILoggerFactory>()
+            .CreateLogger("ERP_RFQ_Automation.Infrastructure.Storage")
+            .LogError(exception,
+                "Durable evidence storage is configured for S3 but could not be constructed. "
+                + "Document intake is paused until the EvidenceStorage configuration is corrected.");
+        return new UnconfiguredEvidenceObjectStorage(exception);
+    }
 });
 // Malware scanner provider is chosen EXPLICITLY by configuration
 // (DocumentInspection:Scanner:Provider = ClamAV | BuiltIn), never implicitly by environment.
