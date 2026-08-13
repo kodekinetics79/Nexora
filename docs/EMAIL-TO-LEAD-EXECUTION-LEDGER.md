@@ -333,3 +333,49 @@ tenant's occurrence or job id with nothing refusing it.
 
 **Next: section B — canonical MIME correctness (M2 decode-before-limit, M3 verifier completeness,
 M5 inline classifier, M6 containers, M7 recursion).**
+
+---
+
+## Section B — canonical MIME correctness
+
+### B1 — bounded decoding. COMPLETE
+
+`BoundedComponentDecoder` enforces the per-component ceiling and the message's remaining shared
+budget **during** the copy, via a write-only sink that refuses past its ceiling. Both planner
+paths (attachment decode, embedded-message serialize) now go through it.
+
+Refusing rather than truncating is deliberate: a silently truncated attachment would be extracted
+as though it were the whole document, and half a bill of quantities priced as a complete one is
+worse than a refusal an operator can see.
+
+Declared `Content-Disposition: size` may only ever REJECT early — it can never authorise a
+decode — because the sender controls it and understating it would otherwise be the way past the
+limit.
+
+| Test | Proves |
+| --- | --- |
+| oversized part refused | observed bytes ≤ ceiling, not the part's real size — the OOM vector |
+| dishonestly small declared size | cannot authorise an oversized decode; still bounded |
+| honestly oversized declared size | refused without touching the body |
+| shared-budget exhaustion | distinct outcome from per-component (different operator action) |
+| exhausted budget | refuses before reading anything |
+| exactly at ceiling | accepted (inclusive limit) |
+| embedded message | same ceilings, no separate allowance |
+| cancellation | propagates, not reported as "could not be read" |
+
+Focused: **Failed: 0, Passed: 34** (decoder + planner). **Closes SME2 M2 (High).**
+
+### B2–B5 — OUTSTANDING
+
+| Item | Finding | Status |
+| --- | --- | --- |
+| B2 real recursion + one shared budget across the tree | M7, SME1 F3 | TODO |
+| B3 verifier completeness (filename/MIME/disposition/reason/depth, dense ordinals, set equality, typed version hold) | M3 | TODO |
+| B4 inline classifier without declared size; screenshot never silently ignored | M5, SME1 F5 | TODO |
+| B5 container formats — TNEF wiring, S/MIME security-gated, appledouble/ics/DSN | M6 | TODO |
+
+**B5 inventory (done):** the repository has **no** existing reader for TNEF, S/MIME, calendar or
+DSN. MimeKit 4.16 supplies `TnefPart.ExtractAttachments()` (safe wiring, no new parser) and
+`ApplicationPkcs7Mime`. Decrypting S/MIME needs a `SecureMimeContext` with keys, which this
+deployment does not have — so encrypted S/MIME must be classified security-gated and surfaced as
+`NeedsReview`, never represented as extracted. No new parsers are to be written.

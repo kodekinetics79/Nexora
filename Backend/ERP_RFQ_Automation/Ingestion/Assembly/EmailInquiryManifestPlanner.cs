@@ -295,32 +295,21 @@ public static class EmailInquiryManifestPlanner
                 continue;
             }
 
-            byte[] bytes;
-            try
+            // Bounded from the first byte: the ceiling is enforced DURING the copy, so an
+            // 800 MB part costs one buffer rather than 1.6 GB of transient allocation. Declared
+            // size can refuse early but never authorises a decode — see BoundedComponentDecoder.
+            var decoded = await BoundedComponentDecoder.DecodeAsync(
+                part, limits.MaxComponentBytes, limits.MaxTotalBytes - total(), ct);
+
+            if (decoded.Outcome == BoundedDecodeOutcome.Unreadable)
             {
-                using var buffer = new MemoryStream();
-                await part.Content.DecodeToAsync(buffer, ct);
-                bytes = buffer.ToArray();
-            }
-            catch (Exception exception) when (exception is not OperationCanceledException)
-            {
-                // A malformed part is a property of the FILE, so it is a skip rather than a
-                // hold: no amount of retrying decodes it. The exception type stays in the log.
                 components.Add(Refused(key, EmailInquiryComponentKind.Attachment, ordinal(),
                     part.FileName, depth,
                     EmailInquirySkipReasons.AttachmentUnreadable,
                     "This attachment could not be decoded from the message."));
                 continue;
             }
-
-            if (bytes.Length == 0)
-            {
-                components.Add(Refused(key, EmailInquiryComponentKind.Attachment, ordinal(),
-                    part.FileName, depth,
-                    EmailInquirySkipReasons.AttachmentEmpty, "This attachment is empty."));
-                continue;
-            }
-            if (bytes.Length > limits.MaxComponentBytes)
+            if (decoded.Outcome == BoundedDecodeOutcome.ExceedsComponentLimit)
             {
                 components.Add(Refused(key, EmailInquiryComponentKind.Attachment, ordinal(),
                     part.FileName, depth,
@@ -328,12 +317,21 @@ public static class EmailInquiryManifestPlanner
                     $"This attachment is larger than the {limits.MaxComponentBytes / (1024 * 1024)} MB limit."));
                 continue;
             }
-            if (total() + bytes.Length > limits.MaxTotalBytes)
+            if (decoded.Outcome == BoundedDecodeOutcome.ExceedsMessageBudget)
             {
                 components.Add(Refused(key, EmailInquiryComponentKind.Attachment, ordinal(),
                     part.FileName, depth,
                     EmailInquirySkipReasons.TotalSizeLimitExceeded,
                     $"This message exceeds the {limits.MaxTotalBytes / (1024 * 1024)} MB total limit."));
+                continue;
+            }
+
+            var bytes = decoded.Bytes;
+            if (bytes.Length == 0)
+            {
+                components.Add(Refused(key, EmailInquiryComponentKind.Attachment, ordinal(),
+                    part.FileName, depth,
+                    EmailInquirySkipReasons.AttachmentEmpty, "This attachment is empty."));
                 continue;
             }
 
@@ -378,16 +376,7 @@ public static class EmailInquiryManifestPlanner
             return;
         }
 
-        byte[] bytes;
-        try
-        {
-            using var buffer = new MemoryStream();
-            if (embedded.Message is null)
-                throw new FormatException("The embedded part carried no message.");
-            await embedded.Message.WriteToAsync(buffer, ct);
-            bytes = buffer.ToArray();
-        }
-        catch (Exception exception) when (exception is not OperationCanceledException)
+        if (embedded.Message is null)
         {
             components.Add(Refused(key, EmailInquiryComponentKind.EmbeddedMessage, ordinal(),
                 EmbeddedName(embedded, index), depth + 1,
@@ -396,14 +385,19 @@ public static class EmailInquiryManifestPlanner
             return;
         }
 
-        if (bytes.Length == 0)
+        // Same ceilings, same shared budget. A nested message never gets an allowance of its own.
+        var serialized = await BoundedComponentDecoder.SerializeAsync(
+            embedded.Message, limits.MaxComponentBytes, limits.MaxTotalBytes - total(), ct);
+
+        if (serialized.Outcome == BoundedDecodeOutcome.Unreadable)
         {
             components.Add(Refused(key, EmailInquiryComponentKind.EmbeddedMessage, ordinal(),
                 EmbeddedName(embedded, index), depth + 1,
-                EmailInquirySkipReasons.AttachmentEmpty, "This forwarded message is empty."));
+                EmailInquirySkipReasons.EmbeddedMessageUnreadable,
+                "This forwarded message could not be read."));
             return;
         }
-        if (bytes.Length > limits.MaxComponentBytes)
+        if (serialized.Outcome == BoundedDecodeOutcome.ExceedsComponentLimit)
         {
             components.Add(Refused(key, EmailInquiryComponentKind.EmbeddedMessage, ordinal(),
                 EmbeddedName(embedded, index), depth + 1,
@@ -411,12 +405,21 @@ public static class EmailInquiryManifestPlanner
                 $"This forwarded message is larger than the {limits.MaxComponentBytes / (1024 * 1024)} MB limit."));
             return;
         }
-        if (total() + bytes.Length > limits.MaxTotalBytes)
+        if (serialized.Outcome == BoundedDecodeOutcome.ExceedsMessageBudget)
         {
             components.Add(Refused(key, EmailInquiryComponentKind.EmbeddedMessage, ordinal(),
                 EmbeddedName(embedded, index), depth + 1,
                 EmailInquirySkipReasons.TotalSizeLimitExceeded,
                 $"This message exceeds the {limits.MaxTotalBytes / (1024 * 1024)} MB total limit."));
+            return;
+        }
+
+        var bytes = serialized.Bytes;
+        if (bytes.Length == 0)
+        {
+            components.Add(Refused(key, EmailInquiryComponentKind.EmbeddedMessage, ordinal(),
+                EmbeddedName(embedded, index), depth + 1,
+                EmailInquirySkipReasons.AttachmentEmpty, "This forwarded message is empty."));
             return;
         }
 
