@@ -157,7 +157,58 @@ namespace ERP_RFQ_Automation.Migrations
                     public."EmailInquiryAssemblies",
                     public."EmailInquiryComponents"
                 TO nexora_tenant_app;
-                GRANT USAGE, SELECT ON SEQUENCE
+                """);
+
+            // Tenant purge reach. 20260811154500_TenantPurgeExecutionRole built nexora_purge_app
+            // from a catalogue sweep at that point in time, so a table added by a LATER migration
+            // is invisible to it and must carry the same grant and the same nexora_tenant_purge
+            // policy itself.
+            //
+            // This is not optional bookkeeping: TenantPurgeExecutor.AssertPurgeReachAsync refuses
+            // to run a sweep it cannot prove it can reach, precisely so that a forgotten table
+            // cannot make a purge "succeed" having destroyed nothing in it. Omitting this blocked
+            // every tenant purge in the suite — the guard worked exactly as designed and named
+            // both tables and the remedy.
+            migrationBuilder.Sql("""
+                DO $$
+                BEGIN
+                    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexora_purge_app') THEN
+                        GRANT SELECT, DELETE ON public."EmailInquiryAssemblies" TO nexora_purge_app;
+                        GRANT SELECT, DELETE ON public."EmailInquiryComponents" TO nexora_purge_app;
+
+                        IF NOT EXISTS (
+                            SELECT 1 FROM pg_policy p
+                            WHERE p.polrelid = 'public."EmailInquiryAssemblies"'::regclass
+                              AND p.polname = 'nexora_tenant_purge') THEN
+                            CREATE POLICY nexora_tenant_purge ON public."EmailInquiryAssemblies"
+                                AS PERMISSIVE FOR ALL TO nexora_purge_app
+                                USING ("BusinessUnitId" = NULLIF(current_setting('nexora.purge_business_unit_id', true), '')::bigint);
+                        END IF;
+
+                        IF NOT EXISTS (
+                            SELECT 1 FROM pg_policy p
+                            WHERE p.polrelid = 'public."EmailInquiryComponents"'::regclass
+                              AND p.polname = 'nexora_tenant_purge') THEN
+                            CREATE POLICY nexora_tenant_purge ON public."EmailInquiryComponents"
+                                AS PERMISSIVE FOR ALL TO nexora_purge_app
+                                USING ("BusinessUnitId" = NULLIF(current_setting('nexora.purge_business_unit_id', true), '')::bigint);
+                        END IF;
+                    END IF;
+                END
+                $$;
+                """);
+
+            // USAGE ONLY on the identity sequences — never SELECT, never UPDATE.
+            //
+            // USAGE is nextval, which is all an INSERT needs. SELECT would let a tenant read
+            // currval and infer how many rows every OTHER tenant has written to a shared
+            // sequence; UPDATE would let it setval and collide deliberately with a neighbour's
+            // future keys. PostgreSqlProductionDialectTests asserts globally that NO sequence
+            // grants either to nexora_tenant_app, and it caught this migration doing exactly
+            // that — the grant was copied from a table-privilege line where SELECT is ordinary
+            // and on a sequence is not.
+            migrationBuilder.Sql("""
+                GRANT USAGE ON SEQUENCE
                     public."EmailInquiryAssemblies_Id_seq",
                     public."EmailInquiryComponents_Id_seq"
                 TO nexora_tenant_app;
@@ -175,7 +226,7 @@ namespace ERP_RFQ_Automation.Migrations
                             public."EmailInquiryAssemblies",
                             public."EmailInquiryComponents"
                         TO nexora_pipeline_app;
-                        GRANT USAGE, SELECT ON SEQUENCE
+                        GRANT USAGE ON SEQUENCE
                             public."EmailInquiryAssemblies_Id_seq",
                             public."EmailInquiryComponents_Id_seq"
                         TO nexora_pipeline_app;
@@ -191,6 +242,8 @@ namespace ERP_RFQ_Automation.Migrations
             // Policies and grants disappear with the tables; dropping them explicitly first keeps
             // the Down readable and survives a partial apply where a table already went.
             migrationBuilder.Sql("""
+                DROP POLICY IF EXISTS nexora_tenant_purge ON public."EmailInquiryComponents";
+                DROP POLICY IF EXISTS nexora_tenant_purge ON public."EmailInquiryAssemblies";
                 DROP POLICY IF EXISTS nexora_tenant_isolation ON public."EmailInquiryComponents";
                 DROP POLICY IF EXISTS nexora_tenant_isolation ON public."EmailInquiryAssemblies";
                 """);
