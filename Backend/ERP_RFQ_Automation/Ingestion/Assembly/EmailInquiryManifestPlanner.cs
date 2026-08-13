@@ -158,23 +158,21 @@ public static class EmailInquiryManifestPlanner
     {
         ArgumentNullException.ThrowIfNull(message);
         ArgumentException.ThrowIfNullOrWhiteSpace(messageKey);
-        limits ??= EmailInquiryLimits.Default;
 
+        var budget = new EmailInquiryBudget(limits ?? EmailInquiryLimits.Default, ct);
         var components = new List<EmailInquiryComponentPlan>();
         var ordinal = 0;
-        long totalBytes = 0;
 
         // 1) The body, and only when the sender actually wrote something. A quoted-only reply
-        //    produces NO body component: expected stays at whatever the attachments contribute,
-        //    so a bare "thanks" with nothing attached ends as NoInquiry rather than sitting in a
-        //    reviewer's queue forever.
+        //    produces NO body component, so a bare "thanks" with nothing attached ends as
+        //    NoInquiry rather than sitting in a reviewer's queue forever.
         var quotedOnly = string.IsNullOrWhiteSpace(freshBodyText);
-        if (!quotedOnly)
+        if (!quotedOnly && budget.TryTakeComponent())
         {
             var bodyDocument =
                 $"Subject: {message.Subject}\nFrom: {message.From}\nDate: {message.Date:yyyy-MM-dd}\n\n{freshBodyText}";
             var bytes = Encoding.UTF8.GetBytes(bodyDocument);
-            totalBytes += bytes.Length;
+            budget.ChargeBytes(bytes.Length);
             components.Add(new EmailInquiryComponentPlan(
                 $"email:{messageKey}:body",
                 EmailInquiryComponentKind.Body,
@@ -187,78 +185,91 @@ public static class EmailInquiryManifestPlanner
                 null, null, 0, bytes));
         }
 
-        // 2) Attachments, in message order, including embedded messages.
-        await WalkAsync(message, messageKey, components, limits, depth: 0,
-            path: string.Empty, ordinal: () => ordinal++, total: () => totalBytes,
-            addTotal: b => totalBytes += b, ct);
+        // 2) The MIME tree, depth-first, sharing ONE budget.
+        var cidReferences = HtmlCidReferences(message);
+        await WalkAsync(message, messageKey, components, budget, depth: 0,
+            path: string.Empty, cidReferences, () => ordinal++);
 
         return new EmailInquiryManifest(messageKey, components, quotedOnly, ContractVersion);
     }
 
+    /// <summary>
+    /// Walks one message level, recursing into embedded messages.
+    ///
+    /// <para><b>Identity is a hierarchical PATH, not a flat counter.</b> Once traversal recurses,
+    /// a counter alone collides: the third top-level attachment and the third attachment inside a
+    /// forward would both be "attachment:3". Keys are therefore <c>part:1</c>, <c>part:3</c>,
+    /// <c>part:3.1</c>, <c>part:3.2</c> — position within the tree, which is deterministic for
+    /// identical bytes and cannot alias across levels.</para>
+    ///
+    /// <para>Recursion is bounded by <see cref="EmailInquiryBudget.MaxNestingDepth"/> before the
+    /// call is made, so the stack depth is a declared constant rather than a property of the
+    /// message.</para>
+    /// </summary>
     private static async Task WalkAsync(
         MimeMessage message,
         string messageKey,
         List<EmailInquiryComponentPlan> components,
-        EmailInquiryLimits limits,
+        EmailInquiryBudget budget,
         int depth,
         string path,
-        Func<int> ordinal,
-        Func<long> total,
-        Action<long> addTotal,
-        CancellationToken ct)
+        IReadOnlySet<string> cidReferences,
+        Func<int> ordinal)
     {
         // MimeKit's `Attachments` is NOT the MIME tree — it yields only entities whose
         // Content-Disposition says "attachment". An embedded message/rfc822 inside a
         // multipart/mixed frequently carries NO disposition header at all, which is how a
         // forwarded enquiry arrives from Outlook and Gmail, and it was therefore invisible to
-        // any planner built on `Attachments`. The old enqueuer had the same blind spot.
-        //
-        // BodyParts walks every leaf, so the candidates are selected here instead: an embedded
-        // message always counts, a named or attachment-dispositioned part counts, and the
-        // text/* parts that ARE the body are excluded because the body is planned separately
-        // from the quote-stripped text.
+        // any planner built on `Attachments`.
         var candidates = message.BodyParts.Where(IsCandidatePart).ToList();
 
         var index = 0;
         foreach (var entity in candidates)
         {
-            ct.ThrowIfCancellationRequested();
+            budget.CancellationToken.ThrowIfCancellationRequested();
             index++;
-            var key = string.IsNullOrEmpty(path)
-                ? $"email:{messageKey}:attachment:{index}"
-                : $"email:{messageKey}:embedded:{path}:{index}";
+            var key = $"email:{messageKey}:part:{Segment(path, index)}";
 
-            // The component ceiling is checked BEFORE decoding, and the overflow is recorded as
-            // ONE row rather than one row per excess part — a message with ten thousand
-            // attachments must not be answered with ten thousand database rows, which would
-            // make the refusal itself the denial of service it is defending against.
-            if (components.Count >= limits.MaxComponents)
+            // The ceiling is checked BEFORE decoding, and the overflow is recorded as ONE row
+            // naming how many parts were dropped rather than one row per excess part — answering
+            // a ten-thousand-attachment message with ten thousand rows would make the refusal
+            // the denial of service it defends against.
+            if (budget.ComponentsExhausted)
             {
                 var remaining = candidates.Count - index + 1;
                 components.Add(Refused(key, EmailInquiryComponentKind.Attachment, ordinal(),
                     NameOf(entity, index), depth,
                     EmailInquirySkipReasons.ComponentLimitExceeded,
-                    $"This message carries more than the {limits.MaxComponents} parts one message "
-                    + $"may contain; {remaining} part(s) were not processed."));
+                    $"This message carries more parts than the {budget.RemainingComponents + components.Count} "
+                    + $"one message may contain; {remaining} part(s) at this level were not processed."));
                 return;
             }
 
             if (entity is MessagePart embedded)
             {
-                await PlanEmbeddedAsync(embedded, messageKey, components, limits, depth,
-                    path, index, key, ordinal, total, addTotal, ct);
+                await PlanEmbeddedAsync(embedded, messageKey, components, budget, depth,
+                    Segment(path, index), cidReferences, ordinal);
                 continue;
             }
 
-            // Before any refusal reason is attached, ask whether this part is provably a
-            // non-commercial inline asset. Only these may go unread without sending the message
-            // to a human, so the test is deliberately narrow and every uncertain case falls
-            // through to normal handling.
-            if (entity is MimePart inlineCandidate && IsIgnorableInlineAsset(inlineCandidate, limits))
+            if (entity is not MimePart part)
+            {
+                if (!budget.TryTakeComponent()) return;
+                components.Add(Refused(key, EmailInquiryComponentKind.Attachment, ordinal(),
+                    NameOf(entity, index), depth,
+                    EmailInquirySkipReasons.AttachmentUnreadable,
+                    "This part could not be read as a file or an embedded message."));
+                continue;
+            }
+
+            if (!budget.TryTakeComponent()) return;
+
+            var classification = InlineAssetClassifier.Classify(part, cidReferences, budget);
+            if (classification == InlineAssetVerdict.Decorative)
             {
                 components.Add(new EmailInquiryComponentPlan(
                     key, EmailInquiryComponentKind.Attachment, ordinal(),
-                    inlineCandidate.FileName, inlineCandidate.ContentType?.MimeType, 0, string.Empty,
+                    part.FileName, CanonicalMimeType(part), 0, string.Empty,
                     EmailInquiryComponentDisposition.IgnoreInlineAsset,
                     EmailInquirySkipReasons.NonCommercialInlineAsset,
                     "A small inline image referenced by the message body — a signature logo or "
@@ -267,202 +278,195 @@ public static class EmailInquiryManifestPlanner
                 continue;
             }
 
-            if (entity is not MimePart part)
+            if (string.IsNullOrWhiteSpace(part.FileName) && classification != InlineAssetVerdict.ProcessAsContent)
             {
                 components.Add(Refused(key, EmailInquiryComponentKind.Attachment, ordinal(),
-                    NameOf(entity, index), depth,
-                    EmailInquirySkipReasons.AttachmentUnreadable,
-                    "This part could not be read as a file or an embedded message."));
-                continue;
-            }
-
-            if (string.IsNullOrWhiteSpace(part.FileName))
-            {
-                components.Add(Refused(key, EmailInquiryComponentKind.Attachment, ordinal(),
-                    $"attachment #{index}", depth,
+                    $"part {Segment(path, index)}", depth,
                     EmailInquirySkipReasons.AttachmentUnnamed,
                     "This attachment arrived without a filename."));
                 continue;
             }
 
-            var extension = Path.GetExtension(part.FileName).ToLowerInvariant();
+            var container = ContainerFormatClassifier.Classify(part);
+            if (container is { } refusal)
+            {
+                components.Add(Refused(key, EmailInquiryComponentKind.Attachment, ordinal(),
+                    part.FileName ?? NameOf(entity, index), depth,
+                    refusal.ReasonCode, refusal.OperatorDetail));
+                continue;
+            }
+
+            var fileName = part.FileName ?? $"inline-image-{Segment(path, index)}{ExtensionFor(part)}";
+            var extension = Path.GetExtension(fileName).ToLowerInvariant();
             if (!ERP_RFQ_Automation.Security.DocumentInspection.DocumentIntakeAllowList.IsAllowed(extension))
             {
                 components.Add(Refused(key, EmailInquiryComponentKind.Attachment, ordinal(),
-                    part.FileName, depth,
+                    fileName, depth,
                     EmailInquirySkipReasons.UnsupportedFileType,
                     $"'{extension}' is not a file type this system reads."));
                 continue;
             }
 
-            // Bounded from the first byte: the ceiling is enforced DURING the copy, so an
-            // 800 MB part costs one buffer rather than 1.6 GB of transient allocation. Declared
-            // size can refuse early but never authorises a decode — see BoundedComponentDecoder.
             var decoded = await BoundedComponentDecoder.DecodeAsync(
-                part, limits.MaxComponentBytes, limits.MaxTotalBytes - total(), ct);
+                part, budget.ComponentLimit, budget.RemainingBytes, budget.CancellationToken);
 
             if (decoded.Outcome == BoundedDecodeOutcome.Unreadable)
             {
                 components.Add(Refused(key, EmailInquiryComponentKind.Attachment, ordinal(),
-                    part.FileName, depth,
-                    EmailInquirySkipReasons.AttachmentUnreadable,
+                    fileName, depth, EmailInquirySkipReasons.AttachmentUnreadable,
                     "This attachment could not be decoded from the message."));
                 continue;
             }
             if (decoded.Outcome == BoundedDecodeOutcome.ExceedsComponentLimit)
             {
                 components.Add(Refused(key, EmailInquiryComponentKind.Attachment, ordinal(),
-                    part.FileName, depth,
-                    EmailInquirySkipReasons.AttachmentOversize,
-                    $"This attachment is larger than the {limits.MaxComponentBytes / (1024 * 1024)} MB limit."));
+                    fileName, depth, EmailInquirySkipReasons.AttachmentOversize,
+                    $"This attachment is larger than the {budget.ComponentLimit / (1024 * 1024)} MB limit."));
                 continue;
             }
             if (decoded.Outcome == BoundedDecodeOutcome.ExceedsMessageBudget)
             {
                 components.Add(Refused(key, EmailInquiryComponentKind.Attachment, ordinal(),
-                    part.FileName, depth,
-                    EmailInquirySkipReasons.TotalSizeLimitExceeded,
-                    $"This message exceeds the {limits.MaxTotalBytes / (1024 * 1024)} MB total limit."));
+                    fileName, depth, EmailInquirySkipReasons.TotalSizeLimitExceeded,
+                    "This message exceeds the total size one message may contain."));
                 continue;
             }
-
-            var bytes = decoded.Bytes;
-            if (bytes.Length == 0)
+            if (decoded.Bytes.Length == 0)
             {
                 components.Add(Refused(key, EmailInquiryComponentKind.Attachment, ordinal(),
-                    part.FileName, depth,
-                    EmailInquirySkipReasons.AttachmentEmpty, "This attachment is empty."));
+                    fileName, depth, EmailInquirySkipReasons.AttachmentEmpty,
+                    "This attachment is empty."));
                 continue;
             }
 
-            addTotal(bytes.Length);
+            budget.ChargeBytes(decoded.Bytes.Length);
             components.Add(new EmailInquiryComponentPlan(
                 key, EmailInquiryComponentKind.Attachment, ordinal(),
-                part.FileName, part.ContentType?.MimeType, bytes.Length, Sha256(bytes),
-                EmailInquiryComponentDisposition.Process, null, null, depth, bytes));
+                fileName, CanonicalMimeType(part), decoded.Bytes.Length, Sha256(decoded.Bytes),
+                EmailInquiryComponentDisposition.Process, null, null, depth, decoded.Bytes));
         }
     }
 
     /// <summary>
-    /// An embedded <c>message/rfc822</c> part becomes a first-class component: it is serialized
-    /// to <c>.eml</c> and processed like any other file, which means it crosses the SAME
-    /// inspection boundary as an attached PDF.
+    /// An embedded <c>message/rfc822</c> becomes a component in its own right — serialized to
+    /// <c>.eml</c> so it crosses the same inspection boundary as any other file — AND is then
+    /// walked, so the parts inside it get their own component rows.
     ///
-    /// <para>The previous code recorded it as "embedded email message is not ingested" and
-    /// dropped it. A forwarded enquiry — one of the commonest ways a real RFQ arrives — was
-    /// therefore invisible to the pipeline. <c>.eml</c> is already on the intake allow-list and
-    /// <c>EmailContainerReader</c> already unwraps it, so nothing new has to trust it.</para>
+    /// <para>Both matter. Without the component the forward is invisible; without the walk, a
+    /// refused spreadsheet inside the forward is a prose note nobody counts, the container
+    /// reports Completed, and a clean Lead is priced against a document nobody opened.</para>
     /// </summary>
     private static async Task PlanEmbeddedAsync(
         MessagePart embedded,
         string messageKey,
         List<EmailInquiryComponentPlan> components,
-        EmailInquiryLimits limits,
+        EmailInquiryBudget budget,
         int depth,
-        string path,
-        int index,
-        string key,
-        Func<int> ordinal,
-        Func<long> total,
-        Action<long> addTotal,
-        CancellationToken ct)
+        string segment,
+        IReadOnlySet<string> cidReferences,
+        Func<int> ordinal)
     {
-        if (depth + 1 > limits.MaxNestingDepth)
+        var key = $"email:{messageKey}:part:{segment}";
+        var nestedDepth = depth + 1;
+
+        if (!budget.TryTakeComponent()) return;
+
+        if (!budget.CanDescendTo(nestedDepth))
         {
             components.Add(Refused(key, EmailInquiryComponentKind.EmbeddedMessage, ordinal(),
-                EmbeddedName(embedded, index), depth + 1,
+                EmbeddedName(embedded, segment), nestedDepth,
                 EmailInquirySkipReasons.NestingLimitExceeded,
-                $"Forwarded messages are followed {limits.MaxNestingDepth} levels deep; this one is deeper."));
+                $"Forwarded messages are followed {budget.MaxNestingDepth} level(s) deep; this one is deeper."));
             return;
         }
 
         if (embedded.Message is null)
         {
             components.Add(Refused(key, EmailInquiryComponentKind.EmbeddedMessage, ordinal(),
-                EmbeddedName(embedded, index), depth + 1,
+                EmbeddedName(embedded, segment), nestedDepth,
                 EmailInquirySkipReasons.EmbeddedMessageUnreadable,
                 "This forwarded message could not be read."));
             return;
         }
 
-        // Same ceilings, same shared budget. A nested message never gets an allowance of its own.
         var serialized = await BoundedComponentDecoder.SerializeAsync(
-            embedded.Message, limits.MaxComponentBytes, limits.MaxTotalBytes - total(), ct);
+            embedded.Message, budget.ComponentLimit, budget.RemainingBytes, budget.CancellationToken);
 
-        if (serialized.Outcome == BoundedDecodeOutcome.Unreadable)
+        if (serialized.Outcome != BoundedDecodeOutcome.Decoded || serialized.Bytes.Length == 0)
         {
+            var (reason, detail) = serialized.Outcome switch
+            {
+                BoundedDecodeOutcome.ExceedsComponentLimit =>
+                    (EmailInquirySkipReasons.AttachmentOversize,
+                     $"This forwarded message is larger than the {budget.ComponentLimit / (1024 * 1024)} MB limit."),
+                BoundedDecodeOutcome.ExceedsMessageBudget =>
+                    (EmailInquirySkipReasons.TotalSizeLimitExceeded,
+                     "This message exceeds the total size one message may contain."),
+                _ => (EmailInquirySkipReasons.EmbeddedMessageUnreadable,
+                     "This forwarded message could not be read.")
+            };
             components.Add(Refused(key, EmailInquiryComponentKind.EmbeddedMessage, ordinal(),
-                EmbeddedName(embedded, index), depth + 1,
-                EmailInquirySkipReasons.EmbeddedMessageUnreadable,
-                "This forwarded message could not be read."));
-            return;
-        }
-        if (serialized.Outcome == BoundedDecodeOutcome.ExceedsComponentLimit)
-        {
-            components.Add(Refused(key, EmailInquiryComponentKind.EmbeddedMessage, ordinal(),
-                EmbeddedName(embedded, index), depth + 1,
-                EmailInquirySkipReasons.AttachmentOversize,
-                $"This forwarded message is larger than the {limits.MaxComponentBytes / (1024 * 1024)} MB limit."));
-            return;
-        }
-        if (serialized.Outcome == BoundedDecodeOutcome.ExceedsMessageBudget)
-        {
-            components.Add(Refused(key, EmailInquiryComponentKind.EmbeddedMessage, ordinal(),
-                EmbeddedName(embedded, index), depth + 1,
-                EmailInquirySkipReasons.TotalSizeLimitExceeded,
-                $"This message exceeds the {limits.MaxTotalBytes / (1024 * 1024)} MB total limit."));
+                EmbeddedName(embedded, segment), nestedDepth, reason, detail));
             return;
         }
 
-        var bytes = serialized.Bytes;
-        if (bytes.Length == 0)
-        {
-            components.Add(Refused(key, EmailInquiryComponentKind.EmbeddedMessage, ordinal(),
-                EmbeddedName(embedded, index), depth + 1,
-                EmailInquirySkipReasons.AttachmentEmpty, "This forwarded message is empty."));
-            return;
-        }
-
-        addTotal(bytes.Length);
+        budget.ChargeBytes(serialized.Bytes.Length);
         components.Add(new EmailInquiryComponentPlan(
             key, EmailInquiryComponentKind.EmbeddedMessage, ordinal(),
-            EmbeddedName(embedded, index), "message/rfc822", bytes.Length, Sha256(bytes),
-            EmailInquiryComponentDisposition.Process, null, null, depth + 1, bytes));
+            EmbeddedName(embedded, segment), "message/rfc822",
+            serialized.Bytes.Length, Sha256(serialized.Bytes),
+            EmailInquiryComponentDisposition.Process, null, null, nestedDepth, serialized.Bytes));
+
+        // The SAME budget instance descends. A nested level never receives a fresh allowance —
+        // three forwards each carrying 90 MB must not each pass a "100 MB total" check.
+        await WalkAsync(embedded.Message, messageKey, components, budget, nestedDepth,
+            segment, HtmlCidReferences(embedded.Message), ordinal);
     }
 
+    /// <summary>Hierarchical path segment: "3" at the top level, "3.2" one level in.</summary>
+    private static string Segment(string path, int index)
+        => string.IsNullOrEmpty(path) ? index.ToString() : $"{path}.{index}";
+
     /// <summary>
-    /// Whether a leaf of the MIME tree is a candidate component.
-    ///
-    /// <para>An embedded message always is. A part is when it names a file or declares itself
-    /// an attachment. Everything else that is <c>text/plain</c> or <c>text/html</c> is the
-    /// message body, which is planned separately from the quote-stripped text and must not be
-    /// counted twice. Anything else non-text is treated as a candidate so that an unnamed
-    /// binary part is RECORDED as unnamed rather than silently vanishing — the whole point of
-    /// the manifest is that a part cannot disappear without a row.</para>
+    /// Content-Ids actually referenced as <c>cid:</c> in the HTML body. Presence of a Content-Id
+    /// alone proves nothing — a document attachment may carry one — so the classifier requires
+    /// the body to genuinely point at it.
     /// </summary>
-    /// <summary>
-    /// Whether a part is provably a non-commercial inline asset — a signature logo, a tracking
-    /// pixel, a social icon — and may therefore go unread WITHOUT sending the message to a
-    /// human.
-    ///
-    /// <para>This is the single exception to "an unread attachment means review", so it is
-    /// built to be hard to satisfy. ALL of the following must hold:</para>
-    /// <list type="bullet">
-    ///   <item>the part declares <c>Content-Disposition: inline</c> — a sender who marks
-    ///   something an attachment is telling us it is content;</item>
-    ///   <item>it carries a <c>Content-Id</c>, which is what an HTML body uses to reference an
-    ///   embedded image and what a genuine document attachment has no reason to have;</item>
-    ///   <item>its media type is <c>image/*</c>;</item>
-    ///   <item>it is under <see cref="EmailInquiryLimits.InlineAssetMaxBytes"/>.</item>
-    /// </list>
-    ///
-    /// <para>The size ceiling is the load-bearing one. A pasted screenshot of a priced
-    /// requirements table is inline, has a Content-Id, and is an image — structurally identical
-    /// to a logo. It is distinguishable only by being big, so anything above the ceiling falls
-    /// through to normal handling, where images are a supported type and get extracted. The
-    /// classifier therefore removes small decorations from consideration and never removes
-    /// something that could plausibly carry a requirement.</para>
-    /// </summary>
+    private static IReadOnlySet<string> HtmlCidReferences(MimeMessage message)
+    {
+        var html = message.HtmlBody;
+        if (string.IsNullOrEmpty(html)) return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        var referenced = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (System.Text.RegularExpressions.Match match in
+                 System.Text.RegularExpressions.Regex.Matches(
+                     html, @"cid:([^\s""'>\)]+)",
+                     System.Text.RegularExpressions.RegexOptions.IgnoreCase,
+                     TimeSpan.FromSeconds(2)))
+        {
+            referenced.Add(Uri.UnescapeDataString(match.Groups[1].Value).Trim('<', '>'));
+        }
+        return referenced;
+    }
+
+    /// <summary>Media type and subtype only — parameter order varies between senders and must
+    /// not make two renderings of the same part look different.</summary>
+    internal static string? CanonicalMimeType(MimePart part)
+        => part.ContentType is null
+            ? null
+            : $"{part.ContentType.MediaType}/{part.ContentType.MediaSubtype}".ToLowerInvariant();
+
+    private static string ExtensionFor(MimePart part) => part.ContentType?.MediaSubtype?.ToLowerInvariant() switch
+    {
+        "png" => ".png",
+        "jpeg" or "jpg" => ".jpg",
+        "gif" => ".gif",
+        "bmp" => ".bmp",
+        "webp" => ".webp",
+        "tiff" => ".tif",
+        _ => ".bin"
+    };
+
     internal static bool IsIgnorableInlineAsset(MimePart part, EmailInquiryLimits limits)
     {
         if (part.ContentDisposition is null) return false;
@@ -500,13 +504,13 @@ public static class EmailInquiryManifestPlanner
     private static string NameOf(MimeEntity entity, int index)
         => entity.ContentDisposition?.FileName
            ?? entity.ContentType?.Name
-           ?? $"attachment #{index}";
+           ?? $"part {index}";
 
-    private static string EmbeddedName(MessagePart embedded, int index)
+    private static string EmbeddedName(MessagePart embedded, string segment)
     {
         var subject = embedded.Message?.Subject;
         return string.IsNullOrWhiteSpace(subject)
-            ? $"forwarded_message_{index}.eml"
+            ? $"forwarded_message_{segment.Replace('.', '_')}.eml"
             : $"{SanitizeFileName(subject)}.eml";
     }
 

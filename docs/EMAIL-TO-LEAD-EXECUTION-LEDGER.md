@@ -391,10 +391,59 @@ Focused: **Failed: 0, Passed: 24** (decoder + boundary).
 
 | Item | Finding | Status |
 | --- | --- | --- |
-| B2 real recursion + one shared budget across the tree | M7, SME1 F3 | TODO |
-| B3 verifier completeness (filename/MIME/disposition/reason/depth, dense ordinals, set equality, typed version hold) | M3 | TODO |
-| B4 inline classifier without declared size; screenshot never silently ignored | M5, SME1 F5 | TODO |
-| B5 container formats — TNEF wiring, S/MIME security-gated, appledouble/ics/DSN | M6 | TODO |
+| B2 real recursion + one shared budget across the tree | M7, SME1 F3 | **IMPLEMENTED** — dedicated test matrix outstanding |
+| B3 verifier completeness + typed outcomes | M3 | TODO |
+| B4 inline classifier without declared size | M5, SME1 F5 | **IMPLEMENTED** — dedicated test matrix outstanding |
+| B5 container formats classified truthfully | M6 | **IMPLEMENTED** — dedicated test matrix outstanding |
+
+### V1 CONTRACT DECISION (required before recursion could land)
+
+Recursion changes key formation, so the contract-version consequence had to be decided rather
+than discovered. **The manifest schema has never been applied outside disposable Testcontainers
+databases** — migration `20260813134002` is unapplied on this branch and production is at base
+`1601db6`, which predates the aggregate entirely. There are therefore **no historical rows in any
+persistent environment** that could be reinterpreted under a new scheme.
+
+**Decision: the completed recursive scheme defines final V1.** `ContractVersion` stays `1`. The
+fail-closed unknown-version path is retained regardless, because B3 needs it and because the next
+scheme change will not have this luxury.
+
+### B2/B4/B5 implementation notes
+
+**Key formation is now a hierarchical PATH**, not a flat counter: `part:1`, `part:3`, `part:3.1`,
+`part:3.2`. A counter alone collides once traversal recurses — the third top-level attachment and
+the third attachment inside a forward would both be `attachment:3`.
+
+**`EmailInquiryBudget`** is one mutable instance passed down every branch. Before recursion the
+limits were locals and the embedded branch was handed `MaxTotalBytes` afresh; under recursion that
+shape gives each nested level a new allowance, so three forwards each carrying 90 MB would each
+pass a "100 MB total" check and cost 270 MB. Byte charging is deliberately double-counted for a
+container and its contents, because the octets really are materialised twice.
+
+**An embedded message is now BOTH a component and a walked subtree.** Without the component the
+forward is invisible; without the walk, a refused spreadsheet inside it is a prose note nobody
+counts, the container reports Completed, and a clean Lead is priced against a document nobody
+opened.
+
+**`InlineAssetClassifier` measures instead of believing.** The old rule required
+`Content-Disposition: size`, which RFC 2183 makes optional and Gmail/Apple Mail/Outlook/Exchange
+omit — so it almost never fired. Size now comes from the encoded stream length (base64 inflates,
+so the bound is conservative), and `Decorative` additionally requires image type, a Content-Id,
+an **actual `cid:` reference in the HTML body**, non-attachment intent, and no commercial filename
+signal. Anything short of that is processed as content, never ignored.
+
+**`ContainerFormatClassifier` refuses truthfully rather than pretending.** TNEF is **not** wired:
+`TnefPart.ExtractAttachments()` materialises the expanded container before any budget can see it,
+which would reintroduce the unbounded-expansion hazard B1 just removed. Per the guardrail,
+`winmail.dat` is classified unsupported **commercial** evidence → `NeedsReview`. Encrypted S/MIME
+is security-gated; opaque signed-data is not unwrapped; detached signatures are marked
+non-commercial so a signed customer is not sent to review forever; AppleDouble refuses only the
+**resource fork**, never the primary file; calendar invites are refused conservatively rather than
+assumed non-commercial; DSN detection requires `multipart/report; report-type=delivery-status`
+with a real `MessageDeliveryStatus` part — a subject line reading "Undeliverable" is not evidence,
+because customers forward bounces asking what went wrong and that forward is a real enquiry.
+
+Affected suites: **Failed: 0, Passed: 162**. Model drift: none.
 
 **B5 inventory (done):** the repository has **no** existing reader for TNEF, S/MIME, calendar or
 DSN. MimeKit 4.16 supplies `TnefPart.ExtractAttachments()` (safe wiring, no new parser) and

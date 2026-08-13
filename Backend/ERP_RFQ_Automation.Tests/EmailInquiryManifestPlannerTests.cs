@@ -181,10 +181,28 @@ public class EmailInquiryManifestPlannerTests
         return part;
     }
 
+    /// <summary>A message whose HTML body genuinely references the inline image by cid.</summary>
+    private static MimeMessage MessageWithCidBody(string subject, string contentId, params MimeEntity[] parts)
+    {
+        var message = new MimeMessage();
+        message.From.Add(new MailboxAddress("Buyer", "buyer@customer.example"));
+        message.To.Add(new MailboxAddress("Sales", "sales@nexora.example"));
+        message.Subject = subject;
+        var related = new Multipart("related")
+        {
+            new TextPart("html") { Text = $"<p>Please quote.</p><img src=\"cid:{contentId}\">" }
+        };
+        foreach (var part in parts) related.Add(part);
+        message.Body = related;
+        return message;
+    }
+
     [Fact]
     public async Task A_small_cid_referenced_inline_image_is_ignored_without_review()
     {
-        var manifest = await Plan(Message("RFQ", InlineImage()));
+        // The reference must be REAL. A Content-Id alone proves nothing — a document attachment
+        // can carry one — so the body has to point at it.
+        var manifest = await Plan(MessageWithCidBody("RFQ", "logo@sig", InlineImage()));
 
         var asset = Assert.Single(manifest.Components,
             c => c.Disposition == EmailInquiryComponentDisposition.IgnoreInlineAsset);
@@ -286,7 +304,7 @@ public class EmailInquiryManifestPlannerTests
         Assert.Equal(6, manifest.ExpectedComponentCount);
         var overflow = Assert.Single(manifest.Components,
             c => c.ReasonCode == EmailInquirySkipReasons.ComponentLimitExceeded);
-        Assert.Contains("part(s) were not processed", overflow.ReasonDetail);
+        Assert.Contains("were not processed", overflow.ReasonDetail);
     }
 
     [Fact]
@@ -338,8 +356,11 @@ public class EmailInquiryManifestPlannerTests
         // finds its component without a second lookup table.
         var manifest = await Plan(Message("RFQ", File("a.pdf")));
 
+        // Hierarchical PATH, not a flat counter. Once traversal recurses, a counter alone
+        // collides: the third top-level attachment and the third attachment inside a forward
+        // would both be "attachment:3".
         Assert.Contains($"email:{MessageKey}:body", manifest.Components.Select(c => c.ComponentKey));
-        Assert.Contains($"email:{MessageKey}:attachment:1", manifest.Components.Select(c => c.ComponentKey));
+        Assert.Contains(manifest.Components, c => c.ComponentKey.StartsWith($"email:{MessageKey}:part:"));
     }
 
     [Fact]
