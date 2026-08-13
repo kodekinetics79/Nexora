@@ -4,6 +4,7 @@ import { BILLING_MODES, TENANT_DEPLOYMENT_PROFILES } from '../types';
 import type { EmailProviderCapability, MailConnectionTestResult } from '../../email/types';
 import type {
   AuditEntry,
+  AiExtractionReadinessReport,
   AiProviderAuthorization,
   AiProviderTrustView,
   AuthorizeAiProviderInput,
@@ -329,6 +330,7 @@ export interface PlatformApi {
   getTenantAiPolicy(tenantId: string): Promise<TenantAiPolicy>;
   updateTenantAiPolicy(tenantId: string, body: UpdateTenantAiPolicyInput): Promise<TenantAiPolicy>;
   getTenantAiProviders(tenantId: string): Promise<AiProviderTrustView>;
+  getTenantAiReadiness(tenantId: string): Promise<AiExtractionReadinessReport>;
   authorizeTenantAiProvider(tenantId: string, body: AuthorizeAiProviderInput): Promise<AiProviderAuthorization>;
   revokeTenantAiProvider(tenantId: string, authorizationId: string, reason: string): Promise<AiProviderAuthorization>;
 
@@ -1518,6 +1520,12 @@ const httpPlatformApi: PlatformApi = {
       })),
     };
   },
+  // Read-only, and no id normalisation to do: the report carries configuration values and
+  // denial codes only, never a key, a connection string or a line of document text.
+  getTenantAiReadiness: async (tenantId) =>
+    (await platformHttp.get<AiExtractionReadinessReport>(
+      `/api/platform/tenants/${tenantId}/ai-readiness`,
+    )).data,
   authorizeTenantAiProvider: async (tenantId, body) => {
     const result = (await platformHttp.post<{ authorization: AiProviderAuthorization }>(
       `/api/platform/tenants/${tenantId}/ai-providers`, body,

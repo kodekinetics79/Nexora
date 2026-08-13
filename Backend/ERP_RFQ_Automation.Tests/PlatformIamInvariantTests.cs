@@ -31,6 +31,21 @@ public sealed class PlatformIamInvariantTests
     }
 
     [Fact]
+    public void Ai_readiness_read_is_gated_like_the_mutations_it_prescribes()
+    {
+        // A prescription whose reader cannot fill it is a worse defect than the one being
+        // fixed: every remedy this report names is an Owner mutation on this controller.
+        var action = typeof(TenantsController).GetMethod(nameof(TenantsController.GetAiReadiness))!;
+
+        Assert.Equal(PlatformPolicies.Owner,
+            Assert.Single(action.GetCustomAttributes<AuthorizeAttribute>()).Policy);
+        Assert.Equal("{id:long}/ai-readiness",
+            Assert.Single(action.GetCustomAttributes<HttpGetAttribute>()).Template);
+        Assert.Empty(action.GetCustomAttributes<HttpPostAttribute>());
+        Assert.Empty(action.GetCustomAttributes<HttpPutAttribute>());
+    }
+
+    [Fact]
     public async Task Sequential_owner_demotions_cannot_remove_the_final_active_Owner()
     {
         using var db = new TestDb();

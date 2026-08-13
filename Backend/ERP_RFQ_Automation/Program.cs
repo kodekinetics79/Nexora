@@ -506,6 +506,9 @@ builder.Services.AddSingleton<IAiProviderEndpointResolver, AiProviderEndpointRes
 builder.Services.AddScoped<AiExternalProviderTrustService>();
 builder.Services.AddScoped<IAiExternalProviderTrust>(services =>
     services.GetRequiredService<AiExternalProviderTrustService>());
+// Read-only pre-flight over the whole extraction chain (AI/AiExtractionReadiness.cs). It
+// reports; it never remediates, and nothing enforces on its output.
+builder.Services.AddScoped<AiExtractionReadinessService>();
 builder.Services.AddSingleton<IAiReservationReconciler, AiReservationReconciler>();
 builder.Services.AddHostedService<AiReservationReconciliationWorker>();
 builder.Services.AddHttpClient<OllamaLlmService>(client =>

@@ -191,7 +191,7 @@ public sealed class AiGovernanceService : IAiGovernanceService
             throw new AiPolicyDeniedException("input_too_large");
         var perAttempt = checked((long)maximumInputBytes + Math.Max(1, maximumOutputTokens));
         var reserve = checked(perAttempt * Math.Max(1, maximumAttempts));
-        var period = new DateTime(now.Year, now.Month, 1, 0, 0, 0, DateTimeKind.Utc);
+        var period = AiPolicyDenials.BudgetPeriodStart(now);
 
         using var tenant = _tenantScope.Push(context.BusinessUnitId);
 
@@ -235,7 +235,11 @@ public sealed class AiGovernanceService : IAiGovernanceService
 
             var policy = await db.AiProcessingPolicies
                 .SingleOrDefaultAsync(x => x.BusinessUnitId == context.BusinessUnitId, ct);
-            var denial = PolicyDenial(policy, context.Purpose, provider, model, context.ProviderClass);
+            // AiPolicyDenials is the ONE implementation of these tests. The read-only
+            // extraction-readiness pre-flight reports them from the same code, so an
+            // operator can never again be told a document is authorized by one layer and
+            // refused by this one under a reason nothing surfaces.
+            var denial = AiPolicyDenials.Evaluate(policy, context.Purpose, provider, model, context.ProviderClass);
 
             // ---- the allow-list is a GATE, not an exemption --------------------
             // This check used to live only inside the ceiling branch below, where the
@@ -259,18 +263,17 @@ public sealed class AiGovernanceService : IAiGovernanceService
 
             if (denial is null && context.ProviderClass == AiProviderClass.External)
             {
-                var recentProviderClasses = await db.AiRequests.AsNoTracking()
-                    .Where(x => x.BusinessUnitId == context.BusinessUnitId && x.Status != AiCallStatuses.Denied)
-                    .OrderByDescending(x => x.CreatedOn).Take(100).Select(x => x.ProviderClass).ToListAsync(ct);
+                var recentProviderClasses = await AiPolicyDenials.RecentProviderClassesAsync(
+                    db.AiRequests, context.BusinessUnitId, ct);
                 // Honour the tenant's configured ceiling instead of a hardcoded 10%.
                 // AiProcessingPolicy.ExternalDependencyCeilingPercent has always been
                 // persisted, editable through the AI Trust Center and validated to 0..10,
                 // but this comparison used a literal .10m — so a tenant who tightened the
                 // ceiling to, say, 2% silently got 10%. A knob that does nothing is worse
-                // than no knob. `policy` is non-null here: PolicyDenial returns
+                // than no knob. `policy` is non-null here: AiPolicyDenials.Evaluate returns
                 // "policy_missing" for a null policy, which short-circuits this branch.
-                var externalCeiling = policy!.ExternalDependencyCeilingPercent / 100m;
-                if ((recentProviderClasses.Count(x => x == AiProviderClass.External) + 1m) / (recentProviderClasses.Count + 1m) > externalCeiling)
+                if (AiPolicyDenials.ExceedsExternalDependencyCeiling(
+                        recentProviderClasses, policy!.ExternalDependencyCeilingPercent))
                 {
                     // The ceiling is a COST control and nothing more. It governs unauthorized
                     // external usage only, and an endpoint the tenant explicitly authorized
@@ -289,7 +292,7 @@ public sealed class AiGovernanceService : IAiGovernanceService
                     // does mean the ratio is no longer the thing standing between a tenant's
                     // line-item data and a third party. The allow-list is.
                     if (liveAuthorizationId is null)
-                        denial = "external_dependency_cap";
+                        denial = AiPolicyDenials.ExternalDependencyCap;
                 }
             }
             if (denial is not null)
@@ -355,14 +358,19 @@ public sealed class AiGovernanceService : IAiGovernanceService
                 }
             }
 
-            if (budget.HardTokenLimit is { } hard
-                && checked(budget.ReservedTokens + budget.SettledTokens + reserve) > hard)
+            // The last refusal in the chain, and the only one no allow-list grant exempts —
+            // so it kills documents that every lock above has already cleared, which is the
+            // same shape of failure the readiness pre-flight was built to end. It therefore
+            // runs through AiPolicyDenials, the one implementation both surfaces ask.
+            // budget.HardTokenLimit is the policy's value: it was copied on the line above.
+            if (AiPolicyDenials.ExceedsHardTokenBudget(
+                    budget.HardTokenLimit, budget.ReservedTokens, budget.SettledTokens, reserve))
             {
                 db.AiRequests.Add(NewRequest(context, provider, model, input, inputHash, estimatedInput, 0, now,
-                    AiCallStatuses.Denied, "hard_budget_exceeded"));
+                    AiCallStatuses.Denied, AiPolicyDenials.HardBudgetExceeded));
                 await db.SaveChangesAsync(ct);
                 await tx.CommitAsync(ct);
-                throw new AiPolicyDeniedException("hard_budget_exceeded");
+                throw new AiPolicyDeniedException(AiPolicyDenials.HardBudgetExceeded);
             }
 
             budget.ReservedTokens = checked(budget.ReservedTokens + reserve);
@@ -498,7 +506,7 @@ public sealed class AiGovernanceService : IAiGovernanceService
                 }
             }
 
-            var period = new DateTime(request.CreatedOn.Year, request.CreatedOn.Month, 1, 0, 0, 0, DateTimeKind.Utc);
+            var period = AiPolicyDenials.BudgetPeriodStart(request.CreatedOn);
             var budget = await db.AiBudgetPeriods.SingleAsync(
                 x => x.BusinessUnitId == reservation.BusinessUnitId && x.PeriodStartUtc == period, ct);
             budget.ReservedTokens = Math.Max(0, budget.ReservedTokens - reservation.ReservedTokens);
@@ -597,26 +605,6 @@ public sealed class AiGovernanceService : IAiGovernanceService
 
         return (destination, await _externalProviderTrust.EvaluateAsync(
             context.BusinessUnitId, destination, context.Purpose, unstructuredPayload: false, ct));
-    }
-
-    private static string? PolicyDenial(
-        AiProcessingPolicy? policy,
-        string purpose,
-        string provider,
-        string model,
-        AiProviderClass providerClass)
-    {
-        if (policy is null) return "policy_missing";
-        if (!policy.IsEnabled) return "policy_disabled";
-        if (providerClass == AiProviderClass.External && !policy.ExternalProcessingAllowed)
-            return "external_processing_denied";
-        var purposes = policy.AllowedPurposes.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        if (!purposes.Contains(purpose, StringComparer.OrdinalIgnoreCase)) return "purpose_denied";
-        if (!string.IsNullOrWhiteSpace(policy.AllowedProvider)
-            && !string.Equals(policy.AllowedProvider, provider, StringComparison.OrdinalIgnoreCase)) return "provider_denied";
-        if (!string.IsNullOrWhiteSpace(policy.AllowedModel)
-            && !string.Equals(policy.AllowedModel, model, StringComparison.Ordinal)) return "model_denied";
-        return null;
     }
 
     public static long EstimateTokens(int characters) => Math.Max(1, (characters + 3L) / 4L);

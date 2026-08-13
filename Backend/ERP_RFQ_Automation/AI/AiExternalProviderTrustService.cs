@@ -61,12 +61,78 @@ public sealed class AiExternalProviderTrustService : IAiExternalProviderTrust
 
     // ---- enforcement -----------------------------------------------------
 
+    /// <inheritdoc />
     public async Task<AiExternalProviderDecision> EvaluateAsync(
         long businessUnitId, AiProviderDescriptor provider, string purpose,
-        bool unstructuredPayload, CancellationToken ct)
+        bool unstructuredPayload, CancellationToken ct) =>
+        (await RunAsync(businessUnitId, provider, purpose, unstructuredPayload,
+            stopAtFirstDenial: true, ct)).Decision;
+
+    /// <summary>
+    /// The same chain, evaluated to the END instead of stopping at the first closed lock.
+    ///
+    /// <para>Five controls in three layers have to agree before an unstructured document can
+    /// be read, and each one used to be discoverable only by fixing the previous one and
+    /// resubmitting. That cost the 2026-08 pilot days of dead-lettered documents. This exists
+    /// so the whole chain can be reported in one pass — read-only, no reservation, no ledger
+    /// row, no audit event, and no refusal warning for a document nobody sent.</para>
+    ///
+    /// <para>It is deliberately NOT on <see cref="IAiExternalProviderTrust"/> and its result
+    /// is a report: no enforcement path may branch on it.</para>
+    /// </summary>
+    internal Task<AiExternalProviderEvaluation> EvaluateAllAsync(
+        long businessUnitId, AiProviderDescriptor provider, string purpose,
+        bool unstructuredPayload, CancellationToken ct) =>
+        RunAsync(businessUnitId, provider, purpose, unstructuredPayload,
+            stopAtFirstDenial: false, ct);
+
+    /// <param name="stopAtFirstDenial">
+    /// True for enforcement: the method returns at the first refusal, executing exactly the
+    /// statements and issuing exactly the queries it always has. False for the pre-flight,
+    /// which records the same refusal and keeps going wherever the remaining locks are still
+    /// well-defined. The verdict is derived from the FIRST closed lock either way, so the two
+    /// modes cannot disagree about whether a document may egress.
+    /// </param>
+    private async Task<AiExternalProviderEvaluation> RunAsync(
+        long businessUnitId, AiProviderDescriptor provider, string purpose,
+        bool unstructuredPayload, bool stopAtFirstDenial, CancellationToken ct)
     {
+        var locks = new List<AiTrustLockOutcome>();
+        AiExternalProviderAuthorization? granted = null;
+
+        // A refusal that is NOT a lock an operator can open: it says the caller is wrong,
+        // not that the tenant's configuration is closed. It carries no lock row, so a
+        // pre-flight run outside the tenant's own scope can never report a green chain.
+        AiExternalProviderEvaluation Refusal(string reason) =>
+            new(AiExternalProviderDecision.Deny(reason, provider), locks);
+
+        // Returns whether the caller must stop here.
+        bool Blocked(string code, string reason, string current, string required)
+        {
+            locks.Add(new(code, AiReadinessStatus.Fail, reason, current, required));
+            return stopAtFirstDenial;
+        }
+
+        void Open(string code, string current, string required) =>
+            locks.Add(new(code, AiReadinessStatus.Pass, null, current, required));
+
+        // Neither open nor closed: an earlier lock removed the thing this one tests, or the
+        // payload does not reach it. It must not read as a green tick.
+        void Moot(string code, string current) =>
+            locks.Add(new(code, AiReadinessStatus.NotApplicable, null, current, string.Empty));
+
+        AiExternalProviderEvaluation Result()
+        {
+            var closed = locks.FirstOrDefault(x => x.Status == AiReadinessStatus.Fail);
+            return new(
+                closed is not null
+                    ? AiExternalProviderDecision.Deny(closed.DenialReason!, provider)
+                    : AiExternalProviderDecision.Allow(granted!.Id, provider),
+                locks);
+        }
+
         if (businessUnitId <= 0)
-            return AiExternalProviderDecision.Deny(AiExternalProviderTrustReasons.TenantMismatch, provider);
+            return Refusal(AiExternalProviderTrustReasons.TenantMismatch);
 
         // A caller may never evaluate another tenant's allow-list, and a caller with NO
         // ambient tenant may not evaluate one either.
@@ -88,24 +154,53 @@ public sealed class AiExternalProviderTrustService : IAiExternalProviderTrust
             _log.LogWarning(
                 "External provider trust evaluation refused: tenant scope {ScopedTenant} does not match requested {RequestedTenant}.",
                 scoped, businessUnitId);
-            return AiExternalProviderDecision.Deny(AiExternalProviderTrustReasons.TenantMismatch, provider);
+            return Refusal(AiExternalProviderTrustReasons.TenantMismatch);
         }
 
+        // Short-circuits in BOTH modes: with no origin there is nothing for an authorization
+        // row to match, so reporting the rest of the chain against an empty endpoint would
+        // invent refusals this deployment does not actually have.
         if (!provider.IsResolved)
-            return AiExternalProviderDecision.Deny(AiExternalProviderTrustReasons.EndpointUnresolved, provider);
+        {
+            Blocked(AiReadinessCodes.EndpointResolved, AiExternalProviderTrustReasons.EndpointUnresolved,
+                $"unresolved ({provider.ClassificationReason})",
+                "an absolute http/https URL with no credentials and no path");
+            return Result();
+        }
+        Open(AiReadinessCodes.EndpointResolved, provider.Endpoint, provider.Endpoint);
 
         // The policy row remains authoritative. The allow-list narrows it; it can never
         // widen it, so a tenant whose secure default is still in force is refused here
         // before a single byte of document text is prepared for egress.
         var policy = await _db.AiProcessingPolicies.AsNoTracking()
             .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId, ct);
+        // Also a short-circuit in both modes: every remaining policy lock is a field ON this
+        // row, and a field of a row that does not exist has no value to report.
         if (policy is null)
-            return AiExternalProviderDecision.Deny(AiExternalProviderTrustReasons.PolicyMissing, provider);
+        {
+            Blocked(AiReadinessCodes.PolicyPresent, AiExternalProviderTrustReasons.PolicyMissing,
+                "no AiProcessingPolicy row for this tenant", "a provisioned AI processing policy row");
+            return Result();
+        }
+        Open(AiReadinessCodes.PolicyPresent, "provisioned", "a provisioned AI processing policy row");
+
         if (!policy.IsEnabled)
-            return AiExternalProviderDecision.Deny(AiExternalProviderTrustReasons.PolicyDisabled, provider);
+        {
+            if (Blocked(AiReadinessCodes.PolicyEnabled, AiExternalProviderTrustReasons.PolicyDisabled,
+                    "IsEnabled = false", "IsEnabled = true"))
+                return Result();
+        }
+        else Open(AiReadinessCodes.PolicyEnabled, "IsEnabled = true", "IsEnabled = true");
+
         if (!policy.ExternalProcessingAllowed)
-            return AiExternalProviderDecision.Deny(
-                AiExternalProviderTrustReasons.PolicyExternalProcessingDenied, provider);
+        {
+            if (Blocked(AiReadinessCodes.ExternalProcessingAllowed,
+                    AiExternalProviderTrustReasons.PolicyExternalProcessingDenied,
+                    "ExternalProcessingAllowed = false", "ExternalProcessingAllowed = true"))
+                return Result();
+        }
+        else Open(AiReadinessCodes.ExternalProcessingAllowed,
+            "ExternalProcessingAllowed = true", "ExternalProcessingAllowed = true");
 
         var candidates = await _db.AiExternalProviderAuthorizations.AsNoTracking()
             .Where(x => x.BusinessUnitId == businessUnitId && x.Endpoint == provider.Endpoint)
@@ -117,30 +212,67 @@ public sealed class AiExternalProviderTrustService : IAiExternalProviderTrust
                         && AiProviderEndpoint.ModelMatches(x.Model, provider.Model))
             .ToList();
 
+        List<AiExternalProviderAuthorization>? forPurpose = null;
         if (matching.Count == 0)
-            return AiExternalProviderDecision.Deny(AiExternalProviderTrustReasons.NotAuthorized, provider);
+        {
+            if (Blocked(AiReadinessCodes.AuthorizationPresent, AiExternalProviderTrustReasons.NotAuthorized,
+                    $"no grant matches {provider.Provider} / {provider.Endpoint} / {DescribeModel(provider.Model)}",
+                    $"a grant for {provider.Provider} at {provider.Endpoint} naming model "
+                    + $"{DescribeModel(provider.Model)} (or {AiProviderEndpoint.AnyModel} for any model)"))
+                return Result();
+            Moot(AiReadinessCodes.AuthorizationLive, "not evaluated: no matching grant to test");
+            Moot(AiReadinessCodes.AuthorizationPurpose, "not evaluated: no matching grant to test");
+        }
+        else
+        {
+            Open(AiReadinessCodes.AuthorizationPresent,
+                $"{matching.Count} matching grant(s)", "at least one matching grant");
 
-        var now = DateTime.UtcNow;
-        var live = matching.Where(x => x.IsActive(now)).ToList();
-        if (live.Count == 0)
-            return AiExternalProviderDecision.Deny(
-                matching.Any(x => x.IsRevoked)
-                    ? AiExternalProviderTrustReasons.Revoked
-                    : AiExternalProviderTrustReasons.Expired,
-                provider);
+            var now = DateTime.UtcNow;
+            var live = matching.Where(x => x.IsActive(now)).ToList();
+            if (live.Count == 0)
+            {
+                var revoked = matching.Any(x => x.IsRevoked);
+                if (Blocked(AiReadinessCodes.AuthorizationLive,
+                        revoked
+                            ? AiExternalProviderTrustReasons.Revoked
+                            : AiExternalProviderTrustReasons.Expired,
+                        revoked
+                            ? $"revoked on {Utc(matching.Where(x => x.IsRevoked).Max(x => x.RevokedOn))}"
+                            : $"expired on {Utc(matching.Max(x => x.ExpiresOn))}",
+                        "a live grant: re-authorize with a justification and a future expiry"))
+                    return Result();
+                Moot(AiReadinessCodes.AuthorizationPurpose, "not evaluated: no live grant to test");
+            }
+            else
+            {
+                Open(AiReadinessCodes.AuthorizationLive, $"{live.Count} live grant(s)", "a live grant");
 
-        var forPurpose = live.Where(x => x.CoversPurpose(purpose)).ToList();
-        if (forPurpose.Count == 0)
-            return AiExternalProviderDecision.Deny(
-                AiExternalProviderTrustReasons.PurposeNotAuthorized, provider);
+                forPurpose = live.Where(x => x.CoversPurpose(purpose)).ToList();
+                if (forPurpose.Count == 0)
+                {
+                    if (Blocked(AiReadinessCodes.AuthorizationPurpose,
+                            AiExternalProviderTrustReasons.PurposeNotAuthorized,
+                            $"AllowedPurposes = {string.Join(" | ", live.Select(x => x.AllowedPurposes))}",
+                            $"a grant whose AllowedPurposes contains {purpose}"))
+                        return Result();
+                    forPurpose = null;
+                }
+                else
+                {
+                    Open(AiReadinessCodes.AuthorizationPurpose,
+                        $"AllowedPurposes covers {purpose}", $"AllowedPurposes contains {purpose}");
 
-        // Prefer the most specific grant (an exact model beats a wildcard) so an operator
-        // can hold a narrow model grant alongside a broad one without the broad one
-        // silently deciding.
-        var granted = forPurpose
-            .OrderBy(x => x.Model == AiProviderEndpoint.AnyModel ? 1 : 0)
-            .ThenByDescending(x => x.AuthorizedOn)
-            .First();
+                    // Prefer the most specific grant (an exact model beats a wildcard) so an
+                    // operator can hold a narrow model grant alongside a broad one without the
+                    // broad one silently deciding.
+                    granted = forPurpose
+                        .OrderBy(x => x.Model == AiProviderEndpoint.AnyModel ? 1 : 0)
+                        .ThenByDescending(x => x.AuthorizedOn)
+                        .First();
+                }
+            }
+        }
 
         if (unstructuredPayload)
         {
@@ -151,26 +283,63 @@ public sealed class AiExternalProviderTrustService : IAiExternalProviderTrust
             // reads as the strict one.
             if (!AiEgressPolicies.PermitsWholeDocument(policy.EgressPolicy))
             {
-                _log.LogWarning(
-                    "Whole-document egress refused for tenant {Tenant}: EgressPolicy={EgressPolicy} does not permit it.",
-                    businessUnitId, policy.EgressPolicy);
-                return AiExternalProviderDecision.Deny(
-                    AiExternalProviderTrustReasons.EgressPolicyForbidsWholeDocuments, provider);
+                // Only the enforcing pass writes this. A read-only pre-flight that logged a
+                // refusal would fill the egress record with documents nobody ever submitted.
+                if (stopAtFirstDenial)
+                    _log.LogWarning(
+                        "Whole-document egress refused for tenant {Tenant}: EgressPolicy={EgressPolicy} does not permit it.",
+                        businessUnitId, policy.EgressPolicy);
+                if (Blocked(AiReadinessCodes.EgressPolicyWholeDocument,
+                        AiExternalProviderTrustReasons.EgressPolicyForbidsWholeDocuments,
+                        $"EgressPolicy = \"{policy.EgressPolicy}\"",
+                        $"EgressPolicy = \"{AiEgressPolicies.FullDocument}\""))
+                    return Result();
             }
+            else Open(AiReadinessCodes.EgressPolicyWholeDocument,
+                $"EgressPolicy = \"{policy.EgressPolicy}\"", $"EgressPolicy = \"{AiEgressPolicies.FullDocument}\"");
 
-            var unstructured = forPurpose
-                .Where(x => x.UnstructuredDocumentsAllowed)
-                .OrderBy(x => x.Model == AiProviderEndpoint.AnyModel ? 1 : 0)
-                .ThenByDescending(x => x.AuthorizedOn)
-                .FirstOrDefault();
-            if (unstructured is null)
-                return AiExternalProviderDecision.Deny(
-                    AiExternalProviderTrustReasons.UnstructuredNotAuthorized, provider);
-            granted = unstructured;
+            if (forPurpose is null)
+                Moot(AiReadinessCodes.AuthorizationUnstructured,
+                    "not evaluated: no grant covering this purpose to test");
+            else
+            {
+                var unstructured = forPurpose
+                    .Where(x => x.UnstructuredDocumentsAllowed)
+                    .OrderBy(x => x.Model == AiProviderEndpoint.AnyModel ? 1 : 0)
+                    .ThenByDescending(x => x.AuthorizedOn)
+                    .FirstOrDefault();
+                if (unstructured is null)
+                {
+                    if (Blocked(AiReadinessCodes.AuthorizationUnstructured,
+                            AiExternalProviderTrustReasons.UnstructuredNotAuthorized,
+                            "UnstructuredDocumentsAllowed = false on every grant covering this purpose",
+                            "UnstructuredDocumentsAllowed = true on the matching grant"))
+                        return Result();
+                }
+                else
+                {
+                    Open(AiReadinessCodes.AuthorizationUnstructured,
+                        "UnstructuredDocumentsAllowed = true", "UnstructuredDocumentsAllowed = true");
+                    granted = unstructured;
+                }
+            }
+        }
+        else
+        {
+            Moot(AiReadinessCodes.EgressPolicyWholeDocument,
+                "structured payload — no whole document egresses");
+            Moot(AiReadinessCodes.AuthorizationUnstructured,
+                "structured payload — no whole document egresses");
         }
 
-        return AiExternalProviderDecision.Allow(granted.Id, provider);
+        return Result();
     }
+
+    private static string DescribeModel(string model) =>
+        model.Length == 0 ? "(unset)" : model;
+
+    private static string Utc(DateTime? value) =>
+        value is { } moment ? moment.ToString("u") : "(unknown)";
 
     // ---- administration --------------------------------------------------
 

@@ -410,6 +410,36 @@ public sealed class AiGovernanceServiceTests
         Assert.Equal("tenant_context_mismatch", denied.Code);
     }
 
+    // The policy row compares AllowedProvider case-INsensitively and AllowedModel ORDINAL.
+    // Nothing pinned that asymmetry, and it is the lock that dead-lettered the 2026-08 pilot:
+    // the allow-list gate had already logged the document as authorized, and the refusal
+    // arrived here, under a code that triages as an extraction failure. The readiness
+    // pre-flight documents the asymmetry; these two tests keep it from being "tidied up".
+
+    [Fact]
+    public async Task AllowedModel_IsComparedCaseSensitively()
+    {
+        using var fixture = new Fixture();
+        fixture.SetPolicyProviderAndModel("Ollama", "Test");
+
+        var denied = await Assert.ThrowsAsync<AiPolicyDeniedException>(() => fixture.Service.ReserveAsync(
+            fixture.Context("model-casing"), "Ollama", "test", "private RFQ text", 32, 10, 1, default));
+
+        Assert.Equal("model_denied", denied.Code);
+    }
+
+    [Fact]
+    public async Task AllowedProvider_IsComparedCaseInsensitively()
+    {
+        using var fixture = new Fixture();
+        fixture.SetPolicyProviderAndModel("OLLAMA", "test");
+
+        var reservation = await fixture.Service.ReserveAsync(
+            fixture.Context("provider-casing"), "Ollama", "test", "private RFQ text", 32, 10, 1, default);
+
+        Assert.NotEqual(Guid.Empty, reservation.RequestId);
+    }
+
     private sealed class Fixture : IDisposable
     {
         public const long BusinessUnitId = 44_001;
@@ -496,6 +526,16 @@ public sealed class AiGovernanceServiceTests
             long? extractionJobId = null) =>
             new(BusinessUnitId, AiPurposes.RfqExtraction, key, "test-v1",
                 ProviderClass: providerClass, ExtractionJobId: extractionJobId);
+
+        /// <summary>Pins the policy row's provider/model allow-values, casing included.</summary>
+        public void SetPolicyProviderAndModel(string? allowedProvider, string? allowedModel)
+        {
+            using var db = Database.ContextFor(null);
+            var policy = db.AiProcessingPolicies.IgnoreQueryFilters().Single(x => x.BusinessUnitId == BusinessUnitId);
+            policy.AllowedProvider = allowedProvider;
+            policy.AllowedModel = allowedModel;
+            db.SaveChanges();
+        }
 
         /// <summary>Authorizes an arbitrary resolved destination for this tenant.</summary>
         public void AuthorizeDestination(AiProviderDescriptor destination)

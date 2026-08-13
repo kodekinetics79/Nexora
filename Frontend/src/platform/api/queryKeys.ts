@@ -61,6 +61,9 @@ export const platformKeys = {
   legalHolds: (tenantId: string) => [...platformKeys.all, 'legal-holds', tenantId] as const,
   tenantAiPolicy: (tenantId: string) => [...platformKeys.all, 'ai-policy', tenantId] as const,
   tenantAiProviders: (tenantId: string) => [...platformKeys.all, 'ai-providers', tenantId] as const,
+  // Separate from the policy and the grants because it is the verdict they combine into, and it
+  // has to be re-read after either of them changes.
+  tenantAiReadiness: (tenantId: string) => [...platformKeys.all, 'ai-readiness', tenantId] as const,
   tenantDataAssets: (tenantId: string) => [...platformKeys.all, 'data-assets', tenantId] as const,
   tenantActivationDataDecision: (tenantId: string) =>
     [...platformKeys.all, 'data-assets', tenantId, 'activation-decision'] as const,
