@@ -52,12 +52,18 @@ public static class EmailInquiryAssemblyModelBuilderExtensions
             // Idempotent replay: the second pass over a message updates these rows rather than
             // appending a parallel set. Without this a retried poll would double every
             // component and the barrier would wait forever for siblings that already finished.
+            //
+            // Keyed on ComponentKey, not Ordinal — the key is derived from the message itself
+            // and therefore survives a restart, whereas an ordinal is only stable if the walk
+            // that produced it ran to completion. Ordinal keeps its own index for display order.
+            e.HasIndex(x => new { x.BusinessUnitId, x.AssemblyId, x.ComponentKey }).IsUnique();
             e.HasIndex(x => new { x.BusinessUnitId, x.AssemblyId, x.Ordinal }).IsUnique();
 
             // The worker resolves a component from the job it is processing.
             e.HasIndex(x => new { x.BusinessUnitId, x.ExtractionJobId });
             e.HasIndex(x => new { x.BusinessUnitId, x.Status });
 
+            e.Property(x => x.ComponentKey).HasMaxLength(512).IsRequired();
             e.Property(x => x.Kind).HasConversion<string>().HasMaxLength(24);
             e.Property(x => x.Status).HasConversion<string>().HasMaxLength(24);
             e.Property(x => x.FileName).HasMaxLength(512);

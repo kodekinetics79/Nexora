@@ -11096,6 +11096,11 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<long?>("ByteSize")
                         .HasColumnType("bigint");
 
+                    b.Property<string>("ComponentKey")
+                        .IsRequired()
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)");
+
                     b.Property<string>("ContentHash")
                         .HasMaxLength(64)
                         .HasColumnType("character(64)")
@@ -11158,6 +11163,9 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasIndex("BusinessUnitId", "ExtractionJobId");
 
                     b.HasIndex("BusinessUnitId", "Status");
+
+                    b.HasIndex("BusinessUnitId", "AssemblyId", "ComponentKey")
+                        .IsUnique();
 
                     b.HasIndex("BusinessUnitId", "AssemblyId", "Ordinal")
                         .IsUnique();

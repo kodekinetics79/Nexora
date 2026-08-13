@@ -221,6 +221,19 @@ public class EmailInquiryComponent
 
     public long AssemblyId { get; set; }
 
+    /// <summary>
+    /// THE stable idempotency identity of this component, deterministic from the message and
+    /// its position in the MIME tree: <c>email:{messageKey}:body</c>,
+    /// <c>email:{messageKey}:attachment:{n}</c>, <c>email:{messageKey}:embedded:{n}:{m}</c>.
+    ///
+    /// <para>It is byte-identical to the <c>SourceOccurrenceId</c> handed to the extraction
+    /// queue, which is what lets a returning job find its component without a second lookup
+    /// table, and what makes a replay after a crash land on the same row instead of appending
+    /// a parallel one. A restart re-walks the same MIME tree and computes the same keys, so
+    /// identity survives process death — an auto-increment id would not have.</para>
+    /// </summary>
+    public string ComponentKey { get; set; } = null!;
+
     public EmailInquiryComponentKind Kind { get; set; }
 
     /// <summary>

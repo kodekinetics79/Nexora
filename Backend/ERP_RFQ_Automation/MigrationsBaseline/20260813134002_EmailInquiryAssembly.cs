@@ -58,6 +58,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
                     BusinessUnitId = table.Column<long>(type: "bigint", nullable: false),
                     AssemblyId = table.Column<long>(type: "bigint", nullable: false),
+                    ComponentKey = table.Column<string>(type: "character varying(512)", maxLength: 512, nullable: false),
                     Kind = table.Column<string>(type: "character varying(24)", maxLength: 24, nullable: false),
                     Ordinal = table.Column<int>(type: "integer", nullable: false),
                     FileName = table.Column<string>(type: "character varying(512)", maxLength: 512, nullable: true),
@@ -101,6 +102,12 @@ namespace ERP_RFQ_Automation.Migrations
                 name: "IX_EmailInquiryAssemblies_EmailIngestId",
                 table: "EmailInquiryAssemblies",
                 column: "EmailIngestId",
+                unique: true);
+
+            migrationBuilder.CreateIndex(
+                name: "IX_EmailInquiryComponents_BusinessUnitId_AssemblyId_ComponentK~",
+                table: "EmailInquiryComponents",
+                columns: new[] { "BusinessUnitId", "AssemblyId", "ComponentKey" },
                 unique: true);
 
             migrationBuilder.CreateIndex(
@@ -150,12 +157,16 @@ namespace ERP_RFQ_Automation.Migrations
                     public."EmailInquiryAssemblies",
                     public."EmailInquiryComponents"
                 TO nexora_tenant_app;
+                GRANT USAGE, SELECT ON SEQUENCE
+                    public."EmailInquiryAssemblies_Id_seq",
+                    public."EmailInquiryComponents_Id_seq"
+                TO nexora_tenant_app;
                 """);
 
             // The mailbox poller and the extraction worker write these rows OUTSIDE a pushed
-            // tenant scope (they are resolving which tenant a message belongs to, and draining a
-            // shared queue), so they execute as nexora_pipeline_app. Guarded on the role existing
-            // because local and CI databases do not always provision it.
+            // tenant scope (the poller is resolving which tenant a message belongs to; the worker
+            // drains a shared queue), so they execute as nexora_pipeline_app. Guarded on the role
+            // existing because local and CI databases do not always provision it.
             migrationBuilder.Sql("""
                 DO $$
                 BEGIN
@@ -171,15 +182,6 @@ namespace ERP_RFQ_Automation.Migrations
                     END IF;
                 END
                 $$;
-                """);
-
-            // The tenant role needs the identity sequences too — an INSERT that cannot draw a key
-            // fails with 42501 on the sequence, which reads as a permissions bug in the wrong place.
-            migrationBuilder.Sql("""
-                GRANT USAGE, SELECT ON SEQUENCE
-                    public."EmailInquiryAssemblies_Id_seq",
-                    public."EmailInquiryComponents_Id_seq"
-                TO nexora_tenant_app;
                 """);
         }
 
