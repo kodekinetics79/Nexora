@@ -1,5 +1,6 @@
 using System.Net;
 using System.Security.Cryptography;
+using Amazon.Runtime;
 using Amazon.S3;
 using Amazon.S3.Model;
 using Microsoft.Extensions.Options;
@@ -254,7 +255,26 @@ public sealed class S3EvidenceObjectStorage : IEvidenceObjectStorage, IDisposabl
             {
                 ServiceURL = _options.ServiceUrl,
                 AuthenticationRegion = string.IsNullOrWhiteSpace(_options.Region) ? "auto" : _options.Region,
-                ForcePathStyle = _options.ForcePathStyle
+                ForcePathStyle = _options.ForcePathStyle,
+
+                // AWS SDK v4 attaches a CRC32 integrity checksum to every upload by default,
+                // which means an x-amz-sdk-checksum-algorithm header on requests that do not
+                // require one. AWS implements it; S3-COMPATIBLE stores largely do not, and
+                // Backblaze B2 answers the whole request with 501 "A header you provided
+                // implies functionality that is not implemented".
+                //
+                // That failed the evidence write, which fails ingestion, which meant every
+                // uploaded RFQ was refused — reported to the operator as a per-file queueing
+                // fault they were told to retry. The endpoint was configured correctly; only
+                // the header was wrong. Requesting checksums only where the operation
+                // genuinely requires them keeps AWS behaviour intact and stops assuming every
+                // S3 endpoint is AWS.
+                //
+                // Deliberately set here rather than left to AWS_REQUEST_CHECKSUM_CALCULATION /
+                // AWS_RESPONSE_CHECKSUM_VALIDATION: an unset environment variable would
+                // silently restore the failure on a fresh deployment.
+                RequestChecksumCalculation = RequestChecksumCalculation.WHEN_REQUIRED,
+                ResponseChecksumValidation = ResponseChecksumValidation.WHEN_REQUIRED
             });
     }
 
