@@ -165,3 +165,36 @@ dotnet test ERP_RFQ_Automation.Tests/ERP_RFQ_Automation.Tests.csproj --nologo -v
 * Credentials are entered only through the application's encrypted secret mechanism. Never in
   chat, code, tests, commits, screenshots or logs.
 * Do not merge, deploy, amend published commits, or start Phase 3 / RFQ participation.
+
+---
+
+## Independent SME review — exact SHA `c61f73cb7ba0e5dd0d3d75cc7f4c7f1c74733e90`
+
+Five bounded reviews commissioned against this SHA. Reviewers ran as separate read-only agents
+with **no edit capability** — the "reviewers may not edit production files" rule is enforced by
+tooling, not by instruction. Findings are recorded verbatim in substance; none is backfilled onto
+earlier commits, and no approval is recorded for work that was not reviewed.
+
+Critical and High block requirement #12.
+
+### SME5 — Principal SDET (test architecture). Status: RETURNED, 8 findings
+
+| ID | Sev | Summary | Disposition |
+| --- | --- | --- | --- |
+| F1 | **Critical** | `EmailInquiryCaptureService` has ZERO tests. `SafeToMarkSeen` — the single flag deciding whether a mailbox message is flagged `\Seen` — is unproven on all four of its return paths. | ACCEPTED |
+| F2 | **Critical** | `EmailComponentManifestVerifier` has zero tests **and zero production callers**. The empty-hash exemption and the version short-circuit are unasserted. | ACCEPTED |
+| F3 | **High** | `EmailInquiryAssemblyCoordinator.RecordComponentQueuedAsync` assigns `ExtractionJobId` **before** the terminal guard, so a replayed enqueue re-points an already-`Completed` component at a newer job id. | ACCEPTED — real defect |
+| F4 | **High** | The source-regex test in `MailboxLoginIdentityTests` does not pin the invariant it claims: its whitelist admits bare `config.EmailAddress`, so rewriting **both** IMAP sites to bypass the resolver keeps it green. | ACCEPTED — my test was weaker than claimed |
+| F5 | **High** | Poller and manual reprocess compute body text with **two different extractors** (`EmailBodyNormalizer` vs `EmailTriageService.GetBodyText`), so the shared enqueuer does not prevent drift — the *input* diverges. `ReprocessAsync` also reads `RawEmailPath` directly, ignoring `IRawEmailEvidenceReader`. | ACCEPTED |
+| F6 | Medium | The "reason names no infrastructure detail" tests assert against hard-coded literals with no interpolation — they can never fail. The real leak surface (caller-supplied `reasonDetail` persisted by the coordinator) is untested. | ACCEPTED — security theatre in my own tests |
+| F7 | Medium | `Attachment_only_inquiry_is_ready…` is byte-identical to the body-only test; `Evaluate` has no notion of component kind, so the distinction cannot exist at that layer. False coverage credit. | ACCEPTED |
+| F8 | Medium | No test exercises capture → schedule → assemble together. Nothing asserts the planner's `ComponentKey` is the same string the consumer looks up, so the two can drift into total silent loss. | ACCEPTED |
+
+**Consequence for #12:** F1, F2 and F3 must close inside #12b/#12c. F3 is a code fix, not a test
+gap. F4/F5 move to #19 and #12d respectively. F6/F7 are test-quality corrections to work already
+landed and are scheduled with #12b.
+
+### SME1 — Principal .NET/domain architect. Status: RUNNING
+### SME2 — Email/MIME specialist. Status: RUNNING
+### SME3 — PostgreSQL/reliability specialist. Status: RUNNING
+### SME4 — Security/evidence specialist. Status: RUNNING
