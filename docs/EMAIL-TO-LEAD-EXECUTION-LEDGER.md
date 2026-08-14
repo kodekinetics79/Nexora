@@ -981,3 +981,73 @@ One focused migration + entity, in this order: result store entity → `EmailInq
 column, partial unique index, tenant-composite FK → coordinator identity by
 `(BusinessUnitId, AssemblyId, ComponentId)` → atomic enqueue→bind → behavioural tests that close
 the three evidence gaps against the real worker, coordinator, scheduler and database.
+
+---
+
+## CTO DECISION ACCEPTED — drain-first, with five corrections to my design record
+
+**Cutover: DRAIN-FIRST.** Dual-run rejected (a legacy job could still mint a per-document Lead);
+abandon/re-poll rejected (messages may already be acknowledged). Compatibility exists only to
+drain jobs that already exist. **There must be no period in which both producers create new email
+jobs** — that is the binding constraint on the caller switch.
+
+### Correction 1 — my design record was factually wrong. Verified.
+
+I wrote that "`EmailInquiryComponents` already exposes the `(BusinessUnitId, Id)` alternate key
+this FK needs, so nothing changes on that side."
+
+**It does not.** Only `EmailInquiryAssemblies` declares it
+(`EmailInquiryAssemblyModelBuilderExtensions.cs:32`, migration line 44). The component entity has
+indexes and a composite FK to its assembly, but **no alternate key of its own** — so the
+composite FK from `ExtractionJobs` would have failed at migration time. Confirmed by inspection,
+not assumed. The alternate key is added and migration-tested in the focused increment.
+
+### Corrections 2–5, accepted and recorded
+
+| # | Correction |
+| --- | --- |
+| 2 | My index description was backwards. The **scalar** `ExtractionJob.EmailInquiryComponentId` is what makes each **job** single-owned; the **partial unique index** is what makes each **component** have at most one job. Two different guarantees, and I conflated them. |
+| 3 | `EmailInquiryComponents.ExtractionJobId` must be **removed** from the final model — leaving it makes two ownership authorities that can disagree, which is the class of defect this whole increment exists to remove. Scheduler and coordinator queries move to `ExtractionJobs.EmailInquiryComponentId`. |
+| 4 | Delete behaviour **Restrict/NoAction**. Never `SET NULL`: nulling the column silently converts a canonical job into an *apparent legacy* job, which under drain-mode rules is then treated as compatibility work — a data-shaped route back into per-document Lead creation. Never `CASCADE`: processing history is evidence. |
+| 5 | `CHECK (EmailInquiryComponentId IS NULL OR SourceType = 'Email')` — a non-email job can never carry an email component. |
+
+### Two further consequences of correction 3, recorded so they are not missed
+
+* `RecordComponentQueuedAsync` currently writes `component.ExtractionJobId`. That write disappears
+  with the column; the binding becomes part of the ingestion transaction (item C).
+* `DurableJobBelongsToComponentAsync` currently reads that column to verify ownership. It becomes
+  a read of `ExtractionJobs.EmailInquiryComponentId`, which is simpler and authoritative — the
+  occurrence-key reconstruction it does today stops being necessary.
+
+### Item D — content-level reuse is a real trap, and it is in the existing code
+
+`DocumentIngestionService` reuses `SourceDocument.ExtractionJobId` for identical content hashes.
+Two components carrying **identical bytes** — the same price list attached twice, the same T&Cs
+across two forwards — would therefore share one job, and one component would be left unowned or
+double-bound. Canonical component jobs must bypass that shortcut: one durable job per component,
+always. Reuse can return later only by transactionally materialising the reused structured result
+for the second component.
+
+### Item G — the completion contract
+
+`Completed` must never mean "output discarded". A processable component marked `Completed`
+without a durable result row **holds the barrier** with a typed `result_missing` reason. That is
+the permanent form of the temporary hold now in the worker.
+
+### Drain runbook — recorded as the deployment sequence
+
+1. Deploy expand migration + worker that reads both shapes. 2. Canonical production stays off.
+3. Pause **inbound polling only** — outbound quote delivery keeps running. 4. Drain all runnable,
+leased, retryable and recoverable `SourceType = Email` jobs with a null component. 5. Reconcile or
+dead-letter exceptions; prove zero active legacy jobs **and zero live leases**. 6. Enable the
+caller switch. 7. Null-component email jobs become fail-closed — compatibility ends. 8. Resume
+polling; monitor job, component, assembly and Lead counts.
+
+### Implementation order for the next context
+
+A: `EmailInquiryComponentResult` entity (+ RLS, purge policy, grants, purge ordering) →
+component composite alternate key → `ExtractionJobs.EmailInquiryComponentId` + partial unique
+index + composite FK (Restrict) + CHECK → drop `EmailInquiryComponents.ExtractionJobId` →
+typed ingestion contract carrying the component id → queue projections (`ReturningColumns`,
+`MapJob`) → coordinator identity `(BusinessUnitId, AssemblyId, ComponentId)` → transactional
+persist/complete/re-evaluate. One focused migration; `20260813134002` stays byte-identical.
