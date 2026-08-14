@@ -907,3 +907,77 @@ discarded** — there is nowhere durable to put it yet. The sentence now claims 
 *"the original captured email evidence is preserved."*
 
 Full backend regression after removal: **Failed: 0, Passed: 4911**.
+
+---
+
+## DESIGN DECISION — the persisted job discriminator (answers the cutover addendum)
+
+The addendum forbids branching on `ExtractionSourceType.Email` and requires an authoritative
+persisted discriminator that is not the optional sidecar. One column answers that **and**
+corrections 2 and 7 at the same time:
+
+### `ExtractionJobs.EmailInquiryComponentId` — nullable FK, tenant-composite
+
+```
+ALTER TABLE public."ExtractionJobs" ADD COLUMN "EmailInquiryComponentId" bigint NULL;
+
+-- one job can never belong to two components
+CREATE UNIQUE INDEX "UX_ExtractionJobs_BU_EmailInquiryComponent"
+  ON public."ExtractionJobs" ("BusinessUnitId", "EmailInquiryComponentId")
+  WHERE "EmailInquiryComponentId" IS NOT NULL;
+
+-- and the component it names must be the same tenant's
+ALTER TABLE public."ExtractionJobs"
+  ADD CONSTRAINT "FK_ExtractionJobs_EmailInquiryComponents_BU_Component"
+  FOREIGN KEY ("BusinessUnitId", "EmailInquiryComponentId")
+  REFERENCES public."EmailInquiryComponents" ("BusinessUnitId", "Id");
+```
+
+Why this column rather than a boolean flag or a new source type:
+
+* **It IS the discriminator.** Non-null ⇒ canonical EmailInquiry component job. Null +
+  `SourceType = Email` ⇒ pre-cutover legacy job, drained under compatibility behaviour. Neither
+  ⇒ manual upload / watched folder, untouched. The worker's three cases fall out of one column
+  instead of a heuristic.
+* **It IS the ownership**, so the sidecar stops being load-bearing entirely — the addendum's
+  requirement — and the worker resolves the owning component by FK rather than by lookup.
+* **The partial unique index makes "one job, two components" impossible**, which application
+  checks could never guarantee (correction 7).
+* **The tenant-composite FK makes cross-tenant binding impossible even with application
+  validation bypassed**, which is the PostgreSQL negative test the directive asks for.
+* **A runnable-but-unowned canonical job becomes structurally impossible** once the column is
+  written inside the same transaction that creates the job (correction 2) — the worker check
+  then really is defence in depth rather than the routing mechanism.
+
+`EmailInquiryComponents` already exposes the alternate key `(BusinessUnitId, Id)` that this FK
+needs, so no change is required on that side.
+
+**Migration:** one focused follow-up carrying the column, index, FK and the new result entity.
+`20260813134002` stays byte-identical, as SME3 EIA-06 requires.
+
+### Ambiguity is now a database impossibility, not a worker judgement
+
+"Ambiguous ownership" cannot arise from two components claiming one job — the unique index
+refuses it. The remaining ambiguity is a canonical job whose component row was deleted, which the
+FK also refuses. So the worker's fail-closed case narrows to exactly one situation: a job marked
+canonical whose component cannot be loaded, which is a genuine integrity fault worth surfacing.
+
+### PRODUCT-OWNER DECISION REQUIRED BEFORE THE CALLER SWITCH
+
+The addendum says: *"Do not deploy the caller switch without an explicit legacy-job
+drain/compatibility decision."* That decision is **not made** and is not mine to make. Options:
+
+| Option | Consequence |
+| --- | --- |
+| **Drain first** — stop the switch until the queue holds no `SourceType = Email` job with a null discriminator | cleanest; needs a quiet window |
+| **Dual-run** — legacy jobs keep the existing per-document path until they age out | no window needed; two behaviours coexist briefly, and a legacy job can still mint a per-document Lead during that period |
+| **Abandon** — fail legacy in-flight email jobs and re-poll their messages | simplest code; re-reads mail already marked seen, so it depends on the acknowledgement work landing first |
+
+Recorded as an open decision, not assumed.
+
+### Next action
+
+One focused migration + entity, in this order: result store entity → `EmailInquiryComponentId`
+column, partial unique index, tenant-composite FK → coordinator identity by
+`(BusinessUnitId, AssemblyId, ComponentId)` → atomic enqueue→bind → behavioural tests that close
+the three evidence gaps against the real worker, coordinator, scheduler and database.
