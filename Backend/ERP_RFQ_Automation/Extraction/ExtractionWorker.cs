@@ -373,11 +373,16 @@ public sealed class ExtractionWorker : BackgroundService
             // Deliberately AFTER the queue transition. Assembling first and completing second
             // would mean a crash in between leaves a Lead whose job still looks unfinished, and
             // the retry would build the Lead twice.
+            // GetRequiredService, deliberately. GetService here meant a botched registration
+            // silently skipped the barrier for EVERY message with no error anywhere — the same
+            // class of invisible total stall this increment exists to remove. Resolved only
+            // inside the branch, so a container without it (the lease/heartbeat harnesses) is
+            // unaffected.
             if (job.EmailInquiryComponentId is not null
-                && scope.ServiceProvider.GetService<
-                    ERP_RFQ_Automation.Ingestion.Assembly.IEmailInquiryLeadAssembler>() is { } assembler
                 && scope.ServiceProvider.GetService<ErpRfqAutomationContext>() is { } assemblyContext)
             {
+                var assembler = scope.ServiceProvider.GetRequiredService<
+                    ERP_RFQ_Automation.Ingestion.Assembly.IEmailInquiryLeadAssembler>();
                 var assemblyId = await assemblyContext
                     .Set<ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponent>()
                     .AsNoTracking()
@@ -1128,10 +1133,11 @@ public sealed class LeadPersister : ILeadPersister
                 job.BusinessUnitId, ownedComponentId, job.Id, payload, ct);
 
             _log.LogInformation(
-                "Component {ComponentKey} of assembly {AssemblyId} recorded a durable result; "
-                + "the message is now {Status} ({Completed}/{Expected}).",
-                owner.ComponentKey, owner.AssemblyId, evaluation.Status,
-                evaluation.CompletedComponentCount, job.BusinessUnitId);
+                "Component {ComponentKey} of assembly {AssemblyId} recorded a durable result for "
+                + "business unit {BusinessUnitId}; the message is now {Status} "
+                + "({Completed} of {Captured} captured).",
+                owner.ComponentKey, owner.AssemblyId, job.BusinessUnitId, evaluation.Status,
+                evaluation.CompletedComponentCount, evaluation.CapturedComponentCount);
 
             // No Lead is built here, and not merely because the message may be incomplete.
             // Assembly is ORCHESTRATION and belongs to the worker: an assembler injected into

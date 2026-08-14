@@ -1,5 +1,6 @@
 using ERP_RFQ_Automation.Infrastructure.Storage;
 using ERP_RFQ_Automation.Ingestion.Assembly;
+using ERP_RFQ_Automation.Retention;
 
 namespace ERP_RFQ_Automation.Tests;
 
@@ -42,11 +43,33 @@ public sealed class EmailInquiryRawEvidenceZoneTests
     }
 
     [Fact]
-    public void Raw_inbound_mail_is_quarantined_not_pre_cleared()
+    public void Raw_inbound_mail_has_its_OWN_zone_and_is_never_pre_cleared()
     {
-        // A message straight off a mailbox has not been through security inspection. Writing
-        // it to "cleared" would legalise the call while asserting something false about the
-        // bytes, and would put un-inspected content in the zone other modules read as trusted.
-        Assert.Equal("quarantine", EmailInquiryCaptureService.RawEmailZone);
+        // "cleared" would assert something false about un-inspected bytes and put them where
+        // other modules read trusted content.
+        Assert.NotEqual("cleared", EmailInquiryCaptureService.RawEmailZone);
+
+        // And NOT "quarantine" either, which is the subtler bug: the retention purge deletes
+        // the sibling key derived by swapping quarantine <-> cleared, so a raw message sharing
+        // that namespace with an .eml SourceDocument would be destroyed when the document was
+        // purged. See RawEmailZone's own documentation.
+        Assert.NotEqual("quarantine", EmailInquiryCaptureService.RawEmailZone);
+    }
+
+    [Fact]
+    public void The_raw_mail_zone_is_immune_to_the_retention_purges_zone_swap()
+    {
+        // THE assertion behind the zone choice, run against the real derivation rather than
+        // asserted in prose: a raw-mail key has no sibling, so purging anything else can never
+        // take the authoritative copy of a customer's message with it.
+        var key = LocalEvidenceObjectStorage.BuildKey(
+            1, EmailInquiryCaptureService.RawEmailZone, new string('a', 64), ".eml");
+
+        Assert.Single(EvidenceRetentionEligibility.ZoneKeysFor(key.Replace('\\', '/')));
+
+        // Proof the derivation genuinely does pair the other two, so the assertion above is
+        // about this zone and not about ZoneKeysFor being inert.
+        var quarantined = LocalEvidenceObjectStorage.BuildKey(1, "quarantine", new string('a', 64), ".eml");
+        Assert.Equal(2, EvidenceRetentionEligibility.ZoneKeysFor(quarantined.Replace('\\', '/')).Count);
     }
 }

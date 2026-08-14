@@ -3,17 +3,20 @@ using System;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
 #nullable disable
 
-namespace ERP_RFQ_Automation.Migrations
+namespace ERP_RFQ_Automation.MigrationsBaseline
 {
     [DbContext(typeof(ErpRfqAutomationContext))]
-    partial class ErpRfqAutomationContextModelSnapshot : ModelSnapshot
+    [Migration("20260814130345_EmailInquiryAssembledLead")]
+    partial class EmailInquiryAssembledLead
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -9983,9 +9986,7 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasIndex("BusinessUnitId", "ContentHash")
                         .HasDatabaseName("IX_ExtractionJobs_BU_ContentHash");
 
-                    b.HasIndex("BusinessUnitId", "EmailInquiryComponentId")
-                        .IsUnique()
-                        .HasFilter("\"EmailInquiryComponentId\" IS NOT NULL");
+                    b.HasIndex("BusinessUnitId", "EmailInquiryComponentId");
 
                     b.HasIndex("BusinessUnitId", "SourceDocumentOccurrenceId")
                         .IsUnique()

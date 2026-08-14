@@ -56,8 +56,8 @@ public class LeadPersisterEmailFenceTests : IDisposable
         public Task HoldForReviewAsync(long bu, long assemblyId, string reasonCode,
             string reasonDetail, CancellationToken ct = default) => Task.CompletedTask;
 
-        public Task MarkAssembledAsync(long bu, long assemblyId, CancellationToken ct = default)
-            => Task.CompletedTask;
+        public Task MarkAssembledAsync(long bu, long assemblyId, long leadId,
+            CancellationToken ct = default) => Task.CompletedTask;
 
         public Task RecordComponentOutcomeAsync(long businessUnitId, long assemblyId, string componentKey,
             EmailInquiryComponentStatus status, string? reasonCode, string? reasonDetail,

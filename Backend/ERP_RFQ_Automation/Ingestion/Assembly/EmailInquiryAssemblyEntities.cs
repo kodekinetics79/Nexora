@@ -252,6 +252,19 @@ public class EmailInquiryAssembly
     /// </summary>
     public int ConcurrencyVersion { get; set; }
 
+    /// <summary>
+    /// The ONE Lead this message became, written in the same transaction as
+    /// <see cref="EmailInquiryAssemblyStatus.Assembled"/>.
+    ///
+    /// <para>Without it the link between a message and its Lead existed nowhere: the component
+    /// jobs complete with a null result lead id by design (the fence creates no per-component
+    /// Lead), and the assembled Lead is written by a path that never touches a queue row. So a
+    /// message that had already produced a Lead was indistinguishable from one that had produced
+    /// nothing, and the assembler's "already assembled, return the existing Lead" branch could
+    /// only ever return null — an idempotency contract that could not be honoured.</para>
+    /// </summary>
+    public long? AssembledLeadId { get; set; }
+
     public DateTimeOffset CreatedAtUtc { get; set; }
 
     public DateTimeOffset UpdatedAtUtc { get; set; }

@@ -288,7 +288,16 @@ public sealed class EmailToLeadVerticalSlicePostgreSqlTests(PostgreSqlTestDataba
         services.AddSingleton<ITenantScopeAccessor, TenantScopeAccessor>();
         services.AddScoped<ITenantContext, HttpTenantContext>();
         services.AddDbContext<ErpRfqAutomationContext>(options =>
-            options.UseNpgsql(_database.ConnectionString).EnableDetailedErrors());
+            // EnableRetryOnFailure is NOT decoration. It installs NpgsqlRetryingExecutionStrategy,
+            // under which a user-initiated BeginTransactionAsync outside
+            // CreateExecutionStrategy().ExecuteAsync throws outright. Production configures it;
+            // omitting it here would leave this test blind to the single most likely way for the
+            // barrier to fail in production while passing locally — the exact substituted-boundary
+            // mistake this whole test exists to stop making.
+            options.UseNpgsql(_database.ConnectionString,
+                    npgsql => npgsql.EnableRetryOnFailure(
+                        maxRetryCount: 5, maxRetryDelay: TimeSpan.FromSeconds(10), errorCodesToAdd: null))
+                .EnableDetailedErrors());
 
         services.AddSingleton<IWebHostEnvironment>(new TestEnvironment(_storageRoot));
         services.AddSingleton<IFileStorage>(new LocalFileStorage(_storageRoot, _storageRoot));

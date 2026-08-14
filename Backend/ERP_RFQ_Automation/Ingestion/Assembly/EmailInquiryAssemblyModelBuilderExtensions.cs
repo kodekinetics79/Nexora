@@ -60,6 +60,10 @@ public static class EmailInquiryAssemblyModelBuilderExtensions
             e.Property(x => x.SkippedPartsJson).HasColumnType("jsonb");
             e.Property(x => x.ConcurrencyVersion).IsConcurrencyToken();
 
+            // The barrier's recovery read: every message that finished its components but has
+            // not yet produced its Lead. A sweeper cannot find a stranded message without it.
+            e.HasIndex(x => new { x.BusinessUnitId, x.AssembledLeadId });
+
             e.HasOne(x => x.EmailIngest)
                 .WithOne()
                 .HasForeignKey<EmailInquiryAssembly>(x => x.EmailIngestId)

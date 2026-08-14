@@ -59,8 +59,9 @@ public interface IEmailInquiryAssemblyCoordinator
         long businessUnitId, long assemblyId, string reasonCode, string reasonDetail,
         CancellationToken ct = default);
 
-    /// <summary>Marks a message assembled once its single Lead exists.</summary>
-    Task MarkAssembledAsync(long businessUnitId, long assemblyId, CancellationToken ct = default);
+    /// <summary>Marks a message assembled and records the ONE Lead it became.</summary>
+    Task MarkAssembledAsync(
+        long businessUnitId, long assemblyId, long leadId, CancellationToken ct = default);
 
     /// <summary>
     /// Whether an extraction job exists AND is the job this exact component owns.
@@ -117,31 +118,31 @@ public sealed class EmailInquiryAssemblyCoordinator : IEmailInquiryAssemblyCoord
         long businessUnitId, long assemblyId, string componentKey, long extractionJobId,
         CancellationToken ct = default)
     {
-        var component = await FindComponentAsync(businessUnitId, assemblyId, componentKey, ct);
-        // A missing component is an ownership failure, not a no-op. Returning silently is how a
-        // scheduled job ends up owned by nobody and its message waits at the barrier forever.
-        if (component is null)
-            throw new InvalidOperationException(
-                $"Component '{componentKey}' of assembly {assemblyId} was not found for business "
-                + $"unit {businessUnitId}; the job binding has no owner.");
-
-        component.ExtractionJobId = extractionJobId;
-        // Pending -> Extracting only. A component that already reached a terminal state is left
-        // alone: a replayed enqueue must not walk a finished part backwards and reopen a
-        // barrier that has already been satisfied.
-        if (component.Status == EmailInquiryComponentStatus.Pending)
-            component.Status = EmailInquiryComponentStatus.Extracting;
-        component.UpdatedAtUtc = DateTimeOffset.UtcNow;
-
-        // The MESSAGE moves too, in the same transaction.
-        //
-        // This used to save the component and stop. The assembly therefore stayed at Captured
-        // for its entire life, and when the barrier finally evaluated ReadyForAssembly the
-        // transition Captured -> ReadyForAssembly was illegal, so the verdict was logged and
-        // thrown away. Every component completed with a durable result and no message was ever
-        // assembled — a total stall that looked, in the data, like a state machine working.
         await ExecuteInTransactionAsync(async () =>
         {
+            var component = await FindComponentAsync(businessUnitId, assemblyId, componentKey, ct);
+            // A missing component is an ownership failure, not a no-op. Returning silently is how a
+            // scheduled job ends up owned by nobody and its message waits at the barrier forever.
+            if (component is null)
+                throw new InvalidOperationException(
+                    $"Component '{componentKey}' of assembly {assemblyId} was not found for "
+                    + $"business unit {businessUnitId}; the job binding has no owner.");
+
+            component.ExtractionJobId = extractionJobId;
+            // Pending -> Extracting only. A component that already reached a terminal state is left
+            // alone: a replayed enqueue must not walk a finished part backwards and reopen a
+            // barrier that has already been satisfied.
+            if (component.Status == EmailInquiryComponentStatus.Pending)
+                component.Status = EmailInquiryComponentStatus.Extracting;
+            component.UpdatedAtUtc = DateTimeOffset.UtcNow;
+
+            // The MESSAGE moves too, in the same transaction.
+            //
+            // This used to save the component and stop. The assembly therefore stayed at Captured
+            // for its entire life, and when the barrier finally evaluated ReadyForAssembly the
+            // transition Captured -> ReadyForAssembly was illegal, so the verdict was logged and
+            // thrown away. Every component completed with a durable result and no message was ever
+            // assembled — a total stall that looked, in the data, like a state machine working.
             await _context.SaveChangesAsync(ct);
             await ReevaluateCoreAsync(component.AssemblyId, businessUnitId, ct);
         }, ct);
@@ -160,35 +161,37 @@ public sealed class EmailInquiryAssemblyCoordinator : IEmailInquiryAssemblyCoord
         string? reasonCode, string? reasonDetail, long? sourceDocumentOccurrenceId,
         CancellationToken ct = default)
     {
-        var component = await FindComponentAsync(businessUnitId, assemblyId, componentKey, ct);
-        // Fail visibly. Logging and returning meant an extraction outcome could evaporate with
-        // the message left mid-flight and nothing anywhere recording that it had happened.
-        if (component is null)
-            throw new InvalidOperationException(
-                $"Component '{componentKey}' of assembly {assemblyId} was not found for business "
-                + $"unit {businessUnitId}; its outcome could not be recorded.");
-
-        // A refusal on security grounds is the one outcome allowed to overwrite a terminal
-        // component: the scanner's verdict outranks a result produced before it was known.
-        if (component.IsTerminal && status != EmailInquiryComponentStatus.RefusedSecurity)
-            return;
-
-        component.Status = status;
-        component.ReasonCode = reasonCode;
-        component.ReasonDetail = Truncate(reasonDetail, 1000);
-        if (sourceDocumentOccurrenceId.HasValue)
-            component.SourceDocumentOccurrenceId = sourceDocumentOccurrenceId;
-        component.UpdatedAtUtc = DateTimeOffset.UtcNow;
-
-        // The component outcome and the message's re-evaluation are ONE unit of work.
-        //
-        // They used to be two independent saves. The loser of a concurrency race committed its
-        // component outcome and then threw out of the re-evaluation, leaving a message with
-        // every component terminal but the assembly never recomputed — permanently one step
-        // short of ReadyForAssembly, with nothing sweeping it. The concurrency token turned a
-        // silent lost update into a loud one and stopped there; this closes the other half.
+        // The component and the assembly are ONE unit of work, and the load belongs inside it
+        // so a retry re-reads both from the database rather than replaying attempt one's
+        // in-memory state (see ExecuteInTransactionAsync).
         await ExecuteInTransactionAsync(async () =>
         {
+            var component = await FindComponentAsync(businessUnitId, assemblyId, componentKey, ct);
+            // Fail visibly. Logging and returning meant an extraction outcome could evaporate with
+            // the message left mid-flight and nothing anywhere recording that it had happened.
+            if (component is null)
+                throw new InvalidOperationException(
+                    $"Component '{componentKey}' of assembly {assemblyId} was not found for "
+                    + $"business unit {businessUnitId}; its outcome could not be recorded.");
+
+            // A refusal on security grounds is the one outcome allowed to overwrite a terminal
+            // component: the scanner's verdict outranks a result produced before it was known.
+            if (component.IsTerminal && status != EmailInquiryComponentStatus.RefusedSecurity)
+                return;
+
+            component.Status = status;
+            component.ReasonCode = reasonCode;
+            component.ReasonDetail = Truncate(reasonDetail, 1000);
+            if (sourceDocumentOccurrenceId.HasValue)
+            component.SourceDocumentOccurrenceId = sourceDocumentOccurrenceId;
+            component.UpdatedAtUtc = DateTimeOffset.UtcNow;
+
+            // The component outcome and the message's re-evaluation are ONE unit of work.
+            //
+            // They used to be two independent saves. The loser of a concurrency race committed
+            // its component outcome and then threw out of the re-evaluation, leaving a message
+            // with every component terminal but the assembly never recomputed — permanently one
+            // step short of ReadyForAssembly, with nothing sweeping it.
             await _context.SaveChangesAsync(ct);
             await ReevaluateCoreAsync(component.AssemblyId, businessUnitId, ct);
         }, ct);
@@ -197,6 +200,15 @@ public sealed class EmailInquiryAssemblyCoordinator : IEmailInquiryAssemblyCoord
     /// <summary>
     /// Runs a unit of work in a transaction, retrying once on a concurrency conflict with fresh
     /// state.
+    ///
+    /// <para><b>Every entity the work touches MUST be loaded INSIDE <paramref name="work"/>.</b>
+    /// The retry clears the change tracker, so an entity captured from an enclosing scope is
+    /// detached on the second attempt — and, worse, still carries attempt one's mutations, so a
+    /// guard like <c>if (!component.IsTerminal)</c> reads the in-memory value it already set and
+    /// skips the write entirely. The observable result is a durable result row with its component
+    /// still Extracting and the message stalled at the barrier for good: exactly the stranded
+    /// message the concurrency stamp exists to prevent, reintroduced by the mechanism meant to
+    /// recover from it.</para>
     ///
     /// <para>Retry is safe because the evaluation is a pure function of the component rows: after
     /// reloading, recomputing converges on the same answer. PostgreSQL raises the conflict two
@@ -208,38 +220,67 @@ public sealed class EmailInquiryAssemblyCoordinator : IEmailInquiryAssemblyCoord
     private async Task ExecuteInTransactionAsync(Func<Task> work, CancellationToken ct)
     {
         const int MaxAttempts = 3;
-        for (var attempt = 1; ; attempt++)
+
+        // JOINING a caller's transaction. Do the work and let the OWNER decide about retries.
+        //
+        // Retrying here was wrong in two ways. A 40001 has already ABORTED the PostgreSQL
+        // transaction, and nothing here rolled it back or opened a new one because it is not
+        // ours — so every statement of attempt two fails 25P02 and the real conflict is masked
+        // by a "current transaction is aborted" error. And ChangeTracker.Clear() would detach
+        // entities belonging to the caller's unit of work: PersistAndCompleteCoreAsync snapshots
+        // its tracked Leads around this call, and a nested Clear silently empties that snapshot.
+        if (_context.Database.CurrentTransaction is not null)
         {
-            try
+            await work();
+            return;
+        }
+
+        // WE own it — and a user-initiated transaction is illegal under the retrying execution
+        // strategy production configures unless the whole unit runs inside ExecuteAsync. Without
+        // this, every non-ambient call throws
+        // "NpgsqlRetryingExecutionStrategy does not support user-initiated transactions"
+        // before doing anything: the Lead would be created and the message never marked
+        // Assembled — the stranded message this class exists to prevent, one layer up.
+        //
+        // The repository has paid for this before; GeneralLedgerService carries the same note
+        // after it made every ledger write throw against PostgreSQL.
+        var strategy = _context.Database.CreateExecutionStrategy();
+        await strategy.ExecuteAsync(async () =>
+        {
+            for (var attempt = 1; ; attempt++)
             {
-                if (_context.Database.CurrentTransaction is not null)
+                try
                 {
+                    await using var transaction = await _context.Database.BeginTransactionAsync(ct);
                     await work();
+                    await transaction.CommitAsync(ct);
                     return;
                 }
-
-                await using var transaction = await _context.Database.BeginTransactionAsync(ct);
-                await work();
-                await transaction.CommitAsync(ct);
-                return;
+                catch (Exception exception) when (IsConcurrencyConflict(exception) && attempt < MaxAttempts)
+                {
+                    // The transaction is rolled back by the using above, so the retry genuinely
+                    // does start from the database. Clearing the tracker is what makes that true
+                    // for the entities as well — every one of them is re-read inside work().
+                    _context.ChangeTracker.Clear();
+                    _logger.LogInformation(
+                        "Concurrency conflict on attempt {Attempt} while recording an email "
+                        + "inquiry outcome; reloading and retrying.", attempt);
+                }
             }
-            catch (Exception exception) when (IsConcurrencyConflict(exception) && attempt < MaxAttempts)
-            {
-                // Discard the failed attempt's tracked state entirely. Re-saving an entry that
-                // already failed would stamp it a second time and race the same stale original
-                // value again, so the retry must start from the database.
-                _context.ChangeTracker.Clear();
-                _logger.LogInformation(
-                    "Concurrency conflict on attempt {Attempt} while recording an email inquiry "
-                    + "outcome; reloading and retrying.", attempt);
-            }
-        }
+        });
     }
 
+    /// <summary>
+    /// 40001 is the serialization failure; 23505 is the unique-violation two writers produce when
+    /// both read "no result row yet" and both insert. The second is just as retriable — the retry
+    /// re-reads and takes the update branch — and leaving it unclassified turned an ordinary race
+    /// into a propagating exception that doomed the caller's transaction and dead-lettered a job
+    /// for a condition this method believes it handles.
+    /// </summary>
     private static bool IsConcurrencyConflict(Exception exception)
         => exception is DbUpdateConcurrencyException
-           || exception is Npgsql.PostgresException { SqlState: "40001" }
-           || exception.InnerException is Npgsql.PostgresException { SqlState: "40001" };
+           || exception is Npgsql.PostgresException { SqlState: "40001" or "23505" }
+           || exception.InnerException is Npgsql.PostgresException { SqlState: "40001" or "23505" };
 
     /// <summary>
     /// Re-reads every component of the message and applies the state machine's verdict.
@@ -273,15 +314,19 @@ public sealed class EmailInquiryAssemblyCoordinator : IEmailInquiryAssemblyCoord
     {
         ArgumentNullException.ThrowIfNull(payload);
 
-        var component = await _context.EmailInquiryComponents
-            .FirstOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.Id == componentId, ct)
-            ?? throw new InvalidOperationException(
-                $"Email inquiry component {componentId} was not found for business unit "
-                + $"{businessUnitId}; its extraction result has no owner to attach to.");
-
         EmailInquiryAssemblyEvaluation evaluation = default;
         await ExecuteInTransactionAsync(async () =>
         {
+            // Loaded INSIDE the retried work. Hoisting this out left the entity detached on a
+            // retry with Status already set to Completed in memory, so the guard below saw a
+            // terminal component and skipped the write — committing the result while leaving the
+            // component Extracting and the message stalled for good.
+            var component = await _context.EmailInquiryComponents
+                .FirstOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.Id == componentId, ct)
+                ?? throw new InvalidOperationException(
+                    $"Email inquiry component {componentId} was not found for business unit "
+                    + $"{businessUnitId}; its extraction result has no owner to attach to.");
+
             var now = DateTimeOffset.UtcNow;
             var existing = await _context.Set<EmailInquiryComponentResult>()
                 .FirstOrDefaultAsync(
@@ -311,10 +356,10 @@ public sealed class EmailInquiryAssemblyCoordinator : IEmailInquiryAssemblyCoord
             existing.ReviewReason = Truncate(payload.ReviewReason, 1000);
             existing.DiagnosticsJson = payload.DiagnosticsJson;
             existing.UpdatedAtUtc = now;
-            // Npgsql does not generate int concurrency tokens the way it generates xmin, so an
-            // unincremented token stays 0 forever and every concurrent update matches — the
-            // protection reads as present and does nothing.
-            existing.ConcurrencyVersion++;
+            // The token is incremented by EmailInquiryConcurrencyStamp in SaveChanges, NOT here.
+            // Its own rationale is that a call site which forgets is exactly how the token became
+            // inert in the first place, and this table was the only one in the aggregate
+            // incrementing at the call site.
 
             // Only now is the component finished. A security refusal recorded in the meantime
             // outranks a result produced before the verdict was known, so it is not overwritten.
@@ -345,6 +390,22 @@ public sealed class EmailInquiryAssemblyCoordinator : IEmailInquiryAssemblyCoord
     private async Task<EmailInquiryAssemblyEvaluation> ReevaluateCoreAsync(
         long assemblyId, long businessUnitId, CancellationToken ct)
     {
+        // Serialize the decision on the assembly row BEFORE reading the components.
+        //
+        // Two workers finishing the last two components each read a READ COMMITTED snapshot in
+        // which the other's component is still Extracting, so both compute "not ready" and the
+        // message is one step short with nothing sweeping it. Optimistic concurrency turned that
+        // into a retry rather than a fix, which made correctness depend on the retry machinery
+        // instead of on a lock. Taking the row lock first makes the second worker read the
+        // first's committed component, and works identically whether or not we own the
+        // transaction.
+        await _context.Database.ExecuteSqlAsync(
+            $"""
+            SELECT 1 FROM public."EmailInquiryAssemblies"
+            WHERE "BusinessUnitId" = {businessUnitId} AND "Id" = {assemblyId}
+            FOR UPDATE
+            """, ct);
+
         var assembly = await _context.EmailInquiryAssemblies
             .Include(x => x.Components)
             .FirstOrDefaultAsync(x => x.Id == assemblyId && x.BusinessUnitId == businessUnitId, ct)
@@ -440,7 +501,7 @@ public sealed class EmailInquiryAssemblyCoordinator : IEmailInquiryAssemblyCoord
     }
 
     public async Task MarkAssembledAsync(
-        long businessUnitId, long assemblyId, CancellationToken ct = default)
+        long businessUnitId, long assemblyId, long leadId, CancellationToken ct = default)
     {
         await ExecuteInTransactionAsync(async () =>
         {
@@ -463,6 +524,7 @@ public sealed class EmailInquiryAssemblyCoordinator : IEmailInquiryAssemblyCoord
             }
 
             assembly.Status = EmailInquiryAssemblyStatus.Assembled;
+            assembly.AssembledLeadId = leadId;
             assembly.StatusReason = null;
             assembly.UpdatedAtUtc = DateTimeOffset.UtcNow;
             await _context.SaveChangesAsync(ct);

@@ -264,7 +264,7 @@ public static class EmailIngestEnqueuer
     // MIGRATION NOTE: EnqueueAsync above is the legacy fan-out and still walks
     // message.Attachments. It is deleted in the next increment, together with its two call
     // sites, because removing it breaks both at compile time and they must land atomically.
-    // Nothing new calls it. This is a migration, not a competing implementation.
+    // Two production callers remain — EmailService and EmailTriageService.ReprocessAsync. This is a migration, not a competing implementation.
     // ------------------------------------------------------------------------------------
 
     /// <summary>Reason recorded when the stored original stops matching what was captured.</summary>

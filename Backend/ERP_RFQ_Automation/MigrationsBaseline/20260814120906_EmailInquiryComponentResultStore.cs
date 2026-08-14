@@ -40,9 +40,19 @@ namespace ERP_RFQ_Automation.MigrationsBaseline
             // HasConversion<string>() onto character varying(30), NOT an integer. Guessing the
             // enum's numeric value here would compile, migrate, and never match a row.
             //
-            // NOT VALID, then VALIDATE, deliberately: the first takes a brief ACCESS EXCLUSIVE
-            // to write the catalogue entry with no scan, and the second takes only SHARE UPDATE
-            // EXCLUSIVE, which runs concurrently with the workers' claims and updates.
+            // NOT VALID then VALIDATE, with an honest account of what it buys HERE.
+            //
+            // In general the split is a concurrency win: ADD CONSTRAINT NOT VALID takes a brief
+            // ACCESS EXCLUSIVE with no scan, and VALIDATE takes only SHARE UPDATE EXCLUSIVE. In
+            // THIS migration it buys nothing, because the same transaction already holds ACCESS
+            // EXCLUSIVE on ExtractionJobs from the AddColumn above and holds it to commit — so
+            // the validation scan runs with the queue exclusively locked either way, and
+            // lock_timeout bounds acquisition, never the hold.
+            //
+            // It is kept because it is the shape that becomes correct the moment the VALIDATE is
+            // moved to its own migration, which is the right change to make if ExtractionJobs
+            // ever grows large enough for the scan to matter. Recording the limitation rather
+            // than letting the comment claim a protection the arrangement does not deliver.
             migrationBuilder.Sql("""
                 ALTER TABLE public."ExtractionJobs"
                     ADD CONSTRAINT "CK_ExtractionJobs_EmailInquiryComponent_IsEmail"
@@ -105,11 +115,22 @@ namespace ERP_RFQ_Automation.MigrationsBaseline
             // one. Splitting that contract for a single index would mean a failed deployment
             // could leave the schema half-applied and an INVALID index behind — a worse
             // failure than a short lock on an index that builds over nothing.
-            migrationBuilder.Sql("""
-                CREATE INDEX "IX_ExtractionJobs_BusinessUnitId_EmailInquiryComponentId"
-                    ON public."ExtractionJobs" ("BusinessUnitId", "EmailInquiryComponentId")
-                    WHERE "EmailInquiryComponentId" IS NOT NULL;
-                """);
+            // UNIQUE, not merely indexed. One component means one unit of work; two jobs naming
+            // the same component means the same attachment is extracted — and paid for — twice,
+            // with the last writer silently winning the upsert into the result store. Partial, so
+            // the uniqueness applies only where the column is set and every non-email job is
+            // unaffected.
+            // Expressed through the migration API rather than as raw SQL so the MODEL carries
+            // the same shape. Hand-written index SQL leaves the snapshot describing a plain full
+            // index while the database holds a partial unique one — the names coincide so nothing
+            // is generated today, but the model misdescribes the database and the next diff that
+            // touches this index emits SQL for the wrong one.
+            migrationBuilder.CreateIndex(
+                name: "IX_ExtractionJobs_BusinessUnitId_EmailInquiryComponentId",
+                table: "ExtractionJobs",
+                columns: new[] { "BusinessUnitId", "EmailInquiryComponentId" },
+                unique: true,
+                filter: "\"EmailInquiryComponentId\" IS NOT NULL");
 
             migrationBuilder.CreateIndex(
                 name: "IX_EmailInquiryComponentResults_BusinessUnitId_AssemblyId",
@@ -161,6 +182,26 @@ namespace ERP_RFQ_Automation.MigrationsBaseline
 
             migrationBuilder.Sql("""
                 ALTER TABLE public."EmailInquiryComponents" FORCE ROW LEVEL SECURITY;
+                """);
+
+            // FORCE must be back on. The lift above is safe only while this migration is one
+            // transaction, and that is an assumption a generated script, a split file, or one
+            // future suppressTransaction command would quietly break — leaving the owner
+            // connection permanently unbounded by tenant with nothing to notice. Asserting the
+            // catalogue costs nothing and turns a silent isolation regression into a failed
+            // deployment.
+            migrationBuilder.Sql("""
+                DO $$
+                BEGIN
+                    IF NOT (SELECT relforcerowsecurity FROM pg_class
+                            WHERE oid = 'public."EmailInquiryComponents"'::regclass) THEN
+                        RAISE EXCEPTION
+                            'EmailInquiryComponents lost FORCE ROW LEVEL SECURITY during migration '
+                            '20260814120906. Refusing to complete: the table owner would be '
+                            'unbounded by tenant.';
+                    END IF;
+                END
+                $$;
                 """);
 
             // ---- TENANT ISOLATION FOR THE NEW TABLE -----------------------------------

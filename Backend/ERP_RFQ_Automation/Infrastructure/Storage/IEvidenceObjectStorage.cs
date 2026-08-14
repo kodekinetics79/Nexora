@@ -302,8 +302,23 @@ public sealed class LocalEvidenceObjectStorage : IEvidenceObjectStorage
     {
         if (businessUnitId <= 0)
             throw new ArgumentOutOfRangeException(nameof(businessUnitId));
-        if (zone is not ("quarantine" or "cleared"))
-            throw new ArgumentException("Evidence zone must be quarantine or cleared.", nameof(zone));
+        // "raw-mail" is a THIRD zone, deliberately outside the quarantine/cleared pair.
+        //
+        // Raw inbound messages were briefly written to "quarantine", which is legal and reads as
+        // correct — an un-inspected message really is quarantined. But the retention purge
+        // derives a sibling key by string-swapping /quarantine/ <-> /cleared/ and deletes BOTH
+        // (EvidenceRetentionEligibility.ZoneKeysFor). Since .eml is on the document intake
+        // allow-list, the same bytes can legitimately exist as a SourceDocument, and purging
+        // that document would delete the authoritative raw message an EmailInquiryAssembly
+        // points at — evidence loss with nothing to say it happened, because an assembly is not
+        // a SourceDocument and none of the retention guards can see it.
+        //
+        // A separate zone matches neither swap arm, so ZoneKeysFor returns only the exact key
+        // and the collision cannot occur. The whitelist is not weakened: this is one more named
+        // constant, not an opening for arbitrary paths.
+        if (zone is not ("quarantine" or "cleared" or "raw-mail"))
+            throw new ArgumentException(
+                "Evidence zone must be quarantine, cleared or raw-mail.", nameof(zone));
         if (sha256.Length != 64 || sha256.Any(c => !Uri.IsHexDigit(c)) || sha256 != sha256.ToLowerInvariant())
             throw new ArgumentException("A lowercase SHA-256 digest is required.", nameof(sha256));
     }

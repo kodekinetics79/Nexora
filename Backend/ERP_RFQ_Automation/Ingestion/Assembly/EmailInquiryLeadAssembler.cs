@@ -1,4 +1,5 @@
 using System.Text.Json;
+using ERP_RFQ_Automation.AI;
 using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Services.Interfaces;
@@ -50,24 +51,67 @@ public sealed class EmailInquiryLeadAssembler : IEmailInquiryLeadAssembler
         _log = log;
     }
 
-    public async Task<long?> AssembleAsync(
+    public Task<long?> AssembleAsync(
         long businessUnitId, long assemblyId, CancellationToken ct = default)
     {
-        var assembly = await _context.EmailInquiryAssemblies
-            .Include(x => x.Components)
-            .FirstOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.Id == assemblyId, ct);
+        // A user-initiated transaction is illegal under the retrying execution strategy that
+        // production configures unless the whole unit runs inside ExecuteAsync. Skipping this
+        // made AssembleAsync throw on the first real message while passing every local test,
+        // because the test host had not configured EnableRetryOnFailure.
+        if (_context.Database.CurrentTransaction is not null)
+            return AssembleCoreAsync(businessUnitId, assemblyId, ct);
 
-        if (assembly is null)
+        var strategy = _context.Database.CreateExecutionStrategy();
+        return strategy.ExecuteAsync(async () =>
+        {
+            // A retried attempt must not inherit the previous one's tracked state.
+            _context.ChangeTracker.Clear();
+            await using var transaction = await _context.Database.BeginTransactionAsync(ct);
+            var leadId = await AssembleCoreAsync(businessUnitId, assemblyId, ct);
+            // Committed on EVERY path, not only the success one: the hold-for-review writes are
+            // the whole reason a refusal is visible rather than a silent stall, and disposing an
+            // uncommitted transaction would roll each of them straight back.
+            await transaction.CommitAsync(ct);
+            return leadId;
+        });
+    }
+
+    private async Task<long?> AssembleCoreAsync(
+        long businessUnitId, long assemblyId, CancellationToken ct)
+    {
+        // The assembly row is LOCKED for the whole of this method.
+        //
+        //
+        // Reading the status and acting on it were previously two separate steps, which is a
+        // check-then-act race with real money on it: two workers finishing the last two
+        // components both observe ReadyForAssembly, both merge, and both persist. Nothing in
+        // this class stopped that — the only thing preventing two Lead rows lived three layers
+        // away in the identity service's idempotency key, which is not guaranteed to be
+        // configured and not guaranteed to agree between the racers.
+        //
+        // The lock makes the loser wait, and the transaction makes the Lead and the Assembled
+        // transition commit together — so a crash between them cannot leave a Lead that no
+        // message points at.
+        var locked = await _context.EmailInquiryAssemblies
+            .FromSql($"""
+                SELECT * FROM "EmailInquiryAssemblies"
+                WHERE "Id" = {assemblyId} AND "BusinessUnitId" = {businessUnitId}
+                FOR UPDATE
+                """)
+            .ToListAsync(ct);
+
+        if (locked.Count == 0)
             throw new InvalidOperationException(
                 $"Email inquiry assembly {assemblyId} was not found for business unit {businessUnitId}.");
 
-        // Only ReadyForAssembly may proceed. Re-entrancy matters here: two workers can finish
-        // the last two components at the same moment and both see a ready message, and a Lead
-        // built twice is the duplicate this class exists to prevent. Already-Assembled is a
-        // no-op that returns the existing Lead rather than an error, because the second worker
-        // did nothing wrong.
+        var assembly = await _context.EmailInquiryAssemblies
+            .Include(x => x.Components)
+            .FirstAsync(x => x.BusinessUnitId == businessUnitId && x.Id == assemblyId, ct);
+
+        // Already done. The second worker did nothing wrong, so this returns the Lead the first
+        // one created rather than an error — and it can now actually FIND it.
         if (assembly.Status == EmailInquiryAssemblyStatus.Assembled)
-            return await ExistingLeadIdAsync(businessUnitId, assemblyId, ct);
+            return assembly.AssembledLeadId;
 
         if (assembly.Status != EmailInquiryAssemblyStatus.ReadyForAssembly)
         {
@@ -99,6 +143,28 @@ public sealed class EmailInquiryLeadAssembler : IEmailInquiryLeadAssembler
             return null;
         }
 
+        // THE UNDER-QUOTE GUARD. Every Completed component must have contributed a result.
+        //
+        // The invariant holds today only because the result and the completion are written in
+        // one transaction — but RecordComponentOutcomeAsync is a public method that accepts
+        // Completed, and one such call would produce a Lead silently missing an attachment's
+        // priced lines. That is the exact commercial defect this whole module exists to prevent,
+        // so it is checked rather than assumed.
+        var completedCount = assembly.Components
+            .Count(c => c.Status == EmailInquiryComponentStatus.Completed);
+        if (results.Count != completedCount)
+        {
+            _log.LogError(
+                "Assembly {AssemblyId} has {Results} result(s) for {Completed} completed "
+                + "component(s); refusing to build a Lead from an incomplete message.",
+                assemblyId, results.Count, completedCount);
+            await _coordinator.HoldForReviewAsync(
+                businessUnitId, assemblyId, EmailInquiryHoldReasons.ResultMissing,
+                "Part of this message finished without recording what was read, so the inquiry "
+                + "would be incomplete. It needs a look before it becomes an inquiry.", ct);
+            return null;
+        }
+
         // Ordinal order, so the body's header fields are considered before an attachment's and
         // the merged Lead reads the way the sender wrote it.
         var byComponent = assembly.Components.ToDictionary(c => c.Id);
@@ -111,6 +177,13 @@ public sealed class EmailInquiryLeadAssembler : IEmailInquiryLeadAssembler
         var expected = 0;
         var extracted = 0;
         var reviewReasons = new List<string>();
+        // Provenance is MERGED, not invented. Hardcoding a deterministic path made every
+        // assembled Lead read as external-AI-derived downstream — which is what the identity
+        // ledger and the Trust Center report to the customer — even when every component was a
+        // deterministic CSV parse. External wins if ANY component used an external model,
+        // because that is the claim that has to be defensible.
+        var providerClasses = new HashSet<string>(StringComparer.Ordinal);
+        var processingPaths = new HashSet<string>(StringComparer.Ordinal);
 
         foreach (var result in ordered)
         {
@@ -140,14 +213,25 @@ public sealed class EmailInquiryLeadAssembler : IEmailInquiryLeadAssembler
                 merged.AddRange(parsed.Items);
             expected += result.ExpectedItemCount;
             extracted += result.ExtractedItemCount;
+            if (!string.IsNullOrWhiteSpace(result.AiProviderClass))
+                providerClasses.Add(result.AiProviderClass!);
+            processingPaths.Add(result.ProcessingPath);
             if (!string.IsNullOrWhiteSpace(result.ReviewReason))
                 reviewReasons.Add(result.ReviewReason!);
         }
 
         if (header is null)
         {
-            _log.LogInformation(
-                "Assembly {AssemblyId} produced no readable extraction; nothing to quote.", assemblyId);
+            // Held, not silently abandoned. Returning null here left the message at
+            // ReadyForAssembly with no Lead, no reason and nothing that would ever look at it
+            // again — invisible to the customer and to the operator alike.
+            _log.LogError(
+                "Assembly {AssemblyId} has result rows but none of them parsed to a usable "
+                + "extraction; the message is held for review.", assemblyId);
+            await _coordinator.HoldForReviewAsync(
+                businessUnitId, assemblyId, EmailInquiryHoldReasons.ResultUnreadable,
+                "This message was processed but nothing usable could be read back from it. "
+                + "It needs a look.", ct);
             return null;
         }
 
@@ -159,9 +243,15 @@ public sealed class EmailInquiryLeadAssembler : IEmailInquiryLeadAssembler
             .FirstOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.Id == anchorJobId, ct);
         if (anchorJob is null)
         {
+            // Same reasoning as the header case: a dead end that changes no state is a message
+            // that stalls forever with nothing recording why.
             _log.LogError(
                 "Assembly {AssemblyId} names extraction job {JobId}, which no longer exists.",
                 assemblyId, anchorJobId);
+            await _coordinator.HoldForReviewAsync(
+                businessUnitId, assemblyId, EmailInquiryHoldReasons.ResultMissing,
+                "The processing record for part of this message is no longer available, so the "
+                + "inquiry cannot be completed automatically. It needs a look.", ct);
             return null;
         }
 
@@ -172,12 +262,15 @@ public sealed class EmailInquiryLeadAssembler : IEmailInquiryLeadAssembler
             ExpectedItemCount = expected,
             ExtractedItemCount = extracted,
             ReviewReason = reviewReasons.Count > 0 ? string.Join("; ", reviewReasons) : null,
-            ProcessingPath = ExtractionProcessingPath.NativeParser
+            AiProviderClass = MergedProviderClass(providerClasses),
+            ProcessingPath = MergedProcessingPath(processingPaths)
         };
 
         var leadId = await _persister.PersistAssembledMessageAsync(anchorJob, outcome, ct);
 
-        await _coordinator.MarkAssembledAsync(businessUnitId, assemblyId, ct);
+        // Same transaction as the Lead. MarkAssembledAsync joins the ambient transaction rather
+        // than opening its own, so either the message has a Lead and says so, or neither.
+        await _coordinator.MarkAssembledAsync(businessUnitId, assemblyId, leadId, ct);
 
         _log.LogInformation(
             "Assembly {AssemblyId} became Lead {LeadId} for business unit {BusinessUnitId}: "
@@ -187,18 +280,25 @@ public sealed class EmailInquiryLeadAssembler : IEmailInquiryLeadAssembler
         return leadId;
     }
 
-    private async Task<long?> ExistingLeadIdAsync(long businessUnitId, long assemblyId, CancellationToken ct)
+    /// <summary>External if ANY component used an external model; null when none did.</summary>
+    private static AiProviderClass? MergedProviderClass(HashSet<string> classes)
     {
-        var jobIds = await _context.Set<EmailInquiryComponentResult>()
-            .AsNoTracking()
-            .Where(x => x.BusinessUnitId == businessUnitId && x.AssemblyId == assemblyId)
-            .Select(x => x.ExtractionJobId)
-            .ToListAsync(ct);
+        if (classes.Count == 0) return null;
+        if (classes.Contains(nameof(AiProviderClass.External))) return AiProviderClass.External;
+        return Enum.TryParse<AiProviderClass>(classes.First(), out var parsed) ? parsed : null;
+    }
 
-        return await _context.Set<ExtractionJob>()
-            .AsNoTracking()
-            .Where(x => x.BusinessUnitId == businessUnitId && jobIds.Contains(x.Id) && x.ResultLeadId != null)
-            .Select(x => x.ResultLeadId)
-            .FirstOrDefaultAsync(ct);
+    /// <summary>
+    /// Deterministic only when EVERY component was deterministic. One model-extracted part makes
+    /// the merged answer a model-extracted answer, and claiming otherwise to a customer reading
+    /// the Trust Center is the kind of untruth that is worse than the uncertainty it hides.
+    /// </summary>
+    private static ExtractionProcessingPath MergedProcessingPath(HashSet<string> paths)
+    {
+        if (paths.Count == 1 && Enum.TryParse<ExtractionProcessingPath>(paths.First(), out var only))
+            return only;
+        return paths.Contains(nameof(ExtractionProcessingPath.DeterministicRules)) && paths.Count == 1
+            ? ExtractionProcessingPath.DeterministicRules
+            : ExtractionProcessingPath.NativeParser;
     }
 }

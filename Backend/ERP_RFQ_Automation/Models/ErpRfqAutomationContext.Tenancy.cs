@@ -416,6 +416,15 @@ public partial class ErpRfqAutomationContext
                 .HasForeignKey(e => new { e.BusinessUnitId, e.EmailInquiryComponentId })
                 .HasPrincipalKey(e => new { e.BusinessUnitId, e.Id })
                 .OnDelete(DeleteBehavior.Restrict);
+            // UNIQUE and FILTERED, matching the SQL the migration actually runs. Without the
+            // filter here the snapshot describes a plain full index while the database holds a
+            // partial unique one: the names coincide so no migration is generated today, but the
+            // model misdescribes the database and the next diff touching this index emits SQL for
+            // the wrong one.
+            modelBuilder.Entity<ERP_RFQ_Automation.Extraction.ExtractionJob>()
+                .HasIndex(e => new { e.BusinessUnitId, e.EmailInquiryComponentId })
+                .IsUnique()
+                .HasFilter("\"EmailInquiryComponentId\" IS NOT NULL");
             modelBuilder.Entity<ERP_RFQ_Automation.Extraction.ExtractionJob>()
                 .HasOne<SourceDocumentOccurrence>()
                 .WithMany()

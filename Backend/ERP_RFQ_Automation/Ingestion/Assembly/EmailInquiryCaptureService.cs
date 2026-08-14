@@ -66,14 +66,19 @@ public sealed class EmailInquiryCaptureService : IEmailInquiryCaptureService
     /// provider — the whole path was dead on arrival and every test missed it because every test
     /// substituted the storage.</para>
     ///
-    /// <para><c>quarantine</c> is also the correct answer on the merits, not merely the legal one:
-    /// a raw message straight off a mailbox is untrusted content that has not been through
-    /// security inspection, which is exactly what the quarantine zone means and exactly what
-    /// <see cref="ERP_RFQ_Automation.Extraction.DocumentIngestionService"/> writes un-inspected
-    /// bytes to. Retention stays settable: nothing sweeps by zone, and the raw message is
-    /// addressed by the URI recorded on the assembly row.</para>
+    /// <para>It was then briefly <c>quarantine</c>, which is legal and reads as correct — an
+    /// un-inspected message really is quarantined. That was wrong for a reason no whitelist could
+    /// show: the retention purge derives a sibling key by swapping <c>/quarantine/</c> for
+    /// <c>/cleared/</c> and deletes both. <c>.eml</c> is on the document intake allow-list, so
+    /// the same bytes can also exist as a <c>SourceDocument</c>, and purging that document would
+    /// destroy the authoritative raw copy this assembly points at — silently, because an assembly
+    /// is not a <c>SourceDocument</c> and no retention guard can see it.</para>
+    ///
+    /// <para><c>raw-mail</c> is its own zone. It matches neither arm of that swap, so the
+    /// collision cannot happen, and the original intent — a mailbox archive whose retention is
+    /// settable independently of document evidence — is what the storage layout now says.</para>
     /// </summary>
-    internal const string RawEmailZone = "quarantine";
+    internal const string RawEmailZone = "raw-mail";
 
     private readonly ErpRfqAutomationContext _context;
     private readonly IEvidenceObjectStorage _evidence;

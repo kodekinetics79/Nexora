@@ -42,5 +42,11 @@ internal static class EmailInquiryConcurrencyStamp
             if (entry.State == EntityState.Modified)
                 entry.Entity.ConcurrencyVersion++;
         }
+
+        foreach (var entry in changeTracker.Entries<EmailInquiryComponentResult>())
+        {
+            if (entry.State == EntityState.Modified)
+                entry.Entity.ConcurrencyVersion++;
+        }
     }
 }
