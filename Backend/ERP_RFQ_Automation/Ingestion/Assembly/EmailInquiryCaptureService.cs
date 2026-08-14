@@ -55,9 +55,25 @@ public interface IEmailInquiryCaptureService
 /// </summary>
 public sealed class EmailInquiryCaptureService : IEmailInquiryCaptureService
 {
-    /// <summary>Evidence zone for raw inbound messages. Separate from document evidence so the
-    /// retention rule for a mailbox archive is settable independently.</summary>
-    internal const string RawEmailZone = "inbound-email";
+    /// <summary>
+    /// Evidence zone for the raw inbound message.
+    ///
+    /// <para>It USED to be <c>"inbound-email"</c>, on the reasoning that a mailbox archive should
+    /// carry its own retention rule. That zone does not exist: both storage providers validate
+    /// against a two-value whitelist (<c>quarantine</c> | <c>cleared</c>) and throw
+    /// <see cref="ArgumentException"/> on anything else. The throw is not the storage-unavailable
+    /// contract, so it escaped the handler below and capture failed on EVERY message, on every
+    /// provider — the whole path was dead on arrival and every test missed it because every test
+    /// substituted the storage.</para>
+    ///
+    /// <para><c>quarantine</c> is also the correct answer on the merits, not merely the legal one:
+    /// a raw message straight off a mailbox is untrusted content that has not been through
+    /// security inspection, which is exactly what the quarantine zone means and exactly what
+    /// <see cref="ERP_RFQ_Automation.Extraction.DocumentIngestionService"/> writes un-inspected
+    /// bytes to. Retention stays settable: nothing sweeps by zone, and the raw message is
+    /// addressed by the URI recorded on the assembly row.</para>
+    /// </summary>
+    internal const string RawEmailZone = "quarantine";
 
     private readonly ErpRfqAutomationContext _context;
     private readonly IEvidenceObjectStorage _evidence;
