@@ -813,3 +813,52 @@ Non-email ingestion is untouched — manual upload and watched folders are not
 | 5 | Real raw `.eml` SHA-256 verification before any recovery/reprocess re-plan; `RawEvidenceHashMismatch` typed outcome | reader exists; verification not yet called on the recovery path |
 | — | Shared `AddEmailInquiryAssembly` extension used by **both** `Program` and the test | current test copies registrations, which the directive rules insufficient |
 | — | Correction test matrix + PG concurrency + SME reviews | |
+
+
+## HOLD LIFECYCLE PROVEN — and the operator message was false
+
+Branch pushed for continuity: local **`c3470218e2539c5823f4552e13fe6fb186ea9bcb`** = remote,
+confirmed by local ref, `origin/` ref and the GitHub API. No `.env`, key, credential or `.eml`
+fixture in the 65 changed files; the design-time `ef.sh` helper is untracked. Not merged, not
+deployed.
+
+### The claim that did not survive checking
+
+The fence's operator sentence said the part "will be processed again automatically". **Nothing
+sweeps `FailedRecoverable` components — there is no recovery service in this build.** The
+sentence was untrue, and it is the same class of defect as advising a retry that cannot succeed:
+the 2026-08-12 incident in miniature, written by the person who had just finished fixing it.
+
+Corrected to: *"This part of the message was read successfully, but the step that combines it
+with the rest of the email is not available yet, so the inquiry is not complete. It is being
+held; no information has been lost."*
+
+Both the reason code and the sentence are now **named constants** in
+`EmailInquiryHoldReasons`, so the promise itself is assertable. The first version of that test
+read the worker's source and matched substrings — a source-text assertion, which is exactly what
+SME5 F4 flagged and what the directive prohibits. It asserts the constant now.
+
+### What "held" actually means, proven
+
+| Property | Evidence |
+| --- | --- |
+| not terminal — the message is never declared finished | `IsTerminal` false, `IsRecoverableHold` true |
+| holds the whole message | `Evaluate` → `FailedRecoverable`, never `ReadyForAssembly` |
+| never counted as captured content | `CapturedComponentCount` 0 **and** `CompletedComponentCount` 0 |
+| cannot reach ready by transition either | `CanTransition(FailedRecoverable, ReadyForAssembly)` false |
+| **no hot-loop / no repeated AI or OCR spend** | the component keeps its job reference, and `ScheduleAsync` skips a component whose referenced job is verified to belong to it — so re-running the scheduler does not re-extract |
+| diagnosable | job reference and reason code retained |
+| per-assembly isolation | same `ComponentKey` under two assemblies stays two rows |
+| no Lead per component | fence returns before reconciliation; Email jobs without ownership fail closed |
+
+**The honest reading: nothing advances until the result store lands.** That is what "held"
+means, and it is why the word "retryable" is not used for it.
+
+Hold lifecycle: **9 passed**. Full backend regression: **Failed: 0, Passed: 4911**.
+
+### Next — the durable component-result store
+
+No reusable contract exists, so the smallest tenant-scoped surface gets added on the frozen-
+migration-safe pattern (focused follow-up migration; `20260813134002` stays byte-identical).
+Then the fence completes instead of holding, and correction 3 (identity by
+`BusinessUnitId + AssemblyId + ComponentId`) lands with it since both touch the coordinator.

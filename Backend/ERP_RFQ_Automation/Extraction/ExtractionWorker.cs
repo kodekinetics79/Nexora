@@ -1044,10 +1044,12 @@ public sealed class LeadPersister : ILeadPersister
                 await _emailAssemblies.RecordComponentOutcomeAsync(
                     job.BusinessUnitId, assemblyComponent.ComponentKey,
                     ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponentStatus.FailedRecoverable,
-                    "assembly_result_store_pending",
-                    "This part was read successfully, but the message-level assembly that "
-                    + "combines it with the rest of the email is not available yet. It will be "
-                    + "processed again automatically.",
+                    ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryHoldReasons.AssemblyResultStorePending,
+                    // Named rather than inlined so the promise itself is testable. It says held,
+                    // NOT "will retry automatically": nothing sweeps FailedRecoverable in this
+                    // build, and promising a retry that never comes is the same class of untruth
+                    // as advising a retry that cannot succeed.
+                    ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryHoldReasons.AssemblyResultStorePendingDetail,
                     job.SourceDocumentOccurrenceId, ct);
 
                 _log.LogWarning(
