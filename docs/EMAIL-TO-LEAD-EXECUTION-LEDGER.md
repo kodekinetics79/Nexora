@@ -1450,3 +1450,41 @@ Unstructured (prose body) extraction requires a model, and the AI gate refuses E
 processing of unstructured documents outright — it did so on the first live poll. Pointing the
 app at a loopback Ollama resolves the provider class to `Local`, which the gate permits:
 `reason=loopback_endpoint ... no third-party egress`. No message content leaves the machine.
+
+### Defect 3, resolved: the platform plane executes as the platform role
+
+`ExtractionWorker` pushes the tenant scope, so the persist transaction runs as
+`nexora_tenant_app`. The usage-metering block inside it is entirely PLATFORM plane: it reads
+`Tenants` and `RateCards` and writes `UsageEvents`, `UsageEventRatings` and
+`UsageMinuteAggregates`. The tenant role holds column-level `SELECT` on six `Tenants` columns and
+nothing else on that list — not even `Tenants."RateCardId"`, which the projection reads. Live
+symptom: `42501`, the job failed, and the queue re-leased it forever.
+
+Two fixes were possible and the choice matters. Granting the tenant role what it lacks is
+defensible for `Tenants` alone — a tenant reading its own tenant row is not an escalation, which
+is exactly why the six column grants already exist — but it does NOT extend to the rest of the
+block. Making metering work under the tenant role means granting `INSERT` on the billing ledger:
+`UsageEvents`, `UsageEventRatings`, `UsageMinuteAggregates`. That is the one plane a tenant must
+never be able to write, because it is what the platform charges them from.
+
+So the block switches ROLE instead, through a scoped `PlatformPlaneExecution` the interceptor
+resolves before the tenant. The statements run as `nexora_pipeline_app` and switch back on
+dispose, inside the same transaction as the tenant-plane write, because the two must commit
+together. The tenant GUC is deliberately left alone: the block cannot be used to blank a tenant
+scope, and the next tenant-plane command re-issues both.
+
+### Two harness bugs, recorded because both cost a full cycle
+
+Neither was a product defect, and both would recur:
+
+- **The demo sender omitted `Date` headers.** The poller searches IMAP with `SENTSINCE`, which
+  matches the Date HEADER, not the server's `INTERNALDATE`. Messages without one are invisible to
+  the poll window — two runs found zero mail and the pipeline looked broken.
+- **`Security:SecretProtectionKey` was regenerated per launch.** Every stored mailbox credential
+  became undecryptable on the next restart (`AuthenticationTagMismatchException`), which surfaces
+  as a mailbox that simply stops polling. Pinned for the demo stack.
+
+A third was a cleanup error worth stating plainly: clearing `ExtractionJobs` without clearing
+`source_document_occurrences` left the content-addressed reuse path bound to deleted jobs, and
+the next ingest failed on the foreign key. The evidence ledger is part of the pipeline's state,
+not a side table.
