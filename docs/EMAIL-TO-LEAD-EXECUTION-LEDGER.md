@@ -1196,3 +1196,93 @@ between, the job reads `Succeeded` and the message sits at `ReadyForAssembly` wi
 nothing in this build sweeps that state. The ordering is still correct (assembling first would
 duplicate the Lead on retry), so the fix is a recovery sweep, not a reordering. Recorded here
 rather than built, and it is the next item.
+
+
+## SME REVIEW OF THE BARRIER — Critical closed (`22ebd5e`)
+
+Three bounded read-only reviews of `ca86def`. The headline finding was one the
+end-to-end test **could not see**, and it failed for the same reason the defects it did
+find were invisible: it differed from production in the dimension under test.
+
+**CRITICAL — every non-ambient transaction would have thrown in production.** `Program.cs`
+configures `EnableRetryOnFailure`, installing `NpgsqlRetryingExecutionStrategy`, under which a
+user-initiated `BeginTransactionAsync` outside `CreateExecutionStrategy().ExecuteAsync` throws
+outright. The slice test built its context WITHOUT it, so `MarkAssembledAsync`,
+`HoldForReviewAsync`, `RecordComponentQueuedAsync` and `RecordComponentOutcomeAsync` all passed
+locally and would each have thrown on the first real message — Lead created, job Succeeded,
+message never marked Assembled. The repository had paid for this before: `GeneralLedgerService`
+carries the same note after it made every ledger write throw against PostgreSQL.
+
+The test now configures the production retry policy, and **reproduced the failure before the
+fix**.
+
+| Also closed | Why it mattered |
+| --- | --- |
+| retrying inside an AMBIENT transaction | 40001 has already aborted it, so attempt two fails 25P02 with the real conflict masked; and `ChangeTracker.Clear()` emptied the caller's tracked-Lead snapshot |
+| the retry dropped the component's completion | the entity was loaded OUTSIDE the retried delegate — detached on retry AND still carrying attempt one's `Completed`, so the guard skipped the write |
+| check-then-act on `ReadyForAssembly` | two workers could both build a Lead; the only thing preventing it lived three layers away in the identity service |
+| a Lead no message pointed at | `AssembledLeadId` added; the old lookup could only ever return null, so the idempotency contract could not be honoured |
+| raw `.eml` in the `quarantine` zone | the retention purge deletes the sibling key derived by swapping `/quarantine/` ↔ `/cleared/`, and `.eml` is intake-allowed — purging a document would have destroyed an assembly's authoritative raw message, silently. Now its own `raw-mail` zone |
+
+Plus: the ownership index is UNIQUE; 23505 is classified as a concurrency conflict; the result
+token is stamped with the rest of the aggregate rather than at the call site; provenance is
+MERGED so a message of deterministic parses stops being reported as external-AI-derived; two
+silent dead ends now hold for review; every `Completed` component must have contributed a
+result; the migration asserts FORCE RLS is back on; and the comment claiming a concurrency
+benefit from `NOT VALID` + `VALIDATE` now records that this migration does not get one.
+
+
+## RECOVERY SWEEP — the stranded message is now impossible to lose (`b4a08db`)
+
+The worker commits the queue job and assembles **after**. That order is correct — assembling
+first means a crash in between is retried and builds the Lead twice — but it left a window with
+nothing watching it. A process dying in between left every job `Succeeded`, every result durable,
+and the message at `ReadyForAssembly` with no Lead, no error, no dead letter, and nothing that
+would ever look again. The window is entered on every deploy, not only on crashes.
+
+**`ReadyForAssembly` with a null `AssembledLeadId` IS the work item.** No outbox, no retry table,
+no requeue, no re-extraction, no re-reading of evidence. A second record of the same fact is how
+two sources of truth start disagreeing.
+
+### Two real defects the failure-injection proof found
+
+| # | Defect |
+| --- | --- |
+| 1 | **`SELECT ... FOR UPDATE` through EF did not serialize two concurrent recovery instances — both built a Lead.** Materializing the row via `FromSql` looks equivalent to a lock and is not: EF wraps raw SQL as a subquery to apply the global query filter, and the entity returned goes through identity resolution, so the value the code reasons about need not be the row just read. Replaced with a compare-and-swap — a conditional `UPDATE` guarded on `Status` and `ConcurrencyVersion` — which takes the row's write lock, blocks the loser until the winner commits, then fails its `WHERE`. |
+| 2 | **The claim's loser reported a recovery it had not performed.** Returning the winner's lead id was true and useless: a caller counting outcomes recorded two recoveries for one Lead, and "a Lead exists" became indistinguishable from "I built it" in every metric downstream. Null now means "not by me". |
+
+Both were found by an applied test, not by reasoning — the first was diagnosed only after an
+instrumented run showed one claim, one persist, and still two Leads.
+
+### What the proof asserts
+
+Real PostgreSQL under the production retry policy. The crash is injected by replacing ONE
+registration — the assembler — so the worker stops where a dying process would; **nothing that
+writes is substituted**, so the stranded state is produced by the real queue, worker, persister
+and coordinator. Process loss is simulated by disposing the entire `ServiceProvider`, and
+recovery runs on a graph sharing nothing but the database.
+
+- the stranded state in full: jobs `Succeeded`, results durable, components `Completed`,
+  assembly `ReadyForAssembly`, `AssembledLeadId` null, zero Leads;
+- recovery produces exactly one Lead with all five lines in the buyer's order;
+- sweeping again recovers nothing, creates no second Lead, and re-runs no extraction;
+- two concurrent instances produce one Lead and agree on its id;
+- cancellation inside the assembler transaction leaves no partial Lead, still recoverable;
+- a replay after success returns the same Lead, twice;
+- a poisoned message is held for review while another tenant's is recovered in the same sweep;
+- a tenant can neither discover nor recover a neighbour's assembly;
+- `Captured`, `Extracting`, `NeedsReview`, `Assembled`, legacy email jobs and manual uploads are
+  all left alone.
+
+The graph now lives in `EmailToLeadHarness` so every test on this path shares ONE definition of
+the production composition — a second copy is how the retry-policy blindness happened once.
+
+Full backend regression: **Failed: 0, Passed: 4944**. No model drift. Frozen migration
+byte-identical.
+
+### Still open, and deliberately not in this increment
+
+**Caller cutover.** `ScheduleAsync` has no production caller: live mail still takes the legacy
+per-attachment route through `EmailService` and `EmailTriageService.ReprocessAsync`. Everything
+above is 0% of production traffic today and 100% of multi-part inquiry mail the day capture is
+wired. The cutover must gate BOTH callers and drain occurrences, not just queue rows.
