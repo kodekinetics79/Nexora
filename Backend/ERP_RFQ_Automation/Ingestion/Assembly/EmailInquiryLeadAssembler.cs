@@ -402,6 +402,41 @@ public sealed class EmailInquiryLeadAssembler : IEmailInquiryLeadAssembler
 
         var leadId = await _persister.PersistAssembledMessageAsync(anchorJob, outcome, ct);
 
+        // A NON-POSITIVE LEAD ID IS "NO LEAD WAS PRODUCED", AND IT MUST NOT BE CALLED SUCCESS.
+        //
+        // This value used to be passed straight into MarkAssembledAsync, which wrote it verbatim.
+        // A message therefore reached `Assembled` with `AssembledLeadId = 0` — a value that is not
+        // an id and never was. Downstream, the message reads as finished: the operator is offered
+        // "open lead" for a lead that cannot be opened, and every count of assembled messages is
+        // one higher than the count of inquiries that exist.
+        //
+        // Zero is not a corruption; it is the persister truthfully saying it created nothing. The
+        // one path that produces it in practice is identity reconciliation classifying the merged
+        // inquiry as PossibleMatchReviewRequired: a match against an existing Lead that is not
+        // certain enough to link automatically, so a human decision is raised and no second
+        // commercial record is written. (A confident duplicate is a different outcome entirely —
+        // reconciliation returns the EXISTING Lead's real id, which is positive, so the message
+        // records that Lead and this branch is never taken.)
+        //
+        // So the honest disposition is the one the module already has for "read in full, cannot
+        // be completed automatically": held for review, with a typed reason. The hold commits with
+        // the rest of this transaction, the message stays visible and actionable, and — because it
+        // is no longer ReadyForAssembly with a null lead — the recovery sweep correctly stops
+        // treating it as stranded work to re-run.
+        if (leadId <= 0)
+        {
+            _log.LogError(
+                "Assembly {AssemblyId} for business unit {BusinessUnitId} merged {Results} "
+                + "component result(s) into {Lines} line(s) but the persist path produced no lead "
+                + "(returned {LeadId}); the message is held for review rather than marked "
+                + "assembled.",
+                assemblyId, businessUnitId, ordered.Count, merged.Count, leadId);
+            await _coordinator.HoldForReviewAsync(
+                businessUnitId, assemblyId, EmailInquiryHoldReasons.LeadNotProduced,
+                EmailInquiryHoldReasons.LeadNotProducedDetail, ct);
+            return new AssembleOutcome(null, null);
+        }
+
         // Same transaction as the Lead. MarkAssembledAsync joins the ambient transaction rather
         // than opening its own, so either the message has a Lead and says so, or neither.
         await _coordinator.MarkAssembledAsync(businessUnitId, assemblyId, leadId, ct);

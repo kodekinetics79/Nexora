@@ -14,6 +14,7 @@ using ERP_RFQ_Automation.Services.DocumentIntelligence;
 using ERP_RFQ_Automation.Services.Interfaces;
 using ERP_RFQ_Automation.MultiTenancy;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -1557,7 +1558,162 @@ public sealed class LeadPersister : ILeadPersister
         // The canonical document meter is committed in the same transaction as both the
         // business result and the fenced queue completion. A retry therefore cannot charge
         // twice, and a rollback leaves neither a successful job nor a usage occurrence.
+        //
+        // ---- WHY THIS BLOCK CHANGES EXECUTION ROLE -----------------------------------------
+        //
+        // This transaction runs as nexora_tenant_app, by TWO independent routes: ProcessOnceAsync
+        // pushes the tenant scope so TenantRlsCommandInterceptor switches the connection, AND
+        // ExtractionQueue.PrepareExecutionScopeAsync issues its own SET LOCAL ROLE when
+        // RenewLeaseAsync opens this transaction a few lines above. The second route needs no
+        // interceptor and no RLS configuration at all, so this is not a production-topology-only
+        // problem — it is every extraction, everywhere, and a graph that registers no interceptor
+        // reproduces it exactly.
+        //
+        // Everything below is PLATFORM plane: it reads platform."Tenants" and
+        // platform."RateCards" and writes platform."UsageEvents", "UsageEventRatings" and
+        // "UsageMinuteAggregates". nexora_tenant_app holds column-level SELECT on six Tenants
+        // columns and NOTHING on the rest of that list — not even Tenants."RateCardId", which the
+        // projection below reads. The first statement therefore failed with
+        // `42501: permission denied for table Tenants`, the job failed, and the queue re-leased it
+        // until it dead-lettered. It went unseen because no test graph registered
+        // UsageMeteringService, so LeadPersister's optional dependency was null and this block
+        // never ran.
+        //
+        // TWO WAYS TO FIX IT, and why this one:
+        //
+        //  (a) Grant nexora_tenant_app what it lacks, with an RLS policy pinning it to its own
+        //      row. Defensible for Tenants alone — a tenant reading its own tenant row is not a
+        //      privilege escalation, and that is exactly why the six column grants above already
+        //      exist. It does NOT extend to the rest of this block. Making metering work under
+        //      the tenant role means granting INSERT on platform."UsageEvents" and
+        //      "UsageEventRatings" and INSERT/UPDATE on "UsageMinuteAggregates" — the billing
+        //      ledger, owned by the platform, written by the platform, and the one plane a tenant
+        //      role must never be able to reach. A tenant-writable meter is a tenant-editable
+        //      invoice. That is a far wider hole than the one being closed.
+        //
+        //  (b) Run the platform-plane statements as the platform role. nexora_pipeline_app
+        //      already holds every grant this block needs, so no schema change, no new grant, and
+        //      no widening of any role's reach. The switch is SET LOCAL on the SAME connection in
+        //      the SAME transaction — exactly what ExtractionQueue already does to reach the
+        //      tenant role — so the meter still commits or rolls back with the business result and
+        //      the fenced completion, which is the property the comment above depends on.
+        //
+        // (b), for the reason the plane split exists at all: the meter is not the tenant's data.
+        //
+        // NOT wrapped in a try/catch, deliberately. Unbilled usage is a silent revenue loss that
+        // nobody discovers; a failed extraction job is loud, retried and visible. If metering
+        // cannot record, this transaction must roll back.
         if (_usageMetering is not null)
+        {
+            // Fail closed on the one way the block below could be misused. Inside it the
+            // connection is nexora_pipeline_app, which is BYPASSRLS: a tenant-plane entity left
+            // dirty in the change tracker would be flushed by the metering service's own
+            // SaveChanges and written without a policy check. Persistence has already saved, so
+            // this is an assertion about a future edit, not a condition seen today.
+            if (_context.ChangeTracker.HasChanges())
+                throw new InvalidOperationException(
+                    $"Extraction job {job.Id} reached usage metering with unsaved tenant-plane "
+                    + "changes. They would be written under the platform role, bypassing row-level "
+                    + "security. Save (or discard) them before entering the platform plane.");
+
+            // The role is restored to whatever this transaction was already using, read rather
+            // than assumed. It is nexora_tenant_app on every production path — ExtractionQueue's
+            // PrepareExecutionScopeAsync set it when RenewLeaseAsync opened this transaction — but
+            // a harness with a substituted queue leaves the connection on its login role, and
+            // forcing such a caller onto the tenant role afterwards would be a second defect.
+            var restoreRole = await CurrentRoleAsync(ct);
+
+            using (PlatformPlaneExecution.Enter())
+            {
+                // TWO mechanisms, because there are two ways this connection acquires a role and
+                // only one of them is the interceptor.
+                //
+                // PlatformPlaneExecution alone is not enough: ExtractionQueue issues its own
+                // SET LOCAL ROLE directly on the connection when it opens the lease renewal, with
+                // no interceptor involved, and SET LOCAL persists to the end of the transaction.
+                // So the persist transaction sits on nexora_tenant_app even in a graph that
+                // registers no interceptor at all — which is why this defect reaches every
+                // extraction, not only the deployments running the RLS interceptor.
+                //
+                // The explicit statement below moves the connection to the platform role the same
+                // way ExtractionQueue moves it to the tenant role. PlatformPlaneExecution then
+                // stops the interceptor, where one IS registered, from clobbering it again before
+                // every command inside the block.
+                await SetLocalRoleAsync(TenantRlsCommandInterceptor.PipelineRole, ct);
+
+                await MeterExtractionAsync(job, outcome, workerId, ct);
+            }
+
+            if (restoreRole is not null)
+                await SetLocalRoleAsync(restoreRole, ct);
+        }
+        if (!await queue.CompleteAsync(job.Id, workerId, leaseAttempt, leadId > 0 ? leadId : null, ct))
+            throw new InvalidOperationException($"Fenced completion failed for extraction job {job.Id}.");
+
+        await transaction.CommitAsync(ct);
+        return new PersistedExtraction(leadId, persistedLeads);
+    }
+
+    /// <summary>
+    /// The role this transaction is currently executing as, or null off PostgreSQL.
+    /// </summary>
+    private async Task<string?> CurrentRoleAsync(CancellationToken ct)
+    {
+        if (!_context.Database.IsNpgsql())
+            return null;
+
+        await using var command = CreateTransactionCommand("SELECT current_user;");
+        return await command.ExecuteScalarAsync(ct) as string;
+    }
+
+    /// <summary>
+    /// Moves the CURRENT transaction to <paramref name="role"/>. Transaction-local, so the commit
+    /// or rollback that ends this transaction discards it either way.
+    /// </summary>
+    private async Task SetLocalRoleAsync(string role, CancellationToken ct)
+    {
+        // Roles are a PostgreSQL concept and SET LOCAL ROLE is a syntax error on SQLite, which is
+        // the same branch ExtractionQueue.PrepareExecutionScopeAsync takes. Nothing is skipped:
+        // there is no role to switch on that provider.
+        if (!_context.Database.IsNpgsql())
+            return;
+
+        // The role name is never user input — it is either a constant from
+        // TenantRlsCommandInterceptor or a value PostgreSQL itself just returned from
+        // current_user — and it is quoted as an identifier because SET ROLE takes no parameter.
+        await using var command = CreateTransactionCommand(
+            $"SET LOCAL ROLE \"{role.Replace("\"", "\"\"")}\";");
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>
+    /// A raw command on the context's own connection and transaction, exactly as
+    /// <c>ExtractionQueue.PrepareExecutionScopeAsync</c> issues its role switch.
+    ///
+    /// <para>Raw rather than <c>ExecuteSqlRawAsync</c> on purpose: these two statements ARE the
+    /// role mechanism, so routing them through the EF pipeline — where an interceptor prepends its
+    /// own <c>SET LOCAL ROLE</c> to every command — would mean the statement that sets the role is
+    /// itself preceded by a statement that sets the role. Going straight at the connection keeps
+    /// the switch a single, ordered, observable fact.</para>
+    /// </summary>
+    private System.Data.Common.DbCommand CreateTransactionCommand(string sql)
+    {
+        var command = _context.Database.GetDbConnection().CreateCommand();
+        command.Transaction = _context.Database.CurrentTransaction?.GetDbTransaction();
+        command.CommandText = sql;
+        return command;
+    }
+
+    /// <summary>
+    /// The platform-plane half of the persist transaction: reads the tenant's billing identity and
+    /// records the meters. Extracted so the role switch above wraps exactly this and nothing else.
+    /// </summary>
+    private async Task MeterExtractionAsync(
+        ExtractionJob job, ChunkedExtractionOutcome outcome, string workerId, CancellationToken ct)
+    {
+        if (_usageMetering is null)
+            return;
+
         {
             var platformTenant = await _context.Set<ERP_RFQ_Automation.Platform.Models.Tenant>()
                 .AsNoTracking()
@@ -1596,11 +1752,6 @@ public sealed class LeadPersister : ILeadPersister
                 }
             }
         }
-        if (!await queue.CompleteAsync(job.Id, workerId, leaseAttempt, leadId > 0 ? leadId : null, ct))
-            throw new InvalidOperationException($"Fenced completion failed for extraction job {job.Id}.");
-
-        await transaction.CommitAsync(ct);
-        return new PersistedExtraction(leadId, persistedLeads);
     }
 
     private sealed record PersistedExtraction(long LeadId, Lead[] Leads);

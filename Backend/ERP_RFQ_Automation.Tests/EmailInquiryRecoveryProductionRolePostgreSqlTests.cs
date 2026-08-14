@@ -41,6 +41,13 @@ public sealed class EmailInquiryRecoveryProductionRolePostgreSqlTests : IAsyncLi
     private const long TenantA = 942_001;
     private const long TenantB = 942_002;
 
+    /// <summary>
+    /// The PLATFORM tenant that owns <see cref="TenantA"/>. Deliberately a different number from
+    /// the business unit: usage is metered against this identifier, so an assertion on it cannot
+    /// pass by coincidence if the Tenants lookup silently returns nothing.
+    /// </summary>
+    private const long PlatformTenantA = 942_901;
+
     private readonly PostgreSqlContainer _container = new PostgreSqlBuilder("postgres:16-alpine")
         .WithDatabase("nexora_bootstrap")
         .WithUsername("nexora")
@@ -261,6 +268,105 @@ public sealed class EmailInquiryRecoveryProductionRolePostgreSqlTests : IAsyncLi
     }
 
     [Fact]
+    public async Task Extraction_meters_its_usage_under_the_tenant_role_without_opening_the_billing_plane_to_it()
+    {
+        // THE DEFECT THIS CLOSES. The persist transaction runs as nexora_tenant_app — the tenant
+        // scope ProcessOnceAsync pushes routes it there through the interceptor, and
+        // ExtractionQueue's own SET LOCAL ROLE puts it there again when RenewLeaseAsync opens the
+        // transaction. That role holds column-level SELECT on six platform."Tenants" columns and
+        // nothing else on the platform plane: not Tenants."RateCardId", which the metering lookup
+        // projects, and nothing at all on platform."UsageEvents". Every extraction failed and
+        // re-leased until it dead-lettered. Verified by reverting the fix and reading the queue:
+        // all three jobs recorded
+        //     DeadLetter: 42501: permission denied for table Tenants
+        //
+        // It survived because NO test graph registered UsageMeteringService, so LeadPersister's
+        // optional dependency was null and the block never executed anywhere. Registering it in
+        // the shared harness is the other half of the fix — and it makes the ordinary superuser
+        // lanes reproduce this too, because the queue's role switch needs no RLS configuration.
+        // The assertion this lane adds on top of theirs is the last block below: that the fix did
+        // not buy the meter by handing the tenant role the billing plane.
+        await SeedTenantAsync(TenantA, "role-lane-0005@buyer.example");
+        await SeedPlatformTenantAsync(PlatformTenantA, TenantA);
+
+        await using var services = BuildGraph();
+        await EmailToLeadHarness.CaptureAndScheduleAsync(
+            services, TenantA, EmailToLeadHarness.BuildMessage("role-lane-0005@buyer.example"));
+        await EmailToLeadHarness.DrainQueueAsync(services, TenantA, assertNoFailures: true);
+
+        // The journey finished, which is already the regression: without the fix DrainQueueAsync
+        // fails with the 42501 in LastError. The meters below prove it finished WITH billing
+        // rather than by skipping it — unbilled usage is the failure that pays no one.
+        Assert.Equal(1, await CountLeadsAsync(TenantA));
+        Assert.Equal(3, await ScalarAsync(_superuserConnectionString, $"""
+            SELECT count(*) FROM platform."UsageEvents"
+            WHERE "TenantId" = {PlatformTenantA} AND "EventType" = 'documents';
+            """));
+
+        // The meter is keyed on the PLATFORM tenant, not the business unit, so this also proves
+        // the Tenants lookup by PrimaryBusinessUnitId returned a row rather than being skipped:
+        // the two identifiers are deliberately different numbers.
+        Assert.Equal(0, await ScalarAsync(_superuserConnectionString, $"""
+            SELECT count(*) FROM platform."UsageEvents" WHERE "TenantId" = {TenantA};
+            """));
+
+        // The rest of the metering write path, which is the part that could not have been fixed
+        // by a grant on Tenants alone: a rating row per event and the minute rollup.
+        Assert.Equal(3, await ScalarAsync(_superuserConnectionString, $"""
+            SELECT count(*) FROM platform."UsageEventRatings" WHERE "TenantId" = {PlatformTenantA};
+            """));
+        Assert.True(await ScalarAsync(_superuserConnectionString, $"""
+            SELECT count(*) FROM platform."UsageMinuteAggregates"
+            WHERE "TenantId" = {PlatformTenantA} AND "EventType" = 'documents';
+            """) > 0, "The minute rollup did not run, so the metering transaction stopped early.");
+
+        // AND THE TENANT ROLE STILL CANNOT REACH ANY OF IT. This is the assertion that
+        // distinguishes the fix that was chosen from the one that was not: metering works because
+        // those statements execute as nexora_pipeline_app, NOT because the tenant role was granted
+        // the billing ledger. A tenant-writable meter is a tenant-editable invoice.
+        Assert.False(await ScalarBoolAsync(_superuserConnectionString, """
+            SELECT has_column_privilege('nexora_tenant_app', 'platform."Tenants"', 'RateCardId', 'SELECT');
+            """), "The tenant role was granted a Tenants column it does not need.");
+        foreach (var (table, privilege) in new[]
+                 {
+                     ("UsageEvents", "SELECT,INSERT,UPDATE,DELETE"),
+                     ("UsageEventRatings", "SELECT,INSERT,UPDATE,DELETE"),
+                     ("UsageMinuteAggregates", "SELECT,INSERT,UPDATE,DELETE"),
+                     ("RateCards", "SELECT,INSERT,UPDATE,DELETE")
+                 })
+        {
+            Assert.False(await ScalarBoolAsync(_superuserConnectionString, $"""
+                SELECT has_table_privilege('nexora_tenant_app', 'platform."{table}"', '{privilege}');
+                """), $"The tenant role reaches platform.\"{table}\". The billing plane was widened.");
+        }
+    }
+
+    [Fact]
+    public async Task The_platform_plane_block_switches_role_for_its_statements_and_gives_the_tenant_role_back()
+    {
+        // The mechanism, observed directly rather than inferred from the journey above. Both
+        // halves matter: the block must reach the platform role, and — the part a leak would come
+        // from — the connection must be back on nexora_tenant_app with its GUC the moment the
+        // block closes, because the fenced queue completion runs immediately after it.
+        await using var services = BuildGraph();
+        using var scope = services.CreateScope();
+        using var tenant = scope.ServiceProvider
+            .GetRequiredService<ITenantScopeAccessor>().Push(TenantA);
+        var context = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+
+        using (PlatformPlaneExecution.Enter())
+        {
+            var inside = await context.Database.SqlQuery<string>($"SELECT current_user").ToListAsync();
+            Assert.Equal("nexora_pipeline_app", Assert.Single(inside));
+        }
+
+        var after = await context.Database
+            .SqlQuery<string>($"SELECT current_user || '|' || current_setting('nexora.business_unit_id', true)")
+            .ToListAsync();
+        Assert.Equal($"nexora_tenant_app|{TenantA}", Assert.Single(after));
+    }
+
+    [Fact]
     public async Task Every_email_assembly_table_is_forced_and_carries_its_tenant_and_purge_policies()
     {
         // The grants and policies the journey above depends on, asserted directly so a failure
@@ -314,6 +420,20 @@ public sealed class EmailInquiryRecoveryProductionRolePostgreSqlTests : IAsyncLi
         await connection.OpenAsync();
         await EmailToLeadHarness.SeedTenantAsync(connection, businessUnitId, messageId);
     }
+
+    /// <summary>
+    /// Seeds the platform-plane row that makes this business unit BILLABLE. Written as the
+    /// superuser because provisioning is a platform operation; the point of the test is what the
+    /// extraction worker can reach afterwards, not who created the tenant.
+    /// </summary>
+    private Task SeedPlatformTenantAsync(long tenantId, long primaryBusinessUnitId) =>
+        ExecuteAsync(_superuserConnectionString, $"""
+            INSERT INTO platform."Tenants"
+                ("Id", "Name", "Slug", "Status", "PrimaryBusinessUnitId", "CreatedOn", "BillingMode")
+            VALUES ({tenantId}, 'Role lane tenant {tenantId}', 'role-lane-{tenantId}', 'Active',
+                    {primaryBusinessUnitId}, now(), 'Billable')
+            ON CONFLICT DO NOTHING;
+            """);
 
     private Task<int> CountLeadsAsync(long businessUnitId) => ScalarAsync(
         _superuserConnectionString,

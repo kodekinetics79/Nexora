@@ -59,7 +59,13 @@ public interface IEmailInquiryAssemblyCoordinator
         long businessUnitId, long assemblyId, string reasonCode, string reasonDetail,
         CancellationToken ct = default);
 
-    /// <summary>Marks a message assembled and records the ONE Lead it became.</summary>
+    /// <summary>
+    /// Marks a message assembled and records the ONE Lead it became.
+    ///
+    /// <para><paramref name="leadId"/> must be positive. Assembled is a claim that a specific
+    /// Lead exists; "no Lead was produced" is a different outcome and belongs in
+    /// <see cref="HoldForReviewAsync"/> or <see cref="MarkNoInquiryAsync"/>, never here.</para>
+    /// </summary>
     Task MarkAssembledAsync(
         long businessUnitId, long assemblyId, long leadId, CancellationToken ct = default);
 
@@ -503,6 +509,18 @@ public sealed class EmailInquiryAssemblyCoordinator : IEmailInquiryAssemblyCoord
     public async Task MarkAssembledAsync(
         long businessUnitId, long assemblyId, long leadId, CancellationToken ct = default)
     {
+        // Assembled MEANS "this message became that Lead". Without an id there is no such claim
+        // to make, and a message was recorded Assembled with AssembledLeadId = 0 because this
+        // method wrote whatever it was handed. Refused here as well as at the caller, because the
+        // guarantee belongs to the state — any future caller inherits it, and a caller that hits
+        // this has a defect rather than a message to hold. Checked before the transaction opens:
+        // there is nothing to roll back and no reason to take a row lock to say no.
+        if (leadId <= 0)
+            throw new ArgumentOutOfRangeException(nameof(leadId), leadId,
+                $"Email inquiry assembly {assemblyId} cannot be marked assembled without a lead. "
+                + "A non-positive id means no lead was produced; hold the message for review "
+                + "instead.");
+
         await ExecuteInTransactionAsync(async () =>
         {
             var assembly = await _context.EmailInquiryAssemblies

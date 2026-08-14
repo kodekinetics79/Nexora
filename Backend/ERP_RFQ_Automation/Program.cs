@@ -139,6 +139,26 @@ builder.Services.AddDbContext<ErpRfqAutomationContext>((services, options) =>
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddSingleton<ITenantScopeAccessor, TenantScopeAccessor>();
 builder.Services.AddScoped<ERP_RFQ_Automation.MultiTenancy.ITenantContext, ERP_RFQ_Automation.MultiTenancy.HttpTenantContext>();
+// LOOPBACK MAIL ALLOWANCE — requested by configuration, GRANTED only by environment.
+//
+// MailEndpointPolicy refuses loopback by default in every environment. A developer machine has
+// no publicly-routable mail sink, so without this the mailbox journey could not be exercised end
+// to end locally and the one path that loses a customer's mail was only ever tested against
+// doubles. The environment check is a PARAMETER to the enabling call rather than a read inside
+// it, so no key, variable or appsettings file can grant this on a non-Development host: a
+// production deployment carrying the flag set true is a no-op, not a hole. Scoped to loopback
+// only — private and link-local ranges stay refused everywhere.
+if (ERP_RFQ_Automation.Security.MailEndpointPolicy.EnableLoopbackForLocalDevelopment(
+        builder.Environment.IsDevelopment(),
+        builder.Configuration.GetValue(
+            ERP_RFQ_Automation.Security.MailEndpointPolicy.LoopbackAllowanceKey, false)))
+{
+    Console.WriteLine(
+        "[mail] LOOPBACK MAIL ENDPOINTS ARE PERMITTED for this Development host "
+        + $"({ERP_RFQ_Automation.Security.MailEndpointPolicy.LoopbackAllowanceKey}=true). "
+        + "Private and link-local addresses remain refused. This cannot be enabled outside Development.");
+}
+
 builder.Services.AddSingleton<IFileStorage, LocalFileStorage>();
 builder.Services.Configure<S3EvidenceStorageOptions>(
     builder.Configuration.GetSection(S3EvidenceStorageOptions.SectionName));

@@ -40,6 +40,35 @@ public static class EmailInquiryHoldReasons
     public const string OwnershipUnresolved = "assembly_ownership_unresolved";
 
     /// <summary>
+    /// The message merged cleanly, but the persist path produced no Lead.
+    ///
+    /// <para>The persister returns a lead id, and a NON-POSITIVE one is not an id — it is
+    /// "nothing was created". It happens for a real, ordinary reason: identity reconciliation
+    /// classified the merged inquiry as a possible match against an existing Lead and raised it
+    /// for a human decision instead of writing a second commercial record. That is the system
+    /// working. Recording it as <c>Assembled</c> with <c>AssembledLeadId = 0</c> is not: the
+    /// message reads as finished, the UI offers "open lead" for a lead that does not exist, and
+    /// the match waiting for a human is invisible because nothing says the message is unresolved.
+    /// </para>
+    ///
+    /// <para>A genuine duplicate is NOT this case and never reaches it — reconciliation returns
+    /// the existing Lead's real id, and that id is what the message records.</para>
+    /// </summary>
+    public const string LeadNotProduced = "assembly_lead_not_produced";
+
+    /// <summary>
+    /// What an operator is told when the merge succeeded but no Lead was created.
+    ///
+    /// <para>Says the two things that are true: nothing was lost, and someone has to decide.
+    /// It does not promise a retry — nothing sweeps this, because there is nothing to retry;
+    /// the decision is the next step and a person owns it.</para>
+    /// </summary>
+    public const string LeadNotProducedDetail =
+        "This message was read in full, but it looks like an inquiry that already exists, so no "
+        + "new inquiry was created from it. Nothing has been lost — confirm whether it is the "
+        + "same request or a new one.";
+
+    /// <summary>
     /// What an operator is told when an email job reaches persistence owning no component.
     ///
     /// <para>Says the two things that are true and nothing else: no lead was invented from the

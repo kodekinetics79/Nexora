@@ -370,7 +370,29 @@ public sealed class DocumentIngestionService : IDocumentIngestion
 
         var fileType = ExtensionForMime(inspection.DetectedContentType, suppliedExtension);
         EnqueueResult enqueue;
-        if (source.ExtractionJobId is { } existingJobId)
+        // CONTENT-LEVEL JOB REUSE IS BYPASSED FOR CANONICAL EMAIL COMPONENTS.
+        //
+        // The branch below hands back the job that was created for the FIRST occurrence of these
+        // exact bytes. For every other door that is a saving; for an email component it is a
+        // stranded message. Two different emails routinely carry byte-identical parts — the same
+        // buyer re-sends a schedule, two buyers attach the same standard form, a covering note is
+        // forwarded verbatim — and the second message's component would be bound to a job that
+        // has ALREADY reached Succeeded. A finished job never runs again, so that component never
+        // receives a result, its assembly waits at the barrier forever at n-of-m, and the message
+        // silently never becomes a Lead. No error, no dead letter, nothing to sweep. This is the
+        // trap recorded as item D in docs/EMAIL-TO-LEAD-EXECUTION-LEDGER.md.
+        //
+        // What is NOT bypassed:
+        //  * the STORED OBJECT stays content-addressed and deduplicated — the bytes are written
+        //    once and both occurrences point at them, which is the saving worth having;
+        //  * the occurrence-level replay short-circuit above still fires, so re-scheduling the
+        //    SAME component of the SAME assembly returns its existing job rather than a second
+        //    one. Idempotency lives on the occurrence key (which carries the derived batch id and
+        //    the component key), and on UX_ExtractionJobs_BU_SourceOccurrence beneath it;
+        //  * the duplicate is still recorded as a duplicate on the occurrence — with
+        //    ProcessingReused false, because the processing genuinely is not reused. Claiming a
+        //    saving that did not happen would be an untruth in the cost ledger.
+        if (emailInquiryComponentId is null && source.ExtractionJobId is { } existingJobId)
         {
             var existingStatus = await _context.Set<ExtractionJob>().AsNoTracking()
                 .Where(x => x.BusinessUnitId == businessUnitId && x.Id == existingJobId)
@@ -409,7 +431,14 @@ public sealed class DocumentIngestionService : IDocumentIngestion
                 Priority = priority
             }, ct);
             occurrence.BindExtractionJob(enqueue.JobId);
-            source.BindExtractionJob(enqueue.JobId);
+            // The SourceDocument is the CONTENT, and one content can now legitimately carry more
+            // than one job (see the bypass above). Its ExtractionJobId names the FIRST job those
+            // bytes produced and is left alone afterwards — rebinding it throws by design, and
+            // overwriting it would make the pointer mean "whichever occurrence was ingested last",
+            // which is not a fact anything wants. Per-job ownership is
+            // ExtractionJobs.SourceDocumentOccurrenceId and, for email, EmailInquiryComponentId.
+            if (source.ExtractionJobId is null)
+                source.BindExtractionJob(enqueue.JobId);
             if (occurrence.OriginalOccurrenceId.HasValue)
                 occurrence.ConfirmExactDuplicate(processingReused: false);
         }

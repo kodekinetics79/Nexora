@@ -54,9 +54,21 @@ public static class GoldenCommercialJourneySeeder
         var password = configuration["GoldenJourneySeed:Password"];
         if (string.IsNullOrWhiteSpace(password))
         {
-            logger.LogWarning(
-                "GoldenJourneySeed:Enabled is true but GoldenJourneySeed:Password is not set. Skipping — "
-                + "no default credential will ever be seeded.");
+            // Error, not Warning, and it names the key. The refusal itself is correct and stays —
+            // this seeder provisions logins, so inventing or generating a default credential is the
+            // one thing it must never do. What was wrong was the VOLUME: a single LogWarning that
+            // never survived into the aggregated log output, so an operator who had turned the
+            // facility on saw only its absence — 0 business units, 0 users, 0 mailboxes — and spent
+            // hours reading a run that looked like a silent no-op rather than a stated refusal.
+            // A misconfiguration that disables an entire facility is not a routine condition, and
+            // the message has to carry the fix (the exact key, and where to put it) because the
+            // symptom on its own points nowhere near the cause.
+            logger.LogError(
+                "GoldenCommercialJourneySeeder refused to run and seeded NOTHING — no business units, "
+                + "no users, no mailboxes: GoldenJourneySeed:Enabled is true but the required "
+                + "configuration key GoldenJourneySeed:Password is not set. Supply it (user-secrets, "
+                + "the GoldenJourneySeed__Password environment variable, or appsettings.Development.json) "
+                + "and restart. No default credential will ever be seeded, and none will be generated.");
             return;
         }
 

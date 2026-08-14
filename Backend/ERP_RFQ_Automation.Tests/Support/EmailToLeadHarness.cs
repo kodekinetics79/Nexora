@@ -118,6 +118,20 @@ public static class EmailToLeadHarness
         services.AddScoped<IChunkedExtractionService, ChunkedExtractionService>();
         services.AddScoped<IConversationalExtractionService, DeterministicBodyExtractor>();
 
+        // REGISTERED, not omitted — and its absence was itself a defect in this harness.
+        //
+        // LeadPersister takes UsageMeteringService as an OPTIONAL constructor argument, so a graph
+        // that leaves it out silently skips the whole metering block inside the persist
+        // transaction. Production registers it (BillingServiceExtensions), which means every test
+        // built on this harness was exercising a persist path production does not have: no
+        // platform."Tenants" read, no platform."UsageEvents" write. That is precisely why the
+        // production-role lane could not see that the metering block runs as nexora_tenant_app,
+        // which has no grant on either table.
+        //
+        // Metering still does nothing unless a platform."Tenants" row names this business unit as
+        // its PrimaryBusinessUnitId, so tests that seed only the tenant plane are unaffected.
+        services.AddScoped<ERP_RFQ_Automation.Billing.Metering.UsageMeteringService>();
+
         // MinimumAge zero: the guard exists so the sweep does not queue behind healthy in-flight
         // work in production, and a test that waited a minute for it would be proving the clock.
         services.AddSingleton(new EmailInquiryAssemblyRecoveryOptions
@@ -336,8 +350,23 @@ public static class EmailToLeadHarness
                 await Task.Delay(100);
             }
 
-            Assert.Fail("The queue did not drain and the message did not settle within the "
-                + "liveness window.");
+            // The state is reported, not just the timeout. A job that keeps failing and being
+            // re-leased never reaches a terminal status, so the loop above simply runs out — and
+            // "did not drain" on its own says nothing about WHY, which cost real time on the
+            // metering-role defect.
+            using (var scope = services.CreateScope())
+            {
+                using var tenant = scope.ServiceProvider
+                    .GetRequiredService<ITenantScopeAccessor>().Push(businessUnitId);
+                var context = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+                var stuck = await context.Set<ExtractionJob>().AsNoTracking()
+                    .Where(j => j.BusinessUnitId == businessUnitId)
+                    .Select(j => new { j.Id, j.FileName, j.Status, j.Attempts, j.LastError })
+                    .ToListAsync();
+                Assert.Fail("The queue did not drain and the message did not settle within the "
+                    + "liveness window. Jobs: " + string.Join(" | ", stuck.Select(
+                        j => $"{j.FileName}#{j.Id} {j.Status} attempts={j.Attempts}: {j.LastError ?? "<none>"}")));
+            }
         }
         finally
         {
