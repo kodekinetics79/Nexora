@@ -703,3 +703,64 @@ Build: 0 errors. Affected: **Failed: 0, Passed: 220**. Model drift: none.
 5. Rewrite `EmailIngestEnqueuerTests` — it asserts the deleted walk.
 6. Register `IEmailInquiryCaptureService`, `IEmailInquiryAssemblyCoordinator`,
    `IRawEmailEvidenceReader` and the scheduler in `Program.cs` (Step 6 dependency).
+
+
+## STEP 2b (partial) — ownership, worker fence, DI registration
+
+Three of the six 2b control groups are complete and green. The atomic caller switch is not.
+
+### 2b-1 — full ownership tuple. DONE
+
+`DurableJobExistsAsync` → **`DurableJobBelongsToComponentAsync`**. Tenant + id was not enough:
+within one tenant it would accept a job belonging to a different component or a different
+message, and the component would count as scheduled while its own work was never queued — a
+message waiting at the barrier forever for something nobody is running.
+
+Now checks the whole tuple: the job's **tenant**, its **batch** (derived from the assembly, so a
+job from another message cannot match), and its **`SourceDocumentOccurrenceId`** resolved from
+the occurrence whose `IdempotencyKey` is rebuilt from *this* component's persisted key. Anything
+short of all three is treated as unscheduled work and rescheduled.
+
+### 2b-4 — worker safety fence. DONE
+
+`ExtractionWorker.PersistInternalAsync` now refuses to reconcile a Lead for any job that belongs
+to an email inquiry component. The signal is the **persisted component row joined on the job id**,
+never the metadata sidecar — the sidecar is best-effort by its own contract and cannot be trusted
+to withhold a commercial action.
+
+The component's outcome is recorded against the message and the assembly is left visibly at its
+state. Work is not lost, the operator can see where it stopped, and no Lead is invented from a
+fragment. Non-email and manual-upload jobs never match the query and keep their existing
+behaviour — proven by the full suite, not asserted.
+
+This is a temporary fence, replaced by the barrier handler in Step 8. **It is not behind a
+feature flag** and there is no path that restores the old email fan-out.
+
+### 2b-5 (partial) — DI registration. DONE
+
+`IEmailInquiryCaptureService`, `IEmailInquiryAssemblyCoordinator`, `IRawEmailEvidenceReader` and
+`EmailInquiryLimits` are registered in `Program.cs`. Every one of them compiled and passed unit
+tests for weeks while registered nowhere — the package was unreachable dead code at runtime and
+no test noticed, because unit tests construct their subjects directly.
+
+`EmailInquiryAssemblyRegistrationTests` (7 passed) proves each contract resolves, that the
+capability resolves **as one graph** (catching a scoped dependency captured by a singleton, which
+per-service resolution would miss), that **registration alone starts no background work**, and
+that the frozen message limits are the committed values.
+
+**Full backend regression: Failed: 0, Passed: 4902.** Model drift: none.
+
+### Exact next action — remaining 2b
+
+* **2b-3/5 atomic switch:** extend `EmailInquiryCaptureResult` with immutable component
+  identities and the transient manifest; switch `EmailService.ProcessSingleEmailAsync` and
+  `EmailTriageService.ReprocessAsync` (the latter via `IRawEmailEvidenceReader`, not
+  `RawEmailPath`); delete `EnqueueAsync` and its `message.Attachments` walk; rewrite
+  `EmailIngestEnqueuerTests`. The scheduler must re-read persisted rows rather than trusting a
+  returned tracked graph, so recovery still works once the DbContext and manifest are gone.
+* **2b-1 tests:** six ownership cases — correct job accepted; purged job rescheduled;
+  foreign-tenant job rejected; same-tenant job of another component rejected; same-tenant job of
+  another assembly rejected; stale `ExtractionJobId` repaired.
+* **2b-2:** PostgreSQL concurrency — two contexts, same assembly, one occurrence, one job, no
+  aborted transaction, replay returns the existing identity.
+* **2b-6:** closure matrix.

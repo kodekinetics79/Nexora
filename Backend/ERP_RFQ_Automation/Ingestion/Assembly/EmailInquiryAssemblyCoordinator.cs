@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -28,15 +29,23 @@ public interface IEmailInquiryAssemblyCoordinator
     Task MarkNoInquiryAsync(EmailInquiryAssembly assembly, string reason, CancellationToken ct = default);
 
     /// <summary>
-    /// Whether an extraction job actually exists and belongs to this tenant.
+    /// Whether an extraction job exists AND is the job this exact component owns.
     ///
-    /// <para>A non-null <c>ExtractionJobId</c> on a component is a claim, not proof: the job may
-    /// have been purged, or the id may have been written by a pass that then failed. Scheduling
-    /// treats an unverifiable reference as unscheduled work rather than as done, because the
-    /// alternative is a component that waits at the barrier forever for a job nobody is running.
-    /// The tenant predicate is part of the question, so a foreign job can never satisfy it.</para>
+    /// <para>A non-null <c>ExtractionJobId</c> is a claim, not proof. Tenant plus id is not
+    /// enough either: within one tenant that would accept a job belonging to a different
+    /// component, or to a different message entirely, and the component would be counted as
+    /// scheduled while its own work was never queued — a message that waits at the barrier
+    /// forever for something nobody is running.</para>
+    ///
+    /// <para>The full tuple is checked: the job's tenant, its batch (derived from the assembly,
+    /// so a job from another message cannot match), and its
+    /// <c>SourceDocumentOccurrenceId</c> resolved from the occurrence whose idempotency key is
+    /// built from THIS component's persisted key. Anything short of all three is treated as
+    /// unscheduled work and rescheduled.</para>
     /// </summary>
-    Task<bool> DurableJobExistsAsync(long businessUnitId, long extractionJobId, CancellationToken ct = default);
+    Task<bool> DurableJobBelongsToComponentAsync(
+        long businessUnitId, long extractionJobId, Guid expectedBatchId, string componentKey,
+        CancellationToken ct = default);
 }
 
 /// <summary>
@@ -163,11 +172,37 @@ public sealed class EmailInquiryAssemblyCoordinator : IEmailInquiryAssemblyCoord
         return evaluation;
     }
 
-    public Task<bool> DurableJobExistsAsync(
-        long businessUnitId, long extractionJobId, CancellationToken ct = default)
-        => _context.Set<ERP_RFQ_Automation.Extraction.ExtractionJob>()
+    public async Task<bool> DurableJobBelongsToComponentAsync(
+        long businessUnitId, long extractionJobId, Guid expectedBatchId, string componentKey,
+        CancellationToken ct = default)
+    {
+        var job = await _context.Set<ERP_RFQ_Automation.Extraction.ExtractionJob>()
             .AsNoTracking()
-            .AnyAsync(x => x.BusinessUnitId == businessUnitId && x.Id == extractionJobId, ct);
+            .Where(x => x.BusinessUnitId == businessUnitId && x.Id == extractionJobId)
+            .Select(x => new { x.BatchId, x.SourceDocumentOccurrenceId })
+            .FirstOrDefaultAsync(ct);
+
+        // Purged, or never committed by a pass that died after writing the id.
+        if (job is null) return false;
+
+        // A job from another message cannot match: the batch is derived from the assembly.
+        if (job.BatchId != expectedBatchId) return false;
+
+        // And within this message, it must be THIS component's occurrence. The occurrence key is
+        // rebuilt from the component's persisted key, so a sibling attachment's job is refused.
+        if (job.SourceDocumentOccurrenceId is not { } occurrenceId) return false;
+
+        var expectedOccurrenceKey = ERP_RFQ_Automation.Extraction.SourceOccurrenceIdentity.BuildKey(
+            expectedBatchId,
+            ERP_RFQ_Automation.Extraction.ExtractionSourceType.Email,
+            new ERP_RFQ_Automation.Extraction.ExtractionJobMetadata { SourceOccurrenceId = componentKey });
+
+        return await _context.Set<SourceDocumentOccurrence>()
+            .AsNoTracking()
+            .AnyAsync(x => x.BusinessUnitId == businessUnitId
+                           && x.Id == occurrenceId
+                           && x.IdempotencyKey == expectedOccurrenceKey, ct);
+    }
 
     public async Task MarkNoInquiryAsync(
         EmailInquiryAssembly assembly, string reason, CancellationToken ct = default)

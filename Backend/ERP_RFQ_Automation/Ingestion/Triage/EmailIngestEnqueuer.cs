@@ -363,15 +363,17 @@ public static class EmailIngestEnqueuer
             {
                 // A non-null id is NOT proof a job exists. Verified against the tenant's own
                 // jobs; if it has gone, the component is rescheduled rather than counted as done.
-                if (await coordinator.DurableJobExistsAsync(assembly.BusinessUnitId, existingJobId, ct))
+                if (await coordinator.DurableJobBelongsToComponentAsync(
+                        assembly.BusinessUnitId, existingJobId, batchId, component.ComponentKey, ct))
                 {
                     alreadyScheduled++;
                     continue;
                 }
                 logger.LogWarning(
                     "Component {ComponentKey} of assembly {AssemblyId} references job "
-                    + "{ExtractionJobId}, which no longer exists for business unit "
-                    + "{BusinessUnitId}; rescheduling.",
+                    + "{ExtractionJobId}, which is not that component's own durable job for "
+                    + "business unit {BusinessUnitId} (purged, or belonging to another component "
+                    + "or message); rescheduling.",
                     component.ComponentKey, assembly.Id, existingJobId, assembly.BusinessUnitId);
             }
 

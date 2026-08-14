@@ -731,6 +731,19 @@ builder.Services.AddAgentEngine(builder.Configuration);
 builder.Services.AddConversionIntelligence();
 builder.Services.AddPricingIntelligence();
 builder.Services.AddScoped<ERP_RFQ_Automation.Agent.IAgentTool, ERP_RFQ_Automation.Intelligence.Conversion.PreviewLeadConversionTool>();
+// Email inquiry assembly. Registered together because they are one capability: capture writes
+// the durable message, the coordinator is the only writer of its state afterwards, and the
+// evidence reader is how anything gets the original message back. Leaving any of them
+// unregistered makes the whole package unreachable at runtime while still compiling.
+builder.Services.AddScoped<ERP_RFQ_Automation.Ingestion.Assembly.IEmailInquiryCaptureService,
+    ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryCaptureService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Ingestion.Assembly.IEmailInquiryAssemblyCoordinator,
+    ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssemblyCoordinator>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Ingestion.Assembly.IRawEmailEvidenceReader,
+    ERP_RFQ_Automation.Ingestion.Assembly.RawEmailEvidenceReader>();
+// The declared per-message boundaries. Registered as a singleton value so an operator can tune
+// them in configuration later without the planner reaching for a static.
+builder.Services.AddSingleton(ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryLimits.Default);
 builder.Services.AddScoped<ERP_RFQ_Automation.Agent.IAgentTool, ERP_RFQ_Automation.Intelligence.Conversion.ConvertLeadToRfqTool>();
 builder.Services.AddScoped<ERP_RFQ_Automation.Agent.IAgentTool, ERP_RFQ_Automation.Intelligence.Pricing.PriceRfqTool>();
 builder.Services.AddScoped<ERP_RFQ_Automation.Agent.IAgentTool, ERP_RFQ_Automation.Intelligence.Pricing.ApplyRfqPricingTool>();

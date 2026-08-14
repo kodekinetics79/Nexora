@@ -959,6 +959,8 @@ public sealed class LeadPersister : ILeadPersister
     private readonly ERP_RFQ_Automation.Deduplication.ILeadDuplicateDetector? _duplicateDetector;
     private readonly ERP_RFQ_Automation.CommercialRouting.ICommercialRoutingApplicationService? _routing;
     private readonly ERP_RFQ_Automation.LeadIdentity.ILeadIdentityApplicationService? _leadIdentity;
+    /// <summary>Present once email assembly is wired; absent leaves non-email ingestion untouched.</summary>
+    private readonly ERP_RFQ_Automation.Ingestion.Assembly.IEmailInquiryAssemblyCoordinator? _emailAssemblies;
     private readonly ERP_RFQ_Automation.CustomerResolution.ILeadCustomerResolutionService? _customerResolution;
     private readonly UsageMeteringService? _usageMetering;
 
@@ -970,6 +972,7 @@ public sealed class LeadPersister : ILeadPersister
         ERP_RFQ_Automation.Deduplication.ILeadDuplicateDetector? duplicateDetector = null,
         ERP_RFQ_Automation.CommercialRouting.ICommercialRoutingApplicationService? routing = null,
         ERP_RFQ_Automation.LeadIdentity.ILeadIdentityApplicationService? leadIdentity = null,
+        ERP_RFQ_Automation.Ingestion.Assembly.IEmailInquiryAssemblyCoordinator? emailAssemblies = null,
         ERP_RFQ_Automation.CustomerResolution.ILeadCustomerResolutionService? customerResolution = null,
         UsageMeteringService? usageMetering = null)
     {
@@ -978,6 +981,7 @@ public sealed class LeadPersister : ILeadPersister
         _duplicateDetector = duplicateDetector;
         _routing = routing;
         _leadIdentity = leadIdentity;
+        _emailAssemblies = emailAssemblies;
         _customerResolution = customerResolution;
         _usageMetering = usageMetering;
     }
@@ -994,6 +998,51 @@ public sealed class LeadPersister : ILeadPersister
     {
         if (outcome.Result is null)
             throw new InvalidOperationException("Cannot persist a null extraction result.");
+
+        // ---- ASSEMBLY SAFETY FENCE -------------------------------------------------------
+        //
+        // A job that belongs to an email inquiry component must NEVER reach the per-job Lead
+        // reconciliation below. That path creates one Lead per document, which is the exact
+        // defect the message-level barrier exists to remove: a body finishing before its
+        // attachment would mint a Lead priced without the attachment.
+        //
+        // The signal is the PERSISTED component row joined on this job id — not the metadata
+        // sidecar, which is best-effort by its own contract and therefore cannot be trusted to
+        // withhold a commercial action.
+        //
+        // Until the barrier handler is wired, the component's outcome is recorded and the
+        // message is left visibly at its assembly state. That is deliberate: the work is not
+        // lost, the operator can see exactly where it stopped, and no Lead is invented from a
+        // fragment. Non-email and manual-upload jobs never match this query and keep their
+        // existing behaviour untouched.
+        if (_emailAssemblies is not null
+            && _context.Model.FindEntityType(typeof(ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponent)) is not null)
+        {
+            var assemblyComponent = await _context
+                .Set<ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponent>()
+                .AsNoTracking()
+                .Where(x => x.BusinessUnitId == job.BusinessUnitId && x.ExtractionJobId == job.Id)
+                .Select(x => new { x.AssemblyId, x.ComponentKey })
+                .FirstOrDefaultAsync(ct);
+
+            if (assemblyComponent is not null)
+            {
+                await _emailAssemblies.RecordComponentOutcomeAsync(
+                    job.BusinessUnitId, assemblyComponent.ComponentKey,
+                    ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponentStatus.Completed,
+                    null, null, job.SourceDocumentOccurrenceId, ct);
+
+                _log.LogInformation(
+                    "Extraction job {ExtractionJobId} is component {ComponentKey} of email "
+                    + "assembly {AssemblyId} (business unit {BusinessUnitId}). Its result is "
+                    + "recorded against the message; no Lead is created per component.",
+                    job.Id, assemblyComponent.ComponentKey, assemblyComponent.AssemblyId,
+                    job.BusinessUnitId);
+
+                return 0;
+            }
+        }
+        // ---- END ASSEMBLY SAFETY FENCE ---------------------------------------------------
 
         // Multi-inquiry auto-split: N per-group results (a strict partition of the merged
         // items) persist as N Leads sharing ONE EmailIngest + the same source document.
