@@ -407,6 +407,13 @@ export interface EmailTriageRow {
   attachmentNames: string[];
   /** Reported only when the payload actually carried an attachment-name array. */
   attachmentNamesReported: boolean;
+  /**
+   * Legacy/pre-assembly record of attachments the intake gate did not hand to extraction.
+   * Canonical assemblies report these as component rows with state `Skipped`; this list remains
+   * necessary for older messages, otherwise the UI silently drops the only durable evidence that
+   * an attachment was missed.
+   */
+  skippedAttachments: string[];
   /** SUPPLIER_QUOTE / SUPPLIER_INVOICE — set when the message was routed rather than extracted. */
   commercialDocumentTypeHint: string | null;
   /** True when the message continues an existing thread (In-Reply-To / References present). */
@@ -433,6 +440,13 @@ export interface EmailTriageRow {
   components: EmailComponent[];
   /** False when the payload carried no component array — distinct from "carried an empty one". */
   componentsReported: boolean;
+  /** True only when the original RFC822 message is durably addressable. Null is not reported. */
+  rawEvidenceStored: boolean | null;
+  /** True when reads are checked against the capture-time SHA-256. */
+  rawEvidenceVerifiable: boolean | null;
+  /** Sender-stamped time and the time extraction completed, when the backend reports them. */
+  senderSentOn: string | null;
+  parsedOn: string | null;
   /** When the message was durably captured, as distinct from when the mailbox happened to poll. */
   ingestedOn: string | null;
   /**
@@ -549,6 +563,7 @@ export const readTriageRow = (payload: unknown): EmailTriageRow => {
     attachmentCount,
     attachmentNames,
     attachmentNamesReported: attachmentNamesRaw !== null,
+    skippedAttachments: asTextList(root.skippedAttachments ?? root.skippedAttachmentReasons),
     commercialDocumentTypeHint: asText(root.commercialDocumentTypeHint) ?? asText(root.documentTypeHint),
     threadContinuation: asFlag(root.threadContinuation),
     // `assembledLeadId` is the assembly worker's name for the same lead the triage row calls
@@ -563,6 +578,10 @@ export const readTriageRow = (payload: unknown): EmailTriageRow => {
     componentsCompleted: asCount(root.completedComponentCount) ?? asCount(root.componentsCompleted),
     components: (componentsRaw ?? []).map(readComponent),
     componentsReported: componentsRaw !== null,
+    rawEvidenceStored: asFlag(root.rawEvidenceStored),
+    rawEvidenceVerifiable: asFlag(root.rawEvidenceVerifiable),
+    senderSentOn: asText(root.senderSentAtUtc) ?? asText(root.senderSentOn),
+    parsedOn: asText(root.parsedAt) ?? asText(root.parsedOn),
     ingestedOn: asText(root.ingestedAtUtc) ?? asText(root.ingestedOn),
     lastUpdatedOn: asText(root.lastUpdatedAtUtc) ?? asText(root.lastUpdatedOn),
   };

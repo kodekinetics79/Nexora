@@ -186,6 +186,11 @@ const REVIEW_MESSAGE = readTriageRow({
       reasonCode: 'attachment_unreadable',
     },
   ],
+  skippedAttachments: ['legacy-price-sheet.xls (unsupported_format)'],
+  rawEvidenceStored: true,
+  rawEvidenceVerifiable: true,
+  senderSentAtUtc: '2026-08-05T08:59:00Z',
+  parsedAt: '2026-08-05T09:02:00Z',
 });
 
 const renderPage = () => {
@@ -655,6 +660,7 @@ describe('assembly reading', () => {
       state: 'Skipped',
       reason: 'unreadable_pdf',
     });
+    expect(reported.skippedAttachments).toEqual([]);
 
     const silent = readTriageRow({ id: 10, outcome: 'Noise' });
     expect(silent.assemblyState).toBeNull();
@@ -662,6 +668,20 @@ describe('assembly reading', () => {
     // Null components mean "not asked for", never "this message has no parts".
     expect(silent.componentsReported).toBe(false);
     expect(describeAssemblyState(silent.assemblyState).recognised).toBe(false);
+  });
+
+  it('keepsLegacySkippedAttachmentsVisibleBesideCanonicalComponents', async () => {
+    listTriage.mockResolvedValue(ASSEMBLY_PAGE);
+    getMessage.mockResolvedValue(REVIEW_MESSAGE);
+
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: /show message scanned enquiry/i }));
+
+    expect(await screen.findByText('Attachments skipped before component tracking')).toBeInTheDocument();
+    expect(screen.getByText('legacy-price-sheet.xls (unsupported_format)')).toBeInTheDocument();
+    expect(screen.getByText(/original email is retained and verified/i)).toBeInTheDocument();
+    expect(screen.getByText(/sender timestamp/i)).toBeInTheDocument();
+    expect(screen.getByText(/extraction finished/i)).toBeInTheDocument();
   });
 });
 

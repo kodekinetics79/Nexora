@@ -776,6 +776,21 @@ export default function InboundMailTriagePage() {
                                     ))}
                                   </Stack>
                                 )}
+                                {detailQuery.isSuccess && (
+                                  <Alert
+                                    severity={detailQuery.data.rawEvidenceStored === false ? 'warning' : 'info'}
+                                    variant="outlined"
+                                    sx={{ mt: 1 }}
+                                  >
+                                    {detailQuery.data.rawEvidenceStored === true
+                                      ? detailQuery.data.rawEvidenceVerifiable === true
+                                        ? 'The original email is retained and verified against its capture-time digest.'
+                                        : 'The original email is retained. Digest verification was not reported.'
+                                      : detailQuery.data.rawEvidenceStored === false
+                                        ? 'The original email is not reported as retained; contact support before relying on reprocessing.'
+                                        : 'Whether the original email is retained is not reported by this deployment.'}
+                                  </Alert>
+                                )}
                               </Box>
 
                               <Box>
@@ -842,17 +857,31 @@ export default function InboundMailTriagePage() {
                                     Decided {formatReceived(row.decidedOn)}
                                   </Typography>
                                 )}
-                                {row.ingestedOn && (
+                                {detailQuery.isSuccess && detailQuery.data.senderSentOn && (
                                   <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
-                                    Ingested {formatReceived(row.ingestedOn)}
+                                    Sender timestamp {formatReceived(detailQuery.data.senderSentOn)}
+                                  </Typography>
+                                )}
+                                {(detailQuery.isSuccess ? detailQuery.data.ingestedOn : row.ingestedOn) && (
+                                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                                    Ingested {formatReceived(
+                                      detailQuery.isSuccess ? detailQuery.data.ingestedOn : row.ingestedOn,
+                                    )}
+                                  </Typography>
+                                )}
+                                {detailQuery.isSuccess && detailQuery.data.parsedOn && (
+                                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                                    Extraction finished {formatReceived(detailQuery.data.parsedOn)}
                                   </Typography>
                                 )}
                                 {/* Named for what the column actually records. Nothing distinguishes
                                     a recovery sweep from the worker's own barrier here, so calling
                                     this "recovered" would state something no row supports. */}
-                                {row.lastUpdatedOn && (
+                                {(detailQuery.isSuccess ? detailQuery.data.lastUpdatedOn : row.lastUpdatedOn) && (
                                   <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
-                                    Last moved {formatReceived(row.lastUpdatedOn)}
+                                    Last moved {formatReceived(
+                                      detailQuery.isSuccess ? detailQuery.data.lastUpdatedOn : row.lastUpdatedOn,
+                                    )}
                                   </Typography>
                                 )}
                               </Box>
@@ -937,6 +966,27 @@ export default function InboundMailTriagePage() {
                                       </TableBody>
                                     </Table>
                                   </TableContainer>
+                                )}
+                                {detailQuery.isSuccess && detailQuery.data.skippedAttachments.length > 0 && (
+                                  <Alert severity="warning" variant="outlined" sx={{ mt: 1 }}>
+                                    <AlertTitle>Attachments skipped before component tracking</AlertTitle>
+                                    <Typography variant="body2">
+                                      These attachments were not handed to extraction. They remain visible here so
+                                      a salesperson cannot price the inquiry as though every attachment was read.
+                                    </Typography>
+                                    <Box component="ul" sx={{ pl: 2.5, mt: 0.75, mb: 0 }}>
+                                      {detailQuery.data.skippedAttachments.map((attachment, index) => (
+                                        <Typography
+                                          key={`${attachment}-${index}`}
+                                          component="li"
+                                          variant="caption"
+                                          sx={{ overflowWrap: 'anywhere' }}
+                                        >
+                                          {presentableServerText(attachment) ?? 'Attachment details recorded for support'}
+                                        </Typography>
+                                      ))}
+                                    </Box>
+                                  </Alert>
                                 )}
                               </Box>
                             </Box>
