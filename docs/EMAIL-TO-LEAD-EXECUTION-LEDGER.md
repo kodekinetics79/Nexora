@@ -1410,3 +1410,43 @@ local path leaves the server — a storage location is useless to the reader and
 evidence layout to everyone else, and a test serializes both surfaces and asserts neither carries
 one. Tenant, module permission and the `EmailIntake` entitlement on the detail endpoint are the
 list's own, unchanged.
+
+
+## DEMO CLOSURE — what the first live run found
+
+The stack: PostgreSQL, a GreenMail IMAP/SMTP server, the API with its extraction and recovery
+workers, and the web client — all local, all throwaway. Outbound email is contained through the
+product's own `POST /api/Mailbox/outbound/pause`, which reports `canSendToCustomers: false`.
+Demo messages carry a `DEMO-<run>` subject marker so a run can never be confused with real mail.
+
+### Three defects the live run found that no test had
+
+| # | Defect | Why no test caught it |
+| --- | --- | --- |
+| 1 | **`GoldenCommercialJourneySeeder` seeded nothing.** `GoldenJourneySeed:Enabled=true` without `GoldenJourneySeed:Password` refuses — correctly, it must never invent a credential — but it did so with ONE `LogWarning` whose message never reached the aggregated output. The observable symptom was 0 tenants, 0 users, 0 mailboxes and a run that looked like a silent no-op. | nothing asserted the refusal was *observable*, only that it refused |
+| 2 | **`MailEndpointPolicy` made local end-to-end mail testing impossible.** Loopback was refused in every environment, and BOTH the Test Connection probe and the poller enforce it, so no mail sink a developer can run was reachable. The one path that loses a customer's mail could only ever be tested against doubles. | by design; the class comment argued the trade-off explicitly |
+| 3 | **Usage metering reads the platform `Tenants` table as `nexora_tenant_app`.** `ExtractionWorker` pushes the tenant scope, so the interceptor switches roles; the metering lookup then hits a table only `nexora_pipeline_app` is granted on. Live symptom: `42501: permission denied for table Tenants`, jobs stuck Pending, retrying forever. **Pre-existing, and it would affect every extraction under production role topology.** | the RLS lane did not register `UsageMeteringService`, so the path was never exercised under a real role |
+
+Defect 3 is the one that justifies the whole exercise. It is not an email defect at all — it sits
+in the shared extraction persist path — and it was invisible to 4,956 passing tests because every
+one of them ran as a superuser, where role grants do not apply.
+
+### The loopback allowance, and why it is not a bypass
+
+The class it modifies argued against exactly this: "an environment-conditional bypass in an SSRF
+control is exactly the kind of flag that reaches production set the wrong way." That objection is
+answered STRUCTURALLY rather than by discipline. The environment is a **parameter to the enabling
+call**, not a read inside it, so there is no key, variable or appsettings file that can grant the
+allowance on a non-Development host — a production deployment carrying the flag set true is a
+no-op with a loud log line, not a hole. It is scoped to **loopback only**: private, link-local and
+carrier-grade-NAT ranges stay refused everywhere, because the risk this control exists for is a
+mail server dialling internal infrastructure, and 127.0.0.0/8 reaches only the machine already
+running the code. Five tests pin it, including the one that matters — a Production host cannot
+grant it even when the key is true.
+
+### Local model, no egress
+
+Unstructured (prose body) extraction requires a model, and the AI gate refuses EXTERNAL
+processing of unstructured documents outright — it did so on the first live poll. Pointing the
+app at a loopback Ollama resolves the provider class to `Local`, which the gate permits:
+`reason=loopback_endpoint ... no third-party egress`. No message content leaves the machine.
