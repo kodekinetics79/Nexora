@@ -18,6 +18,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using ERP_RFQ_Automation.Ingestion.Assembly;
 using Docnet.Core;
 using Docnet.Core.Converters;
 using Docnet.Core.Models;
@@ -418,7 +419,10 @@ namespace ERP_RFQ_Automation.Services
             var localLlm = scopedServices.GetRequiredService<ILLMService>();
             // ING-05: unified-queue gateway from the SAME scope as localContext (null when
             // not registered -> the legacy direct path below still works).
-            var ingestion = scopedServices.GetService<ERP_RFQ_Automation.Extraction.IDocumentIngestion>();
+            // The canonical intake. Resolved once per poll cycle from the scope, like every
+            // other pipeline dependency.
+            var intake = scopedServices
+                .GetService<ERP_RFQ_Automation.Ingestion.Assembly.IEmailInquiryIntakeService>();
 
             var window = ResolveLookbackWindow(config, DateTime.UtcNow);
             LogLookbackWindow(config, window);
@@ -490,7 +494,7 @@ namespace ERP_RFQ_Automation.Services
                         // ING-01: only mark \Seen once a durable record (EmailIngest + raw .eml)
                         // exists, so a message we fail to persist is retried on the next cycle
                         // instead of vanishing.
-                        bool durablyPersisted = await ProcessSingleEmailAsync(message, config, localContext, localLlm, ingestion);
+                        bool durablyPersisted = await ProcessSingleEmailAsync(message, config, localContext, localLlm, intake);
 
                         // Check if connection is still alive before marking as seen
                         if (!client.IsConnected)
@@ -755,7 +759,7 @@ namespace ERP_RFQ_Automation.Services
         /// </summary>
         private async Task<bool> ProcessSingleEmailAsync(MimeMessage message, EmailConfiguration config,
             ErpRfqAutomationContext context, ILLMService llmService,
-            ERP_RFQ_Automation.Extraction.IDocumentIngestion? ingestion = null)
+            ERP_RFQ_Automation.Ingestion.Assembly.IEmailInquiryIntakeService? intake = null)
         {
             var messageId = ResolveIngestKey(message);
             var from = message.From.ToString();
@@ -860,13 +864,26 @@ namespace ERP_RFQ_Automation.Services
             // direct LLM extraction below. The pre-created EmailIngest is referenced via
             // the job's provenance sidecar so the produced lead(s) link to the REAL
             // ingest (from/subject) instead of a synthetic one.
-            if (_useUnifiedQueue && ingestion != null)
+            if (intake != null)
             {
-                var queued = await EnqueueEmailForExtractionAsync(
-                    message, ingest, config, ingestion, triage, bodyParts);
-                if (queued > 0)
+                var result = await EnqueueEmailForExtractionAsync(
+                    message, ingest, config, intake, triage, bodyParts);
+
+                // DO NOT ACKNOWLEDGE unless the bytes are durable. A message marked \Seen whose
+                // raw copy was never stored is unrecoverable — the mailbox was the only other
+                // copy. Returning false leaves it unread for the next cycle.
+                if (!result.SafeToAcknowledge)
                 {
-                    ingest.ParseStatus = STATUS_QUEUED; // persister flips to Success/NeedsReview
+                    _logger.LogError(
+                        "Durable capture did not complete for ingest {IngestId} ({Reason}); the "
+                        + "message stays unread and will be re-fetched.",
+                        ingest.Id, result.FailureReason ?? "unknown");
+                    return false;
+                }
+
+                if (result.Scheduled + result.AlreadyScheduled > 0)
+                {
+                    ingest.ParseStatus = STATUS_QUEUED; // the barrier flips it when the message assembles
                 }
                 else
                 {
@@ -898,34 +915,26 @@ namespace ERP_RFQ_Automation.Services
         }
 
         /// <summary>
-        /// ING-05/ING-07: fans one email out to the durable extraction queue — one job per
-        /// supported attachment plus one job for the sender's FRESH body text, all sharing a
-        /// batch id and a provenance sidecar that names the real EmailIngest. The fan-out
-        /// itself lives in <see cref="ERP_RFQ_Automation.Ingestion.Triage.EmailIngestEnqueuer"/>
-        /// so the mailbox poller and the manual reprocess endpoint cannot drift apart.
-        /// Returns the number of jobs enqueued (duplicates count — they are handled work).
+        /// Hands one message to the CANONICAL intake: durable capture of the raw RFC822 bytes,
+        /// then one extraction job per processable component of the real MIME tree.
+        ///
+        /// <para>It used to fan out over <c>message.Attachments</c> and produce one Lead per
+        /// file. That is not the MIME tree — it yields only entities whose Content-Disposition
+        /// says "attachment", so a forwarded enquiry was invisible — and one Lead per attachment
+        /// is the defect the message barrier exists to remove: a buyer who sends a covering note
+        /// and two schedules became three Leads, each priced from a third of the request.</para>
+        ///
+        /// <para>Returns false when the message must NOT be acknowledged to the mailbox.</para>
         /// </summary>
-        internal async Task<int> EnqueueEmailForExtractionAsync(
+        internal async Task<EmailInquiryIntakeResult> EnqueueEmailForExtractionAsync(
             MimeMessage message, EmailIngest ingest, EmailConfiguration config,
-            ERP_RFQ_Automation.Extraction.IDocumentIngestion ingestion,
-            EmailTriageDecision triage, EmailBodyParts bodyParts)
-        {
-            var result = await EmailIngestEnqueuer.EnqueueAsync(
-                message, ingest, config.BusinessUnitId, config.EmailAddress,
-                ingestion, triage, bodyParts, _logger);
+            IEmailInquiryIntakeService intake,
+            EmailTriageDecision triage, EmailBodyParts bodyParts,
+            CancellationToken ct = default)
+            => await intake.CaptureAndScheduleAsync(
+                message, ingest, config, bodyParts.Fresh, triage,
+                message.From.Mailboxes.FirstOrDefault()?.Address, ct);
 
-            // ING-06: the per-file reasons are recorded on ingest.SkippedAttachmentsJson by the
-            // enqueuer itself, unconditionally and on every path. This only raises the loss into
-            // the 50-char lifecycle status for the one case where the message produced NOTHING
-            // — a "Queued" ingest with no jobs would read as normal progress.
-            if (result.Queued == 0 && result.SkippedAttachments.Count > 0)
-            {
-                ingest.ParseStatus = Truncate(
-                    $"Failed - {result.SkippedAttachments.Count} attachment(s) skipped", 50);
-            }
-
-            return result.Queued;
-        }
         /// <summary>
         /// Builds the pure input for <see cref="DeterministicEmailTriage"/>: the sender's own
         /// words, the resolved party type, and the raw headers that constitute positive

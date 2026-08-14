@@ -112,6 +112,7 @@ public static class EmailToLeadHarness
         services.AddScoped<IExtractionDocumentReader, ProductionDocumentReader>();
         services.AddScoped<ILeadPersister, LeadPersister>();
         services.AddScoped<IEmailInquiryLeadAssembler, EmailInquiryLeadAssembler>();
+        services.AddScoped<IEmailInquiryIntakeService, EmailInquiryIntakeService>();
         services.AddSingleton<ICanonicalRfqNormalizer, CanonicalRfqNormalizer>();
         services.AddSingleton<ILLMService>(llm);
         services.AddScoped<IChunkedExtractionService, ChunkedExtractionService>();

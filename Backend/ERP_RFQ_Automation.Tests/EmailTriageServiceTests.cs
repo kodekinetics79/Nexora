@@ -27,7 +27,26 @@ public class EmailTriageServiceTests : IDisposable
     }
 
     private EmailTriageService NewService(ErpRfqAutomationContext context)
-        => new(context, new NoIngestion(), new NoopLogger<EmailTriageService>());
+        => new(context, new NoIntake(), new NoRawEmail(), new NoopLogger<EmailTriageService>());
+
+    /// <summary>The LIST surface must never enter the pipeline. Any call is a defect.</summary>
+    private sealed class NoIntake : ERP_RFQ_Automation.Ingestion.Assembly.IEmailInquiryIntakeService
+    {
+        public Task<ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryIntakeResult> CaptureAndScheduleAsync(
+            MimeKit.MimeMessage message, EmailIngest ingest, EmailConfiguration configuration,
+            string? freshBodyText, EmailTriageDecision triage, string? clientEmail,
+            CancellationToken ct = default)
+            => throw new NotSupportedException("The list surface must never capture or schedule.");
+    }
+
+    private sealed class NoRawEmail : ERP_RFQ_Automation.Ingestion.Assembly.IRawEmailEvidenceReader
+    {
+        // Null is the reader's documented "no copy survives" answer, which is exactly the state
+        // the reprocess-when-the-message-is-gone test needs.
+        public Task<MimeKit.MimeMessage?> TryLoadAsync(
+            long businessUnitId, EmailIngest ingest, CancellationToken ct = default)
+            => Task.FromResult<MimeKit.MimeMessage?>(null);
+    }
 
     private static EmailIngest Ingest(
         ErpRfqAutomationContext context, long id, long configId, string outcome, string[] reasons,

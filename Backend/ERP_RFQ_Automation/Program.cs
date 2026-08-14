@@ -671,6 +671,11 @@ builder.Services.AddScoped<ILeadPersister, LeadPersister>();
 // component's durable result once the last of them has finished. The worker calls it.
 builder.Services.AddScoped<ERP_RFQ_Automation.Ingestion.Assembly.IEmailInquiryLeadAssembler,
     ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryLeadAssembler>();
+// THE one door into the pipeline, shared by the mailbox poller and the manual reprocess
+// endpoint so the two cannot drift apart again. Registered beside IDocumentIngestion, which it
+// needs, rather than in AddEmailInquiryAssembly.
+builder.Services.AddScoped<ERP_RFQ_Automation.Ingestion.Assembly.IEmailInquiryIntakeService,
+    ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryIntakeService>();
 
 // The stranded-message sweep. The worker commits the queue job and assembles afterwards, which
 // is the correct order (assembling first duplicates the lead on retry) but leaves a window: a

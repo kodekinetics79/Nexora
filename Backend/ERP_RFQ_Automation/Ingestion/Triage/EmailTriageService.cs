@@ -68,17 +68,22 @@ public interface IEmailTriageService
 public sealed class EmailTriageService : IEmailTriageService
 {
     private readonly ErpRfqAutomationContext _context;
-    private readonly IDocumentIngestion _ingestion;
+    private readonly ERP_RFQ_Automation.Ingestion.Assembly.IEmailInquiryIntakeService _intake;
+    private readonly ERP_RFQ_Automation.Ingestion.Assembly.IRawEmailEvidenceReader _rawEmail;
     private readonly ILogger<EmailTriageService> _log;
 
     /// <summary>Emails larger than this are not opened just to count attachments.</summary>
     private const long MaxEmlInspectionBytes = 10 * 1024 * 1024;
 
     public EmailTriageService(
-        ErpRfqAutomationContext context, IDocumentIngestion ingestion, ILogger<EmailTriageService> log)
+        ErpRfqAutomationContext context,
+        ERP_RFQ_Automation.Ingestion.Assembly.IEmailInquiryIntakeService intake,
+        ERP_RFQ_Automation.Ingestion.Assembly.IRawEmailEvidenceReader rawEmail,
+        ILogger<EmailTriageService> log)
     {
         _context = context;
-        _ingestion = ingestion;
+        _intake = intake;
+        _rawEmail = rawEmail;
         _log = log;
     }
 
@@ -217,15 +222,17 @@ public sealed class EmailTriageService : IEmailTriageService
             .FirstOrDefaultAsync(e => e.Id == id && e.EmailConfiguration.BusinessUnitId == businessUnitId, ct)
             ?? throw new KeyNotFoundException($"Email ingest {id} was not found for this tenant.");
 
-        if (string.IsNullOrWhiteSpace(ingest.RawEmailPath) || !File.Exists(ingest.RawEmailPath))
-            throw new InvalidOperationException(
+        // THE AUTHORITATIVE COPY, through the one reader that knows where it lives and verifies
+        // it against the hash recorded at capture.
+        //
+        // This used to File.OpenRead(ingest.RawEmailPath) directly. That path is local container
+        // storage — ephemeral on the managed target, gone on the next deploy, and unverified: a
+        // truncated or replaced file would have been reprocessed as though it were the message
+        // the customer sent. The reader prefers the durable evidence object, checks its digest,
+        // and falls back to the legacy path only for rows written before the assembly existed.
+        var message = await _rawEmail.TryLoadAsync(businessUnitId, ingest, ct)
+            ?? throw new InvalidOperationException(
                 "The stored raw message is no longer available, so it cannot be reprocessed.");
-
-        MimeMessage message;
-        await using (var stream = File.OpenRead(ingest.RawEmailPath))
-        {
-            message = await MimeMessage.LoadAsync(stream, ct);
-        }
 
         var parts = EmailBodyNormalizer.Normalize(GetBodyText(message));
         // FORCED Uncertain: a human overrode the gate, so the message is extracted and flagged
@@ -237,24 +244,34 @@ public sealed class EmailTriageService : IEmailTriageService
             CommercialDocumentTypeHint: null,
             ThreadContinuation: !string.IsNullOrWhiteSpace(message.InReplyTo) || message.References?.Count > 0);
 
-        var result = await EmailIngestEnqueuer.EnqueueAsync(
-            message, ingest, businessUnitId, ingest.EmailConfiguration.EmailAddress,
-            _ingestion, decision, parts, _log, ct);
+        // The SAME canonical intake the poller uses. Capture is idempotent, so a reprocess of an
+        // already-captured message resolves the existing assembly and re-schedules only the
+        // components that still need it — no second assembly, no duplicated component jobs.
+        var result = await _intake.CaptureAndScheduleAsync(
+            message, ingest, ingest.EmailConfiguration, parts.Fresh, decision,
+            ingest.FromEmail, ct);
 
+        if (!result.SafeToAcknowledge)
+            throw new InvalidOperationException(
+                "The message could not be captured durably, so it was not reprocessed.");
+
+        var queued = result.Scheduled + result.AlreadyScheduled;
         ingest.TriageOutcome = EmailTriageOutcome.Uncertain.ToString();
         ingest.TriageReasonJson = JsonSerializer.Serialize(decision.ReasonCodes);
         ingest.TriageDecidedOn = DateTime.UtcNow;
-        ingest.ParseStatus = result.Queued > 0 ? "Queued" : "Failed - nothing to extract";
-        ingest.ParsedAt = result.Queued > 0 ? null : DateTime.UtcNow;
+        ingest.ParseStatus = queued > 0 ? "Queued" : "Failed - nothing to extract";
+        ingest.ParsedAt = queued > 0 ? null : DateTime.UtcNow;
         await _context.SaveChangesAsync(ct);
 
         _log.LogInformation(
             "Email ingest {IngestId} reprocessed as an inquiry by {Actor} (idempotency {Key}): "
-            + "{Queued} job(s) enqueued in batch {BatchId}. Reason: {Reason}",
-            ingest.Id, actor, idempotencyKey, result.Queued, result.BatchId, reason);
+            + "assembly {AssemblyId}, {Scheduled} scheduled, {AlreadyScheduled} already "
+            + "scheduled, {Held} held, batch {BatchId}. Reason recorded.",
+            ingest.Id, actor, idempotencyKey, result.AssemblyId, result.Scheduled,
+            result.AlreadyScheduled, result.Held, result.BatchId);
 
         return new EmailTriageReprocessResult(
-            ingest.Id, result.BatchId, result.Queued,
+            ingest.Id, result.BatchId, queued,
             EmailTriageOutcome.Uncertain.ToString(), ingest.ParseStatus!);
     }
 

@@ -23,6 +23,9 @@ public static class EmailInquiryAssemblyServiceCollectionExtensions
         services.AddScoped<IEmailInquiryCaptureService, EmailInquiryCaptureService>();
         services.AddScoped<IEmailInquiryAssemblyCoordinator, EmailInquiryAssemblyCoordinator>();
         services.AddScoped<IRawEmailEvidenceReader, RawEmailEvidenceReader>();
+        // IEmailInquiryIntakeService is NOT here, for the same reason the assembler is not: it
+        // needs IDocumentIngestion, which belongs to extraction, and registering it would make
+        // this capability unresolvable on its own.
         // IEmailInquiryLeadAssembler is deliberately NOT here. It needs ILeadPersister, which
         // belongs to extraction, and registering it in this extension would make the capability
         // unresolvable on its own — which is exactly what the registration test caught. It is
