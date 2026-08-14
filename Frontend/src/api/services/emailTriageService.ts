@@ -378,6 +378,22 @@ export interface EmailComponent {
 }
 
 /**
+ * One attachment the intake door deliberately did NOT hand to extraction — ING-06.
+ *
+ * It is not a component and never becomes one: no job was queued for it, so it is absent from the
+ * assembly totals and from the component list by design. It is still a piece of what the customer
+ * sent, and the only record of it is this entry.
+ */
+export interface SkippedAttachment {
+  /** Row key: the entry's position in the recorded list, which is all the backend gives. */
+  key: string;
+  /** The sender's own file name, reduced to a leaf. Null when the entry carried no usable name. */
+  fileName: string | null;
+  /** Why it was not scheduled — unsupported type, too large, unreadable. */
+  reason: string | null;
+}
+
+/**
  * One triaged message.
  *
  * `id` and `outcome` are the only fields guaranteed to be usable. Everything typed `| null` may be
@@ -407,6 +423,17 @@ export interface EmailTriageRow {
   attachmentNames: string[];
   /** Reported only when the payload actually carried an attachment-name array. */
   attachmentNamesReported: boolean;
+  /**
+   * Attachments the door refused to schedule — ING-06. Deliberately NOT merged into
+   * {@link components}: nothing was queued for them, so counting them as parts would put the
+   * assembly totals at odds with the work the pipeline actually has.
+   */
+  skippedAttachments: SkippedAttachment[];
+  /**
+   * False when the payload carried no skipped-attachment array at all. "Nothing was skipped" and
+   * "this deployment does not say" are different claims, and only the first one may be stated.
+   */
+  skippedAttachmentsReported: boolean;
   /** SUPPLIER_QUOTE / SUPPLIER_INVOICE — set when the message was routed rather than extracted. */
   commercialDocumentTypeHint: string | null;
   /** True when the message continues an existing thread (In-Reply-To / References present). */
@@ -518,6 +545,70 @@ const readComponent = (payload: unknown, index: number): EmailComponent => {
   };
 };
 
+const isPrintable = (character: string): boolean => {
+  const codePoint = character.codePointAt(0) ?? 0;
+  return codePoint > 0x1f && !(codePoint >= 0x7f && codePoint <= 0x9f);
+};
+
+const MAX_FILE_NAME = 120;
+
+/**
+ * The sender chose this name, so it is read as hostile text: only the last segment survives — a
+ * skipped attachment must never render as a path — and the length is bounded so one absurd name
+ * cannot take the panel over.
+ */
+const safeFileName = (value: string | null): string | null => {
+  const trimmed = asText(value);
+  if (trimmed === null) return null;
+  const leaf = (trimmed.split(/[\\/]/).pop() ?? '').split('').filter(isPrintable).join('').trim();
+  if (leaf.length === 0) return null;
+  return leaf.length <= MAX_FILE_NAME ? leaf : `${leaf.slice(0, MAX_FILE_NAME - 1)}…`;
+};
+
+/**
+ * Splits one recorded entry — `"deck.pptx (unsupported file type '.pptx')"` — into its name and
+ * its reason. That "name (reason)" string is the whole wire shape: the column stores a JSON array
+ * of them, so this is the only place the two halves can be told apart.
+ *
+ * The split is the FIRST bracket opening a group that closes exactly at the end of the entry.
+ * Neither end is safe to anchor on blindly: a reason carries brackets of its own ("exceeds the
+ * 10 MB size limit (12345678 bytes)") and so does an everyday file name ("quote (1).pdf").
+ */
+const splitSkippedEntry = (entry: string): { fileName: string; reason: string | null } => {
+  for (let open = entry.indexOf(' ('); open >= 0; open = entry.indexOf(' (', open + 1)) {
+    let depth = 0;
+    for (let scan = open + 1; scan < entry.length; scan += 1) {
+      if (entry[scan] === '(') depth += 1;
+      else if (entry[scan] === ')') {
+        depth -= 1;
+        if (depth > 0) continue;
+        if (scan === entry.length - 1) {
+          return { fileName: entry.slice(0, open), reason: asText(entry.slice(open + 2, scan)) };
+        }
+        break;
+      }
+    }
+  }
+  return { fileName: entry, reason: null };
+};
+
+/**
+ * Reads one entry. A malformed one is kept as an unnamed skip rather than filtered away: the
+ * count of attachments that will not be quoted is the entire point of the record, and dropping
+ * the entries this build cannot parse is the same disappearance the record exists to prevent.
+ */
+const readSkippedAttachment = (payload: unknown, index: number): SkippedAttachment => {
+  const entry = asText(payload);
+  if (entry === null) return { key: `skipped-${index}`, fileName: null, reason: null };
+  const split = splitSkippedEntry(entry);
+  return {
+    key: `skipped-${index}`,
+    // Falling back to the whole entry keeps an unsplittable line visible under its own text.
+    fileName: safeFileName(split.fileName) ?? safeFileName(entry),
+    reason: split.reason,
+  };
+};
+
 export const readTriageRow = (payload: unknown): EmailTriageRow => {
   const root = isRecord(payload) ? payload : {};
   const componentsRaw = Array.isArray(root.components)
@@ -529,6 +620,11 @@ export const readTriageRow = (payload: unknown): EmailTriageRow => {
     ? root.attachmentNames
     : Array.isArray(root.attachmentFileNames)
       ? root.attachmentFileNames
+      : null;
+  const skippedRaw = Array.isArray(root.skippedAttachments)
+    ? root.skippedAttachments
+    : Array.isArray(root.skippedAttachmentNames)
+      ? root.skippedAttachmentNames
       : null;
   const attachmentNames = asTextList(attachmentNamesRaw);
   const attachmentCount = asCount(root.attachmentCount) ?? (attachmentNamesRaw ? attachmentNames.length : null);
@@ -549,6 +645,8 @@ export const readTriageRow = (payload: unknown): EmailTriageRow => {
     attachmentCount,
     attachmentNames,
     attachmentNamesReported: attachmentNamesRaw !== null,
+    skippedAttachments: (skippedRaw ?? []).map(readSkippedAttachment),
+    skippedAttachmentsReported: skippedRaw !== null,
     commercialDocumentTypeHint: asText(root.commercialDocumentTypeHint) ?? asText(root.documentTypeHint),
     threadContinuation: asFlag(root.threadContinuation),
     // `assembledLeadId` is the assembly worker's name for the same lead the triage row calls

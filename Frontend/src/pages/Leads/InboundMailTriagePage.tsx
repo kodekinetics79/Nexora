@@ -67,6 +67,9 @@ import emailTriageService, {
  *  - a field the backend has not shipped renders as "Not reported", never as 0, blank or a guess;
  *  - for a conversational enquiry the prose IS the evidence, so the original message text is shown
  *    beside what came out of it, and the body/attachment split is always stated;
+ *  - an attachment the door refused to schedule is shown as SKIPPED beside the parts and never
+ *    among them: no job was ever queued for it, so it sits outside the assembly totals on purpose,
+ *    and it is the one thing that can otherwise leave this screen with no trace at all;
  *  - "Open lead" appears only where a lead id actually exists. A message that needs review, was
  *    rejected, or is still being assembled has no lead, and offering the action anyway would send
  *    a rep to a dead route and teach them the screen lies;
@@ -213,6 +216,19 @@ const describeAttachmentRouting = (row: EmailTriageRow): string => {
 
 const plural = (count: number, singular: string, pluralForm = `${singular}s`): string =>
   `${count} ${count === 1 ? singular : pluralForm}`;
+
+/**
+ * What a skipped attachment costs, in the operator's own terms (ING-06).
+ *
+ * Deliberately not worded as a failure: a message can be fully assembled AND carry skips, and that
+ * is a correct outcome, not a stuck pipeline. It is also a piece of the customer's request that
+ * nobody read, so the one thing this sentence must never do is let it pass as ordinary.
+ */
+const describeSkippedImpact = (count: number): string =>
+  `${plural(count, 'attachment')} came with this message and ${count === 1 ? 'was' : 'were'} never `
+  + `sent for extraction, so nothing inside ${count === 1 ? 'it' : 'them'} can be quoted. `
+  + `${count === 1 ? 'It is' : 'They are'} not counted among the parts above — a message can finish `
+  + 'assembling and still be short of what the customer sent.';
 
 const pollSeverity = (report: MailPollReport): 'success' | 'info' | 'warning' | 'error' => {
   if (report.failures.length > 0) return 'error';
@@ -612,6 +628,9 @@ export default function InboundMailTriagePage() {
                     const assemblyReason = presentableReason(row.assemblyReason);
                     const progress = describeComponentProgress(row);
                     const missingLead = describeMissingLead(row);
+                    // Read off the row itself rather than the per-message query: the loss is
+                    // stated the moment the panel opens, and it survives the parts read failing.
+                    const skipped = row.skippedAttachments;
                     const expanded = expandedId === row.id;
                     const detailId = `triage-detail-${row.id}`;
                     const subject = row.subject ?? '(no subject)';
@@ -937,6 +956,74 @@ export default function InboundMailTriagePage() {
                                       </TableBody>
                                     </Table>
                                   </TableContainer>
+                                )}
+
+                                {/* ING-06. Its own heading and its own table, below the parts and
+                                    never inside them: a skipped attachment produced no job, so it
+                                    is absent from the counts above by design. Folding it into the
+                                    parts table would make the totals disagree with the pipeline —
+                                    and leaving it out altogether is the only way an attachment can
+                                    still vanish off this screen without a trace. */}
+                                {skipped.length > 0 && (
+                                  <Box sx={{ mt: 2 }}>
+                                    <Typography variant="subtitle2" component="h2" sx={{ fontWeight: 700 }}>
+                                      Skipped — never sent for extraction
+                                    </Typography>
+                                    <Typography variant="body2" sx={{ mt: 0.5 }}>
+                                      {describeSkippedImpact(skipped.length)}
+                                    </Typography>
+                                    <TableContainer component={Paper} variant="outlined" sx={{ mt: 1 }}>
+                                      <Table size="small" aria-label={`Skipped attachments of ${subject}`}>
+                                        <TableHead>
+                                          <TableRow>
+                                            <TableCell>File</TableCell>
+                                            <TableCell>Type</TableCell>
+                                            <TableCell>State</TableCell>
+                                            <TableCell>Why</TableCell>
+                                          </TableRow>
+                                        </TableHead>
+                                        <TableBody>
+                                          {skipped.map((attachment) => {
+                                            const skippedReason = presentableReason(attachment.reason);
+                                            return (
+                                              <TableRow key={attachment.key}>
+                                                <TableCell sx={{ overflowWrap: 'anywhere' }}>
+                                                  {attachment.fileName ?? NOT_REPORTED}
+                                                </TableCell>
+                                                <TableCell>
+                                                  {describeComponentKind('attachment') ?? NOT_REPORTED}
+                                                </TableCell>
+                                                <TableCell>
+                                                  {/* Named for what happened, not for how it looks.
+                                                      "Skipped" is the word the record uses. */}
+                                                  <Chip size="small" variant="outlined" color="warning" label="Skipped" />
+                                                </TableCell>
+                                                <TableCell sx={{ overflowWrap: 'anywhere' }}>
+                                                  {skippedReason ?? (
+                                                    <Typography variant="caption" color="text.secondary">
+                                                      {attachment.reason === null
+                                                        ? 'No reason recorded'
+                                                        : 'Recorded for support'}
+                                                    </Typography>
+                                                  )}
+                                                </TableCell>
+                                              </TableRow>
+                                            );
+                                          })}
+                                        </TableBody>
+                                      </Table>
+                                    </TableContainer>
+                                  </Box>
+                                )}
+
+                                {/* Silence here would read as "nothing was skipped", which is a
+                                    claim no such deployment has made. Said only where it changes
+                                    the answer: a message with attachments. */}
+                                {!row.skippedAttachmentsReported && row.hasAttachments === true && (
+                                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 2 }}>
+                                    Whether any attachment was skipped instead of being sent for extraction is{' '}
+                                    {NOT_REPORTED.toLowerCase()} by this deployment.
+                                  </Typography>
                                 )}
                               </Box>
                             </Box>

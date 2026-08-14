@@ -188,6 +188,52 @@ const REVIEW_MESSAGE = readTriageRow({
   ],
 });
 
+/**
+ * Fully assembled — and still short of what the customer sent. This is the case ING-06 exists for:
+ * every count on the row is complete, so nothing reads as a failure, while two of the sender's
+ * files were never handed to extraction. The third entry is deliberately malformed.
+ */
+const SKIPPED_PAGE = readTriagePage(
+  {
+    items: [
+      {
+        id: 201,
+        receivedOn: '2026-08-06T06:00:00Z',
+        from: 'projects@fitout-gulf.ae',
+        subject: 'Fit-out package — three files',
+        outcome: 'Inquiry',
+        reasonCodes: ['rfq_reference'],
+        hasAttachments: true,
+        attachmentCount: 3,
+        assemblyState: 'Assembled',
+        expectedComponentCount: 2,
+        completedComponentCount: 2,
+        assembledLeadId: 7010,
+        skippedAttachments: [
+          "deck.pptx (unsupported file type '.pptx')",
+          'site-video.mp4 (exceeds the 10 MB size limit (18874368 bytes))',
+          42,
+        ],
+      },
+    ],
+    totalCount: 1,
+    pageNumber: 1,
+    pageSize: 25,
+  },
+  1,
+);
+
+/** The parts that WERE scheduled for that message: the body and the one readable drawing. */
+const SKIPPED_MESSAGE = readTriageRow({
+  id: 201,
+  outcome: 'Inquiry',
+  assemblyState: 'Assembled',
+  components: [
+    { id: 20, ordinal: 0, kind: 'Body', fileName: null, state: 'Completed' },
+    { id: 21, ordinal: 1, kind: 'Attachment', fileName: 'layout-rev-c.pdf', state: 'Completed' },
+  ],
+});
+
 const renderPage = () => {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -544,6 +590,100 @@ describe('InboundMailTriagePage — assembly', () => {
   });
 });
 
+describe('InboundMailTriagePage — skipped attachments', () => {
+  beforeEach(() => {
+    listTriage.mockResolvedValue(SKIPPED_PAGE);
+    getMessage.mockResolvedValue(SKIPPED_MESSAGE);
+  });
+
+  const openSkippedRow = async (): Promise<HTMLElement> => {
+    renderPage();
+    const row = await rowFor(/Fit-out package — three files/);
+    fireEvent.click(within(row).getByRole('button', { name: /show message/i }));
+    return screen.findByRole('region', { name: /message and extraction/i });
+  };
+
+  it('showsWhatWasSkipped_soAnAttachmentCannotVanishSilently', async () => {
+    const detail = await openSkippedRow();
+
+    const table = await within(detail).findByRole('table', { name: /skipped attachments of/i });
+    expect(within(table).getByText('deck.pptx')).toBeInTheDocument();
+    expect(within(table).getByText("unsupported file type '.pptx'")).toBeInTheDocument();
+    expect(within(table).getByText('site-video.mp4')).toBeInTheDocument();
+    expect(within(table).getByText('exceeds the 10 MB size limit (18874368 bytes)')).toBeInTheDocument();
+    // Each one says what happened to it in the record's own word.
+    expect(within(table).getAllByText('Skipped')).toHaveLength(3);
+    // A malformed entry still occupies a row: dropping it is the disappearance this fixes.
+    expect(within(table).getByText('Not reported')).toBeInTheDocument();
+  });
+
+  it('doesNotCountASkippedAttachmentAsAPart', async () => {
+    const detail = await openSkippedRow();
+    await within(detail).findByRole('table', { name: /skipped attachments of/i });
+
+    // The message is finished and says so — skips do not turn an assembled message into a failure.
+    expect(within(detail).getByText(/Assembly — Assembled/)).toBeInTheDocument();
+    expect(screen.getByText('2 of 2 parts assembled')).toBeInTheDocument();
+
+    // The parts table is the scheduled work only: two components, neither of them a skip.
+    const parts = within(detail).getByRole('table', { name: /parts of fit-out package/i });
+    expect(within(parts).getAllByRole('row')).toHaveLength(3); // header + 2 parts
+    expect(within(parts).queryByText('deck.pptx')).not.toBeInTheDocument();
+    expect(within(parts).queryByText('site-video.mp4')).not.toBeInTheDocument();
+    // And the cost of the skip is stated where the counts are, so "complete" cannot read as "all".
+    expect(
+      within(detail).getByText(/not counted among the parts above/i),
+    ).toBeInTheDocument();
+  });
+
+  it('rendersNothingAtAllWhenNoAttachmentWasSkipped', async () => {
+    listTriage.mockResolvedValue(
+      readTriagePage(
+        {
+          items: [
+            {
+              id: 202,
+              subject: 'Clean package',
+              outcome: 'Inquiry',
+              reasonCodes: [],
+              hasAttachments: true,
+              attachmentCount: 1,
+              assemblyState: 'Assembled',
+              skippedAttachments: [],
+            },
+          ],
+          totalCount: 1,
+          pageNumber: 1,
+          pageSize: 25,
+        },
+        1,
+      ),
+    );
+    renderPage();
+    const row = await rowFor(/Clean package/);
+    fireEvent.click(within(row).getByRole('button', { name: /show message/i }));
+
+    const detail = await screen.findByRole('region', { name: /message and extraction/i });
+    expect(within(detail).queryByText(/never sent for extraction/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('table', { name: /skipped attachments of/i })).not.toBeInTheDocument();
+    // Reported and empty IS an answer, so nothing is owed to the operator here.
+    expect(within(detail).queryByText(/whether any attachment was skipped/i)).not.toBeInTheDocument();
+  });
+
+  it('doesNotClaimNothingWasSkippedWhenTheDeploymentNeverSaid', async () => {
+    listTriage.mockResolvedValue(INQUIRY_PAGE);
+    renderPage();
+    const row = await rowFor(/Requirement — Jebel Ali/);
+    fireEvent.click(within(row).getByRole('button', { name: /show message/i }));
+
+    const detail = await screen.findByRole('region', { name: /message and extraction/i });
+    expect(screen.queryByRole('table', { name: /skipped attachments of/i })).not.toBeInTheDocument();
+    expect(
+      within(detail).getByText(/Whether any attachment was skipped .* is not reported by this deployment/i),
+    ).toBeInTheDocument();
+  });
+});
+
 describe('readPollReport', () => {
   it('treatsAnAbsentMailboxCountAsNothingPolled', () => {
     const report = readPollReport({
@@ -681,6 +821,50 @@ describe('readTriageRow', () => {
     expect(row.attachmentCount).toBe(1);
     expect(row.hasAttachments).toBe(true);
     expect(row.attachmentNamesReported).toBe(true);
+  });
+
+  it('splitsASkippedAttachmentIntoItsNameAndItsReason', () => {
+    const row = readTriageRow({
+      id: 9,
+      outcome: 'Inquiry',
+      skippedAttachments: [
+        "deck.pptx (unsupported file type '.pptx')",
+        // Brackets inside the reason, and brackets inside the name: both are everyday mail, and
+        // anchoring on the first or the last bracket gets one of them wrong.
+        'site-video.mp4 (exceeds the 10 MB size limit (18874368 bytes))',
+        "quote (1).pdf (unsupported file type '.pdf')",
+        // A path is never rendered as one — only the leaf survives.
+        'C:\\Users\\buyer\\Desktop\\boq.xlsx (could not be read)',
+        'orphan.dwg',
+      ],
+    });
+    expect(row.skippedAttachmentsReported).toBe(true);
+    expect(row.skippedAttachments.map((entry) => [entry.fileName, entry.reason])).toEqual([
+      ['deck.pptx', "unsupported file type '.pptx'"],
+      ['site-video.mp4', 'exceeds the 10 MB size limit (18874368 bytes)'],
+      ['quote (1).pdf', "unsupported file type '.pdf'"],
+      ['boq.xlsx', 'could not be read'],
+      ['orphan.dwg', null],
+    ]);
+  });
+
+  it('keepsAMalformedSkipEntryRatherThanDroppingIt', () => {
+    const row = readTriageRow({ id: 9, outcome: 'Inquiry', skippedAttachments: [42, '  ', 'a.pdf (too large)'] });
+    // Three attachments were recorded as skipped, so three are shown. An entry this build cannot
+    // read is unnamed, never absent — absence is the defect the record exists to prevent.
+    expect(row.skippedAttachments).toHaveLength(3);
+    expect(row.skippedAttachments[0]).toMatchObject({ fileName: null, reason: null });
+    expect(row.skippedAttachments[2]).toMatchObject({ fileName: 'a.pdf', reason: 'too large' });
+  });
+
+  it('keepsAnAbsentSkipListDistinctFromAnEmptyOne', () => {
+    const silent = readTriageRow({ id: 9, outcome: 'Inquiry' });
+    expect(silent.skippedAttachmentsReported).toBe(false);
+    expect(silent.skippedAttachments).toEqual([]);
+
+    const clean = readTriageRow({ id: 10, outcome: 'Inquiry', skippedAttachments: [] });
+    expect(clean.skippedAttachmentsReported).toBe(true);
+    expect(clean.skippedAttachments).toEqual([]);
   });
 
   it('readsABareArrayResponseAsOnePage', () => {
