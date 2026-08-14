@@ -1027,18 +1027,56 @@ public sealed class LeadPersister : ILeadPersister
 
             if (assemblyComponent is not null)
             {
+                // HELD, NOT COMPLETED — and the distinction is the whole point.
+                //
+                // The first version of this fence marked the component Completed and returned,
+                // discarding outcome.Result. That is silent result loss dressed as success: the
+                // extraction really ran, really cost money, and its output went nowhere, while
+                // the barrier would later see a Completed component carrying nothing and
+                // assemble a Lead from the parts that happened to survive.
+                //
+                // There is no durable extraction-result store in this repository yet — the
+                // result has only ever flowed straight into Lead creation — so it CANNOT be
+                // persisted here without inventing one. Until the component result store and
+                // the barrier handler land, the honest outcome is a visible recoverable hold:
+                // the work is re-runnable, the operator can see exactly where it stopped, and
+                // nothing is claimed to have finished that did not.
                 await _emailAssemblies.RecordComponentOutcomeAsync(
                     job.BusinessUnitId, assemblyComponent.ComponentKey,
-                    ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponentStatus.Completed,
-                    null, null, job.SourceDocumentOccurrenceId, ct);
+                    ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponentStatus.FailedRecoverable,
+                    "assembly_result_store_pending",
+                    "This part was read successfully, but the message-level assembly that "
+                    + "combines it with the rest of the email is not available yet. It will be "
+                    + "processed again automatically.",
+                    job.SourceDocumentOccurrenceId, ct);
 
-                _log.LogInformation(
+                _log.LogWarning(
                     "Extraction job {ExtractionJobId} is component {ComponentKey} of email "
-                    + "assembly {AssemblyId} (business unit {BusinessUnitId}). Its result is "
-                    + "recorded against the message; no Lead is created per component.",
+                    + "assembly {AssemblyId} (business unit {BusinessUnitId}). Extraction "
+                    + "succeeded but there is no durable component-result store yet, so the "
+                    + "component is HELD as recoverable rather than completed. No Lead is "
+                    + "created per component.",
                     job.Id, assemblyComponent.ComponentKey, assemblyComponent.AssemblyId,
                     job.BusinessUnitId);
 
+                return 0;
+            }
+
+            // FAIL CLOSED. An Email-sourced job with no unambiguous component mapping must not
+            // fall through to per-document Lead reconciliation: that is precisely the path that
+            // mints one Lead per attachment. A missing mapping means the scheduler and the
+            // worker disagree about who owns this job, which is an ownership failure to be seen
+            // and repaired — never a licence to create commercial records.
+            //
+            // Non-email ingestion is untouched: manual upload and watched folders are not
+            // ExtractionSourceType.Email and never reach this branch.
+            if (job.SourceType == ExtractionSourceType.Email)
+            {
+                _log.LogError(
+                    "Email extraction job {ExtractionJobId} (business unit {BusinessUnitId}, "
+                    + "batch {BatchId}) has no authoritative email inquiry component. It is NOT "
+                    + "reconciled into a Lead; the ownership failure is recoverable and visible.",
+                    job.Id, job.BusinessUnitId, job.BatchId);
                 return 0;
             }
         }

@@ -764,3 +764,52 @@ that the frozen message limits are the committed values.
 * **2b-2:** PostgreSQL concurrency — two contexts, same assembly, one occurrence, one job, no
   aborted transaction, replay returns the existing identity.
 * **2b-6:** closure matrix.
+
+
+## STEP 2b SAFETY CORRECTION — result loss and fail-closed
+
+### Correction 1 (partial) — the fence was losing extraction results
+
+`8b91785`'s fence called `RecordComponentOutcomeAsync(... Completed ...)` and returned **before**
+`outcome.Result` was persisted anywhere. The extraction genuinely ran, genuinely cost money, and
+its output went nowhere — while the barrier would later see a `Completed` component carrying
+nothing and assemble a Lead from whatever parts happened to survive. That is silent result loss
+dressed as success, and it was worse than having no fence.
+
+**There is no durable extraction-result store in this repository.** The result has only ever
+flowed straight into Lead creation; `ExtractionJob` has no result payload column and no
+proposal entity exists. So the result genuinely *cannot* be persisted at this point without
+building one — and the standing rule for that case is explicit: mark `FailedRecoverable`, never
+`Completed`-and-discard.
+
+The fence now records `FailedRecoverable` with reason `assembly_result_store_pending` and an
+operator sentence saying the part was read but the message-level assembly is not available yet
+and it will be processed again. The work is re-runnable, the stopping point is visible, and
+nothing claims to have finished that did not.
+
+**This is a hold, not a destination.** It is replaced when the durable component-result store and
+the barrier handler land.
+
+### Correction 4 — the worker now fails closed
+
+An `ExtractionSourceType.Email` job with no unambiguous component mapping no longer falls through
+to per-document Lead reconciliation — the exact path that mints one Lead per attachment. A
+missing mapping means the scheduler and the worker disagree about ownership: something to see and
+repair, never a licence to create commercial records. It is logged as a recoverable ownership
+failure and creates no Lead.
+
+Non-email ingestion is untouched — manual upload and watched folders are not
+`ExtractionSourceType.Email` and never reach the branch. Proven by the full suite.
+
+**Full backend regression: Failed: 0, Passed: 4902.**
+
+### Still outstanding from the correction increment
+
+| # | Item | Note |
+| --- | --- | --- |
+| 1 | Durable component-result store + migration, so the fence **completes** instead of holding | needs a new entity; no existing contract to reuse |
+| 2 | Atomic enqueue→bind transaction + DB uniqueness on the component/job relationship | occurrence/job unique indexes dedupe but do not route |
+| 3 | Coordinator identity by `(BusinessUnitId, AssemblyId, ComponentId)`; remove every `BusinessUnitId + ComponentKey` control-flow lookup | worker already has `AssemblyId` |
+| 5 | Real raw `.eml` SHA-256 verification before any recovery/reprocess re-plan; `RawEvidenceHashMismatch` typed outcome | reader exists; verification not yet called on the recovery path |
+| — | Shared `AddEmailInquiryAssembly` extension used by **both** `Program` and the test | current test copies registrations, which the directive rules insufficient |
+| — | Correction test matrix + PG concurrency + SME reviews | |
