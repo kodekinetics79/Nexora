@@ -131,8 +131,11 @@ public class EmailInquiryManifestPlannerTests
         var manifest = await Plan(
             Message("RFQ", File("big.pdf", Encoding.UTF8.GetBytes(new string('x', 64)))), limits: limits);
 
-        var skipped = Assert.Single(manifest.Components,
-            c => c.Disposition == EmailInquiryComponentDisposition.Skip);
+        // Asserted on the ATTACHMENT specifically. At a 16-byte ceiling the covering note is
+        // oversized too, and the important property is that its refusal no longer takes the
+        // attachment down with it — an oversized body must never discard the priced document.
+        var skipped = Assert.Single(manifest.Components, c => c.FileName == "big.pdf");
+        Assert.Equal(EmailInquiryComponentDisposition.Skip, skipped.Disposition);
         Assert.Equal(EmailInquirySkipReasons.AttachmentOversize, skipped.ReasonCode);
     }
 

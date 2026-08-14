@@ -73,6 +73,27 @@ public sealed class EmailInquiryBudget
         RemainingBytes = Math.Max(0, RemainingBytes - bytes);
     }
 
+    /// <summary>
+    /// Charges bytes only if they fit within BOTH the per-component ceiling and what remains of
+    /// the shared allowance. Returns false without deducting anything when they do not.
+    ///
+    /// <para><b>Why this exists.</b> <see cref="ChargeBytes"/> cannot refuse — it clamps the
+    /// overdraft to zero, so an overspend leaves no trace. Attachments were bounded during
+    /// decoding, but the BODY paths materialised their bytes first and then charged
+    /// unconditionally, so a mail bomb of nested forwards each carrying a multi-megabyte body was
+    /// limited only by the component count. The class comment claimed the budget was true "by
+    /// construction rather than by every call site remembering to subtract"; on the paths
+    /// recursion added, it was not.</para>
+    /// </summary>
+    public bool TryChargeBytes(long bytes)
+    {
+        if (bytes <= 0) return true;
+        if (bytes > ComponentLimit) return false;
+        if (bytes > RemainingBytes) return false;
+        RemainingBytes -= bytes;
+        return true;
+    }
+
     /// <summary>Nesting depth remaining below the current level.</summary>
     public bool CanDescendTo(int depth) => depth <= MaxNestingDepth;
 }

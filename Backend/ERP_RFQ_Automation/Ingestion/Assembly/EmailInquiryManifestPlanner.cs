@@ -170,7 +170,15 @@ public static class EmailInquiryManifestPlanner
     /// migration to be guessed at. Bump it whenever component identity, ordering or disposition
     /// changes — never for an internal refactor that leaves those three alone.</para>
     /// </summary>
-    public const int ContractVersion = 1;
+    /// <para><b>v2</b> — the recursive rewrite. v1 walked one level with flat
+    /// <c>:attachment:{n}</c> keys. v2 recurses, uses hierarchical <c>:part:{path}</c> keys,
+    /// treats a forwarded container as structural, plans nested bodies, and classifies inline
+    /// assets by measured size. Every one of those changes component identity or disposition,
+    /// which is exactly what this number exists to record. Leaving it at 1 through that rewrite
+    /// would have made the guard blind for the only population it protects: a v1-captured
+    /// message re-planned by v2 would pass the version check and then surface as a pile of
+    /// misleading per-component mismatches instead of one true "the contract changed".</para>
+    public const int ContractVersion = 2;
 
     public static async Task<EmailInquiryManifest> PlanAsync(
         MimeMessage message,
@@ -195,7 +203,21 @@ public static class EmailInquiryManifestPlanner
             var bodyDocument =
                 $"Subject: {message.Subject}\nFrom: {message.From}\nDate: {message.Date:yyyy-MM-dd}\n\n{freshBodyText}";
             var bytes = Encoding.UTF8.GetBytes(bodyDocument);
-            budget.ChargeBytes(bytes.Length);
+            // Refusable. A body that will not fit is recorded with its reason, never charged
+            // against an allowance it overdraws and never silently dropped.
+            if (!budget.TryChargeBytes(bytes.Length))
+            {
+                components.Add(Refused(
+                    $"email:{messageKey}:body", EmailInquiryComponentKind.Body, ordinal++,
+                    $"{SanitizeFileName(message.Subject ?? "email")}_body.txt", 0,
+                    EmailInquirySkipReasons.TotalSizeLimitExceeded,
+                    "The text of this message is larger than one message may contain."));
+                // Recorded and skipped, NOT abandoned. Returning here discarded every attachment
+                // on the message, and the attachment is usually the priced document - an
+                // oversized covering note must never take the bill of quantities with it.
+            }
+            else
+            {
             components.Add(new EmailInquiryComponentPlan(
                 $"email:{messageKey}:body",
                 EmailInquiryComponentKind.Body,
@@ -206,6 +228,7 @@ public static class EmailInquiryManifestPlanner
                 Sha256(bytes),
                 EmailInquiryComponentDisposition.Process,
                 null, null, 0, bytes));
+            }
         }
 
         // 2) The MIME tree, depth-first, sharing ONE budget.
@@ -465,7 +488,15 @@ public static class EmailInquiryManifestPlanner
                 $"Subject: {embedded.Message.Subject}\nFrom: {embedded.Message.From}\n"
                 + $"Date: {embedded.Message.Date:yyyy-MM-dd}\n\n{nestedBody.Fresh}";
             var nestedBytes = Encoding.UTF8.GetBytes(nestedDocument);
-            budget.ChargeBytes(nestedBytes.Length);
+            if (!budget.TryChargeBytes(nestedBytes.Length))
+            {
+                components.Add(Refused(
+                    $"email:{messageKey}:part:{segment}.body", EmailInquiryComponentKind.Body,
+                    ordinal(), $"{SanitizeFileName(embedded.Message.Subject ?? "forwarded")}_body.txt",
+                    nestedDepth, EmailInquirySkipReasons.TotalSizeLimitExceeded,
+                    "The text of this forwarded message is larger than one message may contain."));
+                return;
+            }
             components.Add(new EmailInquiryComponentPlan(
                 $"email:{messageKey}:part:{segment}.body",
                 EmailInquiryComponentKind.Body,

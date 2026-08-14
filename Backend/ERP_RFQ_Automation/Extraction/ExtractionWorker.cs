@@ -1042,7 +1042,10 @@ public sealed class LeadPersister : ILeadPersister
                 // the work is re-runnable, the operator can see exactly where it stopped, and
                 // nothing is claimed to have finished that did not.
                 await _emailAssemblies.RecordComponentOutcomeAsync(
-                    job.BusinessUnitId, assemblyComponent.ComponentKey,
+                    // The AssemblyId was already read at the join above and was previously
+                    // discarded, leaving the write to resolve on tenant + key alone — a prefix of
+                    // the unique index, which binds one message's outcome onto another's row.
+                    job.BusinessUnitId, assemblyComponent.AssemblyId, assemblyComponent.ComponentKey,
                     ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponentStatus.FailedRecoverable,
                     ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryHoldReasons.AssemblyResultStorePending,
                     // Named rather than inlined so the promise itself is testable. It says held,

@@ -44,7 +44,11 @@ public static class EmailInquiryAssemblyModelBuilderExtensions
             e.HasIndex(x => new { x.BusinessUnitId, x.Status, x.UpdatedAtUtc });
 
             e.Property(x => x.MessageKey).HasMaxLength(255).IsRequired();
-            e.Property(x => x.ManifestContractVersion).HasDefaultValue(1);
+            // No HasDefaultValue: it marks the property ValueGenerated.OnAdd, so an assembly
+            // constructed with ManifestContractVersion = 0 - a forgotten assignment - would be
+            // silently stored as 1 instead of as an obviously wrong 0, defeating the mismatch
+            // detector a second way. The migration's column default still backfills historic rows.
+            e.Property(x => x.ManifestContractVersion).IsRequired();
             e.Property(x => x.RawEvidenceUri).HasMaxLength(1024);
             e.Property(x => x.RawEvidenceSha256).HasMaxLength(64).IsFixedLength();
             e.Property(x => x.RawEvidenceVersionId).HasMaxLength(256);

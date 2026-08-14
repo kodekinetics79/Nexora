@@ -1051,3 +1051,45 @@ index + composite FK (Restrict) + CHECK → drop `EmailInquiryComponents.Extract
 typed ingestion contract carrying the component id → queue projections (`ReturningColumns`,
 `MapJob`) → coordinator identity `(BusinessUnitId, AssemblyId, ComponentId)` → transactional
 persist/complete/re-evaluate. One focused migration; `20260813134002` stays byte-identical.
+
+---
+
+## THREE SME REVIEWS — 21 findings (5 Critical, 8 High). Criticals and structural Highs resolved.
+
+Reviewers ran read-only on `c61f73c..ab2137a`. **All three independently found the same Critical**,
+which is the strongest signal in this program so far.
+
+### Resolved in this increment
+
+| Finding | Reviewers | Fix |
+| --- | --- | --- |
+| **Component identity was a PREFIX of its own unique index** | .NET EIA-1 · PG-1 · SDET F5 | `FindComponentAsync`/`RecordComponentQueuedAsync`/`RecordComponentOutcomeAsync` now take `(BusinessUnitId, AssemblyId, ComponentKey)` — the exact unique tuple — and use `SingleOrDefaultAsync`. The worker already read `AssemblyId` at the join and **threw it away**. One tenant receiving the same message in two mailboxes (CC, distribution list — routine) produced byte-identical component keys, and the write bound one message's outcome onto the other's row: one advanced on evidence it did not own, the other stalled forever. |
+| **The hold re-armed the outage on a delay** | .NET EIA-2 | `ScheduleAsync` counted a held component as `alreadyScheduled` because its job genuinely existed. Once capture is wired, every component would park in `FailedRecoverable` with nothing sweeping and nothing rescheduling — zero email throughput, the `3a672dd` outage returning by another route. `IsRecoverableHold` is now re-schedulable. |
+| **Missing component was a silent no-op** | .NET EIA-1 | Both coordinator writes threw away outcomes with a log line. They now throw: an unowned job is an ownership failure, not a no-op. |
+| **Body paths bypassed the byte budget entirely** | .NET EIA-7 | `ChargeBytes` clamps and cannot refuse; both body paths materialised then charged unconditionally, so nested forwards carrying multi-megabyte bodies were bounded only by component count. Added `TryChargeBytes`, which refuses without deducting. This is M2 reappearing on the paths recursion added. |
+| **Outcome and re-evaluation were two transactions** | .NET EIA-3 · PG-6 | Now one transaction with a bounded reload-and-retry, catching **both** `DbUpdateConcurrencyException` and SQLSTATE `40001` — the latter is what PostgreSQL raises under tighter isolation, and catching only the first would leave the stranded-message failure intact. The change tracker is cleared before retry: re-saving a failed entry would stamp it twice and race the same stale value. |
+| **Contract version blind through its own rewrite** | PG-5 | Bumped to **v2**. v1 walked one level with flat keys; v2 recurses, uses hierarchical paths, treats forwarded containers as structural, plans nested bodies, and classifies inline assets by measured size. Leaving it at 1 meant a v1-captured message re-planned by v2 would pass the version check and surface as a pile of misleading per-component mismatches instead of one true "the contract changed". |
+| **`HasDefaultValue(1)` was an EF sentinel** | PG-7 | Removed. It marked the property `ValueGenerated.OnAdd`, so a forgotten assignment stored `0` as `1` — defeating the mismatch detector a second way. Focused migration `20260814045818`. |
+
+### A bug the suite caught inside this increment
+
+Refusing an oversized body originally `return`ed the manifest, **abandoning every attachment on
+the message**. An oversized covering note would have discarded the bill of quantities. The body is
+now recorded as skipped and the walk continues.
+
+Frozen-migration gate: `20260813134002` **byte-identical**. Model drift: none.
+Full backend regression: **Failed: 0, Passed: 4925**.
+
+### Open, with owners — not closed by this increment
+
+| Finding | Sev | Why still open |
+| --- | --- | --- |
+| SDET F1 — the fence is **dead code under test**; every `LeadPersister` construction omits `emailAssemblies` | Critical | This is why the fail-closed outage shipped green. Needs `LeadPersisterEmailFenceTests` on `TestDb` with a recording coordinator |
+| SDET F2 — **no end-to-end test** of capture → schedule → extract → assemble | Critical | The scheduler ships wholly unexercised |
+| SDET F4 — the PG isolation negative test **passes with RLS dropped** (FK swallow means the row is never inserted) | High | Must seed the parent and assert the row genuinely exists first |
+| .NET EIA-4 — **`ReprocessAsync` is a second legacy producer**; pausing polling does not stop it | High | Drain runbook needs step 3b gating it |
+| .NET EIA-5 — `SourceDocumentOccurrenceId` is a **third ownership authority**, unaddressed by the plan | High | Demote to evidence-only; it is many-to-one under content reuse |
+| PG-3 — `ExtractionJobs` DDL would take `ACCESS EXCLUSIVE` on the hot queue | High | Split into `NOT VALID` + `VALIDATE`, index `CONCURRENTLY` |
+| PG-4 — `RESTRICT` from jobs conflicts with the child `CASCADE`; also the purge-ordering item is a **misdiagnosis** (`session_replication_role = replica` already makes order irrelevant) | High | Reopen the delete-behaviour decision |
+| SDET F3 — registration test **copies** `Program` registrations | High | Shared `AddEmailInquiryAssembly` extension |
+| .NET EIA-6 — legacy + canonical processing of the **same message** across the cutover yields two Lead sets | Medium | Drain gate must assert on occurrences, not just the queue |

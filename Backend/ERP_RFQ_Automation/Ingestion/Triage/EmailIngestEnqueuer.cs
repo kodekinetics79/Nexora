@@ -338,7 +338,7 @@ public static class EmailIngestEnqueuer
             foreach (var component in components.Where(c => !c.IsTerminal).OrderBy(c => c.Ordinal))
             {
                 await coordinator.RecordComponentOutcomeAsync(
-                    assembly.BusinessUnitId, component.ComponentKey,
+                    assembly.BusinessUnitId, assembly.Id, component.ComponentKey,
                     EmailInquiryComponentStatus.FailedRecoverable,
                     ManifestMismatchReason, detail, null, ct);
                 held++;
@@ -359,7 +359,14 @@ public static class EmailIngestEnqueuer
             // represented on the message and produces no job by design.
             if (component.IsTerminal) continue;
 
-            if (component.ExtractionJobId is { } existingJobId)
+            // A HELD component must be re-scheduled, not counted as done.
+            //
+            // Without this, the moment capture is wired every component the worker holds keeps
+            // its job reference, DurableJobBelongsToComponentAsync confirms the job is genuinely
+            // its own, and the component is counted alreadyScheduled forever. Nothing sweeps
+            // holds, so every assembly parks in FailedRecoverable and email-to-Lead throughput
+            // goes to zero - the outage removed at 3a672dd, re-armed on a delay.
+            if (component.ExtractionJobId is { } existingJobId && !component.IsRecoverableHold)
             {
                 // A non-null id is NOT proof a job exists. Verified against the tenant's own
                 // jobs; if it has gone, the component is rescheduled rather than counted as done.
@@ -389,7 +396,7 @@ public static class EmailIngestEnqueuer
                     BuildMetadata(assembly, component, ingest, clientEmail, triage), ct);
 
                 await coordinator.RecordComponentQueuedAsync(
-                    assembly.BusinessUnitId, component.ComponentKey, result.JobId, ct);
+                    assembly.BusinessUnitId, assembly.Id, component.ComponentKey, result.JobId, ct);
                 scheduled++;
 
                 logger.LogInformation(
@@ -411,7 +418,7 @@ public static class EmailIngestEnqueuer
                     + "{IsConfigurationFault}); the message is held.",
                     component.ComponentKey, assembly.Id, exception.IsConfigurationFault);
                 await coordinator.RecordComponentOutcomeAsync(
-                    assembly.BusinessUnitId, component.ComponentKey,
+                    assembly.BusinessUnitId, assembly.Id, component.ComponentKey,
                     EmailInquiryComponentStatus.FailedRecoverable,
                     EvidenceStorageUnavailableException.ErrorCode,
                     "Document storage was unavailable, so this part has not been processed yet.",
@@ -424,7 +431,7 @@ public static class EmailIngestEnqueuer
                     "Failed to schedule component {ComponentKey} of assembly {AssemblyId}.",
                     component.ComponentKey, assembly.Id);
                 await coordinator.RecordComponentOutcomeAsync(
-                    assembly.BusinessUnitId, component.ComponentKey,
+                    assembly.BusinessUnitId, assembly.Id, component.ComponentKey,
                     EmailInquiryComponentStatus.FailedRecoverable,
                     SchedulingFailedReason,
                     "This part of the message could not be queued for processing yet.",

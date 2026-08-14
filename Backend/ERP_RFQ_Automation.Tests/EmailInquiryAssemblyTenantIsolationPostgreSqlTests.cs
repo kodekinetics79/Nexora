@@ -138,7 +138,12 @@ public sealed class EmailInquiryAssemblyTenantIsolationPostgreSqlTests(PostgreSq
 
         Assert.True(await reader.ReadAsync(), "ManifestContractVersion was not created.");
         Assert.Equal("NO", reader.GetString(0));
-        Assert.Contains("1", reader.GetString(1));
+        // The column default was deliberately REMOVED. EF's HasDefaultValue marks the property
+        // ValueGenerated.OnAdd, so an assembly constructed with ManifestContractVersion = 0 - a
+        // forgotten assignment - was silently stored as 1 rather than as an obviously wrong 0,
+        // which would defeat the very mismatch detector the column exists to feed.
+        Assert.True(await reader.IsDBNullAsync(1),
+            "ManifestContractVersion must have no column default, so an unset value stays visibly 0.");
     }
 
     [Fact]
