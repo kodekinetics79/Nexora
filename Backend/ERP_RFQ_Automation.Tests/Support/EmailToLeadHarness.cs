@@ -50,27 +50,50 @@ public static class EmailToLeadHarness
     /// the instant of a simulated crash. It cannot fabricate the persisted outcome: everything
     /// that writes to the database stays real.
     /// </param>
+    /// <param name="withRlsInterceptor">
+    /// Registers <see cref="TenantRlsCommandInterceptor"/>, which is what makes the connection
+    /// switch to <c>nexora_pipeline_app</c> or <c>nexora_tenant_app</c> per statement.
+    ///
+    /// <para>Off by default because the shared container connects as a SUPERUSER, and a
+    /// superuser bypasses every policy unconditionally — the interceptor would run but prove
+    /// nothing. It is switched on by the production-role lane, which owns a container with the
+    /// real role topology.</para>
+    /// </param>
     public static ServiceProvider BuildGraph(
         string connectionString,
         string storageRoot,
         RefusingLlm llm,
-        Action<IServiceCollection>? configure = null)
+        Action<IServiceCollection>? configure = null,
+        bool withRlsInterceptor = false)
     {
         var services = new ServiceCollection();
         services.AddLogging();
         services.AddHttpContextAccessor();
         services.AddSingleton<ITenantScopeAccessor, TenantScopeAccessor>();
         services.AddScoped<ITenantContext, HttpTenantContext>();
-        services.AddDbContext<ErpRfqAutomationContext>(options =>
+        services.AddDbContext<ErpRfqAutomationContext>((sp, options) =>
             // EnableRetryOnFailure is NOT decoration. It installs NpgsqlRetryingExecutionStrategy,
             // under which a user-initiated BeginTransactionAsync outside
             // CreateExecutionStrategy().ExecuteAsync throws outright. Production configures it,
             // and omitting it here once left every one of these tests blind to a defect that
             // would have thrown on the first real message.
-            options.UseNpgsql(connectionString,
-                    npgsql => npgsql.EnableRetryOnFailure(
-                        maxRetryCount: 5, maxRetryDelay: TimeSpan.FromSeconds(10), errorCodesToAdd: null))
-                .EnableDetailedErrors());
+            {
+                options.UseNpgsql(connectionString,
+                        npgsql => npgsql.EnableRetryOnFailure(
+                            maxRetryCount: 5, maxRetryDelay: TimeSpan.FromSeconds(10),
+                            errorCodesToAdd: null))
+                    .EnableDetailedErrors();
+                if (withRlsInterceptor)
+                    // The three-argument constructor, deliberately. With a null
+                    // IHttpContextAccessor the interceptor cannot distinguish "background work,
+                    // no tenant" from "no role switch at all" and leaves the connection on the
+                    // login role — so the unscoped enumeration would never reach
+                    // nexora_pipeline_app and the lane would prove the wrong thing.
+                    options.AddInterceptors(new TenantRlsCommandInterceptor(
+                        sp.GetRequiredService<ITenantContext>(),
+                        sp.GetRequiredService<Microsoft.AspNetCore.Http.IHttpContextAccessor>(),
+                        new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build()));
+            });
 
         services.AddSingleton<IWebHostEnvironment>(new TestEnvironment(storageRoot));
         services.AddSingleton<IFileStorage>(new LocalFileStorage(storageRoot, storageRoot));
