@@ -55,7 +55,7 @@ public sealed class EmailToLeadVerticalSlicePostgreSqlTests(PostgreSqlTestDataba
 
         // ---- 1-2. CAPTURE the message durably, then SCHEDULE one job per component. ----
         var message = EmailToLeadHarness.BuildMessage(MessageId);
-        var (assemblyId, schedule) = await EmailToLeadHarness.CaptureAndScheduleAsync(
+        var (_, assemblyId, schedule) = await EmailToLeadHarness.CaptureAndScheduleAsync(
             services, BusinessUnitId, message);
 
         Assert.Equal(3, schedule.Scheduled);

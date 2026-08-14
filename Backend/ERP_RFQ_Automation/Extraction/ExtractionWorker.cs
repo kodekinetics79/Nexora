@@ -73,6 +73,20 @@ public interface ILeadPersister
         => throw new NotSupportedException(
             "This ILeadPersister does not support message-level assembly.");
 
+    /// <summary>
+    /// Duplicate detection, customer resolution and routing for an assembled message's Lead.
+    ///
+    /// <para>Split out so the caller can run it AFTER its transaction commits. Inside, it would
+    /// run while the assembly row's claim lock is still held, and a live worker finishing the
+    /// last component of that same message would block on that lock WHILE HOLDING its queue
+    /// lease — long enough, on a slow reconciliation, for the lease to expire, the job to be
+    /// reclaimed, an attempt to be burnt and the extraction to be re-run. Best-effort by
+    /// contract: a failure here must never undo a Lead that already exists.</para>
+    /// </summary>
+    Task EnrichAssembledMessageAsync(
+        ExtractionJob job, long leadId, CancellationToken ct = default)
+        => Task.CompletedTask;
+
     Task<long> PersistAsync(ExtractionJob job, ChunkedExtractionOutcome outcome, CancellationToken ct = default);
 
     /// <summary>Persist the lead graph and complete the fenced queue claim in one transaction.</summary>
@@ -1068,7 +1082,23 @@ public sealed class LeadPersister : ILeadPersister
 
     public Task<long> PersistAssembledMessageAsync(
         ExtractionJob job, ChunkedExtractionOutcome outcome, CancellationToken ct = default)
-        => PersistInternalAsync(job, outcome, enrichAfterPersistence: true, bypassAssemblyFence: true, ct);
+        // enrichAfterPersistence: FALSE — see EnrichAssembledMessageAsync. Enrichment runs after
+        // the caller commits, so the assembly claim lock is not held across it.
+        => PersistInternalAsync(job, outcome, enrichAfterPersistence: false, bypassAssemblyFence: true, ct);
+
+    public async Task EnrichAssembledMessageAsync(
+        ExtractionJob job, long leadId, CancellationToken ct = default)
+    {
+        var lead = await _context.Leads.FirstOrDefaultAsync(
+            x => x.BusinessUnitId == job.BusinessUnitId && x.Id == leadId, ct);
+        if (lead is null) return;
+
+        Lead[] leads = [lead];
+        if (_leadIdentity is null)
+            await TryDetectDuplicatesAsync(job, leads, ct);
+        await TryResolveCustomersAsync(job, leads, ct);
+        await TryRouteLeadsAsync(job, leads, ct);
+    }
 
     private async Task<long> PersistInternalAsync(
         ExtractionJob job,

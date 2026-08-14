@@ -125,11 +125,23 @@ public sealed class EmailInquiryAssemblyRecoveryWorker : BackgroundService
         }
 
         var service = scope.ServiceProvider.GetRequiredService<IEmailInquiryAssemblyRecoveryService>();
-        var result = await service.SweepOnceAsync(ct);
-
-        _metrics?.AssemblyRecoverySwept(
-            result.Candidates, result.Recovered, result.Failed, result.Duration.TotalMilliseconds);
-
-        return result;
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        try
+        {
+            var result = await service.SweepOnceAsync(ct);
+            _metrics?.AssemblyRecoverySwept(
+                result.Candidates, result.Recovered, result.Failed, result.Duration.TotalMilliseconds);
+            return result;
+        }
+        catch
+        {
+            // A sweep that throws — tenant enumeration failed, the gate refused, shutdown
+            // cancelled it mid-way — used to record nothing at all, so the failure counter was
+            // silent in exactly the case an operator most needs it.
+            _metrics?.AssemblyRecoverySwept(
+                candidates: 0, recovered: 0, failed: 1,
+                durationMs: System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+            throw;
+        }
     }
 }

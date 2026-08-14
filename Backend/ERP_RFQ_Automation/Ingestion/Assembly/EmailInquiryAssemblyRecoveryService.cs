@@ -198,9 +198,18 @@ public sealed class EmailInquiryAssemblyRecoveryService : IEmailInquiryAssemblyR
 
         var cutoff = _time.GetUtcNow() - _options.ValidatedMinimumAge;
 
+        // No IgnoreQueryFilters. With no tenant pushed the filter
+        // (`CurrentTenantId == null || ...`) is already a no-op, so the call bought nothing and
+        // removed a layer in the one method described as the widest-privileged step. The
+        // precondition it implied is now ENFORCED instead of commented.
+        if (context.ScopedTenantId is not null)
+            throw new InvalidOperationException(
+                "The recovery sweep's tenant enumeration must run with NO tenant scope. It "
+                + $"resolved tenant {context.ScopedTenantId}, which means it would run under a "
+                + "tenant's own role and silently enumerate only that tenant.");
+
         var tenants = await context.EmailInquiryAssemblies
             .AsNoTracking()
-            .IgnoreQueryFilters()
             .Where(a => a.Status == EmailInquiryAssemblyStatus.ReadyForAssembly
                         && a.AssembledLeadId == null
                         && a.UpdatedAtUtc <= cutoff)
@@ -211,11 +220,14 @@ public sealed class EmailInquiryAssemblyRecoveryService : IEmailInquiryAssemblyR
 
         if (tenants.Count == 0) return tenants;
 
-        // Resolved from this scope rather than injected: the sweep is consumed by a singleton
-        // worker and the gate is scoped, so a constructor dependency would fail scope validation
-        // at startup.
-        var gate = scope.ServiceProvider.GetService<ITenantWorkGate>();
-        return gate is null ? tenants : await gate.FilterServiceableAsync(tenants, ct);
+        // Resolved from THIS scope, not injected, because the gate must be consulted with no
+        // tenant pushed — inside a pushed scope its platform read is refused at column level and
+        // fails open.
+        // Required, not optional. A host composition that dropped the registration would get a
+        // silently ungated platform-wide sweep touching suspended and archived tenants — the
+        // failure mode this class's fail-closed posture exists to avoid everywhere else.
+        var gate = scope.ServiceProvider.GetRequiredService<ITenantWorkGate>();
+        return await gate.FilterServiceableAsync(tenants, ct);
     }
 
     private async Task<EmailInquiryRecoverySweepResult> SweepTenantAsync(

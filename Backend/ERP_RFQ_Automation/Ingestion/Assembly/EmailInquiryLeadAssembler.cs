@@ -13,11 +13,16 @@ public interface IEmailInquiryLeadAssembler
     /// <summary>
     /// Builds the ONE Lead for a message whose components have all finished.
     ///
-    /// <para>Returns the Lead id when THIS call produced it, or when the message was already
-    /// assembled before the call began. Returns null when this call assembled nothing — not
-    /// ready, nothing to quote, held for review, or another worker won the claim. A null is not
-    /// a failure and never means "no Lead exists": the caller re-reads the persisted status to
-    /// learn which of those it was.</para>
+    /// <para>Returns the Lead id if and ONLY if THIS call produced it. Null means this call
+    /// assembled nothing — not ready, nothing to quote, held for review, already assembled by
+    /// someone else, or another worker won the claim. A null is not a failure and never means
+    /// "no Lead exists"; the caller re-reads the persisted status to learn which it was.</para>
+    ///
+    /// <para>The asymmetry matters more than it looks. Returning the winner's id to a caller
+    /// that did nothing is true and useless: every counter downstream then records a recovery
+    /// per caller rather than per Lead, "a Lead exists" becomes indistinguishable from "I built
+    /// it", and the already-complete bucket becomes unreachable — so an operator watching the
+    /// recovery rate sees a number that means nothing.</para>
     /// </summary>
     Task<long?> AssembleAsync(long businessUnitId, long assemblyId, CancellationToken ct = default);
 }
@@ -63,24 +68,62 @@ public sealed class EmailInquiryLeadAssembler : IEmailInquiryLeadAssembler
         // production configures unless the whole unit runs inside ExecuteAsync. Skipping this
         // made AssembleAsync throw on the first real message while passing every local test,
         // because the test host had not configured EnableRetryOnFailure.
+        // THIS METHOD OWNS ITS TRANSACTION. Refusing an ambient one is the contract, not a
+        // limitation: the claim path clears the change tracker, which on a shared scoped
+        // DbContext would silently detach entities belonging to the caller's unit of work —
+        // the coordinator documents the same hazard after PersistAndCompleteCoreAsync's
+        // tracked-Lead snapshot was emptied by exactly that. It would also put the Lead build
+        // and the enrichment inside the caller's lock. Loud beats latent.
         if (_context.Database.CurrentTransaction is not null)
-            return AssembleCoreAsync(businessUnitId, assemblyId, ct);
+            throw new InvalidOperationException(
+                "EmailInquiryLeadAssembler.AssembleAsync owns its own transaction and must not "
+                + "be called inside one. Call it after the caller's transaction has committed.");
 
+        return AssembleAndEnrichAsync(businessUnitId, assemblyId, ct);
+    }
+
+    private async Task<long?> AssembleAndEnrichAsync(
+        long businessUnitId, long assemblyId, CancellationToken ct)
+    {
         var strategy = _context.Database.CreateExecutionStrategy();
-        return strategy.ExecuteAsync(async () =>
+        var built = await strategy.ExecuteAsync(async () =>
         {
-            // A retried attempt must not inherit the previous one's tracked state.
             await using var transaction = await _context.Database.BeginTransactionAsync(ct);
-            var leadId = await AssembleCoreAsync(businessUnitId, assemblyId, ct);
+            var outcome = await AssembleCoreAsync(businessUnitId, assemblyId, ct);
             // Committed on EVERY path, not only the success one: the hold-for-review writes are
             // the whole reason a refusal is visible rather than a silent stall, and disposing an
             // uncommitted transaction would roll each of them straight back.
             await transaction.CommitAsync(ct);
-            return leadId;
+            return outcome;
         });
+
+        // OUTSIDE the transaction, so the assembly's claim lock is released FIRST.
+        //
+        // Held across this, a live worker finishing the last component of the same message would
+        // block on that lock while holding its queue lease — and a slow identity reconciliation
+        // or routing call would cost the lease, an attempt, and a re-extraction. Best-effort by
+        // contract: the Lead already exists and a failure here must not undo it.
+        if (built.LeadId is { } leadId && built.AnchorJob is { } anchorJob)
+        {
+            try
+            {
+                await _persister.EnrichAssembledMessageAsync(anchorJob, leadId, ct);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                _log.LogError(exception,
+                    "Assembly {AssemblyId} produced lead {LeadId} but enrichment failed. The "
+                    + "lead stands; routing and customer resolution can be replayed.",
+                    assemblyId, leadId);
+            }
+        }
+
+        return built.LeadId;
     }
 
-    private async Task<long?> AssembleCoreAsync(
+    private sealed record AssembleOutcome(long? LeadId, ExtractionJob? AnchorJob);
+
+    private async Task<AssembleOutcome> AssembleCoreAsync(
         long businessUnitId, long assemblyId, CancellationToken ct)
     {
         // The assembly row is LOCKED for the whole of this method.
@@ -117,29 +160,54 @@ public sealed class EmailInquiryLeadAssembler : IEmailInquiryLeadAssembler
             ?? throw new InvalidOperationException(
                 $"Email inquiry assembly {assemblyId} was not found for business unit {businessUnitId}.");
 
-        // Already done. The second caller did nothing wrong, so it gets the Lead the first one
-        // created rather than an error — and "already done" stays distinguishable from
-        // "nothing to do", which a bare null could not express.
+        // Already done, by someone else, before this call began. That is not a failure and not
+        // this call's recovery: null, and the caller re-reads the status to see Assembled.
         if (claimed.Status == EmailInquiryAssemblyStatus.Assembled)
-            return claimed.AssembledLeadId;
+        {
+            _log.LogDebug(
+                "Assembly {AssemblyId} is already assembled as lead {LeadId}; nothing to do.",
+                assemblyId, claimed.AssembledLeadId);
+            return new AssembleOutcome(null, null);
+        }
 
         if (claimed.Status != EmailInquiryAssemblyStatus.ReadyForAssembly)
         {
             _log.LogDebug(
                 "Assembly {AssemblyId} is {Status}; not assembling.", assemblyId, claimed.Status);
-            return null;
+            return new AssembleOutcome(null, null);
         }
 
+        // Bounded wait. The claim legitimately blocks on a conflicting holder, but an
+        // unbounded block inherits the 60s command timeout, and the sweep is sequential across
+        // assemblies AND tenants — one wedged row would stall every other tenant on the
+        // platform for a minute at a time. A timeout here means "someone else has it", which is
+        // the same disposition as losing the compare-and-swap.
+        await _context.Database.ExecuteSqlRawAsync("SET LOCAL lock_timeout = '5s'", ct);
+
         var seenVersion = claimed.ConcurrencyVersion;
-        var rows = await _context.Database.ExecuteSqlAsync(
-            $"""
-            UPDATE public."EmailInquiryAssemblies"
-            SET "ConcurrencyVersion" = "ConcurrencyVersion" + 1, "UpdatedAtUtc" = now()
-            WHERE "Id" = {assemblyId}
-              AND "BusinessUnitId" = {businessUnitId}
-              AND "Status" = 'ReadyForAssembly'
-              AND "ConcurrencyVersion" = {seenVersion}
-            """, ct);
+        var readyForAssembly = nameof(EmailInquiryAssemblyStatus.ReadyForAssembly);
+        int rows;
+        try
+        {
+            rows = await _context.Database.ExecuteSqlAsync(
+                $"""
+                UPDATE public."EmailInquiryAssemblies"
+                SET "ConcurrencyVersion" = "ConcurrencyVersion" + 1, "UpdatedAtUtc" = now()
+                WHERE "Id" = {assemblyId}
+                  AND "BusinessUnitId" = {businessUnitId}
+                  AND "Status" = {readyForAssembly}
+                  AND "AssembledLeadId" IS NULL
+                  AND "ConcurrencyVersion" = {seenVersion}
+                """, ct);
+        }
+        catch (Npgsql.PostgresException exception) when (exception.SqlState == "55P03")
+        {
+            // lock_not_available. Another holder has the row; the next sweep tries again.
+            _log.LogInformation(
+                "Assembly {AssemblyId} is locked by another worker; leaving it for the next pass.",
+                assemblyId);
+            return new AssembleOutcome(null, null);
+        }
 
         if (rows == 0)
         {
@@ -156,10 +224,21 @@ public sealed class EmailInquiryLeadAssembler : IEmailInquiryLeadAssembler
                 .Select(x => x.Status)
                 .FirstOrDefaultAsync(ct);
 
+            // A contradiction, not a race: nobody claimed it, yet the compare-and-swap matched
+            // nothing. The likeliest cause is that the row is invisible to this connection —
+            // an unset tenant GUC, or a status spelling the enum no longer produces — and
+            // logging "another worker took it" would be actively misleading while the message
+            // is never recovered.
+            if (settled == EmailInquiryAssemblyStatus.ReadyForAssembly)
+                throw new InvalidOperationException(
+                    $"Assembly {assemblyId} is still ReadyForAssembly but the claim matched no "
+                    + "rows. The row is not visible to this connection, or its stored status "
+                    + "does not match the current enum.");
+
             _log.LogInformation(
                 "Assembly {AssemblyId} was claimed by another worker; it is now {Status}.",
                 assemblyId, settled);
-            return null;
+            return new AssembleOutcome(null, null);
         }
 
         // Cleared so nothing below is answered from state read before the claim.
@@ -191,7 +270,7 @@ public sealed class EmailInquiryLeadAssembler : IEmailInquiryLeadAssembler
                 businessUnitId, assemblyId, EmailInquiryHoldReasons.ResultContractUnsupported,
                 "This message was processed by an earlier version of the system and cannot be "
                 + "combined automatically. It needs a look before it becomes an inquiry.", ct);
-            return null;
+            return new AssembleOutcome(null, null);
         }
 
         // THE UNDER-QUOTE GUARD. Every Completed component must have contributed a result.
@@ -213,7 +292,7 @@ public sealed class EmailInquiryLeadAssembler : IEmailInquiryLeadAssembler
                 businessUnitId, assemblyId, EmailInquiryHoldReasons.ResultMissing,
                 "Part of this message finished without recording what was read, so the inquiry "
                 + "would be incomplete. It needs a look before it becomes an inquiry.", ct);
-            return null;
+            return new AssembleOutcome(null, null);
         }
 
         // Ordinal order, so the body's header fields are considered before an attachment's and
@@ -254,7 +333,7 @@ public sealed class EmailInquiryLeadAssembler : IEmailInquiryLeadAssembler
                     businessUnitId, assemblyId, EmailInquiryHoldReasons.ResultUnreadable,
                     "One part of this message could not be read back, so the inquiry is not "
                     + "complete. It needs a look.", ct);
-                return null;
+                return new AssembleOutcome(null, null);
             }
 
             if (parsed is null) continue;
@@ -283,14 +362,18 @@ public sealed class EmailInquiryLeadAssembler : IEmailInquiryLeadAssembler
                 businessUnitId, assemblyId, EmailInquiryHoldReasons.ResultUnreadable,
                 "This message was processed but nothing usable could be read back from it. "
                 + "It needs a look.", ct);
-            return null;
+            return new AssembleOutcome(null, null);
         }
 
         // The representative job. The Lead needs a provenance anchor and every component of
         // this message shares one batch, so the lowest-ordinal component's job is a stable,
         // deterministic choice rather than "whichever finished last".
         var anchorJobId = ordered.Select(r => r.ExtractionJobId).FirstOrDefault();
+        // AsNoTracking, deliberately. Tracked, any later edit anywhere in the persist path would
+        // emit an UPDATE on ExtractionJobs from inside the assembly-lock transaction — closing an
+        // ABBA cycle with the live worker, which locks the job row first and the assembly second.
         var anchorJob = await _context.Set<ExtractionJob>()
+            .AsNoTracking()
             .FirstOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.Id == anchorJobId, ct);
         if (anchorJob is null)
         {
@@ -303,7 +386,7 @@ public sealed class EmailInquiryLeadAssembler : IEmailInquiryLeadAssembler
                 businessUnitId, assemblyId, EmailInquiryHoldReasons.ResultMissing,
                 "The processing record for part of this message is no longer available, so the "
                 + "inquiry cannot be completed automatically. It needs a look.", ct);
-            return null;
+            return new AssembleOutcome(null, null);
         }
 
         var outcome = new ChunkedExtractionOutcome
@@ -328,7 +411,7 @@ public sealed class EmailInquiryLeadAssembler : IEmailInquiryLeadAssembler
             + "{Components} component(s), {Lines} line(s) merged from {Results} result(s).",
             assemblyId, leadId, businessUnitId, assembly.Components.Count, merged.Count, ordered.Count);
 
-        return leadId;
+        return new AssembleOutcome(leadId, anchorJob);
     }
 
     /// <summary>External if ANY component used an external model; null when none did.</summary>

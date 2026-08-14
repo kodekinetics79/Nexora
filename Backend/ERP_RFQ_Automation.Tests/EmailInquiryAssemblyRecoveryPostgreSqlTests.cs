@@ -2,6 +2,7 @@ using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.Ingestion.Assembly;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.MultiTenancy;
+using ERP_RFQ_Automation.Platform.Lifecycle;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -32,17 +33,47 @@ namespace ERP_RFQ_Automation.Tests;
 [Collection(PostgreSqlIntegrationCollection.Name)]
 public sealed class EmailInquiryAssemblyRecoveryPostgreSqlTests(PostgreSqlTestDatabase database) : IAsyncLifetime
 {
+    // Every test in this class owns a business unit in this range, and DisposeAsync clears it.
+    private const long FirstBu = 941_000;
+    private const long LastBu = 941_099;
+
     private readonly PostgreSqlTestDatabase _database = database;
     private readonly string _storageRoot =
         Path.Combine(Path.GetTempPath(), "nexora-recovery-" + Guid.NewGuid().ToString("N")[..12]);
 
     public Task InitializeAsync() => Task.CompletedTask;
 
-    public Task DisposeAsync()
+    /// <summary>
+    /// Deletes every row this class created.
+    ///
+    /// <para>Not tidiness — correctness of the whole class. The sweep is PLATFORM-wide, and a
+    /// stranded assembly left behind by one test is an eligible candidate for every later one,
+    /// so a leaked row makes the suite depend on xUnit's intra-class ordering. It was leaked:
+    /// the isolation test deliberately ends with a message still ReadyForAssembly.</para>
+    /// </summary>
+    public async Task DisposeAsync()
     {
+        // session_replication_role = replica suspends foreign-key triggers for the session, so
+        // the deletes need no ordering and no knowledge of which child tables a Lead has grown.
+        // It is the same mechanism TenantPurgeExecutor uses, and enumerating FKs by hand here
+        // would be a second, silently-drifting copy of the tenant graph.
+        await ExecuteAsync($"""
+            SET session_replication_role = replica;
+            DELETE FROM public."LeadItems" WHERE "LeadID" IN
+                (SELECT "ID" FROM public."Leads" WHERE "BusinessUnitID" BETWEEN {FirstBu} AND {LastBu});
+            DELETE FROM public."LeadStatusHistories" WHERE "LeadID" IN
+                (SELECT "ID" FROM public."Leads" WHERE "BusinessUnitID" BETWEEN {FirstBu} AND {LastBu});
+            DELETE FROM public."Leads" WHERE "BusinessUnitID" BETWEEN {FirstBu} AND {LastBu};
+            DELETE FROM public."EmailInquiryComponentResults" WHERE "BusinessUnitId" BETWEEN {FirstBu} AND {LastBu};
+            DELETE FROM public."EmailInquiryComponents" WHERE "BusinessUnitId" BETWEEN {FirstBu} AND {LastBu};
+            DELETE FROM public."EmailInquiryAssemblies" WHERE "BusinessUnitId" BETWEEN {FirstBu} AND {LastBu};
+            DELETE FROM public."ExtractionJobs" WHERE "BusinessUnitId" BETWEEN {FirstBu} AND {LastBu};
+            DELETE FROM public."EmailIngests" WHERE "EmailConfigurationID" BETWEEN {FirstBu} AND {LastBu};
+            SET session_replication_role = origin;
+            """);
+
         try { if (Directory.Exists(_storageRoot)) Directory.Delete(_storageRoot, recursive: true); }
         catch (IOException) { }
-        return Task.CompletedTask;
     }
 
     // =====================================================================================
@@ -60,7 +91,7 @@ public sealed class EmailInquiryAssemblyRecoveryPostgreSqlTests(PostgreSqlTestDa
         long assemblyId;
         await using (var crashing = BuildCrashingGraph(out var crashProbe))
         {
-            var (id, schedule) = await EmailToLeadHarness.CaptureAndScheduleAsync(
+            var (_, id, schedule) = await EmailToLeadHarness.CaptureAndScheduleAsync(
                 crashing, bu, EmailToLeadHarness.BuildMessage(messageId));
             assemblyId = id;
             Assert.Equal(3, schedule.Scheduled);
@@ -69,8 +100,9 @@ public sealed class EmailInquiryAssemblyRecoveryPostgreSqlTests(PostgreSqlTestDa
             await EmailToLeadHarness.DrainQueueAsync(
                 crashing, bu, assertNoFailures: true, waitForAssemblySettlement: false);
 
-            Assert.True(crashProbe.Crashes > 0,
-                "The crash seam never fired, so this test proved nothing about recovery.");
+            // Every component, not merely one: the count is what distinguishes "the assembler
+            // was reached and stopped" from "the pipeline died somewhere earlier".
+            Assert.Equal(3, crashProbe.Crashes);
 
             // ---- 2. The stranded state, asserted in full. ----
             await AssertStrandedAsync(bu, assemblyId);
@@ -79,7 +111,19 @@ public sealed class EmailInquiryAssemblyRecoveryPostgreSqlTests(PostgreSqlTestDa
 
         // ---- 4. A brand new production-configured graph sweeps. ----
         await using var recovered = BuildGraph();
+
+        // Reset BEFORE the sweep that does the work. Resetting after it and reading after a
+        // second, zero-candidate sweep asserted "no re-extraction" over a no-op.
+        EmailToLeadHarness.DeterministicBodyExtractor.ResetCallCount();
+        var jobsBefore = await JobFingerprintAsync(bu);
+
         var result = await SweepAsync(recovered);
+
+        // Recovery COMBINES; it does not reprocess. Nothing was extracted again, and no
+        // extraction job was touched — the component results were already durable, which is the
+        // entire reason for having built them.
+        Assert.Equal(0, EmailToLeadHarness.DeterministicBodyExtractor.CallCount);
+        Assert.Equal(jobsBefore, await JobFingerprintAsync(bu));
 
         Assert.Equal(1, result.Candidates);
         Assert.Equal(1, result.Recovered);
@@ -90,18 +134,13 @@ public sealed class EmailInquiryAssemblyRecoveryPostgreSqlTests(PostgreSqlTestDa
         // ---- 5. Exactly one Lead, and the message names it. ----
         var leadId = await AssertRecoveredAsync(bu, assemblyId);
 
-        // ---- 6. Sweeping again is a no-op: no second Lead, and no extraction re-run. ----
-        EmailToLeadHarness.DeterministicBodyExtractor.ResetCallCount();
+        // ---- 6. Sweeping again is a no-op: no second Lead. ----
         var second = await SweepAsync(recovered);
 
         Assert.Equal(0, second.Candidates);
         Assert.Equal(0, second.Recovered);
         Assert.Equal(1, await CountLeadsAsync(bu));
         Assert.Equal(leadId, await AssembledLeadIdAsync(bu, assemblyId));
-
-        // Nothing was re-extracted. The component results were already durable, which is the
-        // entire reason for having built them: recovery combines, it does not reprocess.
-        Assert.Equal(0, EmailToLeadHarness.DeterministicBodyExtractor.CallCount);
     }
 
     // =====================================================================================
@@ -146,22 +185,29 @@ public sealed class EmailInquiryAssemblyRecoveryPostgreSqlTests(PostgreSqlTestDa
         await SeedAsync(bu, messageId);
         var assemblyId = await StrandAsync(bu, messageId);
 
-        // Cancel mid-flight. The assembler holds the assembly row and writes the Lead and the
-        // Assembled transition in ONE transaction, so an abort must leave neither.
-        await using (var cancelling = BuildGraph())
+        // The crash lands AFTER the Lead row is written and BEFORE the Assembled transition
+        // commits — the only instant at which "one transaction" is load-bearing.
+        //
+        // Cancelling a token before the call, which is what this test used to do, aborts at
+        // BeginTransactionAsync: no claim, no Lead, nothing to roll back. It passed against a
+        // build with the Lead write and the transition in SEPARATE transactions, which is the
+        // exact regression it is supposed to catch.
+        await using (var crashing = BuildGraph(services =>
+                     services.AddScoped<ILeadPersister>(sp =>
+                         new EmailToLeadHarness.ThrowAfterPersistingLeadPersister(
+                             ActivatorUtilities.CreateInstance<LeadPersister>(sp)))))
         {
-            using var cts = new CancellationTokenSource();
-            using var scope = cancelling.CreateScope();
+            using var scope = crashing.CreateScope();
             using var tenant = scope.ServiceProvider
                 .GetRequiredService<ITenantScopeAccessor>().Push(bu);
             var assembler = scope.ServiceProvider.GetRequiredService<IEmailInquiryLeadAssembler>();
 
-            await cts.CancelAsync();
-            await Assert.ThrowsAnyAsync<OperationCanceledException>(
-                () => assembler.AssembleAsync(bu, assemblyId, cts.Token));
+            await Assert.ThrowsAsync<InvalidOperationException>(
+                () => assembler.AssembleAsync(bu, assemblyId));
         }
 
-        // No half-built Lead, and the message is exactly where it was.
+        // The Lead that WAS written is gone with the transaction, the claim's version bump is
+        // gone with it, and the message is exactly where it started.
         Assert.Equal(0, await CountLeadsAsync(bu));
         Assert.Null(await AssembledLeadIdAsync(bu, assemblyId));
         Assert.Equal(EmailInquiryAssemblyStatus.ReadyForAssembly, await StatusAsync(bu, assemblyId));
@@ -194,12 +240,24 @@ public sealed class EmailInquiryAssemblyRecoveryPostgreSqlTests(PostgreSqlTestDa
                 .GetRequiredService<ITenantScopeAccessor>().Push(bu);
             var assembler = scope.ServiceProvider.GetRequiredService<IEmailInquiryLeadAssembler>();
 
-            // It returns the SAME Lead rather than null: "already done" must be distinguishable
-            // from "nothing to do", or a caller cannot tell success from silence.
-            Assert.Equal(leadId, await assembler.AssembleAsync(bu, assemblyId));
-            Assert.Equal(leadId, await assembler.AssembleAsync(bu, assemblyId));
+            // Null, twice — and that is the CONTRACT, not a shrug. A non-null return means
+            // "this call built it"; returning the winner's id to a caller that did nothing made
+            // every counter downstream record a recovery per caller instead of per Lead, and
+            // made the already-complete bucket unreachable.
+            Assert.Null(await assembler.AssembleAsync(bu, assemblyId));
+            Assert.Null(await assembler.AssembleAsync(bu, assemblyId));
         }
 
+        // "Already done" is still distinguishable from "nothing to do" — by the persisted
+        // state, which is where the answer belongs and where the sweep reads it.
+        Assert.Equal(1, await CountLeadsAsync(bu));
+        Assert.Equal(EmailInquiryAssemblyStatus.Assembled, await StatusAsync(bu, assemblyId));
+        Assert.Equal(leadId, await AssembledLeadIdAsync(bu, assemblyId));
+
+        // And that is exactly how the sweep classifies it: complete, not recovered again.
+        await using var sweeping = BuildGraph();
+        var replayed = await SweepAsync(sweeping);
+        Assert.Equal(0, replayed.Recovered);
         Assert.Equal(1, await CountLeadsAsync(bu));
     }
 
@@ -210,13 +268,15 @@ public sealed class EmailInquiryAssemblyRecoveryPostgreSqlTests(PostgreSqlTestDa
     [Fact]
     public async Task One_failing_assembly_does_not_stop_another_tenants_ready_assembly()
     {
-        const long healthy = 941_005;
-        const long poisoned = 941_006;
-        await SeedAsync(healthy, "recovery-0005@buyer.example");
-        await SeedAsync(poisoned, "recovery-0006@buyer.example");
+        // The poisoned tenant sorts FIRST. Sorted second, the healthy tenant is already done
+        // before anything can go wrong, and the test passes even if a failure kills the loop.
+        const long poisoned = 941_005;
+        const long healthy = 941_006;
+        await SeedAsync(poisoned, "recovery-0005@buyer.example");
+        await SeedAsync(healthy, "recovery-0006@buyer.example");
 
-        var healthyAssembly = await StrandAsync(healthy, "recovery-0005@buyer.example");
-        var poisonedAssembly = await StrandAsync(poisoned, "recovery-0006@buyer.example");
+        var poisonedAssembly = await StrandAsync(poisoned, "recovery-0005@buyer.example");
+        var healthyAssembly = await StrandAsync(healthy, "recovery-0006@buyer.example");
 
         // Poison the second message at the database, not in a stub: its component result now
         // claims a payload contract version this build cannot read. That is a real refusal the
@@ -305,6 +365,16 @@ public sealed class EmailInquiryAssemblyRecoveryPostgreSqlTests(PostgreSqlTestDa
             Assert.Equal(0, await CountLeadsAsync(bu));
             Assert.Equal(status, await StatusAsync(bu, assemblyId));
         }
+
+        // THE POSITIVE CONTROL. Without it every iteration above could be zero for an unrelated
+        // reason — clock skew against the container, a broken predicate, a changed filter — and
+        // the test would pass having proved only that the sweep does nothing at all.
+        await ExecuteAsync($"""
+            UPDATE public."EmailInquiryAssemblies"
+            SET "Status" = 'ReadyForAssembly' WHERE "Id" = {assemblyId};
+            """);
+        await using var control = BuildGraph();
+        Assert.Equal(1, (await SweepAsync(control)).Candidates);
     }
 
     [Fact]
@@ -312,6 +382,12 @@ public sealed class EmailInquiryAssemblyRecoveryPostgreSqlTests(PostgreSqlTestDa
     {
         const long bu = 941_010;
         await SeedAsync(bu, "recovery-0010@buyer.example");
+
+        // A REAL stranded assembly, so the tenant is genuinely enumerated and the sweep genuinely
+        // runs here. Without it this tenant has no assemblies at all, is never enumerated, and
+        // every assertion below holds because nothing happened rather than because the legacy
+        // jobs were excluded.
+        var assemblyId = await StrandAsync(bu, "recovery-0010@buyer.example");
 
         // A legacy per-attachment email job and a manual upload: neither owns a component, so
         // neither can produce an assembly, so neither is reachable from a status the sweep reads.
@@ -328,28 +404,177 @@ public sealed class EmailInquiryAssemblyRecoveryPostgreSqlTests(PostgreSqlTestDa
                  'manual.csv', 'csv', 'Succeeded', 0, 0, 1, 5, now(), now(), now());
             """);
 
+        var legacyBefore = await QueryAsync($"""
+            SELECT "Id"::text || ':' || "Status" || ':' || "UpdatedOn"::text
+            FROM public."ExtractionJobs"
+            WHERE "BusinessUnitId" = {bu} AND "EmailInquiryComponentId" IS NULL ORDER BY "Id";
+            """);
+        Assert.Equal(2, legacyBefore.Count);
+
         await using var services = BuildGraph();
         var result = await SweepAsync(services);
 
-        Assert.Equal(0, result.Candidates);
-        Assert.Equal(0, result.Recovered);
-        Assert.Equal(0, await CountLeadsAsync(bu));
+        // The sweep DID run here, on the stranded assembly and only on it.
+        Assert.Equal(1, result.Candidates);
+        Assert.Equal(1, result.Recovered);
+        Assert.Equal(EmailInquiryAssemblyStatus.Assembled, await StatusAsync(bu, assemblyId));
 
-        // And neither job was touched.
-        Assert.Equal(2, await ScalarAsync($"""
-            SELECT count(*) FROM public."ExtractionJobs"
-            WHERE "BusinessUnitId" = {bu} AND "Status" = 'Succeeded'
-              AND "EmailInquiryComponentId" IS NULL;
+        // Exactly one Lead — the legacy jobs contributed nothing and produced nothing.
+        Assert.Equal(1, await CountLeadsAsync(bu));
+
+        // And both are byte-identical afterwards, status and timestamp alike.
+        Assert.Equal(legacyBefore, await QueryAsync($"""
+            SELECT "Id"::text || ':' || "Status" || ':' || "UpdatedOn"::text
+            FROM public."ExtractionJobs"
+            WHERE "BusinessUnitId" = {bu} AND "EmailInquiryComponentId" IS NULL ORDER BY "Id";
             """));
+    }
+
+    [Fact]
+    public async Task A_genuinely_throwing_assembly_is_counted_failed_and_the_loop_survives_it()
+    {
+        // The ONLY test that enters the failure handlers. Every other refusal in this suite is a
+        // graceful hold-for-review, so without this the per-assembly and per-tenant catch blocks
+        // could both be deleted and the whole class would stay green.
+        const long broken = 941_011;
+        const long healthy = 941_012;
+        await SeedAsync(broken, "recovery-0011@buyer.example");
+        await SeedAsync(healthy, "recovery-0012@buyer.example");
+        var brokenAssembly = await StrandAsync(broken, "recovery-0011@buyer.example");
+        var healthyAssembly = await StrandAsync(healthy, "recovery-0012@buyer.example");
+
+        // Corrupt the stored payload at the DATABASE — valid jsonb, unreadable as a result.
+        // The assembler's deserialize throws, which is a genuine unhandled failure rather than a
+        // refusal it knows how to describe.
+        await ExecuteAsync($"""
+            UPDATE public."EmailInquiryComponentResults"
+            SET "PayloadJson" = to_jsonb('not-a-result'::text)
+            WHERE "AssemblyId" = {brokenAssembly};
+            """);
+
+        await using var services = BuildGraph();
+        var result = await SweepAsync(services);
+
+        // The broken tenant sorts first and did NOT stop the healthy one.
+        Assert.Equal(1, await CountLeadsAsync(healthy));
+        Assert.Equal(EmailInquiryAssemblyStatus.Assembled, await StatusAsync(healthy, healthyAssembly));
+
+        // The broken message produced no Lead and is accounted for — never silently dropped and
+        // never counted as recovered.
+        Assert.Equal(0, await CountLeadsAsync(broken));
+        Assert.Equal(1, result.Recovered);
+        Assert.True(result.Failed + result.HeldForReview >= 1,
+            "A message the assembler could not read must be counted as failed or held, not ignored.");
+        Assert.NotEqual(EmailInquiryAssemblyStatus.Assembled, await StatusAsync(broken, brokenAssembly));
+    }
+
+    [Fact]
+    public async Task The_minimum_age_grace_keeps_the_sweep_off_freshly_ready_messages()
+    {
+        // MinimumAge is zero in every other test, so deleting the `UpdatedAtUtc <= cutoff`
+        // predicate from both queries would leave the whole suite green.
+        const long bu = 941_013;
+        await SeedAsync(bu, "recovery-0013@buyer.example");
+        var assemblyId = await StrandAsync(bu, "recovery-0013@buyer.example");
+
+        await using var young = BuildGraph(services => services.AddSingleton(
+            new EmailInquiryAssemblyRecoveryOptions { MinimumAge = TimeSpan.FromMinutes(10) }));
+        Assert.Equal(0, (await SweepAsync(young)).Candidates);
+        Assert.Equal(0, await CountLeadsAsync(bu));
+        Assert.Equal(EmailInquiryAssemblyStatus.ReadyForAssembly, await StatusAsync(bu, assemblyId));
+
+        // The POSITIVE control: the same message, aged past the grace, is picked up. Without
+        // this the assertion above would hold for any reason at all.
+        await ExecuteAsync($"""
+            UPDATE public."EmailInquiryAssemblies"
+            SET "UpdatedAtUtc" = now() - interval '30 minutes' WHERE "Id" = {assemblyId};
+            """);
+        Assert.Equal(1, (await SweepAsync(young)).Recovered);
+        Assert.Equal(1, await CountLeadsAsync(bu));
+    }
+
+    [Fact]
+    public async Task A_tenant_the_work_gate_refuses_is_not_swept()
+    {
+        // The gate is what keeps a suspended or archived tenant's data out of a platform-wide
+        // sweep. Every other test admits everyone, so its removal would be invisible.
+        const long refused = 941_014;
+        await SeedAsync(refused, "recovery-0014@buyer.example");
+        var assemblyId = await StrandAsync(refused, "recovery-0014@buyer.example");
+
+        await using (var gated = BuildGraph(services => services.AddScoped<ITenantWorkGate>(
+                         _ => new EmailToLeadHarness.RefusingWorkGate(refused))))
+        {
+            var result = await SweepAsync(gated);
+            Assert.Equal(0, result.TenantsSwept);
+            Assert.Equal(0, result.Candidates);
+        }
+
+        Assert.Equal(0, await CountLeadsAsync(refused));
+        Assert.Equal(EmailInquiryAssemblyStatus.ReadyForAssembly, await StatusAsync(refused, assemblyId));
+
+        // Positive control: the same message with the gate admitting is recovered, so the
+        // assertion above is about the gate and not about the message being unrecoverable.
+        await using var admitted = BuildGraph();
+        Assert.Equal(1, (await SweepAsync(admitted)).Recovered);
+    }
+
+    [Fact]
+    public async Task The_tenant_enumeration_refuses_to_run_inside_a_tenant_scope()
+    {
+        // The enumeration is the one query that runs unscoped, under the BYPASSRLS pipeline
+        // role. Run inside a pushed scope it would silently enumerate one tenant AND consult the
+        // work gate in the position where the gate fails open — so the precondition is enforced
+        // rather than commented, and this is what proves the guard exists.
+        await using var services = BuildGraph();
+        using var scope = services.CreateScope();
+        using var tenant = scope.ServiceProvider
+            .GetRequiredService<ITenantScopeAccessor>().Push(941_015);
+
+        var sweep = scope.ServiceProvider.GetRequiredService<IEmailInquiryAssemblyRecoveryService>();
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => sweep.SweepOnceAsync());
+        Assert.Contains("NO tenant scope", error.Message);
+    }
+
+    [Fact]
+    public async Task An_assembly_that_already_names_a_Lead_is_never_swept_again()
+    {
+        // Pins the second half of the candidate predicate. Every other test reaches Assembled
+        // together with a non-null AssembledLeadId, so `&& AssembledLeadId == null` could be
+        // deleted and nothing would notice.
+        const long bu = 941_016;
+        await SeedAsync(bu, "recovery-0016@buyer.example");
+        var assemblyId = await StrandAsync(bu, "recovery-0016@buyer.example");
+
+        await ExecuteAsync($"""
+            UPDATE public."EmailInquiryAssemblies"
+            SET "AssembledLeadId" = 999999 WHERE "Id" = {assemblyId};
+            """);
+
+        await using var services = BuildGraph();
+        Assert.Equal(0, (await SweepAsync(services)).Candidates);
+        Assert.Equal(0, await CountLeadsAsync(bu));
     }
 
     // =====================================================================================
     // Harness
     // =====================================================================================
 
-    private ServiceProvider BuildGraph() =>
+    private ServiceProvider BuildGraph(Action<IServiceCollection>? configure = null) =>
         EmailToLeadHarness.BuildGraph(
-            _database.ConnectionString, _storageRoot, new EmailToLeadHarness.RefusingLlm());
+            _database.ConnectionString, _storageRoot, new EmailToLeadHarness.RefusingLlm(), configure);
+
+    /// <summary>
+    /// Status + attempts + error of every job owned by this tenant's components, so a test can
+    /// assert recovery touched NONE of them rather than only that none failed.
+    /// </summary>
+    private async Task<string> JobFingerprintAsync(long businessUnitId) =>
+        string.Join(";", await QueryAsync($"""
+            SELECT "Id"::text || ':' || "Status" || ':' || "Attempts"::text
+                || ':' || COALESCE("LastError",'-')
+            FROM public."ExtractionJobs"
+            WHERE "BusinessUnitId" = {businessUnitId} ORDER BY "Id";
+            """));
 
     /// <summary>
     /// The production graph with ONE registration replaced: the assembler throws instead of
@@ -394,7 +619,7 @@ public sealed class EmailInquiryAssemblyRecoveryPostgreSqlTests(PostgreSqlTestDa
     private async Task<long> StrandAsync(long businessUnitId, string messageId)
     {
         await using var crashing = BuildCrashingGraph(out var probe);
-        var (assemblyId, _) = await EmailToLeadHarness.CaptureAndScheduleAsync(
+        var (_, assemblyId, _) = await EmailToLeadHarness.CaptureAndScheduleAsync(
             crashing, businessUnitId, EmailToLeadHarness.BuildMessage(messageId));
         await EmailToLeadHarness.DrainQueueAsync(
             crashing, businessUnitId, assertNoFailures: true, waitForAssemblySettlement: false);
@@ -434,6 +659,15 @@ public sealed class EmailInquiryAssemblyRecoveryPostgreSqlTests(PostgreSqlTestDa
         Assert.Equal(3, await ScalarAsync($"""
             SELECT count(*) FROM public."EmailInquiryComponents"
             WHERE "AssemblyId" = {assemblyId} AND "Status" = 'Completed';
+            """));
+
+        // The worker's catch block wrote NOTHING. The whole injection depends on FailAsync
+        // being a no-op against an already-Succeeded job; if that ever changes, this fails here
+        // rather than somewhere unrelated.
+        Assert.Equal(0, await ScalarAsync($"""
+            SELECT count(*) FROM public."ExtractionJobs" j
+            JOIN public."EmailInquiryComponents" c ON c."Id" = j."EmailInquiryComponentId"
+            WHERE c."AssemblyId" = {assemblyId} AND j."LastError" IS NOT NULL;
             """));
 
         // And the message owes a Lead that does not exist.

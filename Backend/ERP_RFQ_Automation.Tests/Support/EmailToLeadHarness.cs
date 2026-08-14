@@ -103,6 +103,11 @@ public static class EmailToLeadHarness
             MinimumAge = TimeSpan.Zero
         });
         services.AddScoped<IEmailInquiryAssemblyRecoveryService, EmailInquiryAssemblyRecoveryService>();
+        // The sweep now REQUIRES the gate, so it must be present. This one admits everyone;
+        // RefusingWorkGate is substituted by the test that proves the sweep honours a refusal,
+        // which is the only property of the gate this suite can assert without standing up the
+        // whole platform-access plane.
+        services.AddScoped<ERP_RFQ_Automation.Platform.Lifecycle.ITenantWorkGate, AdmitAllWorkGate>();
         services.AddSingleton<IBackgroundWorkerHeartbeats, BackgroundWorkerHeartbeats>();
 
         configure?.Invoke(services);
@@ -186,8 +191,18 @@ public static class EmailToLeadHarness
     /// Captures the message and schedules every processable component through the real
     /// ingestion gateway. Returns the assembly id and the derived batch id.
     /// </summary>
-    public static async Task<(long AssemblyId, EmailScheduleResult Schedule)> CaptureAndScheduleAsync(
-        ServiceProvider services, long businessUnitId, MimeMessage message)
+    /// <summary>
+    /// Captures and schedules, asserting the capture-level properties EVERY caller depends on.
+    ///
+    /// <para>These assertions live here rather than in one test because extracting this method
+    /// silently dropped them, and the most valuable of them —
+    /// <c>SafeToMarkSeen</c> — is the "do not tell IMAP the message was read before it is
+    /// durable" property, whose failure loses a customer's email irrecoverably.</para>
+    /// </summary>
+    public static async Task<(EmailInquiryCaptureResult Capture, long AssemblyId, EmailScheduleResult Schedule)>
+        CaptureAndScheduleAsync(
+            ServiceProvider services, long businessUnitId, MimeMessage message,
+            int expectedComponentCount = 3)
     {
         using var scope = services.CreateScope();
         using var tenant = scope.ServiceProvider
@@ -199,7 +214,18 @@ public static class EmailToLeadHarness
         var capture = await scope.ServiceProvider.GetRequiredService<IEmailInquiryCaptureService>()
             .CaptureAsync(message, ingest, configuration, BodyText);
 
+        Assert.NotNull(capture.Assembly);
+        Assert.False(capture.AlreadyCaptured,
+            "A fresh message must not resolve to an existing assembly.");
+        Assert.True(capture.SafeToMarkSeen,
+            "Capture must be durable before the mailbox is told the message was read.");
+
         var assembly = capture.Assembly!;
+
+        // Asserted, not derived: if the planner ever stops seeing one of the parts, every
+        // downstream assertion about "every component" would still pass on the smaller set.
+        Assert.Equal(expectedComponentCount, assembly.ExpectedComponentCount);
+
         var components = await context.EmailInquiryComponents
             .Where(c => c.AssemblyId == assembly.Id).OrderBy(c => c.Ordinal).ToListAsync();
         var plan = await EmailInquiryManifestPlanner.PlanAsync(message, assembly.MessageKey, BodyText);
@@ -211,7 +237,7 @@ public static class EmailToLeadHarness
             scope.ServiceProvider.GetRequiredService<IEmailInquiryAssemblyCoordinator>(),
             scope.ServiceProvider.GetRequiredService<Microsoft.Extensions.Logging.ILogger<ExtractionWorker>>());
 
-        return (assembly.Id, schedule);
+        return (capture, assembly.Id, schedule);
     }
 
     /// <summary>
@@ -348,6 +374,60 @@ public static class EmailToLeadHarness
                 ProcessingPath = ExtractionProcessingPath.NativeParser
             });
         }
+    }
+
+    /// <summary>Admits every tenant. The sweep requires a gate; this is the neutral one.</summary>
+    public sealed class AdmitAllWorkGate : ERP_RFQ_Automation.Platform.Lifecycle.ITenantWorkGate
+    {
+        public Task<bool> MayConsumeResourcesAsync(long businessUnitId, CancellationToken ct = default)
+            => Task.FromResult(true);
+
+        public Task<IReadOnlyList<long>> FilterServiceableAsync(
+            IEnumerable<long> businessUnitIds, CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<long>>(businessUnitIds.ToList());
+    }
+
+    /// <summary>Refuses the named tenants, as a suspended or archived tenant would be refused.</summary>
+    public sealed class RefusingWorkGate(params long[] refused)
+        : ERP_RFQ_Automation.Platform.Lifecycle.ITenantWorkGate
+    {
+        public Task<bool> MayConsumeResourcesAsync(long businessUnitId, CancellationToken ct = default)
+            => Task.FromResult(!refused.Contains(businessUnitId));
+
+        public Task<IReadOnlyList<long>> FilterServiceableAsync(
+            IEnumerable<long> businessUnitIds, CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<long>>(
+                businessUnitIds.Where(id => !refused.Contains(id)).ToList());
+    }
+
+    /// <summary>
+    /// Persists the Lead exactly as production does, then throws — simulating a process that
+    /// dies INSIDE the assembler's transaction, after the Lead row is written and before the
+    /// Assembled transition commits.
+    /// </summary>
+    public sealed class ThrowAfterPersistingLeadPersister(ILeadPersister inner) : ILeadPersister
+    {
+        public Task<long> PersistAsync(
+            ExtractionJob job, ChunkedExtractionOutcome outcome, CancellationToken ct = default)
+            => inner.PersistAsync(job, outcome, ct);
+
+        public Task<long?> PersistAndCompleteAsync(
+            ExtractionJob job, ChunkedExtractionOutcome outcome, IExtractionQueue queue,
+            string workerId, int leaseAttempt, TimeSpan leaseDuration, CancellationToken ct = default)
+            => inner.PersistAndCompleteAsync(
+                job, outcome, queue, workerId, leaseAttempt, leaseDuration, ct);
+
+        public async Task<long> PersistAssembledMessageAsync(
+            ExtractionJob job, ChunkedExtractionOutcome outcome, CancellationToken ct = default)
+        {
+            await inner.PersistAssembledMessageAsync(job, outcome, ct);
+            throw new InvalidOperationException(
+                "Simulated process loss inside the assembler transaction, after the lead was written.");
+        }
+
+        public Task EnrichAssembledMessageAsync(
+            ExtractionJob job, long leadId, CancellationToken ct = default)
+            => inner.EnrichAssembledMessageAsync(job, leadId, ct);
     }
 
     public sealed class NoThreatScanner : IMalwareScanner
