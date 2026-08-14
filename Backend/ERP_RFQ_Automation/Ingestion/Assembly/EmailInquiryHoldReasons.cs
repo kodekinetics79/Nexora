@@ -25,7 +25,7 @@ public static class EmailInquiryHoldReasons
     public const string AssemblyResultStorePendingDetail =
         "This part of the message was read successfully, but the step that combines it with the "
         + "rest of the email is not available yet, so the inquiry is not complete. It is being "
-        + "held; no information has been lost.";
+        + "held; the original captured email evidence is preserved.";
 
     /// <summary>An Email job the worker cannot map to exactly one owning component.</summary>
     public const string OwnershipUnresolved = "assembly_ownership_unresolved";

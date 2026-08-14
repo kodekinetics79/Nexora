@@ -862,3 +862,48 @@ No reusable contract exists, so the smallest tenant-scoped surface gets added on
 migration-safe pattern (focused follow-up migration; `20260813134002` stays byte-identical).
 Then the fence completes instead of holding, and correction 3 (identity by
 `BusinessUnitId + AssemblyId + ComponentId`) lands with it since both touch the coordinator.
+
+
+## REGRESSION FOUND FROM A LIVE SYMPTOM — "emails picked up but not processed as RFQ"
+
+The product owner reported GoDaddy connected, mail being polled, and nothing becoming an RFQ.
+That is **exactly** what the fail-closed branch I added at `c347021` does on this branch.
+
+`ExtractionWorker` refused a Lead for **every** `ExtractionSourceType.Email` job with no owning
+component row. But capture is not wired into `EmailService` yet, so **no email job has a
+component row** — the branch matched every inbound message and silently stopped all email-to-Lead
+processing. Mail polled, jobs ran, nothing became an RFQ.
+
+It also offered no protection whatsoever: a fence can only guard components that exist, and none
+do until the caller switch. It was pure regression.
+
+**Removed.** The protection is re-added in the same increment that switches the callers to
+capture — when every email job genuinely has an owning component, and a missing one really does
+mean the scheduler and worker disagree — with a test that a component-less email job is refused.
+Not before.
+
+Lesson worth keeping: a fail-closed guard added *ahead* of the thing it guards is not
+conservative, it is an outage. The full suite stayed green through it because no test polls a
+real mailbox — the same blind spot that let the `Username`/`EmailAddress` mismatch survive.
+
+### Evidence correction — the nine hold tests are domain evidence, not behavioural proof
+
+Recorded as the product owner required, because the distinction is real:
+
+| Test | What it actually proves |
+| --- | --- |
+| no-hot-loop | **does not call `ScheduleAsync`** — it asserts the component's shape, not the scheduler's behaviour |
+| per-assembly isolation | **does not touch the coordinator or a database** — two constructed entities, not two rows |
+| operator message | asserts the **constant**, not what the worker persists |
+
+They are still worth keeping — they pin the domain rules — but they are not the behavioural proof
+the hold lifecycle needs. Those gaps close inside the durable-result-store increment, against the
+real worker, coordinator, scheduler and database, rather than as a separate testing exercise.
+
+### Operator message narrowed
+
+"no information has been lost" was too broad. The **extraction output of that pass really is
+discarded** — there is nowhere durable to put it yet. The sentence now claims only what survives:
+*"the original captured email evidence is preserved."*
+
+Full backend regression after removal: **Failed: 0, Passed: 4911**.

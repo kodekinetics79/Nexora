@@ -86,7 +86,10 @@ public class EmailInquiryHoldLifecycleTests
         Assert.DoesNotContain("will retry", detail, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("try again", detail, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("being held", detail, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("no information has been lost", detail, StringComparison.OrdinalIgnoreCase);
+        // Narrowed deliberately: the extraction OUTPUT of this pass is discarded, so claiming
+        // "no information has been lost" was too broad. What survives is the captured evidence.
+        Assert.DoesNotContain("no information has been lost", detail, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("captured email evidence is preserved", detail, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

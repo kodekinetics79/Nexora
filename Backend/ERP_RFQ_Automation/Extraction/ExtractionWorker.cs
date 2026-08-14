@@ -1064,23 +1064,20 @@ public sealed class LeadPersister : ILeadPersister
                 return 0;
             }
 
-            // FAIL CLOSED. An Email-sourced job with no unambiguous component mapping must not
-            // fall through to per-document Lead reconciliation: that is precisely the path that
-            // mints one Lead per attachment. A missing mapping means the scheduler and the
-            // worker disagree about who owns this job, which is an ownership failure to be seen
-            // and repaired — never a licence to create commercial records.
+            // NO BLANKET FAIL-CLOSED HERE — and removing it fixed a live regression.
             //
-            // Non-email ingestion is untouched: manual upload and watched folders are not
-            // ExtractionSourceType.Email and never reach this branch.
-            if (job.SourceType == ExtractionSourceType.Email)
-            {
-                _log.LogError(
-                    "Email extraction job {ExtractionJobId} (business unit {BusinessUnitId}, "
-                    + "batch {BatchId}) has no authoritative email inquiry component. It is NOT "
-                    + "reconciled into a Lead; the ownership failure is recoverable and visible.",
-                    job.Id, job.BusinessUnitId, job.BatchId);
-                return 0;
-            }
+            // The previous version refused a Lead for EVERY ExtractionSourceType.Email job that
+            // had no component row. But capture is not wired into EmailService yet, so NO email
+            // job has a component row: the branch matched every inbound message and silently
+            // stopped all email-to-Lead processing. Mail was polled, jobs ran, and nothing ever
+            // became an RFQ. It offered no protection either, because a fence can only guard
+            // components that exist.
+            //
+            // The protection becomes correct and necessary in the same increment that switches
+            // the callers to capture, when every email job genuinely has an owning component and
+            // a missing one really does mean the scheduler and worker disagree. It is re-added
+            // there, with a test that a component-less email job is refused, and not before.
+
         }
         // ---- END ASSEMBLY SAFETY FENCE ---------------------------------------------------
 
