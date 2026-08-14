@@ -51,6 +51,10 @@ public sealed class NexoraMetrics : IDisposable
     private readonly Counter<long> _jobsEnqueued;
     private readonly Counter<long> _jobsClaimed;
     private readonly Counter<long> _jobsSucceeded;
+    private readonly Counter<long> _assemblyRecoveryCandidates;
+    private readonly Counter<long> _assemblyRecoveryRecovered;
+    private readonly Counter<long> _assemblyRecoveryFailed;
+    private readonly Histogram<double> _assemblyRecoveryDurationMs;
     private readonly Counter<long> _jobsFailed;
     private readonly Counter<long> _jobsDeadLettered;
     private readonly Counter<long> _claimsRefused;
@@ -94,6 +98,37 @@ public sealed class NexoraMetrics : IDisposable
             "nexora.extraction.jobs.succeeded",
             unit: "{job}",
             description: "Extraction jobs that completed successfully.");
+
+        // The stranded-message counters. A message whose parts all finished but whose lead was
+        // never built is invisible by construction — no error, no dead letter, no failed job —
+        // so a NON-ZERO candidate rate is the only signal that the crash window is being hit,
+        // and a candidate rate that stays non-zero while recovered stays flat means recovery
+        // itself is stuck.
+        _assemblyRecoveryCandidates = _meter.CreateCounter<long>(
+            "nexora.ingestion.assembly.recovery.candidates",
+            unit: "{message}",
+            description: "Email messages found stranded with every part complete and no lead. "
+                + "Steady-state zero; sustained non-zero means the assemble-after-commit window "
+                + "is being hit regularly.");
+
+        _assemblyRecoveryRecovered = _meter.CreateCounter<long>(
+            "nexora.ingestion.assembly.recovery.recovered",
+            unit: "{message}",
+            description: "Stranded email messages the recovery sweep turned into their lead. "
+                + "Compare against candidates: a persistent gap is a message that cannot "
+                + "converge.");
+
+        _assemblyRecoveryFailed = _meter.CreateCounter<long>(
+            "nexora.ingestion.assembly.recovery.failed",
+            unit: "{message}",
+            description: "Recovery attempts that threw. Isolated per message and per tenant, so "
+                + "this counts poison rows rather than a stopped sweep.");
+
+        _assemblyRecoveryDurationMs = _meter.CreateHistogram<double>(
+            "nexora.ingestion.assembly.recovery.duration",
+            unit: "ms",
+            description: "Wall-clock duration of one recovery sweep across every serviceable "
+                + "tenant.");
 
         _jobsFailed = _meter.CreateCounter<long>(
             "nexora.extraction.jobs.failed",
@@ -254,6 +289,15 @@ public sealed class NexoraMetrics : IDisposable
     {
         _jobsSucceeded.Add(1, Tenant(businessUnitId));
         if (durationMs is { } ms) _jobDurationMs.Record(ms, Outcome(businessUnitId, "succeeded"));
+    }
+
+    /// <summary>Record one completed recovery sweep. Counts only — never message content.</summary>
+    public void AssemblyRecoverySwept(int candidates, int recovered, int failed, double durationMs)
+    {
+        if (candidates > 0) _assemblyRecoveryCandidates.Add(candidates);
+        if (recovered > 0) _assemblyRecoveryRecovered.Add(recovered);
+        if (failed > 0) _assemblyRecoveryFailed.Add(failed);
+        _assemblyRecoveryDurationMs.Record(durationMs);
     }
 
     /// <summary>Record that a job failed (optionally tagged with a reason + tenant).</summary>

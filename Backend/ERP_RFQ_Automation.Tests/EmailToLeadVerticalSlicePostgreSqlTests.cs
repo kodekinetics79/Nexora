@@ -1,23 +1,12 @@
-using System.Text;
-using ERP_RFQ_Automation.AI;
 using ERP_RFQ_Automation.Extraction;
-using ERP_RFQ_Automation.Extraction.Conversational;
 using ERP_RFQ_Automation.Infrastructure.Storage;
 using ERP_RFQ_Automation.Ingestion.Assembly;
 using ERP_RFQ_Automation.Ingestion.Triage;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.MultiTenancy;
-using ERP_RFQ_Automation.Security.DocumentInspection;
-using ERP_RFQ_Automation.Services.DocumentIntelligence;
-using ERP_RFQ_Automation.Services.Interfaces;
 using ERP_RFQ_Automation.Tests.Support;
-using Microsoft.AspNetCore.Hosting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.FileProviders;
-using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
-using MimeKit;
 
 namespace ERP_RFQ_Automation.Tests;
 
@@ -26,24 +15,14 @@ namespace ERP_RFQ_Automation.Tests;
 /// customer's inquiry is made of comes out.
 ///
 /// <para><b>Why it is built this way.</b> Every other test on this path proves one seam
-/// against doubles. Three independent reviewers landed on the same gap: nothing runs
+/// against doubles. Three independent reviewers landed on the same gap: nothing ran
 /// capture → schedule → queue → worker → barrier against a real database in one pass, so
-/// each seam can be individually green while the pipeline as a whole moves no message at
+/// each seam could be individually green while the pipeline as a whole moved no message at
 /// all. That is not hypothetical — it is exactly what production did.</para>
 ///
-/// <para><b>What is real here.</b> A migrated PostgreSQL container, the production
-/// composition (<see cref="EmailInquiryAssemblyServiceCollectionExtensions.AddEmailInquiryAssembly"/>),
-/// the real <see cref="DocumentIngestionService"/>, the real <see cref="ExtractionQueue"/>
-/// with its advisory-lock claim, the real <see cref="ProductionDocumentReader"/> reading
-/// bytes back out of evidence storage, the real <see cref="ExtractionWorker"/> loop, and
-/// the real <see cref="LeadPersister"/>. No recording queue, no recording persister, no
-/// seeded result, no SQLite.</para>
-///
-/// <para><b>What is substituted, and why that is honest.</b> Exactly one boundary: the
-/// language model. <see cref="RefusingLlm"/> throws on any call, which is an assertion —
-/// the two CSV attachments MUST take the deterministic structured path. The message body
-/// is prose and genuinely needs a model, so <see cref="DeterministicBodyExtractor"/> stands
-/// in for it. Everything between the mailbox and the Lead is production code.</para>
+/// <para>The composition comes from <see cref="EmailToLeadHarness"/> so that every test on
+/// this path shares ONE definition of the production graph. See that class for what is real
+/// and what is substituted.</para>
 /// </summary>
 [Collection(PostgreSqlIntegrationCollection.Name)]
 public sealed class EmailToLeadVerticalSlicePostgreSqlTests(PostgreSqlTestDatabase database) : IAsyncLifetime
@@ -67,58 +46,24 @@ public sealed class EmailToLeadVerticalSlicePostgreSqlTests(PostgreSqlTestDataba
     [Fact]
     public async Task One_email_with_two_priced_attachments_becomes_exactly_one_Lead_carrying_every_line()
     {
-        await SeedTenantAsync();
-        var llm = new RefusingLlm();
-        await using var services = BuildProductionGraph(llm);
+        await using (var connection = await _database.OpenConnectionAsync())
+            await EmailToLeadHarness.SeedTenantAsync(connection, BusinessUnitId, MessageId);
 
-        // ---- 1. CAPTURE: the message becomes durable before anything may touch it. ----
-        var message = BuildMessage();
-        long assemblyId;
-        int expectedComponents;
-        EmailScheduleResult schedule;
+        var llm = new EmailToLeadHarness.RefusingLlm();
+        await using var services = EmailToLeadHarness.BuildGraph(
+            _database.ConnectionString, _storageRoot, llm);
 
-        using (var scope = services.CreateScope())
-        {
-            using var tenant = scope.ServiceProvider
-                .GetRequiredService<ITenantScopeAccessor>().Push(BusinessUnitId);
-            var context = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
-            var configuration = await context.EmailConfigurations.SingleAsync(c => c.Id == BusinessUnitId);
-            var ingest = await context.EmailIngests.SingleAsync(i => i.MessageId == MessageId);
-
-            var capture = await scope.ServiceProvider.GetRequiredService<IEmailInquiryCaptureService>()
-                .CaptureAsync(message, ingest, configuration, BodyText);
-
-            Assert.NotNull(capture.Assembly);
-            Assert.False(capture.AlreadyCaptured);
-            Assert.True(capture.SafeToMarkSeen,
-                "Capture must be durable before the mailbox is told the message was read.");
-
-            assemblyId = capture.Assembly!.Id;
-            expectedComponents = capture.Assembly.ExpectedComponentCount;
-
-            // Body + two CSVs. If the planner ever stops seeing one of them the rest of this
-            // test would still pass, so the count is asserted rather than derived.
-            Assert.Equal(3, expectedComponents);
-
-            // ---- 2. SCHEDULE: one durable job per processable component. ----
-            var components = await context.EmailInquiryComponents
-                .Where(c => c.AssemblyId == assemblyId).OrderBy(c => c.Ordinal).ToListAsync();
-            var plan = await EmailInquiryManifestPlanner.PlanAsync(message, capture.Assembly.MessageKey, BodyText);
-
-            schedule = await EmailIngestEnqueuer.ScheduleAsync(
-                capture.Assembly, components, plan, ingest, "buyer@customer.example",
-                scope.ServiceProvider.GetRequiredService<IDocumentIngestion>(),
-                new EmailTriageDecision(EmailTriageOutcome.Inquiry, [], null, false),
-                scope.ServiceProvider.GetRequiredService<IEmailInquiryAssemblyCoordinator>(),
-                scope.ServiceProvider.GetRequiredService<ILogger<EmailToLeadVerticalSlicePostgreSqlTests>>());
-        }
+        // ---- 1-2. CAPTURE the message durably, then SCHEDULE one job per component. ----
+        var message = EmailToLeadHarness.BuildMessage(MessageId);
+        var (assemblyId, schedule) = await EmailToLeadHarness.CaptureAndScheduleAsync(
+            services, BusinessUnitId, message);
 
         Assert.Equal(3, schedule.Scheduled);
         Assert.Equal(0, schedule.Held);
         Assert.True(schedule.FullyScheduled, $"Manifest verdict was {schedule.Verdict}.");
 
         // ---- 3. DRAIN: the real worker, claiming through the real queue. ----
-        await DrainQueueAsync(services);
+        await EmailToLeadHarness.DrainQueueAsync(services, BusinessUnitId);
 
         // ---- 4. ASSERT the durable outcome. ----
         using (var scope = services.CreateScope())
@@ -225,7 +170,7 @@ public sealed class EmailToLeadVerticalSlicePostgreSqlTests(PostgreSqlTestDataba
         Assert.Equal(0, llm.CallCount);
 
         // ---- 5. REPLAY: draining again must not manufacture a second Lead. ----
-        await DrainQueueAsync(services);
+        await EmailToLeadHarness.DrainQueueAsync(services, BusinessUnitId);
         using (var scope = services.CreateScope())
         {
             using var tenant = scope.ServiceProvider
@@ -236,173 +181,6 @@ public sealed class EmailToLeadVerticalSlicePostgreSqlTests(PostgreSqlTestDataba
         }
     }
 
-    // ------------------------------------------------------------------ the message
-
-    private const string BodyText =
-        "Dear Nexora,\n\nPlease quote the attached requirements for our Jubail expansion. "
-        + "Delivery to Jubail Industrial City, DDP, quotation validity 30 days.\n\nRegards,\nBuyer";
-
-    private static MimeMessage BuildMessage()
-    {
-        // Two ordinary column layouts the deterministic normalizer recognizes, so the
-        // extraction is reproducible byte-for-byte and needs no model.
-        const string valves =
-            "Part Number,Description,Quantity,Unit\n"
-            + "VLV-1001,Ball valve DN50 PN16 stainless,12,EA\n"
-            + "VLV-1002,Gate valve DN80 PN16 carbon steel,4,EA\n";
-        const string gaskets =
-            "Part Number,Description,Quantity,Unit\n"
-            + "GSK-3007,Spiral wound gasket DN50 CL150,60,EA\n"
-            + "GSK-3008,Spiral wound gasket DN80 CL150,25,EA\n"
-            + "GSK-3009,Ring joint gasket R-24 soft iron,8,EA\n";
-
-        var body = new TextPart("plain") { Text = BodyText };
-        var mixed = new Multipart("mixed") { body };
-        mixed.Add(CsvAttachment("valves.csv", valves));
-        mixed.Add(CsvAttachment("gaskets.csv", gaskets));
-
-        var message = new MimeMessage { Subject = "RFQ 88-2410 Jubail expansion", Body = mixed };
-        message.From.Add(new MailboxAddress("Buyer", "buyer@customer.example"));
-        message.To.Add(new MailboxAddress("Nexora", "rfq@nexora.example"));
-        message.MessageId = MessageId;
-        message.Date = new DateTimeOffset(2026, 8, 14, 9, 0, 0, TimeSpan.Zero);
-        return message;
-    }
-
-    private static MimePart CsvAttachment(string fileName, string content) =>
-        new("text", "csv")
-        {
-            Content = new MimeContent(new MemoryStream(Encoding.UTF8.GetBytes(content))),
-            ContentDisposition = new ContentDisposition(ContentDisposition.Attachment) { FileName = fileName },
-            ContentTransferEncoding = ContentEncoding.Base64,
-            FileName = fileName
-        };
-
-    // ------------------------------------------------------------------ the graph
-
-    private ServiceProvider BuildProductionGraph(RefusingLlm llm)
-    {
-        var services = new ServiceCollection();
-        services.AddLogging();
-        services.AddHttpContextAccessor();
-        services.AddSingleton<ITenantScopeAccessor, TenantScopeAccessor>();
-        services.AddScoped<ITenantContext, HttpTenantContext>();
-        services.AddDbContext<ErpRfqAutomationContext>(options =>
-            // EnableRetryOnFailure is NOT decoration. It installs NpgsqlRetryingExecutionStrategy,
-            // under which a user-initiated BeginTransactionAsync outside
-            // CreateExecutionStrategy().ExecuteAsync throws outright. Production configures it;
-            // omitting it here would leave this test blind to the single most likely way for the
-            // barrier to fail in production while passing locally — the exact substituted-boundary
-            // mistake this whole test exists to stop making.
-            options.UseNpgsql(_database.ConnectionString,
-                    npgsql => npgsql.EnableRetryOnFailure(
-                        maxRetryCount: 5, maxRetryDelay: TimeSpan.FromSeconds(10), errorCodesToAdd: null))
-                .EnableDetailedErrors());
-
-        services.AddSingleton<IWebHostEnvironment>(new TestEnvironment(_storageRoot));
-        services.AddSingleton<IFileStorage>(new LocalFileStorage(_storageRoot, _storageRoot));
-        services.AddSingleton<IEvidenceObjectStorage>(sp =>
-            new LocalEvidenceObjectStorage(sp.GetRequiredService<IFileStorage>()));
-        services.AddSingleton<IMalwareScanner, NoThreatScanner>();
-        services.AddSingleton<IFileInspectionService>(sp =>
-            new DocumentFileInspectionService(
-                sp.GetRequiredService<IMalwareScanner>(), new DocumentInspectionOptions()));
-        services.AddSingleton<IOptions<MalwareVerdictPolicyOptions>>(
-            Options.Create(new MalwareVerdictPolicyOptions()));
-
-        services.AddEmailInquiryAssembly();
-        services.AddScoped<IExtractionQueue, ExtractionQueue>();
-        services.AddScoped<IDocumentIngestion, DocumentIngestionService>();
-        services.AddScoped<IExtractionDocumentReader, ProductionDocumentReader>();
-        services.AddScoped<ILeadPersister, LeadPersister>();
-        services.AddScoped<IEmailInquiryLeadAssembler, EmailInquiryLeadAssembler>();
-        services.AddSingleton<ICanonicalRfqNormalizer, CanonicalRfqNormalizer>();
-        services.AddSingleton<ILLMService>(llm);
-        services.AddScoped<IChunkedExtractionService, ChunkedExtractionService>();
-        services.AddScoped<IConversationalExtractionService, DeterministicBodyExtractor>();
-
-        return services.BuildServiceProvider(validateScopes: true);
-    }
-
-    /// <summary>
-    /// Runs the production worker until this tenant's work is genuinely finished.
-    ///
-    /// <para><b>An empty queue is not the finish line.</b> The worker completes a job and
-    /// only THEN assembles the message, so there is a real window where every job reads
-    /// Succeeded and the message is still mid-assembly. Waiting on the queue alone made
-    /// this test read the database while the assembler was still writing to it. The wait
-    /// is therefore on the message's own state, which is what the pipeline is for.</para>
-    ///
-    /// <para>The worker is a background loop, so the test drives it exactly as the host
-    /// does and waits on observable database state rather than on a sleep.</para>
-    /// </summary>
-    private async Task DrainQueueAsync(ServiceProvider services)
-    {
-        var worker = new ExtractionWorker(
-            services.GetRequiredService<IServiceScopeFactory>(),
-            new ExtractionWorkerOptions
-            {
-                WorkerCount = 1,
-                MaxConcurrentLlmCalls = 1,
-                PerTenantConcurrencyCap = 4,
-                LeaseDuration = TimeSpan.FromSeconds(60),
-                IdlePollDelay = TimeSpan.FromMilliseconds(25)
-            },
-            services.GetRequiredService<ILogger<ExtractionWorker>>(),
-            services.GetRequiredService<ITenantScopeAccessor>());
-
-        await worker.StartAsync(CancellationToken.None);
-        try
-        {
-            var deadline = DateTime.UtcNow + TestWaits.Liveness;
-            while (DateTime.UtcNow < deadline)
-            {
-                using var scope = services.CreateScope();
-                using var tenant = scope.ServiceProvider
-                    .GetRequiredService<ITenantScopeAccessor>().Push(BusinessUnitId);
-                var context = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
-                var open = await context.Set<ExtractionJob>().AsNoTracking().CountAsync(j =>
-                    j.BusinessUnitId == BusinessUnitId
-                    && j.Status != ExtractionStatus.Succeeded
-                    && j.Status != ExtractionStatus.DeadLetter
-                    && j.Status != ExtractionStatus.Duplicate
-                    && j.Status != ExtractionStatus.Failed);
-                var unsettled = await context.EmailInquiryAssemblies.AsNoTracking().CountAsync(a =>
-                    a.BusinessUnitId == BusinessUnitId
-                    && a.Status != EmailInquiryAssemblyStatus.Assembled
-                    && a.Status != EmailInquiryAssemblyStatus.NeedsReview
-                    && a.Status != EmailInquiryAssemblyStatus.NoInquiry
-                    && a.Status != EmailInquiryAssemblyStatus.RejectedSecurity);
-
-                if (open == 0 && unsettled == 0)
-                {
-                    // A job that failed or dead-lettered has left the queue too, so "drained"
-                    // alone is not success. Surfacing the recorded error here is the difference
-                    // between a diagnosable failure and a downstream assertion that says only
-                    // that a component never finished.
-                    var broken = await context.Set<ExtractionJob>().AsNoTracking()
-                        .Where(j => j.BusinessUnitId == BusinessUnitId
-                                    && (j.Status == ExtractionStatus.Failed
-                                        || j.Status == ExtractionStatus.DeadLetter))
-                        .Select(j => new { j.Id, j.FileName, j.Status, j.LastError })
-                        .ToListAsync();
-                    Assert.True(broken.Count == 0, "Extraction jobs failed: " + string.Join(
-                        " | ", broken.Select(b => $"{b.FileName}#{b.Id} {b.Status}: {b.LastError}")));
-                    return;
-                }
-                await Task.Delay(100);
-            }
-
-            Assert.Fail("The queue did not drain and the message did not settle within the "
-                + "liveness window.");
-        }
-        finally
-        {
-            await worker.StopAsync(CancellationToken.None);
-            worker.Dispose();
-        }
-    }
-
     /// <summary>Reads a count straight from PostgreSQL, past EF and past every filter.</summary>
     private async Task<int> ScalarAsync(string sql)
     {
@@ -410,98 +188,5 @@ public sealed class EmailToLeadVerticalSlicePostgreSqlTests(PostgreSqlTestDataba
         await using var command = connection.CreateCommand();
         command.CommandText = sql;
         return Convert.ToInt32(await command.ExecuteScalarAsync());
-    }
-
-    // ------------------------------------------------------------------ tenant seed
-
-    private async Task SeedTenantAsync()
-    {
-        await using var connection = await _database.OpenConnectionAsync();
-        await using var command = connection.CreateCommand();
-        command.CommandText = $"""
-            INSERT INTO public."BusinessUnits" ("ID","BusinessUnitCode","BusinessUnitName","IsActive","CreatedBy","CreatedOn")
-            VALUES ({BusinessUnitId}, 'SLICE', 'Vertical Slice', true, 'test', now())
-            ON CONFLICT DO NOTHING;
-
-            INSERT INTO public."Email_Configurations"
-                ("ID","BusinessUnitID","ConfigurationName","EmailAddress","Protocol","Host","Port",
-                 "Username","Password","UseSSL","PollingInterval","IsActive","CreatedOn")
-            VALUES ({BusinessUnitId}, {BusinessUnitId}, 'Inbound', 'rfq@nexora.example', 'IMAP',
-                    'imap.secureserver.net', 993, 'rfq@nexora.example', 'not-a-real-credential',
-                    true, 5, true, now())
-            ON CONFLICT DO NOTHING;
-
-            INSERT INTO public."EmailIngests"
-                ("MessageID","EmailSubject","FromEmail","ToEmail","EmailConfigurationID","CreatedOn")
-            VALUES ('{MessageId}', 'RFQ 88-2410 Jubail expansion', 'buyer@customer.example',
-                    'rfq@nexora.example', {BusinessUnitId}, now())
-            ON CONFLICT DO NOTHING;
-            """;
-        await command.ExecuteNonQueryAsync();
-    }
-
-    // ------------------------------------------------------------------ the two doubles
-
-    /// <summary>
-    /// Any call is a test failure by construction: the CSV attachments must take the
-    /// deterministic path. This is an assertion wearing a stub's clothes.
-    /// </summary>
-    private sealed class RefusingLlm : ILLMService
-    {
-        private int _calls;
-        public int CallCount => Volatile.Read(ref _calls);
-        public AiProviderClass ProviderClass => AiProviderClass.Local;
-
-        public Task<LeadExtractionResult?> ExtractLeadDataAsync(
-            string fullText, AiCallContext context, CancellationToken ct = default)
-        {
-            Interlocked.Increment(ref _calls);
-            throw new InvalidOperationException(
-                "The structured extraction path reached the language model. "
-                + "A recognized CSV layout must never require one.");
-        }
-
-        public Task<BoqDraftResult?> DraftServiceBoqAsync(
-            string scopeText, AiCallContext context, CancellationToken ct = default)
-        {
-            Interlocked.Increment(ref _calls);
-            throw new InvalidOperationException("The slice must not draft a BOQ.");
-        }
-    }
-
-    /// <summary>
-    /// Stands in for the model on the ONE component that genuinely needs prose
-    /// understanding: the sender's covering note. It returns a header-only result, which is
-    /// what a covering note legitimately contributes — the priced lines come from the
-    /// attachments.
-    /// </summary>
-    private sealed class DeterministicBodyExtractor : IConversationalExtractionService
-    {
-        public Task<ChunkedExtractionOutcome> ExtractAsync(
-            DocumentExtractionInput input, bool threadContinuation, CancellationToken ct = default)
-            => Task.FromResult(new ChunkedExtractionOutcome
-            {
-                Status = ExtractionOutcomeStatus.Ok,
-                Result = Ext.Result([], 0.95),
-                ExpectedItemCount = 0,
-                ExtractedItemCount = 0,
-                ProcessingPath = ExtractionProcessingPath.NativeParser
-            });
-    }
-
-    private sealed class NoThreatScanner : IMalwareScanner
-    {
-        public Task<MalwareScanResult> ScanAsync(Stream content, CancellationToken ct = default)
-            => Task.FromResult(MalwareScanResult.Clean("test-no-threat"));
-    }
-
-    private sealed class TestEnvironment(string root) : IWebHostEnvironment
-    {
-        public string ApplicationName { get; set; } = "Tests";
-        public IFileProvider WebRootFileProvider { get; set; } = new NullFileProvider();
-        public string WebRootPath { get; set; } = root;
-        public string EnvironmentName { get; set; } = "Development";
-        public string ContentRootPath { get; set; } = root;
-        public IFileProvider ContentRootFileProvider { get; set; } = new NullFileProvider();
     }
 }

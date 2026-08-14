@@ -36,6 +36,14 @@ public static class BackgroundWorkerNames
     /// for weeks.
     /// </summary>
     public const string ScheduledReports = "scheduled-reports";
+
+    /// <summary>
+    /// The email-assembly recovery sweep. A faulted recovery loop is silent twice over: the
+    /// defect it recovers from produces no error of its own, and a dead sweep produces none
+    /// either — so an inquiry a customer sent simply never exists, and nobody reports the
+    /// absence of a lead nobody knew to expect.
+    /// </summary>
+    public const string EmailInquiryAssemblyRecovery = "email-inquiry-assembly-recovery";
 }
 
 public sealed record BackgroundWorkerHeartbeatStatus(

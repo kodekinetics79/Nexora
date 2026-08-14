@@ -671,6 +671,20 @@ builder.Services.AddScoped<ILeadPersister, LeadPersister>();
 // component's durable result once the last of them has finished. The worker calls it.
 builder.Services.AddScoped<ERP_RFQ_Automation.Ingestion.Assembly.IEmailInquiryLeadAssembler,
     ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryLeadAssembler>();
+
+// The stranded-message sweep. The worker commits the queue job and assembles afterwards, which
+// is the correct order (assembling first duplicates the lead on retry) but leaves a window: a
+// process that dies in between leaves every part complete, every result durable, and no lead —
+// with nothing that would ever look again. Registered as options + service + worker so the
+// sweep itself is testable without a timer or a hosted lifetime.
+builder.Services.AddSingleton(
+    builder.Configuration
+        .GetSection(ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssemblyRecoveryOptions.SectionName)
+        .Get<ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssemblyRecoveryOptions>()
+    ?? new ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssemblyRecoveryOptions());
+builder.Services.AddScoped<ERP_RFQ_Automation.Ingestion.Assembly.IEmailInquiryAssemblyRecoveryService,
+    ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssemblyRecoveryService>();
+builder.Services.AddHostedService<ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssemblyRecoveryWorker>();
 builder.Services.AddScoped<IExtractionDocumentReader, ProductionDocumentReader>();
 builder.Services.AddHostedService<ExtractionWorker>();
 // ING-05: unified ingestion gateway — the ONE door to the durable queue used by the

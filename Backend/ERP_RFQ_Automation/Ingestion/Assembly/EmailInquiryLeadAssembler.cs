@@ -11,8 +11,13 @@ namespace ERP_RFQ_Automation.Ingestion.Assembly;
 public interface IEmailInquiryLeadAssembler
 {
     /// <summary>
-    /// Builds the ONE Lead for a message whose components have all finished. Returns the Lead
-    /// id, or null when the message produced nothing to quote or is not ready.
+    /// Builds the ONE Lead for a message whose components have all finished.
+    ///
+    /// <para>Returns the Lead id when THIS call produced it, or when the message was already
+    /// assembled before the call began. Returns null when this call assembled nothing — not
+    /// ready, nothing to quote, held for review, or another worker won the claim. A null is not
+    /// a failure and never means "no Lead exists": the caller re-reads the persisted status to
+    /// learn which of those it was.</para>
     /// </summary>
     Task<long?> AssembleAsync(long businessUnitId, long assemblyId, CancellationToken ct = default);
 }
@@ -65,7 +70,6 @@ public sealed class EmailInquiryLeadAssembler : IEmailInquiryLeadAssembler
         return strategy.ExecuteAsync(async () =>
         {
             // A retried attempt must not inherit the previous one's tracked state.
-            _context.ChangeTracker.Clear();
             await using var transaction = await _context.Database.BeginTransactionAsync(ct);
             var leadId = await AssembleCoreAsync(businessUnitId, assemblyId, ct);
             // Committed on EVERY path, not only the success one: the hold-for-review writes are
@@ -92,33 +96,80 @@ public sealed class EmailInquiryLeadAssembler : IEmailInquiryLeadAssembler
         // The lock makes the loser wait, and the transaction makes the Lead and the Assembled
         // transition commit together — so a crash between them cannot leave a Lead that no
         // message points at.
-        var locked = await _context.EmailInquiryAssemblies
-            .FromSql($"""
-                SELECT * FROM "EmailInquiryAssemblies"
-                WHERE "Id" = {assemblyId} AND "BusinessUnitId" = {businessUnitId}
-                FOR UPDATE
-                """)
-            .ToListAsync(ct);
-
-        if (locked.Count == 0)
-            throw new InvalidOperationException(
+        // THE CLAIM. A compare-and-swap on the assembly row, not a check-then-act.
+        //
+        // Two earlier attempts at this were wrong in instructive ways. Reading the status and
+        // then acting on it is a plain TOCTOU: two recovery instances both read
+        // ReadyForAssembly and both build a Lead. Taking SELECT ... FOR UPDATE through EF looked
+        // like the fix and was not — it did not serialize two concurrent sweeps in practice, and
+        // an applied test showed both of them still producing a Lead.
+        //
+        // A conditional UPDATE has no such ambiguity. It takes the row's write lock, so the
+        // loser BLOCKS until the winner commits and then re-evaluates its WHERE against the
+        // committed row, where ConcurrencyVersion no longer matches and it claims nothing. The
+        // lock is then held for the rest of this transaction, which is exactly as long as the
+        // Lead takes to write.
+        var claimed = await _context.EmailInquiryAssemblies
+            .AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId && x.Id == assemblyId)
+            .Select(x => new { x.Status, x.ConcurrencyVersion, x.AssembledLeadId })
+            .FirstOrDefaultAsync(ct)
+            ?? throw new InvalidOperationException(
                 $"Email inquiry assembly {assemblyId} was not found for business unit {businessUnitId}.");
+
+        // Already done. The second caller did nothing wrong, so it gets the Lead the first one
+        // created rather than an error — and "already done" stays distinguishable from
+        // "nothing to do", which a bare null could not express.
+        if (claimed.Status == EmailInquiryAssemblyStatus.Assembled)
+            return claimed.AssembledLeadId;
+
+        if (claimed.Status != EmailInquiryAssemblyStatus.ReadyForAssembly)
+        {
+            _log.LogDebug(
+                "Assembly {AssemblyId} is {Status}; not assembling.", assemblyId, claimed.Status);
+            return null;
+        }
+
+        var seenVersion = claimed.ConcurrencyVersion;
+        var rows = await _context.Database.ExecuteSqlAsync(
+            $"""
+            UPDATE public."EmailInquiryAssemblies"
+            SET "ConcurrencyVersion" = "ConcurrencyVersion" + 1, "UpdatedAtUtc" = now()
+            WHERE "Id" = {assemblyId}
+              AND "BusinessUnitId" = {businessUnitId}
+              AND "Status" = 'ReadyForAssembly'
+              AND "ConcurrencyVersion" = {seenVersion}
+            """, ct);
+
+        if (rows == 0)
+        {
+            // Someone else won the claim, so THIS call assembled nothing and must say so.
+            //
+            // Returning the winner's lead id here would be true and useless: a caller counting
+            // outcomes would record two recoveries for one Lead, and "a Lead exists" would
+            // become indistinguishable from "I built it" in every metric and log downstream.
+            // Null means "not by me"; the caller re-reads the persisted status to learn what
+            // actually became of the message.
+            var settled = await _context.EmailInquiryAssemblies
+                .AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId && x.Id == assemblyId)
+                .Select(x => x.Status)
+                .FirstOrDefaultAsync(ct);
+
+            _log.LogInformation(
+                "Assembly {AssemblyId} was claimed by another worker; it is now {Status}.",
+                assemblyId, settled);
+            return null;
+        }
+
+        // Cleared so nothing below is answered from state read before the claim.
+        _context.ChangeTracker.Clear();
 
         var assembly = await _context.EmailInquiryAssemblies
             .Include(x => x.Components)
-            .FirstAsync(x => x.BusinessUnitId == businessUnitId && x.Id == assemblyId, ct);
-
-        // Already done. The second worker did nothing wrong, so this returns the Lead the first
-        // one created rather than an error — and it can now actually FIND it.
-        if (assembly.Status == EmailInquiryAssemblyStatus.Assembled)
-            return assembly.AssembledLeadId;
-
-        if (assembly.Status != EmailInquiryAssemblyStatus.ReadyForAssembly)
-        {
-            _log.LogDebug(
-                "Assembly {AssemblyId} is {Status}; not assembling.", assemblyId, assembly.Status);
-            return null;
-        }
+            .FirstOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.Id == assemblyId, ct)
+            ?? throw new InvalidOperationException(
+                $"Email inquiry assembly {assemblyId} was not found for business unit {businessUnitId}.");
 
         var results = await _context.Set<EmailInquiryComponentResult>()
             .AsNoTracking()
