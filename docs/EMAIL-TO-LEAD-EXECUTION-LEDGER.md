@@ -589,3 +589,70 @@ Dropped from Section B by this directive: the B5 container matrix and the B2 car
 (StructuralOnly lifecycle, raw-message bounds, nested-body normalization tests). The *behaviour*
 they would have tested is already implemented and frozen; only their dedicated proofs are
 deferred. Recorded here so the gap is visible rather than forgotten.
+
+---
+
+## Takeover verified at `e22b119`
+
+Branch `fix/enterprise-email-lead-participation` · clean tree · 24 commits ahead of base
+`1601db6` · repo `kodekinetics79/Nexora`. Handoff matches the repository. No Phase Zero repeat.
+
+### Correction to the record
+
+`EmailComponentManifestVerifier` has **no production caller**. An edit intended to wire it into
+the enqueuer during the typed-verdict step silently matched nothing, because `ScheduleAsync` had
+been reverted earlier and the replace target no longer existed. The build stayed green because
+nothing referenced the old signature. The verifier and its 20 tests are correct; they are simply
+not yet load-bearing. `EmailIngestEnqueuer.EnqueueAsync` still walks `message.Attachments` at
+line 96 and still mints `Guid.NewGuid()` at line 53.
+
+Nothing in this ledger claimed otherwise — steps 2 and 9 were already TODO — but the distinction
+matters and is written down rather than left to be rediscovered.
+
+## STEP 2 — the decisive contract detail
+
+`SourceOccurrenceIdentity.BuildKey` (`Extraction/DocumentIngestionService.cs:638`) is:
+
+```
+$"{batchId:D}:{sourceType}:{sha256(metadata.SourceOccurrenceId)}"
+```
+
+**The batch id is part of the occurrence idempotency key.** That single fact explains SME3's
+EIA-01 and dictates the whole of Step 2:
+
+* With `Guid.NewGuid()` per scheduling pass (today, `EmailIngestEnqueuer.cs:53`), two pollers —
+  or a poller and the recovery sweep — produce **different** occurrence keys for the same
+  component, so `ux_source_document_occurrences_tenant_idempotency` never fires, a second
+  occurrence is created, `UX_ExtractionJobs_BU_SourceOccurrence` never fires, and the component
+  gets **two extraction jobs → two Leads for one email part**.
+* With a **derived** batch id, the occurrence key is deterministic and the two unique indexes
+  the repository ALREADY has collapse concurrent schedulers onto one occurrence and one job.
+  No new queue, no new constraint, no advisory lock of our own — the existing durable pattern
+  does the work once it is fed a stable identity.
+
+So Step 2 needs no new idempotency mechanism. It needs exactly two things fed correctly:
+
+1. `batchId` = SHA-256 over `"nexora:email-assembly-batch:v1:{assemblyId}:{messageKey}"`
+   (never `Guid.NewGuid`, never `GetHashCode`).
+2. `metadata.SourceOccurrenceId` = the **persisted** `ComponentKey`, read from the row, never
+   recomputed.
+
+### Exact next action
+
+Rewrite `Ingestion/Triage/EmailIngestEnqueuer.cs`:
+
+* delete `EnqueueAsync` and its `foreach (var att in message.Attachments)` loop outright;
+* add `ScheduleAsync(assembly, persistedComponents, plan, ingest, clientEmail, ingestion,
+  triage, coordinator, logger, ct)`;
+* call `EmailComponentManifestVerifier.Verify(assembly.ManifestContractVersion,
+  assembly.ExpectedComponentCount, components, plan)` **first** and hold every non-terminal
+  component unless the verdict is `Compatible` — branch on the typed verdict, never on text;
+* iterate persisted rows by `Ordinal`; skip `IsTerminal` (Completed/Skipped/RefusedSecurity/
+  Ignored/StructuralOnly) and any row whose referenced job is verified to exist;
+* schedule under the persisted `ComponentKey` with the derived `batchId`.
+
+Then update `Services/EmailService.cs:913` and `Ingestion/Triage/EmailTriageService.cs:240`
+together — deleting the walk breaks both at compile time, so they land in one increment — and
+rewrite `EmailIngestEnqueuerTests`, which asserts the walk being deleted.
+
+Verify: `dotnet build ERP_RFQ_Automation.sln` then the email/assembly filter, then full backend.
