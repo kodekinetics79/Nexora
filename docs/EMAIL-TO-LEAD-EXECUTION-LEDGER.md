@@ -1286,3 +1286,127 @@ byte-identical.
 per-attachment route through `EmailService` and `EmailTriageService.ReprocessAsync`. Everything
 above is 0% of production traffic today and 100% of multi-part inquiry mail the day capture is
 wired. The cutover must gate BOTH callers and drain occurrences, not just queue rows.
+
+
+## CALLER CUTOVER — both producers, then the guardrails that make it a cutover (`391c306` + this increment)
+
+`391c306` moved both production callers onto `EmailInquiryIntakeService` and deleted the
+`message.Attachments` fan-out with them. That closed the "Still open" item above: `ScheduleAsync`
+has production callers, and it is the only scheduler.
+
+Deleting the second door is not the same as closing the first one. Two things were still missing,
+and they are what turn a switch into a cutover.
+
+### 1. The worker now FAILS CLOSED on a component-less email job
+
+An `ExtractionJob` with `SourceType = Email` and a NULL `EmailInquiryComponentId` used to fall
+through to per-job Lead reconciliation. That was step 7 of the drain runbook recorded above, and
+it was deliberately not taken while capture was unwired — a blanket refusal then returned 0 for
+**every** email job, because no email job had a component. Mail was polled, jobs ran, nothing
+became an RFQ, and 4911 tests stayed green. It was found by a product owner looking at a screen.
+
+**That reason is gone.** Both producers are canonical, and `ScheduleAsync` writes the component id
+WITH the job row. So a component-less email job means the scheduler and the worker disagree about
+the same message, and the per-document Lead it would mint — a covering note priced without the
+schedule attached to it — is the exact defect the barrier exists to remove.
+
+The fence has two outcomes, and the split is not cosmetic:
+
+| The job's message | What happens | Why |
+| --- | --- | --- |
+| has an assembly | `HoldForReviewAsync` with `assembly_ownership_unresolved`, no Lead, job completes | The message exists as an aggregate, so the operator gets a message-level hold on the screen they already read. Retrying the job cannot help — a job never gains a component id — so failing it would only burn attempts before dead-lettering. |
+| has no assembly | the job fails with a reason naming only the job and the tenant | This is pre-cutover work. There is nothing to hold; the honest answer is "this cannot produce a lead, reprocess the message". |
+
+Neither outcome loses anything: raw evidence, sibling components and the ingest row are untouched,
+and `POST /api/email-triage/{id}/reprocess` re-enters the canonical door.
+
+The refusal is gated on the assembly coordinator being registered, exactly as the component fence
+above it is. A container without the capability (the lease/heartbeat harnesses) has no assembly to
+be inconsistent with, and an unregistered capability must degrade to pre-fence behaviour rather
+than silently stop ingestion — that is the same lesson, spelled the same way.
+
+### 2. THE DRAIN BOUNDARY, stated and countable
+
+**The boundary:** an email `ExtractionJob` created before the caller cutover carries no
+`EmailInquiryComponentId`. From this increment those jobs **cannot produce a Lead**. There is no
+dual routing and there will not be one: a compatibility path that stays becomes the path, and the
+migration is then never finished by anyone.
+
+**Draining one:** reprocess the message from the inbound mail triage surface
+(`POST /api/email-triage/{id}/reprocess`). It captures the message, plans the real MIME tree and
+schedules component jobs — the same operation the poller performs, with a different trigger. The
+legacy job is left as history.
+
+**Counting what remains:** `GET /api/operations/readiness` reports `legacyEmailIntake` —
+`inFlight` (email jobs with no component still Pending/Leased/Extracting/Persisting) and
+`oldestCreatedOn`. A non-zero `inFlight` is also a **blocking reason** on that response, because
+these jobs cannot finish and the mail behind them looks ingested while producing nothing. Terminal
+and dead-lettered legacy jobs are deliberately excluded: history does not drain, and a permanently
+red flag is a flag nobody reads.
+
+No new controller, no new table, no new queue. The readiness surface is where an operator already
+goes to ask what is stuck.
+
+### 3. What the tests now hold
+
+`EmailCallerCutoverTests` pins the two properties the cutover is made of, neither of which had any
+coverage — a future edit could have reintroduced a second door to the queue with the whole suite
+green, which is how the two callers drifted apart the first time.
+
+- the poller hands the message to `IEmailInquiryIntakeService`, with the durable ingest row;
+- the poller does **not** acknowledge when capture fails (the message stays unread and the ingest
+  row survives, so the next cycle re-fetches rather than starting from nothing);
+- a message the gate stops is recorded and never reaches capture, and is still acknowledged;
+- reprocess reads the original through `IRawEmailEvidenceReader`, proven by **disagreement**: the
+  local `RawEmailPath` file is a different message from the one the reader returns, and what
+  reaches the intake is the reader's copy;
+- reprocess refuses when capture did not complete;
+- `EmailIngestEnqueuer.EnqueueAsync` does not come back.
+
+`LeadPersisterEmailFenceTests` gains the two fence outcomes above, including that the failure
+reason names no file, no sender and no storage path.
+
+### 4. Two truthfulness fixes found while doing it
+
+**`EmailTriageService.CountRawEmailAttachments` was the deleted walk, still running.** The list
+screen opened the stored `.eml` and counted `message.Attachments` for any message that produced no
+jobs — wrong twice over. It is not the MIME tree (MimeKit yields only entities whose
+Content-Disposition says "attachment", so a forwarded enquiry counted zero), and the path it read
+is container-local storage that does not survive a deploy on the managed target, so the number
+silently degraded to "unknown" for historic mail. It now counts the **persisted components**, which
+are what the pipeline actually planned, cost no file I/O, and are tenant-scoped. Nothing on the
+read path touches the filesystem any more.
+
+**`POST /api/Email/fetch` reported the HTTP call, not the mail.** "Email data fetched and inserted
+into the database successfully" was returned identically by a cycle that turned four emails into
+four inquiries and by one that rejected three as noise and could not queue the fourth's attachment.
+The poll outcome now carries messages found / downloaded / already ingested / captured, components
+scheduled, held for review, rejected, and not acknowledged — per mailbox and as totals — and the
+`mailboxes` field keeps its existing numeric contract, because the web client treats its absence as
+"nothing polled".
+
+### 5. The Email Intake surface now shows the message, not just the decision
+
+List and detail return assembly state and reason, subject/sender/received time, component totals
+(expected/completed), the assembled Lead id, and ingestion/last-change timestamps; detail adds every
+component with its filename, kind, state and failure reason. Detail is the SAME row the list
+renders with `components` filled in — not a second shape, which is how a list and a detail screen
+come to disagree about one message — and `components` is **null on the list**, because "not asked
+for" and "asked, and there are none" are different answers.
+
+The fields are FLAT on the row rather than nested under an `assembly` object, and that is a
+decision about the consumer: the Email Intake screen reads these names off the row and degrades an
+unrecognised name to "not reported", so a nested shape would have rendered the whole panel blank
+while every value was present and correct on the wire.
+
+**One thing is deliberately not reported: a recovery timestamp.** Nothing durable records that a
+message was recovered rather than assembled inline — the sweep and the worker's barrier write the
+same `UpdatedAtUtc` — so the field is named `lastUpdatedAtUtc` and says what it is. Distinguishing
+the two needs a column, and a schema change was out of scope for this increment.
+
+Evidence metadata is limited to size, content type and **whether** a digest and an evidence object
+exist. No URI, no bucket, no key, no
+local path leaves the server — a storage location is useless to the reader and a map of the
+evidence layout to everyone else, and a test serializes both surfaces and asserts neither carries
+one. Tenant, module permission and the `EmailIntake` entitlement on the detail endpoint are the
+list's own, unchanged.

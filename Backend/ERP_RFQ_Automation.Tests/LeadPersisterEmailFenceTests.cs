@@ -53,8 +53,14 @@ public class LeadPersisterEmailFenceTests : IDisposable
             return Task.FromResult(new EmailInquiryAssemblyEvaluation(EvaluatesTo, 1, 1, null));
         }
 
+        public readonly List<(long Bu, long AssemblyId, string ReasonCode, string Detail)> Holds = [];
+
         public Task HoldForReviewAsync(long bu, long assemblyId, string reasonCode,
-            string reasonDetail, CancellationToken ct = default) => Task.CompletedTask;
+            string reasonDetail, CancellationToken ct = default)
+        {
+            Holds.Add((bu, assemblyId, reasonCode, reasonDetail));
+            return Task.CompletedTask;
+        }
 
         public Task MarkAssembledAsync(long bu, long assemblyId, long leadId,
             CancellationToken ct = default) => Task.CompletedTask;
@@ -182,15 +188,20 @@ public class LeadPersisterEmailFenceTests : IDisposable
     // ---- the regression this class exists to prevent -----------------------------------------
 
     [Fact]
-    public async Task An_email_job_with_NO_component_is_NOT_swallowed_by_the_fence()
+    public async Task An_email_job_with_NO_component_and_no_assembly_is_refused_with_a_reason()
     {
-        // THE regression. A blanket "fail closed on SourceType == Email" returned 0 for every
-        // email job, because capture is not wired so no email job has a component. Mail was
-        // polled, jobs ran, nothing became an RFQ — and the whole suite stayed green.
+        // THE CUTOVER FENCE, and the history behind it.
         //
-        // The assertion is that persistence proceeds PAST the fence into ordinary email
-        // handling. Here that surfaces as the provenance requirement email jobs genuinely have;
-        // under the regression the method returned 0 silently and this would not throw at all.
+        // A blanket "fail closed on SourceType == Email" once returned 0 for every email job,
+        // because capture was not wired so NO email job had a component. Mail was polled, jobs
+        // ran, nothing became an RFQ — and the whole suite stayed green. The branch was removed
+        // for that reason and the reason is now gone: both producers go through
+        // EmailInquiryIntakeService, and ScheduleAsync writes the component id with the job row.
+        //
+        // So a component-less email job is legacy in-flight work or a scheduler/worker
+        // disagreement, and either way a per-document Lead from one part of a message is the
+        // defect the barrier exists to remove. It is refused, with a sentence an operator can
+        // act on and no identifiers beyond the job and the tenant.
         var coordinator = new RecordingCoordinator();
         var job = Job(ExtractionSourceType.Email);
 
@@ -199,10 +210,70 @@ public class LeadPersisterEmailFenceTests : IDisposable
         var persister = new LeadPersister(ctx, new NoopLogger<LeadPersister>(),
             emailAssemblies: coordinator);
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() => persister.PersistAsync(job, Outcome()));
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => persister.PersistAsync(job, Outcome()));
 
-        // And crucially: the fence recorded nothing, because this job owns no component.
+        Assert.Contains("no inquiry component", error.Message);
+        Assert.Contains("cutover", error.Message);
+        // Non-sensitive: the reason names the job and the tenant, never the file, the sender or
+        // where any of it is stored.
+        Assert.DoesNotContain(job.StoragePath, error.Message);
+        Assert.DoesNotContain(job.FileName!, error.Message);
+
+        await using var assertCtx = _db.ContextFor(null);
+        Assert.Equal(0, await assertCtx.Leads.CountAsync());
         Assert.Empty(coordinator.Outcomes);
+        Assert.Empty(coordinator.Holds);
+    }
+
+    [Fact]
+    public async Task An_email_job_with_NO_component_holds_the_message_when_its_assembly_is_known()
+    {
+        // The other half: the message DOES exist as an aggregate, so the operator gets a
+        // message-level hold they can see on the inbound mail screen rather than a queue row
+        // nobody reads. Held, not lost — every sibling component and the raw evidence are
+        // untouched, and no Lead is minted from this fragment.
+        var coordinator = new RecordingCoordinator();
+        var seeded = await SeedComponentAsync(jobId: 31);
+
+        long ingestId;
+        await using (var lookup = _db.ContextFor(null))
+        {
+            ingestId = await lookup.Set<EmailInquiryAssembly>()
+                .Where(x => x.Id == seeded.AssemblyId).Select(x => x.EmailIngestId).SingleAsync();
+        }
+
+        // A job for the same MESSAGE that names no component — exactly what a legacy job or a
+        // scheduler that skipped ScheduleAsync produces.
+        var job = Job(ExtractionSourceType.Email, id: 32);
+        job.StoragePath = Path.Combine(Path.GetTempPath(), $"fence-{Guid.NewGuid():N}.bin");
+        await File.WriteAllTextAsync(job.StoragePath, "one part of a message");
+        await new ExtractionJobMetadata { EmailIngestId = ingestId, LeadSource = "Email" }
+            .SaveAsync(job.StoragePath, Bu);
+
+        try
+        {
+            await using var ctx = _db.ContextFor(null);
+            await SeedSourceAsync(ctx, job);
+            var leadId = await new LeadPersister(ctx, new NoopLogger<LeadPersister>(),
+                emailAssemblies: coordinator).PersistAsync(job, Outcome());
+
+            Assert.Equal(0, leadId);
+        }
+        finally
+        {
+            File.Delete(job.StoragePath);
+            File.Delete(ExtractionJobMetadata.SidecarPath(job.StoragePath, Bu));
+        }
+
+        var hold = Assert.Single(coordinator.Holds);
+        Assert.Equal(Bu, hold.Bu);
+        Assert.Equal(seeded.AssemblyId, hold.AssemblyId);
+        Assert.Equal(EmailInquiryHoldReasons.OwnershipUnresolved, hold.ReasonCode);
+        Assert.Equal(EmailInquiryHoldReasons.OwnershipUnresolvedDetail, hold.Detail);
+
+        await using var assertCtx = _db.ContextFor(null);
+        Assert.Equal(0, await assertCtx.Leads.CountAsync());
     }
 
     [Fact]

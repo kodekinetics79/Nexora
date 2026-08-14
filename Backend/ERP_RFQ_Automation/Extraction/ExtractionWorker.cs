@@ -1177,6 +1177,86 @@ public sealed class LeadPersister : ILeadPersister
             return 0;
         }
 
+        // ---- CUTOVER FENCE: AN EMAIL JOB THAT OWNS NO COMPONENT --------------------------
+        //
+        // An Email job with a NULL EmailInquiryComponentId used to fall through to the
+        // per-job Lead reconciliation below. That was correct for exactly one reason and the
+        // reason is gone: capture was not wired, so NO email job carried a component, and a
+        // blanket refusal here stopped every email becoming an RFQ while 4911 tests stayed
+        // green. The outage was found by a product owner looking at a screen.
+        //
+        // Both producers are now canonical. EmailInquiryIntakeService captures the message
+        // and EmailIngestEnqueuer.ScheduleAsync writes the component id WITH the job row, and
+        // it is the only scheduler. So a component-less email job today means the scheduler
+        // and the worker disagree about the same message — and the per-document Lead it would
+        // otherwise mint is the precise defect the barrier exists to remove: a covering note
+        // priced without the schedule that was attached to it.
+        //
+        // Gated on the coordinator for the same reason the fence above is: a container without
+        // the assembly capability (the lease/heartbeat harnesses) has no assembly to hold and
+        // no state to be inconsistent with, and an unregistered capability must degrade to the
+        // pre-fence behaviour rather than silently stop ingestion. The production graph always
+        // registers it, and EmailInquiryAssemblyRegistrationTests is what proves that.
+        if (!bypassAssemblyFence
+            && _emailAssemblies is not null
+            && job.SourceType == ExtractionSourceType.Email
+            && job.EmailInquiryComponentId is null)
+        {
+            // Resolve the MESSAGE, not the component: the job names no component, so the only
+            // honest question left is "is there an assembly this job's message belongs to?".
+            // The sidecar is a best-effort HINT and cannot authorize anything, so its ingest id
+            // is used only to look the row up, and the lookup is bound by the job's own tenant.
+            var strandedMetadata = await ResolveMetadataAsync(job, ct);
+            long? strandedAssemblyId = null;
+            if (strandedMetadata?.EmailIngestId is > 0
+                && _context.Model.FindEntityType(
+                    typeof(ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssembly)) is not null)
+            {
+                strandedAssemblyId = await _context
+                    .Set<ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssembly>()
+                    .AsNoTracking()
+                    .Where(x => x.BusinessUnitId == job.BusinessUnitId
+                                && x.EmailIngestId == strandedMetadata.EmailIngestId!.Value)
+                    .Select(x => (long?)x.Id)
+                    .FirstOrDefaultAsync(ct);
+            }
+
+            if (strandedAssemblyId is { } holdAssemblyId)
+            {
+                // The message exists as an aggregate, so the operator gets a message-level
+                // hold they can see and act on rather than a queue row nobody reads. Held, not
+                // lost: the raw evidence and every sibling component are untouched.
+                await _emailAssemblies.HoldForReviewAsync(
+                    job.BusinessUnitId, holdAssemblyId,
+                    ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryHoldReasons.OwnershipUnresolved,
+                    ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryHoldReasons
+                        .OwnershipUnresolvedDetail,
+                    ct);
+
+                _log.LogError(
+                    "Extraction job {JobId} (business unit {BusinessUnitId}) is an email job that "
+                    + "owns no inquiry component; assembly {AssemblyId} is held for review and NO "
+                    + "per-document lead was created.",
+                    job.Id, job.BusinessUnitId, holdAssemblyId);
+
+                // Deliberately not a throw. The message is visibly held and re-schedulable, and
+                // retrying THIS job cannot help — a job never gains a component id.
+                return 0;
+            }
+
+            // No assembly: this is legacy in-flight work from before the cutover. It is failed
+            // with a reason an operator can act on. The drain boundary — how many of these
+            // remain and what to do with them — is /api/operations/readiness and
+            // docs/EMAIL-TO-LEAD-EXECUTION-LEDGER.md; permanent dual routing is not the answer.
+            //
+            // The reason names ids only. No file name, no sender, no path.
+            throw new InvalidOperationException(
+                $"Extraction job {job.Id} (business unit {job.BusinessUnitId}) is an email job with "
+                + "no inquiry component and no inquiry assembly, so it predates the email intake "
+                + "cutover. It cannot produce a lead on its own; reprocess the message from the "
+                + "inbound mail triage surface, which enters the canonical intake.");
+        }
+
         // ---- END ASSEMBLY SAFETY FENCE ---------------------------------------------------
 
         // Multi-inquiry auto-split: N per-group results (a strict partition of the merged
