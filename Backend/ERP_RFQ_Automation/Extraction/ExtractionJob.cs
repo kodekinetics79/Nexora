@@ -52,6 +52,22 @@ public sealed class ExtractionJob
     /// <summary>The immutable Stage 1 receipt that owns this retryable unit of work.</summary>
     public long? SourceDocumentOccurrenceId { get; set; }
 
+    /// <summary>
+    /// THE email inquiry component this job was created for, where it was.
+    ///
+    /// <para>Ownership used to be inferred from three places that could disagree: a nullable
+    /// <c>ExtractionJobId</c> written back onto the component, a
+    /// <see cref="SourceDocumentOccurrenceId"/>, and a best-effort metadata sidecar. A
+    /// best-effort hint must never authorize a tenant mutation, and two nullable back-references
+    /// pointing at each other are not an ownership model. This column is the single authority,
+    /// carried on the job itself, backed by a composite foreign key that includes the tenant so
+    /// it cannot name another tenant's component.</para>
+    ///
+    /// <para>Null for every non-email job — manual upload, folder watch, API — which is what
+    /// keeps those paths on their existing per-document behaviour.</para>
+    /// </summary>
+    public long? EmailInquiryComponentId { get; set; }
+
     /// <summary>Groups all jobs fanned out from one upload / poll batch (for progress + reporting).</summary>
     public Guid BatchId { get; set; }
 

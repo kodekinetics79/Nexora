@@ -16,6 +16,12 @@ namespace ERP_RFQ_Automation.Tests;
 /// under test. That is precisely how a change that silently stopped all email-to-Lead processing
 /// shipped with 4911 tests green and was found by a product owner looking at a screen.</para>
 ///
+/// <para><b>What changed.</b> The fence used to HOLD every component, because there was nowhere
+/// durable to put an extraction result. There is now, so a component's result is recorded and
+/// the component completes; the fence's remaining job is the one it always had — no Lead is
+/// created per component. Ownership is read from the job's own EmailInquiryComponentId rather
+/// than from a back-reference written after the insert, which a worker could claim ahead of.</para>
+///
 /// <para>These run on `TestDb`: the real model, SQLite in memory, foreign keys and unique indexes
 /// enforced.</para>
 /// </summary>
@@ -31,6 +37,27 @@ public class LeadPersisterEmailFenceTests : IDisposable
     {
         public readonly List<(long Bu, long AssemblyId, string Key, EmailInquiryComponentStatus Status,
             string? ReasonCode, string? Detail, long? OccurrenceId)> Outcomes = [];
+
+        public readonly List<(long Bu, long ComponentId, long JobId,
+            EmailInquiryComponentResultPayload Payload)> Results = [];
+
+        /// <summary>What Reevaluate will claim the message became. Default: still extracting.</summary>
+        public EmailInquiryAssemblyStatus EvaluatesTo { get; set; } =
+            EmailInquiryAssemblyStatus.Extracting;
+
+        public Task<EmailInquiryAssemblyEvaluation> RecordComponentResultAsync(
+            long businessUnitId, long componentId, long extractionJobId,
+            EmailInquiryComponentResultPayload payload, CancellationToken ct = default)
+        {
+            Results.Add((businessUnitId, componentId, extractionJobId, payload));
+            return Task.FromResult(new EmailInquiryAssemblyEvaluation(EvaluatesTo, 1, 1, null));
+        }
+
+        public Task HoldForReviewAsync(long bu, long assemblyId, string reasonCode,
+            string reasonDetail, CancellationToken ct = default) => Task.CompletedTask;
+
+        public Task MarkAssembledAsync(long bu, long assemblyId, CancellationToken ct = default)
+            => Task.CompletedTask;
 
         public Task RecordComponentOutcomeAsync(long businessUnitId, long assemblyId, string componentKey,
             EmailInquiryComponentStatus status, string? reasonCode, string? reasonDetail,
@@ -53,9 +80,11 @@ public class LeadPersisterEmailFenceTests : IDisposable
             string key, CancellationToken ct = default) => Task.FromResult(true);
     }
 
-    private static ExtractionJob Job(ExtractionSourceType sourceType, long id = 1) => new()
+    private static ExtractionJob Job(
+        ExtractionSourceType sourceType, long id = 1, long? componentId = null) => new()
     {
         Id = id,
+        EmailInquiryComponentId = componentId,
         BatchId = Guid.NewGuid(),
         BusinessUnitId = Bu,
         SourceType = sourceType,
@@ -74,7 +103,7 @@ public class LeadPersisterEmailFenceTests : IDisposable
         ExtractedItemCount = 2
     };
 
-    private async Task<(long AssemblyId, string Key)> SeedComponentAsync(long jobId)
+    private async Task<(long AssemblyId, long ComponentId, string Key)> SeedComponentAsync(long jobId)
     {
         await using var ctx = _db.ContextFor(null);
         // The real model enforces the chain: an assembly needs an ingest, which needs a mailbox,
@@ -134,7 +163,8 @@ public class LeadPersisterEmailFenceTests : IDisposable
         ctx.Add(assembly);
         await ctx.SaveChangesAsync();
 
-        return (assembly.Id, assembly.Components.First().ComponentKey);
+        var component = assembly.Components.First();
+        return (assembly.Id, component.Id, component.ComponentKey);
     }
 
     private static async Task SeedSourceAsync(ErpRfqAutomationContext ctx, ExtractionJob job)
@@ -176,11 +206,11 @@ public class LeadPersisterEmailFenceTests : IDisposable
     }
 
     [Fact]
-    public async Task An_email_job_WITH_a_component_creates_no_Lead_and_reports_the_hold()
+    public async Task An_email_job_WITH_a_component_records_a_durable_result_and_creates_no_Lead()
     {
         var coordinator = new RecordingCoordinator();
-        var job = Job(ExtractionSourceType.Email, id: 7);
-        var (assemblyId, key) = await SeedComponentAsync(job.Id);
+        var seeded = await SeedComponentAsync(jobId: 7);
+        var job = Job(ExtractionSourceType.Email, id: 7, componentId: seeded.ComponentId);
 
         await using (var ctx = _db.ContextFor(null))
         {
@@ -189,29 +219,26 @@ public class LeadPersisterEmailFenceTests : IDisposable
             await persister.PersistAsync(job, Outcome());
         }
 
+        // No per-component Lead. This is the fence's entire remaining purpose.
         await using var assertCtx = _db.ContextFor(null);
         Assert.Equal(0, await assertCtx.Leads.CountAsync());
 
-        var outcome = Assert.Single(coordinator.Outcomes);
-        Assert.Equal(Bu, outcome.Bu);
-        // The AssemblyId must be the one the worker read at its join — passing tenant + key alone
-        // binds one message's outcome onto another message's component row.
-        Assert.Equal(assemblyId, outcome.AssemblyId);
-        Assert.Equal(key, outcome.Key);
-        Assert.Equal(EmailInquiryComponentStatus.FailedRecoverable, outcome.Status);
-        Assert.Equal(EmailInquiryHoldReasons.AssemblyResultStorePending, outcome.ReasonCode);
-        // The detail the operator actually receives, not the constant read back in isolation.
-        Assert.Equal(EmailInquiryHoldReasons.AssemblyResultStorePendingDetail, outcome.Detail);
+        // The result went somewhere durable, attributed to the component the JOB names.
+        var recorded = Assert.Single(coordinator.Results);
+        Assert.Equal(Bu, recorded.Bu);
+        Assert.Equal(seeded.ComponentId, recorded.ComponentId);
+        Assert.Equal(job.Id, recorded.JobId);
     }
 
     [Fact]
-    public async Task The_held_component_is_never_reported_as_Completed()
+    public async Task The_recorded_result_carries_the_extracted_lines_and_not_an_empty_payload()
     {
-        // Completed would tell the barrier the part is done while its extraction output was
-        // discarded — a Lead assembled from the remainder.
+        // The failure this pins is silent result loss: a component marked done while its
+        // extraction output went nowhere, so the barrier later assembles a Lead from whatever
+        // parts happened to survive. The payload must genuinely contain the work.
         var coordinator = new RecordingCoordinator();
-        var job = Job(ExtractionSourceType.Email, id: 11);
-        await SeedComponentAsync(job.Id);
+        var seeded = await SeedComponentAsync(jobId: 11);
+        var job = Job(ExtractionSourceType.Email, id: 11, componentId: seeded.ComponentId);
 
         await using (var ctx = _db.ContextFor(null))
         {
@@ -219,8 +246,15 @@ public class LeadPersisterEmailFenceTests : IDisposable
                 .PersistAsync(job, Outcome());
         }
 
+        var payload = Assert.Single(coordinator.Results).Payload;
+        Assert.Contains("RFQ-1", payload.PayloadJson);
+        Assert.Equal(2, payload.ExtractedItemCount);
+        Assert.Equal(2, payload.ExpectedItemCount);
+        Assert.False(string.IsNullOrWhiteSpace(payload.ProcessingPath));
+
+        // And the fence did NOT fall back to the old hold.
         Assert.DoesNotContain(coordinator.Outcomes,
-            o => o.Status == EmailInquiryComponentStatus.Completed);
+            o => o.ReasonCode == EmailInquiryHoldReasons.AssemblyResultStorePending);
     }
 
     [Fact]
@@ -230,6 +264,8 @@ public class LeadPersisterEmailFenceTests : IDisposable
         // component row exists in the database for some other job.
         var coordinator = new RecordingCoordinator();
         await SeedComponentAsync(jobId: 999);
+        // No EmailInquiryComponentId: a manual upload can never carry one — the database CHECK
+        // constraint refuses it — so the fence must not engage.
         var job = Job(ExtractionSourceType.ManualUpload, id: 3);
 
         await using (var ctx = _db.ContextFor(null))
@@ -242,6 +278,7 @@ public class LeadPersisterEmailFenceTests : IDisposable
         await using var assertCtx = _db.ContextFor(null);
         Assert.Equal(1, await assertCtx.Leads.CountAsync());
         Assert.Empty(coordinator.Outcomes);
+        Assert.Empty(coordinator.Results);
     }
 
     [Fact]
@@ -250,8 +287,8 @@ public class LeadPersisterEmailFenceTests : IDisposable
         // The production graph must register the coordinator, but an unregistered one must not
         // silently stop ingestion — it must degrade to the pre-fence behaviour, which for an
         // email job is the ordinary provenance requirement rather than a silent zero.
-        var job = Job(ExtractionSourceType.Email, id: 21);
-        await SeedComponentAsync(job.Id);
+        var seeded = await SeedComponentAsync(jobId: 21);
+        var job = Job(ExtractionSourceType.Email, id: 21, componentId: seeded.ComponentId);
 
         await using var ctx = _db.ContextFor(null);
         await SeedSourceAsync(ctx, job);

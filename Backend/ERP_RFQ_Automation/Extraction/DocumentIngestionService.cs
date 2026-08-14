@@ -75,6 +75,7 @@ public interface IDocumentIngestion
         Guid? batchId = null,
         int priority = 0,
         ExtractionJobMetadata? metadata = null,
+        long? emailInquiryComponentId = null,
         CancellationToken ct = default);
 }
 
@@ -124,6 +125,7 @@ public sealed class DocumentIngestionService : IDocumentIngestion
         Guid? batchId = null,
         int priority = 0,
         ExtractionJobMetadata? metadata = null,
+        long? emailInquiryComponentId = null,
         CancellationToken ct = default)
     {
         return _context.Database.CreateExecutionStrategy().ExecuteAsync(() =>
@@ -133,7 +135,9 @@ public sealed class DocumentIngestionService : IDocumentIngestion
             // return the already-tracked (stale) instance rather than the row as it now stands.
             // IngestCoreAsync loads everything it writes, so nothing is lost by starting clean.
             _context.ChangeTracker.Clear();
-            return IngestCoreAsync(bytes, fileName, businessUnitId, sourceType, batchId, priority, metadata, ct);
+            return IngestCoreAsync(
+                bytes, fileName, businessUnitId, sourceType, batchId, priority, metadata,
+                emailInquiryComponentId, ct);
         });
     }
 
@@ -145,6 +149,7 @@ public sealed class DocumentIngestionService : IDocumentIngestion
         Guid? batchId,
         int priority,
         ExtractionJobMetadata? metadata,
+        long? emailInquiryComponentId,
         CancellationToken ct)
     {
         if (bytes is null || bytes.Length == 0)
@@ -394,6 +399,7 @@ public sealed class DocumentIngestionService : IDocumentIngestion
             {
                 BusinessUnitId = businessUnitId,
                 SourceDocumentOccurrenceId = occurrence.Id,
+                EmailInquiryComponentId = emailInquiryComponentId,
                 SourceType = sourceType,
                 StoragePath = selectedObject.StorageUri,
                 FileName = fileName,

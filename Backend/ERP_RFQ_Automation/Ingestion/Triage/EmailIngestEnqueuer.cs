@@ -173,7 +173,7 @@ public static class EmailIngestEnqueuer
                 };
                 var attachmentResult = await ingestion.IngestAsync(
                     ms.ToArray(), part.FileName, businessUnitId, ExtractionSourceType.Email,
-                    batchId, priority: 0, attachmentMetadata, ct);
+                    batchId, priority: 0, attachmentMetadata, ct: ct);
                 queued++;
                 logger.LogInformation("Enqueued attachment {FileName} as job {JobId} ({Outcome}) for ingest {IngestId}.",
                     part.FileName, attachmentResult.JobId, attachmentResult.Outcome, ingest.Id);
@@ -237,7 +237,7 @@ public static class EmailIngestEnqueuer
                 var bodyName = $"{SanitizeFileName(message.Subject ?? "email")}_body.txt";
                 var bodyResult = await ingestion.IngestAsync(
                     Encoding.UTF8.GetBytes(bodyDocument), bodyName, businessUnitId,
-                    ExtractionSourceType.Email, batchId, priority: 0, metadata, ct);
+                    ExtractionSourceType.Email, batchId, priority: 0, metadata, ct: ct);
                 queued++;
                 logger.LogInformation("Enqueued email body as job {JobId} ({Outcome}) for ingest {IngestId}.",
                     bodyResult.JobId, bodyResult.Outcome, ingest.Id);
@@ -393,7 +393,11 @@ public static class EmailIngestEnqueuer
                     component.FileName ?? $"component-{component.Ordinal}",
                     assembly.BusinessUnitId, ExtractionSourceType.Email,
                     batchId, priority: 0,
-                    BuildMetadata(assembly, component, ingest, clientEmail, triage), ct);
+                    BuildMetadata(assembly, component, ingest, clientEmail, triage),
+                    // THE ownership authority, written with the job row. The sidecar built above
+                    // carries the same ids as diagnostic hints and is explicitly not trusted to
+                    // authorize anything; this parameter is.
+                    component.Id, ct);
 
                 await coordinator.RecordComponentQueuedAsync(
                     assembly.BusinessUnitId, assembly.Id, component.ComponentKey, result.JobId, ct);

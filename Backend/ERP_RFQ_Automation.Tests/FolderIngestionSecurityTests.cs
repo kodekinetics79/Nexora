@@ -327,6 +327,7 @@ public sealed class FolderIngestionSecurityTests
         public async Task<IngestedDocument> IngestAsync(
             byte[] bytes, string fileName, long businessUnitId, ExtractionSourceType sourceType,
             Guid? batchId = null, int priority = 0, ExtractionJobMetadata? metadata = null,
+            long? emailInquiryComponentId = null,
             CancellationToken ct = default)
         {
             if (Failure is not null) throw Failure;

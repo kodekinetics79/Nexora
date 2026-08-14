@@ -279,7 +279,7 @@ namespace ERP_RFQ_Automation.Services
                             ClientEmail = "",
                             LeadSource = leadSourceLabel,
                             EmailSource = leadSourceLabel == "Aramco Leads" ? "Aramco RFP Document" : GetFileTypeLabel(ext)
-                        }, cancellationToken);
+                        }, ct: cancellationToken);
                     _logger.LogInformation("Enqueued {Label} file {FileName} as job {JobId} ({Outcome}).",
                         leadSourceLabel, fileName, result.JobId, result.Outcome);
 

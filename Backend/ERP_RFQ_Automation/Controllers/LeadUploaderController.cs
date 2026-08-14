@@ -74,7 +74,7 @@ namespace ERP_RFQ_Automation.Controllers
                 var result = await _ingestion.IngestAsync(stream.ToArray(), file.FileName, targetBUId,
                     ExtractionSourceType.ManualUpload, batchId, priority: 10,
                     metadata: new ExtractionJobMetadata { SourceOccurrenceId = $"template:{idempotency}:{file.FileName}" },
-                    HttpContext.RequestAborted);
+                    ct: HttpContext.RequestAborted);
                 return StatusCode(StatusCodes.Status202Accepted, new { success = true, batchId, jobId = result.JobId, outcome = result.Outcome.ToString() });
             }
             catch (Platform.Entitlements.EntitlementDeniedException ex)

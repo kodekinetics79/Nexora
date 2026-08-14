@@ -22,6 +22,19 @@ public sealed class EnqueueExtractionRequest
 {
     public long BusinessUnitId { get; init; }
     public long? SourceDocumentOccurrenceId { get; init; }
+
+    /// <summary>
+    /// The email inquiry component this job is being created FOR, where there is one.
+    ///
+    /// <para>It is set on the INSERT rather than bound afterwards, and that is the whole
+    /// point. A worker polls for Pending jobs continuously; a job inserted without its owner
+    /// and bound in a second statement can be claimed in the window between the two, and a
+    /// component-less email job is indistinguishable from a legacy per-document one — so the
+    /// worker would mint a Lead from a single attachment, which is precisely the defect the
+    /// message barrier exists to prevent. Inserted with the row, the window does not exist.</para>
+    /// </summary>
+    public long? EmailInquiryComponentId { get; init; }
+
     public ExtractionSourceType SourceType { get; init; }
 
     /// <summary>Path/URI of the already-persisted immutable file.</summary>

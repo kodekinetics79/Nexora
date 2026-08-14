@@ -23,6 +23,10 @@ public static class EmailInquiryAssemblyServiceCollectionExtensions
         services.AddScoped<IEmailInquiryCaptureService, EmailInquiryCaptureService>();
         services.AddScoped<IEmailInquiryAssemblyCoordinator, EmailInquiryAssemblyCoordinator>();
         services.AddScoped<IRawEmailEvidenceReader, RawEmailEvidenceReader>();
+        // IEmailInquiryLeadAssembler is deliberately NOT here. It needs ILeadPersister, which
+        // belongs to extraction, and registering it in this extension would make the capability
+        // unresolvable on its own — which is exactly what the registration test caught. It is
+        // registered beside ILeadPersister and the worker that calls it.
 
         // The declared per-message boundaries, as an injected value rather than a static, so an
         // operator can tune them in configuration without the planner reaching for a default.

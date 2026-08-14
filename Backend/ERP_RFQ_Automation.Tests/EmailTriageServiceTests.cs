@@ -21,6 +21,7 @@ public class EmailTriageServiceTests : IDisposable
         public Task<IngestedDocument> IngestAsync(
             byte[] bytes, string fileName, long businessUnitId, ExtractionSourceType sourceType,
             Guid? batchId = null, int priority = 0, ExtractionJobMetadata? metadata = null,
+            long? emailInquiryComponentId = null,
             CancellationToken ct = default)
             => throw new NotSupportedException("The list surface must never ingest.");
     }

@@ -666,6 +666,11 @@ builder.Services.AddScoped<ERP_RFQ_Automation.Extraction.Conversational.IConvers
 builder.Services.AddScoped<ERP_RFQ_Automation.Ingestion.Triage.IEmailTriageService,
     ERP_RFQ_Automation.Ingestion.Triage.EmailTriageService>();
 builder.Services.AddScoped<ILeadPersister, LeadPersister>();
+// The message barrier's payoff, registered here rather than with AddEmailInquiryAssembly
+// because it depends on ILeadPersister: one email message becomes ONE Lead, built from every
+// component's durable result once the last of them has finished. The worker calls it.
+builder.Services.AddScoped<ERP_RFQ_Automation.Ingestion.Assembly.IEmailInquiryLeadAssembler,
+    ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryLeadAssembler>();
 builder.Services.AddScoped<IExtractionDocumentReader, ProductionDocumentReader>();
 builder.Services.AddHostedService<ExtractionWorker>();
 // ING-05: unified ingestion gateway — the ONE door to the durable queue used by the

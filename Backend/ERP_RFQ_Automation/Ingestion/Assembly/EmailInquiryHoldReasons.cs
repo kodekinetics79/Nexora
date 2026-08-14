@@ -28,5 +28,14 @@ public static class EmailInquiryHoldReasons
         + "held; the original captured email evidence is preserved.";
 
     /// <summary>An Email job the worker cannot map to exactly one owning component.</summary>
+    /// <summary>A stored result carries a payload contract version this build cannot read.</summary>
+    public const string ResultContractUnsupported = "result_contract_unsupported";
+
+    /// <summary>A stored result is present but could not be deserialized.</summary>
+    public const string ResultUnreadable = "result_unreadable";
+
+    /// <summary>A component reported Completed but has no durable result row.</summary>
+    public const string ResultMissing = "result_missing";
+
     public const string OwnershipUnresolved = "assembly_ownership_unresolved";
 }

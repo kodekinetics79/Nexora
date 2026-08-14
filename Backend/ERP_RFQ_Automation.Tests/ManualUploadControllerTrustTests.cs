@@ -88,6 +88,7 @@ public sealed class ManualUploadControllerTrustTests : IDisposable
         public Task<IngestedDocument> IngestAsync(
             byte[] bytes, string fileName, long businessUnitId, ExtractionSourceType sourceType,
             Guid? batchId = null, int priority = 0, ExtractionJobMetadata? metadata = null,
+            long? emailInquiryComponentId = null,
             CancellationToken ct = default)
         {
             BusinessUnitIds.Add(businessUnitId);

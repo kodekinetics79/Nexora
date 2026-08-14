@@ -33,9 +33,20 @@ public static class EmailInquiryAssemblyStateMachine
             [EmailInquiryAssemblyStatus.Captured] = new[]
             {
                 EmailInquiryAssemblyStatus.Inspecting,
+                // Straight to Extracting is legal, and it is the ordinary path rather than a
+                // shortcut. Security inspection is performed SYNCHRONOUSLY while a component is
+                // being scheduled (DocumentIngestionService writes to quarantine, scans, and
+                // promotes to cleared before the job exists), so by the time any component is
+                // extracting, inspection has already happened — there is simply no window in
+                // which the message sits in a distinct Inspecting state. Omitting this stranded
+                // every real message at Captured: scheduling could not advance it, so the
+                // barrier's later verdict was always an illegal transition and was discarded.
+                EmailInquiryAssemblyStatus.Extracting,
                 // A message that carried nothing to capture is NOT ready — it has no inquiry.
-                // ReadyForAssembly is deliberately absent from this row: it is unreachable
-                // without at least one component completing, which cannot have happened yet.
+                // ReadyForAssembly is still deliberately absent from this row: reaching it
+                // requires a component to have completed, which means the message must have
+                // passed through Extracting first. That invariant is what stops an empty
+                // message being assembled, and it is preserved.
                 EmailInquiryAssemblyStatus.NoInquiry,
                 EmailInquiryAssemblyStatus.FailedRecoverable,
                 EmailInquiryAssemblyStatus.RejectedSecurity

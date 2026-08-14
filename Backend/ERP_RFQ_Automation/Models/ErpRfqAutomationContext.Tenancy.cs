@@ -383,6 +383,8 @@ public partial class ErpRfqAutomationContext
         modelBuilder.Entity<InventoryMovement>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<IncomingInventory>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<LeadLineCommercialResolution>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponentResult>()
+            .HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
 
         modelBuilder.ConfigureGovernedCustomFields();
         modelBuilder.ConfigureCommercialLifecycle();
@@ -404,6 +406,16 @@ public partial class ErpRfqAutomationContext
             modelBuilder.Entity<ERP_RFQ_Automation.Extraction.ExtractionJob>()
                 .HasAlternateKey(e => new { e.BusinessUnitId, e.Id })
                 .HasName("AK_ExtractionJobs_BusinessUnitId_Id");
+            // Canonical ownership: an email job names its component, with the tenant inside
+            // the key. RESTRICT, not CASCADE — deleting a component out from under a job that
+            // is mid-flight would strand the job with no owner to report back to, so the
+            // component must be removed through the assembly (which cascades) or not at all.
+            modelBuilder.Entity<ERP_RFQ_Automation.Extraction.ExtractionJob>()
+                .HasOne<ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponent>()
+                .WithMany()
+                .HasForeignKey(e => new { e.BusinessUnitId, e.EmailInquiryComponentId })
+                .HasPrincipalKey(e => new { e.BusinessUnitId, e.Id })
+                .OnDelete(DeleteBehavior.Restrict);
             modelBuilder.Entity<ERP_RFQ_Automation.Extraction.ExtractionJob>()
                 .HasOne<SourceDocumentOccurrence>()
                 .WithMany()

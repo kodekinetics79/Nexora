@@ -38,10 +38,29 @@ public interface IEmailInquiryAssemblyCoordinator
         string? reasonCode, string? reasonDetail, long? sourceDocumentOccurrenceId,
         CancellationToken ct = default);
 
+    /// <summary>
+    /// Records a component's extraction result durably, completes the component and
+    /// re-evaluates the message — as ONE transaction.
+    /// </summary>
+    Task<EmailInquiryAssemblyEvaluation> RecordComponentResultAsync(
+        long businessUnitId,
+        long componentId,
+        long extractionJobId,
+        EmailInquiryComponentResultPayload payload,
+        CancellationToken ct = default);
+
     Task<EmailInquiryAssemblyEvaluation> ReevaluateAsync(
         long assemblyId, long businessUnitId, CancellationToken ct = default);
 
     Task MarkNoInquiryAsync(EmailInquiryAssembly assembly, string reason, CancellationToken ct = default);
+
+    /// <summary>Sends a message to human review with a machine-readable reason.</summary>
+    Task HoldForReviewAsync(
+        long businessUnitId, long assemblyId, string reasonCode, string reasonDetail,
+        CancellationToken ct = default);
+
+    /// <summary>Marks a message assembled once its single Lead exists.</summary>
+    Task MarkAssembledAsync(long businessUnitId, long assemblyId, CancellationToken ct = default);
 
     /// <summary>
     /// Whether an extraction job exists AND is the job this exact component owns.
@@ -113,7 +132,19 @@ public sealed class EmailInquiryAssemblyCoordinator : IEmailInquiryAssemblyCoord
         if (component.Status == EmailInquiryComponentStatus.Pending)
             component.Status = EmailInquiryComponentStatus.Extracting;
         component.UpdatedAtUtc = DateTimeOffset.UtcNow;
-        await _context.SaveChangesAsync(ct);
+
+        // The MESSAGE moves too, in the same transaction.
+        //
+        // This used to save the component and stop. The assembly therefore stayed at Captured
+        // for its entire life, and when the barrier finally evaluated ReadyForAssembly the
+        // transition Captured -> ReadyForAssembly was illegal, so the verdict was logged and
+        // thrown away. Every component completed with a durable result and no message was ever
+        // assembled — a total stall that looked, in the data, like a state machine working.
+        await ExecuteInTransactionAsync(async () =>
+        {
+            await _context.SaveChangesAsync(ct);
+            await ReevaluateCoreAsync(component.AssemblyId, businessUnitId, ct);
+        }, ct);
     }
 
     /// <summary>
@@ -217,6 +248,91 @@ public sealed class EmailInquiryAssemblyCoordinator : IEmailInquiryAssemblyCoord
     /// counter can only be right if every increment happened exactly once, which is precisely
     /// what a crash, a retry or two concurrent workers cannot promise.</para>
     /// </summary>
+    /// <summary>
+    /// The write that closes the loop: the extraction output becomes durable, the component
+    /// becomes Completed, and the message is re-evaluated — atomically.
+    ///
+    /// <para><b>Why atomic and not three calls.</b> Each pair of these has a failure mode that
+    /// costs real money. Result without completion: the work is done and the barrier waits
+    /// forever. Completion without result: the barrier proceeds and builds a Lead missing an
+    /// attachment's lines, silently under-quoting the customer. Completion without
+    /// re-evaluation: the last component finishes and nothing ever notices the message is
+    /// ready — the failure this coordinator already had to fix once for the outcome path.</para>
+    ///
+    /// <para>The upsert is on the COMPONENT, not the job. A re-run under a new job id must
+    /// replace that component's single answer rather than append a second one, or the barrier
+    /// reads two contradictory results for one attachment and takes whichever the query
+    /// ordering happened to return.</para>
+    /// </summary>
+    public async Task<EmailInquiryAssemblyEvaluation> RecordComponentResultAsync(
+        long businessUnitId,
+        long componentId,
+        long extractionJobId,
+        EmailInquiryComponentResultPayload payload,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(payload);
+
+        var component = await _context.EmailInquiryComponents
+            .FirstOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.Id == componentId, ct)
+            ?? throw new InvalidOperationException(
+                $"Email inquiry component {componentId} was not found for business unit "
+                + $"{businessUnitId}; its extraction result has no owner to attach to.");
+
+        EmailInquiryAssemblyEvaluation evaluation = default;
+        await ExecuteInTransactionAsync(async () =>
+        {
+            var now = DateTimeOffset.UtcNow;
+            var existing = await _context.Set<EmailInquiryComponentResult>()
+                .FirstOrDefaultAsync(
+                    x => x.BusinessUnitId == businessUnitId && x.ComponentId == componentId, ct);
+
+            if (existing is null)
+            {
+                existing = new EmailInquiryComponentResult
+                {
+                    BusinessUnitId = businessUnitId,
+                    AssemblyId = component.AssemblyId,
+                    ComponentId = componentId,
+                    CreatedAtUtc = now
+                };
+                _context.Set<EmailInquiryComponentResult>().Add(existing);
+            }
+
+            existing.ExtractionJobId = extractionJobId;
+            existing.PayloadContractVersion = EmailInquiryComponentResult.CurrentPayloadContractVersion;
+            existing.PayloadJson = payload.PayloadJson;
+            existing.ProcessingPath = payload.ProcessingPath;
+            existing.AiProviderClass = payload.AiProviderClass;
+            existing.ModelIdentifier = payload.ModelIdentifier;
+            existing.HeaderConfidence = payload.HeaderConfidence;
+            existing.ExpectedItemCount = payload.ExpectedItemCount;
+            existing.ExtractedItemCount = payload.ExtractedItemCount;
+            existing.ReviewReason = Truncate(payload.ReviewReason, 1000);
+            existing.DiagnosticsJson = payload.DiagnosticsJson;
+            existing.UpdatedAtUtc = now;
+            // Npgsql does not generate int concurrency tokens the way it generates xmin, so an
+            // unincremented token stays 0 forever and every concurrent update matches — the
+            // protection reads as present and does nothing.
+            existing.ConcurrencyVersion++;
+
+            // Only now is the component finished. A security refusal recorded in the meantime
+            // outranks a result produced before the verdict was known, so it is not overwritten.
+            if (!component.IsTerminal)
+            {
+                component.Status = EmailInquiryComponentStatus.Completed;
+                component.ReasonCode = null;
+                component.ReasonDetail = null;
+                component.UpdatedAtUtc = now;
+            }
+
+            await _context.SaveChangesAsync(ct);
+            evaluation = await ReevaluateCoreAsync(component.AssemblyId, businessUnitId, ct);
+        }, ct);
+
+        return evaluation;
+    }
+
     public async Task<EmailInquiryAssemblyEvaluation> ReevaluateAsync(
         long assemblyId, long businessUnitId, CancellationToken ct = default)
     {
@@ -292,6 +408,65 @@ public sealed class EmailInquiryAssemblyCoordinator : IEmailInquiryAssemblyCoord
             .AnyAsync(x => x.BusinessUnitId == businessUnitId
                            && x.Id == occurrenceId
                            && x.IdempotencyKey == expectedOccurrenceKey, ct);
+    }
+
+    public async Task HoldForReviewAsync(
+        long businessUnitId, long assemblyId, string reasonCode, string reasonDetail,
+        CancellationToken ct = default)
+    {
+        await ExecuteInTransactionAsync(async () =>
+        {
+            var assembly = await _context.EmailInquiryAssemblies
+                .FirstOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.Id == assemblyId, ct)
+                ?? throw new InvalidOperationException(
+                    $"Email inquiry assembly {assemblyId} was not found for this tenant.");
+
+            if (!EmailInquiryAssemblyStateMachine.CanTransition(
+                    assembly.Status, EmailInquiryAssemblyStatus.NeedsReview))
+            {
+                // Loud, not fatal. Throwing would strand the message with no record of why;
+                // leaving it where it is keeps it visible and recoverable.
+                _logger.LogError(
+                    "Assembly {AssemblyId} is {Status}, which cannot move to NeedsReview ({Reason}).",
+                    assemblyId, assembly.Status, reasonCode);
+                return;
+            }
+
+            assembly.Status = EmailInquiryAssemblyStatus.NeedsReview;
+            assembly.StatusReason = Truncate($"{reasonCode}: {reasonDetail}", 1000);
+            assembly.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            await _context.SaveChangesAsync(ct);
+        }, ct);
+    }
+
+    public async Task MarkAssembledAsync(
+        long businessUnitId, long assemblyId, CancellationToken ct = default)
+    {
+        await ExecuteInTransactionAsync(async () =>
+        {
+            var assembly = await _context.EmailInquiryAssemblies
+                .FirstOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.Id == assemblyId, ct)
+                ?? throw new InvalidOperationException(
+                    $"Email inquiry assembly {assemblyId} was not found for this tenant.");
+
+            // Idempotent: a re-entrant assemble that lost the race finds the message already
+            // Assembled and does nothing, rather than failing a transition to its own state.
+            if (assembly.Status == EmailInquiryAssemblyStatus.Assembled) return;
+
+            if (!EmailInquiryAssemblyStateMachine.CanTransition(
+                    assembly.Status, EmailInquiryAssemblyStatus.Assembled))
+            {
+                _logger.LogError(
+                    "Assembly {AssemblyId} is {Status}, which cannot move to Assembled.",
+                    assemblyId, assembly.Status);
+                return;
+            }
+
+            assembly.Status = EmailInquiryAssemblyStatus.Assembled;
+            assembly.StatusReason = null;
+            assembly.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            await _context.SaveChangesAsync(ct);
+        }, ct);
     }
 
     public async Task MarkNoInquiryAsync(

@@ -59,6 +59,20 @@ public interface IExtractionDocumentReader
 /// </summary>
 public interface ILeadPersister
 {
+    /// <summary>
+    /// Persists the ONE Lead for a fully-assembled email message.
+    ///
+    /// <para>Separate from <c>PersistAsync</c> because it is the single caller allowed past the
+    /// assembly fence. The fence refuses a per-component Lead; this is the message-level write
+    /// the fence exists to wait for, and it arrives with every component's lines already
+    /// merged. A default implementation is provided so existing test doubles keep compiling and
+    /// fail loudly if this path is reached unexpectedly.</para>
+    /// </summary>
+    Task<long> PersistAssembledMessageAsync(
+        ExtractionJob job, ChunkedExtractionOutcome outcome, CancellationToken ct = default)
+        => throw new NotSupportedException(
+            "This ILeadPersister does not support message-level assembly.");
+
     Task<long> PersistAsync(ExtractionJob job, ChunkedExtractionOutcome outcome, CancellationToken ct = default);
 
     /// <summary>Persist the lead graph and complete the fenced queue claim in one transaction.</summary>
@@ -347,6 +361,41 @@ public sealed class ExtractionWorker : BackgroundService
                 return true;
             }
             await MarkIntakeFinalizedAsync(job, ct);
+
+            // THE BARRIER'S TRIGGER.
+            //
+            // An email component's job creates no Lead of its own — the persister recorded its
+            // result and completed it. If that was the last part the message was waiting for,
+            // the message becomes one Lead now. The assembler decides: it is a no-op unless the
+            // assembly is genuinely ReadyForAssembly, and idempotent when two workers finish
+            // the final two components at the same moment.
+            //
+            // Deliberately AFTER the queue transition. Assembling first and completing second
+            // would mean a crash in between leaves a Lead whose job still looks unfinished, and
+            // the retry would build the Lead twice.
+            if (job.EmailInquiryComponentId is not null
+                && scope.ServiceProvider.GetService<
+                    ERP_RFQ_Automation.Ingestion.Assembly.IEmailInquiryLeadAssembler>() is { } assembler
+                && scope.ServiceProvider.GetService<ErpRfqAutomationContext>() is { } assemblyContext)
+            {
+                var assemblyId = await assemblyContext
+                    .Set<ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponent>()
+                    .AsNoTracking()
+                    .Where(x => x.BusinessUnitId == job.BusinessUnitId
+                                && x.Id == job.EmailInquiryComponentId!.Value)
+                    .Select(x => (long?)x.AssemblyId)
+                    .FirstOrDefaultAsync(ct);
+
+                if (assemblyId is { } id)
+                {
+                    var assembledLeadId = await assembler.AssembleAsync(job.BusinessUnitId, id, ct);
+                    if (assembledLeadId is not null)
+                        _log.LogInformation(
+                            "Job {JobId} completed email assembly {AssemblyId} as lead {LeadId}.",
+                            job.Id, id, assembledLeadId.Value);
+                }
+            }
+
             _metrics?.JobSucceeded(ElapsedMs(), job.BusinessUnitId);
 
             _log.LogInformation(
@@ -986,14 +1035,41 @@ public sealed class LeadPersister : ILeadPersister
         _usageMetering = usageMetering;
     }
 
+    /// <summary>
+    /// Turns the extractor's outcome into the versioned shape the result store holds.
+    ///
+    /// <para>The conversion lives at this boundary on purpose: the store is versioned and the
+    /// extractor's type is not, so exactly one place has to know how today's outcome maps onto
+    /// today's contract version.</para>
+    /// </summary>
+    private static ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponentResultPayload
+        BuildComponentResultPayload(ChunkedExtractionOutcome outcome)
+        => new(
+            System.Text.Json.JsonSerializer.Serialize(outcome.Result),
+            outcome.ProcessingPath.ToString(),
+            outcome.AiProviderClass?.ToString(),
+            null,
+            outcome.Result?.OverallConfidence is { } confidence ? (decimal)confidence : null,
+            outcome.ExpectedItemCount,
+            outcome.ExtractedItemCount,
+            outcome.ReviewReason,
+            outcome.Diagnostics.Count > 0
+                ? System.Text.Json.JsonSerializer.Serialize(outcome.Diagnostics)
+                : null);
+
     public Task<long> PersistAsync(
         ExtractionJob job, ChunkedExtractionOutcome outcome, CancellationToken ct = default)
-        => PersistInternalAsync(job, outcome, enrichAfterPersistence: true, ct);
+        => PersistInternalAsync(job, outcome, enrichAfterPersistence: true, bypassAssemblyFence: false, ct);
+
+    public Task<long> PersistAssembledMessageAsync(
+        ExtractionJob job, ChunkedExtractionOutcome outcome, CancellationToken ct = default)
+        => PersistInternalAsync(job, outcome, enrichAfterPersistence: true, bypassAssemblyFence: true, ct);
 
     private async Task<long> PersistInternalAsync(
         ExtractionJob job,
         ChunkedExtractionOutcome outcome,
         bool enrichAfterPersistence,
+        bool bypassAssemblyFence,
         CancellationToken ct)
     {
         if (outcome.Result is null)
@@ -1015,73 +1091,56 @@ public sealed class LeadPersister : ILeadPersister
         // lost, the operator can see exactly where it stopped, and no Lead is invented from a
         // fragment. Non-email and manual-upload jobs never match this query and keep their
         // existing behaviour untouched.
-        if (_emailAssemblies is not null
-            && _context.Model.FindEntityType(typeof(ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponent)) is not null)
+        if (!bypassAssemblyFence
+            && _emailAssemblies is not null
+            && job.EmailInquiryComponentId is { } ownedComponentId)
         {
-            var assemblyComponent = await _context
+            // ONE ownership authority, read straight off the job row.
+            //
+            // This used to join EmailInquiryComponents on ExtractionJobId — a nullable
+            // back-reference written in a second statement after the insert, which a worker
+            // could claim the job ahead of. It is now a column on the job, written with the
+            // job, backed by a composite foreign key carrying the tenant. The component's own
+            // ExtractionJobId and SourceDocumentOccurrenceId remain as diagnostics; neither
+            // decides anything.
+            var owner = await _context
                 .Set<ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponent>()
                 .AsNoTracking()
-                .Where(x => x.BusinessUnitId == job.BusinessUnitId && x.ExtractionJobId == job.Id)
+                .Where(x => x.BusinessUnitId == job.BusinessUnitId && x.Id == ownedComponentId)
                 .Select(x => new { x.AssemblyId, x.ComponentKey })
                 .FirstOrDefaultAsync(ct);
 
-            if (assemblyComponent is not null)
+            if (owner is null)
             {
-                // HELD, NOT COMPLETED — and the distinction is the whole point.
-                //
-                // The first version of this fence marked the component Completed and returned,
-                // discarding outcome.Result. That is silent result loss dressed as success: the
-                // extraction really ran, really cost money, and its output went nowhere, while
-                // the barrier would later see a Completed component carrying nothing and
-                // assemble a Lead from the parts that happened to survive.
-                //
-                // There is no durable extraction-result store in this repository yet — the
-                // result has only ever flowed straight into Lead creation — so it CANNOT be
-                // persisted here without inventing one. Until the component result store and
-                // the barrier handler land, the honest outcome is a visible recoverable hold:
-                // the work is re-runnable, the operator can see exactly where it stopped, and
-                // nothing is claimed to have finished that did not.
-                await _emailAssemblies.RecordComponentOutcomeAsync(
-                    // The AssemblyId was already read at the join above and was previously
-                    // discarded, leaving the write to resolve on tenant + key alone — a prefix of
-                    // the unique index, which binds one message's outcome onto another's row.
-                    job.BusinessUnitId, assemblyComponent.AssemblyId, assemblyComponent.ComponentKey,
-                    ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponentStatus.FailedRecoverable,
-                    ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryHoldReasons.AssemblyResultStorePending,
-                    // Named rather than inlined so the promise itself is testable. It says held,
-                    // NOT "will retry automatically": nothing sweeps FailedRecoverable in this
-                    // build, and promising a retry that never comes is the same class of untruth
-                    // as advising a retry that cannot succeed.
-                    ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryHoldReasons.AssemblyResultStorePendingDetail,
-                    job.SourceDocumentOccurrenceId, ct);
-
-                _log.LogWarning(
-                    "Extraction job {ExtractionJobId} is component {ComponentKey} of email "
-                    + "assembly {AssemblyId} (business unit {BusinessUnitId}). Extraction "
-                    + "succeeded but there is no durable component-result store yet, so the "
-                    + "component is HELD as recoverable rather than completed. No Lead is "
-                    + "created per component.",
-                    job.Id, assemblyComponent.ComponentKey, assemblyComponent.AssemblyId,
-                    job.BusinessUnitId);
-
-                return 0;
+                // The foreign key makes this unreachable through the database. If it happens
+                // anyway the job is genuinely ownerless, and inventing a per-document Lead
+                // from it is the one thing that must not happen.
+                throw new InvalidOperationException(
+                    $"Extraction job {job.Id} names email inquiry component {ownedComponentId}, "
+                    + $"which does not exist for business unit {job.BusinessUnitId}.");
             }
 
-            // NO BLANKET FAIL-CLOSED HERE — and removing it fixed a live regression.
-            //
-            // The previous version refused a Lead for EVERY ExtractionSourceType.Email job that
-            // had no component row. But capture is not wired into EmailService yet, so NO email
-            // job has a component row: the branch matched every inbound message and silently
-            // stopped all email-to-Lead processing. Mail was polled, jobs ran, and nothing ever
-            // became an RFQ. It offered no protection either, because a fence can only guard
-            // components that exist.
-            //
-            // The protection becomes correct and necessary in the same increment that switches
-            // the callers to capture, when every email job genuinely has an owning component and
-            // a missing one really does mean the scheduler and worker disagree. It is re-added
-            // there, with a test that a component-less email job is refused, and not before.
+            // The result becomes DURABLE, the component completes, and the message is
+            // re-evaluated — one transaction, in the coordinator. No Lead is created here:
+            // that is the barrier's job once every sibling has finished.
+            var payload = BuildComponentResultPayload(outcome);
+            var evaluation = await _emailAssemblies.RecordComponentResultAsync(
+                job.BusinessUnitId, ownedComponentId, job.Id, payload, ct);
 
+            _log.LogInformation(
+                "Component {ComponentKey} of assembly {AssemblyId} recorded a durable result; "
+                + "the message is now {Status} ({Completed}/{Expected}).",
+                owner.ComponentKey, owner.AssemblyId, evaluation.Status,
+                evaluation.CompletedComponentCount, job.BusinessUnitId);
+
+            // No Lead is built here, and not merely because the message may be incomplete.
+            // Assembly is ORCHESTRATION and belongs to the worker: an assembler injected into
+            // the persister is a dependency cycle (the assembler must persist the Lead it
+            // builds), and the container rejects it — which is how this was found, with three
+            // jobs dead-lettered on a circular-dependency message.
+            return 0;
         }
+
         // ---- END ASSEMBLY SAFETY FENCE ---------------------------------------------------
 
         // Multi-inquiry auto-split: N per-group results (a strict partition of the merged
@@ -1371,7 +1430,8 @@ public sealed class LeadPersister : ILeadPersister
             .Select(entry => entry.Entity.Id)
             .Where(id => id > 0)
             .ToHashSet();
-        var leadId = await PersistInternalAsync(job, outcome, enrichAfterPersistence: false, ct);
+        var leadId = await PersistInternalAsync(
+            job, outcome, enrichAfterPersistence: false, bypassAssemblyFence: false, ct);
         var persistedLeads = _context.ChangeTracker.Entries<Lead>()
             .Where(entry => entry.Entity.Id > 0 && !previouslyTrackedLeadIds.Contains(entry.Entity.Id))
             .Select(entry => entry.Entity)

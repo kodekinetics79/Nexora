@@ -71,6 +71,12 @@ public static class EmailInquiryAssemblyModelBuilderExtensions
             e.ToTable("EmailInquiryComponents");
             e.HasKey(x => x.Id);
 
+            // Same reason as the assembly's: children — the result store, and the extraction
+            // job that owns one — carry the tenant INSIDE their foreign key, so a row can
+            // never point at another tenant's component and the RLS predicate on the child
+            // needs no join to be enforceable.
+            e.HasAlternateKey(x => new { x.BusinessUnitId, x.Id });
+
             // Idempotent replay: the second pass over a message updates these rows rather than
             // appending a parallel set. Without this a retried poll would double every
             // component and the barrier would wait forever for siblings that already finished.
@@ -100,6 +106,39 @@ public static class EmailInquiryAssemblyModelBuilderExtensions
                 .WithMany(x => x.Components)
                 .HasForeignKey(x => new { x.BusinessUnitId, x.AssemblyId })
                 .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id })
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<EmailInquiryComponentResult>(e =>
+        {
+            e.ToTable("EmailInquiryComponentResults");
+            e.HasKey(x => x.Id);
+
+            // ONE result per component. A second extraction of the same part must UPDATE this
+            // row; appending would let the barrier read two contradictory answers for one
+            // attachment and pick whichever the query ordering happened to return.
+            e.HasIndex(x => new { x.BusinessUnitId, x.ComponentId }).IsUnique();
+
+            // The barrier's read: every result for one message, in one indexed scan.
+            e.HasIndex(x => new { x.BusinessUnitId, x.AssemblyId });
+
+            e.Property(x => x.PayloadJson).HasColumnType("jsonb").IsRequired();
+            e.Property(x => x.PayloadContractVersion).IsRequired();
+            e.Property(x => x.ProcessingPath).HasMaxLength(48).IsRequired();
+            e.Property(x => x.AiProviderClass).HasMaxLength(24);
+            e.Property(x => x.ModelIdentifier).HasMaxLength(256);
+            e.Property(x => x.HeaderConfidence).HasPrecision(5, 4);
+            e.Property(x => x.ReviewReason).HasMaxLength(1000);
+            e.Property(x => x.DiagnosticsJson).HasColumnType("jsonb");
+            e.Property(x => x.ConcurrencyVersion).IsConcurrencyToken();
+
+            e.HasOne(x => x.Component)
+                .WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.ComponentId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id })
+                // CASCADE, matching the component's own cascade from the assembly: a purged
+                // message must not leave its extraction payloads behind. Those payloads are
+                // derived from customer content and are exactly what a deletion request means.
                 .OnDelete(DeleteBehavior.Cascade);
         });
     }
