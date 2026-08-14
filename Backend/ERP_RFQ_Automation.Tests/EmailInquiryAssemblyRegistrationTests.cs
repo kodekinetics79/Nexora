@@ -19,10 +19,12 @@ namespace ERP_RFQ_Automation.Tests;
 public class EmailInquiryAssemblyRegistrationTests
 {
     /// <summary>
-    /// Mirrors the production registrations for this capability. It is deliberately a copy of
-    /// the composition rather than a call into <c>Program</c>: booting the real host needs a
-    /// database, secrets and a mail configuration, and the property under test here is only
-    /// "these types can be constructed with their real dependencies".
+    /// Builds the container from the SAME extension <c>Program</c> calls.
+    ///
+    /// <para>It used to re-declare the registrations, which made it assert properties of itself:
+    /// deleting every <c>AddScoped</c> from <c>Program</c> left this green — the exact failure it
+    /// was written to prevent. Only the surrounding infrastructure (context, storage) is
+    /// substituted, because booting the real host needs a database, secrets and a mailbox.</para>
     /// </summary>
     private static ServiceProvider BuildContainer()
     {
@@ -38,12 +40,13 @@ public class EmailInquiryAssemblyRegistrationTests
             new UnconfiguredEvidenceObjectStorage(
                 new InvalidOperationException("Evidence storage is not configured in this test.")));
 
-        services.AddScoped<IEmailInquiryCaptureService, EmailInquiryCaptureService>();
-        services.AddScoped<IEmailInquiryAssemblyCoordinator, EmailInquiryAssemblyCoordinator>();
-        services.AddScoped<IRawEmailEvidenceReader, RawEmailEvidenceReader>();
-        services.AddSingleton(EmailInquiryLimits.Default);
+        // The production composition, not a copy of it.
+        services.AddEmailInquiryAssembly();
 
-        return services.BuildServiceProvider(validateScopes: true);
+        // ValidateOnBuild catches a scoped dependency captured by a singleton at build time,
+        // which resolving service-by-service would miss entirely.
+        return services.BuildServiceProvider(
+            new ServiceProviderOptions { ValidateScopes = true, ValidateOnBuild = true });
     }
 
     [Theory]

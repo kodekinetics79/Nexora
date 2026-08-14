@@ -147,54 +147,157 @@ public sealed class EmailInquiryAssemblyTenantIsolationPostgreSqlTests(PostgreSq
     }
 
     [Fact]
-    public async Task A_tenant_cannot_read_another_tenants_assemblies_even_with_application_filters_bypassed()
+    public async Task A_tenant_cannot_read_or_write_another_tenants_assembly_with_filters_bypassed()
     {
-        // THE negative test. Everything above proves the controls are declared; this proves they
-        // refuse. It goes around EF entirely — raw SQL as nexora_tenant_app with the tenant GUC
-        // set to a DIFFERENT business unit — so no query filter, no interceptor and no
-        // application predicate is involved in the answer.
+        // THE negative test, and the previous version could not fail.
+        //
+        // It swallowed the foreign-key violation from an unseeded parent, so tenant A's row was
+        // never inserted and `count(*) = 0` held for trivial reasons — it passed with row-level
+        // security dropped entirely. The fix is to prove the row genuinely EXISTS as the owner
+        // first, so a zero under tenant B means isolation and nothing else.
         const long tenantA = 918_001;
         const long tenantB = 918_002;
 
         await using var connection = await _database.OpenConnectionAsync();
+        var (ingestId, assemblyId) = await SeedAssemblyAsync(connection, tenantA);
+
+        // 1. The owner can see it. If this is 0 the test is broken, not the database.
+        Assert.Equal(1L, await ScalarAsync(connection,
+            $"SELECT count(*) FROM public.\"EmailInquiryAssemblies\" WHERE \"Id\" = {assemblyId};"));
+
+        // 2. Tenant B cannot READ it — raw SQL as the tenant role, EF entirely bypassed.
+        Assert.Equal(0L, await AsTenantAsync(connection, tenantB,
+            $"SELECT count(*) FROM public.\"EmailInquiryAssemblies\" WHERE \"Id\" = {assemblyId};"));
+
+        // 3. Tenant B cannot UPDATE it. A policy that only filters reads still lets a neighbour
+        //    corrupt rows it cannot see.
+        Assert.Equal(0L, await AsTenantAsync(connection, tenantB,
+            $"WITH u AS (UPDATE public.\"EmailInquiryAssemblies\" SET \"Status\" = 'NoInquiry' "
+            + $"WHERE \"Id\" = {assemblyId} RETURNING 1) SELECT count(*) FROM u;"));
+
+        // 4. Tenant B cannot DELETE it.
+        Assert.Equal(0L, await AsTenantAsync(connection, tenantB,
+            $"WITH d AS (DELETE FROM public.\"EmailInquiryAssemblies\" WHERE \"Id\" = {assemblyId} "
+            + "RETURNING 1) SELECT count(*) FROM d;"));
+
+        // 5. And the row is untouched by any of it.
+        Assert.Equal(1L, await ScalarAsync(connection,
+            $"SELECT count(*) FROM public.\"EmailInquiryAssemblies\" "
+            + $"WHERE \"Id\" = {assemblyId} AND \"Status\" = 'Captured';"));
+
+        await CleanupAsync(connection, assemblyId, ingestId);
+    }
+
+    [Fact]
+    public async Task A_tenant_cannot_reach_another_tenants_components()
+    {
+        const long tenantA = 918_011;
+        const long tenantB = 918_012;
+
+        await using var connection = await _database.OpenConnectionAsync();
+        var (ingestId, assemblyId) = await SeedAssemblyAsync(connection, tenantA);
 
         await using (var seed = connection.CreateCommand())
         {
-            // Inserted as the owner so the row genuinely exists before isolation is tested.
-            seed.CommandText = """
+            seed.CommandText = $"""
+                INSERT INTO public."EmailInquiryComponents"
+                    ("BusinessUnitId","AssemblyId","ComponentKey","Kind","Ordinal","Status",
+                     "NestingDepth","ConcurrencyVersion","CreatedAtUtc","UpdatedAtUtc")
+                VALUES ({tenantA}, {assemblyId}, 'email:isolation:part:1', 'Attachment', 0,
+                        'Pending', 0, 0, now(), now());
+                """;
+            await seed.ExecuteNonQueryAsync();
+        }
+
+        Assert.Equal(1L, await ScalarAsync(connection,
+            $"SELECT count(*) FROM public.\"EmailInquiryComponents\" WHERE \"AssemblyId\" = {assemblyId};"));
+        Assert.Equal(0L, await AsTenantAsync(connection, tenantB,
+            $"SELECT count(*) FROM public.\"EmailInquiryComponents\" WHERE \"AssemblyId\" = {assemblyId};"));
+
+        await CleanupAsync(connection, assemblyId, ingestId);
+    }
+
+    /// <summary>Seeds the real parent chain so an insert cannot fail for unrelated reasons.</summary>
+    private static async Task<(long IngestId, long AssemblyId)> SeedAssemblyAsync(
+        NpgsqlConnection connection, long businessUnitId)
+    {
+        var suffix = businessUnitId;
+        await using (var seed = connection.CreateCommand())
+        {
+            seed.CommandText = $"""
+                INSERT INTO public."BusinessUnits" ("ID","BusinessUnitCode","BusinessUnitName","IsActive","CreatedBy","CreatedOn")
+                VALUES ({businessUnitId}, 'ISO{suffix}', 'Isolation {suffix}', true, 'test', now())
+                ON CONFLICT DO NOTHING;
+
+                INSERT INTO public."Email_Configurations"
+                    ("ID","BusinessUnitID","ConfigurationName","EmailAddress","Protocol","Host","Port",
+                     "Username","Password","UseSSL","PollingInterval","IsActive","CreatedOn")
+                VALUES ({businessUnitId}, {businessUnitId}, 'Inbound', 'rfq{suffix}@nexora.example',
+                        'IMAP', 'imap.secureserver.net', 993, 'rfq{suffix}@nexora.example',
+                        'not-a-real-credential', true, 5, true, now())
+                ON CONFLICT DO NOTHING;
+                """;
+            await seed.ExecuteNonQueryAsync();
+        }
+
+        long ingestId;
+        await using (var ingest = connection.CreateCommand())
+        {
+            ingest.CommandText = $"""
+                INSERT INTO public."EmailIngests" ("MessageID","FromEmail","EmailConfigurationID","CreatedOn")
+                VALUES ('isolation-{suffix}@customer.example', 'buyer@customer.example', {businessUnitId}, now())
+                RETURNING "ID";
+                """;
+            ingestId = Convert.ToInt64(await ingest.ExecuteScalarAsync());
+        }
+
+        long assemblyId;
+        await using (var assembly = connection.CreateCommand())
+        {
+            assembly.CommandText = $"""
                 INSERT INTO public."EmailInquiryAssemblies"
                     ("BusinessUnitId","EmailIngestId","EmailConfigurationId","MessageKey",
                      "ManifestContractVersion","ExpectedComponentCount","CompletedComponentCount",
                      "Status","ConcurrencyVersion","CreatedAtUtc","UpdatedAtUtc")
-                VALUES (@bu, @ingest, @config, @key, 1, 0, 0, 'Captured', 0, now(), now())
-                ON CONFLICT DO NOTHING;
+                VALUES ({businessUnitId}, {ingestId}, {businessUnitId}, 'isolation-{suffix}@customer.example',
+                        1, 0, 0, 'Captured', 0, now(), now())
+                RETURNING "Id";
                 """;
-            seed.Parameters.AddWithValue("bu", tenantA);
-            seed.Parameters.AddWithValue("ingest", 918_101L);
-            seed.Parameters.AddWithValue("config", 918_201L);
-            seed.Parameters.AddWithValue("key", $"isolation-probe-{tenantA}");
-            // The FK to EmailIngests is real, so a missing parent row is an expected outcome.
-            try { await seed.ExecuteNonQueryAsync(); }
-            catch (PostgresException e) when (e.SqlState == "23503")
-            {
-                // No ingest row to hang it on in this fixture. The policy assertions below still
-                // hold — an empty result under tenant B is the property under test, and it must
-                // not be reachable by tenant B regardless of how many rows tenant A has.
-            }
+            assemblyId = Convert.ToInt64(await assembly.ExecuteScalarAsync());
         }
 
-        await using var probe = connection.CreateCommand();
-        probe.CommandText = """
-            SET LOCAL ROLE nexora_tenant_app;
-            SET LOCAL nexora.business_unit_id = '918002';
-            SELECT count(*) FROM public."EmailInquiryAssemblies" WHERE "BusinessUnitId" = 918001;
-            """;
+        return (ingestId, assemblyId);
+    }
+
+    private static async Task<long> ScalarAsync(NpgsqlConnection connection, string sql)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        return Convert.ToInt64(await command.ExecuteScalarAsync());
+    }
+
+    /// <summary>Runs a statement as <c>nexora_tenant_app</c> with the tenant GUC set.</summary>
+    private static async Task<long> AsTenantAsync(
+        NpgsqlConnection connection, long businessUnitId, string sql)
+    {
         await using var transaction = await connection.BeginTransactionAsync();
-        probe.Transaction = transaction;
-
-        var visible = (long)(await probe.ExecuteScalarAsync())!;
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            $"SET LOCAL ROLE nexora_tenant_app; SET LOCAL nexora.business_unit_id = '{businessUnitId}'; {sql}";
+        var value = Convert.ToInt64(await command.ExecuteScalarAsync());
         await transaction.RollbackAsync();
+        return value;
+    }
 
-        Assert.Equal(0, visible);
+    private static async Task CleanupAsync(NpgsqlConnection connection, long assemblyId, long ingestId)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"""
+            DELETE FROM public."EmailInquiryComponents" WHERE "AssemblyId" = {assemblyId};
+            DELETE FROM public."EmailInquiryAssemblies" WHERE "Id" = {assemblyId};
+            DELETE FROM public."EmailIngests" WHERE "ID" = {ingestId};
+            """;
+        await command.ExecuteNonQueryAsync();
     }
 }
