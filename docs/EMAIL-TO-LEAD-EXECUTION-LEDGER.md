@@ -1084,7 +1084,7 @@ Full backend regression: **Failed: 0, Passed: 4925**.
 
 | Finding | Sev | Why still open |
 | --- | --- | --- |
-| SDET F1 — the fence is **dead code under test**; every `LeadPersister` construction omits `emailAssemblies` | Critical | This is why the fail-closed outage shipped green. Needs `LeadPersisterEmailFenceTests` on `TestDb` with a recording coordinator |
+| SDET F1 — the fence is **dead code under test** | Critical | **CLOSED** — `LeadPersisterEmailFenceTests`, 5 tests on `TestDb` with a recording coordinator |
 | SDET F2 — **no end-to-end test** of capture → schedule → extract → assemble | Critical | The scheduler ships wholly unexercised |
 | SDET F4 — the PG isolation negative test **passes with RLS dropped** (FK swallow means the row is never inserted) | High | Must seed the parent and assert the row genuinely exists first |
 | .NET EIA-4 — **`ReprocessAsync` is a second legacy producer**; pausing polling does not stop it | High | Drain runbook needs step 3b gating it |
@@ -1093,3 +1093,25 @@ Full backend regression: **Failed: 0, Passed: 4925**.
 | PG-4 — `RESTRICT` from jobs conflicts with the child `CASCADE`; also the purge-ordering item is a **misdiagnosis** (`session_replication_role = replica` already makes order irrelevant) | High | Reopen the delete-behaviour decision |
 | SDET F3 — registration test **copies** `Program` registrations | High | Shared `AddEmailInquiryAssembly` extension |
 | .NET EIA-6 — legacy + canonical processing of the **same message** across the cutover yields two Lead sets | Medium | Drain gate must assert on occurrences, not just the queue |
+
+
+## SDET F1 CLOSED — the fence is exercised for the first time
+
+`LeadPersisterEmailFenceTests` runs on `TestDb` (real model, SQLite in memory, FKs and unique
+indexes enforced) with a **recording** `IEmailInquiryAssemblyCoordinator`, so assertions are on
+the arguments the worker actually passes rather than on constants read back in isolation.
+
+| Test | Property |
+| --- | --- |
+| email job with **no** component is not swallowed | persistence proceeds PAST the fence into ordinary email handling; under the regression it returned 0 silently and nothing threw |
+| email job **with** a component | zero Leads; the recorded outcome carries the right tenant, the **AssemblyId the worker read at its join**, the component key, `FailedRecoverable`, the reason code, and the operator detail |
+| held component | never reported `Completed` — that would tell the barrier a part was done while its output was discarded |
+| manual upload | unaffected, even with an unrelated component row present for another job |
+| coordinator absent | fence is inert and does not stop processing |
+
+The fixture seeds the real parent chain — business unit → mailbox → ingest → assembly → component
+— because a fixture that skips parents proves nothing about behaviour under real constraints.
+
+**This is the class of test whose absence let the fail-closed outage ship with 4911 green.**
+
+Full backend regression: **Failed: 0, Passed: 4930**.
