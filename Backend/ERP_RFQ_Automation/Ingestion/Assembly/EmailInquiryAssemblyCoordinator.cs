@@ -26,6 +26,17 @@ public interface IEmailInquiryAssemblyCoordinator
         long assemblyId, long businessUnitId, CancellationToken ct = default);
 
     Task MarkNoInquiryAsync(EmailInquiryAssembly assembly, string reason, CancellationToken ct = default);
+
+    /// <summary>
+    /// Whether an extraction job actually exists and belongs to this tenant.
+    ///
+    /// <para>A non-null <c>ExtractionJobId</c> on a component is a claim, not proof: the job may
+    /// have been purged, or the id may have been written by a pass that then failed. Scheduling
+    /// treats an unverifiable reference as unscheduled work rather than as done, because the
+    /// alternative is a component that waits at the barrier forever for a job nobody is running.
+    /// The tenant predicate is part of the question, so a foreign job can never satisfy it.</para>
+    /// </summary>
+    Task<bool> DurableJobExistsAsync(long businessUnitId, long extractionJobId, CancellationToken ct = default);
 }
 
 /// <summary>
@@ -151,6 +162,12 @@ public sealed class EmailInquiryAssemblyCoordinator : IEmailInquiryAssemblyCoord
         await _context.SaveChangesAsync(ct);
         return evaluation;
     }
+
+    public Task<bool> DurableJobExistsAsync(
+        long businessUnitId, long extractionJobId, CancellationToken ct = default)
+        => _context.Set<ERP_RFQ_Automation.Extraction.ExtractionJob>()
+            .AsNoTracking()
+            .AnyAsync(x => x.BusinessUnitId == businessUnitId && x.Id == extractionJobId, ct);
 
     public async Task MarkNoInquiryAsync(
         EmailInquiryAssembly assembly, string reason, CancellationToken ct = default)

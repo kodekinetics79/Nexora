@@ -656,3 +656,50 @@ together — deleting the walk breaks both at compile time, so they land in one 
 rewrite `EmailIngestEnqueuerTests`, which asserts the walk being deleted.
 
 Verify: `dotnet build ERP_RFQ_Automation.sln` then the email/assembly filter, then full backend.
+
+
+## STEP 2a — durable canonical scheduler added. Build green, callers not yet switched.
+
+`EmailIngestEnqueuer.ScheduleAsync` exists and satisfies the Step 2 requirements:
+
+* schedules only from **persisted** component rows, ordered by `Ordinal`;
+* no MIME traversal, no `ComponentKey` recomputation — the key is read from the row;
+* branches on the **typed** `EmailManifestVerdict`; `Compatible` is the only schedulable
+  verdict, and the human-readable detail is never parsed for control flow;
+* on any other verdict, holds **every** non-terminal component rather than scheduling the subset
+  that happens to match, and returns the verdict in `EmailScheduleResult`;
+* `DeriveBatchId` = SHA-256 over `"nexora:email-assembly-batch:v1:{assemblyId}:{messageKey}"` —
+  never `Guid.NewGuid`, never `GetHashCode`;
+* a non-null `ExtractionJobId` is verified via `IEmailInquiryAssemblyCoordinator.DurableJobExistsAsync`,
+  which filters on the tenant, so a purged job is rescheduled and a foreign job can never satisfy
+  the check;
+* `IsTerminal` components — Skipped, Ignored, RefusedSecurity, StructuralOnly — create no job;
+* full ownership tuple on every scheduled job: BusinessUnitId, EmailIngestId, AssemblyId,
+  ComponentId, ComponentKey, plus the derived batch and the occurrence key the queue computes.
+  The sidecar carrying them stays a diagnostic hint and authorizes nothing.
+
+**Idempotency is the database's.** No new queue, constraint or advisory lock was added: feeding
+`SourceOccurrenceIdentity.BuildKey` a derived batch id and the persisted `ComponentKey` makes
+`ux_source_document_occurrences_tenant_idempotency` and `UX_ExtractionJobs_BU_SourceOccurrence`
+collapse concurrent schedulers onto one occurrence and one job.
+
+**Migration state, stated plainly:** `EnqueueAsync` and its `message.Attachments` walk are still
+present and still the only thing the two call sites use. Nothing new calls them. They are deleted
+in Step 2b together with both call sites, because removing them breaks `EmailService.cs:913` and
+`EmailTriageService.cs:240` at compile time and the three must land atomically. This is a
+migration, not a competing implementation.
+
+Build: 0 errors. Affected: **Failed: 0, Passed: 220**. Model drift: none.
+
+### Exact next action — Step 2b
+
+1. `EmailInquiryCaptureResult` must carry the persisted `Components` and the planned `Manifest`
+   so a caller can reach `ScheduleAsync` without re-planning on the first pass.
+2. `EmailService.ProcessSingleEmailAsync`: capture → `ScheduleAsync` → acknowledge only on
+   `FullyScheduled` (Step 3 then splits `CaptureComplete` from `SafeToAcknowledge` properly).
+3. `EmailTriageService.ReprocessAsync`: same coordinator and scheduler; load the message through
+   `IRawEmailEvidenceReader` rather than `RawEmailPath`.
+4. Delete `EnqueueAsync` and the `message.Attachments` loop.
+5. Rewrite `EmailIngestEnqueuerTests` — it asserts the deleted walk.
+6. Register `IEmailInquiryCaptureService`, `IEmailInquiryAssemblyCoordinator`,
+   `IRawEmailEvidenceReader` and the scheduler in `Program.cs` (Step 6 dependency).

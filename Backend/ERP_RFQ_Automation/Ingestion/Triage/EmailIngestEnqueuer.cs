@@ -7,6 +7,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using ERP_RFQ_Automation.Extraction;
+using ERP_RFQ_Automation.Ingestion.Assembly;
 using ERP_RFQ_Automation.Infrastructure.Storage;
 using ERP_RFQ_Automation.Models;
 using Microsoft.Extensions.Logging;
@@ -18,6 +19,20 @@ namespace ERP_RFQ_Automation.Ingestion.Triage;
 /// <param name="Queued">Number of jobs enqueued (duplicates count — they are handled work).</param>
 /// <param name="SkippedAttachments">"filename (reason)" for every attachment that could not be enqueued.</param>
 public sealed record EmailEnqueueResult(Guid BatchId, int Queued, IReadOnlyList<string> SkippedAttachments);
+
+/// <param name="Scheduled">Components handed to the durable queue on this pass.</param>
+/// <param name="AlreadyScheduled">Components whose job was verified to already exist.</param>
+/// <param name="Held">
+/// Components left recoverable. Non-zero means the message is NOT fully scheduled and must not
+/// be acknowledged.
+/// </param>
+/// <param name="Verdict">The manifest verdict that permitted or blocked this pass.</param>
+public sealed record EmailScheduleResult(
+    Guid BatchId, int Scheduled, int AlreadyScheduled, int Held, EmailManifestVerdict Verdict)
+{
+    /// <summary>True when every Process component of the message now holds a durable job.</summary>
+    public bool FullyScheduled => Held == 0 && Verdict == EmailManifestVerdict.Compatible;
+}
 
 /// <summary>
 /// The ONE routine that turns an email into extraction jobs: one job per supported
@@ -241,6 +256,233 @@ public static class EmailIngestEnqueuer
         }
 
         return new EmailEnqueueResult(batchId, queued, skippedAttachments);
+    }
+
+    // ------------------------------------------------------------------------------------
+    // STEP 2 — the durable canonical scheduler.
+    //
+    // MIGRATION NOTE: EnqueueAsync above is the legacy fan-out and still walks
+    // message.Attachments. It is deleted in the next increment, together with its two call
+    // sites, because removing it breaks both at compile time and they must land atomically.
+    // Nothing new calls it. This is a migration, not a competing implementation.
+    // ------------------------------------------------------------------------------------
+
+    /// <summary>Reason recorded when the stored original stops matching what was captured.</summary>
+    public const string ManifestMismatchReason = "manifest_mismatch";
+
+    /// <summary>Reason recorded when the durable queue refused the component.</summary>
+    public const string SchedulingFailedReason = "scheduling_failed";
+
+    /// <summary>
+    /// Schedules every Process component of a message that does not already hold a durable job.
+    ///
+    /// <para><b>Idempotency is the database's, not ours.</b>
+    /// <c>SourceOccurrenceIdentity.BuildKey</c> composes the occurrence key as
+    /// <c>{batchId}:{sourceType}:{sha256(SourceOccurrenceId)}</c> — the batch id is INSIDE the
+    /// key. A random batch id per pass therefore produced a different occurrence key for the
+    /// same component every time, so <c>ux_source_document_occurrences_tenant_idempotency</c>
+    /// never fired, a second occurrence was created,
+    /// <c>UX_ExtractionJobs_BU_SourceOccurrence</c> never fired, and the component received two
+    /// extraction jobs — two Leads for one email part.</para>
+    ///
+    /// <para>Feeding that key a <b>derived</b> batch id and the <b>persisted</b>
+    /// <c>ComponentKey</c> makes both existing unique indexes do the work. No new queue, no new
+    /// constraint, no advisory lock of our own.</para>
+    /// </summary>
+    /// <param name="components">Persisted rows — the authority on identity and disposition.</param>
+    /// <param name="plan">
+    /// The plan those rows came from, carrying decoded bytes. Verified against the rows before
+    /// anything is scheduled.
+    /// </param>
+    public static async Task<EmailScheduleResult> ScheduleAsync(
+        EmailInquiryAssembly assembly,
+        IReadOnlyCollection<EmailInquiryComponent> components,
+        EmailInquiryManifest plan,
+        EmailIngest ingest,
+        string? clientEmail,
+        IDocumentIngestion ingestion,
+        EmailTriageDecision triage,
+        IEmailInquiryAssemblyCoordinator coordinator,
+        ILogger logger,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(assembly);
+        ArgumentNullException.ThrowIfNull(components);
+        ArgumentNullException.ThrowIfNull(plan);
+        ArgumentNullException.ThrowIfNull(ingest);
+        ArgumentNullException.ThrowIfNull(ingestion);
+        ArgumentNullException.ThrowIfNull(triage);
+        ArgumentNullException.ThrowIfNull(coordinator);
+        ArgumentNullException.ThrowIfNull(logger);
+
+        var batchId = DeriveBatchId(assembly.Id, assembly.MessageKey);
+
+        // Compatible is the ONLY schedulable verdict, and the branch is on the TYPE. Parsing the
+        // human-readable detail for control flow is how a hold becomes a substring match that
+        // stops matching the day someone improves the wording.
+        var verification = EmailComponentManifestVerifier.Verify(
+            assembly.ManifestContractVersion, assembly.ExpectedComponentCount, components, plan);
+
+        if (!verification.IsCompatible)
+        {
+            var detail = EmailComponentManifestVerifier.Describe(verification.Mismatches);
+            logger.LogError(
+                "Manifest {Verdict} on assembly {AssemblyId} (business unit {BusinessUnitId}, "
+                + "mailbox {EmailConfigurationId}, ingest {EmailIngestId}): {Detail}",
+                verification.Verdict, assembly.Id, assembly.BusinessUnitId,
+                assembly.EmailConfigurationId, assembly.EmailIngestId, detail);
+
+            // Hold every part still in flight. Scheduling the subset that happens to match would
+            // build a Lead from a message we cannot vouch for.
+            var held = 0;
+            foreach (var component in components.Where(c => !c.IsTerminal).OrderBy(c => c.Ordinal))
+            {
+                await coordinator.RecordComponentOutcomeAsync(
+                    assembly.BusinessUnitId, component.ComponentKey,
+                    EmailInquiryComponentStatus.FailedRecoverable,
+                    ManifestMismatchReason, detail, null, ct);
+                held++;
+            }
+            return new EmailScheduleResult(batchId, 0, 0, held, verification.Verdict);
+        }
+
+        var plans = plan.Components.ToDictionary(c => c.ComponentKey, StringComparer.Ordinal);
+        var scheduled = 0;
+        var alreadyScheduled = 0;
+        var heldByFailure = 0;
+
+        foreach (var component in components.OrderBy(c => c.Ordinal))
+        {
+            ct.ThrowIfCancellationRequested();
+
+            // Terminal at capture — Skipped, Ignored, RefusedSecurity, StructuralOnly — stays
+            // represented on the message and produces no job by design.
+            if (component.IsTerminal) continue;
+
+            if (component.ExtractionJobId is { } existingJobId)
+            {
+                // A non-null id is NOT proof a job exists. Verified against the tenant's own
+                // jobs; if it has gone, the component is rescheduled rather than counted as done.
+                if (await coordinator.DurableJobExistsAsync(assembly.BusinessUnitId, existingJobId, ct))
+                {
+                    alreadyScheduled++;
+                    continue;
+                }
+                logger.LogWarning(
+                    "Component {ComponentKey} of assembly {AssemblyId} references job "
+                    + "{ExtractionJobId}, which no longer exists for business unit "
+                    + "{BusinessUnitId}; rescheduling.",
+                    component.ComponentKey, assembly.Id, existingJobId, assembly.BusinessUnitId);
+            }
+
+            var componentPlan = plans[component.ComponentKey];
+
+            try
+            {
+                var result = await ingestion.IngestAsync(
+                    componentPlan.Content.ToArray(),
+                    component.FileName ?? $"component-{component.Ordinal}",
+                    assembly.BusinessUnitId, ExtractionSourceType.Email,
+                    batchId, priority: 0,
+                    BuildMetadata(assembly, component, ingest, clientEmail, triage), ct);
+
+                await coordinator.RecordComponentQueuedAsync(
+                    assembly.BusinessUnitId, component.ComponentKey, result.JobId, ct);
+                scheduled++;
+
+                logger.LogInformation(
+                    "Scheduled component {ComponentKey} (ordinal {Ordinal}, {Kind}) of assembly "
+                    + "{AssemblyId} as job {ExtractionJobId} ({Outcome}) for business unit "
+                    + "{BusinessUnitId}, mailbox {EmailConfigurationId}, ingest {EmailIngestId}.",
+                    component.ComponentKey, component.Ordinal, component.Kind, assembly.Id,
+                    result.JobId, result.Outcome, assembly.BusinessUnitId,
+                    assembly.EmailConfigurationId, assembly.EmailIngestId);
+            }
+            catch (EvidenceStorageUnavailableException exception)
+            {
+                // The store, not the file. Holding this component holds the WHOLE message, which
+                // is what stops a body-only Lead when the attachment carrying the priced lines
+                // could not be stored.
+                logger.LogError(exception,
+                    "Durable evidence storage is unavailable while scheduling component "
+                    + "{ComponentKey} of assembly {AssemblyId} (configuration fault: "
+                    + "{IsConfigurationFault}); the message is held.",
+                    component.ComponentKey, assembly.Id, exception.IsConfigurationFault);
+                await coordinator.RecordComponentOutcomeAsync(
+                    assembly.BusinessUnitId, component.ComponentKey,
+                    EmailInquiryComponentStatus.FailedRecoverable,
+                    EvidenceStorageUnavailableException.ErrorCode,
+                    "Document storage was unavailable, so this part has not been processed yet.",
+                    null, ct);
+                heldByFailure++;
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                logger.LogError(exception,
+                    "Failed to schedule component {ComponentKey} of assembly {AssemblyId}.",
+                    component.ComponentKey, assembly.Id);
+                await coordinator.RecordComponentOutcomeAsync(
+                    assembly.BusinessUnitId, component.ComponentKey,
+                    EmailInquiryComponentStatus.FailedRecoverable,
+                    SchedulingFailedReason,
+                    "This part of the message could not be queued for processing yet.",
+                    null, ct);
+                heldByFailure++;
+            }
+        }
+
+        return new EmailScheduleResult(
+            batchId, scheduled, alreadyScheduled, heldByFailure, EmailManifestVerdict.Compatible);
+    }
+
+    private static ExtractionJobMetadata BuildMetadata(
+        EmailInquiryAssembly assembly, EmailInquiryComponent component,
+        EmailIngest ingest, string? clientEmail, EmailTriageDecision triage)
+        => new()
+        {
+            // ComponentKey IS the source occurrence: that field's documented contract is "stable
+            // identity of this receipt within its source system, such as an email attachment id
+            // or MIME ordinal", which is precisely what a ComponentKey is. Read from the row,
+            // never recomputed — recomputing is how the two walks came to disagree.
+            SourceOccurrenceId = component.ComponentKey,
+            LogicalGroupKey = $"email:{assembly.MessageKey}",
+            EmailIngestId = ingest.Id,
+            // Typed ownership. These are diagnostic HINTS: the sidecar carrying them is
+            // best-effort by its own contract, so it can never authorize a tenant mutation. The
+            // authoritative mapping is the persisted component row.
+            EmailInquiryAssemblyId = assembly.Id,
+            EmailInquiryComponentId = component.Id,
+            EmailInquiryComponentKey = component.ComponentKey,
+            BusinessUnitId = assembly.BusinessUnitId,
+            FromEmail = assembly.SenderAddress,
+            Subject = assembly.Subject ?? string.Empty,
+            SourceReceivedAtUtc = assembly.ReceivedAtUtc,
+            ClientEmail = clientEmail,
+            LeadSource = "Email",
+            EmailSource = component.Kind == EmailInquiryComponentKind.Body
+                ? "Text Only"
+                : GetFileTypeLabel(Path.GetExtension(component.FileName ?? string.Empty).ToLowerInvariant()),
+            // An email BODY is conversational prose; an attachment keeps structured routing.
+            BodyShape = component.Kind == EmailInquiryComponentKind.Body ? "prose" : null,
+            TriageOutcome = triage.Outcome.ToString(),
+            TriageReasonCodes = triage.ReasonCodes,
+            ThreadContinuation = triage.ThreadContinuation,
+            CommercialDocumentTypeHint = triage.CommercialDocumentTypeHint
+        };
+
+    /// <summary>
+    /// A stable batch id for an assembly.
+    ///
+    /// <para>Derived, never generated. It is part of the occurrence idempotency key, so
+    /// <c>Guid.NewGuid()</c> here splits one message across two batches on any retry and defeats
+    /// both unique indexes. <c>GetHashCode()</c> is equally unusable — it is not stable across
+    /// processes or framework versions, and this identity must survive a restart.</para>
+    /// </summary>
+    internal static Guid DeriveBatchId(long assemblyId, string messageKey)
+    {
+        var seed = System.Security.Cryptography.SHA256.HashData(
+            Encoding.UTF8.GetBytes($"nexora:email-assembly-batch:v1:{assemblyId}:{messageKey}"));
+        return new Guid(seed.AsSpan(0, 16));
     }
 
     /// <summary>
