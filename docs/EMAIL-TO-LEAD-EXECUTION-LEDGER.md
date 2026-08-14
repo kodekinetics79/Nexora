@@ -1115,3 +1115,84 @@ The fixture seeds the real parent chain — business unit → mailbox → ingest
 **This is the class of test whose absence let the fail-closed outage ship with 4911 green.**
 
 Full backend regression: **Failed: 0, Passed: 4930**.
+
+
+## SDET F3 / F4 CLOSED — two tests that could not fail (`3a4522e`)
+
+Both asserted properties of themselves rather than of production.
+
+**F3.** `EmailInquiryAssemblyRegistrationTests` re-declared the registrations it was meant to
+guard, so deleting every `AddScoped` from `Program` left it green. The composition now lives in
+`AddEmailInquiryAssembly()` and the test calls that same extension, with `ValidateOnBuild` so a
+scoped dependency captured by a singleton is caught at build time.
+
+**F4.** The tenant-isolation negative test swallowed the FK violation from an unseeded parent, so
+tenant A's row was never inserted and `count(*) = 0` held for trivial reasons — it passed with
+row-level security dropped entirely. It now seeds the real parent chain, proves the owner can read
+the row, then proves a second tenant can neither read, update nor delete it, and that the row is
+unchanged afterwards.
+
+**Mutation-proved:** with `ROW LEVEL SECURITY` disabled on `EmailInquiryAssemblies` the test fails
+(expected 0, actual 1). Restored, it passes. That is the evidence the old version could not offer.
+
+
+## SDET F2 CLOSED — the vertical slice runs end to end (`1311617`, `ca86def`)
+
+`EmailToLeadVerticalSlicePostgreSqlTests`. One message — a covering note and two priced CSV
+attachments — through a migrated PostgreSQL container and the production composition: capture,
+manifest, scheduling, `DocumentIngestionService`, the real advisory-lock queue claim, the real
+`ExtractionWorker` loop, the real `ProductionDocumentReader` reading bytes back out of evidence
+storage, the real `LeadPersister`. Out comes **exactly one Lead carrying all five lines in the
+order the buyer wrote them**.
+
+No recording queue, no recording persister, no seeded result, no SQLite, no source-text assertions.
+The single substituted boundary is the language model, and `RefusingLlm` throws on any call — so
+the CSVs taking the deterministic path is an assertion, not an assumption.
+
+### Four defects the slice found that every existing test missed
+
+Each was invisible because the seam in question was proven against a double.
+
+| # | Defect | Why it was invisible |
+| --- | --- | --- |
+| 1 | Capture wrote the raw `.eml` to evidence zone `"inbound-email"`. Both providers whitelist `quarantine\|cleared` and throw `ArgumentException` otherwise — outside the storage-unavailable contract capture catches. **Capture failed on every message, on every provider.** | every capture test substituted `IEvidenceObjectStorage` with a double that accepted any string |
+| 2 | The claimed job was materialized by raw SQL that did not select the new ownership column, so it came back null and read exactly like a legacy per-document job — sending an email component past the barrier into its own Lead | no test claimed a job through the real queue and then inspected ownership |
+| 3 | **The assembly never left `Captured`.** Scheduling moved components to `Extracting` but never re-evaluated the message, so when the barrier finally said `ReadyForAssembly` the transition was illegal, was logged, and was discarded. Every component completed with a durable result and no message was ever assembled | the state machine was tested as a pure function; nothing drove it through the real scheduling path |
+| 4 | `VALIDATE CONSTRAINT` against a `FORCE ROW LEVEL SECURITY` table is refused for the table owner, and migrations run as the owner on the managed target. **The deployment would have stopped at this migration** while passing everywhere migrations run as a superuser | the ordinary test fixture migrates as the container superuser |
+
+### What was built
+
+- **`EmailInquiryComponentResults`** — the durable, versioned store the worker had nowhere to write
+  to. Its absence is why the fence could only hold: the honest options were to discard a paid-for
+  extraction or stall the message, and it stalled. A payload contract version this build cannot
+  read sends the message to review rather than being coerced. RLS enabled and forced,
+  tenant/pipeline/purge grants, purge policy, `USAGE`-only on the sequence.
+- **`ExtractionJobs.EmailInquiryComponentId`** — ONE ownership authority, written with the INSERT.
+  Binding it in a second statement leaves a window in which a worker can claim a job whose owner is
+  not yet visible. Composite FK carries the tenant; a `CHECK` confines it to email jobs using the
+  string the provider actually stores, not a guessed enum ordinal.
+- **`RecordComponentResultAsync`** — result, completion and re-evaluation in ONE transaction.
+- **`EmailInquiryLeadAssembler`** — merges every component's durable result into one Lead in ordinal
+  order, so a buyer's schedule is not silently reordered.
+
+### Judgement calls worth recording
+
+- **`CREATE INDEX CONCURRENTLY` was considered and rejected.** It cannot run inside a transaction,
+  and every migration here is applied inside one. Splitting that contract risks a half-applied
+  schema and an INVALID index for an index that builds over zero existing rows. `lock_timeout`,
+  `NOT VALID` + `VALIDATE`, and a partial index carry the load instead.
+- **Assembly is orchestration and belongs to the worker.** The first attempt injected the assembler
+  into `LeadPersister`, which is a dependency cycle (the assembler must persist the Lead it builds).
+  The container rejected it and three jobs dead-lettered on a circular-dependency message.
+- **The assembler is registered beside `ILeadPersister`, not in `AddEmailInquiryAssembly`** — it
+  depends on extraction, and putting it in the capability made the capability unresolvable alone.
+
+Full backend regression: **Failed: 0, Passed: 4935**. Frozen migration byte-identical.
+
+### Known gap, deliberately not closed in this increment
+
+The worker completes the queue job and assembles the message **after**. If the process dies in
+between, the job reads `Succeeded` and the message sits at `ReadyForAssembly` with no Lead — and
+nothing in this build sweeps that state. The ordering is still correct (assembling first would
+duplicate the Lead on retry), so the fix is a recovery sweep, not a reordering. Recorded here
+rather than built, and it is the next item.
