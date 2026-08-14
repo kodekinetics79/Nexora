@@ -74,6 +74,21 @@ public static class DeterministicEmailTriage
     private static readonly string[] SubjectInquiryTerms =
         { "rfq", "request for quot", "enquiry", "inquiry", "itb", "tender" };
 
+    /// <summary>
+    /// Vocabulary of the public- and enterprise-procurement channel, which reaches a distributor
+    /// almost exclusively through NO-REPLY notification platforms — BidNet, DemandStar,
+    /// Periscope, SAM.gov, Ariba, Jaggaer and their like.
+    ///
+    /// <para>These words are positive evidence that a message is business mail, and they exist
+    /// to override the unattended-sender signal. Without them a solicitation or an addendum is
+    /// discarded for the sole reason that nobody could reply to it — which is true of every
+    /// notification this channel has ever sent.</para>
+    /// </summary>
+    private static readonly string[] ProcurementNotificationTerms =
+        { "solicitation", "addendum", "addenda", "bid", "invitation to bid", "request for proposal",
+          "rfp", "rfi", "sourcing event", "prequalification", "procurement", "award notice",
+          "amendment", "due date", "closing date" };
+
     /// <summary>Local parts that identify an unattended mailbox. A reply to one of these can
     /// never reach a human, so a request never originates from one.</summary>
     private static readonly string[] UnattendedLocalParts =
@@ -90,6 +105,27 @@ public static class DeterministicEmailTriage
     internal static readonly string[] PurchaseOrderTerms =
         { "purchase order", "customer po", "order confirmation requested", "ship to" };
 
+    /// <summary>
+    /// Whether the message carries positive evidence of commercial content, used to override
+    /// the unattended-sender signal.
+    ///
+    /// <para>Deliberately broad and cheap: the cost of a false positive is one message reaching
+    /// extraction and being classified as no-inquiry, while the cost of a false negative is a
+    /// discarded solicitation. Those are not comparable, so this errs toward letting mail
+    /// through.</para>
+    /// </summary>
+    internal static bool HasCommercialEvidence(EmailTriageSignals s)
+    {
+        var haystack = $"{s.Subject}\n{s.FreshBody}".ToLowerInvariant();
+        if (SubjectInquiryTerms.Any(haystack.Contains)) return true;
+        if (ProcurementNotificationTerms.Any(haystack.Contains)) return true;
+        if (RequestVerbPattern.IsMatch(haystack)) return true;
+        if (QuantityUomPattern.IsMatch(haystack)) return true;
+        // An unattended sender that troubled to attach a document is describing something, and
+        // the document is the thing worth reading.
+        return s.HasAttachments;
+    }
+
     public static EmailTriageDecision Evaluate(EmailTriageSignals s)
     {
         ArgumentNullException.ThrowIfNull(s);
@@ -105,7 +141,24 @@ public static class DeterministicEmailTriage
             noise.Add(EmailTriageReasonCodes.BulkListHeader);
         if (IsCalendarMessage(s.ContentClass))
             noise.Add(EmailTriageReasonCodes.CalendarInvite);
-        if (IsUnattendedSender(s.FromAddress))
+        // UNATTENDED SENDER IS NOT EVIDENCE OF NON-BUSINESS MAIL.
+        //
+        // This rule used to be a hard stop, reasoning that "a reply to one of these can never
+        // reach a human, so a request never originates from one". That premise is false in this
+        // product's actual market. Government and enterprise procurement reaches a distributor
+        // almost entirely through no-reply notification platforms — BidNet Direct, DemandStar,
+        // Periscope, SAM.gov, Ariba, Jaggaer. You do not reply to a solicitation; you act on it.
+        //
+        // Observed in production on 2026-08-13: BidNet Direct addenda for the Fulton County Jail
+        // and Clayton County justice-system solicitations were all discarded as "No-reply
+        // sender". Real bid opportunities, thrown away for being unrepliable.
+        //
+        // It stays a signal — a no-reply address genuinely does correlate with automated mail —
+        // but it can no longer stop a message ON ITS OWN. Positive commercial evidence in the
+        // subject or body overrides it, which is exactly the principle this gate already claims
+        // to follow: stop only on positive, machine-verifiable evidence that something is NOT
+        // business mail. An unattended address was never that evidence.
+        if (IsUnattendedSender(s.FromAddress) && !HasCommercialEvidence(s))
             noise.Add(EmailTriageReasonCodes.NoreplySender);
         // "The sender added no new words AND attached nothing" — there is provably nothing
         // here to extract. With an attachment present this is a perfectly ordinary
