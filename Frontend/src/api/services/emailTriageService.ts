@@ -391,6 +391,13 @@ export interface SkippedAttachment {
   fileName: string | null;
   /** Why it was not scheduled — unsupported type, too large, unreadable. */
   reason: string | null;
+  /**
+   * The whole recorded line, for the places that want the operator to see the record verbatim
+   * rather than split across columns. Rebuilt from the sanitised halves rather than kept raw, so
+   * a skipped attachment still cannot put a path on the screen. Null only when the entry carried
+   * nothing usable at all.
+   */
+  displayText: string | null;
 }
 
 /**
@@ -427,6 +434,12 @@ export interface EmailTriageRow {
    * Attachments the door refused to schedule — ING-06. Deliberately NOT merged into
    * {@link components}: nothing was queued for them, so counting them as parts would put the
    * assembly totals at odds with the work the pipeline actually has.
+   *
+   * It is also the legacy/pre-assembly record: a canonical assembly reports a refused attachment
+   * as a component row with state `Skipped`, but an older message has only this list, and without
+   * it the UI silently drops the sole durable evidence that an attachment was missed. Parsed
+   * rather than kept as raw text so the name and the reason can be shown apart — see
+   * {@link SkippedAttachment.displayText} for the verbatim line.
    */
   skippedAttachments: SkippedAttachment[];
   /**
@@ -460,6 +473,13 @@ export interface EmailTriageRow {
   components: EmailComponent[];
   /** False when the payload carried no component array — distinct from "carried an empty one". */
   componentsReported: boolean;
+  /** True only when the original RFC822 message is durably addressable. Null is not reported. */
+  rawEvidenceStored: boolean | null;
+  /** True when reads are checked against the capture-time SHA-256. */
+  rawEvidenceVerifiable: boolean | null;
+  /** Sender-stamped time and the time extraction completed, when the backend reports them. */
+  senderSentOn: string | null;
+  parsedOn: string | null;
   /** When the message was durably captured, as distinct from when the mailbox happened to poll. */
   ingestedOn: string | null;
   /**
@@ -599,13 +619,21 @@ const splitSkippedEntry = (entry: string): { fileName: string; reason: string | 
  */
 const readSkippedAttachment = (payload: unknown, index: number): SkippedAttachment => {
   const entry = asText(payload);
-  if (entry === null) return { key: `skipped-${index}`, fileName: null, reason: null };
+  if (entry === null) {
+    return { key: `skipped-${index}`, fileName: null, reason: null, displayText: null };
+  }
   const split = splitSkippedEntry(entry);
+  // Falling back to the whole entry keeps an unsplittable line visible under its own text.
+  const fileName = safeFileName(split.fileName) ?? safeFileName(entry);
+  const reason = split.reason;
   return {
     key: `skipped-${index}`,
-    // Falling back to the whole entry keeps an unsplittable line visible under its own text.
-    fileName: safeFileName(split.fileName) ?? safeFileName(entry),
-    reason: split.reason,
+    fileName,
+    reason,
+    // Recomposed from the sanitised name, never from the wire string: the halves are what the
+    // sender controls, and the leaf-only rule has already been applied to them.
+    displayText:
+      fileName === null ? reason : reason === null ? fileName : `${fileName} (${reason})`,
   };
 };
 
@@ -621,11 +649,15 @@ export const readTriageRow = (payload: unknown): EmailTriageRow => {
     : Array.isArray(root.attachmentFileNames)
       ? root.attachmentFileNames
       : null;
+  // `skippedAttachmentReasons` is the older payload's spelling of the same list. Reading only one
+  // of the three names is how a legacy message's skips reach the browser and render as nothing.
   const skippedRaw = Array.isArray(root.skippedAttachments)
     ? root.skippedAttachments
     : Array.isArray(root.skippedAttachmentNames)
       ? root.skippedAttachmentNames
-      : null;
+      : Array.isArray(root.skippedAttachmentReasons)
+        ? root.skippedAttachmentReasons
+        : null;
   const attachmentNames = asTextList(attachmentNamesRaw);
   const attachmentCount = asCount(root.attachmentCount) ?? (attachmentNamesRaw ? attachmentNames.length : null);
 
@@ -661,6 +693,10 @@ export const readTriageRow = (payload: unknown): EmailTriageRow => {
     componentsCompleted: asCount(root.completedComponentCount) ?? asCount(root.componentsCompleted),
     components: (componentsRaw ?? []).map(readComponent),
     componentsReported: componentsRaw !== null,
+    rawEvidenceStored: asFlag(root.rawEvidenceStored),
+    rawEvidenceVerifiable: asFlag(root.rawEvidenceVerifiable),
+    senderSentOn: asText(root.senderSentAtUtc) ?? asText(root.senderSentOn),
+    parsedOn: asText(root.parsedAt) ?? asText(root.parsedOn),
     ingestedOn: asText(root.ingestedAtUtc) ?? asText(root.ingestedOn),
     lastUpdatedOn: asText(root.lastUpdatedAtUtc) ?? asText(root.lastUpdatedOn),
   };

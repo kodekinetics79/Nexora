@@ -632,6 +632,18 @@ export default function InboundMailTriagePage() {
                     // stated the moment the panel opens, and it survives the parts read failing.
                     const skipped = row.skippedAttachments;
                     const expanded = expandedId === row.id;
+                    // The same record as `skipped`, on the older payload that carries it only on
+                    // the per-message read. Nothing above would ever show those, so they are kept —
+                    // minus any entry the row already stated, so one skip is never listed twice.
+                    // Two unreadable entries are not assumed to be the same entry.
+                    const legacySkipped =
+                      expanded && detailQuery.isSuccess
+                        ? detailQuery.data.skippedAttachments.filter(
+                            (entry) =>
+                              entry.displayText === null
+                              || !skipped.some((shown) => shown.displayText === entry.displayText),
+                          )
+                        : [];
                     const detailId = `triage-detail-${row.id}`;
                     const subject = row.subject ?? '(no subject)';
                     return (
@@ -795,6 +807,21 @@ export default function InboundMailTriagePage() {
                                     ))}
                                   </Stack>
                                 )}
+                                {detailQuery.isSuccess && (
+                                  <Alert
+                                    severity={detailQuery.data.rawEvidenceStored === false ? 'warning' : 'info'}
+                                    variant="outlined"
+                                    sx={{ mt: 1 }}
+                                  >
+                                    {detailQuery.data.rawEvidenceStored === true
+                                      ? detailQuery.data.rawEvidenceVerifiable === true
+                                        ? 'The original email is retained and verified against its capture-time digest.'
+                                        : 'The original email is retained. Digest verification was not reported.'
+                                      : detailQuery.data.rawEvidenceStored === false
+                                        ? 'The original email is not reported as retained; contact support before relying on reprocessing.'
+                                        : 'Whether the original email is retained is not reported by this deployment.'}
+                                  </Alert>
+                                )}
                               </Box>
 
                               <Box>
@@ -861,17 +888,31 @@ export default function InboundMailTriagePage() {
                                     Decided {formatReceived(row.decidedOn)}
                                   </Typography>
                                 )}
-                                {row.ingestedOn && (
+                                {detailQuery.isSuccess && detailQuery.data.senderSentOn && (
                                   <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
-                                    Ingested {formatReceived(row.ingestedOn)}
+                                    Sender timestamp {formatReceived(detailQuery.data.senderSentOn)}
+                                  </Typography>
+                                )}
+                                {(detailQuery.isSuccess ? detailQuery.data.ingestedOn : row.ingestedOn) && (
+                                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                                    Ingested {formatReceived(
+                                      detailQuery.isSuccess ? detailQuery.data.ingestedOn : row.ingestedOn,
+                                    )}
+                                  </Typography>
+                                )}
+                                {detailQuery.isSuccess && detailQuery.data.parsedOn && (
+                                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                                    Extraction finished {formatReceived(detailQuery.data.parsedOn)}
                                   </Typography>
                                 )}
                                 {/* Named for what the column actually records. Nothing distinguishes
                                     a recovery sweep from the worker's own barrier here, so calling
                                     this "recovered" would state something no row supports. */}
-                                {row.lastUpdatedOn && (
+                                {(detailQuery.isSuccess ? detailQuery.data.lastUpdatedOn : row.lastUpdatedOn) && (
                                   <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
-                                    Last moved {formatReceived(row.lastUpdatedOn)}
+                                    Last moved {formatReceived(
+                                      detailQuery.isSuccess ? detailQuery.data.lastUpdatedOn : row.lastUpdatedOn,
+                                    )}
                                   </Typography>
                                 )}
                               </Box>
@@ -1024,6 +1065,35 @@ export default function InboundMailTriagePage() {
                                     Whether any attachment was skipped instead of being sent for extraction is{' '}
                                     {NOT_REPORTED.toLowerCase()} by this deployment.
                                   </Typography>
+                                )}
+
+                                {/* The same loss, from the other source. A canonical assembly reports
+                                    a refused attachment on the LIST row, which is what the table above
+                                    reads; a legacy, pre-assembly message carries it only on the
+                                    per-message read, and nothing above would ever show it. Both are
+                                    kept, and an entry the table already stated is filtered out here so
+                                    one skipped attachment is never counted twice on the screen. */}
+                                {legacySkipped.length > 0 && (
+                                  <Alert severity="warning" variant="outlined" sx={{ mt: 1 }}>
+                                    <AlertTitle>Attachments skipped before component tracking</AlertTitle>
+                                    <Typography variant="body2">
+                                      These attachments were not handed to extraction. They remain visible here so
+                                      a salesperson cannot price the inquiry as though every attachment was read.
+                                    </Typography>
+                                    <Box component="ul" sx={{ pl: 2.5, mt: 0.75, mb: 0 }}>
+                                      {legacySkipped.map((attachment) => (
+                                        <Typography
+                                          key={attachment.key}
+                                          component="li"
+                                          variant="caption"
+                                          sx={{ overflowWrap: 'anywhere' }}
+                                        >
+                                          {presentableServerText(attachment.displayText)
+                                            ?? 'Attachment details recorded for support'}
+                                        </Typography>
+                                      ))}
+                                    </Box>
+                                  </Alert>
                                 )}
                               </Box>
                             </Box>

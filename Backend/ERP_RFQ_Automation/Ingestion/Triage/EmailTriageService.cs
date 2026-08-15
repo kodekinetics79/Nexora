@@ -120,10 +120,14 @@ public sealed record EmailIntakeComponentRow(
 public sealed record EmailTriagePage(
     int PageNumber, int PageSize, int TotalCount, IReadOnlyList<EmailTriageRow> Items);
 
-/// <param name="Enqueued">Jobs created by the replay. Zero means nothing extractable was found.</param>
+/// <param name="Enqueued">Processable jobs associated with the replay, including jobs already
+/// scheduled by an earlier identical request. Zero means nothing extractable was found.</param>
 /// <param name="Status">The ingest's resulting ParseStatus.</param>
+/// <param name="Replayed">True only when the request scheduled no new component and resolved
+/// entirely to work that was already queued. The browser uses this to avoid claiming it created
+/// work on an idempotent replay.</param>
 public sealed record EmailTriageReprocessResult(
-    long Id, Guid BatchId, int Enqueued, string Outcome, string Status);
+    long Id, Guid BatchId, int Enqueued, string Outcome, string Status, bool Replayed);
 
 public interface IEmailTriageService
 {
@@ -473,7 +477,8 @@ public sealed class EmailTriageService : IEmailTriageService
 
         return new EmailTriageReprocessResult(
             ingest.Id, result.BatchId, queued,
-            EmailTriageOutcome.Uncertain.ToString(), ingest.ParseStatus!);
+            EmailTriageOutcome.Uncertain.ToString(), ingest.ParseStatus!,
+            Replayed: result.Scheduled == 0 && result.AlreadyScheduled > 0);
     }
 
     private static bool IsBodyDocument(string? fileName)

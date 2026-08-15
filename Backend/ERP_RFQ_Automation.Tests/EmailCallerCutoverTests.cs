@@ -172,6 +172,35 @@ public sealed class EmailCallerCutoverTests : IDisposable
         Assert.Contains(EmailTriageReasonCodes.ManualReprocess, intakeCall.Triage.ReasonCodes);
         Assert.Equal(2, result.Enqueued);
         Assert.Equal("Queued", result.Status);
+        Assert.False(result.Replayed);
+    }
+
+    [Fact]
+    public async Task Reprocess_reports_a_full_idempotent_replay_instead_of_claiming_new_work()
+    {
+        await SeedMailboxAsync();
+        long ingestId;
+        await using (var seed = _db.ContextFor(null))
+        {
+            var ingest = Seed.EmailIngest(seed, 7103, ConfigId, "Queued");
+            await seed.SaveChangesAsync();
+            ingestId = ingest.Id;
+        }
+
+        var intake = new RecordingIntake
+        {
+            Result = Captured(assemblyId: 42, scheduled: 0, alreadyScheduled: 2)
+        };
+        var reader = new RecordingRawEmailReader(
+            Enquiry("DURABLE EVIDENCE COPY", "Kindly send your best price for 40 nos cable tray."));
+
+        await using var context = _db.ContextFor(Bu);
+        var result = await new EmailTriageService(
+                context, intake, reader, new NoopLogger<EmailTriageService>())
+            .ReprocessAsync(Bu, ingestId, "operator@tenant.example", "Replay proof", "key-replay");
+
+        Assert.Equal(2, result.Enqueued);
+        Assert.True(result.Replayed);
     }
 
     [Fact]
@@ -234,8 +263,10 @@ public sealed class EmailCallerCutoverTests : IDisposable
         }
     }
 
-    private static EmailInquiryIntakeResult Captured(long assemblyId, int scheduled)
-        => new(assemblyId, Guid.NewGuid(), scheduled, 0, 0, scheduled,
+    private static EmailInquiryIntakeResult Captured(
+        long assemblyId, int scheduled, int alreadyScheduled = 0)
+        => new(assemblyId, Guid.NewGuid(), scheduled, alreadyScheduled, 0,
+            scheduled + alreadyScheduled,
             AlreadyCaptured: false, SafeToAcknowledge: true, FailureReason: null);
 
     private sealed class RecordingRawEmailReader : IRawEmailEvidenceReader
