@@ -114,6 +114,11 @@ namespace ERP_RFQ_Automation.Services
         // and the raw .eml is retained so /api/email-triage can replay it on demand.
         private const string STATUS_REJECTED = "Rejected";                      // <= 50 chars
         private const string STATUS_SCANNED_PDF = "NeedsReview - Scanned PDF";  // <= 50 chars
+        // ING-09: terminal state for a stranded Pending row whose retained raw .eml is gone.
+        // Without the bytes there is nothing to replay — not by the sweeper below and not by
+        // the manual /api/email-triage reprocess either — so leaving it Pending would be a
+        // promise of progress nothing can keep. Visible and honest instead.
+        internal const string STATUS_RAW_MESSAGE_LOST = "Failed - raw message lost"; // <= 50 chars
         // ING-04: internal marker returned by PDF extraction when a page image-only/scanned PDF
         // could not be OCR'd. Never fed to the LLM; used only to route the ingest to review.
         private const string SCANNED_PDF_SENTINEL = "SCANNED_PDF_NO_TEXT";
@@ -142,6 +147,15 @@ namespace ERP_RFQ_Automation.Services
         private readonly TimeSpan _initialLookback;
         private readonly TimeSpan _minLookback;
         private readonly TimeSpan _maxLookback;
+        // ING-09: how old a "Pending" ingest must be before the sweeper treats it as stranded
+        // rather than in-flight. Conservative on purpose: the window between the ingest commit
+        // and the enqueue is milliseconds, so anything Pending for this long is a crash
+        // remnant, not work in progress. Overridable via Ingestion:Email:* like the lookback.
+        private const double DEFAULT_STRANDED_PENDING_SWEEP_MINUTES = 15;
+        // Bound on rows recovered per tenant per cycle so a large backlog cannot stall the
+        // poll loop; the next cycle takes the rest (the query is oldest-first).
+        internal const int StrandedSweepBatchSize = 50;
+        private readonly TimeSpan _strandedPendingAge;
         public EmailService(ErpRfqAutomationContext context, IWebHostEnvironment env,
             ILogger<EmailService> logger, ILLMService llmService, IServiceScopeFactory scopeFactory,
             IConfiguration configuration, IFileStorage storage,
@@ -168,6 +182,10 @@ namespace ERP_RFQ_Automation.Services
                 configuration.GetValue("Ingestion:Email:MaxLookbackDays", DEFAULT_MAX_LOOKBACK_DAYS),
                 DEFAULT_MAX_LOOKBACK_DAYS);
             if (_maxLookback < _minLookback) _maxLookback = _minLookback;
+            var sweepMinutes = configuration.GetValue(
+                "Ingestion:Email:StrandedPendingSweepMinutes", DEFAULT_STRANDED_PENDING_SWEEP_MINUTES);
+            _strandedPendingAge = TimeSpan.FromMinutes(
+                sweepMinutes > 0 ? sweepMinutes : DEFAULT_STRANDED_PENDING_SWEEP_MINUTES);
             _attachmentPath = storage.GetPath("RFQ_Attachments");
             _rawEmailPath = storage.GetPath("Raw_Emails");
             _tessDataPath = Path.Combine(_env.ContentRootPath, "tessdata");
@@ -341,6 +359,53 @@ namespace ERP_RFQ_Automation.Services
                         + "No message from this mailbox has been ingested since then.",
                         handle.EmailAddress, outcome.FailureReason,
                         outcome.LastSuccessfulPollOn?.ToString("O") ?? "never");
+                }
+            }
+
+            // ING-09: recover ingests stranded at "Pending" by a crash between the durable
+            // ingest commit and the enqueue. Runs AFTER the mailbox loop, inside the same
+            // poller cycle (and therefore under the same advisory-lease leadership — see
+            // EmailBackgroundService), and deliberately runs even for a mailbox whose IMAP
+            // poll just failed: the raw .eml is on local storage, so a broken mailbox
+            // credential is no reason to leave already-captured mail stuck.
+            //
+            // Fully fenced off from the poll verdict: the sweep is a RECOVERY channel, and a
+            // sweep failure must never repaint a mailbox result (or the reverse).
+            foreach (var sweepBusinessUnitId in configs.Select(c => c.BusinessUnitId).Distinct())
+            {
+                try
+                {
+                    // Same push-before-CreateScope ordering, and the same fail-closed scope
+                    // guard, as the mailbox loop above — the sweep writes tenant data.
+                    using var tenant = tenantScope.Push(sweepBusinessUnitId);
+                    using var sweepScope = _scopeFactory.CreateScope();
+                    var sweepContext = sweepScope.ServiceProvider
+                        .GetRequiredService<ErpRfqAutomationContext>();
+                    if (sweepContext.ScopedTenantId != sweepBusinessUnitId)
+                    {
+                        _logger.LogError(
+                            "Stranded-Pending sweep refused for BU {BusinessUnitId}: the DbContext "
+                            + "resolved tenant {ResolvedTenant}. Tenant scope is mandatory for this sweep.",
+                            sweepBusinessUnitId,
+                            sweepContext.ScopedTenantId?.ToString() ?? "<none>");
+                        continue;
+                    }
+                    // No IDocumentIngestion registered means there is no durable queue to
+                    // re-enqueue into (legacy hosts, minimal test harnesses); the rows stay
+                    // Pending and the operator still sees them on the triage screen.
+                    var sweepIngestion = sweepScope.ServiceProvider
+                        .GetService<ERP_RFQ_Automation.Extraction.IDocumentIngestion>();
+                    if (sweepIngestion is null) continue;
+                    var sweepLlm = sweepScope.ServiceProvider.GetService<ILLMService>() ?? _llmService;
+                    await SweepStrandedPendingIngestsAsync(
+                        sweepContext, sweepIngestion, sweepLlm, sweepBusinessUnitId, DateTime.UtcNow);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex,
+                        "The stranded-Pending sweep failed for BU {BusinessUnitId} this cycle; "
+                        + "the rows stay Pending and the next cycle retries. The mailbox verdict is unaffected.",
+                        sweepBusinessUnitId);
                 }
             }
 
@@ -823,7 +888,23 @@ namespace ERP_RFQ_Automation.Services
 
             // From here a durable record exists: the caller may mark the message \Seen regardless
             // of the classification/extraction outcome below.
+            await RouteIngestAsync(message, ingest, config, context, llmService, ingestion);
+            return true;
+        }
 
+        /// <summary>
+        /// The post-persist half of ingesting one message: triage, then fan-out (or the legacy
+        /// direct extraction), then the resulting ParseStatus. Factored out of
+        /// <see cref="ProcessSingleEmailAsync"/> UNCHANGED so the ING-09 stranded-Pending
+        /// sweeper below can re-run exactly the step a crash cut off — a recovered message
+        /// that took a different routing path than a fresh one would not be a recovery.
+        /// Every branch leaves the ingest saved with a truthful ParseStatus.
+        /// </summary>
+        private async Task RouteIngestAsync(
+            MimeMessage message, EmailIngest ingest, EmailConfiguration config,
+            ErpRfqAutomationContext context, ILLMService llmService,
+            ERP_RFQ_Automation.Extraction.IDocumentIngestion? ingestion)
+        {
             // ING-07: RECOGNITION. The old gate treated "quote"/"quotation" as strong RFQ
             // evidence (so every supplier reply and order confirmation passed) while a bare
             // prose enquiry with none of its 22 keywords was dropped — simultaneously too
@@ -846,11 +927,11 @@ namespace ERP_RFQ_Automation.Services
             {
                 _logger.LogInformation(
                     "Email triaged as noise ({Reasons}); no extraction job enqueued, raw message retained: {Subject}",
-                    string.Join(",", triage.ReasonCodes), subject);
+                    string.Join(",", triage.ReasonCodes), message.Subject ?? "");
                 ingest.ParseStatus = STATUS_REJECTED;
                 ingest.ParsedAt = DateTime.UtcNow;
                 await context.SaveChangesAsync();
-                return true;
+                return;
             }
 
             // ING-05: unified queue — the RFQ email's body and each attachment become
@@ -875,7 +956,7 @@ namespace ERP_RFQ_Automation.Services
                     ingest.ParsedAt = DateTime.UtcNow;
                 }
                 await context.SaveChangesAsync();
-                return true;
+                return;
             }
 
             // Legacy direct-extraction path (Ingestion:UseUnifiedQueue=false).
@@ -892,7 +973,123 @@ namespace ERP_RFQ_Automation.Services
                 ingest.ParseStatus = STATUS_FAILED;
             }
             await context.SaveChangesAsync();
-            return true;
+        }
+
+        /// <summary>
+        /// ING-09: the stranded-Pending recovery pass.
+        ///
+        /// <para>
+        /// The ingest write in <see cref="ProcessSingleEmailAsync"/> is two steps — commit the
+        /// EmailIngest row (ParseStatus "Pending"), then triage + enqueue and flip it to
+        /// Queued/Rejected/Failed. A crash between them leaves a row this system will never
+        /// touch again: the ledger pre-check skips any Message-Id already in EmailIngests, so
+        /// the message is never re-downloaded, and nothing downstream ever reads a "Pending"
+        /// row. The mail was durably captured and then went nowhere, silently — the exact loss
+        /// class ING-01 closed at the door, reintroduced one step later.
+        /// </para>
+        /// <para>
+        /// This pass re-runs the cut-off step from the retained raw .eml through
+        /// <see cref="RouteIngestAsync"/> — the SAME routine a fresh message takes, so triage,
+        /// fan-out and status semantics cannot drift. It is safe to re-run against a message
+        /// that was in fact partially enqueued: the evidence store's (BusinessUnitId,
+        /// ContentHash) idempotency resolves every already-ingested document as Duplicate,
+        /// which counts as handled work and flips the row to Queued. A row whose enqueue
+        /// completed but whose status flip was the thing that crashed is detected cheaply (its
+        /// extraction occurrences already exist under the message's logical group key) and just
+        /// gets the flip. A row whose raw .eml is gone gets the terminal
+        /// <see cref="STATUS_RAW_MESSAGE_LOST"/> instead of an unpayable promise.
+        /// </para>
+        /// <para>
+        /// Per-row fault isolation: one unreadable message must never stop the sweep, so each
+        /// row is handled in its own try/catch and a failed row simply stays Pending for the
+        /// next cycle. Runs after the mailbox loop under the same poller advisory lease, so it
+        /// never executes concurrently with itself. Internal so the tests can drive it with a
+        /// deterministic clock.
+        /// </para>
+        /// </summary>
+        internal async Task<int> SweepStrandedPendingIngestsAsync(
+            ErpRfqAutomationContext context,
+            ERP_RFQ_Automation.Extraction.IDocumentIngestion ingestion,
+            ILLMService llmService,
+            long businessUnitId,
+            DateTime nowUtc)
+        {
+            var cutoff = nowUtc - _strandedPendingAge;
+            var stranded = await context.EmailIngests
+                .Include(e => e.EmailConfiguration)
+                .Where(e => e.EmailConfiguration.BusinessUnitId == businessUnitId
+                    && e.ParseStatus == STATUS_PENDING
+                    && e.CreatedOn < cutoff)
+                .OrderBy(e => e.CreatedOn).ThenBy(e => e.Id)
+                .Take(StrandedSweepBatchSize)
+                .ToListAsync();
+            if (stranded.Count == 0) return 0;
+
+            _logger.LogWarning(
+                "Found {Count} email ingest(s) stranded at Pending for over {Minutes:F0} minute(s) "
+                + "in BU {BusinessUnitId}; re-running the enqueue step from the retained raw messages.",
+                stranded.Count, _strandedPendingAge.TotalMinutes, businessUnitId);
+
+            var recovered = 0;
+            foreach (var ingest in stranded)
+            {
+                try
+                {
+                    if (string.IsNullOrWhiteSpace(ingest.RawEmailPath) || !File.Exists(ingest.RawEmailPath))
+                    {
+                        ingest.ParseStatus = STATUS_RAW_MESSAGE_LOST;
+                        ingest.ParsedAt = DateTime.UtcNow;
+                        await context.SaveChangesAsync();
+                        _logger.LogError(
+                            "Stranded ingest {IngestId} ({MessageId}) has no retained raw message at "
+                            + "'{Path}'; it cannot be recovered and is marked '{Status}'.",
+                            ingest.Id, ingest.MessageId, ingest.RawEmailPath, STATUS_RAW_MESSAGE_LOST);
+                        continue;
+                    }
+
+                    // The enqueue itself completed but the flip to Queued did not: the message's
+                    // extraction occurrences already exist under its logical group key (the same
+                    // key the triage screen joins on). Only the missing status write is replayed
+                    // — re-reading and re-hashing every document would prove nothing more.
+                    var groupKey = $"email:{ingest.MessageId}";
+                    var alreadyEnqueued = await context
+                        .Set<ERP_RFQ_Automation.DocumentIntelligence.Persistence.SourceDocumentOccurrence>()
+                        .AsNoTracking()
+                        .AnyAsync(o => o.BusinessUnitId == businessUnitId && o.LogicalGroupKey == groupKey);
+                    if (alreadyEnqueued)
+                    {
+                        ingest.ParseStatus = STATUS_QUEUED; // persister flips to Success/NeedsReview
+                        await context.SaveChangesAsync();
+                        recovered++;
+                        _logger.LogInformation(
+                            "Stranded ingest {IngestId} already had extraction work under {GroupKey}; "
+                            + "ParseStatus restored to Queued.", ingest.Id, groupKey);
+                        continue;
+                    }
+
+                    MimeMessage message;
+                    await using (var stream = File.OpenRead(ingest.RawEmailPath))
+                    {
+                        message = await MimeMessage.LoadAsync(stream);
+                    }
+
+                    await RouteIngestAsync(
+                        message, ingest, ingest.EmailConfiguration, context, llmService, ingestion);
+                    recovered++;
+                    _logger.LogInformation(
+                        "Stranded ingest {IngestId} ({MessageId}) re-routed; ParseStatus is now '{Status}'.",
+                        ingest.Id, ingest.MessageId, ingest.ParseStatus);
+                }
+                catch (Exception ex)
+                {
+                    // Poison-row isolation: the row stays Pending and is retried next cycle;
+                    // the remaining stranded rows are still swept.
+                    _logger.LogError(ex,
+                        "Failed to recover stranded ingest {IngestId} ({MessageId}); it stays Pending "
+                        + "and will be retried on the next sweep.", ingest.Id, ingest.MessageId);
+                }
+            }
+            return recovered;
         }
 
         /// <summary>

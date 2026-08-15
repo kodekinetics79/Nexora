@@ -318,6 +318,13 @@ public sealed class ExtractionWorker : BackgroundService
                 else
                 {
                     await MarkIntakeFailureAsync(job, errorCode, workToken, permanent: permanent);
+                    // CancellationToken.None deliberately: the queue row is already durably
+                    // dead-lettered, so abandoning this small visibility write halfway through
+                    // (lease-expiry or shutdown cancellation) would leave the triage screen
+                    // claiming "Queued" over a dead letter — the exact lie being fixed. The
+                    // catch-block failure sites below already record under None for the same
+                    // reason.
+                    await MarkIngestDeadLetterVisibleAsync(job, permanent, CancellationToken.None);
                     RecordFailureMetrics(job, errorCode, failureReason, ElapsedMs(), permanent: permanent);
                 }
                 return true;
@@ -378,6 +385,7 @@ public sealed class ExtractionWorker : BackgroundService
                 else
                 {
                     await MarkIntakeFailureAsync(job, parseReason, CancellationToken.None, permanent: true);
+                    await MarkIngestDeadLetterVisibleAsync(job, permanent: true, CancellationToken.None);
                     // FailPermanentlyAsync dead-letters immediately, regardless of attempts.
                     RecordFailureMetrics(job, parseReason, ex.Message, ElapsedMs(), permanent: true);
                 }
@@ -413,6 +421,7 @@ public sealed class ExtractionWorker : BackgroundService
                 else
                 {
                     await MarkIntakeFailureAsync(job, "evidence_integrity_failure", CancellationToken.None);
+                    await MarkIngestDeadLetterVisibleAsync(job, permanent: false, CancellationToken.None);
                     RecordFailureMetrics(job, "evidence_integrity_failure",
                         "Evidence integrity failure: " + ex.Message, ElapsedMs());
                 }
@@ -433,6 +442,7 @@ public sealed class ExtractionWorker : BackgroundService
                 else
                 {
                     await MarkIntakeFailureAsync(job, "unexpected_extraction_failure", CancellationToken.None);
+                    await MarkIngestDeadLetterVisibleAsync(job, permanent: false, CancellationToken.None);
                     RecordFailureMetrics(job, "unexpected_extraction_failure", ex.Message, ElapsedMs());
                 }
             }
@@ -728,6 +738,81 @@ public sealed class ExtractionWorker : BackgroundService
                 "Job {JobId} was failed as '{ErrorCode}' but its intake occurrence could not be annotated. "
                 + "The queue row is authoritative; the intake record understates the reason.",
                 job.Id, errorCode);
+        }
+    }
+
+    /// <summary>
+    /// EmailIngest.ParseStatus value for an email whose extraction reached the dead-letter
+    /// queue. &lt;= 50 chars (the column's limit), and in the existing "Failed - reason"
+    /// vocabulary ("Failed - nothing to extract", "Failed - N attachment(s) skipped") so the
+    /// triage screen and the LeadRepository/Dashboard readers — which key only on
+    /// "NeedsReview" — treat it exactly like every other failed state.
+    /// </summary>
+    internal const string DeadLetterParseStatus = "Failed - extraction dead-lettered";
+
+    /// <summary>
+    /// ING-09: makes a dead-lettered email job VISIBLE on its EmailIngest row.
+    ///
+    /// <para>
+    /// The only other writer that resolves ParseStatus downstream of "Queued" is
+    /// <c>LeadPersister.ResolveIngestAsync</c>, which runs on the persist/success path. When
+    /// every job of a message dead-letters, that path never runs, so the triage screen said
+    /// "Queued" forever while the DLQ held the truth. This is the failure-path counterpart.
+    /// </para>
+    /// <para>
+    /// DELIBERATELY in worker C#, on both database engines — unlike the occurrence intake
+    /// status, which <c>trg_release01c_sync_intake_from_job</c> owns on PostgreSQL and which
+    /// <see cref="MarkIntakeFailureAsync"/> therefore only writes when
+    /// <c>!db.Database.IsNpgsql()</c>. No trigger touches EmailIngests on either engine, so
+    /// there is nothing here to race or rewind; guarding this write the same way would
+    /// reintroduce on PostgreSQL exactly the invisibility being fixed.
+    /// </para>
+    /// <para>
+    /// Only "Queued"/"Pending" are overwritten: an email fans out to SEVERAL jobs (body +
+    /// attachments), and a sibling that already persisted a lead has set Success/NeedsReview
+    /// — a later dead-letter among the siblings must not un-say that. In the other order the
+    /// same rule self-heals: a successful sibling (or a dead-letter recovery replay) flips
+    /// this state back through ResolveIngestAsync, which writes unconditionally.
+    /// </para>
+    /// <para>
+    /// Best-effort like every intake annotation here: the queue row is already durably
+    /// dead-lettered, and a failure to annotate must not turn into a second failure recording.
+    /// Not covered: jobs dead-lettered by the claim statement itself (the exhausted-lease and
+    /// lineage-quarantine CTEs in ExtractionQueue, PostgreSQL-only) — no worker owns those
+    /// transitions; they remain visible through the operator dead-letter queue.
+    /// </para>
+    /// </summary>
+    private async Task MarkIngestDeadLetterVisibleAsync(
+        ExtractionJob job, bool permanent, CancellationToken ct)
+    {
+        if (job.SourceType != ExtractionSourceType.Email) return;
+        // Same terminality condition FailAsync/FailPermanentlyAsync apply: Attempts was
+        // incremented at claim, so this attempt was the last one iff it reached MaxAttempts.
+        if (!permanent && job.Attempts < job.MaxAttempts) return;
+        try
+        {
+            var metadata = await ReadJobMetadataAsync(job, ct);
+            if (metadata?.EmailIngestId is not > 0) return;
+            using var scope = _scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+            var ingest = await db.EmailIngests
+                .FirstOrDefaultAsync(e => e.Id == metadata.EmailIngestId.Value
+                    && e.EmailConfiguration.BusinessUnitId == job.BusinessUnitId, ct);
+            if (ingest is null || ingest.ParseStatus is not ("Queued" or "Pending")) return;
+            ingest.ParseStatus = DeadLetterParseStatus;
+            ingest.ParsedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync(ct);
+            _log.LogWarning(
+                "Job {JobId} dead-lettered; EmailIngest {IngestId} marked '{Status}' so the "
+                + "triage screen stops claiming the message is still queued.",
+                job.Id, ingest.Id, DeadLetterParseStatus);
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex,
+                "Job {JobId} was dead-lettered but its EmailIngest could not be marked failed. "
+                + "The queue row is authoritative; the triage screen overstates progress until "
+                + "a retry resolves it.", job.Id);
         }
     }
 

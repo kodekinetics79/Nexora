@@ -39,8 +39,14 @@ public sealed class ExtractionDeadLetterServiceTests
     }
 
     [Fact]
-    public async Task MissingSource_IsAuditedAndNoLongerPresentedAsRetryable()
+    public async Task MissingSource_IsAuditedAndStaysVisibleAsATerminalSourceLostRow()
     {
+        // The disposition is honest — the bytes are gone and no retry can succeed — but it
+        // used to also REMOVE the row from the operator list, making these the only dead
+        // letters with no surface at all: still DeadLetter in the queue, still unprocessed
+        // for the customer, and invisible on the one screen built to show lost work. The
+        // row must stay listed, labeled with the disposition and a fixed operator action,
+        // while continuing not to block readiness (nothing an operator does can clear it).
         using var testDb = new TestDb();
         await using var db = testDb.ContextFor(7);
         var job = await SeedDeadLetterAsync(db, 7);
@@ -51,9 +57,32 @@ public sealed class ExtractionDeadLetterServiceTests
 
         Assert.Equal("SourceObjectUnavailable", result.Status);
         Assert.False(result.BlocksReadiness);
-        Assert.Empty(await service.ListAsync(7, default));
+        var listed = Assert.Single(await service.ListAsync(7, default));
+        Assert.Equal(job.Id, listed.JobId);
+        Assert.Equal("SourceObjectUnavailable", listed.Resolution);
+        Assert.False(listed.BlocksReadiness);
+        Assert.Equal(ExtractionDeadLetterService.SourceLostOperatorAction, listed.OperatorAction);
         Assert.Equal(ExtractionStatus.DeadLetter,
             (await db.Set<ExtractionJob>().SingleAsync(x => x.Id == job.Id)).Status);
+    }
+
+    [Fact]
+    public async Task AnOpenDeadLetterIsListedAsBlockingWithoutASourceLostLabel()
+    {
+        // The counterpart guarantee: unhiding the source-lost rows must not relabel the
+        // ordinary ones. A dead letter with no disposition stays Open, blocks readiness,
+        // and keeps its category-driven operator action.
+        using var testDb = new TestDb();
+        await using var db = testDb.ContextFor(7);
+        var job = await SeedDeadLetterAsync(db, 7);
+        var service = new ExtractionDeadLetterService(db, new AvailableStorage(), new Scanner(MalwareScanStatus.Clean));
+
+        var listed = Assert.Single(await service.ListAsync(7, default));
+
+        Assert.Equal(job.Id, listed.JobId);
+        Assert.Equal("Open", listed.Resolution);
+        Assert.True(listed.BlocksReadiness);
+        Assert.NotEqual(ExtractionDeadLetterService.SourceLostOperatorAction, listed.OperatorAction);
     }
 
     [Fact]
