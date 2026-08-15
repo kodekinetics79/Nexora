@@ -913,4 +913,127 @@ public sealed class LeadIdentityApplicationServiceTests
         batch, "ManualUpload", key, null, null, "test", sender, "RFQ", $"{key}.xlsx",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 100, hash.PadRight(64, '0')[..64],
         null, null, null, DateTimeOffset.UtcNow, LeadProcessingPath.Deterministic, false, 0, "User", "tester", $"test:{key}");
+
+    // ===================================================================== thread identity
+    // FR-RFQ-05/06 via mail threading: a reply whose In-Reply-To/References chain names the
+    // message an existing lead was ingested from is strong evidence for that lead — treated
+    // exactly like the logical-group signal: it lowers the similarity bar only WITH a
+    // corroborating customer or reference, and never merges on the thread alone.
+
+    [Fact]
+    public async Task Thread_linkage_with_corroborating_customer_versions_the_existing_rfq()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(201);
+        Seed.BusinessUnit(context, 201); Seed.EmailConfig(context, 2011, 201); Seed.EmailIngest(context, 2021, 2011, "NeedsReview");
+        await context.SaveChangesAsync();
+        var service = new LeadIdentityApplicationService(context);
+
+        // The original inquiry has NO customer reference — the arm under test must work from
+        // thread + customer identity, because a reference would already match without either.
+        var created = await service.ReconcileAsync(Candidate(201, 2021, null, "buyer@thread.test", 10),
+            Intake("thread-original", "thread-a", Guid.NewGuid(), "buyer@thread.test")
+                with { EmailThreadId = "email:origin-msg@customer.example" });
+        Assert.Equal(LeadOccurrenceClassification.New, created.Classification);
+
+        context.ChangeTracker.Clear();
+        // The amendment arrives as a REPLY: its own Message-Id differs, so the logical group
+        // key cannot match — only the persisted In-Reply-To/References chain reaches back.
+        var revision = await service.ReconcileAsync(Candidate(201, 2021, null, "buyer@thread.test", 25),
+            Intake("thread-amendment", "thread-b", Guid.NewGuid(), "buyer@thread.test")
+                with
+            {
+                EmailThreadId = "email:reply-msg@customer.example",
+                ThreadReferencedMessageIds = new[] { "email:origin-msg@customer.example" }
+            });
+
+        Assert.Equal(LeadOccurrenceClassification.Revision, revision.Classification);
+        Assert.Equal(created.LeadId, revision.LeadId);
+        Assert.Equal(2, revision.RevisionNumber);
+        Assert.Equal(1, await context.Leads.CountAsync());
+        Assert.Contains("email thread", revision.Reasons.Single(), StringComparison.Ordinal);
+        Assert.Equal(25, (await context.Leads.Include(x => x.LeadItems)
+            .SingleAsync(x => x.Id == created.LeadId)).LeadItems.Single().Quantity);
+    }
+
+    [Fact]
+    public async Task Thread_linkage_alone_without_corroboration_is_reviewed_not_merged()
+    {
+        // Subjects and threads get reused: a forwarded thread can carry a different company's
+        // inquiry. With no corroborating customer identity and no reference, the thread hit
+        // must reach a human, never auto-link.
+        using var db = new TestDb();
+        await using var context = db.ContextFor(202);
+        Seed.BusinessUnit(context, 202); Seed.EmailConfig(context, 2021, 202); Seed.EmailIngest(context, 2031, 2021, "NeedsReview");
+        await context.SaveChangesAsync();
+        var service = new LeadIdentityApplicationService(context);
+
+        var created = await service.ReconcileAsync(Candidate(202, 2031, null, "buyer@threadonly.test", 10),
+            Intake("threadonly-original", "threadonly-a", Guid.NewGuid(), "buyer@threadonly.test")
+                with { EmailThreadId = "email:root@threadonly.example" });
+
+        context.ChangeTracker.Clear();
+        var review = await service.ReconcileAsync(Candidate(202, 2031, null, null, 10),
+            Intake("threadonly-reply", "threadonly-b", Guid.NewGuid(), sender: null)
+                with { ThreadReferencedMessageIds = new[] { "email:root@threadonly.example" } });
+
+        Assert.Equal(LeadOccurrenceClassification.PossibleMatchReviewRequired, review.Classification);
+        Assert.Equal(0, review.LeadId);
+        Assert.Equal(1, await context.Leads.CountAsync());
+        var match = Assert.Single(await context.Set<LeadMatchCandidate>()
+            .Where(x => x.OccurrenceId == review.OccurrenceId).ToListAsync());
+        Assert.Equal(created.LeadId, match.CandidateLeadId);
+        Assert.Contains("email thread", review.Reasons.Single(), StringComparison.Ordinal);
+    }
+
+    // ================================================================ beyond the recency window
+    // Matching used to score only the 250 most recently created leads, so an amendment to any
+    // older inquiry silently became a brand-new, unlinked lead. The targeted candidate probes
+    // (normalized reference / content hash / customer scope / thread) must find the canonical
+    // lead however deep it sits.
+
+    [Fact]
+    public async Task Amendment_to_a_lead_older_than_the_recency_window_is_still_versioned()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(203);
+        Seed.BusinessUnit(context, 203); Seed.EmailConfig(context, 2031, 203); Seed.EmailIngest(context, 2041, 2031, "NeedsReview");
+        await context.SaveChangesAsync();
+        var service = new LeadIdentityApplicationService(context);
+
+        var original = Candidate(203, 2041, "TENDER-OLD-7", "tenders@old.test", 10);
+        original.BidClosingDate = new DateTime(2026, 9, 1, 12, 0, 0, DateTimeKind.Utc);
+        original.CreatedDate = new DateTime(2026, 1, 5, 8, 0, 0, DateTimeKind.Utc);
+        var created = await service.ReconcileAsync(original,
+            Intake("old-original", "old-a", Guid.NewGuid(), "tenders@old.test"));
+        Assert.Equal(LeadOccurrenceClassification.New, created.Classification);
+
+        // 260 newer leads push the canonical inquiry far outside the 250-lead recency window.
+        context.ChangeTracker.Clear();
+        for (var i = 0; i < 260; i++)
+            context.Leads.Add(new Lead
+            {
+                Rfqno = $"FILLER-{i}", BuyersName = "Filler Buyer", RecDate = DateTime.UtcNow,
+                LeadSource = "Seed", CreatedBy = "seed",
+                CreatedDate = new DateTime(2026, 6, 1, 8, 0, 0, DateTimeKind.Utc).AddMinutes(i),
+                BusinessUnitId = 203, EmailIngestsId = 2041
+            });
+        await context.SaveChangesAsync();
+
+        // The manually uploaded amendment PDF: same reference and lines, no sender or buyer of
+        // its own, and a moved closing date — the exact FR-RFQ-05 shape, months later.
+        context.ChangeTracker.Clear();
+        var amendment = Candidate(203, 2041, "TENDER-OLD-7", null, 10);
+        amendment.BidClosingDate = new DateTime(2026, 9, 20, 12, 0, 0, DateTimeKind.Utc);
+        var revision = await service.ReconcileAsync(amendment,
+            Intake("old-amendment", "old-b", Guid.NewGuid(), sender: null));
+
+        Assert.Equal(LeadOccurrenceClassification.Revision, revision.Classification);
+        Assert.Equal(created.LeadId, revision.LeadId);
+        Assert.Equal(2, revision.RevisionNumber);
+        // 1 canonical + 260 fillers — and no 262nd lead standing in for the amendment.
+        Assert.Equal(261, await context.Leads.CountAsync());
+        var canonical = await context.Leads.SingleAsync(x => x.Id == created.LeadId);
+        Assert.Equal(new DateTime(2026, 9, 20, 12, 0, 0, DateTimeKind.Utc), canonical.BidClosingDate);
+    }
 }

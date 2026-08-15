@@ -411,6 +411,12 @@ public partial class ErpRfqAutomationContext : DbContext
             // for each. Recorded unconditionally so a dropped .msg on a quoted-only reply is
             // visible on the message it arrived with instead of nowhere.
             entity.Property(e => e.SkippedAttachmentsJson).HasMaxLength(2000);
+            // Thread identity (FR-RFQ-05/06): In-Reply-To joins against MessageID, so it shares
+            // that column's 255-char key space; References is a JSON id list in the same shape
+            // (and cap) as SkippedAttachmentsJson. Both indexed-by-content nowhere — they are
+            // read per message at reconciliation time through the ingest row itself.
+            entity.Property(e => e.InReplyToMessageId).HasMaxLength(255);
+            entity.Property(e => e.ReferencesJson).HasMaxLength(2000);
 
             entity.HasOne(d => d.EmailConfiguration).WithMany(p => p.EmailIngests)
                 .HasForeignKey(d => d.EmailConfigurationId)

@@ -815,8 +815,11 @@ namespace ERP_RFQ_Automation.Services
         /// Processes a single fetched message. Returns true when a durable record
         /// (EmailIngest row + raw .eml) exists for the message, meaning the caller may safely
         /// mark it \Seen; returns false only when nothing could be persisted (retry next cycle).
+        /// Internal rather than private so the thread-identity round-trip test can drive the
+        /// REAL ingest write path — the header capture, normalization and persisted row —
+        /// instead of a re-implementation of it.
         /// </summary>
-        private async Task<bool> ProcessSingleEmailAsync(MimeMessage message, EmailConfiguration config,
+        internal async Task<bool> ProcessSingleEmailAsync(MimeMessage message, EmailConfiguration config,
             ErpRfqAutomationContext context, ILLMService llmService,
             ERP_RFQ_Automation.Extraction.IDocumentIngestion? ingestion = null)
         {
@@ -851,7 +854,14 @@ namespace ERP_RFQ_Automation.Services
                 ToEmail = to,
                 EmailConfigurationId = config.Id,
                 CreatedOn = DateTime.UtcNow,
-                ParseStatus = STATUS_PENDING
+                ParseStatus = STATUS_PENDING,
+                // FR-RFQ-05/06: thread identity is captured HERE, the one place the parsed
+                // MimeMessage is in hand, or it is lost — these headers are not recoverable from
+                // the occurrence graph later without re-reading every raw .eml. Reconciliation
+                // uses them as a strong (but never solitary) signal that a reply carrying an
+                // amendment belongs to an already-ingested inquiry's thread.
+                InReplyToMessageId = ResolveInReplyTo(message),
+                ReferencesJson = SerializeReferences(message)
             };
 
             // Save the raw email bytes first so the original is never lost, even for rejected mail.
@@ -1199,6 +1209,72 @@ namespace ERP_RFQ_Automation.Services
         }
 
         /// <summary>
+        /// The normalized In-Reply-To id, or null. An id longer than the 255-char MessageID key
+        /// space is DROPPED rather than truncated or hashed: it exists only to join against
+        /// stored MessageIDs, which are all ≤255, so a truncation could never match honestly and
+        /// could match falsely.
+        /// </summary>
+        internal static string? ResolveInReplyTo(MimeMessage message)
+        {
+            var id = NormalizeMessageId(message.InReplyTo);
+            return id is { Length: <= 255 } ? id : null;
+        }
+
+        /// <summary>
+        /// The References chain as a JSON array of normalized Message-Ids, oldest first, or null
+        /// when the message carries none. ReferencesJson is varchar(2000); when the chain does
+        /// not fit, the OLDEST ids are dropped first — the nearest ancestors are the ones most
+        /// likely to sit in this mailbox's ingest ledger, and In-Reply-To (the immediate parent)
+        /// is persisted separately regardless. The column must never be the thing that fails an
+        /// ingest.
+        /// </summary>
+        internal static string? SerializeReferences(MimeMessage message)
+        {
+            var ids = (message.References ?? Enumerable.Empty<string>())
+                .Select(NormalizeMessageId)
+                .Where(id => id is { Length: <= 255 })
+                .Select(id => id!)
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+            if (ids.Count == 0) return null;
+            var json = JsonSerializer.Serialize(ids);
+            while (json.Length > 2000 && ids.Count > 1)
+            {
+                ids.RemoveAt(0); // drop the oldest ancestor first
+                json = JsonSerializer.Serialize(ids);
+            }
+            return json.Length <= 2000 ? json : null;
+        }
+
+        /// <summary>
+        /// The thread-ancestor keys of an ingested message, in occurrence EmailThreadId form
+        /// ("email:{Message-Id}"), for the reconciliation descriptor. Union of In-Reply-To and
+        /// the References chain — RFC 5322 obliges neither header, so each covers the other's
+        /// absence.
+        /// </summary>
+        internal static IReadOnlyList<string> ThreadAncestorKeys(
+            string? inReplyToMessageId, string? referencesJson)
+        {
+            var ids = new List<string>();
+            if (!string.IsNullOrWhiteSpace(inReplyToMessageId)) ids.Add(inReplyToMessageId);
+            if (!string.IsNullOrWhiteSpace(referencesJson))
+            {
+                try
+                {
+                    ids.AddRange(JsonSerializer.Deserialize<string[]>(referencesJson) ?? []);
+                }
+                catch (JsonException)
+                {
+                    // A malformed legacy value yields no thread evidence rather than no lead.
+                }
+            }
+            return ids.Where(id => !string.IsNullOrWhiteSpace(id))
+                .Select(id => $"email:{id}")
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+        }
+
+        /// <summary>
         /// Deterministic stand-in for a missing Message-Id: SHA-256 over the full header block
         /// (which carries the per-delivery Received trail) plus the body text. The SAME message
         /// re-read next cycle hashes identically and is skipped; a DIFFERENT message under the
@@ -1526,6 +1602,19 @@ namespace ERP_RFQ_Automation.Services
                     // so every emailed lead was born with line items and NO revision — and was
                     // therefore permanently unconvertible to an RFQ, because commercial line
                     // resolution refuses a lead with no immutable current revision.
+                    //
+                    // DELIBERATELY still the baseline writer, NOT ReconcileAsync — unlike the
+                    // manual-upload and bulk-import doors, which were rewired to full
+                    // reconciliation when the amendment fork was closed. This legacy direct path
+                    // runs only when Ingestion:UseUnifiedQueue=false, and
+                    // UnifiedDocumentIngestionGuard refuses to boot production in that state: in
+                    // production every emailed document reaches ReconcileAsync through
+                    // ExtractionWorker.LeadPersister, thread headers included. What remains here
+                    // is a development/test fallback whose naive (Rfqno, BuyersName) pre-check
+                    // above already refuses amendments before this line could reconcile them —
+                    // making it amendment-correct would mean rebuilding the whole intake shape of
+                    // a fenced-off path. Known, accepted limitation of the fallback; the fence is
+                    // the guarantee.
                     //
                     // Constructed on the SAME `context` this method was handed, so it enlists in
                     // this transaction. The service takes only the DbContext, so this is

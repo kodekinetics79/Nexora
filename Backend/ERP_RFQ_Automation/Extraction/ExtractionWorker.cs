@@ -1143,9 +1143,12 @@ public sealed class LeadPersister : ILeadPersister
             // EmailIngest row it creates and as the job's logical group key ("email:{Message-Id}").
             // That id is a LOWER BOUND on thread identity: documents sharing it are provably from
             // one message and therefore one thread, so it can only ever miss a relationship, never
-            // invent one. A reply carries its own Message-Id and will NOT match — real
-            // In-Reply-To/References threading needs the mail door to persist the header chain.
-            // Manual upload and watched folders have no mail message at all, so this stays null
+            // invent one. A reply carries its own Message-Id and will NOT match on it — which is
+            // why the ANCESTOR chain below exists: the mail door persists the reply's In-Reply-To
+            // and References headers on the ingest row, and reconciliation treats "this message
+            // replies to a message an existing lead came from" as strong (but never solitary)
+            // evidence for that lead.
+            // Manual upload and watched folders have no mail message at all, so both stay null
             // rather than carrying a manufactured identity that the scorer would read as evidence.
             var emailThreadId = job.SourceType != ExtractionSourceType.Email
                 ? null
@@ -1153,6 +1156,10 @@ public sealed class LeadPersister : ILeadPersister
                     && messageGroupKey.StartsWith("email:", StringComparison.Ordinal)
                     ? messageGroupKey
                     : ingest?.MessageId is { Length: > 0 } messageId ? $"email:{messageId}" : null;
+            var threadAncestorKeys = job.SourceType == ExtractionSourceType.Email && ingest is not null
+                ? ERP_RFQ_Automation.Services.EmailService.ThreadAncestorKeys(
+                    ingest.InReplyToMessageId, ingest.ReferencesJson)
+                : Array.Empty<string>();
             var externalRequests = await _context.Set<ERP_RFQ_Automation.AI.AiRequest>()
                 .AsNoTracking()
                 .Where(x => x.BusinessUnitId == job.BusinessUnitId && x.ExtractionJobId == job.Id
@@ -1178,7 +1185,8 @@ public sealed class LeadPersister : ILeadPersister
                         attributedExternalCost, "Service", "extraction-worker", $"extraction:{job.Id}")
                     {
                         SourceDocumentOccurrenceId = job.SourceDocumentOccurrenceId,
-                        LogicalGroupKey = logicalGroupKey ?? metadata?.LogicalGroupKey
+                        LogicalGroupKey = logicalGroupKey ?? metadata?.LogicalGroupKey,
+                        ThreadReferencedMessageIds = threadAncestorKeys
                     }, ct));
             }
             if (job.SourceDocumentOccurrenceId.HasValue)
