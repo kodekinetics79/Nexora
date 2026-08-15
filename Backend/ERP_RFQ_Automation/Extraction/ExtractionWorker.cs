@@ -1041,18 +1041,14 @@ public sealed class LeadPersister : ILeadPersister
 {
     private readonly ErpRfqAutomationContext _context;
     private readonly ILogger<LeadPersister> _log;
-    private readonly ERP_RFQ_Automation.Deduplication.ILeadDuplicateDetector? _duplicateDetector;
     private readonly ERP_RFQ_Automation.CommercialRouting.ICommercialRoutingApplicationService? _routing;
     private readonly ERP_RFQ_Automation.LeadIdentity.ILeadIdentityApplicationService? _leadIdentity;
     private readonly ERP_RFQ_Automation.CustomerResolution.ILeadCustomerResolutionService? _customerResolution;
     private readonly UsageMeteringService? _usageMetering;
 
-    // The detector is optional so persistence keeps working before (and without)
-    // the Deduplication DI registration (see Deduplication/DEDUP-WIRING.md).
     public LeadPersister(
         ErpRfqAutomationContext context,
         ILogger<LeadPersister> log,
-        ERP_RFQ_Automation.Deduplication.ILeadDuplicateDetector? duplicateDetector = null,
         ERP_RFQ_Automation.CommercialRouting.ICommercialRoutingApplicationService? routing = null,
         ERP_RFQ_Automation.LeadIdentity.ILeadIdentityApplicationService? leadIdentity = null,
         ERP_RFQ_Automation.CustomerResolution.ILeadCustomerResolutionService? customerResolution = null,
@@ -1060,7 +1056,6 @@ public sealed class LeadPersister : ILeadPersister
     {
         _context = context;
         _log = log;
-        _duplicateDetector = duplicateDetector;
         _routing = routing;
         _leadIdentity = leadIdentity;
         _customerResolution = customerResolution;
@@ -1244,11 +1239,6 @@ public sealed class LeadPersister : ILeadPersister
         // attachment failure must never fail the persistence.
         await TryAttachSourceDocumentAsync(job, leads, now, ct);
 
-        // WP-A3: duplicate detection AFTER the save, PER produced lead. Best-effort by
-        // contract — a detection failure must never fail (or roll back) the persistence.
-        if (enrichAfterPersistence && _leadIdentity is null)
-            await TryDetectDuplicatesAsync(job, leads, ct);
-
         // Every extracted lead enters the governed routing flow. Matching may assign
         // an effective owner or create one durable unassigned work item. Routing is
         // idempotent per job/lead; a transient routing failure cannot duplicate the
@@ -1331,8 +1321,6 @@ public sealed class LeadPersister : ILeadPersister
         if (persisted is null)
             return null;
 
-        if (_leadIdentity is null)
-            await TryDetectDuplicatesAsync(job, persisted.Leads, ct);
         if (_leadIdentity is null)
         {
             await TryResolveCustomersAsync(job, persisted.Leads, ct);
@@ -1432,29 +1420,6 @@ public sealed class LeadPersister : ILeadPersister
     }
 
     private sealed record PersistedExtraction(long LeadId, Lead[] Leads);
-
-    private async Task TryDetectDuplicatesAsync(
-        ExtractionJob job, IEnumerable<Lead> leads, CancellationToken ct)
-    {
-        if (_duplicateDetector is null)
-            return;
-
-        foreach (var lead in leads)
-        {
-            try
-            {
-                var check = await _duplicateDetector.CheckAndFlagAsync(lead.Id, job.BusinessUnitId, ct);
-                if (check.Flagged)
-                    _log.LogInformation(
-                        "Lead {LeadId} flagged as suspected duplicate of lead {OriginalId} ({Reason}).",
-                        check.FlaggedLeadId, check.OriginalLeadId, check.Reason);
-            }
-            catch (Exception ex)
-            {
-                _log.LogError(ex, "Duplicate detection failed for lead {LeadId}; persistence succeeded.", lead.Id);
-            }
-        }
-    }
 
     /// <summary>
     /// Deterministic client-organisation resolution at INGESTION — the seam that turns

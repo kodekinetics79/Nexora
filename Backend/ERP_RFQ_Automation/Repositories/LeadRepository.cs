@@ -1,4 +1,3 @@
-using ERP_RFQ_Automation.Deduplication;
 using ERP_RFQ_Automation.DTOs.AcceptedLeadDTOs;
 using ERP_RFQ_Automation.DTOs.Lead;
 using ERP_RFQ_Automation.DTOs.LeadDTOs;
@@ -35,19 +34,17 @@ namespace ERP_RFQ_Automation.Repositories
 
         private readonly ErpRfqAutomationContext _context;
         private readonly ISlaPolicyReader _slaPolicy;
-        private readonly ILeadDuplicateDetector? _duplicateDetector;
         private readonly ILogger<LeadRepository>? _logger;
         private readonly ERP_RFQ_Automation.Metrics.IMetricRecorder? _metrics;
         private readonly ICommercialLineResolutionApplicationService? _lineResolution;
         private readonly ERP_RFQ_Automation.CustomerResolution.ICustomerAliasLearner? _aliasLearner;
 
         // Optional dependencies keep existing constructions (tests, pre-wiring DI)
-        // compiling and running: duplicate detection / metrics / alias learning
-        // degrade to no-ops, the SLA reader falls back to the flat default threshold.
+        // compiling and running: metrics / alias learning degrade to no-ops, the SLA
+        // reader falls back to the flat default threshold.
         public LeadRepository(
             ErpRfqAutomationContext context,
             ISlaPolicyReader? slaPolicy = null,
-            ILeadDuplicateDetector? duplicateDetector = null,
             ILogger<LeadRepository>? logger = null,
             ERP_RFQ_Automation.Metrics.IMetricRecorder? metrics = null,
             ICommercialLineResolutionApplicationService? lineResolution = null,
@@ -55,7 +52,6 @@ namespace ERP_RFQ_Automation.Repositories
         {
             _context = context;
             _slaPolicy = slaPolicy ?? new DefaultSlaPolicyReader();
-            _duplicateDetector = duplicateDetector;
             _logger = logger;
             _metrics = metrics;
             _lineResolution = lineResolution;
