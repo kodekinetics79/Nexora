@@ -22,6 +22,10 @@ const MAILBOXES = '/setup/mailboxes';
 
 test.skip(!EMAIL || !PASSWORD || !RUN, 'Live demo requires DEMO_EMAIL, DEMO_PASSWORD and DEMO_RUN.');
 
+// This spec authenticates itself against the LIVE backend, so it must not inherit the
+// project's stored fixture session — those users exist only in the mocked lane.
+test.use({ storageState: { cookies: [], origins: [] } });
+
 test.describe.configure({ mode: 'serial' });
 
 test.beforeEach(async ({ page }) => {
@@ -31,6 +35,24 @@ test.beforeEach(async ({ page }) => {
 /** Finds the intake row for one demo scenario by its unique subject marker. */
 const rowFor = (page: import('@playwright/test').Page, letter: string) =>
   page.getByRole('row').filter({ hasText: `DEMO-${RUN} ${letter}` });
+
+/**
+ * Opens the triage tab the message actually landed on.
+ *
+ * The screen splits messages by triage decision — Extracted / Uncertain / Rejected as noise /
+ * Routed as supplier document — and which one a message lands on is part of what is under test.
+ * Hard-coding a tab would make the spec assert its own assumption instead of the product's
+ * decision, and would go green for the wrong reason the day the decision changes.
+ */
+async function openTabContaining(page: import('@playwright/test').Page, letter: string) {
+  for (const name of ['Extracted', 'Uncertain', 'Rejected as noise', 'Routed as supplier document']) {
+    const tab = page.getByRole('tab', { name });
+    if (!(await tab.isVisible().catch(() => false))) continue;
+    await tab.click();
+    if (await rowFor(page, letter).first().isVisible({ timeout: 8_000 }).catch(() => false)) return name;
+  }
+  throw new Error(`DEMO-${RUN} ${letter} was not on any triage tab.`);
+}
 
 test('1 — Test Connection, then Poll Now brings the mailbox in', async ({ page }, testInfo) => {
   // ---- Test Connection: the operator's first act, and proof the mailbox is really dialled.
@@ -61,8 +83,10 @@ test('1 — Test Connection, then Poll Now brings the mailbox in', async ({ page
 
 test('A — a body-only inquiry becomes exactly one Lead', async ({ page }, testInfo) => {
   await page.goto(INTAKE);
+  const tab = await openTabContaining(page, 'A');
   const row = rowFor(page, 'A');
   await expect(row.first()).toBeVisible({ timeout: 60_000 });
+  testInfo.annotations.push({ type: 'triage-tab', description: tab });
   await testInfo.attach('A-01-row', { body: await page.screenshot(), contentType: 'image/png' });
 
   // One assembly, and the operator can see its state and how many parts it is made of.
@@ -72,8 +96,10 @@ test('A — a body-only inquiry becomes exactly one Lead', async ({ page }, test
 
 test('B — body plus two schedules becomes ONE combined Lead with its parts visible', async ({ page }, testInfo) => {
   await page.goto(INTAKE);
+  const tab = await openTabContaining(page, 'B');
   const row = rowFor(page, 'B');
   await expect(row.first()).toBeVisible({ timeout: 60_000 });
+  testInfo.annotations.push({ type: 'triage-tab', description: tab });
 
   // Expand to reveal the components — the evidence that the message was taken apart and put
   // back together, rather than turned into one Lead per file.
@@ -95,8 +121,10 @@ test('B — body plus two schedules becomes ONE combined Lead with its parts vis
 
 test('C — an unsupported attachment is visibly refused with no partial Lead', async ({ page }, testInfo) => {
   await page.goto(INTAKE);
+  const tab = await openTabContaining(page, 'C');
   const row = rowFor(page, 'C');
   await expect(row.first()).toBeVisible({ timeout: 60_000 });
+  testInfo.annotations.push({ type: 'triage-tab', description: tab });
 
   await row.first().getByRole('button', { name: /^Show message/ }).click();
 
@@ -112,6 +140,7 @@ test('C — an unsupported attachment is visibly refused with no partial Lead', 
 
 test('D — polling again creates no duplicate assembly, job or Lead', async ({ page }, testInfo) => {
   await page.goto(INTAKE);
+  await openTabContaining(page, 'B');
   const before = await rowFor(page, 'B').count();
 
   await page.getByRole('button', { name: 'Poll now' }).click();
