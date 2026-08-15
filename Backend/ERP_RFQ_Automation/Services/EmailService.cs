@@ -932,6 +932,14 @@ namespace ERP_RFQ_Automation.Services
             ingest.TriageOutcome = triage.Outcome.ToString();
             ingest.TriageReasonJson = SerializeReasonCodes(triage.ReasonCodes);
             ingest.TriageDecidedOn = DateTime.UtcNow;
+            // …and persist means SAVE, not "assign and hope the branch saves later". The
+            // unified-queue branch below hands this context to DocumentIngestionService, whose
+            // execution-strategy hygiene clears the change tracker per document — which
+            // DETACHED this very ingest, so a save issued only after the fan-out silently
+            // wrote NOTHING: the triage verdict was lost and the row stayed "Pending" until
+            // the ING-09 sweeper healed the status a cycle later (the reasons never came
+            // back). The acceptance journey against the real graph is what caught it.
+            await context.SaveChangesAsync();
 
             if (triage.Outcome == EmailTriageOutcome.Noise)
             {
@@ -965,6 +973,14 @@ namespace ERP_RFQ_Automation.Services
                         ingest.ParseStatus = STATUS_FAILED;
                     ingest.ParsedAt = DateTime.UtcNow;
                 }
+                // The fan-out above shares this scope's DbContext with the ingestion gateway,
+                // and the gateway clears the change tracker per document — detaching this
+                // ingest, so the status flip and the enqueuer's skip evidence
+                // (SkippedAttachmentsJson) would otherwise be silent no-ops. Re-attach as
+                // Modified (the entity alone — not its navigation graph) so the in-memory
+                // truth of this routing pass lands durably.
+                if (context.Entry(ingest).State == EntityState.Detached)
+                    context.Entry(ingest).State = EntityState.Modified;
                 await context.SaveChangesAsync();
                 return;
             }

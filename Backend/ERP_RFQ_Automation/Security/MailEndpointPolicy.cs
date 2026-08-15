@@ -21,10 +21,20 @@ namespace ERP_RFQ_Automation.Security;
 /// resolves public for the check and private for the connection. Callers therefore receive a
 /// connected <see cref="Socket"/> rather than permission to dial.</para>
 ///
-/// <para><b>Loopback is rejected in every environment, deliberately.</b> A local mail sink is a
-/// legitimate development convenience, but an environment-conditional bypass in an SSRF control is
-/// exactly the kind of flag that reaches production set the wrong way. Point local testing at a
-/// sink reachable by a non-loopback address instead.</para>
+/// <para><b>Loopback is rejected unless a Development host explicitly opts in.</b> This class
+/// used to refuse loopback in every environment, and its stated reason was sound: an
+/// environment-conditional bypass in an SSRF control is exactly the kind of flag that reaches
+/// production set the wrong way. That objection is answered STRUCTURALLY rather than by
+/// discipline — see <see cref="EnableLoopbackForLocalDevelopment"/>. The allowance cannot be
+/// turned on by configuration alone: the enabling call itself refuses outside Development, so a
+/// production deployment carrying the flag set true is not a vulnerability, it is a no-op with a
+/// loud log line. It is also scoped to LOOPBACK ONLY — private, link-local, carrier-grade-NAT and
+/// every other special range stay refused everywhere, because the SSRF risk that matters is
+/// dialling internal infrastructure, and 127.0.0.0/8 is not that.</para>
+///
+/// <para>It exists because the alternative was worse in practice: with no local mail sink
+/// reachable at all, the mailbox journey could not be exercised end to end on a developer
+/// machine, so the one path that loses a customer's mail was only ever tested against doubles.</para>
 ///
 /// <para>The logic here is the long-standing implementation from
 /// <see cref="MailKitOutboundSmtpTransport"/> and <c>SmtpController</c>, moved to one place so the
@@ -35,6 +45,43 @@ public static class MailEndpointPolicy
 {
     /// <summary>Longest legal DNS name.</summary>
     private const int MaximumHostLength = 253;
+
+    /// <summary>Configuration key that REQUESTS the allowance. Requesting is not granting.</summary>
+    public const string LoopbackAllowanceKey = "Mail:AllowLoopbackForLocalDevelopment";
+
+    private static volatile bool _loopbackAllowed;
+
+    /// <summary>True when a Development host has explicitly opted in. False everywhere else.</summary>
+    public static bool IsLoopbackAllowed => _loopbackAllowed;
+
+    /// <summary>
+    /// Grants the loopback allowance, and ONLY from a Development host.
+    /// </summary>
+    /// <param name="isDevelopmentEnvironment">
+    /// <c>IHostEnvironment.IsDevelopment()</c>. The gate is a PARAMETER rather than a
+    /// configuration read so the refusal is a property of the call itself: there is no key,
+    /// environment variable or appsettings file that can grant this on a non-Development host,
+    /// which is what makes "the flag reached production set the wrong way" a no-op rather than a
+    /// hole.
+    /// </param>
+    /// <param name="requested">The value of <see cref="LoopbackAllowanceKey"/>.</param>
+    /// <returns>True when the allowance is now active.</returns>
+    public static bool EnableLoopbackForLocalDevelopment(bool isDevelopmentEnvironment, bool requested)
+    {
+        _loopbackAllowed = isDevelopmentEnvironment && requested;
+        return _loopbackAllowed;
+    }
+
+    /// <summary>Test hook: restores the default (refused) state.</summary>
+    internal static void ResetLoopbackAllowance() => _loopbackAllowed = false;
+
+    /// <summary>
+    /// Loopback, and nothing else. Private ranges, link-local, CGNAT and the rest stay refused
+    /// even under the allowance: the SSRF risk this control exists for is a mail server dialling
+    /// internal infrastructure, and 127.0.0.0/8 reaches only the machine already running the code.
+    /// </summary>
+    private static bool IsAllowedLoopback(IPAddress address)
+        => _loopbackAllowed && IPAddress.IsLoopback(address);
 
     /// <summary>
     /// Syntactic admission check: is this host/port pair even eligible to be dialled? Cheap, does
@@ -52,10 +99,10 @@ public static class MailEndpointPolicy
         // ".localhost" is reserved by RFC 6761 and resolves to loopback on every resolver.
         if (normalized.Equals("localhost", StringComparison.OrdinalIgnoreCase) ||
             normalized.EndsWith(".localhost", StringComparison.OrdinalIgnoreCase))
-            return false;
+            return _loopbackAllowed;
 
         return IPAddress.TryParse(normalized, out var literal)
-            ? IsPublicAddress(literal)
+            ? IsPublicAddress(literal) || IsAllowedLoopback(literal)
             : Uri.CheckHostName(normalized) == UriHostNameType.Dns;
     }
 
@@ -82,7 +129,10 @@ public static class MailEndpointPolicy
 
     public static void ValidateResolvedAddresses(IReadOnlyCollection<IPAddress> addresses)
     {
-        if (addresses.Count == 0 || addresses.Any(x => !IsPublicAddress(x)))
+        // ALL, not any: a name resolving to one public and one private address must not be
+        // dialled on whichever the OS returned first. The loopback allowance widens what counts
+        // as acceptable; it does not weaken the all-must-pass rule.
+        if (addresses.Count == 0 || addresses.Any(x => !IsPublicAddress(x) && !IsAllowedLoopback(x)))
             throw new InvalidOperationException("The configured mail host resolves to a prohibited address.");
     }
 
@@ -92,7 +142,7 @@ public static class MailEndpointPolicy
     /// </summary>
     public static Task<Socket> ConnectAsync(
         string host, int port, CancellationToken cancellationToken)
-        => ConnectAsync(host, port, IsPublicAddress,
+        => ConnectAsync(host, port, address => IsPublicAddress(address) || IsAllowedLoopback(address),
             "The configured mail host resolves to a prohibited address.", cancellationToken);
 
     /// <summary>
