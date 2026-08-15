@@ -283,16 +283,16 @@ namespace ERP_RFQ_Automation.Repositories
 
             if (rfq.LeadId.HasValue)
             {
-                // Tenant scoping is enforced here, not by the caller: a LeadId from another
-                // business unit is indistinguishable from a LeadId that does not exist.
-                var lead = await _context.Leads.SingleOrDefaultAsync(l =>
-                    l.Id == rfq.LeadId.Value && l.BusinessUnitId == rfq.BusinessUnitId);
-                if (lead == null)
-                    throw new ArgumentException($"Lead ID {rfq.LeadId} does not exist in this business unit.");
-                if (!lead.CustomerId.HasValue)
-                    throw new ArgumentException("Resolve the lead customer before creating an RFQ.");
-                rfq.InheritCommercialIdentity(lead);
-                await PersistNewRfqAsync(rfq);
+                // POST /api/Rfq with a LeadId IS a lead conversion and goes through the same
+                // door as the two conversion endpoints: the shared LeadConversionGate, the
+                // governed CONVERTED_TO_RFQ transition and the promotion event, all in one
+                // transaction. Before this, the raw door validated only "lead exists in-tenant
+                // and has a customer" — so it happily created a SECOND RFQ for a lead that
+                // already had one, from an unqualified lead, past the duplicate flag and past
+                // extraction review. The difference from ConvertLeadToRfqAsync is only WHERE
+                // the lines come from: here the caller supplies them; there they are copied
+                // from the lead.
+                await AddForLeadAsync(rfq, rfq.LeadId.Value);
                 return;
             }
 
@@ -352,6 +352,79 @@ namespace ERP_RFQ_Automation.Repositories
 
                 await transaction.CommitAsync();
             });
+        }
+
+        /// <summary>
+        /// The lead-linked half of <see cref="AddAsync"/>: gates, creates, transitions and
+        /// records the promotion atomically. Serializable, like ConvertLeadToRfqAsync — the
+        /// existence check and the insert must not interleave with a concurrent conversion
+        /// (and the RFQ."LeadID" partial unique index backstops whatever still slips through).
+        /// </summary>
+        private async Task AddForLeadAsync(Rfq rfq, long leadId)
+        {
+            var strategy = _context.Database.CreateExecutionStrategy();
+            try
+            {
+                await strategy.ExecuteAsync(async () =>
+                {
+                    _context.ChangeTracker.Clear();
+                    await using var transaction = await _context.Database
+                        .BeginTransactionAsync(System.Data.IsolationLevel.Serializable);
+
+                    // Tenant scoping is enforced here, not by the caller: a LeadId from another
+                    // business unit is indistinguishable from a LeadId that does not exist.
+                    var lead = await _context.Leads
+                        .Include(l => l.LeadStatus)
+                        .SingleOrDefaultAsync(l => l.Id == leadId && l.BusinessUnitId == rfq.BusinessUnitId);
+                    if (lead == null)
+                        throw new ArgumentException($"Lead ID {leadId} does not exist in this business unit.");
+
+                    // One lead, one RFQ. The conversion endpoints resolve a repeat to the
+                    // existing RFQ; this door is an explicit "create" so a repeat is refused,
+                    // naming the RFQ the caller should open instead.
+                    var existing = await _context.Rfqs.AsNoTracking()
+                        .FirstOrDefaultAsync(r => r.LeadId == leadId && r.BusinessUnitId == rfq.BusinessUnitId);
+                    if (existing != null)
+                        throw new InvalidOperationException(
+                            $"Lead {leadId} was already converted to RFQ #{existing.Id} ({existing.Rfqno}). "
+                            + "Open that RFQ instead of creating a second one for the same lead.");
+
+                    LeadConversionGate.EnsureEligible(lead);
+
+                    rfq.InheritCommercialIdentity(lead);
+                    await PersistNewRfqAsync(rfq);
+
+                    // The same governed transition + dedicated promotion event the conversion
+                    // endpoints record, so a lead converted through this door reads identically
+                    // in the lifecycle stream and never resurfaces in the accepted-leads queue.
+                    var actor = new LifecycleActor(
+                        string.IsNullOrWhiteSpace(rfq.CreatedBy) ? "System" : rfq.CreatedBy.Trim(),
+                        "AuthenticatedUser");
+                    var lifecycle = new LifecycleApplicationService(_context);
+                    await lifecycle.TransitionLeadInCurrentTransactionAsync(
+                        lead.BusinessUnitId, lead.Id, actor,
+                        new LifecycleTransitionCommand("CONVERTED_TO_RFQ", lead.LifecycleVersion, null, null,
+                            "Api", $"conversion-{lead.Id}", $"rfq-{rfq.Id}",
+                            $"lead-conversion:{lead.BusinessUnitId}:{lead.Id}"), false, default);
+                    await lifecycle.RecordLeadPromotedToRfqInCurrentTransactionAsync(
+                        lead.BusinessUnitId, lead.Id, rfq.Id, actor, $"conversion-{lead.Id}", default);
+
+                    await transaction.CommitAsync();
+                });
+            }
+            catch (DbUpdateException ex) when (LeadConversionGate.IsDuplicateKey(ex))
+            {
+                // Lost the race against the RFQ."LeadID" partial unique index: a concurrent
+                // conversion won. Same refusal as the pre-insert check above, so a race and a
+                // repeat read identically to the caller instead of surfacing as a 500.
+                _context.ChangeTracker.Clear();
+                var winner = await _context.Rfqs.AsNoTracking()
+                    .FirstOrDefaultAsync(r => r.LeadId == leadId && r.BusinessUnitId == rfq.BusinessUnitId);
+                if (winner == null) throw; // Not our index after all — surface the truth.
+                throw new InvalidOperationException(
+                    $"Lead {leadId} was already converted to RFQ #{winner.Id} ({winner.Rfqno}). "
+                    + "Open that RFQ instead of creating a second one for the same lead.");
+            }
         }
 
         /// <summary>

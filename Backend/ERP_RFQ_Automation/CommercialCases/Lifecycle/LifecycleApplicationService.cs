@@ -18,6 +18,7 @@ public interface ILifecycleApplicationService
     Task<LifecycleTransitionResult> TransitionQuoteAsync(long businessUnitId, long quoteId, LifecycleActor actor, LifecycleTransitionCommand command, bool reopen, CancellationToken ct);
     Task<LifecycleTransitionResult> TransitionLeadInCurrentTransactionAsync(long businessUnitId, long leadId, LifecycleActor actor, LifecycleTransitionCommand command, bool reopen, CancellationToken ct);
     Task<LifecycleTransitionResult> TransitionQuoteInCurrentTransactionAsync(long businessUnitId, long quoteId, LifecycleActor actor, LifecycleTransitionCommand command, bool reopen, CancellationToken ct);
+    Task RecordLeadPromotedToRfqInCurrentTransactionAsync(long businessUnitId, long leadId, long rfqId, LifecycleActor actor, string correlationId, CancellationToken ct);
 }
 
 public sealed class LifecycleApplicationService : ILifecycleApplicationService
@@ -98,6 +99,114 @@ public sealed class LifecycleApplicationService : ILifecycleApplicationService
         ValidateInput(businessUnitId, quoteId, actor, command);
         var requestHash = HashRequest(QuoteAggregate, quoteId, actor, command, reopen);
         return await ExecuteCoreAsync(QuoteAggregate, businessUnitId, quoteId, actor, command, reopen, requestHash, ct);
+    }
+
+    /// <summary>
+    /// Records the dedicated lead→RFQ promotion event alongside (never instead of) the generic
+    /// CONVERTED_TO_RFQ status transition, in the caller's already-open transaction.
+    ///
+    /// <para>The generic <c>commercial-case.lead.statustransitioned</c> outbox message says only
+    /// that a status changed; a consumer that cares that an RFQ now exists for the lead had to
+    /// parse reason strings to find out which RFQ. This event carries the facts of the promotion
+    /// by name: the lead, the RFQ it became, the lead revision that was evaluated
+    /// (<c>Lead.CurrentRevisionId</c>), the actor and the correlation id.</para>
+    ///
+    /// <para>It is written as its own <see cref="CommercialLifecycleEvent"/> row (the outbox is
+    /// 1:1 with lifecycle events, so it cannot share the transition's row) and therefore bumps
+    /// the lead's LifecycleVersion again — the event stream is append-only and every appended
+    /// event advances the aggregate version, which the unique
+    /// (BusinessUnitId, AggregateType, AggregateId, AggregateVersion) index insists on.</para>
+    ///
+    /// <para>Idempotent per lead via the (BusinessUnitId, IdempotencyKey) unique index and the
+    /// same read-then-return replay the transitions use: a lead is promoted at most once, so a
+    /// replayed conversion finds the existing promotion event and writes nothing.</para>
+    /// </summary>
+    public async Task RecordLeadPromotedToRfqInCurrentTransactionAsync(
+        long businessUnitId, long leadId, long rfqId, LifecycleActor actor, string correlationId, CancellationToken ct)
+    {
+        if (_db.Database.CurrentTransaction == null)
+            throw new InvalidOperationException("An active database transaction is required.");
+        if (businessUnitId <= 0 || leadId <= 0 || rfqId <= 0)
+            throw new LifecycleValidationException("Tenant, lead and RFQ identifiers are required.");
+        Required(actor.ActorId, nameof(actor.ActorId), 255);
+        Required(actor.ActorSource, nameof(actor.ActorSource), 50);
+        Required(correlationId, nameof(correlationId), 100);
+
+        var idempotencyKey = $"lead-promotion:{businessUnitId}:{leadId}";
+        if (await FindReplayAsync(businessUnitId, idempotencyKey, ct) != null)
+            return; // Promotion already recorded (retried conversion): nothing new happened.
+
+        var lead = await _db.Leads.Include(x => x.LeadStatus)
+            .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.Id == leadId, ct)
+            ?? throw new LifecycleNotFoundException("Lead was not found.");
+        if (!lead.LeadStatusId.HasValue)
+            throw new LifecycleValidationException("A lead cannot be promoted before it has a lifecycle status.");
+        var statusCode = LifecyclePolicy.Canonicalize("Lead", lead.LeadStatus?.SetupCode, lead.LeadStatus?.SetupValue);
+
+        var now = DateTime.UtcNow;
+        lead.LifecycleVersion++;
+        var requestHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
+            JsonSerializer.Serialize(new { businessUnitId, leadId, rfqId, eventType = "PromotedToRfq" })))).ToLowerInvariant();
+        var lifecycleEvent = new CommercialLifecycleEvent
+        {
+            BusinessUnitId = businessUnitId,
+            CommercialCaseId = lead.CommercialCaseId,
+            CommercialCaseReference = lead.CommercialCaseReference,
+            AggregateType = LeadAggregate,
+            AggregateId = leadId,
+            EventType = "PromotedToRfq",
+            // Not a status change: the promotion happens AT the CONVERTED_TO_RFQ status the
+            // preceding transition established. PreviousStatus stays NULL, deliberately —
+            // the CK_lifecycle_events_StatusChanged constraint (PostgreSQL) insists that a
+            // STATED previous status differs from the new one, and this event states none.
+            PreviousStatusId = null,
+            PreviousStatusCode = null,
+            NewStatusId = lead.LeadStatusId.Value,
+            NewStatusCode = statusCode,
+            AggregateVersion = lead.LifecycleVersion,
+            ActorId = actor.ActorId.Trim(),
+            ActorSource = actor.ActorSource.Trim(),
+            OccurredOn = now,
+            PolicyVersion = LifecyclePolicy.Version,
+            Source = "Api",
+            CorrelationId = correlationId.Trim(),
+            RequestReference = $"rfq-{rfqId}",
+            IdempotencyKey = idempotencyKey,
+            RequestHash = requestHash
+        };
+        _db.CommercialLifecycleEvents.Add(lifecycleEvent);
+        await _db.SaveChangesAsync(ct);
+
+        var payload = JsonSerializer.Serialize(new
+        {
+            lifecycleEvent.Id,
+            BusinessUnitId = businessUnitId,
+            lead.CommercialCaseId,
+            lead.CommercialCaseReference,
+            LeadId = leadId,
+            RfqId = rfqId,
+            // The lead revision whose facts this conversion evaluated. Null on legacy leads
+            // that predate revision tracking — stated as null, never invented.
+            LeadRevisionId = lead.CurrentRevisionId,
+            ActorId = actor.ActorId.Trim(),
+            ActorSource = actor.ActorSource.Trim(),
+            OccurredOn = now,
+            CorrelationId = correlationId.Trim()
+        });
+        _db.LifecycleOutboxMessages.Add(new LifecycleOutboxMessage
+        {
+            BusinessUnitId = businessUnitId,
+            LifecycleEvent = lifecycleEvent,
+            // Named event type (hyphenated, matching the consumer contract) rather than the
+            // ToLowerInvariant() concatenation the generic transition derives — a consumer
+            // routes on this literal string.
+            EventType = "commercial-case.lead.promoted-to-rfq",
+            Payload = payload,
+            SchemaVersion = 1,
+            OccurredOn = now,
+            AvailableOn = now
+        });
+        await _db.SaveChangesAsync(ct);
     }
 
     private async Task<LifecycleTransitionResult> ExecuteAsync(

@@ -323,6 +323,8 @@ namespace ERP_RFQ_Automation.Repositories
             if (string.IsNullOrWhiteSpace(createdBy)) throw new ArgumentException("Authenticated actor is required.", nameof(createdBy));
 
             var strategy = _context.Database.CreateExecutionStrategy();
+            try
+            {
             return await strategy.ExecuteAsync(async () =>
             {
                 _context.ChangeTracker.Clear();
@@ -348,16 +350,9 @@ namespace ERP_RFQ_Automation.Repositories
                     await transaction.CommitAsync();
                     return (already.Id, already.Rfqno);
                 }
-                if (lifecycleCode != "QUALIFIED")
-                    throw new InvalidOperationException("Only a qualified lead can be converted to an RFQ.");
-                if (lead.DuplicateStatus is "suspected" or "confirmed")
-                    throw new InvalidOperationException(
-                        $"This lead is flagged as a possible duplicate of lead #{lead.DuplicateOfLeadId}; resolve the duplicate flag first.");
-                if (lead.RequiresCommercialReview && !lead.CommercialFactsVerified)
-                    throw new InvalidOperationException(
-                        "AI-extracted commercial facts must be approved in extraction review before RFQ conversion.");
-                if (!lead.CustomerId.HasValue)
-                    throw new InvalidOperationException("Resolve the lead customer before creating an RFQ.");
+                // The shared gate every RFQ-creating door runs (this door, the intelligence
+                // conversion, and POST /api/Rfq with a LeadId) — one set of checks, one wording.
+                LeadConversionGate.EnsureEligible(lead);
 
                 if (_lineResolution is not null)
                     await _lineResolution.ResolveLeadAsync(businessUnitId, lead.Id, 10);
@@ -377,14 +372,33 @@ namespace ERP_RFQ_Automation.Repositories
                 if (_lineResolution is not null)
                     await _lineResolution.LinkRfqAsync(businessUnitId, lead.Id, rfq.Id);
 
-                await new LifecycleApplicationService(_context).TransitionLeadInCurrentTransactionAsync(
-                    lead.BusinessUnitId, lead.Id, new LifecycleActor(createdBy.Trim(), "AuthenticatedUser"),
+                var lifecycle = new LifecycleApplicationService(_context);
+                var actor = new LifecycleActor(createdBy.Trim(), "AuthenticatedUser");
+                await lifecycle.TransitionLeadInCurrentTransactionAsync(
+                    lead.BusinessUnitId, lead.Id, actor,
                     new LifecycleTransitionCommand("CONVERTED_TO_RFQ", lead.LifecycleVersion, null, null,
                         "Api", $"conversion-{lead.Id}", $"rfq-{rfq.Id}",
                         $"lead-conversion:{lead.BusinessUnitId}:{lead.Id}"), false, default);
+                // Dedicated promotion event ALONGSIDE the generic transition, same transaction:
+                // consumers get the lead/RFQ/revision facts by name instead of parsing a
+                // status-transition payload.
+                await lifecycle.RecordLeadPromotedToRfqInCurrentTransactionAsync(
+                    lead.BusinessUnitId, lead.Id, rfq.Id, actor, $"conversion-{lead.Id}", default);
                 await transaction.CommitAsync();
                 return (rfq.Id, rfq.Rfqno);
             });
+            }
+            catch (DbUpdateException ex) when (LeadConversionGate.IsDuplicateKey(ex))
+            {
+                // Lost the race against the RFQ."LeadID" partial unique index: another caller
+                // converted this lead between our existence check and our insert. The lead HAS
+                // its RFQ — resolve to it exactly as the read-then-return idempotent path would.
+                _context.ChangeTracker.Clear();
+                var winner = await _context.Rfqs.AsNoTracking()
+                    .FirstOrDefaultAsync(r => r.LeadId == id && r.BusinessUnitId == businessUnitId);
+                if (winner == null) throw; // Not our index after all — surface the truth.
+                return (winner.Id, winner.Rfqno);
+            }
         }
 
         private async Task<Rfq> CreateRfqFromLeadAsync(Lead lead, long businessUnitId, string createdBy)

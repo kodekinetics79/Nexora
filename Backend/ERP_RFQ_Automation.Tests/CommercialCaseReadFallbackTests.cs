@@ -35,8 +35,9 @@ public sealed class CommercialCaseReadFallbackTests
         Assert.Null(dto.CommercialCaseId);
         Assert.Null(dto.NexoraSerial);
         Assert.Null(dto.CommercialCaseReference);
-        // Proof the fallback's source was present and simply not used.
-        Assert.Equal(graph.LeadId, dto.LeadId);
+        // Proof the fallback's source was present and simply not used: the unlinked RFQ's
+        // own lead carries a case of its own.
+        Assert.Equal(graph.UnlinkedLeadId, dto.LeadId);
         Assert.True(graph.CaseId > 0);
     }
 
@@ -96,13 +97,16 @@ public sealed class CommercialCaseReadFallbackTests
     // ---- fixture ---------------------------------------------------------------------------
 
     private sealed record Graph(
-        long CaseId, string Serial, long LeadId,
+        long CaseId, string Serial, long LeadId, long UnlinkedLeadId,
         long LinkedRfqId, long UnlinkedRfqId, long LinkedQuoteId, long UnlinkedQuoteId);
 
     /// <summary>
-    /// One lead with a case, and beneath it both shapes of every document: one that inherited the
-    /// case and one that never did. The unlinked pair is attached to the SAME parents as the linked
-    /// pair, so the only thing that can distinguish them in a DTO is the document's own column.
+    /// Both shapes of every document: one that inherited its parent's case and one that never
+    /// did. Each unlinked document is attached to a parent that HAS a case, so the only thing
+    /// that can distinguish linked from unlinked in a DTO is the document's own column. The
+    /// unlinked RFQ hangs off a SECOND lead (which also owns a case) because the partial unique
+    /// index on RFQ."LeadID" — one lead, one RFQ — makes the earlier same-lead shape
+    /// unrepresentable, exactly as intended.
     /// </summary>
     private static async Task<Graph> SeedAsync(TestDb db)
     {
@@ -113,15 +117,17 @@ public sealed class CommercialCaseReadFallbackTests
         Seed.EnsureBusinessUnit(seed, Tenant);
         var customer = Seed.Customer(seed, Tenant, Tenant, "Fallback customer");
         var lead = Seed.Lead(seed, 97_611, Tenant, buyersName: "Fallback buyer");
+        var unlinkedLead = Seed.Lead(seed, 97_612, Tenant, buyersName: "Fallback buyer");
         await seed.SaveChangesAsync();
 
         lead.ResolveCommercialIdentity(customer.Id, null, "CONFIRMED");
+        unlinkedLead.ResolveCommercialIdentity(customer.Id, null, "CONFIRMED");
         caseId = lead.CommercialCaseId;
         serial = lead.CommercialCaseReference;
 
         var linkedRfq = NewRfq(97_621, "RFQ-FALLBACK-LINKED", lead.Id);
         linkedRfq.InheritCommercialIdentity(lead);
-        var unlinkedRfq = NewRfq(97_622, "RFQ-FALLBACK-UNLINKED", lead.Id);
+        var unlinkedRfq = NewRfq(97_622, "RFQ-FALLBACK-UNLINKED", unlinkedLead.Id);
         seed.Rfqs.AddRange(linkedRfq, unlinkedRfq);
 
         var linkedQuote = NewQuote(97_631, "QT-FALLBACK-LINKED", linkedRfq.Id, customer.Id);
@@ -130,7 +136,8 @@ public sealed class CommercialCaseReadFallbackTests
         seed.Quotes.AddRange(linkedQuote, unlinkedQuote);
         await seed.SaveChangesAsync();
 
-        return new Graph(caseId, serial, lead.Id, linkedRfq.Id, unlinkedRfq.Id, linkedQuote.Id, unlinkedQuote.Id);
+        return new Graph(caseId, serial, lead.Id, unlinkedLead.Id,
+            linkedRfq.Id, unlinkedRfq.Id, linkedQuote.Id, unlinkedQuote.Id);
     }
 
     private static Rfq NewRfq(long id, string number, long leadId) => new()

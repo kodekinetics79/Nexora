@@ -1119,6 +1119,17 @@ public partial class ErpRfqAutomationContext : DbContext
 
             entity.HasIndex(e => new { e.BusinessUnitId, e.NexoraSerial }, "IX_RFQ_BusinessUnitID_NexoraSerial");
 
+            // One lead, one RFQ — the database backstop for the single conversion door.
+            // Every gated path already answers a repeat conversion with the existing RFQ
+            // (read-then-return idempotency); this partial unique index is what makes a
+            // RACING second insert physically impossible rather than merely unlikely, on
+            // PostgreSQL and on the relational-SQLite test lane alike. Filtered to non-null
+            // LeadID because the leadless spreadsheet imports (RfqUploaderService /
+            // ManualUploadService) legitimately create RFQs that carry no lead.
+            entity.HasIndex(e => e.LeadId)
+                .IsUnique()
+                .HasFilter("\"LeadID\" IS NOT NULL");
+
             entity.Property(e => e.Id).HasColumnName("ID");
             entity.Property(e => e.BiddingDecision).HasMaxLength(200);
             entity.Property(e => e.BusinessUnitId).HasColumnName("BusinessUnitID");

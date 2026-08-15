@@ -190,9 +190,14 @@ public sealed class QuotationUploaderCommercialCaseTests
         });
         var lead = Seed.Lead(seed, 97_721, Tenant, buyersName: "Spine buyer");
         var foreignLead = Seed.Lead(seed, 97_722, ForeignTenant, buyersName: "Foreign buyer");
+        // One lead per additional RFQ: the partial unique index on RFQ."LeadID" (one lead,
+        // one RFQ) makes the earlier all-on-one-lead shape unrepresentable, as intended.
+        var secondLead = Seed.Lead(seed, 97_723, Tenant, buyersName: "Spine buyer");
+        var caselessLead = Seed.Lead(seed, 97_724, Tenant, buyersName: "Spine buyer");
         await seed.SaveChangesAsync();
 
         lead.ResolveCommercialIdentity(customer.Id, null, "CONFIRMED");
+        secondLead.ResolveCommercialIdentity(customer.Id, null, "CONFIRMED");
         var caseId = lead.CommercialCaseId;
         var serial = lead.CommercialCaseReference;
 
@@ -200,10 +205,10 @@ public sealed class QuotationUploaderCommercialCaseTests
         rfq.InheritCommercialIdentity(lead);
         // A second linked RFQ, so "one quote, two RFQs" is testable and so the generated template
         // has a real sample reference to print.
-        var second = NewRfq(97_732, "RFQ-SPINE-2", Tenant, lead.Id);
-        second.InheritCommercialIdentity(lead);
+        var second = NewRfq(97_732, "RFQ-SPINE-2", Tenant, secondLead.Id);
+        second.InheritCommercialIdentity(secondLead);
         // Deliberately never inherits: an RFQ created outside the spine.
-        var caseless = NewRfq(97_733, "RFQ-SPINE-CASELESS", Tenant, lead.Id);
+        var caseless = NewRfq(97_733, "RFQ-SPINE-CASELESS", Tenant, caselessLead.Id);
         var foreign = NewRfq(97_734, "RFQ-SPINE-FOREIGN", ForeignTenant, foreignLead.Id);
         foreign.InheritCommercialIdentity(foreignLead);
         seed.Rfqs.AddRange(rfq, second, caseless, foreign);
