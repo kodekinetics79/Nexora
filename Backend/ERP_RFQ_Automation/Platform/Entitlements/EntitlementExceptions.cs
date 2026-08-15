@@ -22,6 +22,13 @@ public static class NexoraProblems
     public const string ImpersonationExportDenied = Base + "impersonation-export-denied";
 
     /// <summary>
+    /// An intake door refused because durable document storage cannot be written. Not an
+    /// entitlement denial — it lives here because this class is the ONE problem-type
+    /// namespace, and a refusal invented its own base URI is exactly what P2-A10 forbade.
+    /// </summary>
+    public const string DocumentStorageUnavailable = Base + "document-storage-unavailable";
+
+    /// <summary>
     /// Sec-D3: a read refused because the route is not on the impersonation allow-list. Replaces
     /// <see cref="ImpersonationExportDenied"/> as the answer for every refused impersonated read —
     /// the old type named exports specifically, and the refusal is now much broader than exports,

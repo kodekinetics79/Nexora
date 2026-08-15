@@ -487,7 +487,15 @@ public sealed class FinanceDefinerForcedRowSecurityPostgreSqlTests(ForcedRowSecu
         // migration created that table WITHOUT its policy, this number would have stayed at 220 and
         // said so. It going up by exactly one is the evidence the policy reached real PostgreSQL,
         // which no portable test can establish.
-        Assert.Equal(221L, await CountAsync("pg_policy", "polname = 'nexora_tenant_isolation'"));
+        //
+        // 221 -> 223 with EmailInquiryAssemblies and EmailInquiryComponents. Exactly two, for the
+        // two tenant-owned tables the email inquiry assembly adds — the census doing its job again.
+        //
+        // 223 -> 224 with EmailInquiryComponentResults. Exactly one, and it is the row that holds
+        // extracted customer content — the single worst table in the schema to leave readable
+        // across tenants, and the one a migration is most likely to add without a policy because
+        // the tables it hangs off already have theirs.
+        Assert.Equal(224L, await CountAsync("pg_policy", "polname = 'nexora_tenant_isolation'"));
         Assert.Equal(300L, await CountAsync("pg_policy",
             "polname IN ('nexora_definer_tenant_read','nexora_definer_tenant_insert','nexora_definer_tenant_update')"));
 

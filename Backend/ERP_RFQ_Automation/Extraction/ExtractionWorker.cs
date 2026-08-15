@@ -14,6 +14,7 @@ using ERP_RFQ_Automation.Services.DocumentIntelligence;
 using ERP_RFQ_Automation.Services.Interfaces;
 using ERP_RFQ_Automation.MultiTenancy;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -59,6 +60,34 @@ public interface IExtractionDocumentReader
 /// </summary>
 public interface ILeadPersister
 {
+    /// <summary>
+    /// Persists the ONE Lead for a fully-assembled email message.
+    ///
+    /// <para>Separate from <c>PersistAsync</c> because it is the single caller allowed past the
+    /// assembly fence. The fence refuses a per-component Lead; this is the message-level write
+    /// the fence exists to wait for, and it arrives with every component's lines already
+    /// merged. A default implementation is provided so existing test doubles keep compiling and
+    /// fail loudly if this path is reached unexpectedly.</para>
+    /// </summary>
+    Task<long> PersistAssembledMessageAsync(
+        ExtractionJob job, ChunkedExtractionOutcome outcome, CancellationToken ct = default)
+        => throw new NotSupportedException(
+            "This ILeadPersister does not support message-level assembly.");
+
+    /// <summary>
+    /// Duplicate detection, customer resolution and routing for an assembled message's Lead.
+    ///
+    /// <para>Split out so the caller can run it AFTER its transaction commits. Inside, it would
+    /// run while the assembly row's claim lock is still held, and a live worker finishing the
+    /// last component of that same message would block on that lock WHILE HOLDING its queue
+    /// lease — long enough, on a slow reconciliation, for the lease to expire, the job to be
+    /// reclaimed, an attempt to be burnt and the extraction to be re-run. Best-effort by
+    /// contract: a failure here must never undo a Lead that already exists.</para>
+    /// </summary>
+    Task EnrichAssembledMessageAsync(
+        ExtractionJob job, long leadId, CancellationToken ct = default)
+        => Task.CompletedTask;
+
     Task<long> PersistAsync(ExtractionJob job, ChunkedExtractionOutcome outcome, CancellationToken ct = default);
 
     /// <summary>Persist the lead graph and complete the fenced queue claim in one transaction.</summary>
@@ -347,6 +376,46 @@ public sealed class ExtractionWorker : BackgroundService
                 return true;
             }
             await MarkIntakeFinalizedAsync(job, ct);
+
+            // THE BARRIER'S TRIGGER.
+            //
+            // An email component's job creates no Lead of its own — the persister recorded its
+            // result and completed it. If that was the last part the message was waiting for,
+            // the message becomes one Lead now. The assembler decides: it is a no-op unless the
+            // assembly is genuinely ReadyForAssembly, and idempotent when two workers finish
+            // the final two components at the same moment.
+            //
+            // Deliberately AFTER the queue transition. Assembling first and completing second
+            // would mean a crash in between leaves a Lead whose job still looks unfinished, and
+            // the retry would build the Lead twice.
+            // GetRequiredService, deliberately. GetService here meant a botched registration
+            // silently skipped the barrier for EVERY message with no error anywhere — the same
+            // class of invisible total stall this increment exists to remove. Resolved only
+            // inside the branch, so a container without it (the lease/heartbeat harnesses) is
+            // unaffected.
+            if (job.EmailInquiryComponentId is not null
+                && scope.ServiceProvider.GetService<ErpRfqAutomationContext>() is { } assemblyContext)
+            {
+                var assembler = scope.ServiceProvider.GetRequiredService<
+                    ERP_RFQ_Automation.Ingestion.Assembly.IEmailInquiryLeadAssembler>();
+                var assemblyId = await assemblyContext
+                    .Set<ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponent>()
+                    .AsNoTracking()
+                    .Where(x => x.BusinessUnitId == job.BusinessUnitId
+                                && x.Id == job.EmailInquiryComponentId!.Value)
+                    .Select(x => (long?)x.AssemblyId)
+                    .FirstOrDefaultAsync(ct);
+
+                if (assemblyId is { } id)
+                {
+                    var assembledLeadId = await assembler.AssembleAsync(job.BusinessUnitId, id, ct);
+                    if (assembledLeadId is not null)
+                        _log.LogInformation(
+                            "Job {JobId} completed email assembly {AssemblyId} as lead {LeadId}.",
+                            job.Id, id, assembledLeadId.Value);
+                }
+            }
+
             _metrics?.JobSucceeded(ElapsedMs(), job.BusinessUnitId);
 
             _log.LogInformation(
@@ -959,6 +1028,8 @@ public sealed class LeadPersister : ILeadPersister
     private readonly ERP_RFQ_Automation.Deduplication.ILeadDuplicateDetector? _duplicateDetector;
     private readonly ERP_RFQ_Automation.CommercialRouting.ICommercialRoutingApplicationService? _routing;
     private readonly ERP_RFQ_Automation.LeadIdentity.ILeadIdentityApplicationService? _leadIdentity;
+    /// <summary>Present once email assembly is wired; absent leaves non-email ingestion untouched.</summary>
+    private readonly ERP_RFQ_Automation.Ingestion.Assembly.IEmailInquiryAssemblyCoordinator? _emailAssemblies;
     private readonly ERP_RFQ_Automation.CustomerResolution.ILeadCustomerResolutionService? _customerResolution;
     private readonly UsageMeteringService? _usageMetering;
 
@@ -970,6 +1041,7 @@ public sealed class LeadPersister : ILeadPersister
         ERP_RFQ_Automation.Deduplication.ILeadDuplicateDetector? duplicateDetector = null,
         ERP_RFQ_Automation.CommercialRouting.ICommercialRoutingApplicationService? routing = null,
         ERP_RFQ_Automation.LeadIdentity.ILeadIdentityApplicationService? leadIdentity = null,
+        ERP_RFQ_Automation.Ingestion.Assembly.IEmailInquiryAssemblyCoordinator? emailAssemblies = null,
         ERP_RFQ_Automation.CustomerResolution.ILeadCustomerResolutionService? customerResolution = null,
         UsageMeteringService? usageMetering = null)
     {
@@ -978,22 +1050,215 @@ public sealed class LeadPersister : ILeadPersister
         _duplicateDetector = duplicateDetector;
         _routing = routing;
         _leadIdentity = leadIdentity;
+        _emailAssemblies = emailAssemblies;
         _customerResolution = customerResolution;
         _usageMetering = usageMetering;
     }
 
+    /// <summary>
+    /// Turns the extractor's outcome into the versioned shape the result store holds.
+    ///
+    /// <para>The conversion lives at this boundary on purpose: the store is versioned and the
+    /// extractor's type is not, so exactly one place has to know how today's outcome maps onto
+    /// today's contract version.</para>
+    /// </summary>
+    private static ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponentResultPayload
+        BuildComponentResultPayload(ChunkedExtractionOutcome outcome)
+        => new(
+            System.Text.Json.JsonSerializer.Serialize(outcome.Result),
+            outcome.ProcessingPath.ToString(),
+            outcome.AiProviderClass?.ToString(),
+            null,
+            outcome.Result?.OverallConfidence is { } confidence ? (decimal)confidence : null,
+            outcome.ExpectedItemCount,
+            outcome.ExtractedItemCount,
+            outcome.ReviewReason,
+            outcome.Diagnostics.Count > 0
+                ? System.Text.Json.JsonSerializer.Serialize(outcome.Diagnostics)
+                : null);
+
     public Task<long> PersistAsync(
         ExtractionJob job, ChunkedExtractionOutcome outcome, CancellationToken ct = default)
-        => PersistInternalAsync(job, outcome, enrichAfterPersistence: true, ct);
+        => PersistInternalAsync(job, outcome, enrichAfterPersistence: true, bypassAssemblyFence: false, ct);
+
+    public Task<long> PersistAssembledMessageAsync(
+        ExtractionJob job, ChunkedExtractionOutcome outcome, CancellationToken ct = default)
+        // enrichAfterPersistence: FALSE — see EnrichAssembledMessageAsync. Enrichment runs after
+        // the caller commits, so the assembly claim lock is not held across it.
+        => PersistInternalAsync(job, outcome, enrichAfterPersistence: false, bypassAssemblyFence: true, ct);
+
+    public async Task EnrichAssembledMessageAsync(
+        ExtractionJob job, long leadId, CancellationToken ct = default)
+    {
+        var lead = await _context.Leads.FirstOrDefaultAsync(
+            x => x.BusinessUnitId == job.BusinessUnitId && x.Id == leadId, ct);
+        if (lead is null) return;
+
+        Lead[] leads = [lead];
+        if (_leadIdentity is null)
+            await TryDetectDuplicatesAsync(job, leads, ct);
+        await TryResolveCustomersAsync(job, leads, ct);
+        await TryRouteLeadsAsync(job, leads, ct);
+    }
 
     private async Task<long> PersistInternalAsync(
         ExtractionJob job,
         ChunkedExtractionOutcome outcome,
         bool enrichAfterPersistence,
+        bool bypassAssemblyFence,
         CancellationToken ct)
     {
         if (outcome.Result is null)
             throw new InvalidOperationException("Cannot persist a null extraction result.");
+
+        // ---- ASSEMBLY SAFETY FENCE -------------------------------------------------------
+        //
+        // A job that belongs to an email inquiry component must NEVER reach the per-job Lead
+        // reconciliation below. That path creates one Lead per document, which is the exact
+        // defect the message-level barrier exists to remove: a body finishing before its
+        // attachment would mint a Lead priced without the attachment.
+        //
+        // The signal is the PERSISTED component row joined on this job id — not the metadata
+        // sidecar, which is best-effort by its own contract and therefore cannot be trusted to
+        // withhold a commercial action.
+        //
+        // Until the barrier handler is wired, the component's outcome is recorded and the
+        // message is left visibly at its assembly state. That is deliberate: the work is not
+        // lost, the operator can see exactly where it stopped, and no Lead is invented from a
+        // fragment. Non-email and manual-upload jobs never match this query and keep their
+        // existing behaviour untouched.
+        if (!bypassAssemblyFence
+            && _emailAssemblies is not null
+            && job.EmailInquiryComponentId is { } ownedComponentId)
+        {
+            // ONE ownership authority, read straight off the job row.
+            //
+            // This used to join EmailInquiryComponents on ExtractionJobId — a nullable
+            // back-reference written in a second statement after the insert, which a worker
+            // could claim the job ahead of. It is now a column on the job, written with the
+            // job, backed by a composite foreign key carrying the tenant. The component's own
+            // ExtractionJobId and SourceDocumentOccurrenceId remain as diagnostics; neither
+            // decides anything.
+            var owner = await _context
+                .Set<ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponent>()
+                .AsNoTracking()
+                .Where(x => x.BusinessUnitId == job.BusinessUnitId && x.Id == ownedComponentId)
+                .Select(x => new { x.AssemblyId, x.ComponentKey })
+                .FirstOrDefaultAsync(ct);
+
+            if (owner is null)
+            {
+                // The foreign key makes this unreachable through the database. If it happens
+                // anyway the job is genuinely ownerless, and inventing a per-document Lead
+                // from it is the one thing that must not happen.
+                throw new InvalidOperationException(
+                    $"Extraction job {job.Id} names email inquiry component {ownedComponentId}, "
+                    + $"which does not exist for business unit {job.BusinessUnitId}.");
+            }
+
+            // The result becomes DURABLE, the component completes, and the message is
+            // re-evaluated — one transaction, in the coordinator. No Lead is created here:
+            // that is the barrier's job once every sibling has finished.
+            var payload = BuildComponentResultPayload(outcome);
+            var evaluation = await _emailAssemblies.RecordComponentResultAsync(
+                job.BusinessUnitId, ownedComponentId, job.Id, payload, ct);
+
+            _log.LogInformation(
+                "Component {ComponentKey} of assembly {AssemblyId} recorded a durable result for "
+                + "business unit {BusinessUnitId}; the message is now {Status} "
+                + "({Completed} of {Captured} captured).",
+                owner.ComponentKey, owner.AssemblyId, job.BusinessUnitId, evaluation.Status,
+                evaluation.CompletedComponentCount, evaluation.CapturedComponentCount);
+
+            // No Lead is built here, and not merely because the message may be incomplete.
+            // Assembly is ORCHESTRATION and belongs to the worker: an assembler injected into
+            // the persister is a dependency cycle (the assembler must persist the Lead it
+            // builds), and the container rejects it — which is how this was found, with three
+            // jobs dead-lettered on a circular-dependency message.
+            return 0;
+        }
+
+        // ---- CUTOVER FENCE: AN EMAIL JOB THAT OWNS NO COMPONENT --------------------------
+        //
+        // An Email job with a NULL EmailInquiryComponentId used to fall through to the
+        // per-job Lead reconciliation below. That was correct for exactly one reason and the
+        // reason is gone: capture was not wired, so NO email job carried a component, and a
+        // blanket refusal here stopped every email becoming an RFQ while 4911 tests stayed
+        // green. The outage was found by a product owner looking at a screen.
+        //
+        // Both producers are now canonical. EmailInquiryIntakeService captures the message
+        // and EmailIngestEnqueuer.ScheduleAsync writes the component id WITH the job row, and
+        // it is the only scheduler. So a component-less email job today means the scheduler
+        // and the worker disagree about the same message — and the per-document Lead it would
+        // otherwise mint is the precise defect the barrier exists to remove: a covering note
+        // priced without the schedule that was attached to it.
+        //
+        // Gated on the coordinator for the same reason the fence above is: a container without
+        // the assembly capability (the lease/heartbeat harnesses) has no assembly to hold and
+        // no state to be inconsistent with, and an unregistered capability must degrade to the
+        // pre-fence behaviour rather than silently stop ingestion. The production graph always
+        // registers it, and EmailInquiryAssemblyRegistrationTests is what proves that.
+        if (!bypassAssemblyFence
+            && _emailAssemblies is not null
+            && job.SourceType == ExtractionSourceType.Email
+            && job.EmailInquiryComponentId is null)
+        {
+            // Resolve the MESSAGE, not the component: the job names no component, so the only
+            // honest question left is "is there an assembly this job's message belongs to?".
+            // The sidecar is a best-effort HINT and cannot authorize anything, so its ingest id
+            // is used only to look the row up, and the lookup is bound by the job's own tenant.
+            var strandedMetadata = await ResolveMetadataAsync(job, ct);
+            long? strandedAssemblyId = null;
+            if (strandedMetadata?.EmailIngestId is > 0
+                && _context.Model.FindEntityType(
+                    typeof(ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssembly)) is not null)
+            {
+                strandedAssemblyId = await _context
+                    .Set<ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssembly>()
+                    .AsNoTracking()
+                    .Where(x => x.BusinessUnitId == job.BusinessUnitId
+                                && x.EmailIngestId == strandedMetadata.EmailIngestId!.Value)
+                    .Select(x => (long?)x.Id)
+                    .FirstOrDefaultAsync(ct);
+            }
+
+            if (strandedAssemblyId is { } holdAssemblyId)
+            {
+                // The message exists as an aggregate, so the operator gets a message-level
+                // hold they can see and act on rather than a queue row nobody reads. Held, not
+                // lost: the raw evidence and every sibling component are untouched.
+                await _emailAssemblies.HoldForReviewAsync(
+                    job.BusinessUnitId, holdAssemblyId,
+                    ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryHoldReasons.OwnershipUnresolved,
+                    ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryHoldReasons
+                        .OwnershipUnresolvedDetail,
+                    ct);
+
+                _log.LogError(
+                    "Extraction job {JobId} (business unit {BusinessUnitId}) is an email job that "
+                    + "owns no inquiry component; assembly {AssemblyId} is held for review and NO "
+                    + "per-document lead was created.",
+                    job.Id, job.BusinessUnitId, holdAssemblyId);
+
+                // Deliberately not a throw. The message is visibly held and re-schedulable, and
+                // retrying THIS job cannot help — a job never gains a component id.
+                return 0;
+            }
+
+            // No assembly: this is legacy in-flight work from before the cutover. It is failed
+            // with a reason an operator can act on. The drain boundary — how many of these
+            // remain and what to do with them — is /api/operations/readiness and
+            // docs/EMAIL-TO-LEAD-EXECUTION-LEDGER.md; permanent dual routing is not the answer.
+            //
+            // The reason names ids only. No file name, no sender, no path.
+            throw new InvalidOperationException(
+                $"Extraction job {job.Id} (business unit {job.BusinessUnitId}) is an email job with "
+                + "no inquiry component and no inquiry assembly, so it predates the email intake "
+                + "cutover. It cannot produce a lead on its own; reprocess the message from the "
+                + "inbound mail triage surface, which enters the canonical intake.");
+        }
+
+        // ---- END ASSEMBLY SAFETY FENCE ---------------------------------------------------
 
         // Multi-inquiry auto-split: N per-group results (a strict partition of the merged
         // items) persist as N Leads sharing ONE EmailIngest + the same source document.
@@ -1282,7 +1547,8 @@ public sealed class LeadPersister : ILeadPersister
             .Select(entry => entry.Entity.Id)
             .Where(id => id > 0)
             .ToHashSet();
-        var leadId = await PersistInternalAsync(job, outcome, enrichAfterPersistence: false, ct);
+        var leadId = await PersistInternalAsync(
+            job, outcome, enrichAfterPersistence: false, bypassAssemblyFence: false, ct);
         var persistedLeads = _context.ChangeTracker.Entries<Lead>()
             .Where(entry => entry.Entity.Id > 0 && !previouslyTrackedLeadIds.Contains(entry.Entity.Id))
             .Select(entry => entry.Entity)
@@ -1292,7 +1558,162 @@ public sealed class LeadPersister : ILeadPersister
         // The canonical document meter is committed in the same transaction as both the
         // business result and the fenced queue completion. A retry therefore cannot charge
         // twice, and a rollback leaves neither a successful job nor a usage occurrence.
+        //
+        // ---- WHY THIS BLOCK CHANGES EXECUTION ROLE -----------------------------------------
+        //
+        // This transaction runs as nexora_tenant_app, by TWO independent routes: ProcessOnceAsync
+        // pushes the tenant scope so TenantRlsCommandInterceptor switches the connection, AND
+        // ExtractionQueue.PrepareExecutionScopeAsync issues its own SET LOCAL ROLE when
+        // RenewLeaseAsync opens this transaction a few lines above. The second route needs no
+        // interceptor and no RLS configuration at all, so this is not a production-topology-only
+        // problem — it is every extraction, everywhere, and a graph that registers no interceptor
+        // reproduces it exactly.
+        //
+        // Everything below is PLATFORM plane: it reads platform."Tenants" and
+        // platform."RateCards" and writes platform."UsageEvents", "UsageEventRatings" and
+        // "UsageMinuteAggregates". nexora_tenant_app holds column-level SELECT on six Tenants
+        // columns and NOTHING on the rest of that list — not even Tenants."RateCardId", which the
+        // projection below reads. The first statement therefore failed with
+        // `42501: permission denied for table Tenants`, the job failed, and the queue re-leased it
+        // until it dead-lettered. It went unseen because no test graph registered
+        // UsageMeteringService, so LeadPersister's optional dependency was null and this block
+        // never ran.
+        //
+        // TWO WAYS TO FIX IT, and why this one:
+        //
+        //  (a) Grant nexora_tenant_app what it lacks, with an RLS policy pinning it to its own
+        //      row. Defensible for Tenants alone — a tenant reading its own tenant row is not a
+        //      privilege escalation, and that is exactly why the six column grants above already
+        //      exist. It does NOT extend to the rest of this block. Making metering work under
+        //      the tenant role means granting INSERT on platform."UsageEvents" and
+        //      "UsageEventRatings" and INSERT/UPDATE on "UsageMinuteAggregates" — the billing
+        //      ledger, owned by the platform, written by the platform, and the one plane a tenant
+        //      role must never be able to reach. A tenant-writable meter is a tenant-editable
+        //      invoice. That is a far wider hole than the one being closed.
+        //
+        //  (b) Run the platform-plane statements as the platform role. nexora_pipeline_app
+        //      already holds every grant this block needs, so no schema change, no new grant, and
+        //      no widening of any role's reach. The switch is SET LOCAL on the SAME connection in
+        //      the SAME transaction — exactly what ExtractionQueue already does to reach the
+        //      tenant role — so the meter still commits or rolls back with the business result and
+        //      the fenced completion, which is the property the comment above depends on.
+        //
+        // (b), for the reason the plane split exists at all: the meter is not the tenant's data.
+        //
+        // NOT wrapped in a try/catch, deliberately. Unbilled usage is a silent revenue loss that
+        // nobody discovers; a failed extraction job is loud, retried and visible. If metering
+        // cannot record, this transaction must roll back.
         if (_usageMetering is not null)
+        {
+            // Fail closed on the one way the block below could be misused. Inside it the
+            // connection is nexora_pipeline_app, which is BYPASSRLS: a tenant-plane entity left
+            // dirty in the change tracker would be flushed by the metering service's own
+            // SaveChanges and written without a policy check. Persistence has already saved, so
+            // this is an assertion about a future edit, not a condition seen today.
+            if (_context.ChangeTracker.HasChanges())
+                throw new InvalidOperationException(
+                    $"Extraction job {job.Id} reached usage metering with unsaved tenant-plane "
+                    + "changes. They would be written under the platform role, bypassing row-level "
+                    + "security. Save (or discard) them before entering the platform plane.");
+
+            // The role is restored to whatever this transaction was already using, read rather
+            // than assumed. It is nexora_tenant_app on every production path — ExtractionQueue's
+            // PrepareExecutionScopeAsync set it when RenewLeaseAsync opened this transaction — but
+            // a harness with a substituted queue leaves the connection on its login role, and
+            // forcing such a caller onto the tenant role afterwards would be a second defect.
+            var restoreRole = await CurrentRoleAsync(ct);
+
+            using (PlatformPlaneExecution.Enter())
+            {
+                // TWO mechanisms, because there are two ways this connection acquires a role and
+                // only one of them is the interceptor.
+                //
+                // PlatformPlaneExecution alone is not enough: ExtractionQueue issues its own
+                // SET LOCAL ROLE directly on the connection when it opens the lease renewal, with
+                // no interceptor involved, and SET LOCAL persists to the end of the transaction.
+                // So the persist transaction sits on nexora_tenant_app even in a graph that
+                // registers no interceptor at all — which is why this defect reaches every
+                // extraction, not only the deployments running the RLS interceptor.
+                //
+                // The explicit statement below moves the connection to the platform role the same
+                // way ExtractionQueue moves it to the tenant role. PlatformPlaneExecution then
+                // stops the interceptor, where one IS registered, from clobbering it again before
+                // every command inside the block.
+                await SetLocalRoleAsync(TenantRlsCommandInterceptor.PipelineRole, ct);
+
+                await MeterExtractionAsync(job, outcome, workerId, ct);
+            }
+
+            if (restoreRole is not null)
+                await SetLocalRoleAsync(restoreRole, ct);
+        }
+        if (!await queue.CompleteAsync(job.Id, workerId, leaseAttempt, leadId > 0 ? leadId : null, ct))
+            throw new InvalidOperationException($"Fenced completion failed for extraction job {job.Id}.");
+
+        await transaction.CommitAsync(ct);
+        return new PersistedExtraction(leadId, persistedLeads);
+    }
+
+    /// <summary>
+    /// The role this transaction is currently executing as, or null off PostgreSQL.
+    /// </summary>
+    private async Task<string?> CurrentRoleAsync(CancellationToken ct)
+    {
+        if (!_context.Database.IsNpgsql())
+            return null;
+
+        await using var command = CreateTransactionCommand("SELECT current_user;");
+        return await command.ExecuteScalarAsync(ct) as string;
+    }
+
+    /// <summary>
+    /// Moves the CURRENT transaction to <paramref name="role"/>. Transaction-local, so the commit
+    /// or rollback that ends this transaction discards it either way.
+    /// </summary>
+    private async Task SetLocalRoleAsync(string role, CancellationToken ct)
+    {
+        // Roles are a PostgreSQL concept and SET LOCAL ROLE is a syntax error on SQLite, which is
+        // the same branch ExtractionQueue.PrepareExecutionScopeAsync takes. Nothing is skipped:
+        // there is no role to switch on that provider.
+        if (!_context.Database.IsNpgsql())
+            return;
+
+        // The role name is never user input — it is either a constant from
+        // TenantRlsCommandInterceptor or a value PostgreSQL itself just returned from
+        // current_user — and it is quoted as an identifier because SET ROLE takes no parameter.
+        await using var command = CreateTransactionCommand(
+            $"SET LOCAL ROLE \"{role.Replace("\"", "\"\"")}\";");
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>
+    /// A raw command on the context's own connection and transaction, exactly as
+    /// <c>ExtractionQueue.PrepareExecutionScopeAsync</c> issues its role switch.
+    ///
+    /// <para>Raw rather than <c>ExecuteSqlRawAsync</c> on purpose: these two statements ARE the
+    /// role mechanism, so routing them through the EF pipeline — where an interceptor prepends its
+    /// own <c>SET LOCAL ROLE</c> to every command — would mean the statement that sets the role is
+    /// itself preceded by a statement that sets the role. Going straight at the connection keeps
+    /// the switch a single, ordered, observable fact.</para>
+    /// </summary>
+    private System.Data.Common.DbCommand CreateTransactionCommand(string sql)
+    {
+        var command = _context.Database.GetDbConnection().CreateCommand();
+        command.Transaction = _context.Database.CurrentTransaction?.GetDbTransaction();
+        command.CommandText = sql;
+        return command;
+    }
+
+    /// <summary>
+    /// The platform-plane half of the persist transaction: reads the tenant's billing identity and
+    /// records the meters. Extracted so the role switch above wraps exactly this and nothing else.
+    /// </summary>
+    private async Task MeterExtractionAsync(
+        ExtractionJob job, ChunkedExtractionOutcome outcome, string workerId, CancellationToken ct)
+    {
+        if (_usageMetering is null)
+            return;
+
         {
             var platformTenant = await _context.Set<ERP_RFQ_Automation.Platform.Models.Tenant>()
                 .AsNoTracking()
@@ -1331,11 +1752,6 @@ public sealed class LeadPersister : ILeadPersister
                 }
             }
         }
-        if (!await queue.CompleteAsync(job.Id, workerId, leaseAttempt, leadId > 0 ? leadId : null, ct))
-            throw new InvalidOperationException($"Fenced completion failed for extraction job {job.Id}.");
-
-        await transaction.CommitAsync(ct);
-        return new PersistedExtraction(leadId, persistedLeads);
     }
 
     private sealed record PersistedExtraction(long LeadId, Lead[] Leads);

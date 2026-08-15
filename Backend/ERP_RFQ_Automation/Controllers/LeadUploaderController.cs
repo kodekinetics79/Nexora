@@ -74,7 +74,7 @@ namespace ERP_RFQ_Automation.Controllers
                 var result = await _ingestion.IngestAsync(stream.ToArray(), file.FileName, targetBUId,
                     ExtractionSourceType.ManualUpload, batchId, priority: 10,
                     metadata: new ExtractionJobMetadata { SourceOccurrenceId = $"template:{idempotency}:{file.FileName}" },
-                    HttpContext.RequestAborted);
+                    ct: HttpContext.RequestAborted);
                 return StatusCode(StatusCodes.Status202Accepted, new { success = true, batchId, jobId = result.JobId, outcome = result.Outcome.ToString() });
             }
             catch (Platform.Entitlements.EntitlementDeniedException ex)
@@ -82,6 +82,15 @@ namespace ERP_RFQ_Automation.Controllers
                 _logger.LogWarning("Template upload denied for tenant {BusinessUnitId}: {Reason}", targetBUId, ex.Message);
                 // P2-A10: one canonical problem+json shape/base URI for typed denials.
                 return Platform.Entitlements.EntitlementProblemFilter.ToResult(ex);
+            }
+            catch (Infrastructure.Storage.EvidenceStorageUnavailableException ex)
+            {
+                // Same refusal as every other intake door: the template was not accepted, and
+                // the caller is told the one fixable thing rather than "internal server error".
+                _logger.LogError(ex,
+                    "Template upload refused for tenant {BusinessUnitId}: durable evidence storage is unavailable "
+                    + "(configuration fault: {IsConfigurationFault}).", targetBUId, ex.IsConfigurationFault);
+                return Infrastructure.Storage.EvidenceStorageProblemFilter.ToResult(ex);
             }
             catch (Exception ex)
             {

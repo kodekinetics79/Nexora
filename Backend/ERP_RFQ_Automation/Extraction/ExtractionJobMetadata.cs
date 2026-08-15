@@ -33,6 +33,28 @@ public sealed class ExtractionJobMetadata
     /// <summary>Stable source-level grouping hint, such as an email message id.</summary>
     public string? LogicalGroupKey { get; set; }
 
+    /// <summary>
+    /// Ownership of an email-sourced job: the message assembly, the component within it, and
+    /// the tenant.
+    ///
+    /// <para>These are a HINT, deliberately. This sidecar is best-effort by contract — "a
+    /// missing or corrupt sidecar never fails a job" — so it can never be the thing that decides
+    /// whether a result is allowed to touch a tenant's data. The authoritative mapping is the
+    /// persisted <c>EmailInquiryComponent</c> row, which carries the same identity under a
+    /// database constraint. Carrying them here lets a worker resolve the component in one hop
+    /// and lets a log line name the message; it does not grant anything.</para>
+    /// </summary>
+    public long? EmailInquiryAssemblyId { get; set; }
+
+    /// <inheritdoc cref="EmailInquiryAssemblyId"/>
+    public long? EmailInquiryComponentId { get; set; }
+
+    /// <inheritdoc cref="EmailInquiryAssemblyId"/>
+    public string? EmailInquiryComponentKey { get; set; }
+
+    /// <inheritdoc cref="EmailInquiryAssemblyId"/>
+    public long? BusinessUnitId { get; set; }
+
     /// <summary>Id of a PRE-CREATED EmailIngest row the produced lead(s) must link to.
     /// Null for doors that have no real ingest (manual upload, folder).</summary>
     public long? EmailIngestId { get; set; }

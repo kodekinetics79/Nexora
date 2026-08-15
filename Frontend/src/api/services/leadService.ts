@@ -1,5 +1,7 @@
 import axios from 'axios';
 import axiosInstance from '../axiosInstance';
+// One definition of the storage-refusal code, shared with the error boundary that renders it.
+import { DOCUMENT_STORAGE_UNAVAILABLE } from '../../utils/apiErrors';
 
 export interface LeadFilters {
   businessUnitId?: number;
@@ -344,6 +346,64 @@ export interface GovernedUploadResponseDTO {
   batchId?: string | null;
   jobs: GovernedUploadJobDTO[];
 }
+
+/**
+ * The 503 problem+json `/api/Extraction/upload` answers when durable document storage cannot be
+ * written (Controllers/ExtractionController.cs).
+ *
+ * It refuses the REST of the batch, and says how much of it was already accepted. Nexora stores
+ * every source immutably before it queues anything, so a store it cannot write means nothing more
+ * can enter — but a batch can fail part way through, and the documents stored before that are
+ * queued and will produce leads. On 2026-08-12 this fault was answered per file with "upload this
+ * file again", advice that could not work because the bucket did not exist.
+ *
+ * `detail` is server-authored but operator-safe by construction — the backend builds it from a
+ * fixed set of sentences and keeps bucket/endpoint/provider detail in its own log. It still passes
+ * the shared presentability gate before anything renders it.
+ */
+export interface UploadPausedProblemDTO {
+  type?: string;
+  title?: string;
+  /** The operator-facing sentence: what happened, then what to do about it. */
+  detail?: string;
+  status?: number;
+  errorCode?: string;
+  /** True when configuration must be corrected — waiting and retrying cannot clear it. */
+  isConfigurationFault?: boolean;
+  batchId?: string | null;
+  /**
+   * Every per-file row decided before the outage — accepted AND refused, exactly as a 202 carries
+   * them. NOT a count of stored documents: it also holds quarantined, rejected and held files.
+   */
+  jobs?: GovernedUploadJobDTO[];
+  /** How many documents actually reached durable storage. The server's own count. */
+  accepted?: number;
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null;
+
+/**
+ * Recognises the storage refusal inside an axios error, or returns null so the caller falls back to
+ * its normal error handling. Read structurally (like src/utils/apiErrors.ts) rather than by
+ * importing axios, and keyed on the machine `errorCode` — never on the message text.
+ */
+export const readUploadPausedProblem = (error: unknown): UploadPausedProblemDTO | null => {
+  if (!isRecord(error) || !isRecord(error.response)) return null;
+  const body = error.response.data;
+  if (!isRecord(body) || body.errorCode !== DOCUMENT_STORAGE_UNAVAILABLE) return null;
+  return {
+    type: typeof body.type === 'string' ? body.type : undefined,
+    title: typeof body.title === 'string' ? body.title : undefined,
+    detail: typeof body.detail === 'string' ? body.detail : undefined,
+    status: typeof body.status === 'number' ? body.status : undefined,
+    errorCode: DOCUMENT_STORAGE_UNAVAILABLE,
+    isConfigurationFault: body.isConfigurationFault === true,
+    batchId: typeof body.batchId === 'string' ? body.batchId : null,
+    jobs: Array.isArray(body.jobs) ? (body.jobs as GovernedUploadJobDTO[]) : [],
+    accepted: typeof body.accepted === 'number' ? body.accepted : undefined,
+  };
+};
 
 export interface BatchReconciliationItemDTO {
   occurrenceId: number;

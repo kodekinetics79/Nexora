@@ -167,31 +167,41 @@ public sealed class DocumentIntakeAllowListTests
                 ("rates.csv", "text/csv"),
                 ("deck.pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"));
 
-            var queued = await service.EnqueueEmailForExtractionAsync(
-                message, ingest, Config(), ingestion, InquiryTriage(), FreshBody(message));
+            var intake = new RecordingIntake();
+            await service.EnqueueEmailForExtractionAsync(
+                message, ingest, Config(), intake, InquiryTriage(), FreshBody(message));
 
-            // body + the two supported attachments
-            Assert.Equal(3, queued);
-            Assert.Contains(ingestion.Calls, c => c.FileName == "quote.xls");
-            Assert.Contains(ingestion.Calls, c => c.FileName == "rates.csv");
-            // .pptx never reaches the ingestion gateway (and therefore never inspection/quarantine)
-            Assert.DoesNotContain(ingestion.Calls, c => c.FileName == "deck.pptx");
+            // The poller reaches the CANONICAL intake, not a per-attachment fan-out. Which parts
+            // of the MIME tree become components is decided by EmailInquiryManifestPlanner and is
+            // asserted against real messages in EmailInquiryManifestPlannerTests; what matters
+            // here is that this caller no longer decides it for itself.
+            var call = Assert.Single(intake.Calls);
+            Assert.Same(message, call.Message);
+            Assert.Same(ingest, call.Ingest);
+            // The poller itself now touches the ingestion gateway for NOTHING. It used to call
+            // it once per allowed attachment, which is how it came to own the allow-list
+            // decision in the first place.
+            Assert.Empty(ingestion.Calls);
 
-            // The skip was not silent: a Warning names the file and the reason...
-            Assert.Contains(logger.Entries, e =>
-                e.Level == LogLevel.Warning &&
-                e.Message.Contains("deck.pptx") &&
-                e.Message.Contains("unsupported file type '.pptx'"));
+            // WHERE THE ALLOW-LIST PROPERTY LIVES NOW. .pptx being refused before it reaches
+            // ingestion, inspection or quarantine — and the refusal being recorded rather than
+            // silent — is EmailInquiryManifestPlanner's behaviour, asserted against real
+            // messages in EmailInquiryManifestPlannerTests and on real evidence in the
+            // PostgreSQL slice. Re-asserting a weaker version of it here through a double would
+            // describe the shape of the old fan-out as though it were a requirement.
+            Assert.True(
+                ERP_RFQ_Automation.Security.DocumentInspection.DocumentIntakeAllowList
+                    .IsAllowed(".xls"),
+                ".xls must remain an admitted intake type.");
+            Assert.False(
+                ERP_RFQ_Automation.Security.DocumentInspection.DocumentIntakeAllowList
+                    .IsAllowed(".pptx"),
+                ".pptx must remain refused at intake.");
 
-            // ...and the durable body-job provenance metadata carries the summary.
-            var body = Assert.Single(ingestion.Calls, c => c.FileName.EndsWith("_body.txt", StringComparison.Ordinal));
-            Assert.NotNull(body.Metadata?.SkippedAttachments);
-            Assert.Contains(body.Metadata!.SkippedAttachments!,
-                s => s.Contains("deck.pptx") && s.Contains(".pptx"));
-
-            // Supported attachments carry the correct file-type label.
-            Assert.Equal("Excel", Assert.Single(ingestion.Calls, c => c.FileName == "quote.xls").Metadata?.EmailSource);
-            Assert.Equal("CSV", Assert.Single(ingestion.Calls, c => c.FileName == "rates.csv").Metadata?.EmailSource);
+            // The file-type label is still derived the same way; it is now applied by the
+            // canonical scheduler from the persisted component rather than by this caller.
+            Assert.Equal("Excel", EmailIngestEnqueuer.GetFileTypeLabel(".xls"));
+            Assert.Equal("CSV", EmailIngestEnqueuer.GetFileTypeLabel(".csv"));
         }
         finally
         {
@@ -211,18 +221,36 @@ public sealed class DocumentIntakeAllowListTests
             var message = BuildMessage("RFQ 4712", body: null,
                 ("deck.pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"));
 
-            var queued = await service.EnqueueEmailForExtractionAsync(
-                message, ingest, Config(), ingestion, InquiryTriage(), FreshBody(message));
+            var intake = new RecordingIntake();
+            await service.EnqueueEmailForExtractionAsync(
+                message, ingest, Config(), intake, InquiryTriage(), FreshBody(message));
 
-            Assert.Equal(0, queued);
-            Assert.Empty(ingestion.Calls);
-            Assert.Contains(logger.Entries, e => e.Level == LogLevel.Warning && e.Message.Contains("deck.pptx"));
-            // Tenant-visible ingest record shows the loss instead of a bare "Failed".
-            Assert.Equal("Failed - 1 attachment(s) skipped", ingest.ParseStatus);
+            // Still one canonical intake call. Whether the message yields anything enqueuable
+            // is the planner's answer, not this caller's — the allow-list itself is asserted in
+            // DocumentIntakeAllowList's own tests and in the manifest planner's.
+            Assert.Single(intake.Calls);
         }
         finally
         {
             try { Directory.Delete(temp, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
+    /// <summary>Records what the poller handed the canonical intake.</summary>
+    private sealed class RecordingIntake : ERP_RFQ_Automation.Ingestion.Assembly.IEmailInquiryIntakeService
+    {
+        public readonly List<(MimeKit.MimeMessage Message, EmailIngest Ingest)> Calls = [];
+
+        public Task<ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryIntakeResult> CaptureAndScheduleAsync(
+            MimeKit.MimeMessage message, EmailIngest ingest, EmailConfiguration configuration,
+            string? freshBodyText, ERP_RFQ_Automation.Ingestion.Triage.EmailTriageDecision triage,
+            string? clientEmail, CancellationToken ct = default)
+        {
+            Calls.Add((message, ingest));
+            return Task.FromResult(new ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryIntakeResult(
+                AssemblyId: 1, BatchId: Guid.Empty, Scheduled: 0, AlreadyScheduled: 0, Held: 0,
+                ExpectedComponents: 0, AlreadyCaptured: false, SafeToAcknowledge: true,
+                FailureReason: null));
         }
     }
 
@@ -306,6 +334,7 @@ public sealed class DocumentIntakeAllowListTests
         public Task<IngestedDocument> IngestAsync(
             byte[] bytes, string fileName, long businessUnitId, ExtractionSourceType sourceType,
             Guid? batchId = null, int priority = 0, ExtractionJobMetadata? metadata = null,
+            long? emailInquiryComponentId = null,
             CancellationToken ct = default)
         {
             Calls.Enqueue(new Call(fileName, businessUnitId, sourceType, metadata));

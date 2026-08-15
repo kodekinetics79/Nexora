@@ -279,7 +279,7 @@ namespace ERP_RFQ_Automation.Services
                             ClientEmail = "",
                             LeadSource = leadSourceLabel,
                             EmailSource = leadSourceLabel == "Aramco Leads" ? "Aramco RFP Document" : GetFileTypeLabel(ext)
-                        }, cancellationToken);
+                        }, ct: cancellationToken);
                     _logger.LogInformation("Enqueued {Label} file {FileName} as job {JobId} ({Outcome}).",
                         leadSourceLabel, fileName, result.JobId, result.Outcome);
 
@@ -316,6 +316,27 @@ namespace ERP_RFQ_Automation.Services
                 catch (FileNotFoundException) when (claimedPath is null && !File.Exists(filePath))
                 {
                     // Another concurrent sweep atomically claimed this watched file.
+                }
+                catch (EvidenceStorageUnavailableException ex)
+                {
+                    // A storage outage is NOT three strikes against this file. The generic
+                    // handler below counts every failure toward RecordRetryAsync, so a
+                    // ten-minute outage across three sweeps quarantined every watched document
+                    // as "Staging failed after three attempts" — a permanent rejection naming
+                    // nothing fixable, for files that were never even read as faulty.
+                    //
+                    // The file goes back to the watched folder untouched, no attempt is
+                    // recorded, and the sweep stops: every remaining file would fail the same
+                    // way. The next sweep picks all of them up once storage is restored.
+                    _logger.LogError(ex,
+                        "Durable evidence storage is unavailable while staging {Label} file {FileName} "
+                        + "(configuration fault: {IsConfigurationFault}). The file was left in place and the sweep stopped; "
+                        + "no retry was counted against it.",
+                        leadSourceLabel, fileName, ex.IsConfigurationFault);
+                    if (claimedPath is not null && File.Exists(claimedPath) && !File.Exists(filePath))
+                        File.Move(claimedPath, filePath, false);
+                    report.Failed++;
+                    return;
                 }
                 catch (Exception ex)
                 {

@@ -42,6 +42,7 @@ using ERP_RFQ_Automation.CustomFields;
 using ERP_RFQ_Automation.AI;
 using ERP_RFQ_Automation.QuoteDelivery;
 using ERP_RFQ_Automation.Security;
+using ERP_RFQ_Automation.Ingestion.Assembly;
 using ERP_RFQ_Automation.Security.DocumentInspection;
 using ERP_RFQ_Automation.Security.PasswordReset;
 using Microsoft.AspNetCore.HttpOverrides;
@@ -110,6 +111,11 @@ builder.Services.AddControllers()
         options.JsonSerializerOptions.NumberHandling = JsonNumberHandling.AllowReadingFromString;
     });
 
+// Safety net for intake doors that do not catch it themselves: a durable-storage outage
+// renders as the one honest 503 refusal instead of a bare 500 that names nothing.
+builder.Services.Configure<Microsoft.AspNetCore.Mvc.MvcOptions>(
+    options => options.Filters.Add<EvidenceStorageProblemFilter>());
+
 // Keep the host alive if a BackgroundService throws — a transient failure in the
 // email poller must not tear down the whole API. (DATA-01)
 builder.Services.Configure<HostOptions>(options =>
@@ -133,6 +139,26 @@ builder.Services.AddDbContext<ErpRfqAutomationContext>((services, options) =>
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddSingleton<ITenantScopeAccessor, TenantScopeAccessor>();
 builder.Services.AddScoped<ERP_RFQ_Automation.MultiTenancy.ITenantContext, ERP_RFQ_Automation.MultiTenancy.HttpTenantContext>();
+// LOOPBACK MAIL ALLOWANCE — requested by configuration, GRANTED only by environment.
+//
+// MailEndpointPolicy refuses loopback by default in every environment. A developer machine has
+// no publicly-routable mail sink, so without this the mailbox journey could not be exercised end
+// to end locally and the one path that loses a customer's mail was only ever tested against
+// doubles. The environment check is a PARAMETER to the enabling call rather than a read inside
+// it, so no key, variable or appsettings file can grant this on a non-Development host: a
+// production deployment carrying the flag set true is a no-op, not a hole. Scoped to loopback
+// only — private and link-local ranges stay refused everywhere.
+if (ERP_RFQ_Automation.Security.MailEndpointPolicy.EnableLoopbackForLocalDevelopment(
+        builder.Environment.IsDevelopment(),
+        builder.Configuration.GetValue(
+            ERP_RFQ_Automation.Security.MailEndpointPolicy.LoopbackAllowanceKey, false)))
+{
+    Console.WriteLine(
+        "[mail] LOOPBACK MAIL ENDPOINTS ARE PERMITTED for this Development host "
+        + $"({ERP_RFQ_Automation.Security.MailEndpointPolicy.LoopbackAllowanceKey}=true). "
+        + "Private and link-local addresses remain refused. This cannot be enabled outside Development.");
+}
+
 builder.Services.AddSingleton<IFileStorage, LocalFileStorage>();
 builder.Services.Configure<S3EvidenceStorageOptions>(
     builder.Configuration.GetSection(S3EvidenceStorageOptions.SectionName));
@@ -141,9 +167,28 @@ builder.Services.Configure<MalwareVerdictPolicyOptions>(
 builder.Services.AddSingleton<IEvidenceObjectStorage>(services =>
 {
     var options = services.GetRequiredService<Microsoft.Extensions.Options.IOptions<S3EvidenceStorageOptions>>();
-    return string.Equals(options.Value.Provider, "S3", StringComparison.OrdinalIgnoreCase)
-        ? new S3EvidenceObjectStorage(options)
-        : new LocalEvidenceObjectStorage(services.GetRequiredService<IFileStorage>());
+    if (!string.Equals(options.Value.Provider, "S3", StringComparison.OrdinalIgnoreCase))
+        return new LocalEvidenceObjectStorage(services.GetRequiredService<IFileStorage>());
+
+    try
+    {
+        return new S3EvidenceObjectStorage(options);
+    }
+    catch (InvalidOperationException exception)
+    {
+        // An S3 block missing its bucket, credentials or a usable endpoint used to throw out of
+        // THIS factory, so resolving any intake controller failed and every upload answered an
+        // unhandled 500 — the 2026-08-12 defect one degree worse, since a 500 names nothing at
+        // all. Hand back a store that refuses honestly instead: readiness goes Unhealthy, every
+        // door returns the one "document storage is not configured" outcome, and the reason a
+        // human can act on is logged here, once, where infrastructure detail belongs.
+        services.GetRequiredService<ILoggerFactory>()
+            .CreateLogger("ERP_RFQ_Automation.Infrastructure.Storage")
+            .LogError(exception,
+                "Durable evidence storage is configured for S3 but could not be constructed. "
+                + "Document intake is paused until the EvidenceStorage configuration is corrected.");
+        return new UnconfiguredEvidenceObjectStorage(exception);
+    }
 });
 // Malware scanner provider is chosen EXPLICITLY by configuration
 // (DocumentInspection:Scanner:Provider = ClamAV | BuiltIn), never implicitly by environment.
@@ -641,6 +686,30 @@ builder.Services.AddScoped<ERP_RFQ_Automation.Extraction.Conversational.IConvers
 builder.Services.AddScoped<ERP_RFQ_Automation.Ingestion.Triage.IEmailTriageService,
     ERP_RFQ_Automation.Ingestion.Triage.EmailTriageService>();
 builder.Services.AddScoped<ILeadPersister, LeadPersister>();
+// The message barrier's payoff, registered here rather than with AddEmailInquiryAssembly
+// because it depends on ILeadPersister: one email message becomes ONE Lead, built from every
+// component's durable result once the last of them has finished. The worker calls it.
+builder.Services.AddScoped<ERP_RFQ_Automation.Ingestion.Assembly.IEmailInquiryLeadAssembler,
+    ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryLeadAssembler>();
+// THE one door into the pipeline, shared by the mailbox poller and the manual reprocess
+// endpoint so the two cannot drift apart again. Registered beside IDocumentIngestion, which it
+// needs, rather than in AddEmailInquiryAssembly.
+builder.Services.AddScoped<ERP_RFQ_Automation.Ingestion.Assembly.IEmailInquiryIntakeService,
+    ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryIntakeService>();
+
+// The stranded-message sweep. The worker commits the queue job and assembles afterwards, which
+// is the correct order (assembling first duplicates the lead on retry) but leaves a window: a
+// process that dies in between leaves every part complete, every result durable, and no lead —
+// with nothing that would ever look again. Registered as options + service + worker so the
+// sweep itself is testable without a timer or a hosted lifetime.
+builder.Services.AddSingleton(
+    builder.Configuration
+        .GetSection(ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssemblyRecoveryOptions.SectionName)
+        .Get<ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssemblyRecoveryOptions>()
+    ?? new ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssemblyRecoveryOptions());
+builder.Services.AddScoped<ERP_RFQ_Automation.Ingestion.Assembly.IEmailInquiryAssemblyRecoveryService,
+    ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssemblyRecoveryService>();
+builder.Services.AddHostedService<ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssemblyRecoveryWorker>();
 builder.Services.AddScoped<IExtractionDocumentReader, ProductionDocumentReader>();
 builder.Services.AddHostedService<ExtractionWorker>();
 // ING-05: unified ingestion gateway — the ONE door to the durable queue used by the
@@ -707,6 +776,9 @@ builder.Services.AddAgentEngine(builder.Configuration);
 builder.Services.AddConversionIntelligence();
 builder.Services.AddPricingIntelligence();
 builder.Services.AddScoped<ERP_RFQ_Automation.Agent.IAgentTool, ERP_RFQ_Automation.Intelligence.Conversion.PreviewLeadConversionTool>();
+// Email inquiry assembly - one capability, composed in one place so the resolution test
+// exercises the production composition instead of a copy of it.
+builder.Services.AddEmailInquiryAssembly();
 builder.Services.AddScoped<ERP_RFQ_Automation.Agent.IAgentTool, ERP_RFQ_Automation.Intelligence.Conversion.ConvertLeadToRfqTool>();
 builder.Services.AddScoped<ERP_RFQ_Automation.Agent.IAgentTool, ERP_RFQ_Automation.Intelligence.Pricing.PriceRfqTool>();
 builder.Services.AddScoped<ERP_RFQ_Automation.Agent.IAgentTool, ERP_RFQ_Automation.Intelligence.Pricing.ApplyRfqPricingTool>();

@@ -182,6 +182,21 @@ public sealed class TenantRlsCommandInterceptor : DbCommandInterceptor
 
     private ExecutionScope? ResolveExecutionScope()
     {
+        // PLATFORM-PLANE OVERRIDE, resolved before the tenant. See PlatformPlaneExecution.
+        //
+        // A tenant-scoped flow that has explicitly entered the platform plane is doing work the
+        // tenant role has no grant for — reading platform."Tenants", writing platform."UsageEvents"
+        // — inside the SAME transaction as its tenant-plane write, because the two must commit
+        // together. The role is switched for those statements and switched back by the block's
+        // Dispose; nothing else about the scope changes.
+        //
+        // The tenant GUC is deliberately NOT re-set here. It was set LOCAL by the enclosing
+        // transaction and stays set; leaving it alone means the block cannot be used to blank a
+        // tenant scope, and the next tenant-plane command re-issues both the role and the GUC
+        // anyway. Passing a null business unit here only means "issue no set_config", not "clear".
+        if (PlatformPlaneExecution.IsActive)
+            return new ExecutionScope(PipelineRole, null, null);
+
         var businessUnitId = _tenantContext.BusinessUnitId;
         var role = ResolveDatabaseRole(businessUnitId, _httpContextAccessor);
         return role is null

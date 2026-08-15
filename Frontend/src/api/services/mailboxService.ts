@@ -77,6 +77,12 @@ export interface MailboxTestRequest {
   protocol: MailboxProtocol;
   host: string;
   port: number;
+  /**
+   * The mailbox address. Sent for EVERY test, because it is the identity the inbound poller
+   * signs in with — the test used to send `username` alone and therefore proved nothing about
+   * the credential IMAP actually uses.
+   */
+  emailAddress?: string;
   username: string;
   /** Omit to reuse the stored password of `mailboxId`. */
   password?: string;

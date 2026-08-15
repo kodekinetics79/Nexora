@@ -81,6 +81,10 @@ namespace ERP_RFQ_Automation.Controllers
                 ? Guid.NewGuid()
                 : StableBatchId(businessUnitId, idempotencyKey);
             var results = new List<object>(files.Count);
+            // Counted separately from `results`, which also carries every per-file REFUSAL —
+            // rejected, quarantined, held for scanning, failed to enqueue. Reading its length as
+            // "documents accepted" would report a malware quarantine as stored and processing.
+            var accepted = 0;
 
             for (var fileIndex = 0; fileIndex < files.Count; fileIndex++)
             {
@@ -107,8 +111,9 @@ namespace ERP_RFQ_Automation.Controllers
                                 ?? User.Identity?.Name
                                 ?? User.FindFirst(ClaimTypes.NameIdentifier)?.Value
                         },
-                        ct);
+                        ct: ct);
 
+                    accepted++;
                     results.Add(new
                     {
                         jobId = ingested.JobId,
@@ -154,6 +159,37 @@ namespace ERP_RFQ_Automation.Controllers
                         StatusCode = ex.SuggestedStatusCode,
                         ContentTypes = { "application/problem+json" }
                     };
+                }
+                catch (Infrastructure.Storage.EvidenceStorageUnavailableException ex)
+                {
+                    // Nexora stores the immutable source BEFORE it queues anything, so a store
+                    // that cannot be written means no file in this batch can be accepted — the
+                    // bucket does not exist for the next one either.
+                    //
+                    // On 2026-08-12 this loop answered four .doc files with "upload this file
+                    // again", which could never work: evidence storage had been repointed at a
+                    // misspelled bucket and the readiness probe already read Unhealthy. One
+                    // honest refusal instead of N useless retries. The provider's own account
+                    // (bucket, endpoint, error code) stays in the log line below and never
+                    // enters the response.
+                    _logger.LogError(ex,
+                        "Upload batch stopped for tenant {BusinessUnitId}: durable evidence storage is unavailable "
+                        + "(configuration fault: {IsConfigurationFault}). {Accepted} of {Total} file(s) were stored before it failed.",
+                        businessUnitId, ex.IsConfigurationFault, accepted, files.Count);
+
+                    return Infrastructure.Storage.EvidenceStorageProblemFilter.ToResult(ex,
+                        new Dictionary<string, object?>(StringComparer.Ordinal)
+                        {
+                            ["batchId"] = batchId,
+                            // Every row decided before the outage, accepted and refused alike, so
+                            // the caller keeps the whole record: a mid-batch failure must neither
+                            // erase accepted work nor dress a quarantined file up as accepted.
+                            ["jobs"] = results,
+                            // The count of documents that actually reached durable storage. The
+                            // client must not derive this from `jobs.length`, which counts
+                            // refusals too.
+                            ["accepted"] = accepted
+                        });
                 }
                 catch (Exception ex)
                 {

@@ -245,6 +245,47 @@ const serverText = (data: unknown): string | null => {
   return null;
 };
 
+/**
+ * The one backend code meaning "durable document storage cannot be written right now"
+ * (Backend/ERP_RFQ_Automation/Infrastructure/Storage/IEvidenceObjectStorage.cs). Exported so the
+ * intake map and the upload services key off the same string this boundary does — a second copy
+ * is how one door would keep rendering "try again shortly" after the others stopped.
+ */
+export const DOCUMENT_STORAGE_UNAVAILABLE = 'evidence_storage_unavailable';
+
+const DOCUMENT_STORAGE_TITLE = 'Uploads are paused — document storage is unavailable';
+
+/** Used only if the server's own sentence fails the presentability gate. */
+const DOCUMENT_STORAGE_MESSAGE =
+  'Nexora could not store this document, so it was not accepted. The fault is in Nexora document storage, not in your file.';
+
+interface DocumentStorageRefusal {
+  message: string;
+  isConfigurationFault: boolean;
+}
+
+/**
+ * The one payload that outranks its own status code.
+ *
+ * A 503 normally means "the service blinked, try again shortly", which is why `statusCopy` refuses
+ * to render server text for it. This refusal is the opposite: it is a DIAGNOSIS the product already
+ * made, and when it is a configuration fault retrying is precisely the thing that cannot work. On
+ * 2026-08-12 four uploads were each answered with "upload this file again" while evidence storage
+ * pointed at a misspelled bucket, so letting the generic 503 copy overwrite this one would restore
+ * that defect at every intake door.
+ *
+ * Recognised by the machine `errorCode`, never by message text, and the sentence still passes the
+ * shared presentability gate before it renders.
+ */
+const documentStorageRefusal = (data: unknown): DocumentStorageRefusal | null => {
+  if (!isRecord(data) || data.errorCode !== DOCUMENT_STORAGE_UNAVAILABLE) return null;
+  return {
+    message: serverText(data) ?? DOCUMENT_STORAGE_MESSAGE,
+    // Absent or false means the provider may come back on its own, and a retry is honest.
+    isConfigurationFault: data.isConfigurationFault === true,
+  };
+};
+
 interface StatusCopy {
   title: string;
   message: string;
@@ -489,6 +530,22 @@ export const toPresentableError = (
       isNetworkFailure: false,
       isCanceled: false,
       technicalDetail: buildTechnicalDetail(shape, null) ?? describeForSupport(error) ?? undefined,
+    };
+  }
+
+  const storageRefusal = documentStorageRefusal(shape.data);
+  if (storageRefusal !== null) {
+    return {
+      title: DOCUMENT_STORAGE_TITLE,
+      message: storageRefusal.message,
+      severity: 'error',
+      // A misconfigured store will refuse the next attempt identically; an unreachable one may
+      // not. Retryability follows the fault, not the status code.
+      isRetryable: !storageRefusal.isConfigurationFault,
+      status: shape.status,
+      isNetworkFailure: false,
+      isCanceled: false,
+      technicalDetail: buildTechnicalDetail(shape, null, problemTraceId(shape.data)),
     };
   }
 

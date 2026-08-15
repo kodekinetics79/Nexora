@@ -18,6 +18,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using ERP_RFQ_Automation.Ingestion.Assembly;
 using Docnet.Core;
 using Docnet.Core.Converters;
 using Docnet.Core.Models;
@@ -37,6 +38,22 @@ namespace ERP_RFQ_Automation.Services
     /// <c>MailKit.Security.AuthenticationException</c> 1.5 ms earlier — the caller had no way to
     /// know, so it beat its heartbeat and the channel stayed green for a week.
     /// </summary>
+    /// <param name="MessagesFound">Messages the search window returned, before the ledger is
+    /// consulted. "Nothing arrived" and "nothing was in the window" are different facts.</param>
+    /// <param name="MessagesCaptured">Messages whose raw bytes reached durable evidence and
+    /// became an inquiry assembly. This — not "we saw it" — is what makes a message survivable,
+    /// and it is the number an operator should compare against MessagesDownloaded.</param>
+    /// <param name="ComponentsScheduled">Parts handed to the extraction queue across the cycle,
+    /// including parts a repoll found already queued. It is a COMPONENT count, not a message
+    /// count: one email is routinely three or four of these.</param>
+    /// <param name="MessagesHeldForReview">Captured messages with at least one part that could
+    /// not be queued. Held, not lost — and deliberately reported separately from a failure,
+    /// because the message is ours and re-reading it from IMAP would only duplicate it.</param>
+    /// <param name="MessagesRejected">Messages the triage gate stopped. They are recorded with
+    /// their reasons and replayable from the inbound mail triage surface.</param>
+    /// <param name="MessagesNotAcknowledged">Messages left unread on the server because nothing
+    /// durable was written. They are RETRIED next cycle; a non-zero count that never falls is an
+    /// incident.</param>
     public sealed record MailboxPollOutcome(
         long EmailConfigurationId,
         string EmailAddress,
@@ -47,7 +64,15 @@ namespace ERP_RFQ_Automation.Services
         DateTime WindowSinceUtc,
         int LookbackCappedDays,
         int MessagesDownloaded,
-        int MessagesAlreadyIngested);
+        int MessagesAlreadyIngested,
+        // Defaulted so the failure constructors, which know none of this, stay honest by
+        // reporting zero rather than inventing a number for a cycle that never ran.
+        int MessagesFound = 0,
+        int MessagesCaptured = 0,
+        int ComponentsScheduled = 0,
+        int MessagesHeldForReview = 0,
+        int MessagesRejected = 0,
+        int MessagesNotAcknowledged = 0);
 
     /// <summary>The truthful result of one poll cycle across every configured mailbox.</summary>
     public sealed record MailboxPollReport(IReadOnlyList<MailboxPollOutcome> Mailboxes)
@@ -74,6 +99,17 @@ namespace ERP_RFQ_Automation.Services
 
         public string FailureSummary => string.Join("; ",
             Mailboxes.Where(m => !m.Succeeded).Select(m => $"{m.EmailAddress}: {m.FailureReason}"));
+
+        // Cycle totals, so the one caller that renders them (POST /api/Email/fetch) does not have
+        // to know how to add up a poll — and cannot quietly report a different sum than the log.
+        public int MessagesFound => Mailboxes.Sum(m => m.MessagesFound);
+        public int MessagesDownloaded => Mailboxes.Sum(m => m.MessagesDownloaded);
+        public int MessagesAlreadyIngested => Mailboxes.Sum(m => m.MessagesAlreadyIngested);
+        public int MessagesCaptured => Mailboxes.Sum(m => m.MessagesCaptured);
+        public int ComponentsScheduled => Mailboxes.Sum(m => m.ComponentsScheduled);
+        public int MessagesHeldForReview => Mailboxes.Sum(m => m.MessagesHeldForReview);
+        public int MessagesRejected => Mailboxes.Sum(m => m.MessagesRejected);
+        public int MessagesNotAcknowledged => Mailboxes.Sum(m => m.MessagesNotAcknowledged);
     }
 
     public class EmailService : IEmailService
@@ -418,13 +454,20 @@ namespace ERP_RFQ_Automation.Services
             var localLlm = scopedServices.GetRequiredService<ILLMService>();
             // ING-05: unified-queue gateway from the SAME scope as localContext (null when
             // not registered -> the legacy direct path below still works).
-            var ingestion = scopedServices.GetService<ERP_RFQ_Automation.Extraction.IDocumentIngestion>();
+            // The canonical intake. Resolved once per poll cycle from the scope, like every
+            // other pipeline dependency.
+            var intake = scopedServices
+                .GetService<ERP_RFQ_Automation.Ingestion.Assembly.IEmailInquiryIntakeService>();
 
             var window = ResolveLookbackWindow(config, DateTime.UtcNow);
             LogLookbackWindow(config, window);
 
             var downloaded = 0;
             var alreadyIngested = 0;
+            // What the cycle actually achieved, accumulated as it happens. The poll used to be
+            // able to report only "how many messages did I download", which is the one number
+            // that says nothing about whether any of them became an inquiry.
+            var tally = new MailboxIntakeTally();
             using var client = new ImapClient();
             try
             {
@@ -453,7 +496,8 @@ namespace ERP_RFQ_Automation.Services
                     pollSocket.Dispose();
                     throw;
                 }
-                await client.AuthenticateAsync(config.EmailAddress, config.Password);
+                await client.AuthenticateAsync(
+                    ERP_RFQ_Automation.Mailbox.MailboxLoginIdentity.ForInbound(config), config.Password);
                 var inbox = client.Inbox;
                 await inbox.OpenAsync(FolderAccess.ReadWrite);
                 var query = BuildRFQSearchQuery(window.SinceUtc);
@@ -469,6 +513,7 @@ namespace ERP_RFQ_Automation.Services
                     : (await inbox.FetchAsync(uids,
                         MessageSummaryItems.UniqueId | MessageSummaryItems.Envelope)).ToList();
                 var ledger = await LoadIngestedMessageIdsAsync(localContext, config, summaries);
+                tally.Found = summaries.Count;
 
                 foreach (var summary in summaries)
                 {
@@ -489,7 +534,8 @@ namespace ERP_RFQ_Automation.Services
                         // ING-01: only mark \Seen once a durable record (EmailIngest + raw .eml)
                         // exists, so a message we fail to persist is retried on the next cycle
                         // instead of vanishing.
-                        bool durablyPersisted = await ProcessSingleEmailAsync(message, config, localContext, localLlm, ingestion);
+                        bool durablyPersisted = await ProcessSingleEmailAsync(
+                            message, config, localContext, localLlm, intake, tally);
 
                         // Check if connection is still alive before marking as seen
                         if (!client.IsConnected)
@@ -512,7 +558,8 @@ namespace ERP_RFQ_Automation.Services
                                 reconnectSocket.Dispose();
                                 throw;
                             }
-                            await client.AuthenticateAsync(config.EmailAddress, config.Password);
+                            await client.AuthenticateAsync(
+                    ERP_RFQ_Automation.Mailbox.MailboxLoginIdentity.ForInbound(config), config.Password);
                             await client.Inbox.OpenAsync(FolderAccess.ReadWrite);
                         }
 
@@ -524,11 +571,15 @@ namespace ERP_RFQ_Automation.Services
                         }
                         else
                         {
+                            tally.NotAcknowledged++;
                             _logger.LogWarning("Email UID {UID} not persisted durably; it will be retried next cycle.", uid);
                         }
                     }
                     catch (Exception ex)
                     {
+                        // The message stays unread, so it is counted with the rest of the work
+                        // this cycle did not finish rather than disappearing into a log line.
+                        tally.NotAcknowledged++;
                         _logger.LogError(ex, "Error processing email UID {UID}", uid);
                     }
                 }
@@ -537,15 +588,21 @@ namespace ERP_RFQ_Automation.Services
                 return new MailboxPollOutcome(
                     config.Id, config.EmailAddress, Succeeded: true, FailureReason: null,
                     FailureIsPermanent: false, config.LastSuccessfulPollOn, window.SinceUtc,
-                    window.CappedDays, downloaded, alreadyIngested);
+                    window.CappedDays, downloaded, alreadyIngested,
+                    tally.Found, tally.Captured, tally.ComponentsScheduled,
+                    tally.HeldForReview, tally.Rejected, tally.NotAcknowledged);
             }
             catch (Exception ex)
             {
                 // NOT swallowed into silence and NOT rethrown into a dead loop: the reason is
                 // recorded, the caller reports the failure, and the poller keeps retrying while
                 // remaining visibly failed.
+                //
+                // The tally accumulated BEFORE the fault is carried through rather than zeroed:
+                // messages this cycle genuinely captured before the connection dropped are
+                // captured, and reporting zero would understate what the tenant now owns.
                 _logger.LogError(ex, "IMAP error for config: {Email}", config.EmailAddress);
-                return FailedOutcome(config, ex, window, downloaded, alreadyIngested);
+                return FailedOutcome(config, ex, window, downloaded, alreadyIngested, tally);
             }
         }
 
@@ -571,12 +628,30 @@ namespace ERP_RFQ_Automation.Services
             return new HashSet<string>(known, StringComparer.Ordinal);
         }
 
+        /// <summary>
+        /// What one mailbox's messages produced on this cycle. A mutable tally rather than a
+        /// returned record per message because the loop that fills it is the loop that owns the
+        /// IMAP connection: threading six counters through it as return values is how one of
+        /// them ends up incremented on one branch and not the other.
+        /// </summary>
+        internal sealed class MailboxIntakeTally
+        {
+            public int Found;
+            public int Captured;
+            public int ComponentsScheduled;
+            public int HeldForReview;
+            public int Rejected;
+            public int NotAcknowledged;
+        }
+
         private MailboxPollOutcome FailedOutcome(
             EmailConfiguration config, Exception ex, LookbackWindow window,
-            int downloaded = 0, int alreadyIngested = 0)
+            int downloaded = 0, int alreadyIngested = 0, MailboxIntakeTally? tally = null)
             => new(config.Id, config.EmailAddress, Succeeded: false,
                 DescribeFailure(ex), IsPermanentFailure(ex), config.LastSuccessfulPollOn,
-                window.SinceUtc, window.CappedDays, downloaded, alreadyIngested);
+                window.SinceUtc, window.CappedDays, downloaded, alreadyIngested,
+                tally?.Found ?? 0, tally?.Captured ?? 0, tally?.ComponentsScheduled ?? 0,
+                tally?.HeldForReview ?? 0, tally?.Rejected ?? 0, tally?.NotAcknowledged ?? 0);
 
         /// <summary>Same outcome from the discovery handle, for the failures that happen BEFORE the
         /// mailbox row could be read inside its own tenant scope (including the scope guard).</summary>
@@ -750,10 +825,19 @@ namespace ERP_RFQ_Automation.Services
         /// Processes a single fetched message. Returns true when a durable record
         /// (EmailIngest row + raw .eml) exists for the message, meaning the caller may safely
         /// mark it \Seen; returns false only when nothing could be persisted (retry next cycle).
+        ///
+        /// <para><b>Internal, not private.</b> This is the mailbox poller's half of the canonical
+        /// intake and the place acknowledgement is decided, and it was reachable only through a
+        /// live IMAP connection — so the one behaviour that loses a customer's mail (marking a
+        /// message \Seen whose bytes were never stored) could not be asserted at all. It is
+        /// called directly by EmailCallerCutoverTests.</para>
         /// </summary>
-        private async Task<bool> ProcessSingleEmailAsync(MimeMessage message, EmailConfiguration config,
+        /// <param name="tally">The mailbox's running count of what its messages produced. Optional
+        /// so a caller that only wants the acknowledgement decision need not supply one.</param>
+        internal async Task<bool> ProcessSingleEmailAsync(MimeMessage message, EmailConfiguration config,
             ErpRfqAutomationContext context, ILLMService llmService,
-            ERP_RFQ_Automation.Extraction.IDocumentIngestion? ingestion = null)
+            ERP_RFQ_Automation.Ingestion.Assembly.IEmailInquiryIntakeService? intake = null,
+            MailboxIntakeTally? tally = null)
         {
             var messageId = ResolveIngestKey(message);
             var from = message.From.ToString();
@@ -850,6 +934,7 @@ namespace ERP_RFQ_Automation.Services
                 ingest.ParseStatus = STATUS_REJECTED;
                 ingest.ParsedAt = DateTime.UtcNow;
                 await context.SaveChangesAsync();
+                if (tally is not null) tally.Rejected++;
                 return true;
             }
 
@@ -858,13 +943,35 @@ namespace ERP_RFQ_Automation.Services
             // direct LLM extraction below. The pre-created EmailIngest is referenced via
             // the job's provenance sidecar so the produced lead(s) link to the REAL
             // ingest (from/subject) instead of a synthetic one.
-            if (_useUnifiedQueue && ingestion != null)
+            if (intake != null)
             {
-                var queued = await EnqueueEmailForExtractionAsync(
-                    message, ingest, config, ingestion, triage, bodyParts);
-                if (queued > 0)
+                var result = await EnqueueEmailForExtractionAsync(
+                    message, ingest, config, intake, triage, bodyParts);
+
+                // DO NOT ACKNOWLEDGE unless the bytes are durable. A message marked \Seen whose
+                // raw copy was never stored is unrecoverable — the mailbox was the only other
+                // copy. Returning false leaves it unread for the next cycle.
+                if (!result.SafeToAcknowledge)
                 {
-                    ingest.ParseStatus = STATUS_QUEUED; // persister flips to Success/NeedsReview
+                    _logger.LogError(
+                        "Durable capture did not complete for ingest {IngestId} ({Reason}); the "
+                        + "message stays unread and will be re-fetched.",
+                        ingest.Id, result.FailureReason ?? "unknown");
+                    return false;
+                }
+
+                if (tally is not null)
+                {
+                    // Captured means the BYTES are durable and an assembly exists, which is the
+                    // fact acknowledgement rests on — not "an extraction job was created".
+                    tally.Captured++;
+                    tally.ComponentsScheduled += result.Scheduled + result.AlreadyScheduled;
+                    if (result.Held > 0) tally.HeldForReview++;
+                }
+
+                if (result.Scheduled + result.AlreadyScheduled > 0)
+                {
+                    ingest.ParseStatus = STATUS_QUEUED; // the barrier flips it when the message assembles
                 }
                 else
                 {
@@ -896,34 +1003,26 @@ namespace ERP_RFQ_Automation.Services
         }
 
         /// <summary>
-        /// ING-05/ING-07: fans one email out to the durable extraction queue — one job per
-        /// supported attachment plus one job for the sender's FRESH body text, all sharing a
-        /// batch id and a provenance sidecar that names the real EmailIngest. The fan-out
-        /// itself lives in <see cref="ERP_RFQ_Automation.Ingestion.Triage.EmailIngestEnqueuer"/>
-        /// so the mailbox poller and the manual reprocess endpoint cannot drift apart.
-        /// Returns the number of jobs enqueued (duplicates count — they are handled work).
+        /// Hands one message to the CANONICAL intake: durable capture of the raw RFC822 bytes,
+        /// then one extraction job per processable component of the real MIME tree.
+        ///
+        /// <para>It used to fan out over <c>message.Attachments</c> and produce one Lead per
+        /// file. That is not the MIME tree — it yields only entities whose Content-Disposition
+        /// says "attachment", so a forwarded enquiry was invisible — and one Lead per attachment
+        /// is the defect the message barrier exists to remove: a buyer who sends a covering note
+        /// and two schedules became three Leads, each priced from a third of the request.</para>
+        ///
+        /// <para>Returns false when the message must NOT be acknowledged to the mailbox.</para>
         /// </summary>
-        internal async Task<int> EnqueueEmailForExtractionAsync(
+        internal async Task<EmailInquiryIntakeResult> EnqueueEmailForExtractionAsync(
             MimeMessage message, EmailIngest ingest, EmailConfiguration config,
-            ERP_RFQ_Automation.Extraction.IDocumentIngestion ingestion,
-            EmailTriageDecision triage, EmailBodyParts bodyParts)
-        {
-            var result = await EmailIngestEnqueuer.EnqueueAsync(
-                message, ingest, config.BusinessUnitId, config.EmailAddress,
-                ingestion, triage, bodyParts, _logger);
+            IEmailInquiryIntakeService intake,
+            EmailTriageDecision triage, EmailBodyParts bodyParts,
+            CancellationToken ct = default)
+            => await intake.CaptureAndScheduleAsync(
+                message, ingest, config, bodyParts.Fresh, triage,
+                message.From.Mailboxes.FirstOrDefault()?.Address, ct);
 
-            // ING-06: the per-file reasons are recorded on ingest.SkippedAttachmentsJson by the
-            // enqueuer itself, unconditionally and on every path. This only raises the loss into
-            // the 50-char lifecycle status for the one case where the message produced NOTHING
-            // — a "Queued" ingest with no jobs would read as normal progress.
-            if (result.Queued == 0 && result.SkippedAttachments.Count > 0)
-            {
-                ingest.ParseStatus = Truncate(
-                    $"Failed - {result.SkippedAttachments.Count} attachment(s) skipped", 50);
-            }
-
-            return result.Queued;
-        }
         /// <summary>
         /// Builds the pure input for <see cref="DeterministicEmailTriage"/>: the sender's own
         /// words, the resolved party type, and the raw headers that constitute positive
@@ -2042,6 +2141,15 @@ namespace ERP_RFQ_Automation.Services
                 using var socket = await ERP_RFQ_Automation.Security.MailEndpointPolicy
                     .ConnectAsync(config.Host, config.Port, CancellationToken.None);
                 await client.ConnectAsync(socket, config.Host, config.Port, config.UseSsl ? SecureSocketOptions.Auto : SecureSocketOptions.StartTls);
+                // DELIBERATELY the address, not MailboxLoginIdentity.ForOutbound.
+                //
+                // This quote-delivery send has always authenticated as EmailAddress, while
+                // OutboundSmtpTransport and SmtpEmailSender authenticate as Username. That
+                // disagreement is pre-existing and is NOT this change's to settle: routing this
+                // line through ForOutbound would swap the credential on a live sending path to
+                // tidy up a naming inconsistency, and the first anyone would know is quotes
+                // failing to reach customers. Left exactly as it was, and named so the next
+                // reader sees a decision rather than an oversight.
                 await client.AuthenticateAsync(config.EmailAddress, config.Password);
                 await client.SendAsync(message);
                 await client.DisconnectAsync(true);

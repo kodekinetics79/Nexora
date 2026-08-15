@@ -16,6 +16,7 @@ import axiosInstance from '../axiosInstance';
  *   GET  /api/email-triage?outcome=&page=   → id, receivedOn, from, subject, outcome,
  *                                             reasonCodes, hasAttachments, linkedBatchId
  *   POST /api/email-triage/{id}/reprocess   → { reason, idempotencyKey }, RBAC "Leads"
+ *   POST /api/Email/fetch                   → a manual mailbox poll, RBAC "Leads:Create"
  *
  * Everything ELSE this module reads is optional and defaults to "not reported". The backend lock
  * ships separately; a field that is not there yet must degrade to an honest absence, never to a
@@ -121,6 +122,285 @@ export const describeTriageOutcome = (outcome: string): TriageOutcomeCopy =>
   };
 
 /**
+ * Server state tokens are not spelled consistently across the pipeline — `NeedsReview`,
+ * `needs_review` and `NEEDS-REVIEW` all occur. Matching on a stripped, lowercased token means a
+ * spelling change cannot silently demote a known state to "unrecognised", which is the failure
+ * that would put a message in front of nobody.
+ */
+const stateToken = (value: string): string => value.replace(/[^a-z0-9]/gi, '').toLowerCase();
+
+/** Title-cases a machine token for a LABEL. Never used on a reason — see the page's reason gate. */
+const humanise = (value: string): string =>
+  value
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replaceAll('_', ' ')
+    .replaceAll('-', ' ')
+    .toLowerCase()
+    .replace(/(^|\s)\S/g, (letter) => letter.toUpperCase());
+
+export interface AssemblyStateCopy {
+  label: string;
+  /** One sentence stating where the message actually is, in plain words. */
+  meaning: string;
+  chipColor: 'default' | 'error' | 'info' | 'warning' | 'success';
+  /** The worker has not finished; this row is not a final answer and will change on its own. */
+  inProgress: boolean;
+  /** No lead will ever appear here unless a person acts. */
+  needsHuman: boolean;
+  /** False when the deployment reported a state this build has no wording for. */
+  recognised: boolean;
+}
+
+/**
+ * What "assembly" means: one inbound message can carry a body and several attachments, and all of
+ * them have to land before a single Lead can be made. Until they do, the message is neither a
+ * success nor a failure — it is waiting, and saying so is the whole point of this column.
+ */
+const ASSEMBLY_STATE_COPY: Record<string, AssemblyStateCopy> = {
+  captured: {
+    label: 'Captured',
+    meaning:
+      'The message and its original are durably recorded. Nothing has been inspected yet, so no lead exists.',
+    chipColor: 'default',
+    inProgress: true,
+    needsHuman: false,
+    recognised: true,
+  },
+  inspecting: {
+    label: 'Inspecting',
+    meaning: 'The parts of this message are being scanned and checked. No lead exists yet.',
+    chipColor: 'info',
+    inProgress: true,
+    needsHuman: false,
+    recognised: true,
+  },
+  extracting: {
+    label: 'Reading',
+    meaning: 'The parts of this message are being read for line items. No lead exists yet.',
+    chipColor: 'info',
+    inProgress: true,
+    needsHuman: false,
+    recognised: true,
+  },
+  readyforassembly: {
+    label: 'Ready to assemble',
+    meaning: 'Every part is finished and at least one carried commercial content. The lead is next.',
+    chipColor: 'info',
+    inProgress: true,
+    needsHuman: false,
+    recognised: true,
+  },
+  assembled: {
+    label: 'Assembled',
+    meaning: 'Every part of this message was merged into one lead — one inquiry, not one per file.',
+    chipColor: 'success',
+    inProgress: false,
+    needsHuman: false,
+    recognised: true,
+  },
+  needsreview: {
+    label: 'Needs review',
+    meaning:
+      'A person has to look at this message: the grouping was ambiguous, confidence was low, or a part '
+      + 'could not be read. Terminal for the pipeline, open for you.',
+    chipColor: 'warning',
+    inProgress: false,
+    needsHuman: true,
+    recognised: true,
+  },
+  failedrecoverable: {
+    // The hold-reason vocabulary is explicit that nothing sweeps held components in this build, so
+    // this must not promise an automatic retry — it says what is true and names the human action.
+    label: 'Held — service unavailable',
+    meaning:
+      'Something this system depends on was unavailable. It is not the sender’s fault and nothing was '
+      + 'lost, but nothing picks this up on its own — reprocess the message to run it again.',
+    chipColor: 'warning',
+    inProgress: false,
+    needsHuman: true,
+    recognised: true,
+  },
+  rejectedsecurity: {
+    label: 'Rejected — security',
+    meaning:
+      'A part of this message was refused on security grounds, so it cannot proceed and no lead was '
+      + 'created. The original is retained for the security record.',
+    chipColor: 'error',
+    inProgress: false,
+    needsHuman: true,
+    recognised: true,
+  },
+  noinquiry: {
+    // Not a defect and not a loss: distinguishing it from NeedsReview is the whole reason the state
+    // exists, so it must not be coloured like a failure.
+    label: 'Nothing to quote',
+    meaning:
+      'The message carried no commercial content at all — no fresh text and no parts — so no lead was '
+      + 'created. The original is retained.',
+    chipColor: 'default',
+    inProgress: false,
+    needsHuman: false,
+    recognised: true,
+  },
+  rejected: {
+    label: 'Rejected',
+    meaning: 'This message was rejected during assembly, so no lead was created. The original is retained.',
+    chipColor: 'error',
+    inProgress: false,
+    needsHuman: true,
+    recognised: true,
+  },
+};
+
+/**
+ * Spellings this build accepts for the same state. These are drift insurance, not the contract:
+ * the canonical names above are the `EmailInquiryAssemblyStatus` members.
+ */
+const ASSEMBLY_STATE_ALIASES: Record<string, string> = {
+  pending: 'captured',
+  queued: 'captured',
+  notstarted: 'captured',
+  scanning: 'inspecting',
+  inprogress: 'inspecting',
+  processing: 'extracting',
+  reading: 'extracting',
+  ready: 'readyforassembly',
+  completed: 'assembled',
+  complete: 'assembled',
+  succeeded: 'assembled',
+  done: 'assembled',
+  review: 'needsreview',
+  awaitingreview: 'needsreview',
+  heldforreview: 'needsreview',
+  failed: 'failedrecoverable',
+  faulted: 'failedrecoverable',
+  held: 'failedrecoverable',
+  discarded: 'rejected',
+  nocommercialcontent: 'noinquiry',
+};
+
+/**
+ * An unknown state is reported verbatim and treated as neither finished nor in flight. It must
+ * never be assumed successful: the "Open lead" action is gated on an actual lead id, so a state
+ * this build cannot read degrades to "we do not know", not to a dead link.
+ */
+export const describeAssemblyState = (state: string | null): AssemblyStateCopy => {
+  if (state === null) {
+    return {
+      label: 'Not reported',
+      meaning: 'This deployment does not report assembly state yet.',
+      chipColor: 'default',
+      inProgress: false,
+      needsHuman: false,
+      recognised: false,
+    };
+  }
+  const token = stateToken(state);
+  const copy = ASSEMBLY_STATE_COPY[token] ?? ASSEMBLY_STATE_COPY[ASSEMBLY_STATE_ALIASES[token] ?? ''];
+  return (
+    copy ?? {
+      label: humanise(state),
+      meaning: 'This deployment reported an assembly state this screen does not recognise yet.',
+      chipColor: 'default',
+      inProgress: false,
+      needsHuman: false,
+      recognised: false,
+    }
+  );
+};
+
+export interface ComponentStateCopy {
+  label: string;
+  chipColor: 'default' | 'error' | 'info' | 'warning' | 'success';
+}
+
+/**
+ * `EmailInquiryComponentStatus`, in the words a salesperson reads.
+ *
+ * `Skipped` is the one that must not look benign: it means the sender attached something this
+ * system could not process, which is a quotation priced against a document nobody read if it goes
+ * unnoticed. `Ignored` is its opposite — a signature logo — and is deliberately quiet.
+ */
+const COMPONENT_STATE_COPY: Record<string, ComponentStateCopy> = {
+  pending: { label: 'Queued', chipColor: 'default' },
+  inspecting: { label: 'Being scanned', chipColor: 'info' },
+  extracting: { label: 'Being read', chipColor: 'info' },
+  completed: { label: 'Read', chipColor: 'success' },
+  skipped: { label: 'Could not be read', chipColor: 'warning' },
+  refusedsecurity: { label: 'Refused — security', chipColor: 'error' },
+  failedrecoverable: { label: 'Held — service unavailable', chipColor: 'warning' },
+  ignored: { label: 'Ignored — not commercial', chipColor: 'default' },
+  structuralonly: { label: 'Container — content is in its parts', chipColor: 'default' },
+};
+
+const COMPONENT_STATE_ALIASES: Record<string, string> = {
+  inprogress: 'extracting',
+  processing: 'extracting',
+  complete: 'completed',
+  done: 'completed',
+  failed: 'failedrecoverable',
+  held: 'failedrecoverable',
+};
+
+export const describeComponentState = (state: string | null): ComponentStateCopy => {
+  if (state === null) return { label: 'Not reported', chipColor: 'default' };
+  const token = stateToken(state);
+  const copy = COMPONENT_STATE_COPY[token] ?? COMPONENT_STATE_COPY[COMPONENT_STATE_ALIASES[token] ?? ''];
+  return copy ?? { label: humanise(state), chipColor: 'default' };
+};
+
+/** `EmailInquiryComponentKind`. "Body" on its own reads as jargon on a sales screen. */
+const COMPONENT_KIND_LABELS: Record<string, string> = {
+  body: 'Message text',
+  attachment: 'Attachment',
+  embeddedmessage: 'Forwarded email',
+};
+
+export const describeComponentKind = (kind: string | null): string | null =>
+  kind === null ? null : COMPONENT_KIND_LABELS[stateToken(kind)] ?? humanise(kind);
+
+/**
+ * One part of a message that has to land before the lead can be made — the body itself, or one
+ * attachment. Every field is optional: a deployment that does not report components yet must show
+ * an absence, not a row of blanks that reads as a file with no name and no state.
+ */
+export interface EmailComponent {
+  /** Row key: the server id when there is one, otherwise the position within the message. */
+  key: string;
+  /** The part's position in the message, when reported. */
+  ordinal: number | null;
+  fileName: string | null;
+  /** Body / Attachment / … — the server's own vocabulary, humanised for display only. */
+  kind: string | null;
+  state: string | null;
+  /** Why this part failed, or why it is waiting for a person. Null when neither applies. */
+  reason: string | null;
+}
+
+/**
+ * One attachment the intake door deliberately did NOT hand to extraction — ING-06.
+ *
+ * It is not a component and never becomes one: no job was queued for it, so it is absent from the
+ * assembly totals and from the component list by design. It is still a piece of what the customer
+ * sent, and the only record of it is this entry.
+ */
+export interface SkippedAttachment {
+  /** Row key: the entry's position in the recorded list, which is all the backend gives. */
+  key: string;
+  /** The sender's own file name, reduced to a leaf. Null when the entry carried no usable name. */
+  fileName: string | null;
+  /** Why it was not scheduled — unsupported type, too large, unreadable. */
+  reason: string | null;
+  /**
+   * The whole recorded line, for the places that want the operator to see the record verbatim
+   * rather than split across columns. Rebuilt from the sanitised halves rather than kept raw, so
+   * a skipped attachment still cannot put a path on the screen. Null only when the entry carried
+   * nothing usable at all.
+   */
+  displayText: string | null;
+}
+
+/**
  * One triaged message.
  *
  * `id` and `outcome` are the only fields guaranteed to be usable. Everything typed `| null` may be
@@ -150,6 +430,23 @@ export interface EmailTriageRow {
   attachmentNames: string[];
   /** Reported only when the payload actually carried an attachment-name array. */
   attachmentNamesReported: boolean;
+  /**
+   * Attachments the door refused to schedule — ING-06. Deliberately NOT merged into
+   * {@link components}: nothing was queued for them, so counting them as parts would put the
+   * assembly totals at odds with the work the pipeline actually has.
+   *
+   * It is also the legacy/pre-assembly record: a canonical assembly reports a refused attachment
+   * as a component row with state `Skipped`, but an older message has only this list, and without
+   * it the UI silently drops the sole durable evidence that an attachment was missed. Parsed
+   * rather than kept as raw text so the name and the reason can be shown apart — see
+   * {@link SkippedAttachment.displayText} for the verbatim line.
+   */
+  skippedAttachments: SkippedAttachment[];
+  /**
+   * False when the payload carried no skipped-attachment array at all. "Nothing was skipped" and
+   * "this deployment does not say" are different claims, and only the first one may be stated.
+   */
+  skippedAttachmentsReported: boolean;
   /** SUPPLIER_QUOTE / SUPPLIER_INVOICE — set when the message was routed rather than extracted. */
   commercialDocumentTypeHint: string | null;
   /** True when the message continues an existing thread (In-Reply-To / References present). */
@@ -159,6 +456,38 @@ export interface EmailTriageRow {
   /** How many line items came out of the body. */
   extractedItemCount: number | null;
   decidedOn: string | null;
+
+  // ---- Assembly. Read through {@link describeAssemblyState}, never compared raw. ----
+  /** Raw server state; null when this deployment does not report assembly at all. */
+  assemblyState: string | null;
+  /** Why assembly stopped, failed, or is waiting for a person. */
+  assemblyReason: string | null;
+  /** How many parts this message is expected to produce, and how many are finished. */
+  componentsExpected: number | null;
+  componentsCompleted: number | null;
+  /**
+   * Every physical part of the message. NULL on the list and populated by {@link getMessage}:
+   * "not asked for" and "asked, and this message genuinely has no parts" are different facts and
+   * the screen must not conflate them — hence {@link componentsReported}.
+   */
+  components: EmailComponent[];
+  /** False when the payload carried no component array — distinct from "carried an empty one". */
+  componentsReported: boolean;
+  /** True only when the original RFC822 message is durably addressable. Null is not reported. */
+  rawEvidenceStored: boolean | null;
+  /** True when reads are checked against the capture-time SHA-256. */
+  rawEvidenceVerifiable: boolean | null;
+  /** Sender-stamped time and the time extraction completed, when the backend reports them. */
+  senderSentOn: string | null;
+  parsedOn: string | null;
+  /** When the message was durably captured, as distinct from when the mailbox happened to poll. */
+  ingestedOn: string | null;
+  /**
+   * When the pipeline last moved this message. Deliberately NOT called a recovery timestamp:
+   * nothing durable distinguishes a recovery sweep from the worker's own barrier, and both write
+   * this same value. With the state, it is how "stuck" is told apart from "busy".
+   */
+  lastUpdatedOn: string | null;
 }
 
 export interface EmailTriagePage {
@@ -212,13 +541,123 @@ const asTextList = (value: unknown): string[] =>
  * Reads one row defensively. Alternate key spellings are accepted because the list endpoint and any
  * future detail endpoint should not be able to break this screen by disagreeing on a name.
  */
+/**
+ * Reads one component. The list endpoint and the assembly worker have historically disagreed on
+ * key spelling (`fileName` vs `filename`, `state` vs `status`), so every field accepts the known
+ * aliases rather than letting one rename blank out the whole panel.
+ */
+const readComponent = (payload: unknown, index: number): EmailComponent => {
+  const root = isRecord(payload) ? payload : {};
+  const id = asCount(root.id) ?? asCount(root.componentId);
+  return {
+    key: id !== null ? `component-${id}` : `component-index-${index}`,
+    ordinal: asCount(root.ordinal),
+    fileName: asText(root.fileName) ?? asText(root.filename) ?? asText(root.name),
+    kind: asText(root.kind) ?? asText(root.componentKind) ?? asText(root.type) ?? asText(root.componentType),
+    state: asText(root.state) ?? asText(root.componentState) ?? asText(root.status),
+    // The operator-safe sentence first; the stable code is the fallback, and the page humanises it
+    // rather than printing raw snake_case at a salesperson.
+    reason:
+      asText(root.reason) ??
+      asText(root.failureReason) ??
+      asText(root.reviewReason) ??
+      asText(root.reasonCode),
+  };
+};
+
+const isPrintable = (character: string): boolean => {
+  const codePoint = character.codePointAt(0) ?? 0;
+  return codePoint > 0x1f && !(codePoint >= 0x7f && codePoint <= 0x9f);
+};
+
+const MAX_FILE_NAME = 120;
+
+/**
+ * The sender chose this name, so it is read as hostile text: only the last segment survives — a
+ * skipped attachment must never render as a path — and the length is bounded so one absurd name
+ * cannot take the panel over.
+ */
+const safeFileName = (value: string | null): string | null => {
+  const trimmed = asText(value);
+  if (trimmed === null) return null;
+  const leaf = (trimmed.split(/[\\/]/).pop() ?? '').split('').filter(isPrintable).join('').trim();
+  if (leaf.length === 0) return null;
+  return leaf.length <= MAX_FILE_NAME ? leaf : `${leaf.slice(0, MAX_FILE_NAME - 1)}…`;
+};
+
+/**
+ * Splits one recorded entry — `"deck.pptx (unsupported file type '.pptx')"` — into its name and
+ * its reason. That "name (reason)" string is the whole wire shape: the column stores a JSON array
+ * of them, so this is the only place the two halves can be told apart.
+ *
+ * The split is the FIRST bracket opening a group that closes exactly at the end of the entry.
+ * Neither end is safe to anchor on blindly: a reason carries brackets of its own ("exceeds the
+ * 10 MB size limit (12345678 bytes)") and so does an everyday file name ("quote (1).pdf").
+ */
+const splitSkippedEntry = (entry: string): { fileName: string; reason: string | null } => {
+  for (let open = entry.indexOf(' ('); open >= 0; open = entry.indexOf(' (', open + 1)) {
+    let depth = 0;
+    for (let scan = open + 1; scan < entry.length; scan += 1) {
+      if (entry[scan] === '(') depth += 1;
+      else if (entry[scan] === ')') {
+        depth -= 1;
+        if (depth > 0) continue;
+        if (scan === entry.length - 1) {
+          return { fileName: entry.slice(0, open), reason: asText(entry.slice(open + 2, scan)) };
+        }
+        break;
+      }
+    }
+  }
+  return { fileName: entry, reason: null };
+};
+
+/**
+ * Reads one entry. A malformed one is kept as an unnamed skip rather than filtered away: the
+ * count of attachments that will not be quoted is the entire point of the record, and dropping
+ * the entries this build cannot parse is the same disappearance the record exists to prevent.
+ */
+const readSkippedAttachment = (payload: unknown, index: number): SkippedAttachment => {
+  const entry = asText(payload);
+  if (entry === null) {
+    return { key: `skipped-${index}`, fileName: null, reason: null, displayText: null };
+  }
+  const split = splitSkippedEntry(entry);
+  // Falling back to the whole entry keeps an unsplittable line visible under its own text.
+  const fileName = safeFileName(split.fileName) ?? safeFileName(entry);
+  const reason = split.reason;
+  return {
+    key: `skipped-${index}`,
+    fileName,
+    reason,
+    // Recomposed from the sanitised name, never from the wire string: the halves are what the
+    // sender controls, and the leaf-only rule has already been applied to them.
+    displayText:
+      fileName === null ? reason : reason === null ? fileName : `${fileName} (${reason})`,
+  };
+};
+
 export const readTriageRow = (payload: unknown): EmailTriageRow => {
   const root = isRecord(payload) ? payload : {};
+  const componentsRaw = Array.isArray(root.components)
+    ? root.components
+    : Array.isArray(root.assemblyComponents)
+      ? root.assemblyComponents
+      : null;
   const attachmentNamesRaw = Array.isArray(root.attachmentNames)
     ? root.attachmentNames
     : Array.isArray(root.attachmentFileNames)
       ? root.attachmentFileNames
       : null;
+  // `skippedAttachmentReasons` is the older payload's spelling of the same list. Reading only one
+  // of the three names is how a legacy message's skips reach the browser and render as nothing.
+  const skippedRaw = Array.isArray(root.skippedAttachments)
+    ? root.skippedAttachments
+    : Array.isArray(root.skippedAttachmentNames)
+      ? root.skippedAttachmentNames
+      : Array.isArray(root.skippedAttachmentReasons)
+        ? root.skippedAttachmentReasons
+        : null;
   const attachmentNames = asTextList(attachmentNamesRaw);
   const attachmentCount = asCount(root.attachmentCount) ?? (attachmentNamesRaw ? attachmentNames.length : null);
 
@@ -238,11 +677,28 @@ export const readTriageRow = (payload: unknown): EmailTriageRow => {
     attachmentCount,
     attachmentNames,
     attachmentNamesReported: attachmentNamesRaw !== null,
+    skippedAttachments: (skippedRaw ?? []).map(readSkippedAttachment),
+    skippedAttachmentsReported: skippedRaw !== null,
     commercialDocumentTypeHint: asText(root.commercialDocumentTypeHint) ?? asText(root.documentTypeHint),
     threadContinuation: asFlag(root.threadContinuation),
-    leadId: asCount(root.leadId),
+    // `assembledLeadId` is the assembly worker's name for the same lead the triage row calls
+    // `leadId`. Reading only one of them is how an assembled message shows no way through to it.
+    leadId: asCount(root.leadId) ?? asCount(root.assembledLeadId),
     extractedItemCount: asCount(root.extractedItemCount) ?? asCount(root.itemCount),
     decidedOn: asText(root.decidedOn) ?? asText(root.triageDecidedOn),
+
+    assemblyState: asText(root.assemblyState) ?? asText(root.assemblyStatus),
+    assemblyReason: asText(root.assemblyReason) ?? asText(root.assemblyStateReason),
+    componentsExpected: asCount(root.expectedComponentCount) ?? asCount(root.componentsExpected),
+    componentsCompleted: asCount(root.completedComponentCount) ?? asCount(root.componentsCompleted),
+    components: (componentsRaw ?? []).map(readComponent),
+    componentsReported: componentsRaw !== null,
+    rawEvidenceStored: asFlag(root.rawEvidenceStored),
+    rawEvidenceVerifiable: asFlag(root.rawEvidenceVerifiable),
+    senderSentOn: asText(root.senderSentAtUtc) ?? asText(root.senderSentOn),
+    parsedOn: asText(root.parsedAt) ?? asText(root.parsedOn),
+    ingestedOn: asText(root.ingestedAtUtc) ?? asText(root.ingestedOn),
+    lastUpdatedOn: asText(root.lastUpdatedAtUtc) ?? asText(root.lastUpdatedOn),
   };
 };
 
@@ -272,6 +728,125 @@ const readReprocessResult = (payload: unknown): ReprocessTriageResult => {
   };
 };
 
+/** One mailbox the poll could not read. */
+export interface MailPollFailure {
+  /** The mailbox address. Never a credential — the server does not return those. */
+  mailbox: string | null;
+  /** Server-authored sentence; the page passes it through the product's error-copy gate. */
+  reason: string | null;
+  lastSuccessfulPollOn: string | null;
+}
+
+/**
+ * What one manual poll actually did.
+ *
+ * Every count is nullable because a deployment may not report it, and a count this screen invents
+ * is worse than one it omits — "0 rejected" and "rejections not reported" are different claims.
+ */
+export interface MailPollReport {
+  /** The server's own sentence. Present on every branch, including the "nothing polled" one. */
+  message: string | null;
+  mailboxesChecked: number | null;
+  mailboxesFailed: number | null;
+  /** Messages in the poll window, whether or not this cycle could take them. */
+  messagesFound: number | null;
+  /** Messages this cycle actually downloaded, and how many were already ingested before. */
+  messagesNew: number | null;
+  alreadyIngested: number | null;
+  /** Messages durably stored with their original — the point of no loss. */
+  captured: number | null;
+  /** Parts handed to extraction. These become leads later, not during the poll. */
+  scheduled: number | null;
+  needsReview: number | null;
+  rejected: number | null;
+  /**
+   * Messages left unread for the next cycle. Non-zero means mail is still sitting in the mailbox
+   * that this poll could not take, which is the one number a "0 new messages" summary would hide.
+   */
+  notAcknowledged: number | null;
+  failures: MailPollFailure[];
+  /**
+   * Days of mail older than the poll window that were not read, across every mailbox. Non-zero
+   * means messages exist that this poll could not see at all.
+   */
+  lookbackCappedDays: number | null;
+  /**
+   * False when the mailbox count was absent — the "no active IMAP mailbox is configured" branch,
+   * which the server answers with 200. Nothing was polled and nothing ever will be until a mailbox
+   * is connected, so this can never be presented as a successful poll (ING-08).
+   */
+  anyMailboxPolled: boolean;
+}
+
+const readPollFailure = (payload: unknown): MailPollFailure => {
+  const root = isRecord(payload) ? payload : {};
+  return {
+    mailbox: asText(root.mailbox) ?? asText(root.emailAddress) ?? asText(root.configurationName),
+    reason: asText(root.reason) ?? asText(root.failureReason) ?? asText(root.message),
+    lastSuccessfulPollOn: asText(root.lastSuccessfulPoll) ?? asText(root.lastSuccessfulPollOn),
+  };
+};
+
+/**
+ * Reads the poll response.
+ *
+ * Counts live under `totals`; `mailboxes` and `newMessages` stay at the top level because the All
+ * Inquiries toolbar reads them there. Both shapes are accepted so neither side can break the other
+ * by moving a field. Failures come from `reasons` (the 502 branch) or, failing that, from the
+ * per-mailbox `polled` array — a mailbox that reports `succeeded: false` is a failure whichever
+ * branch carried it.
+ */
+export const readPollReport = (payload: unknown): MailPollReport => {
+  const root = isRecord(payload) ? payload : {};
+  const totals = isRecord(root.totals) ? root.totals : {};
+  const perMailbox = Array.isArray(root.polled) ? root.polled : [];
+  const failuresRaw = Array.isArray(root.reasons)
+    ? root.reasons
+    : Array.isArray(root.failures)
+      ? root.failures
+      : perMailbox.filter((entry) => isRecord(entry) && entry.succeeded === false);
+  const mailboxesChecked = asCount(totals.mailboxesPolled) ?? asCount(root.mailboxes);
+  // Summed rather than read from a total, because the cap is reported per mailbox only. Absent
+  // everywhere stays null: "no mailbox capped" and "nobody said" are different claims.
+  const cappedDays = perMailbox
+    .map((entry) => (isRecord(entry) ? asCount(entry.lookbackCappedDays) : null))
+    .filter((days): days is number => days !== null);
+
+  return {
+    message: asText(root.message),
+    mailboxesChecked,
+    mailboxesFailed: asCount(totals.mailboxesFailed),
+    messagesFound: asCount(totals.messagesFound),
+    messagesNew: asCount(totals.messagesDownloaded) ?? asCount(root.newMessages),
+    alreadyIngested: asCount(totals.messagesAlreadyIngested),
+    captured: asCount(totals.messagesCaptured),
+    scheduled: asCount(totals.componentsScheduled),
+    needsReview: asCount(totals.messagesHeldForReview),
+    rejected: asCount(totals.messagesRejected),
+    notAcknowledged: asCount(totals.messagesNotAcknowledged),
+    failures: failuresRaw.map(readPollFailure),
+    lookbackCappedDays: cappedDays.length > 0 ? Math.max(...cappedDays) : null,
+    anyMailboxPolled: mailboxesChecked !== null && mailboxesChecked > 0,
+  };
+};
+
+/**
+ * The poll's failure branch is an HTTP error (502) whose body still carries a usable report: which
+ * mailboxes refused and why. Returned so the page can name them instead of showing a bare
+ * "request failed", which tells an operator nothing about which inbox to go and fix.
+ *
+ * Null when the error carries no structured report — a network drop, a 403, a proxy HTML page.
+ */
+export const readPollFailureReport = (error: unknown): MailPollReport | null => {
+  if (!isRecord(error)) return null;
+  const response = isRecord(error.response) ? error.response : undefined;
+  const data = response?.data;
+  if (!isRecord(data)) return null;
+  const hasReport = Array.isArray(data.reasons) || Array.isArray(data.failures) || isRecord(data.totals);
+  if (!hasReport) return null;
+  return readPollReport(data);
+};
+
 /**
  * True when the deployment simply does not expose triage yet (backend lock not shipped). Rendered
  * as an explanation rather than as a failure — nothing is broken, the feature is just not there.
@@ -294,6 +869,18 @@ const emailTriageService = {
   },
 
   /**
+   * One message with every part it was made of.
+   *
+   * The list deliberately leaves `components` null — it is the same audit surface at a different
+   * zoom level, and loading every part of every message to render a collapsed table would be paid
+   * for on every page view. The screen asks for this only when a row is opened.
+   */
+  getMessage: async (id: number): Promise<EmailTriageRow> => {
+    const response = await axiosInstance.get(`/api/email-triage/${id}`);
+    return readTriageRow(response.data);
+  },
+
+  /**
    * Puts a triaged message back through ingestion as if it were uncertain — the human override for
    * "this WAS an inquiry". The reason is mandatory: it is the audit record for overturning a
    * machine decision, and the idempotency key stops a double-click from queueing the message twice.
@@ -309,6 +896,19 @@ const emailTriageService = {
       { headers: { 'Idempotency-Key': idempotencyKey } },
     );
     return readReprocessResult(response.data);
+  },
+
+  /**
+   * Polls the configured mailboxes now, instead of waiting for the background cycle.
+   *
+   * The same endpoint backs the "Sync email" button on All Inquiries, which reads only the two
+   * counts its toolbar snackbar needs (`leadService.fetchEmails`). This reader keeps the whole
+   * report, because Email Intake has to state what the poll DID — found, captured, scheduled,
+   * flagged, rejected — rather than claim a green result over a mailbox that refused to answer.
+   */
+  pollMailboxes: async (): Promise<MailPollReport> => {
+    const response = await axiosInstance.post('/api/Email/fetch');
+    return readPollReport(response.data);
   },
 };
 

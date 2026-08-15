@@ -148,6 +148,15 @@ public sealed record MailboxTestRequestDTO
     [Range(1, 65535)]
     public int Port { get; init; }
 
+    /// <summary>
+    /// The mailbox address. REQUIRED for an inbound test, because it is the identity the
+    /// poller signs in with — see <c>MailboxLoginIdentity</c>. Without it this endpoint tested
+    /// <see cref="Username"/> and therefore tested a credential the IMAP poller never uses.
+    /// Optional for SMTP, which genuinely authenticates as <see cref="Username"/>.
+    /// </summary>
+    [StringLength(320)]
+    public string? EmailAddress { get; init; }
+
     [Required, StringLength(320)]
     public string Username { get; init; } = string.Empty;
 
@@ -159,7 +168,7 @@ public sealed record MailboxTestRequestDTO
     /// <inheritdoc cref="MailboxSecretRedaction.Marker"/>
     public override string ToString() =>
         $"MailboxTestRequestDTO {{ MailboxId = {MailboxId}, Protocol = {Protocol}, Host = {Host}, "
-        + $"Port = {Port}, Username = {Username}, "
+        + $"Port = {Port}, EmailAddress = {EmailAddress}, Username = {Username}, "
         + $"Password = {MailboxSecretRedaction.Marker(Password)}, UseSsl = {UseSsl} }}";
 }
 

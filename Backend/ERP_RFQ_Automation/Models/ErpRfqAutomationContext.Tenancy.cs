@@ -10,6 +10,7 @@ using ERP_RFQ_Automation.OrderToCash;
 using ERP_RFQ_Automation.GeneralLedger;
 using ERP_RFQ_Automation.BankReconciliation;
 using ERP_RFQ_Automation.LeadIdentity;
+using ERP_RFQ_Automation.Ingestion.Assembly;
 using ERP_RFQ_Automation.QuoteDelivery;
 using ERP_RFQ_Automation.CommercialIntelligence.Sales;
 using ERP_RFQ_Automation.Inventory.Commercial;
@@ -61,6 +62,16 @@ public partial class ErpRfqAutomationContext
     /// </summary>
     public virtual DbSet<PasswordResetToken> PasswordResetTokens { get; set; } = null!;
 
+    /// <summary>
+    /// One row per received email message. The commercial gate in front of Lead creation:
+    /// see <see cref="EmailInquiryAssembly"/> for why a message-level aggregate had to exist.
+    /// </summary>
+    public virtual DbSet<EmailInquiryAssembly> EmailInquiryAssemblies { get; set; } = null!;
+
+    /// <summary>The body, attachments and embedded messages of an
+    /// <see cref="EmailInquiryAssembly"/>, with per-part provenance and reasons.</summary>
+    public virtual DbSet<EmailInquiryComponent> EmailInquiryComponents { get; set; } = null!;
+
     partial void OnModelCreatingPartial(ModelBuilder modelBuilder)
     {
         if (Database.IsNpgsql())
@@ -78,6 +89,14 @@ public partial class ErpRfqAutomationContext
         modelBuilder.ConfigureBankReconciliation();
         modelBuilder.ConfigureOrderToCash();
         modelBuilder.ConfigureLeadIdentity();
+        // The message-level aggregate that makes one email one coherent Lead. Configured
+        // alongside LeadIdentity because it is the gate in front of it: nothing reconciles a
+        // Lead for an emailed message until the assembly says every expected part is terminal.
+        modelBuilder.ConfigureEmailInquiryAssembly();
+        modelBuilder.Entity<ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssembly>()
+            .HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponent>()
+            .HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         // Gate 2 — supplier tier column and the per-tenant comparison weight set. Carries its own
         // query filter in the partial, alongside the entity it protects.
         ConfigureSupplierEvaluationModel(modelBuilder);
@@ -364,6 +383,8 @@ public partial class ErpRfqAutomationContext
         modelBuilder.Entity<InventoryMovement>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<IncomingInventory>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<LeadLineCommercialResolution>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponentResult>()
+            .HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
 
         modelBuilder.ConfigureGovernedCustomFields();
         modelBuilder.ConfigureCommercialLifecycle();
@@ -385,6 +406,25 @@ public partial class ErpRfqAutomationContext
             modelBuilder.Entity<ERP_RFQ_Automation.Extraction.ExtractionJob>()
                 .HasAlternateKey(e => new { e.BusinessUnitId, e.Id })
                 .HasName("AK_ExtractionJobs_BusinessUnitId_Id");
+            // Canonical ownership: an email job names its component, with the tenant inside
+            // the key. RESTRICT, not CASCADE — deleting a component out from under a job that
+            // is mid-flight would strand the job with no owner to report back to, so the
+            // component must be removed through the assembly (which cascades) or not at all.
+            modelBuilder.Entity<ERP_RFQ_Automation.Extraction.ExtractionJob>()
+                .HasOne<ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponent>()
+                .WithMany()
+                .HasForeignKey(e => new { e.BusinessUnitId, e.EmailInquiryComponentId })
+                .HasPrincipalKey(e => new { e.BusinessUnitId, e.Id })
+                .OnDelete(DeleteBehavior.Restrict);
+            // UNIQUE and FILTERED, matching the SQL the migration actually runs. Without the
+            // filter here the snapshot describes a plain full index while the database holds a
+            // partial unique one: the names coincide so no migration is generated today, but the
+            // model misdescribes the database and the next diff touching this index emits SQL for
+            // the wrong one.
+            modelBuilder.Entity<ERP_RFQ_Automation.Extraction.ExtractionJob>()
+                .HasIndex(e => new { e.BusinessUnitId, e.EmailInquiryComponentId })
+                .IsUnique()
+                .HasFilter("\"EmailInquiryComponentId\" IS NOT NULL");
             modelBuilder.Entity<ERP_RFQ_Automation.Extraction.ExtractionJob>()
                 .HasOne<SourceDocumentOccurrence>()
                 .WithMany()

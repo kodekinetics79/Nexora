@@ -7,6 +7,113 @@ using Microsoft.Extensions.Options;
 
 namespace ERP_RFQ_Automation.Infrastructure.Storage;
 
+/// <summary>
+/// Durable evidence storage itself is unavailable or misconfigured — the bucket does not
+/// exist, credentials are refused, or the provider cannot be reached. NOT a verdict about
+/// the document: every file in flight would fail identically, so the caller must refuse the
+/// whole batch rather than tell N operators to retry N files.
+///
+/// <para>Raised for the 2026-08-12 incident, where evidence storage was repointed at a
+/// misspelled bucket and four uploads were each answered with "upload this file again" —
+/// advice that could not work, while the readiness probe already read Unhealthy with the
+/// cause.</para>
+///
+/// <para>The provider's own account (bucket, endpoint, error code) lives in
+/// <see cref="Exception.InnerException"/> for the SERVER LOG only.
+/// <see cref="Exception.Message"/> is operator-safe and carries no infrastructure
+/// detail, so it can be put straight into a response body.</para>
+/// </summary>
+public sealed class EvidenceStorageUnavailableException : Exception
+{
+    /// <summary>
+    /// The single machine code for "we cannot durably store documents right now", already
+    /// emitted by <c>SecurityScanRecoveryService</c> for the read side. One code, both sides.
+    /// </summary>
+    public const string ErrorCode = "evidence_storage_unavailable";
+
+    public EvidenceStorageUnavailableException(bool isConfigurationFault, Exception? inner = null)
+        : base(isConfigurationFault
+            ? "Document storage is not configured, so uploads are paused."
+            : "Document storage is unavailable, so uploads are paused.", inner)
+        => IsConfigurationFault = isConfigurationFault;
+
+    /// <summary>
+    /// True when the deployment is misconfigured (no bucket, refused credentials, wrong
+    /// endpoint) — waiting cannot fix it, so no retry may be offered. False when the
+    /// provider is merely unreachable and may come back on its own.
+    /// </summary>
+    public bool IsConfigurationFault { get; }
+
+    /// <summary>
+    /// What the reader should do next. The two faults demand OPPOSITE actions — a misspelled
+    /// bucket needs a human to change a setting and will never clear by waiting, while an
+    /// unreachable provider genuinely can come back — so they must never share one sentence.
+    /// Telling someone to wait out a typo is the 2026-08-12 defect; telling someone a
+    /// thirty-second blip needs an administrator is the same defect inverted.
+    /// </summary>
+    public string OperatorNextAction => IsConfigurationFault
+        ? "Retrying will not help until an administrator corrects the document storage settings."
+        : "This can clear on its own — try again shortly, and tell an administrator if it persists.";
+
+    /// <summary>
+    /// The whole operator-facing sentence, cause then next action. Deliberately says nothing
+    /// about what a caller did or did not accept: only the caller knows whether work was
+    /// already stored before the store failed, and a shared sentence that asserted "nothing
+    /// was accepted" would be a lie on every door that ingests more than one document.
+    /// </summary>
+    public string OperatorDetail => $"{Message} {OperatorNextAction}";
+}
+
+/// <summary>
+/// Splits a failed evidence write into "this document" and "the store".
+///
+/// <para>Allow-list, not deny-list: ONLY the faults named in
+/// <see cref="IsPerDocumentFault"/> are verdicts about the document in hand. Anything else
+/// out of a write is the store failing, and answering it per file — "upload this file
+/// again" — is the useless advice the 2026-08-12 incident produced four times. A deny-list
+/// would silently misfile the next unknown provider error code back into "retry this
+/// file", which is the bug being fixed.</para>
+/// </summary>
+internal static class EvidenceStorageFaults
+{
+    /// <summary>The race resolution in <see cref="S3EvidenceObjectStorage.WriteImmutableAsync"/>.</summary>
+    internal const string UnresolvableRaceMessage = "Immutable evidence object raced but cannot be resolved.";
+
+    internal static bool IsPerDocumentFault(Exception exception) =>
+        exception is ArgumentException or InvalidDataException
+        || exception is InvalidOperationException { Message: UnresolvableRaceMessage };
+
+    /// <summary>
+    /// True when this failure means the store, not the document. A caller-driven cancellation
+    /// is excluded deliberately: a client that hung up is not a storage outage and must keep
+    /// propagating as the cancellation it is.
+    /// </summary>
+    internal static bool IsStoreUnavailable(Exception exception, CancellationToken ct) =>
+        !IsPerDocumentFault(exception)
+        && !(exception is OperationCanceledException && ct.IsCancellationRequested);
+
+    /// <summary>
+    /// Distinguishes "someone typed the bucket name wrong" from "the provider blinked". The
+    /// operator's next action differs completely — edit configuration versus wait — so the
+    /// two must not collapse into one message.
+    /// </summary>
+    internal static bool IsConfigurationFault(Exception exception) => exception switch
+    {
+        AmazonS3Exception s3 => s3.ErrorCode is "NoSuchBucket" or "AccessDenied"
+            or "InvalidAccessKeyId" or "SignatureDoesNotMatch" or "InvalidSecurity"
+            or "PermanentRedirect" or "AuthorizationHeaderMalformed",
+        // S3EvidenceObjectStorage raises InvalidOperationException only for endpoint,
+        // credential and versioning assertions; the one per-object race that shares the type
+        // is filtered out by IsPerDocumentFault before this is ever consulted.
+        InvalidOperationException => true,
+        UnauthorizedAccessException => true,
+        _ => false
+    };
+
+    internal static EvidenceStorageUnavailableException Unavailable(Exception exception) =>
+        new(IsConfigurationFault(exception), exception);
+}
+
 public sealed record EvidenceObject(
     string StorageUri,
     string Bucket,
@@ -104,12 +211,23 @@ public sealed class LocalEvidenceObjectStorage : IEvidenceObjectStorage
         ReadOnlyMemory<byte> content,
         CancellationToken ct = default)
     {
-        ValidateIdentity(businessUnitId, zone, sha256);
-        var relative = BuildKey(businessUnitId, zone, sha256, extension);
-        var path = await _files.WriteImmutableAsync(relative, content, ct);
-        await using var stored = await _files.OpenReadAsync(path, ct);
-        await VerifyAsync(stored, sha256, content.Length, ct);
-        return new EvidenceObject(path, "local", relative.Replace('\\', '/'), sha256, sha256, content.Length);
+        try
+        {
+            ValidateIdentity(businessUnitId, zone, sha256);
+            var relative = BuildKey(businessUnitId, zone, sha256, extension);
+            var path = await _files.WriteImmutableAsync(relative, content, ct);
+            await using var stored = await _files.OpenReadAsync(path, ct);
+            await VerifyAsync(stored, sha256, content.Length, ct);
+            return new EvidenceObject(path, "local", relative.Replace('\\', '/'), sha256, sha256, content.Length);
+        }
+        catch (Exception exception) when (EvidenceStorageFaults.IsStoreUnavailable(exception, ct))
+        {
+            // A full or read-only disk is the local mirror of the misspelled bucket: every file
+            // in the batch would fail the same way, so it is the STORE that is unavailable and
+            // not the document. InvalidDataException from VerifyAsync stays out of here — that
+            // one is a genuine per-document integrity verdict.
+            throw EvidenceStorageFaults.Unavailable(exception);
+        }
     }
 
     public async Task<Stream> OpenVerifiedReadAsync(
@@ -184,8 +302,23 @@ public sealed class LocalEvidenceObjectStorage : IEvidenceObjectStorage
     {
         if (businessUnitId <= 0)
             throw new ArgumentOutOfRangeException(nameof(businessUnitId));
-        if (zone is not ("quarantine" or "cleared"))
-            throw new ArgumentException("Evidence zone must be quarantine or cleared.", nameof(zone));
+        // "raw-mail" is a THIRD zone, deliberately outside the quarantine/cleared pair.
+        //
+        // Raw inbound messages were briefly written to "quarantine", which is legal and reads as
+        // correct — an un-inspected message really is quarantined. But the retention purge
+        // derives a sibling key by string-swapping /quarantine/ <-> /cleared/ and deletes BOTH
+        // (EvidenceRetentionEligibility.ZoneKeysFor). Since .eml is on the document intake
+        // allow-list, the same bytes can legitimately exist as a SourceDocument, and purging
+        // that document would delete the authoritative raw message an EmailInquiryAssembly
+        // points at — evidence loss with nothing to say it happened, because an assembly is not
+        // a SourceDocument and none of the retention guards can see it.
+        //
+        // A separate zone matches neither swap arm, so ZoneKeysFor returns only the exact key
+        // and the collision cannot occur. The whitelist is not weakened: this is one more named
+        // constant, not an opening for arbitrary paths.
+        if (zone is not ("quarantine" or "cleared" or "raw-mail"))
+            throw new ArgumentException(
+                "Evidence zone must be quarantine, cleared or raw-mail.", nameof(zone));
         if (sha256.Length != 64 || sha256.Any(c => !Uri.IsHexDigit(c)) || sha256 != sha256.ToLowerInvariant())
             throw new ArgumentException("A lowercase SHA-256 digest is required.", nameof(sha256));
     }
@@ -370,6 +503,14 @@ public sealed class S3EvidenceObjectStorage : IEvidenceObjectStorage, IDisposabl
         }
     }
 
+    /// <summary>
+    /// Classification boundary for the 2026-08-12 incident: <c>Amazon.S3</c> exceptions stop
+    /// HERE and never travel up as themselves. Controllers must not depend on the SDK, and
+    /// keeping the provider type inside the storage layer is what makes it structurally
+    /// impossible for a bucket name to reach a response body. The original is preserved as
+    /// the inner exception, so the Render log still records
+    /// "The specified bucket does not exist: …" verbatim.
+    /// </summary>
     public async Task<EvidenceObject> WriteImmutableAsync(
         long businessUnitId,
         string zone,
@@ -377,6 +518,24 @@ public sealed class S3EvidenceObjectStorage : IEvidenceObjectStorage, IDisposabl
         string extension,
         ReadOnlyMemory<byte> content,
         CancellationToken ct = default)
+    {
+        try
+        {
+            return await WriteImmutableCoreAsync(businessUnitId, zone, sha256, extension, content, ct);
+        }
+        catch (Exception exception) when (EvidenceStorageFaults.IsStoreUnavailable(exception, ct))
+        {
+            throw EvidenceStorageFaults.Unavailable(exception);
+        }
+    }
+
+    private async Task<EvidenceObject> WriteImmutableCoreAsync(
+        long businessUnitId,
+        string zone,
+        string sha256,
+        string extension,
+        ReadOnlyMemory<byte> content,
+        CancellationToken ct)
     {
         LocalEvidenceObjectStorage.ValidateIdentity(businessUnitId, zone, sha256);
         var key = LocalEvidenceObjectStorage.BuildKey(businessUnitId, zone, sha256, extension).Replace('\\', '/');
@@ -405,7 +564,7 @@ public sealed class S3EvidenceObjectStorage : IEvidenceObjectStorage, IDisposabl
         catch (AmazonS3Exception ex) when (ex.StatusCode is HttpStatusCode.PreconditionFailed or HttpStatusCode.Conflict)
         {
             var raced = await TryHeadAsync(key, ct)
-                ?? throw new InvalidOperationException("Immutable evidence object raced but cannot be resolved.", ex);
+                ?? throw new InvalidOperationException(EvidenceStorageFaults.UnresolvableRaceMessage, ex);
             return ValidateExisting(raced, key, sha256, content.Length);
         }
     }
@@ -591,4 +750,46 @@ public sealed class S3EvidenceObjectStorage : IEvidenceObjectStorage, IDisposabl
     }
 
     public void Dispose() => _client.Dispose();
+}
+
+/// <summary>
+/// Stand-in for a durable provider that was ASKED FOR but could not be built — an S3 block
+/// with no bucket, no credentials, or a rejected endpoint.
+///
+/// <para>Without it the failure lands in the DI factory, so resolving any controller that
+/// touches evidence storage throws and every upload answers an unhandled 500 — strictly
+/// worse than the incident that motivated this class, because a 500 says nothing at all.
+/// Here the deployment gets the same honest refusal as an unreachable bucket: one
+/// configuration outcome, logged once at boot with the real reason, and a readiness probe
+/// that fails for as long as it is true.</para>
+///
+/// <para><see cref="IsDurable"/> reports true because the deployment CHOSE durable storage.
+/// Reporting false would make the health check say "evidence storage is local and
+/// ephemeral", which is a different and untrue diagnosis.</para>
+/// </summary>
+public sealed class UnconfiguredEvidenceObjectStorage : IEvidenceObjectStorage
+{
+    private readonly Exception _configurationFault;
+
+    public UnconfiguredEvidenceObjectStorage(Exception configurationFault)
+        => _configurationFault = configurationFault;
+
+    public bool IsDurable => true;
+
+    public Task ProbeAsync(CancellationToken ct = default) => throw Refuse();
+
+    public Task<EvidenceObject> WriteImmutableAsync(
+        long businessUnitId,
+        string zone,
+        string sha256,
+        string extension,
+        ReadOnlyMemory<byte> content,
+        CancellationToken ct = default) => throw Refuse();
+
+    public Task<Stream> OpenVerifiedReadAsync(
+        string storageUri,
+        string expectedSha256,
+        CancellationToken ct = default) => throw Refuse();
+
+    private EvidenceStorageUnavailableException Refuse() => new(true, _configurationFault);
 }

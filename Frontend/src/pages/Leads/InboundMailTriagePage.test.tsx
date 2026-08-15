@@ -3,7 +3,13 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import InboundMailTriagePage from './InboundMailTriagePage';
-import { readTriagePage, readTriageRow } from '../../api/services/emailTriageService';
+import {
+  describeAssemblyState,
+  readPollFailureReport,
+  readPollReport,
+  readTriagePage,
+  readTriageRow,
+} from '../../api/services/emailTriageService';
 
 /**
  * What is locked down here is the reason the screen exists:
@@ -11,11 +17,16 @@ import { readTriagePage, readTriageRow } from '../../api/services/emailTriageSer
  *  - the machine's reasoning is shown as human wording, never as raw snake_case;
  *  - a rejected message can always be put back, and only with a reason;
  *  - the prose that arrived IS the evidence, so it is rendered next to what came out of it;
- *  - a field the backend has not shipped reads as an absence, never as 0 or a blank cell.
+ *  - a field the backend has not shipped reads as an absence, never as 0 or a blank cell;
+ *  - a poll states what it DID, and a poll that touched no mailbox is never dressed as a success;
+ *  - "Open lead" exists only where a lead does — a message needing review has none, and offering
+ *    the action anyway is the defect this screen is meant to remove.
  */
 
 const listTriage = vi.fn();
 const reprocess = vi.fn();
+const pollMailboxes = vi.fn();
+const getMessage = vi.fn();
 
 vi.mock('../../api/services/emailTriageService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../api/services/emailTriageService')>();
@@ -24,6 +35,8 @@ vi.mock('../../api/services/emailTriageService', async (importOriginal) => {
     default: {
       listTriage: (params: unknown) => listTriage(params),
       reprocess: (id: number, reason: string) => reprocess(id, reason),
+      pollMailboxes: () => pollMailboxes(),
+      getMessage: (id: number) => getMessage(id),
     },
   };
 });
@@ -100,6 +113,132 @@ const INQUIRY_PAGE = readTriagePage(
   1,
 );
 
+/**
+ * The three assembly outcomes that must look different: finished with a lead, still in flight, and
+ * stopped for a person. The last two have no lead — and must offer no way to pretend otherwise.
+ *
+ * Component arrays are deliberately absent here, exactly as the list endpoint returns them. Parts
+ * arrive only from the per-message read, and the screen must not fake them from the list.
+ */
+const ASSEMBLY_PAGE = readTriagePage(
+  {
+    items: [
+      {
+        id: 101,
+        receivedOn: '2026-08-05T07:00:00Z',
+        from: 'projects@dana-cont.qa',
+        subject: 'RFQ 8891 — pipe supports',
+        outcome: 'Inquiry',
+        reasonCodes: ['rfq_reference'],
+        assemblyState: 'Assembled',
+        expectedComponentCount: 2,
+        completedComponentCount: 2,
+        // The assembly worker's key for the lead, not the triage row's.
+        assembledLeadId: 6120,
+        ingestedAtUtc: '2026-08-05T07:01:00Z',
+      },
+      {
+        id: 102,
+        receivedOn: '2026-08-05T08:00:00Z',
+        from: 'tenders@mep-gulf.ae',
+        subject: 'Tender pack — three drawings',
+        outcome: 'Inquiry',
+        reasonCodes: [],
+        assemblyState: 'Extracting',
+        expectedComponentCount: 3,
+        completedComponentCount: 1,
+      },
+      {
+        id: 103,
+        receivedOn: '2026-08-05T09:00:00Z',
+        from: 'buying@qcon.qa',
+        subject: 'Scanned enquiry',
+        outcome: 'Uncertain',
+        reasonCodes: ['no_signal'],
+        assemblyState: 'NeedsReview',
+        assemblyReason: 'An attachment could not be read, so a person has to look at this message.',
+        expectedComponentCount: 2,
+        completedComponentCount: 2,
+      },
+    ],
+    totalCount: 3,
+    pageNumber: 1,
+    pageSize: 25,
+  },
+  1,
+);
+
+/** What the per-message read returns for the message that needs review. */
+const REVIEW_MESSAGE = readTriageRow({
+  id: 103,
+  outcome: 'Uncertain',
+  assemblyState: 'NeedsReview',
+  assemblyReason: 'An attachment could not be read, so a person has to look at this message.',
+  components: [
+    { id: 10, ordinal: 0, kind: 'Body', fileName: null, state: 'Completed' },
+    {
+      id: 11,
+      ordinal: 1,
+      kind: 'Attachment',
+      fileName: 'scan.pdf',
+      state: 'Skipped',
+      // Code only, no sentence: the screen must humanise it rather than print snake_case.
+      reasonCode: 'attachment_unreadable',
+    },
+  ],
+  skippedAttachments: ['legacy-price-sheet.xls (unsupported_format)'],
+  rawEvidenceStored: true,
+  rawEvidenceVerifiable: true,
+  senderSentAtUtc: '2026-08-05T08:59:00Z',
+  parsedAt: '2026-08-05T09:02:00Z',
+});
+
+/**
+ * Fully assembled — and still short of what the customer sent. This is the case ING-06 exists for:
+ * every count on the row is complete, so nothing reads as a failure, while two of the sender's
+ * files were never handed to extraction. The third entry is deliberately malformed.
+ */
+const SKIPPED_PAGE = readTriagePage(
+  {
+    items: [
+      {
+        id: 201,
+        receivedOn: '2026-08-06T06:00:00Z',
+        from: 'projects@fitout-gulf.ae',
+        subject: 'Fit-out package — three files',
+        outcome: 'Inquiry',
+        reasonCodes: ['rfq_reference'],
+        hasAttachments: true,
+        attachmentCount: 3,
+        assemblyState: 'Assembled',
+        expectedComponentCount: 2,
+        completedComponentCount: 2,
+        assembledLeadId: 7010,
+        skippedAttachments: [
+          "deck.pptx (unsupported file type '.pptx')",
+          'site-video.mp4 (exceeds the 10 MB size limit (18874368 bytes))',
+          42,
+        ],
+      },
+    ],
+    totalCount: 1,
+    pageNumber: 1,
+    pageSize: 25,
+  },
+  1,
+);
+
+/** The parts that WERE scheduled for that message: the body and the one readable drawing. */
+const SKIPPED_MESSAGE = readTriageRow({
+  id: 201,
+  outcome: 'Inquiry',
+  assemblyState: 'Assembled',
+  components: [
+    { id: 20, ordinal: 0, kind: 'Body', fileName: null, state: 'Completed' },
+    { id: 21, ordinal: 1, kind: 'Attachment', fileName: 'layout-rev-c.pdf', state: 'Completed' },
+  ],
+});
+
 const renderPage = () => {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -125,6 +264,28 @@ beforeEach(() => {
   hasPermission.mockReturnValue(true);
   listTriage.mockResolvedValue(NOISE_PAGE);
   reprocess.mockResolvedValue({ id: 41, status: 'Queued', batchId: 'batch-42', replayed: false });
+  pollMailboxes.mockResolvedValue(
+    readPollReport({
+      message: '2 mailbox(es) polled, 4 message(s) in the poll window, 3 new, 3 captured.',
+      mailboxes: 2,
+      newMessages: 3,
+      totals: {
+        mailboxesPolled: 2,
+        mailboxesFailed: 0,
+        messagesFound: 4,
+        messagesDownloaded: 3,
+        messagesAlreadyIngested: 1,
+        messagesCaptured: 3,
+        componentsScheduled: 5,
+        messagesHeldForReview: 1,
+        messagesRejected: 0,
+        messagesNotAcknowledged: 0,
+      },
+      polled: [{ mailbox: 'enquiries@example.test', succeeded: true, lookbackCappedDays: 0 }],
+    }),
+  );
+  // A message whose parts this deployment does not report — the default for the sparse fixtures.
+  getMessage.mockImplementation((id: number) => Promise.resolve(readTriageRow({ id, outcome: 'Noise' })));
 });
 
 describe('InboundMailTriagePage', () => {
@@ -246,6 +407,424 @@ describe('InboundMailTriagePage', () => {
   });
 });
 
+describe('InboundMailTriagePage — polling on demand', () => {
+  it('statesWhatThePollDid_ratherThanABareConfirmation', async () => {
+    renderPage();
+    await screen.findByText(/Automatic reply: Cable tray enquiry/);
+
+    fireEvent.click(screen.getByRole('button', { name: /poll now/i }));
+
+    await waitFor(() => expect(pollMailboxes).toHaveBeenCalled());
+    expect(await screen.findByText('Polled 2 mailboxes — 3 new messages')).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        '4 messages in the poll window · 3 new · 1 already ingested · 3 captured · '
+        + '5 parts queued for extraction · 1 held for review · 0 rejected.',
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it('warnsWhenMailWasLeftInTheMailboxDespiteASuccessfulPoll', async () => {
+    pollMailboxes.mockResolvedValue(
+      readPollReport({
+        mailboxes: 1,
+        newMessages: 2,
+        totals: { mailboxesPolled: 1, messagesDownloaded: 2, messagesNotAcknowledged: 1 },
+        polled: [{ mailbox: 'enquiries@example.test', succeeded: true, lookbackCappedDays: 3 }],
+      }),
+    );
+    renderPage();
+    await screen.findByText(/Automatic reply: Cable tray enquiry/);
+
+    fireEvent.click(screen.getByRole('button', { name: /poll now/i }));
+
+    expect(
+      await screen.findByText(/1 message could not be taken and was left unread for the next cycle/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Mail older than the poll window was not read — up to 3 days/)).toBeInTheDocument();
+  });
+
+  it('rereadsTheListAfterAPoll_soCapturedMailIsVisibleWithoutRefreshing', async () => {
+    renderPage();
+    await screen.findByText(/Automatic reply: Cable tray enquiry/);
+    const before = listTriage.mock.calls.length;
+
+    fireEvent.click(screen.getByRole('button', { name: /poll now/i }));
+
+    await waitFor(() => expect(listTriage.mock.calls.length).toBeGreaterThan(before));
+  });
+
+  it('refusesToDressAPollThatTouchedNoMailboxAsASuccess', async () => {
+    pollMailboxes.mockResolvedValue(
+      readPollReport({ message: 'No active IMAP mailbox is configured, so no mail was fetched.' }),
+    );
+    renderPage();
+    await screen.findByText(/Automatic reply: Cable tray enquiry/);
+
+    fireEvent.click(screen.getByRole('button', { name: /poll now/i }));
+
+    expect(await screen.findByText('No mailbox was polled')).toBeInTheDocument();
+    expect(screen.getByText(/No active IMAP mailbox is configured/)).toBeInTheDocument();
+  });
+
+  it('namesTheMailboxAPollCouldNotRead', async () => {
+    pollMailboxes.mockRejectedValue({
+      isAxiosError: true,
+      response: {
+        status: 502,
+        data: {
+          message: '1 of 2 mailbox(es) could not be polled. No mail has been ingested from them.',
+          reasons: [
+            {
+              mailbox: 'enquiries@example.test',
+              reason: 'The mail server refused the sign-in.',
+              lastSuccessfulPoll: '2026-08-04T05:00:00Z',
+            },
+          ],
+        },
+      },
+    });
+    renderPage();
+    await screen.findByText(/Automatic reply: Cable tray enquiry/);
+
+    fireEvent.click(screen.getByRole('button', { name: /poll now/i }));
+
+    expect(await screen.findByText('1 mailbox could not be polled')).toBeInTheDocument();
+    expect(screen.getByText('enquiries@example.test')).toBeInTheDocument();
+    expect(screen.getByText(/The mail server refused the sign-in/)).toBeInTheDocument();
+  });
+
+  it('disablesThePollWhenTheRoleCannotRunIt', async () => {
+    // Read plus edit, but not create — the exact permission the endpoint requires.
+    hasPermission.mockImplementation((_module: string, action?: string) => action !== 'create');
+    renderPage();
+    await screen.findByText(/Automatic reply: Cable tray enquiry/);
+
+    expect(screen.getByRole('button', { name: /poll now/i })).toBeDisabled();
+    expect(screen.getByText(/"create leads" permission to poll the mailboxes/i)).toBeInTheDocument();
+  });
+});
+
+describe('InboundMailTriagePage — assembly', () => {
+  beforeEach(() => {
+    listTriage.mockResolvedValue(ASSEMBLY_PAGE);
+  });
+
+  it('showsTheAssemblyStateAndItsReasonPerMessage', async () => {
+    renderPage();
+
+    const assembled = await rowFor(/RFQ 8891 — pipe supports/);
+    expect(within(assembled).getByText('Assembled')).toBeInTheDocument();
+    expect(within(assembled).getByText('2 of 2 parts assembled')).toBeInTheDocument();
+
+    const review = await rowFor(/Scanned enquiry/);
+    expect(within(review).getByText('Needs review')).toBeInTheDocument();
+    expect(
+      within(review).getByText('An attachment could not be read, so a person has to look at this message.'),
+    ).toBeInTheDocument();
+  });
+
+  it('offersOpenLeadOnlyWhereALeadActuallyExists', async () => {
+    renderPage();
+
+    const assembled = await rowFor(/RFQ 8891 — pipe supports/);
+    fireEvent.click(within(assembled).getByRole('button', { name: /open lead/i }));
+    expect(navigate).toHaveBeenCalledWith('/procurement/leads/view/6120');
+
+    const review = await rowFor(/Scanned enquiry/);
+    expect(within(review).queryByRole('button', { name: /open lead/i })).not.toBeInTheDocument();
+    expect(within(review).getByText('No lead was created for this message.')).toBeInTheDocument();
+  });
+
+  it('saysAMessageIsStillBeingAssembledInsteadOfLookingStuck', async () => {
+    renderPage();
+
+    const inFlight = await rowFor(/Tender pack — three drawings/);
+    expect(within(inFlight).getByText('Reading')).toBeInTheDocument();
+    expect(within(inFlight).getByText('1 of 3 parts assembled')).toBeInTheDocument();
+    expect(within(inFlight).queryByRole('button', { name: /open lead/i })).not.toBeInTheDocument();
+    expect(
+      within(inFlight).getByText('No lead exists yet — this message is still being assembled.'),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/1 message on this page is still being assembled/)).toBeInTheDocument();
+  });
+
+  it('readsThePartsOnlyWhenTheRowIsOpened_andShowsStateAndReasonForEach', async () => {
+    getMessage.mockResolvedValue(REVIEW_MESSAGE);
+    renderPage();
+    const review = await rowFor(/Scanned enquiry/);
+    // The list carries no parts, so nothing may have been requested before the row is opened.
+    expect(getMessage).not.toHaveBeenCalled();
+
+    fireEvent.click(within(review).getByRole('button', { name: /show message/i }));
+
+    await waitFor(() => expect(getMessage).toHaveBeenCalledWith(103));
+    const parts = await screen.findByRole('table', { name: /parts of scanned enquiry/i });
+    expect(within(parts).getByText('scan.pdf')).toBeInTheDocument();
+    expect(within(parts).getByText('Could not be read')).toBeInTheDocument();
+    // A bare reason code must not reach a salesperson as snake_case.
+    expect(within(parts).getByText('Attachment Unreadable')).toBeInTheDocument();
+    expect(within(parts).queryByText('attachment_unreadable')).not.toBeInTheDocument();
+    // The body has no filename; naming it by what it is beats an empty cell.
+    expect(within(parts).getAllByText('Message text').length).toBeGreaterThan(0);
+  });
+
+  it('saysSoWhenTheDeploymentReportsNoPartsAtAll', async () => {
+    listTriage.mockResolvedValue(NOISE_PAGE);
+    renderPage();
+    const sparse = await rowFor(/\(no subject\)/);
+    fireEvent.click(within(sparse).getByRole('button', { name: /show message/i }));
+
+    const detail = await screen.findByRole('region', { name: /message and extraction/i });
+    expect(
+      await within(detail).findByText(/does not report the individual parts of a message yet/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('table', { name: /parts of/i })).not.toBeInTheDocument();
+  });
+
+  it('keepsTheMessageReadableWhenItsPartsCannotBeRead', async () => {
+    getMessage.mockRejectedValue({ isAxiosError: true, response: { status: 500, data: {} } });
+    renderPage();
+    const review = await rowFor(/Scanned enquiry/);
+    fireEvent.click(within(review).getByRole('button', { name: /show message/i }));
+
+    const detail = await screen.findByRole('region', { name: /message and extraction/i });
+    expect(await within(detail).findByRole('alert')).toBeInTheDocument();
+    // The decision the panel already had must survive the parts failing to load.
+    expect(within(detail).getByText(/Assembly — Needs review/)).toBeInTheDocument();
+  });
+});
+
+describe('InboundMailTriagePage — skipped attachments', () => {
+  beforeEach(() => {
+    listTriage.mockResolvedValue(SKIPPED_PAGE);
+    getMessage.mockResolvedValue(SKIPPED_MESSAGE);
+  });
+
+  const openSkippedRow = async (): Promise<HTMLElement> => {
+    renderPage();
+    const row = await rowFor(/Fit-out package — three files/);
+    fireEvent.click(within(row).getByRole('button', { name: /show message/i }));
+    return screen.findByRole('region', { name: /message and extraction/i });
+  };
+
+  it('showsWhatWasSkipped_soAnAttachmentCannotVanishSilently', async () => {
+    const detail = await openSkippedRow();
+
+    const table = await within(detail).findByRole('table', { name: /skipped attachments of/i });
+    expect(within(table).getByText('deck.pptx')).toBeInTheDocument();
+    expect(within(table).getByText("unsupported file type '.pptx'")).toBeInTheDocument();
+    expect(within(table).getByText('site-video.mp4')).toBeInTheDocument();
+    expect(within(table).getByText('exceeds the 10 MB size limit (18874368 bytes)')).toBeInTheDocument();
+    // Each one says what happened to it in the record's own word.
+    expect(within(table).getAllByText('Skipped')).toHaveLength(3);
+    // A malformed entry still occupies a row: dropping it is the disappearance this fixes.
+    expect(within(table).getByText('Not reported')).toBeInTheDocument();
+  });
+
+  it('doesNotCountASkippedAttachmentAsAPart', async () => {
+    const detail = await openSkippedRow();
+    await within(detail).findByRole('table', { name: /skipped attachments of/i });
+
+    // The message is finished and says so — skips do not turn an assembled message into a failure.
+    expect(within(detail).getByText(/Assembly — Assembled/)).toBeInTheDocument();
+    expect(screen.getByText('2 of 2 parts assembled')).toBeInTheDocument();
+
+    // The parts table is the scheduled work only: two components, neither of them a skip.
+    const parts = within(detail).getByRole('table', { name: /parts of fit-out package/i });
+    expect(within(parts).getAllByRole('row')).toHaveLength(3); // header + 2 parts
+    expect(within(parts).queryByText('deck.pptx')).not.toBeInTheDocument();
+    expect(within(parts).queryByText('site-video.mp4')).not.toBeInTheDocument();
+    // And the cost of the skip is stated where the counts are, so "complete" cannot read as "all".
+    expect(
+      within(detail).getByText(/not counted among the parts above/i),
+    ).toBeInTheDocument();
+  });
+
+  it('rendersNothingAtAllWhenNoAttachmentWasSkipped', async () => {
+    listTriage.mockResolvedValue(
+      readTriagePage(
+        {
+          items: [
+            {
+              id: 202,
+              subject: 'Clean package',
+              outcome: 'Inquiry',
+              reasonCodes: [],
+              hasAttachments: true,
+              attachmentCount: 1,
+              assemblyState: 'Assembled',
+              skippedAttachments: [],
+            },
+          ],
+          totalCount: 1,
+          pageNumber: 1,
+          pageSize: 25,
+        },
+        1,
+      ),
+    );
+    renderPage();
+    const row = await rowFor(/Clean package/);
+    fireEvent.click(within(row).getByRole('button', { name: /show message/i }));
+
+    const detail = await screen.findByRole('region', { name: /message and extraction/i });
+    expect(within(detail).queryByText(/never sent for extraction/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('table', { name: /skipped attachments of/i })).not.toBeInTheDocument();
+    // Reported and empty IS an answer, so nothing is owed to the operator here.
+    expect(within(detail).queryByText(/whether any attachment was skipped/i)).not.toBeInTheDocument();
+  });
+
+  it('doesNotClaimNothingWasSkippedWhenTheDeploymentNeverSaid', async () => {
+    listTriage.mockResolvedValue(INQUIRY_PAGE);
+    renderPage();
+    const row = await rowFor(/Requirement — Jebel Ali/);
+    fireEvent.click(within(row).getByRole('button', { name: /show message/i }));
+
+    const detail = await screen.findByRole('region', { name: /message and extraction/i });
+    expect(screen.queryByRole('table', { name: /skipped attachments of/i })).not.toBeInTheDocument();
+    expect(
+      within(detail).getByText(/Whether any attachment was skipped .* is not reported by this deployment/i),
+    ).toBeInTheDocument();
+  });
+});
+
+describe('readPollReport', () => {
+  it('treatsAnAbsentMailboxCountAsNothingPolled', () => {
+    const report = readPollReport({
+      message: 'No active IMAP mailbox is configured, so no mail was fetched.',
+    });
+    expect(report.anyMailboxPolled).toBe(false);
+    expect(report.messagesFound).toBeNull();
+    expect(report.failures).toEqual([]);
+  });
+
+  it('readsTheCountsFromTotals_andKeepsUnreportedOnesNullRatherThanZero', () => {
+    const report = readPollReport({
+      mailboxes: 1,
+      newMessages: 0,
+      totals: { mailboxesPolled: 1, messagesDownloaded: 0, messagesCaptured: 0 },
+    });
+    expect(report.anyMailboxPolled).toBe(true);
+    expect(report.messagesNew).toBe(0);
+    expect(report.captured).toBe(0);
+    expect(report.rejected).toBeNull();
+    expect(report.scheduled).toBeNull();
+    expect(report.lookbackCappedDays).toBeNull();
+  });
+
+  it('countsAMailboxThatReportedFailureEvenWithoutAReasonsArray', () => {
+    const report = readPollReport({
+      mailboxes: 2,
+      totals: { mailboxesPolled: 2, mailboxesFailed: 1 },
+      polled: [
+        { mailbox: 'good@example.test', succeeded: true },
+        { mailbox: 'bad@example.test', succeeded: false, reason: 'The sign-in was refused.' },
+      ],
+    });
+    expect(report.failures).toHaveLength(1);
+    expect(report.failures[0]).toMatchObject({ mailbox: 'bad@example.test' });
+  });
+
+  it('keepsThePartlyFailedCyclesWorkVisible', () => {
+    // The 502 branch reports the same work detail as the success branch: a partly-failed cycle
+    // can still have captured mail, and hiding that sends an operator hunting for it.
+    const report = readPollFailureReport({
+      response: {
+        status: 502,
+        data: {
+          message: '1 of 2 mailbox(es) could not be polled.',
+          reasons: [{ mailbox: 'bad@example.test', reason: 'The sign-in was refused.' }],
+          mailboxes: 2,
+          totals: { mailboxesPolled: 2, mailboxesFailed: 1, messagesCaptured: 4 },
+        },
+      },
+    });
+    expect(report?.captured).toBe(4);
+    expect(report?.failures).toHaveLength(1);
+  });
+});
+
+describe('assembly reading', () => {
+  it('readsTheRealPipelineStates', () => {
+    expect(describeAssemblyState('Captured').inProgress).toBe(true);
+    expect(describeAssemblyState('Inspecting').inProgress).toBe(true);
+    expect(describeAssemblyState('Extracting').inProgress).toBe(true);
+    expect(describeAssemblyState('ReadyForAssembly').inProgress).toBe(true);
+    expect(describeAssemblyState('Assembled')).toMatchObject({ inProgress: false, needsHuman: false });
+    expect(describeAssemblyState('NeedsReview').needsHuman).toBe(true);
+    expect(describeAssemblyState('RejectedSecurity').needsHuman).toBe(true);
+  });
+
+  it('doesNotPromiseAnAutomaticRetryForAHeldMessage', () => {
+    // Nothing sweeps held components in this build, so "held" must name a human action, not a
+    // retry that never comes.
+    const held = describeAssemblyState('FailedRecoverable');
+    expect(held.inProgress).toBe(false);
+    expect(held.needsHuman).toBe(true);
+    expect(held.meaning).toMatch(/nothing picks this up on its own/i);
+  });
+
+  it('doesNotColourAnEmptyMessageAsAFailure', () => {
+    // "Nothing to quote" and "we could not read it" are different facts about different mail.
+    const empty = describeAssemblyState('NoInquiry');
+    expect(empty.needsHuman).toBe(false);
+    expect(empty.chipColor).toBe('default');
+  });
+
+  it('neverTreatsAnUnknownStateAsFinished', () => {
+    const unknown = describeAssemblyState('QuantumSuperposition');
+    expect(unknown.recognised).toBe(false);
+    expect(unknown.inProgress).toBe(false);
+    expect(unknown.needsHuman).toBe(false);
+  });
+
+  it('acceptsTheWorkerKeySpellingsAndKeepsAbsenceDistinct', () => {
+    const reported = readTriageRow({
+      id: 9,
+      outcome: 'Inquiry',
+      assemblyState: 'NeedsReview',
+      assembledLeadId: 12,
+      expectedComponentCount: 1,
+      lastUpdatedAtUtc: '2026-08-05T10:00:00Z',
+      components: [
+        { id: 4, ordinal: 0, fileName: 'a.pdf', kind: 'Attachment', state: 'Skipped', reasonCode: 'unreadable_pdf' },
+      ],
+    });
+    expect(reported.leadId).toBe(12);
+    expect(reported.componentsExpected).toBe(1);
+    expect(reported.lastUpdatedOn).toBe('2026-08-05T10:00:00Z');
+    expect(reported.componentsReported).toBe(true);
+    expect(reported.components[0]).toMatchObject({
+      fileName: 'a.pdf',
+      state: 'Skipped',
+      reason: 'unreadable_pdf',
+    });
+    expect(reported.skippedAttachments).toEqual([]);
+
+    const silent = readTriageRow({ id: 10, outcome: 'Noise' });
+    expect(silent.assemblyState).toBeNull();
+    expect(silent.componentsExpected).toBeNull();
+    // Null components mean "not asked for", never "this message has no parts".
+    expect(silent.componentsReported).toBe(false);
+    expect(describeAssemblyState(silent.assemblyState).recognised).toBe(false);
+  });
+
+  it('keepsLegacySkippedAttachmentsVisibleBesideCanonicalComponents', async () => {
+    listTriage.mockResolvedValue(ASSEMBLY_PAGE);
+    getMessage.mockResolvedValue(REVIEW_MESSAGE);
+
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: /show message scanned enquiry/i }));
+
+    expect(await screen.findByText('Attachments skipped before component tracking')).toBeInTheDocument();
+    expect(screen.getByText('legacy-price-sheet.xls (unsupported_format)')).toBeInTheDocument();
+    expect(screen.getByText(/original email is retained and verified/i)).toBeInTheDocument();
+    expect(screen.getByText(/sender timestamp/i)).toBeInTheDocument();
+    expect(screen.getByText(/extraction finished/i)).toBeInTheDocument();
+  });
+});
+
 describe('readTriageRow', () => {
   it('keepsAbsenceDistinctFromFalseAndZero', () => {
     const row = readTriageRow({ id: 9, outcome: 'Uncertain' });
@@ -262,6 +841,50 @@ describe('readTriageRow', () => {
     expect(row.attachmentCount).toBe(1);
     expect(row.hasAttachments).toBe(true);
     expect(row.attachmentNamesReported).toBe(true);
+  });
+
+  it('splitsASkippedAttachmentIntoItsNameAndItsReason', () => {
+    const row = readTriageRow({
+      id: 9,
+      outcome: 'Inquiry',
+      skippedAttachments: [
+        "deck.pptx (unsupported file type '.pptx')",
+        // Brackets inside the reason, and brackets inside the name: both are everyday mail, and
+        // anchoring on the first or the last bracket gets one of them wrong.
+        'site-video.mp4 (exceeds the 10 MB size limit (18874368 bytes))',
+        "quote (1).pdf (unsupported file type '.pdf')",
+        // A path is never rendered as one — only the leaf survives.
+        'C:\\Users\\buyer\\Desktop\\boq.xlsx (could not be read)',
+        'orphan.dwg',
+      ],
+    });
+    expect(row.skippedAttachmentsReported).toBe(true);
+    expect(row.skippedAttachments.map((entry) => [entry.fileName, entry.reason])).toEqual([
+      ['deck.pptx', "unsupported file type '.pptx'"],
+      ['site-video.mp4', 'exceeds the 10 MB size limit (18874368 bytes)'],
+      ['quote (1).pdf', "unsupported file type '.pdf'"],
+      ['boq.xlsx', 'could not be read'],
+      ['orphan.dwg', null],
+    ]);
+  });
+
+  it('keepsAMalformedSkipEntryRatherThanDroppingIt', () => {
+    const row = readTriageRow({ id: 9, outcome: 'Inquiry', skippedAttachments: [42, '  ', 'a.pdf (too large)'] });
+    // Three attachments were recorded as skipped, so three are shown. An entry this build cannot
+    // read is unnamed, never absent — absence is the defect the record exists to prevent.
+    expect(row.skippedAttachments).toHaveLength(3);
+    expect(row.skippedAttachments[0]).toMatchObject({ fileName: null, reason: null });
+    expect(row.skippedAttachments[2]).toMatchObject({ fileName: 'a.pdf', reason: 'too large' });
+  });
+
+  it('keepsAnAbsentSkipListDistinctFromAnEmptyOne', () => {
+    const silent = readTriageRow({ id: 9, outcome: 'Inquiry' });
+    expect(silent.skippedAttachmentsReported).toBe(false);
+    expect(silent.skippedAttachments).toEqual([]);
+
+    const clean = readTriageRow({ id: 10, outcome: 'Inquiry', skippedAttachments: [] });
+    expect(clean.skippedAttachmentsReported).toBe(true);
+    expect(clean.skippedAttachments).toEqual([]);
   });
 
   it('readsABareArrayResponseAsOnePage', () => {

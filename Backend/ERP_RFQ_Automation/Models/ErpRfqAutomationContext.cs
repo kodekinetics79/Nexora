@@ -142,6 +142,10 @@ public partial class ErpRfqAutomationContext : DbContext
         CustomFieldGovernanceInterceptor.Validate(ChangeTracker);
         LifecycleGovernanceInterceptor.Validate(ChangeTracker);
         MasterDataAuditInterceptor.ValidateAppendOnly(ChangeTracker);
+        // The email-assembly concurrency token is an int, and Npgsql does not auto-generate
+        // those. Stamped here rather than at each call site because a call site that forgets is
+        // precisely how the token came to be declared and never incremented.
+        ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryConcurrencyStamp.Stamp(ChangeTracker);
         // FR-MDM-05 / E44. Captured HERE, not in the controllers, because every other write path
         // — the spreadsheet uploader above all — goes around a controller and none of them can go
         // around SaveChanges. Update and delete audits are enlisted into this very batch; creates
@@ -160,6 +164,7 @@ public partial class ErpRfqAutomationContext : DbContext
         CustomFieldGovernanceInterceptor.Validate(ChangeTracker);
         LifecycleGovernanceInterceptor.Validate(ChangeTracker);
         MasterDataAuditInterceptor.ValidateAppendOnly(ChangeTracker);
+        ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryConcurrencyStamp.Stamp(ChangeTracker);
         var audit = MasterDataAuditInterceptor.Capture(this);
         var written = await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
         // acceptAllChangesOnSuccess == false means the caller intends to accept the change tracker

@@ -88,7 +88,12 @@ public sealed class ExtractionQueue : IExtractionQueue
 
     // All entity columns default to their property names (case-sensitive, quoted).
     private const string ReturningColumns =
-        "j.\"Id\", j.\"SourceDocumentOccurrenceId\", j.\"BatchId\", j.\"BusinessUnitId\", j.\"SourceType\", j.\"ContentHash\", " +
+        // EmailInquiryComponentId belongs in EVERY materializer, not only the EF ones. The
+        // worker reads ownership off the claimed job, and a column omitted here comes back null
+        // however correct the row is — which reads exactly like a legacy per-document job and
+        // sends an email component straight past the assembly barrier into its own Lead.
+        "j.\"Id\", j.\"SourceDocumentOccurrenceId\", j.\"EmailInquiryComponentId\", " +
+        "j.\"BatchId\", j.\"BusinessUnitId\", j.\"SourceType\", j.\"ContentHash\", " +
         "j.\"StoragePath\", j.\"FileName\", j.\"FileType\", j.\"Status\", j.\"Priority\", " +
         "j.\"SchedulerTag\", j.\"Attempts\", j.\"MaxAttempts\", j.\"NextAttemptAt\", " +
         "j.\"LeasedBy\", j.\"LeaseExpiresAt\", j.\"LastError\", j.\"ResultLeadId\", " +
@@ -410,6 +415,7 @@ RETURNING j.""Id"", j.""BusinessUnitId"", j.""Status"", j.""Attempts"", j.""MaxA
             var job = new ExtractionJob
             {
                 SourceDocumentOccurrenceId = request.SourceDocumentOccurrenceId,
+                EmailInquiryComponentId = request.EmailInquiryComponentId,
                 BatchId = batchId,
                 BusinessUnitId = request.BusinessUnitId,
                 SourceType = request.SourceType,
@@ -707,6 +713,7 @@ WHERE ""Id"" = @id AND ""LeasedBy"" = @worker AND ""Attempts"" = @attempt
         {
             Id = r.GetInt64(r.GetOrdinal("Id")),
             SourceDocumentOccurrenceId = GetNullableInt64(r, "SourceDocumentOccurrenceId"),
+            EmailInquiryComponentId = GetNullableInt64(r, "EmailInquiryComponentId"),
             BatchId = r.GetGuid(r.GetOrdinal("BatchId")),
             BusinessUnitId = r.GetInt64(r.GetOrdinal("BusinessUnitId")),
             SourceType = Enum.Parse<ExtractionSourceType>(r.GetString(r.GetOrdinal("SourceType"))),

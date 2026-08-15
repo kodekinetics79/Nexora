@@ -148,7 +148,11 @@ const MailboxPage: React.FC = () => {
   const testMutation = useMutation({
     mutationFn: () => mailboxService.test({
       mailboxId: editing?.id, protocol: form.protocol, host: form.host, port: form.port,
-      username: form.username, password: form.password || undefined, useSsl: form.useSsl,
+      // Sent so the probe authenticates exactly as the poller will. For IMAP the poller signs
+      // in as the address, not the username, and testing the wrong one is how a mailbox can
+      // report healthy while ingesting nothing.
+      emailAddress: form.emailAddress, username: form.username,
+      password: form.password || undefined, useSsl: form.useSsl,
     }),
     onSuccess: setProbe,
     onError: (error: any) =>
