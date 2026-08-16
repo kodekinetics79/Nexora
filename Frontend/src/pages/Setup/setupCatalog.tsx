@@ -17,7 +17,13 @@ import {
   Badge as RoleIcon,
   People as UsersIcon,
   VerifiedUser as PermissionsIcon,
+  Schema as TaxonomyIcon,
+  Psychology as AiTrustIcon,
+  ModelTraining as LifecycleIcon,
+  QueryStats as QualityIcon,
   Hub as IntegrationIcon,
+  RocketLaunch as ReleaseIcon,
+  Gavel as LegalHoldIcon,
   Storage as RetentionIcon,
 } from '@mui/icons-material';
 
@@ -27,17 +33,23 @@ import {
  * Every setup surface — the hub page, the in-page quick switcher, the sidebar's visibility rule —
  * reads this file and nothing else. That is the point: a configuration screen can be listed once
  * or not at all, which is what stops the same feature reappearing under two names as the module
- * grows. `setupCatalog.test.ts` fails the build if an entry is duplicated, if a `/setup/*` route
- * in `App.tsx` is missing here, or if an entry points at a route that does not exist.
+ * grows. `setupCatalog.test.ts` fails the build if an entry is duplicated, if a route in
+ * `setupRoutes.tsx` is missing here, or if an entry points at a route that does not exist.
+ *
+ * Scope note: Setup is the whole administrative surface, not only the `/setup` URL space. The
+ * screens formerly railed as "Platform Governance" and "User & Access" are listed here as first
+ * class entries and adopted into Setup's chrome (see `SETUP_ADOPTED_ROUTES`). They keep their own
+ * URLs — bookmarks and e2e specs point at them — but they are no longer a separate place in the
+ * navigation, which is what made Users, Roles & Permissions, Integration Hub and Storage &
+ * Retention appear twice: once in a rail of their own and once as a card here.
  */
 export interface SetupEntry {
   /** Stable identity — used for React keys and for the route-coverage test. */
   key: string;
   label: string;
   /**
-   * i18n key for the label, where one already exists. The sidebar used to render these seven names
-   * through `t()`, so an Arabic or Urdu workspace read them in its own language; dropping the keys
-   * along with the sidebar list would have quietly made this module English-only. `label` stays the
+   * i18n key for the label, where one already exists. These names render through `t()` elsewhere
+   * in the app, so an Arabic or Urdu workspace reads them in its own language; `label` is the
    * default, so an entry without a key — or a locale without that string — still reads.
    */
   labelKey?: string;
@@ -54,11 +66,6 @@ export interface SetupEntry {
    * so nobody has to discover the difference by trial: the ambiguity is answered where it arises.
    */
   seeAlso?: { label: string; path: string; note: string };
-  /**
-   * Set on entries that live outside `/setup`. They are listed for findability and never counted
-   * as Setup's own surface: the hub links out to the owning module rather than re-implementing it.
-   */
-  external?: boolean;
 }
 
 export interface SetupGroup {
@@ -255,81 +262,154 @@ export const SETUP_GROUPS: SetupGroup[] = [
         path: '/setup/master',
         icon: <ListsIcon />,
         moduleName: 'UOM',
-        // Not "taxonomy": it belongs to Platform Governance's Taxonomy & Skills, and it makes a
-        // search for "tax" answer with this screen instead of Commercial Policy.
+        // Not "taxonomy": it belongs to Taxonomy & Document Skills below, and it makes a search
+        // for "tax" answer with this screen instead of Commercial Policy.
         keywords: ['setup master', 'master sub', 'lookup', 'dropdown', 'reason', 'status', 'picklist'],
+      },
+    ],
+  },
+  {
+    key: 'access',
+    title: 'People & Access',
+    caption: 'Who can sign in, what they are called, and what each one is allowed to do.',
+    entries: [
+      {
+        key: 'users',
+        label: 'Users',
+        labelKey: 'users',
+        description: 'Accounts, the role each person holds, and whether they can still sign in.',
+        path: '/security/users',
+        icon: <UsersIcon />,
+        moduleName: 'Users',
+        keywords: ['account', 'people', 'staff', 'login', 'invite', 'deactivate', 'user management'],
       },
       {
         key: 'roles',
         label: 'Roles',
-        description: 'The job titles people can be given, and the authority tier each one carries.',
         // Roles are Setup_Master rows (SetupType "Role") — creating one is a Setup act, granting it
-        // permissions is a Security act. Deep-linking the filtered list keeps the two honest instead
-        // of building a second role editor: see the Access group for the permissions half.
+        // permissions is the screen below. Deep-linking the filtered list keeps the two honest
+        // instead of building a second role editor.
+        description: 'The job titles people can be given, and the authority tier each one carries.',
         path: '/setup/master?type=role',
         icon: <RoleIcon />,
         moduleName: 'UOM',
         keywords: ['role', 'job title', 'authority', 'rank', 'tier', 'manager', 'administrator'],
+      },
+      {
+        key: 'roles-permissions',
+        label: 'Roles & Permissions',
+        labelKey: 'roles_and_permissions',
+        description: 'What each role may see, create, edit and delete, module by module.',
+        path: '/security/roles',
+        icon: <PermissionsIcon />,
+        moduleName: 'Roles & Permissions',
+        keywords: ['permission', 'access', 'grant', 'module', 'rbac'],
+      },
+    ],
+  },
+  {
+    key: 'ai-governance',
+    title: 'AI & Automation Governance',
+    caption: 'What the models may do, how a change to them is approved, and how their output is judged.',
+    entries: [
+      {
+        key: 'platform-taxonomy',
+        label: 'Taxonomy & Document Skills',
+        description: 'The document schemas and extraction strategies — what the platform reads from a customer or supplier document, and what it does next.',
+        path: '/admin/platform/taxonomy',
+        icon: <TaxonomyIcon />,
+        moduleName: 'Users',
+        keywords: ['taxonomy', 'skills', 'schema', 'extraction', 'validation', 'document type'],
+      },
+      {
+        key: 'platform-ai-trust',
+        label: 'AI Trust',
+        description: 'Which models may run, what may leave your tenant, what it costs, and the record of every call.',
+        path: '/admin/platform/ai-trust',
+        icon: <AiTrustIcon />,
+        moduleName: 'Users',
+        keywords: ['ai', 'llm', 'model policy', 'egress', 'tokens', 'cost', 'accountability', 'trust'],
+      },
+      {
+        key: 'platform-lifecycle',
+        label: 'Model & Rule Lifecycle',
+        description: 'How a model, rule or dataset is evaluated, promoted and rolled back.',
+        path: '/admin/platform/lifecycle',
+        icon: <LifecycleIcon />,
+        moduleName: 'Users',
+        keywords: ['model', 'rule', 'dataset', 'promotion', 'provenance', 'rollback', 'evaluation'],
+      },
+      {
+        key: 'platform-quality',
+        label: 'Quality Analytics',
+        description: 'The metric definitions and thresholds the platform judges its own output by.',
+        path: '/admin/platform/quality',
+        icon: <QualityIcon />,
+        moduleName: 'Users',
+        keywords: ['quality', 'metric', 'threshold', 'cohort', 'accuracy', 'measurement'],
+      },
+    ],
+  },
+  {
+    key: 'platform-ops',
+    title: 'Platform Operations',
+    caption: 'Connections to other systems, how changes ship, and what becomes of documents over time.',
+    entries: [
+      {
+        key: 'platform-integrations',
+        label: 'Integration Hub',
+        description: 'Versioned connections to outside systems, their mappings and delivery controls.',
+        path: '/admin/platform/integrations',
+        icon: <IntegrationIcon />,
+        moduleName: 'Users',
+        keywords: ['connector', 'api', 'webhook', 'erp', 'sync', 'integration'],
+      },
+      {
+        key: 'platform-releases',
+        label: 'Test & Release',
+        description: 'Test suites, release approval and rollback for changes made on the screens above.',
+        path: '/admin/platform/releases',
+        icon: <ReleaseIcon />,
+        moduleName: 'Users',
+        keywords: ['release', 'test suite', 'approval', 'rollback', 'deploy', 'change control'],
+      },
+      {
+        key: 'platform-archive',
+        // The rail called this "Document Archive", the page calls itself "Retention & Legal Hold
+        // Policies" and the browser tab said "Commercial Document Archive" — three names for one
+        // screen. It authors policy, so it is named for that, and points at the screen that acts
+        // on it.
+        label: 'Archive & Legal Hold',
+        description: 'How long commercial documents are kept, and the holds that stop them being deleted.',
+        path: '/admin/platform/archive',
+        icon: <LegalHoldIcon />,
+        moduleName: 'Users',
+        keywords: ['document archive', 'retention policy', 'legal hold', 'compliance', 'keep'],
         seeAlso: {
-          label: 'User & Access → Roles & Permissions',
-          path: '/security/roles',
-          note: 'decides what each role may do',
+          label: 'Storage & Retention',
+          path: '/admin/platform/retention',
+          note: 'runs the purge these policies allow',
+        },
+      },
+      {
+        key: 'platform-retention',
+        label: 'Storage & Retention',
+        description: 'Reclaiming disk space by purging stored files. The evidence record, its fingerprint and its lineage survive the purge.',
+        path: '/admin/platform/retention',
+        icon: <RetentionIcon />,
+        moduleName: 'Users',
+        keywords: ['storage', 'purge', 'disk', 'evidence', 's3', 'reclaim', 'delete files'],
+        seeAlso: {
+          label: 'Archive & Legal Hold',
+          path: '/admin/platform/archive',
+          note: 'sets the policy this purge obeys',
         },
       },
     ],
   },
 ];
 
-/**
- * Configuration that Setup deliberately does not own. Listed so the search finds it and nobody
- * builds a second copy inside Setup, but every one of these links out to the module that governs it.
- */
-export const SETUP_ELSEWHERE: SetupEntry[] = [
-  {
-    key: 'users',
-    label: 'Users',
-    labelKey: 'users',
-    description: 'Accounts, the role each person holds, and whether they can still sign in.',
-    path: '/security/users',
-    icon: <UsersIcon />,
-    moduleName: 'Users',
-    keywords: ['account', 'people', 'staff', 'login', 'invite', 'deactivate'],
-    external: true,
-  },
-  {
-    key: 'roles-permissions',
-    label: 'Roles & Permissions',
-    labelKey: 'roles_and_permissions',
-    description: 'What each role may see, create, edit and delete, module by module.',
-    path: '/security/roles',
-    icon: <PermissionsIcon />,
-    moduleName: 'Roles & Permissions',
-    keywords: ['permission', 'access', 'grant', 'module', 'rbac'],
-    external: true,
-  },
-  {
-    key: 'integrations',
-    label: 'Integration Hub',
-    description: 'Versioned connections to outside systems, their mappings and delivery controls.',
-    path: '/admin/platform/integrations',
-    icon: <IntegrationIcon />,
-    moduleName: 'Users',
-    keywords: ['connector', 'api', 'webhook', 'erp', 'sync'],
-    external: true,
-  },
-  {
-    key: 'retention',
-    label: 'Storage & Retention',
-    description: 'Where documents are stored and how long the platform keeps them.',
-    path: '/admin/platform/retention',
-    icon: <RetentionIcon />,
-    moduleName: 'Users',
-    keywords: ['archive', 's3', 'storage', 'retention', 'purge', 'documents'],
-    external: true,
-  },
-];
-
-/** Every entry Setup itself owns, flattened — hub search, quick switcher and tests all read this. */
+/** Every entry Setup governs, flattened — hub search, quick switcher and tests all read this. */
 export const SETUP_ENTRIES: SetupEntry[] = SETUP_GROUPS.flatMap((group) => group.entries);
 
 /** The group an entry belongs to, for breadcrumbs. */

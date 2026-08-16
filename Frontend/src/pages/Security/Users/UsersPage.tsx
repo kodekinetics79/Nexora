@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { Link as RouterLink } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import {
@@ -52,6 +53,18 @@ const describeFailure = (error: unknown, context: string): string =>
  * an obviously-doomed round trip and gives the administrator immediate feedback.
  */
 const MIN_PASSWORD_LENGTH = 8;
+
+/**
+ * A translated string, or the English fallback.
+ *
+ * `t('key') || 'Fallback'` looks equivalent and is not: i18next answers a missing key with the key
+ * itself, which is truthy, so the fallback never fires and the raw key reaches the screen. Four
+ * strings on this page did exactly that — "retry" sat under the roles banner in place of "Retry".
+ */
+const label = (t: (key: string) => string, key: string, fallback: string): string => {
+  const translated = t(key);
+  return !translated || translated === key ? fallback : translated;
+};
 
 const UsersPage: React.FC = () => {
   const { t } = useTranslation();
@@ -122,7 +135,7 @@ const UsersPage: React.FC = () => {
   const roleNotice = rolesError
     ? describeFailure(rolesErrorValue, 'The list of roles could not be loaded.')
     : hasNoRoles
-      ? 'No roles are configured for this business unit. Create one under Setup → Setup Master (type "Role") before adding users.'
+      ? 'No roles are configured for this business unit. Create one under Setup Master → Roles before adding users.'
       : null;
 
   const { data: teams } = useQuery({
@@ -305,11 +318,11 @@ const UsersPage: React.FC = () => {
               </Tooltip>
             </PermissionGuard>
             {isSelf && (
-              <Tooltip title={t('change_my_password') || 'Change my password'}>
+              <Tooltip title={label(t, 'change_my_password', 'Change my password')}>
                 <IconButton
                   size="small"
                   color="secondary"
-                  aria-label={t('change_my_password') || 'Change my password'}
+                  aria-label={label(t, 'change_my_password', 'Change my password')}
                   onClick={() => { setSelectedRecord(params.row); setIsPasswordModalOpen(true); }}
                 >
                   <KeyIcon fontSize="small" />
@@ -350,9 +363,24 @@ const UsersPage: React.FC = () => {
           severity={rolesError ? 'error' : 'warning'}
           sx={{ mb: 1.5, borderRadius: 2 }}
           action={
-            <Button color="inherit" size="small" onClick={() => { void refetchRoles(); }}>
-              {t('retry') || 'Retry'}
-            </Button>
+            // Two different situations, two different offers: a failed load is worth retrying, an
+            // empty list is not — nothing changes until a role exists, so send them where one is
+            // made instead of asking them to press Retry at an answer that is already correct.
+            hasNoRoles ? (
+              <Button
+                color="inherit"
+                size="small"
+                component={RouterLink}
+                to="/setup/master?type=role"
+                sx={{ fontWeight: 700, whiteSpace: 'nowrap' }}
+              >
+                {label(t, 'create_a_role', 'Create a role')}
+              </Button>
+            ) : (
+              <Button color="inherit" size="small" onClick={() => { void refetchRoles(); }}>
+                {label(t, 'retry', 'Retry')}
+              </Button>
+            )
           }
         >
           {roleNotice}
@@ -392,7 +420,7 @@ const UsersPage: React.FC = () => {
               )}
             </Alert>
             <Button variant="contained" startIcon={<RefreshIcon />} onClick={() => refetchUsers()} sx={{ fontWeight: 700 }}>
-              {t('retry') || 'Retry'}
+              {label(t, 'retry', 'Retry')}
             </Button>
           </Box>
         ) : (
@@ -535,7 +563,7 @@ const UsersPage: React.FC = () => {
             disabled={saveMutation.isPending || isFormIncomplete}
             sx={{ px: 4 }}
           >
-            {saveMutation.isPending ? <CircularProgress size={24} aria-label={t('saving') || 'Saving'} /> : (selectedRecord ? (t('update_user') || 'Update User') : (t('create_user') || 'Create User'))}
+            {saveMutation.isPending ? <CircularProgress size={24} aria-label={label(t, 'saving', 'Saving')} /> : (selectedRecord ? (t('update_user') || 'Update User') : (t('create_user') || 'Create User'))}
           </Button>
         </DialogActions>
       </Dialog>
@@ -551,7 +579,7 @@ const UsersPage: React.FC = () => {
             the account — the thief sets a password the owner does not know and the owner is never
             signed out to notice.
           */}
-          <TextField fullWidth type="password" sx={{ mb: 2 }} label={t('current_password') || 'Current Password'} value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} />
+          <TextField fullWidth type="password" sx={{ mb: 2 }} label={label(t, 'current_password', 'Current Password')} value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} />
           <TextField fullWidth type="password" label={t('new_password') || 'New Password'} value={newPassword} onChange={(e) => setNewPassword(e.target.value)} />
         </DialogContent>
         <DialogActions sx={{ p: 3 }}>

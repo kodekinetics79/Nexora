@@ -18,7 +18,6 @@ import {
   Assignment as OrderIcon,
   LocalShipping as ShipmentIcon,
   Settings as SetupIcon,
-  AdminPanelSettings as SecurityIcon,
   Inventory2 as InventoryIcon,
   Handshake as SupplierIcon,
   People as CustomerIcon,
@@ -30,7 +29,6 @@ import {
   FactCheck as BoqIcon,
   AccountBalance as FinanceIcon,
   WarningAmber as ExceptionIcon,
-  AccountTree as PlatformIcon,
 } from '@mui/icons-material';
 import { useAuth } from '../../context/AuthContext';
 import { SETUP_ENTRIES, SETUP_ROOT } from '../../pages/Setup/setupCatalog';
@@ -64,13 +62,11 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
     'dashboard': location.pathname.startsWith('/dashboard') || location.pathname.startsWith('/analytics/'),
     'rfq_mgmt': location.pathname.includes('/rfqs'),
     'quote_mgmt': location.pathname.includes('/quotes'),
-    'security': location.pathname.includes('/security'),
     'inventory': location.pathname.includes('/inventory'),
     'supplier_mgmt': location.pathname.includes('/suppliers') || location.pathname.includes('/supplier-quotes') || location.pathname.includes('/commercial-inbox') || location.pathname.includes('/quoted-items') || location.pathname.includes('/purchase-orders') || location.pathname.includes('/sourcing-cases'),
     'lead_mgmt': location.pathname.includes('/leads') || location.pathname.includes('/commercial-cases'),
     'copilot': location.pathname.includes('/copilot'),
     'sales-management': location.pathname.startsWith('/sales/'),
-    'platform-governance': location.pathname.startsWith('/admin/platform/'),
   });
 
   const handleGroupClick = (key: string) => {
@@ -257,44 +253,20 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
           { key: 'sub-categories', label: t('sub_categories'), path: '/inventory/sub-categories', moduleName: 'Product Categories' },
         ]
       },
-      {
-        key: 'platform-governance',
-        label: 'Platform Governance',
-        icon: <PlatformIcon />,
-        moduleName: 'Users',
-        activePrefixes: ['/admin/platform/'],
-        children: [
-          { key: 'platform-taxonomy', label: 'Taxonomy & Skills', path: '/admin/platform/taxonomy', moduleName: 'Users' },
-          { key: 'platform-ai-trust', label: 'AI Trust', path: '/admin/platform/ai-trust', moduleName: 'Users' },
-          { key: 'platform-lifecycle', label: 'Model & Rule Lifecycle', path: '/admin/platform/lifecycle', moduleName: 'Users' },
-          { key: 'platform-integrations', label: 'Integration Hub', path: '/admin/platform/integrations', moduleName: 'Users' },
-          { key: 'platform-releases', label: 'Test & Release', path: '/admin/platform/releases', moduleName: 'Users' },
-          { key: 'platform-archive', label: 'Document Archive', path: '/admin/platform/archive', moduleName: 'Users' },
-          { key: 'platform-quality', label: 'Quality Analytics', path: '/admin/platform/quality', moduleName: 'Users' },
-          { key: 'platform-retention', label: 'Storage & Retention', path: '/admin/platform/retention', moduleName: 'Users' },
-        ],
-      },
-      {
-        key: 'security',
-        label: t('user_and_access'),
-        icon: <SecurityIcon />,
-        moduleName: 'Users',
-        children: [
-          { key: 'users', label: t('users'), path: '/security/users', moduleName: 'Users' },
-          { key: 'roles', label: t('roles_and_permissions'), path: '/security/roles', moduleName: 'Roles & Permissions' },
-        ]
-      },
-      // Setup is one rail entry, not fourteen. The list had grown past the height of the rail and
-      // pushed everything under it out of reach, and a flat list of fourteen equal-weight labels
-      // could not say what any of them did. The hub at /setup groups and describes them, and the
-      // shell there carries a jump field, so no depth is lost by not listing them here.
+      // Setup is one rail entry for the whole administrative surface — the fourteen setup screens
+      // plus the ten that were railed separately as "Platform Governance" and "User & Access".
+      // Those two rails put Users, Roles & Permissions, Integration Hub and Storage & Retention in
+      // the navigation twice, once as a row and once as a card in the hub. The hub at /setup groups
+      // and describes all of them, and every one of them carries Setup's breadcrumb and jump field,
+      // so nothing is further away for having one door instead of three.
       ...(setupIsReachable
         ? [{
             key: 'setup',
             label: t('setup_master'),
             icon: <SetupIcon />,
             path: SETUP_ROOT,
-            activePrefixes: ['/setup'],
+            // Setup is 'here' on every address it governs, not only its own URL space.
+            activePrefixes: ['/setup', '/security', '/admin/platform'],
           } satisfies MenuItem]
         : []),
     ];

@@ -5,7 +5,7 @@ import MainLayout from './components/layout/MainLayout';
 import PermissionGuard from './components/common/PermissionGuard';
 import RouteAnnouncer from './components/layout/RouteAnnouncer';
 import useDocumentTitle from './hooks/useDocumentTitle';
-import { SETUP_ROUTES } from './pages/Setup/setupRoutes';
+import { SETUP_ROUTES, SETUP_ADOPTED_ROUTES } from './pages/Setup/setupRoutes';
 
 // FE-09: route-level code splitting. Each page is loaded on demand so the
 // initial bundle only ships the app shell (layout, guards, providers).
@@ -15,8 +15,6 @@ const LoginPage = lazy(() => import('./pages/Login/LoginPage'));
 // `pages/Setup/setupRoutes.tsx` and mapped into the route tree further down.
 const SetupShell = lazy(() => import('./pages/Setup/SetupShell'));
 const SetupHubPage = lazy(() => import('./pages/Setup/SetupHubPage'));
-const UsersPage = lazy(() => import('./pages/Security/Users/UsersPage'));
-const RolesPermissionsPage = lazy(() => import('./pages/Security/Roles/RolesPermissionsPage'));
 const ProductsPage = lazy(() => import('./pages/Inventory/ProductsPage'));
 const ProductDetailPage = lazy(() => import('./pages/Inventory/ProductDetailPage'));
 const ProductCategoryPage = lazy(() => import('./pages/Inventory/ProductCategoryPage'));
@@ -101,15 +99,7 @@ const TenantAdminOperationsPage = lazy(() => import('./pages/Today/TenantAdminOp
 const LeadConvertPage = lazy(() => import('./pages/Intelligence/LeadConvertPage'));
 const RfqPricingPage = lazy(() => import('./pages/Intelligence/RfqPricingPage'));
 const CommercialMemoryPage = lazy(() => import('./pages/Intelligence/CommercialMemoryPage'));
-const TaxonomySkillStudioPage = lazy(() => import('./pages/PlatformGovernance/TaxonomySkillStudioPage'));
 const HumanActionCenterPage = lazy(() => import('./pages/PlatformGovernance/HumanActionCenterPage'));
-const AiTrustCenterPage = lazy(() => import('./pages/PlatformGovernance/AiTrustCenterPage'));
-const LifecycleStudioPage = lazy(() => import('./pages/PlatformGovernance/LifecycleStudioPage'));
-const IntegrationHubPage = lazy(() => import('./pages/PlatformGovernance/IntegrationHubPage'));
-const ReleaseCenterPage = lazy(() => import('./pages/PlatformGovernance/ReleaseCenterPage'));
-const CommercialDocumentArchivePage = lazy(() => import('./pages/PlatformGovernance/CommercialDocumentArchivePage'));
-const QualityAnalyticsPage = lazy(() => import('./pages/PlatformGovernance/QualityAnalyticsPage'));
-const StorageRetentionPage = lazy(() => import('./pages/PlatformGovernance/StorageRetentionPage'));
 
 // Service RFQ → BOQ engine — drafted bills of quantities for service work.
 const BoqListPage = lazy(() => import('./pages/Boq/BoqListPage'));
@@ -198,14 +188,6 @@ function App() {
       <Route path="/inventory/today" element={<MainLayout><PermissionGuard moduleName="Products"><InventoryOverviewPage /></PermissionGuard></MainLayout>} />
       <Route path="/executive/today" element={<MainLayout><PermissionGuard moduleName="Dashboard"><DashboardPage /></PermissionGuard></MainLayout>} />
       <Route path="/admin/operations" element={<MainLayout><PermissionGuard moduleName="Users"><TenantAdminOperationsPage /></PermissionGuard></MainLayout>} />
-      <Route path="/admin/platform/taxonomy" element={<MainLayout><PermissionGuard moduleName="Users"><TaxonomySkillStudioPage /></PermissionGuard></MainLayout>} />
-      <Route path="/admin/platform/ai-trust" element={<MainLayout><PermissionGuard moduleName="Users"><AiTrustCenterPage /></PermissionGuard></MainLayout>} />
-      <Route path="/admin/platform/lifecycle" element={<MainLayout><PermissionGuard moduleName="Users"><LifecycleStudioPage /></PermissionGuard></MainLayout>} />
-      <Route path="/admin/platform/integrations" element={<MainLayout><PermissionGuard moduleName="Users"><IntegrationHubPage /></PermissionGuard></MainLayout>} />
-      <Route path="/admin/platform/releases" element={<MainLayout><PermissionGuard moduleName="Users"><ReleaseCenterPage /></PermissionGuard></MainLayout>} />
-      <Route path="/admin/platform/archive" element={<MainLayout><PermissionGuard moduleName="Users"><CommercialDocumentArchivePage /></PermissionGuard></MainLayout>} />
-      <Route path="/admin/platform/quality" element={<MainLayout><PermissionGuard moduleName="Users"><QualityAnalyticsPage /></PermissionGuard></MainLayout>} />
-      <Route path="/admin/platform/retention" element={<MainLayout><PermissionGuard moduleName="Users"><StorageRetentionPage /></PermissionGuard></MainLayout>} />
       <Route path="/sales/actions" element={<MainLayout><PermissionGuard moduleName="Leads"><HumanActionCenterPage /></PermissionGuard></MainLayout>} />
       <Route path="/sales/team" element={<MainLayout><PermissionGuard moduleName="Leads"><TeamOverviewPage /></PermissionGuard></MainLayout>} />
       <Route path="/sales/reps" element={<MainLayout><PermissionGuard moduleName="Users"><RepDirectoryPage /></PermissionGuard></MainLayout>} />
@@ -277,9 +259,19 @@ function App() {
         ))}
       </Route>
 
-      {/* Security Routes */}
-      <Route path="/security/users" element={<MainLayout><PermissionGuard moduleName="Users"><UsersPage /></PermissionGuard></MainLayout>} />
-      <Route path="/security/roles" element={<MainLayout><PermissionGuard moduleName="Roles & Permissions"><RolesPermissionsPage /></PermissionGuard></MainLayout>} />
+      {/* The screens Setup governs at their own addresses — the former "User & Access" and
+          "Platform Governance" rails. A pathless layout route puts them under the same shell as
+          /setup/*, so they carry Setup's breadcrumb and jump field while keeping the URLs that
+          bookmarks and the e2e suite already point at. */}
+      <Route element={<MainLayout><SetupShell /></MainLayout>}>
+        {SETUP_ADOPTED_ROUTES.map(({ path, moduleName, component: Screen }) => (
+          <Route
+            key={path}
+            path={path}
+            element={<PermissionGuard moduleName={moduleName}><Screen /></PermissionGuard>}
+          />
+        ))}
+      </Route>
 
       {/* Inventory Routes */}
       <Route path="/inventory/overview" element={<MainLayout><PermissionGuard moduleName="Products"><InventoryOverviewPage /></PermissionGuard></MainLayout>} />
