@@ -55,7 +55,11 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
     private readonly Func<byte[], IReadOnlyList<string>>? _tiffFrameOcr;
     private readonly IFileInspectionService? _inspection;
     private readonly IEntitlementService? _entitlements;
+    private readonly bool _requireOcrEntitlement;
     private readonly NativeSpreadsheetParser _spreadsheetParser = new();
+
+    /// <summary>Config key for <see cref="_requireOcrEntitlement"/>.</summary>
+    internal const string RequireOcrEntitlementConfigKey = "Extraction:Ocr:RequirePlanEntitlement";
 
     // A Word RFQ usually states its lines in a table, which is structured data and should not be
     // flattened to prose and sent to a model. Shares the spreadsheet column-alias and
@@ -202,13 +206,25 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         IEvidenceObjectStorage evidenceStorage,
         Func<byte[], IReadOnlyList<string>>? tiffFrameOcr,
         IFileInspectionService? inspection = null,
-        IEntitlementService? entitlements = null)
+        IEntitlementService? entitlements = null,
+        IConfiguration? configuration = null)
     {
         _log = log;
         _evidenceStorage = evidenceStorage;
         _tiffFrameOcr = tiffFrameOcr;
         _inspection = inspection;
         _entitlements = entitlements;
+        // Whether reading a SCANNED document requires a plan entitlement. Default OFF wherever
+        // configuration exists: the entitlement denies when the business unit has no governed
+        // platform tenant, or no assigned plan, or a plan whose Features JSON does not name
+        // capability.ocr — all billing-plane conditions, and all of them the normal state of an
+        // internal deployment that never sold itself a plan. The observable effect was that
+        // every scanned PDF, photographed page, .eml and .msg threw before a single page was
+        // rasterized, which reads as "the extractor cannot handle scans" rather than as a
+        // licensing decision. A direct (test) construction passes no configuration and keeps
+        // the entitlement required, so the tests that prove the gate bites still prove it.
+        _requireOcrEntitlement = configuration is null
+            || (configuration.GetValue<bool?>(RequireOcrEntitlementConfigKey) ?? false);
         _docxTableParser = new DocxTableParser(_spreadsheetParser);
         _tessDataPath = Path.Combine(env.ContentRootPath, "tessdata");
         // EPPlus 7 requires a license context; the app sets this at startup, set it here too
@@ -258,7 +274,7 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         // available when OCR is disabled; the decision is enforced only if a branch would invoke
         // Tesseract/Docnet. Email containers carry the same decision into their attachments.
         EntitlementDecision? ocrDecision = null;
-        if (_entitlements is not null && MayRequireOcr(ext))
+        if (_entitlements is not null && _requireOcrEntitlement && MayRequireOcr(ext))
             ocrDecision = await _entitlements.CheckFeatureAsync(
                 job.BusinessUnitId, TypedEntitlementCatalog.Ocr, ct);
 

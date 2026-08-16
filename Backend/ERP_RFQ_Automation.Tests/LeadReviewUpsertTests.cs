@@ -583,7 +583,11 @@ public class LeadReviewUpsertTests
 
         using var verify = db.ContextFor(Bu);
         var approved = verify.Leads.Include(l => l.EmailIngests).Single(l => l.Id == 100);
-        Assert.True(approved.RequiresCommercialReview);
+        // Approval CLEARS the demand it satisfies. Leaving RequiresCommercialReview set was not
+        // a stricter posture — the "ready-for-rfq" queue selects on
+        // `CommercialFactsVerified && !RequiresCommercialReview`, so an approved lead stayed
+        // invisible in the one list whose job is to show approved leads, permanently.
+        Assert.False(approved.RequiresCommercialReview);
         Assert.True(approved.CommercialFactsVerified);
         Assert.Equal("reviewer@example.com", approved.ReviewApprovedBy);
         Assert.NotNull(approved.ReviewApprovedOn);

@@ -121,8 +121,12 @@ namespace ERP_RFQ_Automation.Repositories
             else if (string.Equals(view, "revisions", StringComparison.OrdinalIgnoreCase))
                 query = query.Where(l => l.CurrentRevisionNumber > 1);
             else if (string.Equals(view, "ready-for-rfq", StringComparison.OrdinalIgnoreCase))
+                // Mirrors LeadConversionIntelligence.FindConversionBlockers exactly. A closing
+                // date is deliberately NOT required in either place: an enquiry that states no
+                // deadline is still convertible, and a queue that hid those from the user while
+                // conversion accepted them would disagree with the button it exists to feed.
                 query = query.Where(l => l.CommercialFactsVerified && !l.RequiresCommercialReview
-                    && l.CustomerId != null && l.BidClosingDate != null && l.LeadItems.Any()
+                    && l.CustomerId != null && l.LeadItems.Any()
                     && !l.Rfqs.Any());
 
             // Get total count before pagination
@@ -1248,6 +1252,16 @@ namespace ERP_RFQ_Automation.Repositories
             lead.CommercialFactsVerified = action == "approve";
             if (action == "approve")
             {
+                // The review that RequiresCommercialReview asks for has now happened, so the
+                // demand is satisfied and is cleared. Leaving it set was not a stricter
+                // posture, it was a dead end: the "ready-for-rfq" queue selects on
+                // `CommercialFactsVerified && !RequiresCommercialReview` (see the list view
+                // above), so every AI-extracted lead — including fully approved ones — was
+                // invisible there forever, and the queue that tells a user WHICH leads to
+                // convert has therefore always been empty. Conversion itself already gates on
+                // the pair together (`RequiresCommercialReview && !CommercialFactsVerified`),
+                // so clearing the flag on approval loses no protection.
+                lead.RequiresCommercialReview = false;
                 lead.ReviewApprovedBy = reviewedBy.Trim();
                 lead.ReviewApprovedOn = DateTime.UtcNow;
             }
