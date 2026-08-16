@@ -360,6 +360,19 @@ public class EmailInquiryAssemblyStateMachineTests
     }
 
     [Theory]
+    [InlineData(EmailInquiryAssemblyStatus.NeedsReview, true)]
+    [InlineData(EmailInquiryAssemblyStatus.FailedRecoverable, true)]
+    [InlineData(EmailInquiryAssemblyStatus.Extracting, true)]
+    [InlineData(EmailInquiryAssemblyStatus.Assembled, false)]
+    [InlineData(EmailInquiryAssemblyStatus.RejectedSecurity, false)]
+    public void Only_governed_recovery_can_reopen_a_held_message(
+        EmailInquiryAssemblyStatus status, bool expected)
+    {
+        Assert.Equal(expected,
+            EmailInquiryAssemblyStateMachine.CanGovernedExtractionRecoveryTransition(status));
+    }
+
+    [Theory]
     [InlineData(EmailInquiryAssemblyStatus.Inspecting)]
     [InlineData(EmailInquiryAssemblyStatus.Extracting)]
     [InlineData(EmailInquiryAssemblyStatus.ReadyForAssembly)]

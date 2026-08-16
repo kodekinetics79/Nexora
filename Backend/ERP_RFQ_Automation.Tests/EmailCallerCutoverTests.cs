@@ -96,10 +96,78 @@ public sealed class EmailCallerCutoverTests : IDisposable
         await using var assertContext = _db.ContextFor(Bu);
         var ingest = Assert.Single(await assertContext.EmailIngests.ToListAsync());
         Assert.Equal("Pending", ingest.ParseStatus);
+
+        // The checkpoint is not a tombstone. The same message on the next poll must re-enter
+        // canonical capture, then acknowledge only after that succeeds.
+        intake.Result = Captured(assemblyId: 42, scheduled: 1);
+        await using var retryContext = _db.ContextFor(Bu);
+        var retried = await service.ProcessSingleEmailAsync(
+            EnquiryWithMessageId("RFQ 4712", "Please quote 12 pcs of gland kits.", ingest.MessageId),
+            config, retryContext, new StubLlm(), intake);
+
+        Assert.True(retried);
+        Assert.Equal(2, intake.Calls.Count);
+        await using var finalContext = _db.ContextFor(Bu);
+        Assert.Single(await finalContext.EmailIngests.ToListAsync());
     }
 
     [Fact]
-    public async Task A_message_the_gate_stops_is_recorded_and_never_reaches_capture()
+    public async Task A_crash_after_capture_before_scheduling_repolls_and_resumes_the_same_ingest()
+    {
+        await SeedMailboxAsync();
+        const string messageId = "captured-before-schedule@gulf.example";
+        await using (var seed = _db.ContextFor(null))
+        {
+            var ingest = Seed.EmailIngest(seed, 7_199, ConfigId, "Pending");
+            ingest.MessageId = messageId;
+            var now = DateTimeOffset.UtcNow;
+            var assembly = new EmailInquiryAssembly
+            {
+                BusinessUnitId = Bu,
+                EmailIngestId = ingest.Id,
+                EmailConfigurationId = ConfigId,
+                MessageKey = messageId,
+                RawEvidenceUri = "evidence://raw/captured.eml",
+                RawEvidenceSha256 = new string('a', 64),
+                ManifestContractVersion = EmailInquiryManifestPlanner.ContractVersion,
+                ExpectedComponentCount = 1,
+                Status = EmailInquiryAssemblyStatus.Captured,
+                CreatedAtUtc = now,
+                UpdatedAtUtc = now
+            };
+            assembly.Components.Add(new EmailInquiryComponent
+            {
+                BusinessUnitId = Bu,
+                ComponentKey = "body",
+                Kind = EmailInquiryComponentKind.Body,
+                Ordinal = 0,
+                MimeType = "text/plain",
+                ContentHash = new string('b', 64),
+                Status = EmailInquiryComponentStatus.Pending,
+                ExtractionJobId = null,
+                CreatedAtUtc = now,
+                UpdatedAtUtc = now
+            });
+            seed.Add(assembly);
+            await seed.SaveChangesAsync();
+        }
+
+        var intake = new RecordingIntake { Result = Captured(assemblyId: 7_199, scheduled: 1) };
+        var (service, config) = PollerFor(intake);
+        await using var context = _db.ContextFor(Bu);
+        var acknowledged = await service.ProcessSingleEmailAsync(
+            EnquiryWithMessageId("RFQ captured before scheduling", "Please quote 10 sets.", messageId),
+            config, context, new StubLlm(), intake);
+
+        Assert.True(acknowledged);
+        Assert.Single(intake.Calls);
+        Assert.Equal(7_199, intake.Calls[0].Ingest.Id);
+        await using var finalContext = _db.ContextFor(Bu);
+        Assert.Single(await finalContext.EmailIngests.Where(x => x.MessageId == messageId).ToListAsync());
+    }
+
+    [Fact]
+    public async Task Noise_is_durably_captured_then_terminalized_without_extraction()
     {
         // The gate is still the gate. A stopped message is recorded with its reasons and its raw
         // bytes are retained — it simply does not enter the pipeline, and the poller must still
@@ -116,11 +184,42 @@ public sealed class EmailCallerCutoverTests : IDisposable
             autoReply, config, context, new StubLlm(), intake);
 
         Assert.True(acknowledged);
-        Assert.Empty(intake.Calls);
+        var capture = Assert.Single(intake.Calls);
+        Assert.Equal(EmailTriageOutcome.Noise, capture.Triage.Outcome);
 
         await using var assertContext = _db.ContextFor(Bu);
         var ingest = Assert.Single(await assertContext.EmailIngests.ToListAsync());
         Assert.Equal(EmailTriageOutcome.Noise.ToString(), ingest.TriageOutcome);
+    }
+
+    [Fact]
+    public async Task Poller_resumes_a_committed_manual_override_without_reapplying_noise_rules()
+    {
+        await SeedMailboxAsync();
+        const string messageId = "governed-reprocess-crash@buyer.example";
+        await using (var seed = _db.ContextFor(null))
+        {
+            var ingest = Seed.EmailIngest(seed, 7_205, ConfigId,
+                EmailTriagePersistenceStatuses.Reprocessing);
+            ingest.MessageId = messageId;
+            ingest.TriageOutcome = EmailTriageOutcome.Uncertain.ToString();
+            ingest.TriageReasonJson = "[\"manual_reprocess\"]";
+            await seed.SaveChangesAsync();
+        }
+
+        var intake = new RecordingIntake();
+        var (service, config) = PollerFor(intake);
+        var autoReply = EnquiryWithMessageId(
+            "Automated-looking RFQ", "Please quote 5 sets.", messageId);
+        autoReply.Headers.Add("Auto-Submitted", "auto-generated");
+
+        await using var context = _db.ContextFor(Bu);
+        Assert.True(await service.ProcessSingleEmailAsync(
+            autoReply, config, context, new StubLlm(), intake));
+
+        var call = Assert.Single(intake.Calls);
+        Assert.Equal(EmailTriageOutcome.Uncertain, call.Triage.Outcome);
+        Assert.Equal([EmailTriageReasonCodes.ManualReprocess], call.Triage.ReasonCodes);
     }
 
     // ---- B. THE MANUAL REPROCESS ENDPOINT ----------------------------------------------------
@@ -182,7 +281,8 @@ public sealed class EmailCallerCutoverTests : IDisposable
         long ingestId;
         await using (var seed = _db.ContextFor(null))
         {
-            var ingest = Seed.EmailIngest(seed, 7103, ConfigId, "Queued");
+            var ingest = Seed.EmailIngest(seed, 7103, ConfigId, "Rejected");
+            ingest.TriageOutcome = EmailTriageOutcome.Noise.ToString();
             await seed.SaveChangesAsync();
             ingestId = ingest.Id;
         }
@@ -204,6 +304,38 @@ public sealed class EmailCallerCutoverTests : IDisposable
     }
 
     [Fact]
+    public async Task Reprocess_rejects_same_idempotency_key_with_a_different_request()
+    {
+        await SeedMailboxAsync();
+        long ingestId;
+        await using (var seed = _db.ContextFor(null))
+        {
+            var ingest = Seed.EmailIngest(seed, 7104, ConfigId, "Rejected");
+            ingest.TriageOutcome = EmailTriageOutcome.Noise.ToString();
+            await seed.SaveChangesAsync();
+            ingestId = ingest.Id;
+        }
+
+        var intake = new RecordingIntake();
+        var reader = new RecordingRawEmailReader(
+            Enquiry("DURABLE EVIDENCE COPY", "Please quote 5 sets."));
+        await using var context = _db.ContextFor(Bu);
+        var service = new EmailTriageService(
+            context, intake, reader, new NoopLogger<EmailTriageService>());
+
+        await service.ReprocessAsync(
+            Bu, ingestId, "operator", "Buyer confirmed this is an RFQ.", "same-key");
+        var conflict = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            service.ReprocessAsync(
+                Bu, ingestId, "operator", "A different justification.", "same-key"));
+
+        Assert.Contains("different reprocess request", conflict.Message);
+        Assert.Single(await context.IamAuditEvents.AsNoTracking().Where(x =>
+            x.BusinessUnitId == Bu && x.Action == "EmailTriageReprocessed"
+            && x.CorrelationId == "same-key").ToListAsync());
+    }
+
+    [Fact]
     public async Task Reprocess_refuses_when_capture_did_not_complete()
     {
         // Same posture as the poller: nothing is claimed to have been reprocessed unless the
@@ -214,6 +346,7 @@ public sealed class EmailCallerCutoverTests : IDisposable
         await using (var seed = _db.ContextFor(null))
         {
             var ingest = Seed.EmailIngest(seed, 7102, ConfigId, "Rejected");
+            ingest.TriageOutcome = EmailTriageOutcome.Noise.ToString();
             await seed.SaveChangesAsync();
             ingestId = ingest.Id;
         }
@@ -330,6 +463,13 @@ public sealed class EmailCallerCutoverTests : IDisposable
         message.Subject = subject;
         message.MessageId = MimeKit.Utils.MimeUtils.GenerateMessageId();
         message.Body = new BodyBuilder { TextBody = body }.ToMessageBody();
+        return message;
+    }
+
+    private static MimeMessage EnquiryWithMessageId(string subject, string body, string messageId)
+    {
+        var message = Enquiry(subject, body);
+        message.MessageId = messageId;
         return message;
     }
 

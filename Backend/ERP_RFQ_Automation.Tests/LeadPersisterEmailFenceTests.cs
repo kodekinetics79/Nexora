@@ -77,7 +77,8 @@ public class LeadPersisterEmailFenceTests : IDisposable
         public Task<EmailInquiryComponent?> FindComponentAsync(long bu, long assemblyId, string key,
             CancellationToken ct = default) => Task.FromResult<EmailInquiryComponent?>(null);
         public Task RecordComponentQueuedAsync(long bu, long assemblyId, string key, long jobId,
-            CancellationToken ct = default) => Task.CompletedTask;
+            CancellationToken ct = default, string? evidenceUri = null,
+            long? sourceDocumentOccurrenceId = null) => Task.CompletedTask;
         public Task<EmailInquiryAssemblyEvaluation> ReevaluateAsync(long assemblyId, long bu,
             CancellationToken ct = default) => Task.FromResult(default(EmailInquiryAssemblyEvaluation));
         public Task MarkNoInquiryAsync(EmailInquiryAssembly assembly, string reason,

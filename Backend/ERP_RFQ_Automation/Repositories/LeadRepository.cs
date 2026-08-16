@@ -823,6 +823,21 @@ namespace ERP_RFQ_Automation.Repositories
                 earliestReceivedOn.TryGetValue(lead.Id, out var receivedOn) ? receivedOn : null,
                 lead.CreatedDate);
             var detailCandidates = await GetClientCandidatesAsync(id, businessUnitId);
+            var emailProvenance = lead.EmailIngestsId.HasValue
+                ? await (from ingest in _context.EmailIngests.AsNoTracking()
+                         where ingest.Id == lead.EmailIngestsId.Value
+                               && ingest.EmailConfiguration.BusinessUnitId == businessUnitId
+                         join assembly in _context.EmailInquiryAssemblies.AsNoTracking()
+                             on ingest.Id equals assembly.EmailIngestId into assemblies
+                         from assembly in assemblies.DefaultIfEmpty()
+                         select new
+                         {
+                             ingest.MessageId,
+                             ingest.EmailSubject,
+                             Sender = ingest.FromEmail,
+                             ReceivedAtUtc = assembly == null ? null : assembly.ReceivedAtUtc
+                         }).SingleOrDefaultAsync()
+                : null;
 
             return new LeadResponseDTO
             {
@@ -868,6 +883,10 @@ namespace ERP_RFQ_Automation.Repositories
                 BusinessUnitId = lead.BusinessUnitId,
                 BusinessUnitName = lead.BusinessUnit?.BusinessUnitName,
                 EmailIngestsId = lead.EmailIngestsId,
+                EmailMessageId = emailProvenance?.MessageId,
+                EmailSubject = emailProvenance?.EmailSubject,
+                EmailSender = emailProvenance?.Sender,
+                EmailReceivedAtUtc = emailProvenance?.ReceivedAtUtc,
                 ModifiedDate = lead.ModifiedDate,
                 EmailSource = lead.EmailSource,
                 Clientemail = lead.Clientemail,

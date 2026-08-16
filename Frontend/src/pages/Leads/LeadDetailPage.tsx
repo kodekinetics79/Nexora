@@ -303,6 +303,15 @@ const LeadDetailPage: React.FC = () => {
               </Grid>
               <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Source" value={lead.leadSource} /></Grid>
 
+              {lead.leadSource === 'Email' && (
+                <>
+                  <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Email Sender" value={lead.emailSender || lead.clientemail} /></Grid>
+                  <Grid size={{ xs: 12, md: 8 }} component="div"><DataField label="Email Subject" value={lead.emailSubject ?? null} /></Grid>
+                  <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Email Received" value={lead.emailReceivedAtUtc ? formatDate(lead.emailReceivedAtUtc) : '—'} /></Grid>
+                  <Grid size={{ xs: 12, md: 8 }} component="div"><DataField label="RFC Message-ID" value={lead.emailMessageId ?? null} boldValue={false} /></Grid>
+                </>
+              )}
+
               {/* FR-RFQ-04. What the BUYER asked for. It sits next to the bid deadline
                   because the two are constantly confused and they drive different
                   decisions: the deadline governs when we must answer, this governs what

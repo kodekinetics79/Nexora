@@ -107,6 +107,11 @@ export interface LeadResponseDTO {
   commercialFactsVerified: boolean;
   currentRevisionNumber: number;
   ingestedAtUtc?: string | null;
+  /** Immutable source-email provenance; populated only for email-origin leads. */
+  emailMessageId?: string | null;
+  emailSubject?: string | null;
+  emailSender?: string | null;
+  emailReceivedAtUtc?: string | null;
   // Ingestion audit (owner requirement): when the lead actually ENTERED Nexora —
   // the earliest source-document received_on, falling back server-side to
   // createdDate for manual leads. Distinct from recDate/bidClosingDate.

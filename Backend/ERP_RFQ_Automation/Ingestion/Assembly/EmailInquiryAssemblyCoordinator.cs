@@ -30,7 +30,8 @@ public interface IEmailInquiryAssemblyCoordinator
 
     Task RecordComponentQueuedAsync(
         long businessUnitId, long assemblyId, string componentKey, long extractionJobId,
-        CancellationToken ct = default);
+        CancellationToken ct = default, string? evidenceUri = null,
+        long? sourceDocumentOccurrenceId = null);
 
     Task RecordComponentOutcomeAsync(
         long businessUnitId, long assemblyId, string componentKey,
@@ -116,13 +117,15 @@ public sealed class EmailInquiryAssemblyCoordinator : IEmailInquiryAssemblyCoord
         // is a corrupt index rather than a row to pick between. Throwing surfaces it; guessing
         // writes one message's outcome onto another's component and hides it forever.
         => _context.EmailInquiryComponents
+            .Include(x => x.Assembly)
             .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId
                                        && x.AssemblyId == assemblyId
                                        && x.ComponentKey == componentKey, ct)!;
 
     public async Task RecordComponentQueuedAsync(
         long businessUnitId, long assemblyId, string componentKey, long extractionJobId,
-        CancellationToken ct = default)
+        CancellationToken ct = default, string? evidenceUri = null,
+        long? sourceDocumentOccurrenceId = null)
     {
         await ExecuteInTransactionAsync(async () =>
         {
@@ -134,12 +137,36 @@ public sealed class EmailInquiryAssemblyCoordinator : IEmailInquiryAssemblyCoord
                     $"Component '{componentKey}' of assembly {assemblyId} was not found for "
                     + $"business unit {businessUnitId}; the job binding has no owner.");
 
+            var automaticRecovery = component.Status == EmailInquiryComponentStatus.FailedRecoverable
+                && component.ExtractionJobId == null;
+            if (automaticRecovery && !EmailInquiryAssemblyStateMachine
+                    .CanAutomaticSchedulingRecoveryTransition(component.Assembly.Status))
+                throw new InvalidOperationException(
+                    $"Component '{componentKey}' cannot automatically resume while assembly "
+                    + $"{assemblyId} is {component.Assembly.Status}.");
+
             component.ExtractionJobId = extractionJobId;
+            // Bind the exact immutable object and occurrence at the same moment as its job.
+            // Without this, the component claims to carry field-level provenance while its
+            // EvidenceUri remains null even after successful ingestion.
+            if (!string.IsNullOrWhiteSpace(evidenceUri)) component.EvidenceUri = evidenceUri;
+            if (sourceDocumentOccurrenceId.HasValue)
+                component.SourceDocumentOccurrenceId = sourceDocumentOccurrenceId;
             // Pending -> Extracting only. A component that already reached a terminal state is left
             // alone: a replayed enqueue must not walk a finished part backwards and reopen a
             // barrier that has already been satisfied.
             if (component.Status == EmailInquiryComponentStatus.Pending)
                 component.Status = EmailInquiryComponentStatus.Extracting;
+            else if (automaticRecovery)
+            {
+                component.Status = EmailInquiryComponentStatus.Extracting;
+                component.ReasonCode = null;
+                component.ReasonDetail = null;
+                component.Assembly.Status = EmailInquiryAssemblyStatus.Extracting;
+                component.Assembly.StatusReason =
+                    "A previously unscheduled component was durably bound to a processing job.";
+                component.Assembly.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            }
             component.UpdatedAtUtc = DateTimeOffset.UtcNow;
 
             // The MESSAGE moves too, in the same transaction.
@@ -556,6 +583,25 @@ public sealed class EmailInquiryAssemblyCoordinator : IEmailInquiryAssemblyCoord
         if (!EmailInquiryAssemblyStateMachine.CanTransition(
                 assembly.Status, EmailInquiryAssemblyStatus.NoInquiry))
             return;
+
+        // A triage-time NoInquiry happens immediately after capture, while every processable
+        // component is still Pending. Leaving those rows non-terminal makes the stranded-work
+        // sweep later treat an intentionally rejected message as a scheduling crash. Close only
+        // components that have never been job-bound; completed extraction evidence remains
+        // untouched when the assembler concludes that extracted content was non-commercial.
+        var untouched = await _context.EmailInquiryComponents
+            .Where(x => x.BusinessUnitId == assembly.BusinessUnitId
+                        && x.AssemblyId == assembly.Id
+                        && x.Status == EmailInquiryComponentStatus.Pending
+                        && x.ExtractionJobId == null)
+            .ToListAsync(ct);
+        foreach (var component in untouched)
+        {
+            component.Status = EmailInquiryComponentStatus.Ignored;
+            component.ReasonCode = "no_inquiry";
+            component.ReasonDetail = Truncate(reason, 1000);
+            component.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        }
 
         assembly.Status = EmailInquiryAssemblyStatus.NoInquiry;
         assembly.StatusReason = Truncate(reason, 1000);

@@ -71,6 +71,17 @@ public static class EmailTriageReasonCodes
     public const string ManualReprocess = "manual_reprocess";
 }
 
+/// <summary>Durable checkpoint states owned by the inbound-email orchestration layer.</summary>
+public static class EmailTriagePersistenceStatuses
+{
+    /// <summary>
+    /// A governed human override has been committed, but one or more extraction jobs may still
+    /// need to be scheduled. The poller must resume with the persisted manual decision instead of
+    /// running the deterministic noise rule again.
+    /// </summary>
+    public const string Reprocessing = "Reprocessing";
+}
+
 /// <summary>Commercial-document type hints handed to the extraction worker. Anything that is
 /// not a customer RFQ completes the job WITHOUT creating a Lead
 /// (<see cref="ERP_RFQ_Automation.Extraction.ExtractionJobMetadata.IsNonLeadCommercialType"/>).</summary>

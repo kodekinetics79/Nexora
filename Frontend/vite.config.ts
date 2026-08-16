@@ -6,6 +6,12 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 3000,
+    // Live Playwright writes screenshots, traces and HTML reports inside Frontend while the
+    // browser is running. Watching those artifacts makes Vite force a full-page reload between
+    // assertions, leaving lazy routes on their loading spinner and invalidating the journey.
+    watch: {
+      ignored: ['**/test-results/**', '**/playwright-report*/**'],
+    },
   },
   build: {
     rollupOptions: {

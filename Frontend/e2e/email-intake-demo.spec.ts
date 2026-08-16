@@ -45,11 +45,17 @@ const rowFor = (page: import('@playwright/test').Page, letter: string) =>
  * decision, and would go green for the wrong reason the day the decision changes.
  */
 async function openTabContaining(page: import('@playwright/test').Page, letter: string) {
+  // A fresh authenticated navigation lazy-loads this route. Wait for the route itself instead of
+  // sampling tab visibility while React is still showing the application loading boundary.
+  await expect(page.getByRole('button', { name: 'Poll now' })).toBeVisible({ timeout: 20_000 });
+
   for (const name of ['Extracted', 'Uncertain', 'Rejected as noise', 'Routed as supplier document']) {
     const tab = page.getByRole('tab', { name });
-    if (!(await tab.isVisible().catch(() => false))) continue;
+    await tab.waitFor({ state: 'visible', timeout: 10_000 });
     await tab.click();
-    if (await rowFor(page, letter).first().isVisible({ timeout: 8_000 }).catch(() => false)) return name;
+    if (await rowFor(page, letter).first().waitFor({ state: 'visible', timeout: 8_000 }).then(() => true).catch(() => false)) {
+      return name;
+    }
   }
   throw new Error(`DEMO-${RUN} ${letter} was not on any triage tab.`);
 }
@@ -92,6 +98,18 @@ test('A — a body-only inquiry becomes exactly one Lead', async ({ page }, test
   // One assembly, and the operator can see its state and how many parts it is made of.
   await expect(row.first()).toContainText(/assembl/i, { timeout: 120_000 });
   await testInfo.attach('A-02-assembled', { body: await page.screenshot(), contentType: 'image/png' });
+
+  const open = row.first().getByRole('link', { name: /open lead/i })
+    .or(row.first().getByRole('button', { name: /open lead/i }));
+  await expect(open).toHaveCount(1);
+  await open.click();
+  await expect(page).toHaveURL(/lead/i);
+  await expect(page.getByText('Email Sender', { exact: true })).toBeVisible();
+  await expect(page.getByText('Email Subject', { exact: true }).locator('..'))
+    .toContainText(`DEMO-${RUN} A`);
+  await expect(page.getByText('RFC Message-ID', { exact: true }).locator('..'))
+    .toContainText(/@/);
+  await testInfo.attach('A-03-lead-provenance', { body: await page.screenshot(), contentType: 'image/png' });
 });
 
 test('B — body plus two schedules becomes ONE combined Lead with its parts visible', async ({ page }, testInfo) => {
@@ -104,8 +122,9 @@ test('B — body plus two schedules becomes ONE combined Lead with its parts vis
   // Expand to reveal the components — the evidence that the message was taken apart and put
   // back together, rather than turned into one Lead per file.
   await row.first().getByRole('button', { name: /^Show message/ }).click();
-  await expect(page.getByText(/valves\.csv/i)).toBeVisible({ timeout: 60_000 });
-  await expect(page.getByText(/gaskets\.csv/i)).toBeVisible();
+  const detail = page.getByRole('region', { name: new RegExp(`Message and extraction for DEMO-${RUN} B`) });
+  await expect(detail.getByRole('cell', { name: 'valves.csv', exact: true })).toBeVisible({ timeout: 60_000 });
+  await expect(detail.getByRole('cell', { name: 'gaskets.csv', exact: true })).toBeVisible();
   await testInfo.attach('B-01-components', { body: await page.screenshot(), contentType: 'image/png' });
 
   // ONE lead for the whole message.
@@ -130,8 +149,10 @@ test('C — an unsupported attachment is visibly refused with no partial Lead', 
 
   // The refused part is SHOWN, labelled, and with its reason — not silently dropped. This is the
   // only place a customer's attachment can otherwise vanish without trace.
-  await expect(page.getByText(/skipped/i).first()).toBeVisible({ timeout: 60_000 });
-  await expect(page.getByText(/requirements\.pptx/i)).toBeVisible();
+  const detail = page.getByRole('region', { name: new RegExp(`Message and extraction for DEMO-${RUN} C`) });
+  await expect(detail.getByText(/requirements\.pptx/i)).toBeVisible({ timeout: 60_000 });
+  await expect(detail.getByText('Could not be read', { exact: true })).toBeVisible();
+  await expect(detail.getByText(/not a file type this system reads/i)).toBeVisible();
   await testInfo.attach('C-01-skipped-evidence', { body: await page.screenshot(), contentType: 'image/png' });
 
   // And no Lead action is offered where there is no Lead.
@@ -142,12 +163,14 @@ test('D — polling again creates no duplicate assembly, job or Lead', async ({ 
   await page.goto(INTAKE);
   await openTabContaining(page, 'B');
   const before = await rowFor(page, 'B').count();
+  expect(before).toBe(1);
 
   await page.getByRole('button', { name: 'Poll now' }).click();
   await expect(page.getByText(/captured|message\(s\)|polled/i).first()).toBeVisible({ timeout: 60_000 });
   await testInfo.attach('D-01-second-poll', { body: await page.screenshot(), contentType: 'image/png' });
 
   await page.reload();
+  await openTabContaining(page, 'B');
   await expect(rowFor(page, 'B')).toHaveCount(before, { timeout: 30_000 });
   await testInfo.attach('D-02-no-duplicate', { body: await page.screenshot(), contentType: 'image/png' });
 });
