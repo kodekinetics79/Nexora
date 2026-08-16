@@ -27,6 +27,8 @@ import { DataGrid, type GridColDef, type GridPaginationModel } from '@mui/x-data
 import warehouseService, { type WarehouseDTO } from '../../../api/services/warehouseService';
 import { useAuth } from '../../../context/AuthContext';
 import SearchField from '../../../components/common/SearchField';
+// The grid is sized against the viewport, and the Setup breadcrumb bar is part of that viewport.
+import { SETUP_CHROME_HEIGHT } from '../SetupShell';
 import { handleApiError } from '../../../utils/errorHandler';
 import { useSnackbar } from 'notistack';
 import countryService from '../../../api/services/countryService';
@@ -215,7 +217,7 @@ const WarehousePage: React.FC = () => {
       </Paper>
 
       {/* Grid */}
-      <Paper sx={{ height: 'calc(100vh - 220px)', width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
+      <Paper sx={{ height: `calc(100vh - ${220 + SETUP_CHROME_HEIGHT}px)`, width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
         <DataGrid
           rows={data?.items || []}
           columns={columns}

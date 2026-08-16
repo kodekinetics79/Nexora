@@ -5,19 +5,18 @@ import MainLayout from './components/layout/MainLayout';
 import PermissionGuard from './components/common/PermissionGuard';
 import RouteAnnouncer from './components/layout/RouteAnnouncer';
 import useDocumentTitle from './hooks/useDocumentTitle';
+import { SETUP_ROUTES } from './pages/Setup/setupRoutes';
 
 // FE-09: route-level code splitting. Each page is loaded on demand so the
 // initial bundle only ships the app shell (layout, guards, providers).
 const LoginPage = lazy(() => import('./pages/Login/LoginPage'));
-const SetupMaster = lazy(() => import('./pages/Setup/SetupMaster'));
-const CurrencyPage = lazy(() => import('./pages/Setup/Currency/CurrencyPage'));
-const WarehousePage = lazy(() => import('./pages/Setup/Warehouse/WarehousePage'));
-const UomPage = lazy(() => import('./pages/Setup/UOM/UomPage'));
-const QuoteFormatPage = lazy(() => import('./pages/Setup/QuoteFormat/QuoteFormatPage'));
-const LocationMaster = lazy(() => import('./pages/Setup/Location/LocationMaster'));
+// The `/setup` shell (breadcrumb + jump field) and the hub it fronts. Both split like every other
+// route: nothing outside Setup pays for them. The screens below them are declared as data in
+// `pages/Setup/setupRoutes.tsx` and mapped into the route tree further down.
+const SetupShell = lazy(() => import('./pages/Setup/SetupShell'));
+const SetupHubPage = lazy(() => import('./pages/Setup/SetupHubPage'));
 const UsersPage = lazy(() => import('./pages/Security/Users/UsersPage'));
 const RolesPermissionsPage = lazy(() => import('./pages/Security/Roles/RolesPermissionsPage'));
-const BusinessUnitPage = lazy(() => import('./pages/Setup/BusinessUnit/BusinessUnitPage'));
 const ProductsPage = lazy(() => import('./pages/Inventory/ProductsPage'));
 const ProductDetailPage = lazy(() => import('./pages/Inventory/ProductDetailPage'));
 const ProductCategoryPage = lazy(() => import('./pages/Inventory/ProductCategoryPage'));
@@ -86,13 +85,6 @@ const ShipmentListPage = lazy(() => import('./pages/Sales/Shipments/ShipmentList
 const CreateShipmentPage = lazy(() => import('./pages/Sales/Shipments/CreateShipmentPage'));
 const ShipmentViewPage = lazy(() => import('./pages/Sales/Shipments/ShipmentViewPage'));
 const ShipmentInvoicePage = lazy(() => import('./pages/Sales/Shipments/ShipmentInvoicePage'));
-const PriceStructurePage = lazy(() => import('./pages/Setup/PriceStructure/PriceStructurePage'));
-const SlaSettingsPage = lazy(() => import('./pages/Setup/Sla/SlaSettingsPage'));
-const ScheduledReportsPage = lazy(() => import('./pages/Setup/Reporting/ScheduledReportsPage'));
-const CommercialPolicyPage = lazy(() => import('./pages/Setup/CommercialPolicy/CommercialPolicyPage'));
-const MailboxPage = lazy(() => import('./pages/Setup/Mailbox/MailboxPage'));
-const RoutingRulesPage = lazy(() => import('./pages/Setup/RoutingRules/RoutingRulesPage'));
-const CustomFieldsPage = lazy(() => import('./pages/Setup/CustomFields/CustomFieldsPage'));
 const SalesTodayPage = lazy(() => import('./pages/SalesManagement/SalesTodayPage'));
 const TeamOverviewPage = lazy(() => import('./pages/SalesManagement/TeamOverviewPage'));
 const RepDirectoryPage = lazy(() => import('./pages/SalesManagement/RepDirectoryPage'));
@@ -270,35 +262,20 @@ function App() {
       <Route path="/rfqs/view/:id" element={<MainLayout><PermissionGuard moduleName="RFQ Management"><ViewRFQPage /></PermissionGuard></MainLayout>} />
       <Route path="/rfqs" element={<Navigate to="/procurement/rfqs/all" replace />} />
       
-      {/* Setup Routes */}
-      <Route path="/setup/master" element={<MainLayout><PermissionGuard moduleName="UOM"><SetupMaster /></PermissionGuard></MainLayout>} />
-      <Route path="/setup/currency" element={<MainLayout><PermissionGuard moduleName="Currency"><CurrencyPage /></PermissionGuard></MainLayout>} />
-      <Route path="/setup/warehouse" element={<MainLayout><PermissionGuard moduleName="Warehouse"><WarehousePage /></PermissionGuard></MainLayout>} />
-      <Route path="/setup/uom" element={<MainLayout><PermissionGuard moduleName="UOM"><UomPage /></PermissionGuard></MainLayout>} />
-      <Route path="/setup/locations" element={<MainLayout><PermissionGuard moduleName="Locations"><LocationMaster /></PermissionGuard></MainLayout>} />
-      <Route path="/setup/quote-format" element={<MainLayout><PermissionGuard moduleName="Quote Configuration"><QuoteFormatPage /></PermissionGuard></MainLayout>} />
-      <Route path="/setup/business-unit" element={<MainLayout><PermissionGuard moduleName="Business Units"><BusinessUnitPage /></PermissionGuard></MainLayout>} />
-      <Route path="/setup/price-structure" element={<MainLayout><PermissionGuard moduleName="UOM"><PriceStructurePage /></PermissionGuard></MainLayout>} />
-      {/* SLA & alert policy (WP-A2). Guarded by the generic setup module ("UOM"),
-          matching /setup/master and /setup/price-structure. */}
-      <Route path="/setup/sla" element={<MainLayout><PermissionGuard moduleName="UOM"><SlaSettingsPage /></PermissionGuard></MainLayout>} />
-      {/* FR-DSH-06 scheduled report delivery. Guarded by "Dashboard" because that is the module
-          the reporting endpoints check, and because the reports carry dashboard content — the
-          write side additionally requires a manager role at the API. */}
-      <Route path="/setup/scheduled-reports" element={<MainLayout><PermissionGuard moduleName="Dashboard"><ScheduledReportsPage /></PermissionGuard></MainLayout>} />
-      <Route path="/setup/commercial-policy" element={<MainLayout><PermissionGuard moduleName="UOM"><CommercialPolicyPage /></PermissionGuard></MainLayout>} />
-      {/* Mailbox administration. Guarded by "Email & SMTP" — the module the supplier-email
-          screen already uses — rather than the generic setup module, because these rows hold
-          stored credentials and decide where customer-facing mail is sent from. */}
-      <Route path="/setup/mailboxes" element={<MainLayout><PermissionGuard moduleName="Email & SMTP"><MailboxPage /></PermissionGuard></MainLayout>} />
-      {/* RFQ routing rules (FR-RFQ-07). Guarded by "Customers" because that is the module the
-          underlying commercial-routing endpoints check for both reading a customer's routing
-          profile and creating ownership/identifier rows. */}
-      <Route path="/setup/routing-rules" element={<MainLayout><PermissionGuard moduleName="Customers"><RoutingRulesPage /></PermissionGuard></MainLayout>} />
-      {/* AA-01 · tenant-defined custom fields. Guarded by the generic setup module ("UOM"),
-          matching /setup/master and /setup/sla; the API additionally requires a manager role
-          and edit permission on the module the field attaches to. */}
-      <Route path="/setup/custom-fields" element={<MainLayout><PermissionGuard moduleName="UOM"><CustomFieldsPage /></PermissionGuard></MainLayout>} />
+      {/* Setup Routes — one shell over a nested tree, so `/setup` is a real place (the hub) and
+          every screen below it inherits the breadcrumb and the jump field. What each screen is,
+          and which group it belongs to, is declared once in `pages/Setup/setupCatalog.tsx`;
+          `setupCatalog.test.ts` fails if a route here is missing from it or listed twice. */}
+      <Route path="/setup" element={<MainLayout><SetupShell /></MainLayout>}>
+        <Route index element={<SetupHubPage />} />
+        {SETUP_ROUTES.map(({ path, moduleName, component: Screen }) => (
+          <Route
+            key={path}
+            path={path}
+            element={<PermissionGuard moduleName={moduleName}><Screen /></PermissionGuard>}
+          />
+        ))}
+      </Route>
 
       {/* Security Routes */}
       <Route path="/security/users" element={<MainLayout><PermissionGuard moduleName="Users"><UsersPage /></PermissionGuard></MainLayout>} />

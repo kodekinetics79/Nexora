@@ -34,6 +34,8 @@ import stateService, { type StateDTO } from '../../../api/services/stateService'
 import cityService from '../../../api/services/cityService';
 import { useAuth } from '../../../context/AuthContext';
 import SearchField from '../../../components/common/SearchField';
+// The grid is sized against the viewport, and the Setup breadcrumb bar is part of that viewport.
+import { SETUP_CHROME_HEIGHT } from '../SetupShell';
 import { handleApiError } from '../../../utils/errorHandler';
 import { useSnackbar } from 'notistack';
 
@@ -126,7 +128,7 @@ const LocationMaster: React.FC = () => {
   };
 
   return (
-    <Box sx={{ height: 'calc(100vh - 120px)', px: 1, py: 1 }}>
+    <Box sx={{ height: `calc(100vh - ${120 + SETUP_CHROME_HEIGHT}px)`, px: 1, py: 1 }}>
       <Box sx={{ mb: 2 }}>
         <Typography variant="h5" sx={{ fontWeight: 800 }}>{t('locations')}</Typography>
         <Typography variant="body2" color="text.secondary">Manage countries, states, and cities in a single unified view</Typography>
