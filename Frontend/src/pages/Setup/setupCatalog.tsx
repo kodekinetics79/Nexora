@@ -99,7 +99,7 @@ export const SETUP_GROUPS: SetupGroup[] = [
         path: '/setup/business-unit',
         icon: <BusinessUnitIcon />,
         moduleName: 'Business Units',
-        keywords: ['company', 'entity', 'legal', 'branch', 'division', 'vat', 'tax registration'],
+        keywords: ['business units', 'company', 'entity', 'legal', 'branch', 'division', 'vat', 'tax registration'],
       },
       {
         key: 'locations',
@@ -119,7 +119,7 @@ export const SETUP_GROUPS: SetupGroup[] = [
         path: '/setup/warehouse',
         icon: <WarehouseIcon />,
         moduleName: 'Warehouse',
-        keywords: ['store', 'depot', 'site', 'stock location'],
+        keywords: ['warehouses', 'store', 'depot', 'site', 'stock location'],
         seeAlso: {
           label: 'Inventory → Warehouses',
           path: '/inventory/warehouses',
@@ -141,7 +141,10 @@ export const SETUP_GROUPS: SetupGroup[] = [
         path: '/setup/currency',
         icon: <CurrencyIcon />,
         moduleName: 'Currency',
-        keywords: ['fx', 'exchange', 'money', 'sar', 'usd', 'rate'],
+        // The label is the product's own word for it ('Currency', as the supplier grid heads the
+        // column). The plural and the spelled-out names people actually type live here instead,
+        // so the terse label costs nothing at the search box.
+        keywords: ['currencies', 'fx', 'exchange', 'money', 'sar', 'usd', 'rate'],
       },
       {
         key: 'uom',
@@ -151,7 +154,7 @@ export const SETUP_GROUPS: SetupGroup[] = [
         path: '/setup/uom',
         icon: <UomIcon />,
         moduleName: 'UOM',
-        keywords: ['unit', 'measure', 'each', 'metre', 'kg', 'quantity'],
+        keywords: ['units of measure', 'unit of measure', 'units', 'measure', 'each', 'metre', 'kg', 'quantity'],
       },
       {
         key: 'price-structure',
@@ -179,7 +182,7 @@ export const SETUP_GROUPS: SetupGroup[] = [
         path: '/setup/quote-format',
         icon: <QuoteFormatIcon />,
         moduleName: 'Quote Configuration',
-        keywords: ['template', 'pdf', 'numbering', 'terms', 'layout', 'branding'],
+        keywords: ['quote format', 'template', 'pdf', 'numbering', 'terms', 'layout', 'branding'],
       },
     ],
   },

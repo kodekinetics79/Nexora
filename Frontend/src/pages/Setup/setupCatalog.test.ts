@@ -7,6 +7,7 @@ import {
   entryMatches,
   groupOfEntry,
   normaliseSetupType,
+  setupEntryLabel,
 } from './setupCatalog';
 import { SETUP_ROUTES } from './setupRoutes';
 
@@ -129,6 +130,40 @@ describe('searching the catalogue', () => {
 
   it('matches everything on an empty query', () => {
     expect(entryMatches(entry, '   ')).toBe(true);
+  });
+});
+
+describe('labels', () => {
+  const entry = (key: string) => SETUP_ENTRIES.find((item) => item.key === key)!;
+
+  it('reads the localised name where the product already has one', () => {
+    // `t('currency')` also heads a column in the supplier grid and labels a field in the product
+    // dialog. The hub shares it deliberately: one name per screen, and every locale keeps the
+    // translation it already had.
+    const t = (key: string, fallback: string) => (key === 'currency' ? 'العملة' : fallback);
+    expect(setupEntryLabel(entry('currency'), t)).toBe('العملة');
+  });
+
+  it('falls back to the English label when a locale has no string for the key', () => {
+    const t = (_key: string, fallback: string) => fallback;
+    expect(setupEntryLabel(entry('currency'), t)).toBe('Currencies');
+    expect(setupEntryLabel(entry('sla'), t)).toBe('Deadlines & Alerts');
+  });
+
+  it('finds a terse label by the name a newcomer would type', () => {
+    // The labels follow the product's own vocabulary ("UOM", "Currency"), which is right on a grid
+    // heading and terse on a hub card. Search carries the spelled-out names so the terse label
+    // never costs anyone the screen.
+    expect(entryMatches(entry('uom'), 'units of measure')).toBe(true);
+    expect(entryMatches(entry('uom'), 'unit of measure')).toBe(true);
+    expect(entryMatches(entry('currency'), 'currencies')).toBe(true);
+    expect(entryMatches(entry('warehouse'), 'warehouses')).toBe(true);
+    expect(entryMatches(entry('business-unit'), 'business units')).toBe(true);
+  });
+
+  it('still does not match a screen the words do not describe', () => {
+    expect(entryMatches(entry('uom'), 'currencies')).toBe(false);
+    expect(entryMatches(entry('mailboxes'), 'units of measure')).toBe(false);
   });
 });
 
