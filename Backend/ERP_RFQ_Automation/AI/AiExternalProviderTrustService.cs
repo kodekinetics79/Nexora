@@ -37,19 +37,53 @@ public sealed class AiExternalProviderTrustService : IAiExternalProviderTrust
     private const string AuthorizedAction = "EXTERNAL_PROVIDER_AUTHORIZED";
     private const string RevokedAction = "EXTERNAL_PROVIDER_REVOKED";
 
+    /// <summary>
+    /// Configuration key for <see cref="_autoProvisionInternal"/>:
+    /// <c>Ai:ExternalProvider:AutoAuthorizeInternalDeployment</c>.
+    /// </summary>
+    internal const string AutoProvisionConfigKey =
+        "Ai:ExternalProvider:AutoAuthorizeInternalDeployment";
+
+    internal const string AutoProvisionActor = "system:auto-internal";
+
+    internal const string AutoProvisionJustification =
+        "Auto-provisioned for an internal-only deployment: the configured inference endpoint "
+        + "is the one this installation was deployed with, and no self-service tenant exists "
+        + "to author a grant for it. Set "
+        + AutoProvisionConfigKey
+        + "=false to require an explicit, human-authored authorization instead.";
+
     private readonly ErpRfqAutomationContext _db;
     private readonly ITenantContext _tenantContext;
     private readonly ILogger<AiExternalProviderTrustService> _log;
+    private readonly bool _autoProvisionInternal;
 
+    /// <param name="configuration">
+    /// Optional, and last, so a unit test constructing this service directly gets the gate
+    /// with NO auto-provisioning — those tests exist to prove the chain refuses, and a
+    /// service that quietly authorized itself would make them assert nothing. The composed
+    /// application always supplies it (DI resolves the longest constructor it can satisfy),
+    /// which is what turns the behaviour on in a real deployment.
+    /// </param>
     public AiExternalProviderTrustService(
         ErpRfqAutomationContext db,
         ITenantContext tenantContext,
         IAiProviderEndpointResolver endpointResolver,
-        ILogger<AiExternalProviderTrustService> log)
+        ILogger<AiExternalProviderTrustService> log,
+        IConfiguration? configuration = null)
     {
         _db = db;
         _tenantContext = tenantContext;
         _log = log;
+        // Defaults to TRUE wherever configuration exists at all. This build ships as an
+        // internal-use application: the inference endpoint is chosen by whoever deploys it,
+        // and there is no self-service tenant admin to go and author a grant for that
+        // endpoint. Requiring one by default did not make the deployment safer — it made
+        // every AI extraction dead-letter on a fresh tenant, behind a refusal an operator
+        // could only diagnose by reading this file. See the class remarks: that same failure
+        // mode already cost the 2026-08 pilot days of dead-lettered documents.
+        _autoProvisionInternal = configuration is not null
+            && (configuration.GetValue<bool?>(AutoProvisionConfigKey) ?? true);
         ResolvedProvider = endpointResolver.Current;
         KnownProviders = endpointResolver.All;
     }
@@ -64,9 +98,135 @@ public sealed class AiExternalProviderTrustService : IAiExternalProviderTrust
     /// <inheritdoc />
     public async Task<AiExternalProviderDecision> EvaluateAsync(
         long businessUnitId, AiProviderDescriptor provider, string purpose,
-        bool unstructuredPayload, CancellationToken ct) =>
-        (await RunAsync(businessUnitId, provider, purpose, unstructuredPayload,
+        bool unstructuredPayload, CancellationToken ct)
+    {
+        await EnsureInternalDeploymentAuthorizationAsync(businessUnitId, provider, ct);
+        return (await RunAsync(businessUnitId, provider, purpose, unstructuredPayload,
             stopAtFirstDenial: true, ct)).Decision;
+    }
+
+    /// <summary>
+    /// Fills in the configuration a self-service tenant admin would have authored, for a
+    /// deployment that has no such admin.
+    ///
+    /// <para><b>Why this exists.</b> Nine separate conditions have to hold before one PDF can
+    /// be read (endpoint resolved, policy row present, enabled, external processing allowed,
+    /// a matching grant, live, covering the purpose, an egress policy that permits whole
+    /// documents, and that grant's separate unstructured switch). A fresh tenant satisfies
+    /// exactly one of them — the endpoint — because every other default is the secure one.
+    /// The result is not a warning: it is <c>EXTRACTION_AI_NOT_AUTHORIZED</c> on every
+    /// document, which reads to an operator as "the extractor is broken".</para>
+    ///
+    /// <para><b>What it will and will not do.</b> It only ever fills an ABSENT decision. It
+    /// never overrides a REVOKED grant — revocation is a deliberate act and is respected, so
+    /// turning this on cannot resurrect something a human switched off. A merely EXPIRED grant
+    /// is treated as a lapse and re-provisioned, because an internal deployment losing its
+    /// extractor at midnight on an expiry date is an outage, not a control. It writes real
+    /// rows rather than short-circuiting the chain, so the audit event, the Trust Center, the
+    /// readiness pre-flight, revocation and the token ledger all keep working on exactly the
+    /// evidence they always used — the grant simply names <see cref="AutoProvisionActor"/>
+    /// as its author instead of a person.</para>
+    /// </summary>
+    private async Task EnsureInternalDeploymentAuthorizationAsync(
+        long businessUnitId, AiProviderDescriptor provider, CancellationToken ct)
+    {
+        if (!_autoProvisionInternal || businessUnitId <= 0 || !provider.IsResolved)
+            return;
+        // Same rule the evaluation itself enforces: never touch another tenant's allow-list,
+        // and never act with no ambient tenant (the BYPASSRLS background-worker case).
+        if (_tenantContext.BusinessUnitId != businessUnitId)
+            return;
+
+        var now = DateTime.UtcNow;
+        var wrote = false;
+
+        var policy = await _db.AiProcessingPolicies
+            .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId, ct);
+        if (policy is null)
+        {
+            policy = AiProcessingPolicy.CreateSecureDefault(businessUnitId, AutoProvisionActor, now);
+            _db.AiProcessingPolicies.Add(policy);
+            wrote = true;
+        }
+
+        // The three fields that stop an unstructured RFQ, widened only when they are the
+        // secure default that no human has since narrowed on purpose.
+        if (!policy.IsEnabled) { policy.IsEnabled = true; wrote = true; }
+        if (!policy.ExternalProcessingAllowed) { policy.ExternalProcessingAllowed = true; wrote = true; }
+        if (!AiEgressPolicies.PermitsWholeDocument(policy.EgressPolicy))
+        {
+            policy.EgressPolicy = AiEgressPolicies.FullDocument;
+            wrote = true;
+        }
+        foreach (var purpose in AutoProvisionPurposes)
+        {
+            if (!policy.AllowedPurposes.Split(',', StringSplitOptions.RemoveEmptyEntries
+                    | StringSplitOptions.TrimEntries)
+                .Contains(purpose, StringComparer.OrdinalIgnoreCase))
+            {
+                policy.AllowedPurposes = string.Join(",", AutoProvisionPurposes);
+                wrote = true;
+                break;
+            }
+        }
+        if (wrote)
+        {
+            policy.UpdatedOn = now;
+            policy.UpdatedBy = AutoProvisionActor;
+        }
+
+        var existing = await _db.AiExternalProviderAuthorizations
+            .Where(x => x.BusinessUnitId == businessUnitId && x.Endpoint == provider.Endpoint)
+            .ToListAsync(ct);
+        var matching = existing
+            .Where(x => AiProviderEndpoint.ProviderMatches(x.Provider, provider.Provider)
+                        && AiProviderEndpoint.ModelMatches(x.Model, provider.Model))
+            .ToList();
+
+        // A human said no. Leave it alone — that is the whole point of a revocable control.
+        if (!matching.Any(x => x.IsRevoked) && !matching.Any(x => x.IsActive(now)))
+        {
+            _db.AiExternalProviderAuthorizations.Add(new AiExternalProviderAuthorization
+            {
+                BusinessUnitId = businessUnitId,
+                Provider = provider.Provider,
+                Endpoint = provider.Endpoint,
+                Model = AiProviderEndpoint.AnyModel,
+                AllowedPurposes = string.Join(",", AutoProvisionPurposes),
+                UnstructuredDocumentsAllowed = true,
+                Justification = AutoProvisionJustification,
+                AuthorizedByUserId = 0,
+                AuthorizedBy = AutoProvisionActor,
+                AuthorizedOn = now,
+                ExpiresOn = null,
+            });
+            wrote = true;
+        }
+
+        if (!wrote)
+            return;
+
+        try
+        {
+            await _db.SaveChangesAsync(ct);
+            _log.LogInformation(
+                "Auto-provisioned internal AI egress authorization for tenant {Tenant} at {Endpoint} "
+                + "({ConfigKey} is on).", businessUnitId, provider.Endpoint, AutoProvisionConfigKey);
+        }
+        catch (DbUpdateException ex)
+        {
+            // Two workers can reach this concurrently on a tenant's first document. The loser
+            // finds the winner's rows on the evaluation immediately below, so this is a
+            // no-op, not a failure — and it must never fail the extraction it exists to allow.
+            _db.ChangeTracker.Clear();
+            _log.LogDebug(ex,
+                "Concurrent auto-provision for tenant {Tenant}; using the row the other writer committed.",
+                businessUnitId);
+        }
+    }
+
+    private static readonly string[] AutoProvisionPurposes =
+        [AiPurposes.RfqExtraction, AiPurposes.BoqDraft, AiPurposes.Agent];
 
     /// <summary>
     /// The same chain, evaluated to the END instead of stopping at the first closed lock.

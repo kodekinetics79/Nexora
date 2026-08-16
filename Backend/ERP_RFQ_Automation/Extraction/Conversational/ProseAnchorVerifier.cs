@@ -38,8 +38,12 @@ public sealed record ProseAnchorVerification(
 public static class ProseAnchorVerifier
 {
     /// <summary>Longest permitted anchor. A "span" longer than this is a paraphrase of the
-    /// whole message, not a citation of one request.</summary>
-    public const int MaxSpanLength = 120;
+    /// whole message, not a citation of one request. Raised from 120: a single technical line
+    /// ("2 x 300mm hot-dip galvanised perforated cable tray, 2.5m length, with coupler plates
+    /// and M8 fixings, to BS EN 61537") is a legitimate one-request citation and its natural
+    /// verbatim quote exceeds 120 characters, so the old bound marked real lines unverifiable
+    /// purely for being descriptive.</summary>
+    public const int MaxSpanLength = 400;
 
     private static readonly TimeSpan RegexTimeout = TimeSpan.FromMilliseconds(200);
     private const RegexOptions Opts = RegexOptions.IgnoreCase | RegexOptions.CultureInvariant;
@@ -75,51 +79,58 @@ public static class ProseAnchorVerifier
         var haystack = Collapse(submittedText);
         var kept = new List<LeadItemData>(items.Count);
         var unanchored = 0;
-        var searchFrom = 0;
+        // Text already claimed by an earlier item's anchor. Claiming REGIONS rather than
+        // advancing a single cursor keeps both properties that matter, which a cursor could
+        // only ever trade against each other:
+        //   * one sentence cannot be quoted twice to manufacture two line items — the second
+        //     quote finds only claimed text, so it stays unverified;
+        //   * items returned out of document order (a model that groups by product family)
+        //     still verify against their own, unclaimed text, instead of every item after the
+        //     first out-of-order one failing behind an advanced cursor. That was a cliff.
+        var claimed = new List<(int Start, int End)>();
 
         foreach (var item in items)
         {
             var span = Collapse(item.SourceSpan);
-            if (string.IsNullOrEmpty(span) || (item.SourceSpan?.Length ?? 0) > MaxSpanLength)
+            var tooLong = (item.SourceSpan?.Length ?? 0) > MaxSpanLength;
+            var verified = false;
+
+            if (!string.IsNullOrEmpty(span) && !tooLong && haystack.Length > 0)
             {
-                unanchored++;
-                continue;
-            }
-            if (haystack.Length == 0)
-            {
-                unanchored++;
-                continue;
+                var hit = LocateUnclaimedSpan(haystack, span, claimed);
+                if (hit is not null)
+                {
+                    claimed.Add(hit.Value);
+                    verified = true;
+                }
             }
 
-            // Monotonic and non-overlapping: each span must occur AFTER the previous span
-            // ended. This is what stops the model from quoting the same sentence twice to
-            // manufacture two line items out of one request.
-            var end = LocateSpan(haystack, span, searchFrom);
-            if (end < 0)
-            {
-                unanchored++;
-                continue;
-            }
-            searchFrom = end;
+            // KEEP IT EITHER WAY. An unverified span means "this quote could not be found",
+            // which is a reason to show a human the line — not a reason to delete a request
+            // the customer may really have made. Deleting was strictly worse than flagging:
+            // every lead from this path goes to review regardless, so a hallucinated line is
+            // caught by the reviewer, whereas a silently deleted real line is caught by
+            // nobody and costs the bid. The counts below still drive that review flag.
+            if (!verified) unanchored++;
             kept.Add(item);
         }
 
         if (unanchored > 0)
             diagnostics.Add(
-                $"{unanchored} item(s) dropped: the quoted source span does not occur, in order, "
-                + "in the submitted message text.");
+                $"{unanchored} item(s) kept but UNVERIFIED: the quoted source span could not be "
+                + "located in the submitted message text. Confirm these against the original.");
 
-        var ceilingDropped = 0;
-        if (kept.Count > ceiling)
-        {
-            ceilingDropped = kept.Count - ceiling;
-            kept = kept.Take(ceiling).ToList();
+        // The ceiling is a signal, never a knife. It is derived from quantity+unit tokens and
+        // bullet prefixes, so a plain-prose RFQ using units the token list does not know
+        // ("each", "box", "roll", "lot", or Arabic units) computes a ceiling of 1 — which
+        // used to discard every line but the first, silently, on a perfectly real enquiry.
+        var overCeiling = Math.Max(0, kept.Count - ceiling);
+        if (overCeiling > 0)
             diagnostics.Add(
-                $"{ceilingDropped} item(s) dropped: the message supports at most {ceiling} "
-                + "requestable item(s).");
-        }
+                $"{overCeiling} item(s) beyond the {ceiling} the message text obviously supports; "
+                + "all are kept for review rather than discarded.");
 
-        return new ProseAnchorVerification(kept, unanchored, ceilingDropped, ceiling, diagnostics);
+        return new ProseAnchorVerification(kept, unanchored, overCeiling, ceiling, diagnostics);
     }
 
     /// <summary>
@@ -146,13 +157,53 @@ public static class ProseAnchorVerifier
     /// or -1 when it does not occur there at all. Redaction markers split the span into
     /// fragments that must each occur, in order.
     /// </summary>
+    /// <summary>
+    /// The first occurrence of <paramref name="span"/> that does not overlap text an earlier
+    /// item already claimed, or null when every occurrence is claimed (or there are none).
+    /// Scanning forward from each successive candidate is what lets a legitimate repeated
+    /// phrase anchor to its OWN occurrence while a re-quote of one sentence finds nothing free.
+    /// </summary>
+    private static (int Start, int End)? LocateUnclaimedSpan(
+        string haystack, string span, List<(int Start, int End)> claimed)
+    {
+        var from = 0;
+        while (from <= haystack.Length)
+        {
+            var end = LocateSpan(haystack, span, from);
+            if (end < 0) return null;
+            var start = FindStart(haystack, span, from, end);
+            if (!claimed.Any(c => start < c.End && c.Start < end))
+                return (start, end);
+            // Overlaps a claim: step past this occurrence's start and look for another.
+            from = start + 1;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Where the match that ended at <paramref name="end"/> began. For a plain span this is
+    /// simple arithmetic; for a redaction-fragmented span the first fragment's position is the
+    /// true start, so the claimed region covers the whole quoted stretch rather than its tail.
+    /// </summary>
+    private static int FindStart(string haystack, string span, int from, int end)
+    {
+        if (!RedactionMarker.IsMatch(span))
+            return Math.Max(from, end - span.Length);
+        var first = RedactionMarker.Split(span)
+            .Select(f => f.Trim())
+            .FirstOrDefault(f => f.Length >= 3);
+        if (string.IsNullOrEmpty(first)) return Math.Max(from, end - 1);
+        var at = haystack.IndexOf(first, from, StringComparison.OrdinalIgnoreCase);
+        return at < 0 ? Math.Max(from, end - 1) : at;
+    }
+
     private static int LocateSpan(string haystack, string span, int from)
     {
         if (from > haystack.Length) return -1;
 
         if (!RedactionMarker.IsMatch(span))
         {
-            var at = haystack.IndexOf(span, from, StringComparison.Ordinal);
+            var at = haystack.IndexOf(span, from, StringComparison.OrdinalIgnoreCase);
             return at < 0 ? -1 : at + span.Length;
         }
 
@@ -166,7 +217,7 @@ public static class ProseAnchorVerifier
         foreach (var fragment in fragments)
         {
             if (cursor > haystack.Length) return -1;
-            var at = haystack.IndexOf(fragment, cursor, StringComparison.Ordinal);
+            var at = haystack.IndexOf(fragment, cursor, StringComparison.OrdinalIgnoreCase);
             if (at < 0) return -1;
             cursor = at + fragment.Length;
         }

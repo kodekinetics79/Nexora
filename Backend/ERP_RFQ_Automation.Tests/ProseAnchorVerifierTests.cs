@@ -36,10 +36,13 @@ public class ProseAnchorVerifierTests
     }
 
     [Fact]
-    public void AnInventedItemIsDropped()
+    public void AnInventedItemIsKeptButFlaggedUnverified()
     {
         // The message never mentions switchgear. Nothing in the confidence score would have
-        // revealed that; the missing quote does.
+        // revealed that; the missing quote does. The item is still KEPT — a reviewer sees
+        // every line the model claimed and the flag says which one could not be corroborated.
+        // Deleting it here would have hidden the model's behaviour from the only person able
+        // to judge it, and would delete a real request whenever the quote check is wrong.
         var items = new[]
         {
             Anchored("Cable tray 300mm", "40 nos cable tray 300mm", 40, "40 nos"),
@@ -48,25 +51,28 @@ public class ProseAnchorVerifierTests
 
         var verification = ProseAnchorVerifier.Verify(Message, items);
 
-        Assert.Single(verification.Items);
-        Assert.Equal("Cable tray 300mm", verification.Items[0].ProductShortName);
+        Assert.Equal(2, verification.Items.Count);
         Assert.Equal(1, verification.UnanchoredItemCount);
         Assert.False(verification.Clean);
-        Assert.Contains(verification.Diagnostics, d => d.Contains("does not occur"));
+        Assert.Contains(verification.Diagnostics, d => d.Contains("UNVERIFIED"));
     }
 
     [Fact]
-    public void ItemWithNoSpanIsDropped()
+    public void ItemWithNoSpanIsKeptButFlagged()
     {
         var verification = ProseAnchorVerifier.Verify(Message, new[] { Ext.Item(0.99, "Cable tray") });
 
-        Assert.Empty(verification.Items);
+        Assert.Single(verification.Items);
         Assert.Equal(1, verification.UnanchoredItemCount);
+        Assert.False(verification.Clean);
     }
 
     [Fact]
-    public void TheSameSentenceQuotedTwiceCannotProduceTwoItems()
+    public void TheSameSentenceQuotedTwiceStillFlagsTheSecondItem()
     {
+        // The anti-duplication signal survives the switch to keep-and-flag: the first item
+        // claims the sentence, so the second finds no unclaimed occurrence and is reported
+        // unverified. Both are kept for the reviewer to judge.
         var items = new[]
         {
             Anchored("Cable tray 300mm", "40 nos cable tray 300mm", 40),
@@ -75,13 +81,17 @@ public class ProseAnchorVerifierTests
 
         var verification = ProseAnchorVerifier.Verify(Message, items);
 
-        Assert.Single(verification.Items);
+        Assert.Equal(2, verification.Items.Count);
         Assert.Equal(1, verification.UnanchoredItemCount);
     }
 
     [Fact]
-    public void OutOfOrderSpansAreRejected()
+    public void OutOfOrderSpansBothVerify()
     {
+        // Models routinely group by product family rather than document order. Under the old
+        // single advancing cursor, the second item here — quoting text EARLIER in the message
+        // — failed to locate and was deleted, and so was everything after it. Claiming regions
+        // instead of advancing a cursor means each item anchors to its own text.
         var items = new[]
         {
             Anchored("Junction box IP65", "12 nos junction box IP65", 12),
@@ -90,8 +100,9 @@ public class ProseAnchorVerifierTests
 
         var verification = ProseAnchorVerifier.Verify(Message, items);
 
-        Assert.Single(verification.Items);
-        Assert.Equal("Junction box IP65", verification.Items[0].ProductShortName);
+        Assert.Equal(2, verification.Items.Count);
+        Assert.Equal(0, verification.UnanchoredItemCount);
+        Assert.True(verification.Clean);
     }
 
     [Fact]
@@ -106,14 +117,43 @@ public class ProseAnchorVerifierTests
     }
 
     [Fact]
-    public void AnOverlongSpanIsNotAnAnchor()
+    public void AnOverlongSpanIsNotAnAnchorButTheItemSurvives()
     {
         var longSpan = new string('x', ProseAnchorVerifier.MaxSpanLength + 1);
         var verification = ProseAnchorVerifier.Verify(Message + longSpan,
             new[] { Anchored("Padding", longSpan) });
 
-        Assert.Empty(verification.Items);
+        Assert.Single(verification.Items);
         Assert.Equal(1, verification.UnanchoredItemCount);
+    }
+
+    [Fact]
+    public void ADetailedTechnicalQuoteIsStillAnAnchor()
+    {
+        // The bound exists to reject a paraphrase of the whole message, not to punish a line
+        // for being specific. A real spec line runs well past the old 120-character limit.
+        const string line =
+            "2 x 300mm hot-dip galvanised perforated cable tray, 2.5m length, supplied with "
+            + "coupler plates, M8 fixings and earth continuity straps, to BS EN 61537";
+        var verification = ProseAnchorVerifier.Verify(
+            $"Please quote {line}.", new[] { Anchored("Cable tray", line, 2) });
+
+        Assert.Single(verification.Items);
+        Assert.Equal(0, verification.UnanchoredItemCount);
+        Assert.True(verification.Clean);
+    }
+
+    [Fact]
+    public void AQuoteThatDiffersOnlyInCaseStillAnchors()
+    {
+        // Every regex in the verifier is IgnoreCase; the span comparison was not, so a model
+        // that title-cased a description while quoting it lost the line.
+        var verification = ProseAnchorVerifier.Verify(
+            "please quote 40 nos cable tray 300mm",
+            new[] { Anchored("Cable tray", "40 NOS Cable Tray 300MM", 40) });
+
+        Assert.Single(verification.Items);
+        Assert.Equal(0, verification.UnanchoredItemCount);
     }
 
     [Fact]
@@ -157,7 +197,7 @@ public class ProseAnchorVerifierTests
     }
 
     [Fact]
-    public void ItemsBeyondTheCeilingAreDroppedAndReported()
+    public void ItemsBeyondTheCeilingAreReportedButNeverDropped()
     {
         const string message = "Please quote cable tray 300mm.";
         var items = new[]
@@ -168,9 +208,32 @@ public class ProseAnchorVerifierTests
 
         var verification = ProseAnchorVerifier.Verify(message, items);
 
-        Assert.Single(verification.Items);
+        Assert.Equal(2, verification.Items.Count);
         Assert.Equal(1, verification.Ceiling);
         Assert.False(verification.Clean);
+    }
+
+    [Fact]
+    public void AProseRfqUsingUnknownUnitsKeepsEveryLine()
+    {
+        // The ceiling is derived from a short English unit list. A real enquiry written in
+        // prose using "each", "box" and "roll" scores a ceiling of 1 — which used to discard
+        // every line but the first, silently, on a completely genuine RFQ. This is the single
+        // most expensive way the extractor could be wrong, so it is pinned.
+        const string message =
+            "Kindly quote the following: 12 each of junction box IP65, 5 box of gland kits, "
+            + "and 3 roll of earth tape.";
+        var items = new[]
+        {
+            Anchored("Junction box IP65", "12 each of junction box IP65", 12),
+            Anchored("Gland kits", "5 box of gland kits", 5),
+            Anchored("Earth tape", "3 roll of earth tape", 3)
+        };
+
+        var verification = ProseAnchorVerifier.Verify(message, items);
+
+        Assert.Equal(3, verification.Items.Count);
+        Assert.Equal(0, verification.UnanchoredItemCount);
     }
 
     [Fact]

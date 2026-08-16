@@ -178,8 +178,10 @@ public sealed class ConversationalExtractionService : IConversationalExtractionS
         else if (!verification.Clean)
         {
             reviewReason =
-                $"Unverified line items removed: {verification.UnanchoredItemCount} unanchored, "
-                + $"{verification.CeilingDroppedCount} beyond the {verification.Ceiling}-item ceiling.";
+                $"Line items KEPT but needing confirmation: {verification.UnanchoredItemCount} whose "
+                + $"quoted source text could not be located, {verification.CeilingDroppedCount} beyond "
+                + $"the {verification.Ceiling} the message obviously supports. Nothing was discarded — "
+                + "check these against the original message.";
         }
         else if (!customerResolved)
         {
