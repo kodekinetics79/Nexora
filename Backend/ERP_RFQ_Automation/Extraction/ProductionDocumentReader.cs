@@ -235,6 +235,19 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         {
             throw;
         }
+        // A file that is NOT THERE and a file whose bytes changed are different incidents with
+        // different remedies, and collapsing them cost a production morning: 42 documents
+        // dead-lettered reading "the stored bytes no longer match the hash recorded at intake,
+        // re-upload from the original source", when the bytes had simply vanished from
+        // ephemeral storage — advice that is impossible to follow for a system-generated email
+        // body, and which sends an operator hunting a corruption bug that is not there.
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            _log.LogError(ex,
+                "Evidence object missing for extraction job {JobId} at {StoragePath}; the record "
+                + "survives but its bytes do not.", job.Id, job.StoragePath);
+            throw new EvidenceIntegrityException(job.Id, EvidenceIntegrityException.ObjectMissingCode, ex);
+        }
         catch (Exception ex)
         {
             _log.LogError(ex, "Verified evidence read failed for extraction job {JobId}.", job.Id);
@@ -1266,8 +1279,19 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
 
 public sealed class EvidenceIntegrityException : IOException
 {
+    /// <summary>The stored object was absent, as distinct from present-but-altered.</summary>
+    public const string ObjectMissingCode = "evidence_object_missing";
+
+    /// <summary>Marker the dead-letter classifier matches on, so the two incidents can carry
+    /// different operator guidance without parsing prose.</summary>
+    public const string ObjectMissingMarker = "[EVIDENCE_OBJECT_MISSING]";
+
     public EvidenceIntegrityException(long extractionJobId, string code, Exception innerException)
-        : base("The authoritative source document failed evidence integrity verification.", innerException)
+        : base(code == ObjectMissingCode
+                ? ObjectMissingMarker + " The stored evidence object is no longer present in "
+                    + "storage, so its integrity could not be verified."
+                : "The authoritative source document failed evidence integrity verification.",
+            innerException)
     {
         ExtractionJobId = extractionJobId;
         Code = code;

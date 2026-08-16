@@ -97,8 +97,27 @@ export default function TenantAdminOperationsPage() {
       </Alert>}
       <Typography variant="h6" sx={{ fontWeight: 800 }}>Lead extraction exceptions</Typography>
       <QueryState loading={deadLetters.isLoading} error={deadLetters.isError} empty={!deadLetters.data?.length} onRetry={() => void deadLetters.refetch()} emptyText="No lead extraction exceptions require review.">
-        <ResponsiveTable label="Lead extraction exceptions"><Table size="small"><TableHead><TableRow><TableCell>Document</TableCell><TableCell>Failure</TableCell><TableCell>Attempts</TableCell><TableCell>Disposition</TableCell><TableCell>Last updated</TableCell><TableCell align="right">Actions</TableCell></TableRow></TableHead><TableBody>
-          {deadLetters.data?.map(item => <TableRow hover key={item.jobId}><TableCell>{item.fileName}</TableCell><TableCell><Stack spacing={0.25}><Typography sx={{ fontSize: '0.85rem', fontWeight: 700 }}>{item.failureCategory.replaceAll('_', ' ')}</Typography>{item.operatorAction && <Typography sx={{ fontSize: '0.75rem', color: 'text.secondary' }}>{item.operatorAction}</Typography>}</Stack></TableCell><TableCell>{item.attempts} / {item.maxAttempts}</TableCell><TableCell><StatusChip value={item.resolution} /></TableCell><TableCell>{new Date(item.updatedOn).toLocaleString()}</TableCell><TableCell align="right"><Stack direction="row" spacing={1} sx={{ justifyContent: 'flex-end' }}><Button size="small" onClick={() => navigate(`/procurement/leads/ingestion/${encodeURIComponent(item.batchId)}`)}>Open batch</Button>{canRecoverExtraction && <Button size="small" variant="contained" onClick={() => openRecovery(item.jobId, item.fileName)}>Verify and retry</Button>}</Stack></TableCell></TableRow>)}
+        {/* Fixed layout with explicit widths: the remedy sentence in Failure is the only
+            long cell, and without a declared width it squeezed itself into a narrow column
+            and stretched every row to ~15 lines while Attempts and Disposition sat nearly
+            empty. Percentages keep the columns aligned at any viewport; minWidth hands the
+            surrounding ResponsiveTable a horizontal scroll instead of crushing the text. */}
+        <ResponsiveTable label="Lead extraction exceptions"><Table size="small" sx={{ tableLayout: 'fixed', minWidth: 900 }}><TableHead><TableRow>
+          <TableCell sx={{ width: '22%' }}>Document</TableCell>
+          <TableCell sx={{ width: '32%' }}>Failure</TableCell>
+          <TableCell sx={{ width: '9%', whiteSpace: 'nowrap' }}>Attempts</TableCell>
+          <TableCell sx={{ width: '11%' }}>Disposition</TableCell>
+          <TableCell sx={{ width: '13%' }}>Last updated</TableCell>
+          <TableCell align="right" sx={{ width: '13%' }}>Actions</TableCell>
+        </TableRow></TableHead><TableBody>
+          {deadLetters.data?.map(item => <TableRow hover key={item.jobId} sx={{ '& > td': { verticalAlign: 'top' } }}>
+            <TableCell sx={{ overflowWrap: 'anywhere' }}>{item.fileName}</TableCell>
+            <TableCell><Stack spacing={0.25}><Typography sx={{ fontSize: '0.85rem', fontWeight: 700 }}>{item.failureCategory.replaceAll('_', ' ')}</Typography>{item.operatorAction && <Typography sx={{ fontSize: '0.75rem', color: 'text.secondary' }}>{item.operatorAction}</Typography>}</Stack></TableCell>
+            <TableCell sx={{ whiteSpace: 'nowrap' }}>{item.attempts} / {item.maxAttempts}</TableCell>
+            <TableCell><StatusChip value={item.resolution} /></TableCell>
+            <TableCell>{new Date(item.updatedOn).toLocaleString()}</TableCell>
+            <TableCell align="right"><Stack spacing={1} sx={{ alignItems: 'flex-end' }}><Button size="small" onClick={() => navigate(`/procurement/leads/ingestion/${encodeURIComponent(item.batchId)}`)}>Open batch</Button>{canRecoverExtraction && <Button size="small" variant="contained" sx={{ whiteSpace: 'nowrap' }} onClick={() => openRecovery(item.jobId, item.fileName)}>Verify and retry</Button>}</Stack></TableCell>
+          </TableRow>)}
         </TableBody></Table></ResponsiveTable>
       </QueryState>
     </Stack>

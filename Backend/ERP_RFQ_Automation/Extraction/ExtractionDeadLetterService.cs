@@ -504,6 +504,10 @@ public sealed class ExtractionDeadLetterService(
     /// <summary>Tenant-facing name for a document refused because AI processing is not authorized.</summary>
     internal const string AiNotAuthorizedCategory = "AI_NOT_AUTHORIZED";
 
+    /// <summary>The evidence record survives but its bytes do not — distinct from
+    /// EVIDENCE_INTEGRITY, which means the bytes are present and altered.</summary>
+    internal const string EvidenceMissingCategory = "EVIDENCE_MISSING";
+
     /// <summary>
     /// What the operator must DO about this category, in words, or null where the category
     /// alone is the whole story.
@@ -520,6 +524,12 @@ public sealed class ExtractionDeadLetterService(
         AiNotAuthorizedCategory => ChunkedExtractionService.AiNotAuthorizedOperatorAction,
         "MALWARE" => "The stored file failed malware inspection. It cannot be retried until a "
             + "platform owner clears the disposition; recovery is blocked by design.",
+        EvidenceMissingCategory => "The stored copy of this document is gone from evidence "
+            + "storage, so nothing can be re-read from it — this is a storage-durability "
+            + "incident, not a corrupt file. Retrying this job cannot succeed. For mail-borne "
+            + "documents the original message is still retained: reprocess it from Inbound Mail "
+            + "and the parts are rebuilt from the source email. Check that evidence storage is "
+            + "backed by a persistent volume before reprocessing, or the bytes will vanish again.",
         "EVIDENCE_INTEGRITY" => "The stored bytes no longer match the hash recorded at intake. "
             + "Re-upload the document from its original source; retrying this copy cannot succeed.",
         "UNSUPPORTED_DOCUMENT" => "The file passed inspection but no reader in this deployment "
@@ -550,6 +560,10 @@ public sealed class ExtractionDeadLetterService(
         // structured-fallback note onto the stored reason.
         if (error.Contains(ChunkedExtractionService.AiNotAuthorizedCode, StringComparison.Ordinal))
             return AiNotAuthorizedCategory;
+        // BEFORE the integrity rule, whose prose this message also contains: a missing object
+        // and an altered one are different incidents and only one of them is a corruption bug.
+        if (error.Contains(EvidenceIntegrityException.ObjectMissingMarker, StringComparison.Ordinal))
+            return EvidenceMissingCategory;
         if (error.Contains("integrity", StringComparison.OrdinalIgnoreCase)) return "EVIDENCE_INTEGRITY";
         if (error.Contains("malware", StringComparison.OrdinalIgnoreCase)) return "MALWARE";
         if (error.Contains("unsupported", StringComparison.OrdinalIgnoreCase)) return "UNSUPPORTED_DOCUMENT";
