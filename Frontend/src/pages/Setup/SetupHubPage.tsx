@@ -16,14 +16,12 @@ import { alpha } from '@mui/material/styles';
 import {
   Search as SearchIcon,
   ChevronRight as ChevronIcon,
-  OpenInNew as ExternalIcon,
   TravelExplore as NoResultIcon,
   LockOutlined as LockedIcon,
 } from '@mui/icons-material';
 import { useTranslation } from 'react-i18next';
 import { useAuth } from '../../context/AuthContext';
 import {
-  SETUP_ELSEWHERE,
   SETUP_GROUPS,
   entryMatches,
   setupEntryLabel,
@@ -108,11 +106,7 @@ const SetupCard: React.FC<{ entry: SetupEntry; groupLabel?: string }> = ({ entry
         <Typography variant="subtitle1" sx={{ fontWeight: 700, lineHeight: 1.25, flex: 1, minWidth: 0 }}>
           {setupEntryLabel(entry, t)}
         </Typography>
-        {entry.external ? (
-          <ExternalIcon sx={{ fontSize: 16, color: 'text.disabled' }} aria-hidden />
-        ) : (
-          <ChevronIcon sx={{ fontSize: 18, color: 'text.disabled' }} aria-hidden />
-        )}
+        <ChevronIcon sx={{ fontSize: 18, color: 'text.disabled' }} aria-hidden />
       </Box>
       <Typography variant="body2" color="text.secondary" sx={{ lineHeight: 1.55 }}>
         {entry.description}
@@ -178,20 +172,15 @@ const SetupHubPage: React.FC = () => {
     [permitted, query],
   );
 
-  const visibleElsewhere = useMemo(
-    () => SETUP_ELSEWHERE.filter((entry) => permitted(entry) && entryMatches(entry, query)),
-    [permitted, query],
-  );
-
   const ownedCount = useMemo(
     () => SETUP_GROUPS.flatMap((group) => group.entries).filter(permitted).length,
     [permitted],
   );
 
-  /** Every match in one list, Setup's own screens before the ones another module owns. */
+  /** Every match in one list, in group order. */
   const matches = useMemo(
-    () => [...visibleGroups.flatMap((group) => group.entries), ...visibleElsewhere],
-    [visibleGroups, visibleElsewhere],
+    () => visibleGroups.flatMap((group) => group.entries),
+    [visibleGroups],
   );
 
   /** Which section each match came from, so a flat result still says where it lives. */
@@ -200,9 +189,8 @@ const SetupHubPage: React.FC = () => {
     for (const group of visibleGroups) {
       for (const entry of group.entries) labels[entry.key] = group.title;
     }
-    for (const entry of visibleElsewhere) labels[entry.key] = 'Configured outside Setup';
     return labels;
-  }, [visibleGroups, visibleElsewhere]);
+  }, [visibleGroups]);
 
   const matchCount = matches.length;
   const isSearching = query.trim().length > 0;
@@ -287,24 +275,6 @@ const SetupHubPage: React.FC = () => {
             <CardGrid entries={group.entries} />
           </Box>
         ))}
-
-        {!isSearching && visibleElsewhere.length > 0 && (
-          <Box component="section" aria-labelledby="setup-group-elsewhere">
-            <Typography
-              id="setup-group-elsewhere"
-              variant="h6"
-              component="h2"
-              sx={{ fontWeight: 800, letterSpacing: '-0.01em', mb: 0.5 }}
-            >
-              Configured outside Setup
-            </Typography>
-            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-              Settings another module owns. They are listed here so you can find them — each one opens
-              where it is governed, and nothing on this page edits them.
-            </Typography>
-            <CardGrid entries={visibleElsewhere} />
-          </Box>
-        )}
 
         {/* Two different nothings. A failed search is the user's word not matching; an empty hub
             with no search is a permission answer, and telling that person to try another word

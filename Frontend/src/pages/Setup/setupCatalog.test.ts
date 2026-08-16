@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import {
-  SETUP_ELSEWHERE,
   SETUP_ENTRIES,
   SETUP_GROUPS,
   entryForLocation,
@@ -9,7 +8,7 @@ import {
   normaliseSetupType,
   setupEntryLabel,
 } from './setupCatalog';
-import { SETUP_ROUTES } from './setupRoutes';
+import { SETUP_ROUTES, SETUP_ADOPTED_ROUTES } from './setupRoutes';
 
 /**
  * The catalogue is the register of what Setup governs, and these tests are what make it binding.
@@ -21,8 +20,23 @@ import { SETUP_ROUTES } from './setupRoutes';
  * no path or key appears twice.
  */
 
-/** The paths App.tsx actually mounts under `/setup`. */
-const routedSetupPaths = (): string[] => SETUP_ROUTES.map((route) => `/setup/${route.path}`);
+/**
+ * Every path App.tsx mounts inside Setup's shell: the `/setup/*` subtree plus the screens adopted
+ * at their own addresses (`/security/*`, `/admin/platform/*`).
+ */
+const routedSetupPaths = (): string[] => [
+  ...SETUP_ROUTES.map((route) => `/setup/${route.path}`),
+  ...SETUP_ADOPTED_ROUTES.map((route) => route.path),
+];
+
+/** The route backing a catalogue entry, from whichever of the two tables mounts it. */
+const routeFor = (entryPath: string) => {
+  const path = routeOf(entryPath);
+  return (
+    SETUP_ROUTES.find((route) => `/setup/${route.path}` === path) ??
+    SETUP_ADOPTED_ROUTES.find((route) => route.path === path)
+  );
+};
 
 /** A catalogue path stripped of any query — `/setup/master?type=role` routes to `/setup/master`. */
 const routeOf = (path: string) => path.split('?')[0];
@@ -50,8 +64,7 @@ describe('the setup catalogue', () => {
     const paths = SETUP_ENTRIES.map((entry) => entry.path);
     expect(new Set(paths).size, `duplicate paths in the catalogue: ${paths.join(', ')}`).toBe(paths.length);
 
-    const all = [...SETUP_ENTRIES, ...SETUP_ELSEWHERE];
-    const keys = all.map((entry) => entry.key);
+    const keys = SETUP_ENTRIES.map((entry) => entry.key);
     expect(new Set(keys).size, `duplicate keys in the catalogue: ${keys.join(', ')}`).toBe(keys.length);
   });
 
@@ -59,7 +72,7 @@ describe('the setup catalogue', () => {
     // A card gated on a different module than its route is worse than no card: it either offers a
     // screen that answers Access Denied, or hides one the user is entitled to open.
     for (const entry of SETUP_ENTRIES) {
-      const route = SETUP_ROUTES.find((item) => `/setup/${item.path}` === routeOf(entry.path));
+      const route = routeFor(entry.path);
       expect(route, `${entry.key} should have a route`).toBeDefined();
       expect(
         entry.moduleName,
@@ -68,17 +81,29 @@ describe('the setup catalogue', () => {
     }
   });
 
-  it('keeps cross-module links out of Setup proper', () => {
-    // Entries under SETUP_ELSEWHERE describe screens another module owns. If one ever pointed back
-    // into /setup it would be a second door onto a screen the hub already lists.
-    for (const entry of SETUP_ELSEWHERE) {
-      expect(entry.external, `${entry.key} must be marked external`).toBe(true);
-      expect(entry.path.startsWith('/setup')).toBe(false);
+  it('leaves an adopted screen at the address it already had', () => {
+    // Absorbing "User & Access" and "Platform Governance" into Setup was a navigation change, not
+    // a URL change: bookmarks, the a11y spec's title assertions and the e2e suite all point at
+    // these paths. A rename here would spend those links to buy nothing the reader can see.
+    expect(SETUP_ADOPTED_ROUTES.map((route) => route.path).sort()).toEqual([
+      '/admin/platform/ai-trust',
+      '/admin/platform/archive',
+      '/admin/platform/integrations',
+      '/admin/platform/lifecycle',
+      '/admin/platform/quality',
+      '/admin/platform/releases',
+      '/admin/platform/retention',
+      '/admin/platform/taxonomy',
+      '/security/roles',
+      '/security/users',
+    ]);
+    for (const route of SETUP_ADOPTED_ROUTES) {
+      expect(route.path.startsWith('/setup'), `${route.path} is not an adopted address`).toBe(false);
     }
   });
 
   it('describes every entry in a sentence a non-engineer can act on', () => {
-    for (const entry of [...SETUP_ENTRIES, ...SETUP_ELSEWHERE]) {
+    for (const entry of SETUP_ENTRIES) {
       expect(entry.label.length, `${entry.key} needs a label`).toBeGreaterThan(0);
       expect(entry.description.length, `${entry.key} needs a description`).toBeGreaterThan(20);
       expect(entry.icon, `${entry.key} needs an icon`).toBeTruthy();
@@ -110,8 +135,14 @@ describe('finding the current entry', () => {
     expect(entryForLocation('/setup/master', '?type=Role')?.key).toBe('roles');
   });
 
-  it('returns nothing for a path Setup does not own', () => {
-    expect(entryForLocation('/security/users')).toBeUndefined();
+  it('finds an adopted screen by its own address', () => {
+    // The breadcrumb on /security/users has to read "Setup Master › People & Access › Users".
+    expect(entryForLocation('/security/users')?.key).toBe('users');
+    expect(entryForLocation('/admin/platform/retention')?.key).toBe('platform-retention');
+  });
+
+  it('returns nothing for a path Setup does not govern', () => {
+    expect(entryForLocation('/procurement/leads/all')).toBeUndefined();
   });
 });
 
