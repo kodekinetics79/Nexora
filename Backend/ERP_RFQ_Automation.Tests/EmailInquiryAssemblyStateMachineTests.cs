@@ -146,52 +146,65 @@ public class EmailInquiryAssemblyStateMachineTests
     // ---- an unread attachment outranks a cleanly extracted body ----------------------------
 
     [Fact]
-    public void See_attached_quotation_plus_an_unreadable_attachment_goes_to_a_human()
+    public void See_attached_quotation_plus_an_unreadable_attachment_becomes_a_flagged_inquiry()
     {
-        // THE case that killed the earlier rule. The body extracts perfectly and says "please
-        // see the attached quotation"; the attachment is a format we cannot read. Treating this
-        // as a clean body-only Lead prices a deal against a document nobody opened.
+        // The body extracts perfectly and says "please see the attached quotation"; the
+        // attachment is a format we cannot read.
         //
-        // An earlier version returned ReadyForAssembly here, reasoning that the unread part was
-        // probably a company logo. Sometimes it is. Sometimes it is the bill of quantities, and
-        // at this layer the two are indistinguishable.
+        // This used to return NeedsReview, on the reasoning that a clean body-only Lead prices
+        // a deal against a document nobody opened. The concern is real, but withholding the
+        // Lead was the wrong lever for it: `Skipped` is reached by any attachment outside
+        // DocumentIntakeAllowList — including .p7s, which the SENDER'S gateway attaches to
+        // every outgoing message — so a whole customer could never produce a Lead at all, and
+        // NeedsReview cannot reach ReadyForAssembly, so the sweep never looked again.
+        //
+        // The inquiry is now built from what WAS read and the gap is named on it, which the
+        // salesperson can price around. Strictly more information than never seeing it.
         var result = Evaluate(2,
             EmailInquiryComponentStatus.Completed,
             EmailInquiryComponentStatus.Skipped);
 
-        Assert.Equal(EmailInquiryAssemblyStatus.NeedsReview, result.Status);
+        Assert.Equal(EmailInquiryAssemblyStatus.ReadyForAssembly, result.Status);
         Assert.Equal(1, result.CapturedComponentCount);
-        Assert.Contains("may be incomplete", result.Reason);
+        Assert.Contains("could not be read", result.Reason);
     }
 
     [Fact]
-    public void One_unread_attachment_among_several_good_ones_still_goes_to_a_human()
+    public void One_unread_attachment_among_several_good_ones_does_not_discard_the_good_ones()
     {
+        // Three attachments' worth of priced lines is real money. Discarding all of it because
+        // a fourth part was unreadable is the expensive half of the old rule.
         var result = Evaluate(4,
             EmailInquiryComponentStatus.Completed,
             EmailInquiryComponentStatus.Completed,
             EmailInquiryComponentStatus.Completed,
             EmailInquiryComponentStatus.Skipped);
 
-        Assert.Equal(EmailInquiryAssemblyStatus.NeedsReview, result.Status);
+        Assert.Equal(EmailInquiryAssemblyStatus.ReadyForAssembly, result.Status);
+        Assert.Equal(3, result.CapturedComponentCount);
+        Assert.Contains("could not be read", result.Reason);
     }
 
     [Fact]
-    public void A_provable_inline_asset_is_the_ONLY_thing_that_may_go_unread_silently()
+    public void A_provable_inline_asset_is_the_only_thing_that_goes_unread_SILENTLY()
     {
-        // A signature logo must not drag a real inquiry into review on every message that
-        // carries one — but it is the sole exception, and it is reached only by a
-        // deterministic classifier, never by a judgement about importance.
+        // Both shapes now become an inquiry; what separates them is whether anyone is TOLD.
+        //
+        // A signature logo is provably non-commercial, so it costs the message nothing: no
+        // review reason, no noise on the Lead. An unreadable part is a real gap in the
+        // evidence, so it becomes an inquiry too — but a flagged one. The distinction moved
+        // from "does a Lead exist" to "what does the Lead say", which is where it belongs.
         var withLogo = Evaluate(2,
             EmailInquiryComponentStatus.Completed,
             EmailInquiryComponentStatus.Ignored);
         Assert.Equal(EmailInquiryAssemblyStatus.ReadyForAssembly, withLogo.Status);
+        Assert.Null(withLogo.Reason);
 
-        // Same shape, but the part was merely unreadable rather than provably decorative.
         var withUnknown = Evaluate(2,
             EmailInquiryComponentStatus.Completed,
             EmailInquiryComponentStatus.Skipped);
-        Assert.Equal(EmailInquiryAssemblyStatus.NeedsReview, withUnknown.Status);
+        Assert.Equal(EmailInquiryAssemblyStatus.ReadyForAssembly, withUnknown.Status);
+        Assert.Contains("could not be read", withUnknown.Reason);
     }
 
     [Fact]

@@ -389,9 +389,41 @@ public sealed class EmailInquiryLeadAssembler : IEmailInquiryLeadAssembler
             return new AssembleOutcome(null, null);
         }
 
+        // THE UNREAD PARTS TRAVEL WITH THE LEAD.
+        //
+        // A message reaches this method with unread parts only because the state machine now
+        // lets it — see rule (2) there. That is only half the fix: a Lead built from three of a
+        // buyer's four attachments, with nothing saying so, is exactly the "price quoted against
+        // a document nobody opened" that withholding the Lead was trying to prevent. Naming the
+        // files on the Lead's review reason is what makes the trade honest, and it is why the
+        // blockade could be dropped safely.
+        var unreadParts = assembly.Components
+            .Where(c => c.Status == EmailInquiryComponentStatus.Skipped)
+            .OrderBy(c => c.Ordinal)
+            .ToList();
+
+        if (unreadParts.Count > 0)
+        {
+            var names = string.Join(", ", unreadParts.Select(c => c.FileName ?? $"part {c.Ordinal}"));
+            reviewReasons.Insert(0,
+                $"{unreadParts.Count} attached part(s) could not be read and are NOT reflected in "
+                + $"these lines: {names}. Price with that in mind.");
+
+            _log.LogInformation(
+                "Assembly {AssemblyId} carries {Count} unread part(s) onto its lead: {Names}",
+                assemblyId, unreadParts.Count, names);
+        }
+
         var outcome = new ChunkedExtractionOutcome
         {
-            Status = ExtractionOutcomeStatus.Ok,
+            // NeedsReview when a part went unread, and that is the whole trade: the Lead is
+            // still CREATED — which is the fix — but it is not auto-verified, and the persist
+            // path stamps "[NEEDS REVIEW] …" onto its remarks, so the missing evidence follows
+            // the inquiry to whoever prices it. Ok here would create a Lead that looks complete
+            // and quietly is not, which is the outcome withholding it was trying to avoid.
+            Status = unreadParts.Count > 0
+                ? ExtractionOutcomeStatus.NeedsReview
+                : ExtractionOutcomeStatus.Ok,
             Result = header with { Items = merged },
             ExpectedItemCount = expected,
             ExtractedItemCount = extracted,

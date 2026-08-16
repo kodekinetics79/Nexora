@@ -144,18 +144,21 @@ public sealed class EmailInquiryStrandedComponentSweepPostgreSqlTests(PostgreSql
         Assert.Equal(1, result.StrandedComponents.Skipped);
         Assert.Equal(0, result.StrandedComponents.Held);
 
-        // Terminal and commercially significant: the message FINALIZES, into a human's hands,
-        // and says plainly that one part could not be read.
+        // Terminal and commercially significant: the message FINALIZES and says plainly that
+        // one part could not be read.
         Assert.Equal(EmailInquiryComponentStatus.Skipped,
             await ComponentStatusAsync(assemblyId, "gaskets.csv"));
         Assert.Equal(EmailInquiryHoldReasons.StrandedJobStopped,
             await ComponentReasonAsync(assemblyId, "gaskets.csv"));
-        Assert.Equal(EmailInquiryAssemblyStatus.NeedsReview, await StatusAsync(assemblyId));
+
+        // It finalizes into an INQUIRY, not into an empty shell awaiting a human. A dead
+        // extraction job used to destroy the whole message; the two parts that read perfectly
+        // are now a Lead, flagged with the name of the part that did not.
+        Assert.Equal(EmailInquiryAssemblyStatus.Assembled, await StatusAsync(assemblyId));
+        Assert.Equal(1, await CountLeadsAsync(bu));
 
         // AND NOTHING THAT WAS READ IS LOST. The two parts that extracted keep their durable
-        // results, so the reviewer is looking at a message with its content attached rather than
-        // at an empty shell — this is what "with everything that was read" has to mean when the
-        // assembler deliberately builds no lead for a message a human still has to judge.
+        // results, and those results are what the Lead above was built from.
         Assert.Equal(2, await ScalarAsync($"""
             SELECT count(*) FROM public."EmailInquiryComponentResults"
             WHERE "AssemblyId" = {assemblyId} AND "PayloadJson" IS NOT NULL;
@@ -212,8 +215,9 @@ public sealed class EmailInquiryStrandedComponentSweepPostgreSqlTests(PostgreSql
         Assert.Equal(EmailInquiryComponentStatus.Skipped, await ComponentStatusAsync(assemblyId, "gaskets.csv"));
         Assert.Equal(EmailInquiryHoldReasons.StrandedJobMissing, await ComponentReasonAsync(assemblyId, "gaskets.csv"));
 
-        // And the message is finished rather than waiting on work nobody is doing.
-        Assert.Equal(EmailInquiryAssemblyStatus.NeedsReview, await StatusAsync(assemblyId));
+        // And the message is finished rather than waiting on work nobody is doing — finished
+        // as an INQUIRY, because the parts that did read are still a customer's request.
+        Assert.Equal(EmailInquiryAssemblyStatus.Assembled, await StatusAsync(assemblyId));
     }
 
     // =====================================================================================
@@ -345,7 +349,10 @@ public sealed class EmailInquiryStrandedComponentSweepPostgreSqlTests(PostgreSql
         Assert.Equal(0, second.StrandedComponents.Resolved);
         Assert.Equal(0, second.StrandedComponents.Failed);
         Assert.Equal(settled, await FingerprintAsync(assemblyId));
-        Assert.Equal(0, await CountLeadsAsync(bu));
+
+        // The first sweep already turned this into a Lead; the second must not make a second
+        // one. That is the assembler's claim doing its job through the sweep.
+        Assert.Equal(1, await CountLeadsAsync(bu));
     }
 
     [Fact]
@@ -389,7 +396,7 @@ public sealed class EmailInquiryStrandedComponentSweepPostgreSqlTests(PostgreSql
         // The poisoned row is COUNTED, not swallowed, and it did not take the platform with it.
         Assert.Equal(1, result.StrandedComponents.Failed);
         Assert.Equal(1, result.StrandedComponents.Skipped);
-        Assert.Equal(EmailInquiryAssemblyStatus.NeedsReview, await StatusAsync(healthyAssembly));
+        Assert.Equal(EmailInquiryAssemblyStatus.Assembled, await StatusAsync(healthyAssembly));
 
         // The poisoned message is exactly where it was — a throw costs a cycle, never a message.
         Assert.Equal(EmailInquiryComponentStatus.Extracting,

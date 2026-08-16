@@ -570,7 +570,27 @@ public sealed class EmailInquiryAssemblyCoordinator : IEmailInquiryAssemblyCoord
 
             assembly.Status = EmailInquiryAssemblyStatus.Assembled;
             assembly.AssembledLeadId = leadId;
-            assembly.StatusReason = null;
+
+            // The reason is CLEARED for a clean message and KEPT for one that assembled with
+            // parts unread.
+            //
+            // Nulling it unconditionally was correct while an unread part meant the message
+            // could never reach Assembled at all. Now that it can — the whole point of the
+            // change — clearing it would erase the operator's only assembly-level record that
+            // something in this inquiry was never opened, leaving an intake screen that shows a
+            // clean assembled message and a Lead that quietly says otherwise.
+            // Counted from the database, NOT from assembly.Components: this query does not
+            // Include them, so the navigation is empty here and would silently report zero
+            // unread parts on every message.
+            var unread = await _context.EmailInquiryComponents
+                .CountAsync(c => c.BusinessUnitId == businessUnitId
+                                 && c.AssemblyId == assemblyId
+                                 && c.Status == EmailInquiryComponentStatus.Skipped, ct);
+            assembly.StatusReason = unread > 0
+                ? $"{unread} attached part(s) of this message could not be read. The inquiry was "
+                  + "built from the parts that were, and its lead is flagged for review."
+                : null;
+
             assembly.UpdatedAtUtc = DateTimeOffset.UtcNow;
             await _context.SaveChangesAsync(ct);
         }, ct);

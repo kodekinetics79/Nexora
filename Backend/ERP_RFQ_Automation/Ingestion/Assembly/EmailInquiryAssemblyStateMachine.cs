@@ -215,34 +215,46 @@ public static class EmailInquiryAssemblyStateMachine
         var captured = CapturedCount(componentStatuses);
         var unread = UnreadCount(componentStatuses);
 
-        // (1) A part the sender attached could not be processed. THE MESSAGE GOES TO A HUMAN,
-        // even when the body extracted perfectly and even when other attachments succeeded.
-        //
-        // This outranks capture deliberately. "Please see the attached quotation" plus an
-        // attachment nobody could read is not a body-only inquiry — it is an inquiry whose
-        // commercial content is missing, and a clean Lead built from the covering note alone is
-        // a price quoted against a document that was never opened. An earlier version of this
-        // method returned ReadyForAssembly here on the grounds that the unread part was
-        // probably a company logo. Sometimes it is. Sometimes it is the bill of quantities, and
-        // the two are indistinguishable at this layer — which is exactly why the only parts
-        // allowed to be invisible here are the ones a deterministic classifier has already
-        // proven to be non-commercial (see EmailInquiryComponentStatus.Ignored).
-        if (unread > 0)
+        // (1) NOTHING was read, and parts went unread. There is no inquiry to build — only a
+        // message whose entire commercial content is in files this system cannot open. A human
+        // may recognise it; the pipeline cannot.
+        if (unread > 0 && captured == 0)
             return new EmailInquiryAssemblyEvaluation(
                 EmailInquiryAssemblyStatus.NeedsReview,
                 CompletedCount(componentStatuses), captured,
-                captured > 0
-                    ? $"{unread} attached part(s) of this message could not be read, so the "
-                      + "inquiry may be incomplete. The original is retained for review."
-                    : "No part of this message could be read. Its attachments were refused or "
-                      + "are unsupported; the original is retained for review.");
+                "No part of this message could be read. Its attachments were refused or "
+                + "are unsupported; the original is retained for review.");
 
-        // (2) Everything the sender attached was either read or provably non-commercial. Only
-        // now may the message become commercial fact.
+        // (2) Something WAS read. The message becomes an inquiry — even when another part of it
+        // went unread.
+        //
+        // This rule used to be the other way round: one unread part sent the whole message to
+        // NeedsReview, "even when the body extracted perfectly and even when other attachments
+        // succeeded." The reasoning was sound — a clean Lead built from the covering note alone
+        // is a price quoted against a document nobody opened — but the lever was wrong, and the
+        // cost was not hypothetical.
+        //
+        // `Skipped` is reached by any attachment outside DocumentIntakeAllowList, which excludes
+        // .p7s (an S/MIME signature, attached by the SENDER'S gateway to every outgoing
+        // message), .dwg/.step (drawings, routine on an industrial RFQ) and .zip. So a buyer
+        // whose mail is signed, or who attaches a drawing, produced NO Lead at all — and because
+        // NeedsReview cannot reach ReadyForAssembly, the recovery sweep never revisited it. The
+        // inquiry existed, was read, and waited forever for someone to notice.
+        //
+        // Withholding the Lead treats a PRICING-CONFIDENCE problem as an INQUIRY-EXISTENCE
+        // problem. The warning is kept and the blockade is dropped: the Lead is created from the
+        // evidence that WAS read, the unread parts are named on it (see the assembler's review
+        // reason and SkippedPartsJson), and the salesperson makes the participation decision
+        // with the gap in front of them. That is strictly more information than a message that
+        // silently never became an inquiry.
         if (captured > 0)
             return new EmailInquiryAssemblyEvaluation(
                 EmailInquiryAssemblyStatus.ReadyForAssembly,
-                CompletedCount(componentStatuses), captured, null);
+                CompletedCount(componentStatuses), captured,
+                unread > 0
+                    ? $"{unread} attached part(s) of this message could not be read. The inquiry "
+                      + "is built from the parts that were, and is flagged for review."
+                    : null);
 
         // (3) Nothing to capture and nothing unread: no fresh body, and no parts beyond inline
         // assets. A terminal triage outcome, NOT an assemblable inquiry.

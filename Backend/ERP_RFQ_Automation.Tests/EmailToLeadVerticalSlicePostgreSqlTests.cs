@@ -360,7 +360,7 @@ public sealed class EmailToLeadVerticalSlicePostgreSqlTests(PostgreSqlTestDataba
     }
 
     [Fact]
-    public async Task Unsupported_commercial_attachment_holds_the_whole_message_without_a_partial_Lead()
+    public async Task Unsupported_commercial_attachment_still_produces_a_Lead_that_names_the_gap()
     {
         var businessUnitId = UniqueBusinessUnitId();
         const string messageId = "vertical-unsupported-0001@buyer.example";
@@ -386,12 +386,27 @@ public sealed class EmailToLeadVerticalSlicePostgreSqlTests(PostgreSqlTestDataba
         var refused = await context.EmailInquiryComponents.AsNoTracking().SingleAsync(c =>
             c.AssemblyId == assemblyId && c.FileName == "commercial-drawing.dwg");
 
-        Assert.Equal(EmailInquiryAssemblyStatus.NeedsReview, assembly.Status);
-        Assert.Null(assembly.AssembledLeadId);
+        // THE regression. This exact message — a readable RFQ plus a .dwg drawing — used to
+        // finish ingestion and produce nothing at all, forever: NeedsReview cannot reach
+        // ReadyForAssembly, so the recovery sweep never revisited it and only a human noticing
+        // could rescue it. An S/MIME-signing customer hit this on every single message.
+        Assert.Equal(EmailInquiryAssemblyStatus.Assembled, assembly.Status);
+        Assert.NotNull(assembly.AssembledLeadId);
+
+        // The part is still refused, and still says why. Nothing about the security or
+        // supportability judgement changed — only whether it destroys the inquiry.
         Assert.Equal(EmailInquiryComponentStatus.Skipped, refused.Status);
         Assert.Equal(EmailInquirySkipReasons.UnsupportedFileType, refused.ReasonCode);
-        Assert.Equal(0, await context.Leads.AsNoTracking()
-            .CountAsync(l => l.BusinessUnitId == businessUnitId));
+
+        // Exactly one Lead, carrying the lines that WERE read.
+        var lead = await context.Leads.AsNoTracking().Include(l => l.LeadItems)
+            .SingleAsync(l => l.BusinessUnitId == businessUnitId);
+        Assert.Equal(assembly.AssembledLeadId, lead.Id);
+        Assert.NotEmpty(lead.LeadItems);
+
+        // And the gap travels with it, by name, so nobody prices this as if it were complete.
+        Assert.Contains("NEEDS REVIEW", lead.HeaderRemarks ?? string.Empty);
+        Assert.Contains("commercial-drawing.dwg", lead.HeaderRemarks ?? string.Empty);
     }
 
     [Fact]

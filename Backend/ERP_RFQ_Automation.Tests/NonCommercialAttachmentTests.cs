@@ -191,8 +191,18 @@ public class NonCommercialAttachmentTests
             ]);
         Assert.Equal(EmailInquiryAssemblyStatus.ReadyForAssembly, clean.Status);
 
-        // The same message with the part Skipped — which is what happened before — goes to a
-        // human instead. Both halves are asserted so the contrast is the test.
+        // Clean means CLEAN: no review reason at all, so a signature logo costs the message
+        // nothing on its way to a lead.
+        Assert.Null(clean.Reason);
+
+        // The same message with the part Skipped also becomes an inquiry — but a FLAGGED one.
+        // Both halves are asserted so the contrast is the test.
+        //
+        // The contrast used to be "lead" versus "no lead", and that was the defect: Skipped is
+        // reached by any attachment outside the intake allow-list, including the .p7s signature
+        // a sender's own gateway attaches to every message, so whole customers produced nothing
+        // at all. Classifying a part as provably non-commercial now buys silence rather than
+        // existence — which is all it was ever entitled to buy.
         var reviewed = EmailInquiryAssemblyStateMachine.Evaluate(
             3,
             [
@@ -200,7 +210,8 @@ public class NonCommercialAttachmentTests
                 EmailInquiryComponentStatus.Completed,
                 EmailInquiryComponentStatus.Skipped
             ]);
-        Assert.Equal(EmailInquiryAssemblyStatus.NeedsReview, reviewed.Status);
+        Assert.Equal(EmailInquiryAssemblyStatus.ReadyForAssembly, reviewed.Status);
+        Assert.Contains("could not be read", reviewed.Reason);
     }
 
     [Fact]
