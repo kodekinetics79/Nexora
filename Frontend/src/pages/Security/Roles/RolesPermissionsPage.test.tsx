@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { SnackbarProvider } from 'notistack';
+import { MemoryRouter } from 'react-router-dom';
 import RolesPermissionsPage from './RolesPermissionsPage';
 
 // `t('key') || 'Fallback'` is the pattern throughout these pages, so an empty translation makes
@@ -79,11 +80,16 @@ const renderPage = () => {
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   return render(
-    <QueryClientProvider client={queryClient}>
-      <SnackbarProvider>
-        <RolesPermissionsPage />
-      </SnackbarProvider>
-    </QueryClientProvider>,
+    // The empty state links to the screen that creates roles, so the page now needs a router the
+    // way it already needs a query client. Without one, the <Link> throws and the whole page
+    // renders as an empty <div> — which is what this helper produced before the wrapper was added.
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <SnackbarProvider>
+          <RolesPermissionsPage />
+        </SnackbarProvider>
+      </QueryClientProvider>
+    </MemoryRouter>,
   );
 };
 

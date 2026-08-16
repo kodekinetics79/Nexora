@@ -77,8 +77,10 @@ const STATIC_ROUTE_TITLES: Readonly<Record<string, string>> = {
   '/procurement/commercial-inbox': 'Commercial Inbox',
   '/procurement/handoffs': 'Procurement Handoffs',
 
-  // Setup
-  '/setup/master': 'Setup Master',
+  // Setup — titles track the labels in `pages/Setup/setupCatalog.tsx`; a screen that is called one
+  // thing in the hub and another in the browser tab is two screens as far as the reader is concerned.
+  '/setup': 'Setup Master',
+  '/setup/master': 'Lists & Picklists',
   '/setup/currency': 'Currencies',
   '/setup/warehouse': 'Warehouses',
   '/setup/uom': 'Units of Measure',
@@ -89,6 +91,9 @@ const STATIC_ROUTE_TITLES: Readonly<Record<string, string>> = {
   '/setup/sla': 'Deadlines & Alerts',
   '/setup/commercial-policy': 'Commercial Policy',
   '/setup/routing-rules': 'RFQ Routing Rules',
+  '/setup/scheduled-reports': 'Scheduled Reports',
+  '/setup/custom-fields': 'Custom Fields',
+  '/setup/mailboxes': 'Email Inboxes',
 
   // Security
   '/security/users': 'Users',

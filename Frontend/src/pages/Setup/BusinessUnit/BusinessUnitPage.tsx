@@ -25,6 +25,8 @@ import {
 import { DataGrid, type GridColDef, type GridPaginationModel } from '@mui/x-data-grid';
 import businessUnitService, { type BusinessUnitDTO } from '../../../api/services/businessUnitService';
 import SearchField from '../../../components/common/SearchField';
+// The grid is sized against the viewport, and the Setup breadcrumb bar is part of that viewport.
+import { SETUP_CHROME_HEIGHT } from '../SetupShell';
 import { handleApiError } from '../../../utils/errorHandler';
 import { useSnackbar } from 'notistack';
 
@@ -190,7 +192,7 @@ const BusinessUnitPage: React.FC = () => {
         <SearchField value={search} onChange={setSearch} placeholder="Search business units..." />
       </Paper>
 
-      <Paper sx={{ height: 'calc(100vh - 220px)', width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
+      <Paper sx={{ height: `calc(100vh - ${220 + SETUP_CHROME_HEIGHT}px)`, width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
         <DataGrid
           rows={data?.items || []}
           columns={columns}
