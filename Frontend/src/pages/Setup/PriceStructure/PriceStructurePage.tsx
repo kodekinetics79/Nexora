@@ -98,10 +98,10 @@ const PriceStructurePage: React.FC = () => {
   };
 
   return (
-    <Box sx={{ p: 3, bgcolor: '#f8f9fa', minHeight: '100vh' }}>
+    <Box sx={{ p: 3 }}>
       <Box sx={{ mb: 4, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <Box>
-          <Typography variant="h4" sx={{ fontWeight: 950, color: '#1a237e', display: 'flex', alignItems: 'center', gap: 2 }}>
+          <Typography variant="h4" component="h1" sx={{ fontWeight: 950, color: 'primary.main', display: 'flex', alignItems: 'center', gap: 2 }}>
             <PriceIcon sx={{ fontSize: 32 }} />
             Price Structure Module
           </Typography>
@@ -123,7 +123,7 @@ const PriceStructurePage: React.FC = () => {
         </Button>
       </Box>
 
-      <Paper sx={{ p: 2, mb: 4, borderRadius: 3, display: 'flex', gap: 2, alignItems: 'center', boxShadow: 'none', border: '1px solid #eee' }}>
+      <Paper sx={{ p: 2, mb: 4, borderRadius: 3, display: 'flex', gap: 2, alignItems: 'center', boxShadow: 'none', border: '1px solid', borderColor: 'divider' }}>
         <SearchField
           width="400px"
           value={search}
@@ -140,10 +140,11 @@ const PriceStructurePage: React.FC = () => {
             <Grid size={{ xs: 12, sm: 6, md: 4, lg: 3 }} key={item.setupId}>
               <Card sx={{
                 borderRadius: 4,
-                border: '1px solid #eee',
+                border: '1px solid',
+                borderColor: 'divider',
                 boxShadow: 'none',
                 transition: 'all 0.2s',
-                '&:hover': { transform: 'translateY(-4px)', boxShadow: '0 12px 24px rgba(0,0,0,0.05)', borderColor: '#1a237e' }
+                '&:hover': { transform: 'translateY(-4px)', boxShadow: '0 12px 24px rgba(0,0,0,0.05)', borderColor: 'primary.main' }
               }}>
                 <CardContent sx={{ p: 3 }}>
                   <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 2 }}>
@@ -157,7 +158,7 @@ const PriceStructurePage: React.FC = () => {
                   </Box>
                   <Typography variant="h6" sx={{ fontWeight: 800, mb: 1 }}>{item.setupName}</Typography>
                   <Box sx={{ display: 'flex', alignItems: 'baseline', gap: 0.5 }}>
-                    <Typography variant="h4" sx={{ fontWeight: 950, color: item.setupCode === 'D' ? '#d32f2f' : '#2e7d32' }}>
+                    <Typography variant="h4" sx={{ fontWeight: 950, color: item.setupCode === 'D' ? 'error.main' : 'success.main' }}>
                       {item.description}%
                     </Typography>
                     <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700 }}>{item.setupCode === 'D' ? 'OFF' : 'ADD-ON'}</Typography>
@@ -179,7 +180,7 @@ const PriceStructurePage: React.FC = () => {
           ))}
           {filteredData.length === 0 && (
             <Grid size={{ xs: 12 }}>
-              <Box sx={{ textAlign: 'center', py: 8, bgcolor: 'white', borderRadius: 4, border: '1px dashed #ccc' }}>
+              <Box sx={{ textAlign: 'center', py: 8, bgcolor: 'background.paper', borderRadius: 4, border: '1px dashed', borderColor: 'divider' }}>
                 <Typography color="text.secondary" sx={{ fontWeight: 700 }}>No price structures found.</Typography>
               </Box>
             </Grid>

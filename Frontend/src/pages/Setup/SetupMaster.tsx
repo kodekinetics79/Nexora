@@ -22,6 +22,8 @@ import {
   Card,
   CardContent,
   Avatar,
+  Alert,
+  Link as MuiLink,
 } from '@mui/material';
 import {
   Add as AddIcon,
@@ -31,9 +33,10 @@ import {
   CheckCircle as ActiveIcon,
   Cancel as InactiveIcon,
   Security as ShieldIcon,
+  LockOutlined as LockIcon,
 } from '@mui/icons-material';
 import { useTranslation } from 'react-i18next';
-import { useLocation } from 'react-router-dom';
+import { useLocation, useNavigate, Link as RouterLink } from 'react-router-dom';
 import setupService from '../../api/services/setupService';
 import type { SetupMasterDTO, SetupMasterCreateDTO, SetupMasterUpdateDTO } from '../../api/services/setupService';
 import { useAuth } from '../../context/AuthContext';
@@ -51,6 +54,7 @@ import {
   roleRankChoices,
   roleRankTier,
 } from './roleRankTiers';
+import { SETUP_TYPES_OWNED_ELSEWHERE, entryForLocation, normaliseSetupType, setupEntryLabel } from './setupCatalog';
 import lodash from 'lodash';
 
 /** Authority reads at a glance: the higher the tier, the louder the chip. */
@@ -65,20 +69,47 @@ const SetupMaster: React.FC = () => {
   const { t } = useTranslation();
   const { userData } = useAuth();
   const location = useLocation();
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
 
-  const getSetupTypeFromPath = (path: string) => {
-    const p = path.toLowerCase();
-    if (p.includes('currency')) return 'CURRENCY';
-    if (p.includes('warehouse')) return 'WAREHOUSE';
-    if (p.includes('uom')) return 'UOM';
-    if (p.includes('country')) return 'COUNTRY';
-    if (p.includes('state')) return 'STATE';
-    if (p.includes('city')) return 'CITY';
-    return undefined;
-  };
+  const { data: allSetups, isLoading } = useQuery({
+    queryKey: ['setups-global-all'],
+    queryFn: () => setupService.getAll({ pageSize: 5000 }),
+  });
 
-  const setupType = getSetupTypeFromPath(location.pathname);
+  /**
+   * The list can be scoped to one type by URL — `/setup/master?type=role` is how the catalogue's
+   * "Roles" entry lands here, and clicking a type chip below writes the same URL, so a scoped list
+   * can be linked and bookmarked.
+   *
+   * This replaces a path sniffer that mapped `/setup/currency`, `/setup/uom` and `/setup/warehouse`
+   * onto setup types. Those paths have had their own screens and their own backing tables for some
+   * time, so the sniffer could never fire — and the types it named are not what those screens edit.
+   */
+  const requestedType = new URLSearchParams(location.search).get('type') || undefined;
+
+  /** Stored casing wins: `Setup_Master.SetupType` holds "Role", the URL may say "role". */
+  const setupType = useMemo(() => {
+    if (!requestedType) return undefined;
+    const wanted = normaliseSetupType(requestedType);
+    return (
+      allSetups?.items?.find((item) => normaliseSetupType(item.setupType) === wanted)?.setupType ??
+      requestedType
+    );
+  }, [requestedType, allSetups]);
+
+  /** Every type in the tenant, with its row count — the chip rail and the type dropdown read this. */
+  const typeCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const item of allSetups?.items ?? []) {
+      counts.set(item.setupType, (counts.get(item.setupType) ?? 0) + 1);
+    }
+    return [...counts.entries()].sort(([a], [b]) => a.localeCompare(b));
+  }, [allSetups]);
+
+  const scopeToType = (type?: string) => {
+    navigate(type ? `/setup/master?type=${encodeURIComponent(type)}` : '/setup/master');
+  };
 
   // Filters
   const [search, setSearch] = useState('');
@@ -123,18 +154,14 @@ const SetupMaster: React.FC = () => {
     }
   }, [selectedRecord, setupType]);
 
-  const { data: allSetups, isLoading } = useQuery({
-    queryKey: ['setups-global-all'],
-    queryFn: () => setupService.getAll({ pageSize: 5000 }),
-  });
-
   const groupedData = useMemo(() => {
     if (!allSetups?.items) return {};
 
     let filtered = allSetups.items;
 
     if (setupType) {
-      filtered = filtered.filter(item => item.setupType === setupType);
+      const wanted = normaliseSetupType(setupType);
+      filtered = filtered.filter(item => normaliseSetupType(item.setupType) === wanted);
     }
 
     if (search) {
@@ -155,6 +182,35 @@ const SetupMaster: React.FC = () => {
   }, [allSetups, search, filterActive, setupType]);
 
   const distinctTypes = useMemo(() => Object.keys(groupedData).sort(), [groupedData]);
+
+  /** Types a row may be created under here — anything a dedicated screen owns is not one of them. */
+  const creatableTypes = useMemo(
+    () => typeCounts
+      .map(([type]) => type)
+      .filter((type) => !SETUP_TYPES_OWNED_ELSEWHERE[normaliseSetupType(type)]),
+    [typeCounts],
+  );
+
+  /** True while the list is scoped to a type this screen only displays. */
+  const scopedTypeIsOwnedElsewhere = !!setupType && !!SETUP_TYPES_OWNED_ELSEWHERE[normaliseSetupType(setupType)];
+
+  /**
+   * A scoped list is a destination in its own right — `?type=role` is "Roles" in the sidebar's
+   * catalogue and in the breadcrumb above. Take the heading from the same entry so the page does
+   * not introduce a third name (the stored type, e.g. "Role") for what the reader just clicked.
+   */
+  const catalogEntry = entryForLocation(location.pathname, location.search);
+  // Only an entry that names this scope may retitle the page. Without the query check, a type with
+  // no catalogue entry of its own (PRICE_STRUCTURE, ShipmentStatus…) falls back to the unscoped
+  // entry and the heading claims to be the whole list while showing one type of it.
+  const scopedEntry = catalogEntry?.path.includes('?') ? catalogEntry : undefined;
+  const heading = setupType
+    ? (scopedEntry ? setupEntryLabel(scopedEntry, t) : setupType)
+    : 'Lists & Picklists';
+  const subheading = setupType
+    ? scopedEntry?.description ??
+      `Every ${setupType} value the platform offers. Rows here appear in the dropdowns that use this type.`
+    : 'The values behind the dropdowns — statuses, reasons, categories and roles. Anything listed here is offered somewhere in the platform.';
 
   const createMutation = useMutation({
     mutationFn: (newRecord: SetupMasterCreateDTO) => setupService.create(newRecord),
@@ -248,22 +304,23 @@ const SetupMaster: React.FC = () => {
   const [isNewType, setIsNewType] = useState(false);
 
   return (
-    <Box sx={{ width: '100%', p: 3, backgroundColor: (theme) => theme.palette.mode === 'dark' ? '#0a0a0a' : '#f4f6f8', minHeight: '100vh' }}>
+    <Box sx={{ width: '100%', p: 3 }}>
       {/* Header Section */}
-      <Box sx={{ mb: 3, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+      <Box sx={{ mb: 3, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
         <Box>
-          <Typography variant="h4" sx={{ fontWeight: 900, color: 'text.primary', display: 'flex', alignItems: 'center', gap: 1.5 }}>
+          <Typography variant="h4" component="h1" sx={{ fontWeight: 900, color: 'text.primary', display: 'flex', alignItems: 'center', gap: 1.5 }}>
             <SettingsIcon sx={{ fontSize: 32, color: 'primary.main' }} />
-            {setupType || t('setup_master')}
+            {heading}
           </Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 600, ml: 6, mt: -0.5 }}>
-            Manage master categories and configuration entries.
+          <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 500, ml: 6, mt: 0.25, maxWidth: 640, lineHeight: 1.5 }}>
+            {subheading}
           </Typography>
         </Box>
         <Button
           variant="contained"
           startIcon={<AddIcon />}
           onClick={() => openDialog(null)}
+          disabled={scopedTypeIsOwnedElsewhere}
           sx={{
             borderRadius: 2.5,
             px: 3,
@@ -278,7 +335,7 @@ const SetupMaster: React.FC = () => {
       </Box>
 
       {/* Filter Bar */}
-      <Paper sx={{ p: 1.5, mb: 4, borderRadius: 3, display: 'flex', gap: 2, alignItems: 'center', border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
+      <Paper sx={{ p: 1.5, mb: 2.5, borderRadius: 3, display: 'flex', gap: 2, alignItems: 'center', border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
         <SearchField
           width="350px"
           value={search}
@@ -299,6 +356,42 @@ const SetupMaster: React.FC = () => {
         </TextField>
       </Paper>
 
+      {/* Type rail. A tenant accumulates dozens of types; scrolling past all of them to reach one
+          was the whole complaint about this screen. Each chip writes ?type=, so a scoped list is a
+          link you can send someone. */}
+      {typeCounts.length > 0 && (
+        <Box
+          role="group"
+          aria-label="Filter by type"
+          sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, mb: 4 }}
+        >
+          <Chip
+            label="All types"
+            size="small"
+            color={setupType ? 'default' : 'primary'}
+            variant={setupType ? 'outlined' : 'filled'}
+            onClick={() => scopeToType(undefined)}
+            sx={{ fontWeight: 700 }}
+          />
+          {typeCounts.map(([type, count]) => {
+            const owner = SETUP_TYPES_OWNED_ELSEWHERE[normaliseSetupType(type)];
+            const isSelected = !!setupType && normaliseSetupType(setupType) === normaliseSetupType(type);
+            return (
+              <Chip
+                key={type}
+                label={`${type} · ${count}`}
+                size="small"
+                color={isSelected ? 'primary' : 'default'}
+                variant={isSelected ? 'filled' : 'outlined'}
+                icon={owner ? <LockIcon sx={{ fontSize: '13px !important' }} /> : undefined}
+                onClick={() => scopeToType(type)}
+                sx={{ fontWeight: 600 }}
+              />
+            );
+          })}
+        </Box>
+      )}
+
       {/* Content Grid */}
       {isLoading ? (
         <Box sx={{ display: 'flex', justifyContent: 'center', p: 10 }}>
@@ -306,10 +399,14 @@ const SetupMaster: React.FC = () => {
         </Box>
       ) : (
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-          {distinctTypes.map((type) => (
+          {distinctTypes.map((type) => {
+            // A type with a screen of its own is shown here but never edited here — two editors over
+            // one table is how the same value ends up with two different meanings.
+            const owner = SETUP_TYPES_OWNED_ELSEWHERE[normaliseSetupType(type)];
+            return (
             <Box key={type}>
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 2.5, pl: 0.5 }}>
-                <Typography variant="subtitle1" sx={{ fontWeight: 900, letterSpacing: '0.05em', color: 'text.primary', textTransform: 'uppercase' }}>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: owner ? 1.5 : 2.5, pl: 0.5, flexWrap: 'wrap' }}>
+                <Typography variant="subtitle1" component="h2" sx={{ fontWeight: 900, letterSpacing: '0.05em', color: 'text.primary', textTransform: 'uppercase' }}>
                   {type}
                 </Typography>
                 <Chip
@@ -319,6 +416,26 @@ const SetupMaster: React.FC = () => {
                 />
                 <Divider sx={{ flex: 1, opacity: 0.5 }} />
               </Box>
+              {owner && (
+                <Alert
+                  severity="info"
+                  icon={<LockIcon fontSize="small" />}
+                  sx={{ mb: 2.5, borderRadius: 2 }}
+                  action={
+                    <Button
+                      component={RouterLink}
+                      to={owner.path}
+                      size="small"
+                      sx={{ fontWeight: 700, textTransform: 'none', whiteSpace: 'nowrap', flexShrink: 0 }}
+                    >
+                      Open {owner.label}
+                    </Button>
+                  }
+                >
+                  These rows belong to {owner.label}, which is where they are created and changed.
+                  They are listed here so the list is complete, not so it can be edited twice.
+                </Alert>
+              )}
               <Grid container spacing={2}>
                 {groupedData[type].map((item) => (
                   <Grid size={{ xs: 12, sm: 6, md: 4, lg: 3, xl: 2.4 }} key={item.setupId}>
@@ -346,14 +463,20 @@ const SetupMaster: React.FC = () => {
                               {item.setupCode || 'NO-CODE'}
                             </Typography>
                           </Box>
-                          <Tooltip title="Edit">
-                            <IconButton
-                              size="small"
-                              onClick={() => openDialog(item)}
-                              sx={{ mt: -0.5, mr: -0.5, color: 'text.secondary' }}
-                            >
-                              <EditIcon fontSize="small" />
-                            </IconButton>
+                          <Tooltip title={owner ? `Edited in ${owner.label}` : 'Edit'}>
+                            {/* A disabled button fires no events, so the tooltip needs a live
+                                wrapper to hang off. */}
+                            <Box component="span">
+                              <IconButton
+                                size="small"
+                                onClick={() => openDialog(item)}
+                                disabled={!!owner}
+                                aria-label={owner ? `${item.setupName} is edited in ${owner.label}` : `Edit ${item.setupName}`}
+                                sx={{ mt: -0.5, mr: -0.5, color: 'text.secondary' }}
+                              >
+                                {owner ? <LockIcon fontSize="small" /> : <EditIcon fontSize="small" />}
+                              </IconButton>
+                            </Box>
                           </Tooltip>
                         </Box>
 
@@ -361,12 +484,27 @@ const SetupMaster: React.FC = () => {
                           {item.setupName}
                         </Typography>
 
-                        <Typography variant="caption" sx={{ color: 'text.secondary', mb: 2, height: 32, overflow: 'hidden', textOverflow: 'ellipsis', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }}>
+                        {/* Clamped to two lines with the height it needs for them. It was a fixed
+                            32px box the text overflowed, so a two-line description ran under the
+                            chips below it. */}
+                        <Typography
+                          variant="caption"
+                          sx={{
+                            color: 'text.secondary',
+                            mb: 1.75,
+                            minHeight: 34,
+                            lineHeight: 1.4,
+                            overflow: 'hidden',
+                            display: '-webkit-box',
+                            WebkitLineClamp: 2,
+                            WebkitBoxOrient: 'vertical',
+                          }}
+                        >
                           {item.description || 'No description available for this item.'}
                         </Typography>
 
-                        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 0.75 }}>
-                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, minWidth: 0 }}>
+                        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 0.75, flexWrap: 'wrap' }}>
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, minWidth: 0, flexWrap: 'wrap' }}>
                             <Chip
                               icon={item.isActive ? <ActiveIcon sx={{ fontSize: '12px !important' }} /> : <InactiveIcon sx={{ fontSize: '12px !important' }} />}
                               label={item.isActive ? 'Active' : 'Disabled'}
@@ -389,7 +527,7 @@ const SetupMaster: React.FC = () => {
                               </Tooltip>
                             )}
                           </Box>
-                          <Typography variant="caption" sx={{ fontSize: '0.6rem', color: 'text.disabled', fontWeight: 600 }}>
+                          <Typography variant="caption" sx={{ fontSize: '0.6rem', color: 'text.disabled', fontWeight: 600, flexShrink: 0, whiteSpace: 'nowrap' }}>
                             ID: #{item.setupId}
                           </Typography>
                         </Box>
@@ -399,13 +537,23 @@ const SetupMaster: React.FC = () => {
                 ))}
               </Grid>
             </Box>
-          ))}
+            );
+          })}
           {distinctTypes.length === 0 && (
             <Box sx={{ textAlign: 'center', py: 10 }}>
               <LayersIcon sx={{ fontSize: 64, color: 'action.disabled', mb: 2 }} />
               <Typography variant="h6" color="text.secondary" sx={{ fontWeight: 700 }}>
-                No items match your search.
+                {search || filterActive !== 'all' ? 'No items match your search.' : 'Nothing on this list yet.'}
               </Typography>
+              {setupType && !search && filterActive === 'all' && (
+                <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                  No {setupType} values exist yet. Create the first one, or{' '}
+                  <MuiLink component="button" type="button" onClick={() => scopeToType(undefined)} sx={{ fontWeight: 600 }}>
+                    show every type
+                  </MuiLink>
+                  .
+                </Typography>
+              )}
             </Box>
           )}
         </Box>
@@ -457,12 +605,15 @@ const SetupMaster: React.FC = () => {
                     onChange={(e) => setFormData({ ...formData, setupType: e.target.value })}
                     required
                   >
-                    {distinctTypes.map((type) => (
+                    {/* Every type in the tenant, not just the ones the current filter left on
+                        screen — scoping the list to Role used to leave Role as the only type you
+                        could create. Types another screen owns are absent by design. */}
+                    {creatableTypes.map((type) => (
                       <MenuItem key={type} value={type}>
                         {type}
                       </MenuItem>
                     ))}
-                    {distinctTypes.length === 0 && <MenuItem disabled>No types available</MenuItem>}
+                    {creatableTypes.length === 0 && <MenuItem disabled>No types available</MenuItem>}
                   </TextField>
                 )
               ) : (

@@ -33,6 +33,7 @@ import {
   AccountTree as PlatformIcon,
 } from '@mui/icons-material';
 import { useAuth } from '../../context/AuthContext';
+import { SETUP_ENTRIES, SETUP_ROOT } from '../../pages/Setup/setupCatalog';
 
 interface SidebarProps {
   collapsed: boolean;
@@ -63,7 +64,6 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
     'dashboard': location.pathname.startsWith('/dashboard') || location.pathname.startsWith('/analytics/'),
     'rfq_mgmt': location.pathname.includes('/rfqs'),
     'quote_mgmt': location.pathname.includes('/quotes'),
-    'setup': location.pathname.includes('/setup'),
     'security': location.pathname.includes('/security'),
     'inventory': location.pathname.includes('/inventory'),
     'supplier_mgmt': location.pathname.includes('/suppliers') || location.pathname.includes('/supplier-quotes') || location.pathname.includes('/commercial-inbox') || location.pathname.includes('/quoted-items') || location.pathname.includes('/purchase-orders') || location.pathname.includes('/sourcing-cases'),
@@ -81,6 +81,16 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
     navigate(path);
     onNavigate?.();
   };
+
+  /**
+   * Setup keeps its rail entry when the user can open at least one screen inside it. The old group
+   * derived this from its children; the children now live in the catalogue, so the rule reads from
+   * there — one register, no second list of setup screens to forget to update.
+   */
+  const setupIsReachable = useMemo(
+    () => SETUP_ENTRIES.some((entry) => !entry.moduleName || hasPermission(entry.moduleName)),
+    [hasPermission],
+  );
 
   const menuItems: MenuItem[] = useMemo(() => {
     const rawItems: MenuItem[] = [
@@ -274,30 +284,19 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
           { key: 'roles', label: t('roles_and_permissions'), path: '/security/roles', moduleName: 'Roles & Permissions' },
         ]
       },
-      {
-        key: 'setup',
-        label: t('setup_master'),
-        icon: <SetupIcon />,
-        moduleName: 'Business Units',
-        children: [
-          { key: 'currency', label: t('currency'), path: '/setup/currency', moduleName: 'Currency' },
-          { key: 'warehouse', label: t('warehouse'), path: '/setup/warehouse', moduleName: 'Warehouse' },
-          { key: 'master', label: t('master_sub'), path: '/setup/master', moduleName: 'UOM' },
-          { key: 'uom', label: t('uom'), path: '/setup/uom', moduleName: 'UOM' },
-          { key: 'locations', label: t('locations'), path: '/setup/locations', moduleName: 'Locations' },
-          { key: 'quote-format', label: t('quote_format'), path: '/setup/quote-format', moduleName: 'Quote Configuration' },
-          { key: 'price-structure', label: 'Price Structure', path: '/setup/price-structure', moduleName: 'UOM' },
-          { key: 'sla', label: 'Deadlines & Alerts', path: '/setup/sla', moduleName: 'UOM' },
-          { key: 'scheduled-reports', label: 'Scheduled Reports', path: '/setup/scheduled-reports', moduleName: 'Dashboard' },
-          // The tax and tolerance numbers behind every landed cost and every customer price.
-          { key: 'commercial-policy', label: 'Commercial Policy', path: '/setup/commercial-policy', moduleName: 'UOM' },
-          { key: 'routing-rules', label: 'RFQ Routing Rules', path: '/setup/routing-rules', moduleName: 'Customers' },
-          // AA-01: discoverable next to the other master-data screens, not buried.
-          { key: 'custom-fields', label: 'Custom Fields', path: '/setup/custom-fields', moduleName: 'UOM' },
-          { key: 'mailboxes', label: 'Email Inboxes', path: '/setup/mailboxes', moduleName: 'Email & SMTP' },
-          { key: 'business-unit', label: t('business_unit'), path: '/setup/business-unit', moduleName: 'Business Units' },
-        ]
-      },
+      // Setup is one rail entry, not fourteen. The list had grown past the height of the rail and
+      // pushed everything under it out of reach, and a flat list of fourteen equal-weight labels
+      // could not say what any of them did. The hub at /setup groups and describes them, and the
+      // shell there carries a jump field, so no depth is lost by not listing them here.
+      ...(setupIsReachable
+        ? [{
+            key: 'setup',
+            label: t('setup_master'),
+            icon: <SetupIcon />,
+            path: SETUP_ROOT,
+            activePrefixes: ['/setup'],
+          } satisfies MenuItem]
+        : []),
     ];
 
     // Filter items based on permissions
@@ -310,7 +309,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
       }
       return !item.moduleName || hasPermission(item.moduleName);
     });
-  }, [t, hasPermission, isManager]);
+  }, [t, hasPermission, isManager, setupIsReachable]);
 
   const renderMenuItem = (item: MenuItem) => {
     const hasChildren = !!item.children;

@@ -18,6 +18,7 @@ import {
   Button,
 } from '@mui/material';
 
+import { Link as RouterLink } from 'react-router-dom';
 import rolePermissionService, {
   type RolePermissionBulkEntry,
   type RolePermissionDTO,
@@ -319,14 +320,25 @@ const RolesPermissionsPage: React.FC = () => {
         <Paper sx={{ borderRadius: 2, p: 2 }}>
           <EmptyState
             title={label(t, 'no_roles_configured', 'No roles are configured for this business unit')}
-            message={
-              t('no_roles_configured_help') ||
-              'Roles are created under Setup → Setup Master with a type of "Role". Until at least one role exists there is nothing to assign permissions to.'
-            }
+            // `t(key) || fallback` never reached the fallback: i18next answers a missing key with
+            // the key itself, which is truthy, so this screen printed "no_roles_configured_help"
+            // at the reader. `label` is the helper this file already has for exactly that.
+            message={label(
+              t,
+              'no_roles_configured_help',
+              'Roles are created in Setup Master → Roles, where each one is also given its authority tier. Until at least one role exists there is nothing to assign permissions to.',
+            )}
             action={
-              <Button variant="outlined" onClick={() => { void rolesQuery.refetch(); }}>
-                {label(t, 'retry', 'Retry')}
-              </Button>
+              <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', justifyContent: 'center' }}>
+                {/* The screen that creates roles, one click away — this empty state used to name it
+                    in prose and then offer only a Retry that could not change the answer. */}
+                <Button variant="contained" component={RouterLink} to="/setup/master?type=role">
+                  {label(t, 'create_a_role', 'Create a role')}
+                </Button>
+                <Button variant="outlined" onClick={() => { void rolesQuery.refetch(); }}>
+                  {label(t, 'retry', 'Retry')}
+                </Button>
+              </Box>
             }
           />
         </Paper>

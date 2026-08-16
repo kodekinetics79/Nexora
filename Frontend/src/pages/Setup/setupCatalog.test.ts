@@ -1,0 +1,142 @@
+import { describe, expect, it } from 'vitest';
+import {
+  SETUP_ELSEWHERE,
+  SETUP_ENTRIES,
+  SETUP_GROUPS,
+  entryForLocation,
+  entryMatches,
+  groupOfEntry,
+  normaliseSetupType,
+} from './setupCatalog';
+import { SETUP_ROUTES } from './setupRoutes';
+
+/**
+ * The catalogue is the register of what Setup governs, and these tests are what make it binding.
+ *
+ * Setup grew to fourteen sidebar rows by accretion — each addition reasonable on its own, none
+ * checked against the rest, and two of them (roles, price structures) already editable from a
+ * second screen. A register nobody verifies drifts back into that within a release, so: every
+ * `/setup/*` route in App.tsx is listed here exactly once, every listed path is a real route, and
+ * no path or key appears twice.
+ */
+
+/** The paths App.tsx actually mounts under `/setup`. */
+const routedSetupPaths = (): string[] => SETUP_ROUTES.map((route) => `/setup/${route.path}`);
+
+/** A catalogue path stripped of any query — `/setup/master?type=role` routes to `/setup/master`. */
+const routeOf = (path: string) => path.split('?')[0];
+
+describe('the setup catalogue', () => {
+  it('lists every routed setup screen', () => {
+    const listed = new Set(SETUP_ENTRIES.map((entry) => routeOf(entry.path)));
+    const missing = routedSetupPaths().filter((path) => !listed.has(path));
+    expect(
+      missing,
+      'a screen routed under /setup but absent from the catalogue is unreachable: the hub, the ' +
+        'jump field and the sidebar all read the catalogue and nothing else',
+    ).toEqual([]);
+  });
+
+  it('lists nothing that is not routed', () => {
+    const routed = new Set(routedSetupPaths());
+    const dangling = SETUP_ENTRIES.filter((entry) => !routed.has(routeOf(entry.path)));
+    expect(dangling.map((entry) => entry.path), 'catalogue entries must point at a real route').toEqual([]);
+  });
+
+  it('gives each screen exactly one entry', () => {
+    // Two entries may share a route only when they scope it differently (Roles is
+    // /setup/master?type=role); the same *path* twice is the duplication this guards against.
+    const paths = SETUP_ENTRIES.map((entry) => entry.path);
+    expect(new Set(paths).size, `duplicate paths in the catalogue: ${paths.join(', ')}`).toBe(paths.length);
+
+    const all = [...SETUP_ENTRIES, ...SETUP_ELSEWHERE];
+    const keys = all.map((entry) => entry.key);
+    expect(new Set(keys).size, `duplicate keys in the catalogue: ${keys.join(', ')}`).toBe(keys.length);
+  });
+
+  it('gates each entry on the module its route actually guards', () => {
+    // A card gated on a different module than its route is worse than no card: it either offers a
+    // screen that answers Access Denied, or hides one the user is entitled to open.
+    for (const entry of SETUP_ENTRIES) {
+      const route = SETUP_ROUTES.find((item) => `/setup/${item.path}` === routeOf(entry.path));
+      expect(route, `${entry.key} should have a route`).toBeDefined();
+      expect(
+        entry.moduleName,
+        `${entry.key} is listed under "${entry.moduleName}" but its route guards "${route!.moduleName}"`,
+      ).toBe(route!.moduleName);
+    }
+  });
+
+  it('keeps cross-module links out of Setup proper', () => {
+    // Entries under SETUP_ELSEWHERE describe screens another module owns. If one ever pointed back
+    // into /setup it would be a second door onto a screen the hub already lists.
+    for (const entry of SETUP_ELSEWHERE) {
+      expect(entry.external, `${entry.key} must be marked external`).toBe(true);
+      expect(entry.path.startsWith('/setup')).toBe(false);
+    }
+  });
+
+  it('describes every entry in a sentence a non-engineer can act on', () => {
+    for (const entry of [...SETUP_ENTRIES, ...SETUP_ELSEWHERE]) {
+      expect(entry.label.length, `${entry.key} needs a label`).toBeGreaterThan(0);
+      expect(entry.description.length, `${entry.key} needs a description`).toBeGreaterThan(20);
+      expect(entry.icon, `${entry.key} needs an icon`).toBeTruthy();
+    }
+  });
+
+  it('places every entry in exactly one group', () => {
+    for (const entry of SETUP_ENTRIES) {
+      const groups = SETUP_GROUPS.filter((group) => group.entries.some((item) => item.key === entry.key));
+      expect(groups, `${entry.key} should belong to one group`).toHaveLength(1);
+      expect(groupOfEntry(entry.key)?.key).toBe(groups[0].key);
+    }
+  });
+});
+
+describe('finding the current entry', () => {
+  it('matches a plain setup path', () => {
+    expect(entryForLocation('/setup/currency')?.key).toBe('currency');
+  });
+
+  it('tells a scoped screen apart from the screen it scopes', () => {
+    // Both live at /setup/master. The breadcrumb has to say "Roles" for one and
+    // "Lists & Picklists" for the other, or the two read as the same place.
+    expect(entryForLocation('/setup/master', '?type=role')?.key).toBe('roles');
+    expect(entryForLocation('/setup/master')?.key).toBe('master');
+  });
+
+  it('ignores the casing the URL happens to use', () => {
+    expect(entryForLocation('/setup/master', '?type=Role')?.key).toBe('roles');
+  });
+
+  it('returns nothing for a path Setup does not own', () => {
+    expect(entryForLocation('/security/users')).toBeUndefined();
+  });
+});
+
+describe('searching the catalogue', () => {
+  const entry = SETUP_ENTRIES.find((item) => item.key === 'commercial-policy')!;
+
+  it('matches on words the operator would use, not only our label', () => {
+    expect(entryMatches(entry, 'vat')).toBe(true);
+    expect(entryMatches(entry, 'zatca')).toBe(true);
+    expect(entryMatches(entry, 'tax rates')).toBe(true);
+  });
+
+  it('requires every term to match', () => {
+    expect(entryMatches(entry, 'tax mailbox')).toBe(false);
+  });
+
+  it('matches everything on an empty query', () => {
+    expect(entryMatches(entry, '   ')).toBe(true);
+  });
+});
+
+describe('normalising a stored setup type', () => {
+  // Production holds 'Role', ' Role ' and 'role' — see Backend Authorization/SetupTypes.cs.
+  it('folds case and stray whitespace the way the backend does', () => {
+    expect(normaliseSetupType(' Role ')).toBe('role');
+    expect(normaliseSetupType('PRICE_STRUCTURE')).toBe('price_structure');
+    expect(normaliseSetupType(null)).toBe('');
+  });
+});
