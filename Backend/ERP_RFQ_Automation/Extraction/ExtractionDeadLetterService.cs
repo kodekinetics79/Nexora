@@ -508,6 +508,10 @@ public sealed class ExtractionDeadLetterService(
     /// EVIDENCE_INTEGRITY, which means the bytes are present and altered.</summary>
     internal const string EvidenceMissingCategory = "EVIDENCE_MISSING";
 
+    /// <summary>The bytes are intact in a bucket this service is not configured to read.
+    /// Recoverable by configuration alone — nothing has been lost.</summary>
+    internal const string EvidenceBucketMismatchCategory = "EVIDENCE_BUCKET_MISMATCH";
+
     /// <summary>
     /// What the operator must DO about this category, in words, or null where the category
     /// alone is the whole story.
@@ -524,6 +528,13 @@ public sealed class ExtractionDeadLetterService(
         AiNotAuthorizedCategory => ChunkedExtractionService.AiNotAuthorizedOperatorAction,
         "MALWARE" => "The stored file failed malware inspection. It cannot be retried until a "
             + "platform owner clears the disposition; recovery is blocked by design.",
+        EvidenceBucketMismatchCategory => "NOTHING IS LOST. This document's bytes are intact in "
+            + "the storage bucket they were written to, but this service is now configured to "
+            + "read a DIFFERENT bucket, and it refuses to read across that boundary. Renaming or "
+            + "repointing the evidence bucket orphans every object written under the previous "
+            + "name. Do not re-upload and do not reprocess yet: point EvidenceStorage__Bucket "
+            + "back at the bucket these objects were written to (or copy the objects across), "
+            + "then retry — the same copy will then read cleanly.",
         EvidenceMissingCategory => "The stored copy of this document is gone from evidence "
             + "storage, so nothing can be re-read from it — this is a storage-durability "
             + "incident, not a corrupt file. Retrying this job cannot succeed. For mail-borne "
@@ -562,6 +573,8 @@ public sealed class ExtractionDeadLetterService(
             return AiNotAuthorizedCategory;
         // BEFORE the integrity rule, whose prose this message also contains: a missing object
         // and an altered one are different incidents and only one of them is a corruption bug.
+        if (error.Contains(EvidenceIntegrityException.BucketMismatchMarker, StringComparison.Ordinal))
+            return EvidenceBucketMismatchCategory;
         if (error.Contains(EvidenceIntegrityException.ObjectMissingMarker, StringComparison.Ordinal))
             return EvidenceMissingCategory;
         if (error.Contains("integrity", StringComparison.OrdinalIgnoreCase)) return "EVIDENCE_INTEGRITY";

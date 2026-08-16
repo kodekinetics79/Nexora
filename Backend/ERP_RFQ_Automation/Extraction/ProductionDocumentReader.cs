@@ -257,6 +257,21 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         // re-upload from the original source", when the bytes had simply vanished from
         // ephemeral storage — advice that is impossible to follow for a system-generated email
         // body, and which sends an operator hunting a corruption bug that is not there.
+        // The object exists, somewhere — the reader is simply pointed at a different bucket
+        // than the one this object was written to, and refuses to cross that line
+        // (EnsureConfiguredBucket). Renaming or repointing the evidence bucket orphans every
+        // object written under the old name in exactly this way. Nothing is lost and nothing
+        // is corrupt, so telling an operator to re-upload is both wrong and destructive
+        // advice: the fix is to point the configuration back, or migrate the objects across.
+        catch (InvalidDataException ex) when (ex.Message
+            == ERP_RFQ_Automation.Infrastructure.Storage.S3EvidenceObjectStorage.BucketMismatchMessage)
+        {
+            _log.LogError(ex,
+                "Evidence object for extraction job {JobId} belongs to a different bucket than the "
+                + "configured one ({StoragePath}); the bytes are not lost, the reader is repointed.",
+                job.Id, job.StoragePath);
+            throw new EvidenceIntegrityException(job.Id, EvidenceIntegrityException.BucketMismatchCode, ex);
+        }
         catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
         {
             _log.LogError(ex,
@@ -1298,15 +1313,24 @@ public sealed class EvidenceIntegrityException : IOException
     /// <summary>The stored object was absent, as distinct from present-but-altered.</summary>
     public const string ObjectMissingCode = "evidence_object_missing";
 
-    /// <summary>Marker the dead-letter classifier matches on, so the two incidents can carry
+    /// <summary>The object belongs to a bucket other than the configured one — present,
+    /// intact, and unreachable from here.</summary>
+    public const string BucketMismatchCode = "evidence_bucket_mismatch";
+
+    /// <summary>Markers the dead-letter classifier matches on, so these incidents can carry
     /// different operator guidance without parsing prose.</summary>
     public const string ObjectMissingMarker = "[EVIDENCE_OBJECT_MISSING]";
+    public const string BucketMismatchMarker = "[EVIDENCE_BUCKET_MISMATCH]";
 
     public EvidenceIntegrityException(long extractionJobId, string code, Exception innerException)
-        : base(code == ObjectMissingCode
-                ? ObjectMissingMarker + " The stored evidence object is no longer present in "
-                    + "storage, so its integrity could not be verified."
-                : "The authoritative source document failed evidence integrity verification.",
+        : base(code switch
+            {
+                ObjectMissingCode => ObjectMissingMarker + " The stored evidence object is no "
+                    + "longer present in storage, so its integrity could not be verified.",
+                BucketMismatchCode => BucketMismatchMarker + " The stored evidence object belongs "
+                    + "to a different bucket than the one this service is configured to read.",
+                _ => "The authoritative source document failed evidence integrity verification.",
+            },
             innerException)
     {
         ExtractionJobId = extractionJobId;

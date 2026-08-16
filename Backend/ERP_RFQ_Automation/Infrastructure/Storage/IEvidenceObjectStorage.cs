@@ -735,11 +735,21 @@ public sealed class S3EvidenceObjectStorage : IEvidenceObjectStorage, IDisposabl
             "S3 evidence storage requires HTTPS for non-local service endpoints.");
     }
 
+    /// <summary>
+    /// Stable text identifying a bucket mismatch. InvalidDataException is sealed and is also
+    /// what a genuine DIGEST mismatch raises, so the two cannot be told apart by type — and
+    /// they mean opposite things: a digest mismatch says the bytes are present and WRONG,
+    /// this says they are almost certainly present and RIGHT, in a bucket the service is no
+    /// longer pointed at. Reported as one incident, an operator is told to re-upload
+    /// documents that were never damaged. Consumers match on this constant, never on prose.
+    /// </summary>
+    public const string BucketMismatchMessage =
+        "The evidence object URI does not belong to the configured storage bucket.";
+
     internal static void EnsureConfiguredBucket(string uriBucket, string configuredBucket)
     {
         if (!string.Equals(uriBucket, configuredBucket, StringComparison.Ordinal))
-            throw new InvalidDataException(
-                "The evidence object URI does not belong to the configured storage bucket.");
+            throw new InvalidDataException(BucketMismatchMessage);
     }
 
     internal static void EnsureVersioningEnabled(VersionStatus? status)
