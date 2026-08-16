@@ -304,6 +304,18 @@ public static class EmailToLeadHarness
     ///
     /// <para><paramref name="waitForAssemblySettlement"/> is false for exactly one caller: the
     /// recovery test, whose whole subject is the state that exists inside that window.</para>
+    ///
+    /// <para><b>DRAIN ONE TENANT COMPLETELY BEFORE THE NEXT ONE HAS ANY JOBS.</b> The worker this
+    /// starts covers the WHOLE queue, but the wait watches only <paramref name="businessUnitId"/>
+    /// — so a test that captures two tenants and then drains twice lets the first call stop a
+    /// worker that is mid-flight on the second tenant's job. A stopped worker abandons its lease
+    /// by design (ExtractionWorker: "Leave the lease to expire; another worker reclaims it after
+    /// shutdown"), and the claim SQL will not reclaim a Leased row until <c>LeaseExpiresAt</c>
+    /// passes — 60 seconds here, which is exactly <see cref="TestWaits.Liveness"/>. The second
+    /// drain then burns its entire window unable to claim the row and fails with every job
+    /// reading terminal, because the lease expired and the job finished while the failure message
+    /// was being built. It passes on a fast machine and fails on a loaded CI runner. Interleave
+    /// capture and drain per tenant instead.</para>
     /// </summary>
     public static async Task DrainQueueAsync(
         ServiceProvider services,

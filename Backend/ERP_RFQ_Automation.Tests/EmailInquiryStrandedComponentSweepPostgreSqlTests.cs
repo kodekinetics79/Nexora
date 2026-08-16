@@ -358,18 +358,23 @@ public sealed class EmailInquiryStrandedComponentSweepPostgreSqlTests(PostgreSql
         await SeedAsync(poisoned, "stranded-0007@buyer.example");
         await SeedAsync(healthy, "stranded-0008@buyer.example");
 
-        long poisonedAssembly;
-        long healthyAssembly;
-        await using (var open = BuildGraph())
-        {
-            poisonedAssembly = await CaptureAsync(open, poisoned, "stranded-0007@buyer.example");
-            healthyAssembly = await CaptureAsync(open, healthy, "stranded-0008@buyer.example");
-
-            await KillJobAsync(poisonedAssembly, "gaskets.csv", ExtractionStatus.DeadLetter, ContentError);
-            await KillJobAsync(healthyAssembly, "gaskets.csv", ExtractionStatus.DeadLetter, ContentError);
-            await DrainAsync(open, poisoned);
-            await DrainAsync(open, healthy);
-        }
+        // ONE TENANT AT A TIME, ALL THE WAY THROUGH — capture, strand, drain, then the next.
+        //
+        // Capturing both first and draining twice afterwards is a race this test lost reliably on
+        // a slower runner. DrainQueueAsync runs a worker over the WHOLE queue and stops it the
+        // moment the NAMED tenant's jobs are terminal, so the first drain can stop a worker that
+        // is mid-flight on the SECOND tenant's job. A stopped worker abandons its lease by design
+        // ("Leave the lease to expire; another worker reclaims it after shutdown"), and the claim
+        // SQL will not reclaim a Leased row until LeaseExpiresAt passes — 60 seconds here, which
+        // is exactly TestWaits.Liveness. The second drain then spends its entire window unable to
+        // claim the row, and reports every job terminal because the lease expired and the job
+        // finished while the failure message was being built.
+        //
+        // Draining each tenant to completion before the next one has any jobs removes the
+        // cross-tenant in-flight work entirely. It is also the pattern the assembly-recovery lane
+        // already uses, for the same reason.
+        var poisonedAssembly = await StrandAsync(poisoned, "stranded-0007@buyer.example");
+        var healthyAssembly = await StrandAsync(healthy, "stranded-0008@buyer.example");
 
         // The write the sweep makes for the poisoned tenant throws — a lock timeout, a connection
         // fault, a constraint nobody predicted all look like this from here. Injected at the ONE
@@ -451,14 +456,7 @@ public sealed class EmailInquiryStrandedComponentSweepPostgreSqlTests(PostgreSql
         // the component phase must honour it exactly as the assembly phase does.
         const long refused = 947_009;
         await SeedAsync(refused, "stranded-0009@buyer.example");
-
-        long assemblyId;
-        await using (var open = BuildGraph())
-        {
-            assemblyId = await CaptureAsync(open, refused, "stranded-0009@buyer.example");
-            await KillJobAsync(assemblyId, "gaskets.csv", ExtractionStatus.DeadLetter, ContentError);
-            await DrainAsync(open, refused);
-        }
+        var assemblyId = await StrandAsync(refused, "stranded-0009@buyer.example");
 
         await using (var gated = BuildGraph(s => s.AddScoped<ERP_RFQ_Automation.Platform.Lifecycle.ITenantWorkGate>(
                          _ => new EmailToLeadHarness.RefusingWorkGate(refused))))
@@ -630,6 +628,27 @@ public sealed class EmailInquiryStrandedComponentSweepPostgreSqlTests(PostgreSql
     {
         await using var connection = await _database.OpenConnectionAsync();
         await EmailToLeadHarness.SeedTenantAsync(connection, businessUnitId, messageId);
+    }
+
+    /// <summary>
+    /// Drives ONE tenant to the stranded state and returns its assembly id: capture, strand the
+    /// gaskets part with a content dead letter, then drain to completion.
+    ///
+    /// <para>Self-contained on purpose. The worker it starts covers the whole queue, so a caller
+    /// that interleaved two tenants' captures and drains would let one drain stop a worker
+    /// holding the other's job — see the note at the call site.</para>
+    /// </summary>
+    private async Task<long> StrandAsync(long businessUnitId, string messageId)
+    {
+        await using var services = BuildGraph();
+        var assemblyId = await CaptureAsync(services, businessUnitId, messageId);
+        await KillJobAsync(assemblyId, "gaskets.csv", ExtractionStatus.DeadLetter, ContentError);
+        await DrainAsync(services, businessUnitId);
+
+        Assert.Equal(EmailInquiryComponentStatus.Extracting,
+            await ComponentStatusAsync(assemblyId, "gaskets.csv"));
+        Assert.Equal(EmailInquiryAssemblyStatus.Extracting, await StatusAsync(assemblyId));
+        return assemblyId;
     }
 
     private static async Task<long> CaptureAsync(
