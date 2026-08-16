@@ -64,6 +64,42 @@ public sealed class EvidenceObjectStorageTests : IDisposable
         Assert.Contains("configured storage bucket", error.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task S3Store_AcceptsItsOwnUriWhenTheBucketNameHasUppercase()
+    {
+        // Regression: the bucket used to be recovered with Uri.Host, which LOWERCASES it —
+        // hostnames are case-insensitive, bucket names are not. AWS S3 forbids uppercase so
+        // this never showed there, but Backblaze B2 permits it. Against a real bucket named
+        // "NexoraBucket" every write stored s3://NexoraBucket/... and every read parsed
+        // "nexorabucket", so the service rejected its own objects as belonging to another
+        // bucket — reported to operators as a hash mismatch on 42 intact documents.
+        using var storage = CreateS3Storage("http://127.0.0.1:1", "NexoraBucket");
+
+        var error = await Assert.ThrowsAnyAsync<Exception>(() =>
+            storage.OpenVerifiedReadAsync(
+                "s3://NexoraBucket/Evidence/tenants/17/cleared/sha256/ab/source.pdf",
+                new string('a', 64)));
+
+        // It must fail trying to REACH the (unreachable) endpoint, never by refusing the URI.
+        Assert.IsNotType<InvalidDataException>(error);
+    }
+
+    [Fact]
+    public async Task S3Store_StillRejectsADifferentBucketThatDiffersOnlyInCase()
+    {
+        // Case preservation must not become case-insensitivity: "nexorabucket" and
+        // "NexoraBucket" are two different buckets on a provider that permits mixed case,
+        // and reading across that boundary is the containment failure the guard exists for.
+        using var storage = CreateS3Storage("http://127.0.0.1:1", "NexoraBucket");
+
+        var error = await Assert.ThrowsAsync<InvalidDataException>(() =>
+            storage.OpenVerifiedReadAsync(
+                "s3://nexorabucket/Evidence/tenants/17/cleared/sha256/ab/source.pdf",
+                new string('a', 64)));
+
+        Assert.Contains("configured storage bucket", error.Message, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("http://127.0.0.1:9000")]
     [InlineData("http://localhost:9000")]

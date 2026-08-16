@@ -367,7 +367,13 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
     {
         var blockers = new List<string>();
         if (!lead.CustomerId.HasValue) blockers.Add("customer");
-        if (!lead.BidClosingDate.HasValue) blockers.Add("customer deadline");
+        // A missing closing date is NOT a blocker. Plenty of genuine enquiries state no
+        // deadline — "please quote the attached" with nothing else — and refusing to convert
+        // those stranded otherwise-complete leads behind a value the customer never supplied
+        // and nobody can invent. The date drives SLA and urgency, which degrade gracefully
+        // when it is absent; it is not an input the RFQ needs in order to exist. Everything
+        // below (customer, at least one line, and each line's quantity/UoM/currency) remains
+        // blocking, because an RFQ genuinely cannot be sent to a supplier without them.
         if (includedLines.Count == 0) blockers.Add("at least one requested item");
 
         foreach (var line in includedLines.OrderBy(item => item.Id))

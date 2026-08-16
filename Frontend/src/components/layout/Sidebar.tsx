@@ -157,10 +157,17 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
         icon: <LeadIcon />,
         moduleName: 'Leads',
         children: [
-          { key: 'lead-intelligence', label: 'Lead Intelligence', path: '/procurement/leads/intelligence', moduleName: 'Leads' },
           { key: 'leads-all', label: 'All Inquiries', path: '/procurement/leads/all', moduleName: 'Leads', activePrefixes: ['/procurement/leads/view', '/leads/view'] },
           { key: 'leads-review', label: 'Needs Review', path: '/procurement/extraction/review', moduleName: 'Leads', activePrefixes: ['/procurement/extraction/review'] },
-          { key: 'leads-bulk', label: 'Bulk Uploads', path: '/procurement/leads/manual-upload', moduleName: 'Leads', activePrefixes: ['/procurement/leads/ingestion'] },
+          // ONE entry for the document door. "Lead Intelligence" pointed at this same
+          // ManualUploadLeadsPage component — two menu items, two URLs, one screen — and the
+          // name promised analysis while delivering an upload form. The route it used is kept
+          // alive below for bookmarks and e2e, but it no longer earns a second place in the nav.
+          // "Upload Documents" over "Bulk Uploads": this door READS documents (PDF/Word/Excel,
+          // up to 50 per batch) through the same extraction the mailbox uses. The genuinely
+          // bulk thing — importing a spreadsheet whose ROWS ARE leads — is a different door
+          // with a different trust model, and it has no screen at all yet.
+          { key: 'leads-bulk', label: 'Upload Documents', path: '/procurement/leads/manual-upload', moduleName: 'Leads', activePrefixes: ['/procurement/leads/ingestion', '/procurement/leads/intelligence'] },
           { key: 'leads-inbound-mail', label: 'Inbound Mail', path: '/procurement/leads/inbound-mail', moduleName: 'Leads' },
           { key: 'leads-watched-folders', label: 'Watched Folders', path: '/procurement/leads/watched-folders', moduleName: 'Leads' },
           { key: 'leads-duplicates', label: 'Duplicates', path: '/procurement/leads/duplicates', moduleName: 'Leads' },

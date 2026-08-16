@@ -118,7 +118,9 @@ const STATIC_ROUTE_TITLES: Readonly<Record<string, string>> = {
   // Extraction review & leads
   '/procurement/extraction/review': 'Extraction Review',
   '/procurement/leads/all': 'All Inquiries',
-  '/procurement/leads/intelligence': 'Lead Intelligence',
+  // Retained route (bookmarks, existing e2e); it renders the document-upload screen, so it is
+  // titled for what it shows rather than for the analytics page that does not exist yet.
+  '/procurement/leads/intelligence': 'Upload Documents',
   '/procurement/leads/outstanding': 'Outstanding Leads',
   '/procurement/leads/assigned': 'Assigned Leads',
   '/procurement/leads/manual-upload': 'Bulk Lead Upload',

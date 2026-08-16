@@ -692,13 +692,46 @@ public sealed class S3EvidenceObjectStorage : IEvidenceObjectStorage, IDisposabl
         return string.IsNullOrWhiteSpace(versionId) ? uri : uri + "?versionId=" + Uri.EscapeDataString(versionId);
     }
 
+    /// <summary>
+    /// Splits an <c>s3://bucket/key</c> evidence URI, PRESERVING THE BUCKET'S CASE.
+    ///
+    /// <para>This used to read the bucket from <c>Uri.Host</c>, and System.Uri lowercases the
+    /// host — hostnames are case-insensitive, bucket names are not. AWS S3 forbids uppercase
+    /// in bucket names so the defect was invisible there, but Backblaze B2 permits mixed case:
+    /// against a bucket named <c>NexoraBucket</c>, every WRITE stored
+    /// <c>s3://NexoraBucket/...</c> (built from the configured name, verbatim) and every READ
+    /// parsed it back as <c>nexorabucket</c>. The ordinal comparison in
+    /// <see cref="EnsureConfiguredBucket"/> then rejected the service's own objects, and the
+    /// lowercased name was also the one handed to GetObject — so even past that check the
+    /// request addressed a bucket that may not exist. Result: uploads succeed forever, every
+    /// read fails, and the failure surfaces as "the stored bytes no longer match the hash
+    /// recorded at intake" on documents that are perfectly intact.</para>
+    /// </summary>
     private static (string Bucket, string Key, string? VersionId) ParseUri(string storageUri)
     {
-        if (!Uri.TryCreate(storageUri, UriKind.Absolute, out var uri) || uri.Scheme != "s3")
+        const string scheme = "s3://";
+        if (string.IsNullOrWhiteSpace(storageUri)
+            || !storageUri.StartsWith(scheme, StringComparison.Ordinal))
             throw new ArgumentException("A valid s3:// evidence URI is required.", nameof(storageUri));
-        var query = Microsoft.AspNetCore.WebUtilities.QueryHelpers.ParseQuery(uri.Query);
-        return (uri.Host, Uri.UnescapeDataString(uri.AbsolutePath.TrimStart('/')),
-            query.TryGetValue("versionId", out var value) ? value.ToString() : null);
+
+        var remainder = storageUri[scheme.Length..];
+        var separator = remainder.IndexOf('/');
+        if (separator <= 0 || separator == remainder.Length - 1)
+            throw new ArgumentException("A valid s3:// evidence URI is required.", nameof(storageUri));
+
+        var bucket = remainder[..separator];
+        var pathAndQuery = remainder[(separator + 1)..];
+        string? versionId = null;
+        var queryStart = pathAndQuery.IndexOf('?');
+        if (queryStart >= 0)
+        {
+            var query = Microsoft.AspNetCore.WebUtilities.QueryHelpers.ParseQuery(
+                pathAndQuery[queryStart..]);
+            versionId = query.TryGetValue("versionId", out var value) ? value.ToString() : null;
+            pathAndQuery = pathAndQuery[..queryStart];
+        }
+
+        return (bucket, Uri.UnescapeDataString(pathAndQuery), versionId);
     }
 
     private async Task VerifyBucketVersioningAsync(CancellationToken ct)
@@ -735,11 +768,21 @@ public sealed class S3EvidenceObjectStorage : IEvidenceObjectStorage, IDisposabl
             "S3 evidence storage requires HTTPS for non-local service endpoints.");
     }
 
+    /// <summary>
+    /// Stable text identifying a bucket mismatch. InvalidDataException is sealed and is also
+    /// what a genuine DIGEST mismatch raises, so the two cannot be told apart by type — and
+    /// they mean opposite things: a digest mismatch says the bytes are present and WRONG,
+    /// this says they are almost certainly present and RIGHT, in a bucket the service is no
+    /// longer pointed at. Reported as one incident, an operator is told to re-upload
+    /// documents that were never damaged. Consumers match on this constant, never on prose.
+    /// </summary>
+    public const string BucketMismatchMessage =
+        "The evidence object URI does not belong to the configured storage bucket.";
+
     internal static void EnsureConfiguredBucket(string uriBucket, string configuredBucket)
     {
         if (!string.Equals(uriBucket, configuredBucket, StringComparison.Ordinal))
-            throw new InvalidDataException(
-                "The evidence object URI does not belong to the configured storage bucket.");
+            throw new InvalidDataException(BucketMismatchMessage);
     }
 
     internal static void EnsureVersioningEnabled(VersionStatus? status)

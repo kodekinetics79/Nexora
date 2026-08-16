@@ -220,8 +220,12 @@ public class ConversationalExtractionServiceTests
     // -------------------------------------------------------------- invention guard
 
     [Fact]
-    public async Task AnItemThatDoesNotQuoteTheMessageIsDroppedAndTheLeadIsFlagged()
+    public async Task AnItemThatDoesNotQuoteTheMessageIsKeptAndTheLeadIsFlagged()
     {
+        // The switchgear line quotes text the message never contains. It is KEPT and the lead
+        // is flagged for review, rather than deleted: the reviewer is the one who can tell a
+        // model's invention from a quote-check false negative, and only one of those two
+        // mistakes is recoverable once the line is gone.
         var llm = new ProseLlm(Result(new List<LeadItemData>
         {
             Item("Cable tray 300mm", "40 nos cable tray 300mm", 40, "40 nos"),
@@ -231,10 +235,10 @@ public class ConversationalExtractionServiceTests
         var outcome = await NewService(llm).ExtractAsync(Input());
 
         Assert.Equal(ExtractionOutcomeStatus.NeedsReview, outcome.Status);
-        Assert.Single(outcome.Result!.Items);
+        Assert.Equal(2, outcome.Result!.Items.Count);
         Assert.Equal(2, outcome.ExpectedItemCount);
-        Assert.Equal(1, outcome.ExtractedItemCount);
-        Assert.Contains("unanchored", outcome.ReviewReason!, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(2, outcome.ExtractedItemCount);
+        Assert.Contains("confirmation", outcome.ReviewReason!, StringComparison.OrdinalIgnoreCase);
     }
 
     // ------------------------------------------------------------- honest outcomes

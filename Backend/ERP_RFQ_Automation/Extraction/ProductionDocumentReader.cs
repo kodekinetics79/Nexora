@@ -55,7 +55,11 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
     private readonly Func<byte[], IReadOnlyList<string>>? _tiffFrameOcr;
     private readonly IFileInspectionService? _inspection;
     private readonly IEntitlementService? _entitlements;
+    private readonly bool _requireOcrEntitlement;
     private readonly NativeSpreadsheetParser _spreadsheetParser = new();
+
+    /// <summary>Config key for <see cref="_requireOcrEntitlement"/>.</summary>
+    internal const string RequireOcrEntitlementConfigKey = "Extraction:Ocr:RequirePlanEntitlement";
 
     // A Word RFQ usually states its lines in a table, which is structured data and should not be
     // flattened to prose and sent to a model. Shares the spreadsheet column-alias and
@@ -202,13 +206,25 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         IEvidenceObjectStorage evidenceStorage,
         Func<byte[], IReadOnlyList<string>>? tiffFrameOcr,
         IFileInspectionService? inspection = null,
-        IEntitlementService? entitlements = null)
+        IEntitlementService? entitlements = null,
+        IConfiguration? configuration = null)
     {
         _log = log;
         _evidenceStorage = evidenceStorage;
         _tiffFrameOcr = tiffFrameOcr;
         _inspection = inspection;
         _entitlements = entitlements;
+        // Whether reading a SCANNED document requires a plan entitlement. Default OFF wherever
+        // configuration exists: the entitlement denies when the business unit has no governed
+        // platform tenant, or no assigned plan, or a plan whose Features JSON does not name
+        // capability.ocr — all billing-plane conditions, and all of them the normal state of an
+        // internal deployment that never sold itself a plan. The observable effect was that
+        // every scanned PDF, photographed page, .eml and .msg threw before a single page was
+        // rasterized, which reads as "the extractor cannot handle scans" rather than as a
+        // licensing decision. A direct (test) construction passes no configuration and keeps
+        // the entitlement required, so the tests that prove the gate bites still prove it.
+        _requireOcrEntitlement = configuration is null
+            || (configuration.GetValue<bool?>(RequireOcrEntitlementConfigKey) ?? false);
         _docxTableParser = new DocxTableParser(_spreadsheetParser);
         _tessDataPath = Path.Combine(env.ContentRootPath, "tessdata");
         // EPPlus 7 requires a license context; the app sets this at startup, set it here too
@@ -235,6 +251,34 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         {
             throw;
         }
+        // A file that is NOT THERE and a file whose bytes changed are different incidents with
+        // different remedies, and collapsing them cost a production morning: 42 documents
+        // dead-lettered reading "the stored bytes no longer match the hash recorded at intake,
+        // re-upload from the original source", when the bytes had simply vanished from
+        // ephemeral storage — advice that is impossible to follow for a system-generated email
+        // body, and which sends an operator hunting a corruption bug that is not there.
+        // The object exists, somewhere — the reader is simply pointed at a different bucket
+        // than the one this object was written to, and refuses to cross that line
+        // (EnsureConfiguredBucket). Renaming or repointing the evidence bucket orphans every
+        // object written under the old name in exactly this way. Nothing is lost and nothing
+        // is corrupt, so telling an operator to re-upload is both wrong and destructive
+        // advice: the fix is to point the configuration back, or migrate the objects across.
+        catch (InvalidDataException ex) when (ex.Message
+            == ERP_RFQ_Automation.Infrastructure.Storage.S3EvidenceObjectStorage.BucketMismatchMessage)
+        {
+            _log.LogError(ex,
+                "Evidence object for extraction job {JobId} belongs to a different bucket than the "
+                + "configured one ({StoragePath}); the bytes are not lost, the reader is repointed.",
+                job.Id, job.StoragePath);
+            throw new EvidenceIntegrityException(job.Id, EvidenceIntegrityException.BucketMismatchCode, ex);
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            _log.LogError(ex,
+                "Evidence object missing for extraction job {JobId} at {StoragePath}; the record "
+                + "survives but its bytes do not.", job.Id, job.StoragePath);
+            throw new EvidenceIntegrityException(job.Id, EvidenceIntegrityException.ObjectMissingCode, ex);
+        }
         catch (Exception ex)
         {
             _log.LogError(ex, "Verified evidence read failed for extraction job {JobId}.", job.Id);
@@ -245,7 +289,7 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         // available when OCR is disabled; the decision is enforced only if a branch would invoke
         // Tesseract/Docnet. Email containers carry the same decision into their attachments.
         EntitlementDecision? ocrDecision = null;
-        if (_entitlements is not null && MayRequireOcr(ext))
+        if (_entitlements is not null && _requireOcrEntitlement && MayRequireOcr(ext))
             ocrDecision = await _entitlements.CheckFeatureAsync(
                 job.BusinessUnitId, TypedEntitlementCatalog.Ocr, ct);
 
@@ -1266,8 +1310,28 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
 
 public sealed class EvidenceIntegrityException : IOException
 {
+    /// <summary>The stored object was absent, as distinct from present-but-altered.</summary>
+    public const string ObjectMissingCode = "evidence_object_missing";
+
+    /// <summary>The object belongs to a bucket other than the configured one — present,
+    /// intact, and unreachable from here.</summary>
+    public const string BucketMismatchCode = "evidence_bucket_mismatch";
+
+    /// <summary>Markers the dead-letter classifier matches on, so these incidents can carry
+    /// different operator guidance without parsing prose.</summary>
+    public const string ObjectMissingMarker = "[EVIDENCE_OBJECT_MISSING]";
+    public const string BucketMismatchMarker = "[EVIDENCE_BUCKET_MISMATCH]";
+
     public EvidenceIntegrityException(long extractionJobId, string code, Exception innerException)
-        : base("The authoritative source document failed evidence integrity verification.", innerException)
+        : base(code switch
+            {
+                ObjectMissingCode => ObjectMissingMarker + " The stored evidence object is no "
+                    + "longer present in storage, so its integrity could not be verified.",
+                BucketMismatchCode => BucketMismatchMarker + " The stored evidence object belongs "
+                    + "to a different bucket than the one this service is configured to read.",
+                _ => "The authoritative source document failed evidence integrity verification.",
+            },
+            innerException)
     {
         ExtractionJobId = extractionJobId;
         Code = code;

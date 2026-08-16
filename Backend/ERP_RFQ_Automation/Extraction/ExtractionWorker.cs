@@ -1032,6 +1032,15 @@ public sealed class LeadPersister : ILeadPersister
     private readonly ERP_RFQ_Automation.Ingestion.Assembly.IEmailInquiryAssemblyCoordinator? _emailAssemblies;
     private readonly ERP_RFQ_Automation.CustomerResolution.ILeadCustomerResolutionService? _customerResolution;
     private readonly UsageMeteringService? _usageMetering;
+    /// <summary>Null disables auto-verification entirely (every lead goes to review).</summary>
+    private readonly decimal? _autoVerifyMinConfidence;
+
+    /// <summary>Config key for <see cref="_autoVerifyMinConfidence"/>; default 0.85.</summary>
+    internal const string AutoVerifyMinConfidenceKey = "Extraction:Review:AutoVerifyMinConfidence";
+
+    /// <summary>Recorded as the approver so an auto-verified lead is never mistaken in the
+    /// audit trail for one a named person looked at.</summary>
+    internal const string AutoVerifyActor = "system:auto-verified-high-confidence";
 
     // The detector is optional so persistence keeps working before (and without)
     // the Deduplication DI registration (see Deduplication/DEDUP-WIRING.md).
@@ -1043,8 +1052,19 @@ public sealed class LeadPersister : ILeadPersister
         ERP_RFQ_Automation.LeadIdentity.ILeadIdentityApplicationService? leadIdentity = null,
         ERP_RFQ_Automation.Ingestion.Assembly.IEmailInquiryAssemblyCoordinator? emailAssemblies = null,
         ERP_RFQ_Automation.CustomerResolution.ILeadCustomerResolutionService? customerResolution = null,
-        UsageMeteringService? usageMetering = null)
+        UsageMeteringService? usageMetering = null,
+        IConfiguration? configuration = null)
     {
+        // A CLEAN extraction whose model confidence clears the bar is verified without a human.
+        // Holding every lead regardless of confidence meant the queue never drained: confidence
+        // was computed, stored, and then not consulted for the one decision it exists to inform,
+        // so a perfect three-line RFQ and an unreadable scan arrived in the same tray. Anything
+        // not clean — low confidence, unverified quotes, truncated input, OCR gaps, a split
+        // document — still goes to a person. Off wherever no configuration exists (direct/test
+        // construction), so the tests that assert unconditional review still assert it.
+        _autoVerifyMinConfidence = configuration is null
+            ? null
+            : configuration.GetValue<decimal?>(AutoVerifyMinConfidenceKey) ?? 0.85m;
         _context = context;
         _log = log;
         _duplicateDetector = duplicateDetector;
@@ -1286,14 +1306,33 @@ public sealed class LeadPersister : ILeadPersister
             : string.Empty;
 
         var leads = new List<Lead>(results.Count);
+        // A split document is never auto-verified: deciding that one message was really several
+        // separate enquiries is exactly the judgement a person should confirm.
+        var mayAutoVerify = _autoVerifyMinConfidence is not null
+            && outcome.Status == ExtractionOutcomeStatus.Ok
+            && results.Count == 1;
         for (var g = 0; g < results.Count; g++)
         {
             var splitNote = results.Count > 1
                 ? $"Split from a multi-inquiry document (group {g + 1} of {results.Count}). "
                 : string.Empty;
-            leads.Add(BuildLead(job, metadata, results[g], ingest, now,
-                $"{reviewNote}{splitNote}{sourceNote}"));
+            var lead = BuildLead(job, metadata, results[g], ingest, now,
+                $"{reviewNote}{splitNote}{sourceNote}");
+            if (mayAutoVerify && lead.Aiconfidence >= _autoVerifyMinConfidence)
+            {
+                lead.RequiresCommercialReview = false;
+                lead.CommercialFactsVerified = true;
+                lead.ReviewApprovedBy = AutoVerifyActor;
+                lead.ReviewApprovedOn = now;
+            }
+            leads.Add(lead);
         }
+
+        // Keep the message's own status honest about what happened to it. The ingest status was
+        // decided before the leads existed, so a lead that needed nobody would still have left
+        // its message sitting in the review tray.
+        if (ingest is not null && leads.Count > 0 && leads.All(l => !l.RequiresCommercialReview))
+            ingest.ParseStatus = "Success";
 
         var reconciliation = new List<ERP_RFQ_Automation.LeadIdentity.LeadReconciliationResult>(leads.Count);
         if (_leadIdentity is not null)

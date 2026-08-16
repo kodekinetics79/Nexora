@@ -504,6 +504,14 @@ public sealed class ExtractionDeadLetterService(
     /// <summary>Tenant-facing name for a document refused because AI processing is not authorized.</summary>
     internal const string AiNotAuthorizedCategory = "AI_NOT_AUTHORIZED";
 
+    /// <summary>The evidence record survives but its bytes do not — distinct from
+    /// EVIDENCE_INTEGRITY, which means the bytes are present and altered.</summary>
+    internal const string EvidenceMissingCategory = "EVIDENCE_MISSING";
+
+    /// <summary>The bytes are intact in a bucket this service is not configured to read.
+    /// Recoverable by configuration alone — nothing has been lost.</summary>
+    internal const string EvidenceBucketMismatchCategory = "EVIDENCE_BUCKET_MISMATCH";
+
     /// <summary>
     /// What the operator must DO about this category, in words, or null where the category
     /// alone is the whole story.
@@ -520,6 +528,19 @@ public sealed class ExtractionDeadLetterService(
         AiNotAuthorizedCategory => ChunkedExtractionService.AiNotAuthorizedOperatorAction,
         "MALWARE" => "The stored file failed malware inspection. It cannot be retried until a "
             + "platform owner clears the disposition; recovery is blocked by design.",
+        EvidenceBucketMismatchCategory => "NOTHING IS LOST. This document's bytes are intact in "
+            + "the storage bucket they were written to, but this service is now configured to "
+            + "read a DIFFERENT bucket, and it refuses to read across that boundary. Renaming or "
+            + "repointing the evidence bucket orphans every object written under the previous "
+            + "name. Do not re-upload and do not reprocess yet: point EvidenceStorage__Bucket "
+            + "back at the bucket these objects were written to (or copy the objects across), "
+            + "then retry — the same copy will then read cleanly.",
+        EvidenceMissingCategory => "The stored copy of this document is gone from evidence "
+            + "storage, so nothing can be re-read from it — this is a storage-durability "
+            + "incident, not a corrupt file. Retrying this job cannot succeed. For mail-borne "
+            + "documents the original message is still retained: reprocess it from Inbound Mail "
+            + "and the parts are rebuilt from the source email. Check that evidence storage is "
+            + "backed by a persistent volume before reprocessing, or the bytes will vanish again.",
         "EVIDENCE_INTEGRITY" => "The stored bytes no longer match the hash recorded at intake. "
             + "Re-upload the document from its original source; retrying this copy cannot succeed.",
         "UNSUPPORTED_DOCUMENT" => "The file passed inspection but no reader in this deployment "
@@ -550,6 +571,12 @@ public sealed class ExtractionDeadLetterService(
         // structured-fallback note onto the stored reason.
         if (error.Contains(ChunkedExtractionService.AiNotAuthorizedCode, StringComparison.Ordinal))
             return AiNotAuthorizedCategory;
+        // BEFORE the integrity rule, whose prose this message also contains: a missing object
+        // and an altered one are different incidents and only one of them is a corruption bug.
+        if (error.Contains(EvidenceIntegrityException.BucketMismatchMarker, StringComparison.Ordinal))
+            return EvidenceBucketMismatchCategory;
+        if (error.Contains(EvidenceIntegrityException.ObjectMissingMarker, StringComparison.Ordinal))
+            return EvidenceMissingCategory;
         if (error.Contains("integrity", StringComparison.OrdinalIgnoreCase)) return "EVIDENCE_INTEGRITY";
         if (error.Contains("malware", StringComparison.OrdinalIgnoreCase)) return "MALWARE";
         if (error.Contains("unsupported", StringComparison.OrdinalIgnoreCase)) return "UNSUPPORTED_DOCUMENT";
