@@ -37,8 +37,12 @@ namespace ERP_RFQ_Automation.Tests;
 public sealed class EmailInquiryStrandedComponentSweepPostgreSqlTests(PostgreSqlTestDatabase database)
     : IAsyncLifetime
 {
-    private const long FirstBu = 943_000;
-    private const long LastBu = 943_099;
+    // EXCLUSIVE to this class, and it has to be: DisposeAsync deletes the whole range, so a range
+    // shared with another class in this collection makes each of them delete the other's rows
+    // mid-run. 941_0xx belongs to the assembly-recovery lane and 943_0xx to the identical-content
+    // lane; this one owns 947_0xx.
+    private const long FirstBu = 947_000;
+    private const long LastBu = 947_099;
 
     /// <summary>A dead letter whose prose carries the closed marker an evidence outage stamps.</summary>
     private const string InfrastructureError =
@@ -87,7 +91,7 @@ public sealed class EmailInquiryStrandedComponentSweepPostgreSqlTests(PostgreSql
     [Fact]
     public async Task An_infrastructure_dead_letter_holds_the_message_instead_of_quoting_without_the_document()
     {
-        const long bu = 943_001;
+        const long bu = 947_001;
         const string messageId = "stranded-0001@buyer.example";
         await SeedAsync(bu, messageId);
         await using var services = BuildGraph();
@@ -123,7 +127,7 @@ public sealed class EmailInquiryStrandedComponentSweepPostgreSqlTests(PostgreSql
     [Fact]
     public async Task A_content_dead_letter_finalizes_the_message_into_review_with_everything_that_was_read()
     {
-        const long bu = 943_002;
+        const long bu = 947_002;
         const string messageId = "stranded-0002@buyer.example";
         await SeedAsync(bu, messageId);
         await using var services = BuildGraph();
@@ -175,7 +179,7 @@ public sealed class EmailInquiryStrandedComponentSweepPostgreSqlTests(PostgreSql
     [Fact]
     public async Task A_component_whose_job_never_existed_or_is_gone_is_Skipped_rather_than_waited_for()
     {
-        const long bu = 943_003;
+        const long bu = 947_003;
         const string messageId = "stranded-0003@buyer.example";
         await SeedAsync(bu, messageId);
         await using var services = BuildGraph();
@@ -219,7 +223,7 @@ public sealed class EmailInquiryStrandedComponentSweepPostgreSqlTests(PostgreSql
     [Fact]
     public async Task A_component_whose_job_actually_succeeded_is_reconciled_and_its_message_becomes_a_Lead()
     {
-        const long bu = 943_004;
+        const long bu = 947_004;
         const string messageId = "stranded-0004@buyer.example";
         await SeedAsync(bu, messageId);
 
@@ -276,7 +280,7 @@ public sealed class EmailInquiryStrandedComponentSweepPostgreSqlTests(PostgreSql
     [Fact]
     public async Task A_component_whose_job_still_has_attempts_left_is_not_touched()
     {
-        const long bu = 943_005;
+        const long bu = 947_005;
         const string messageId = "stranded-0005@buyer.example";
         await SeedAsync(bu, messageId);
         await using var services = BuildGraph();
@@ -320,7 +324,7 @@ public sealed class EmailInquiryStrandedComponentSweepPostgreSqlTests(PostgreSql
     [Fact]
     public async Task Sweeping_twice_changes_nothing_the_first_sweep_settled()
     {
-        const long bu = 943_006;
+        const long bu = 947_006;
         const string messageId = "stranded-0006@buyer.example";
         await SeedAsync(bu, messageId);
         await using var services = BuildGraph();
@@ -349,8 +353,8 @@ public sealed class EmailInquiryStrandedComponentSweepPostgreSqlTests(PostgreSql
     {
         // The poisoned tenant sorts FIRST. Sorted second, the healthy one would already be done
         // before anything could go wrong and the test would pass with the isolation removed.
-        const long poisoned = 943_007;
-        const long healthy = 943_008;
+        const long poisoned = 947_007;
+        const long healthy = 947_008;
         await SeedAsync(poisoned, "stranded-0007@buyer.example");
         await SeedAsync(healthy, "stranded-0008@buyer.example");
 
@@ -445,7 +449,7 @@ public sealed class EmailInquiryStrandedComponentSweepPostgreSqlTests(PostgreSql
     {
         // The gate is what keeps a suspended or archived tenant out of a platform-wide sweep, and
         // the component phase must honour it exactly as the assembly phase does.
-        const long refused = 943_009;
+        const long refused = 947_009;
         await SeedAsync(refused, "stranded-0009@buyer.example");
 
         long assemblyId;
@@ -477,7 +481,7 @@ public sealed class EmailInquiryStrandedComponentSweepPostgreSqlTests(PostgreSql
     {
         // Every other test in this class runs with the threshold at zero, so the predicate could
         // be deleted and none of them would notice.
-        const long bu = 943_010;
+        const long bu = 947_010;
         await SeedAsync(bu, "stranded-0010@buyer.example");
 
         await using var services = BuildGraph();
@@ -512,7 +516,7 @@ public sealed class EmailInquiryStrandedComponentSweepPostgreSqlTests(PostgreSql
     [Fact]
     public async Task A_terms_and_conditions_attachment_no_longer_downgrades_a_perfectly_good_RFQ()
     {
-        const long bu = 943_011;
+        const long bu = 947_011;
         const string messageId = "stranded-0011@buyer.example";
         await SeedAsync(bu, messageId);
         await using var services = BuildGraph();
@@ -563,7 +567,7 @@ public sealed class EmailInquiryStrandedComponentSweepPostgreSqlTests(PostgreSql
     {
         // The mirror of the test above, and the more expensive failure of the two: a bill of
         // quantities called "Terms and Conditions.xlsx" must be READ, not ignored.
-        const long bu = 943_012;
+        const long bu = 947_012;
         const string messageId = "stranded-0012@buyer.example";
         await SeedAsync(bu, messageId);
         await using var services = BuildGraph();
