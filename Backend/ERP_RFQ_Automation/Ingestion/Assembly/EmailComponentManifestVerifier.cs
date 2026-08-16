@@ -281,6 +281,11 @@ public static class EmailComponentManifestVerifier
         => disposition switch
         {
             EmailInquiryComponentDisposition.IgnoreInlineAsset => status == EmailInquiryComponentStatus.Ignored,
+            // Both ignore dispositions land on the same status. They are separate dispositions
+            // because the EVIDENCE differs — measured size plus a cid reference, versus an
+            // unambiguous filename — and an operator asking why a part went unread deserves the
+            // real answer.
+            EmailInquiryComponentDisposition.IgnoreNonCommercial => status == EmailInquiryComponentStatus.Ignored,
             EmailInquiryComponentDisposition.StructuralContainer => status == EmailInquiryComponentStatus.StructuralOnly,
             EmailInquiryComponentDisposition.Skip => status == EmailInquiryComponentStatus.Skipped,
             // A Process component legitimately advances through Pending -> Extracting ->

@@ -702,11 +702,19 @@ builder.Services.AddScoped<ERP_RFQ_Automation.Ingestion.Assembly.IEmailInquiryIn
 // process that dies in between leaves every part complete, every result durable, and no lead —
 // with nothing that would ever look again. Registered as options + service + worker so the
 // sweep itself is testable without a timer or a hosted lifetime.
-builder.Services.AddSingleton(
-    builder.Configuration
+var assemblyRecoveryOptions = builder.Configuration
         .GetSection(ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssemblyRecoveryOptions.SectionName)
         .Get<ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssemblyRecoveryOptions>()
-    ?? new ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssemblyRecoveryOptions());
+    ?? new ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssemblyRecoveryOptions();
+// The stranded-COMPONENT threshold is additionally readable at the operator-facing key
+// Ingestion:Assembly:StrandedComponentSweepMinutes, which sits with the rest of the assembly
+// settings rather than inside the recovery worker's own section. Applied second, so an explicit
+// value there wins over one set in the recovery section; absent, the section (or the default)
+// stands. One property, two discoverable places, and no third source of truth.
+assemblyRecoveryOptions.StrandedComponentSweepMinutes = builder.Configuration.GetValue(
+    "Ingestion:Assembly:StrandedComponentSweepMinutes",
+    assemblyRecoveryOptions.StrandedComponentSweepMinutes);
+builder.Services.AddSingleton(assemblyRecoveryOptions);
 builder.Services.AddScoped<ERP_RFQ_Automation.Ingestion.Assembly.IEmailInquiryAssemblyRecoveryService,
     ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssemblyRecoveryService>();
 builder.Services.AddHostedService<ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssemblyRecoveryWorker>();

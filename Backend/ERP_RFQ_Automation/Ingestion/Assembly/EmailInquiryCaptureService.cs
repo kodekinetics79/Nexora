@@ -202,6 +202,35 @@ public sealed class EmailInquiryCaptureService : IEmailInquiryCaptureService
 
         foreach (var plan in manifest.Components)
         {
+            // A part that will not be processed is terminal the moment it is recorded, with its
+            // reason. It still occupies a row so that "dropped" and "never there" stay different
+            // observations.
+            //
+            // Skipped and Ignored are BOTH terminal and differ only in what they mean for the
+            // message: Skipped is a part the sender attached that we could not read, and one of
+            // those sends the whole message to review; Ignored is a provable decoration or
+            // provable non-commercial paperwork and costs the message nothing.
+            var componentStatus = plan.Disposition switch
+            {
+                EmailInquiryComponentDisposition.Process => EmailInquiryComponentStatus.Pending,
+                EmailInquiryComponentDisposition.IgnoreInlineAsset => EmailInquiryComponentStatus.Ignored,
+                EmailInquiryComponentDisposition.IgnoreNonCommercial => EmailInquiryComponentStatus.Ignored,
+                EmailInquiryComponentDisposition.StructuralContainer => EmailInquiryComponentStatus.StructuralOnly,
+                _ => EmailInquiryComponentStatus.Skipped
+            };
+
+            // AUDITABLE. Ignoring a part is the only decision here that lets a message stay clean
+            // while something went unread, so every one of them is traceable to the exact name and
+            // rule that produced it — at Debug, because a healthy mailbox produces one of these
+            // per signature logo on every message.
+            if (componentStatus == EmailInquiryComponentStatus.Ignored)
+                _logger.LogDebug(
+                    "Ignoring part '{FileName}' ({MimeType}) of message {MessageKey} as {Reason} "
+                    + "({Disposition}): {Detail}. It is terminal and does not send the message to "
+                    + "review.",
+                    plan.FileName, plan.MimeType, assembly.MessageKey, plan.ReasonCode,
+                    plan.Disposition, plan.ReasonDetail);
+
             assembly.Components.Add(new EmailInquiryComponent
             {
                 BusinessUnitId = businessUnitId,
@@ -212,21 +241,7 @@ public sealed class EmailInquiryCaptureService : IEmailInquiryCaptureService
                 MimeType = Truncate(plan.MimeType, 255),
                 ByteSize = plan.ByteSize,
                 ContentHash = string.IsNullOrEmpty(plan.ContentHash) ? null : plan.ContentHash,
-                // A part that will not be processed is terminal the moment it is recorded, with
-                // its reason. It still occupies a row so that "dropped" and "never there" stay
-                // different observations.
-                //
-                // Skipped and Ignored are BOTH terminal and differ only in what they mean for
-                // the message: Skipped is a part the sender attached that we could not read, and
-                // one of those sends the whole message to review; Ignored is a provable inline
-                // decoration and costs the message nothing.
-                Status = plan.Disposition switch
-                {
-                    EmailInquiryComponentDisposition.Process => EmailInquiryComponentStatus.Pending,
-                    EmailInquiryComponentDisposition.IgnoreInlineAsset => EmailInquiryComponentStatus.Ignored,
-                    EmailInquiryComponentDisposition.StructuralContainer => EmailInquiryComponentStatus.StructuralOnly,
-                    _ => EmailInquiryComponentStatus.Skipped
-                },
+                Status = componentStatus,
                 ReasonCode = plan.ReasonCode,
                 ReasonDetail = Truncate(plan.ReasonDetail, 1000),
                 NestingDepth = plan.NestingDepth,

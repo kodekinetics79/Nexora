@@ -134,11 +134,18 @@ public static class EmailToLeadHarness
 
         // MinimumAge zero: the guard exists so the sweep does not queue behind healthy in-flight
         // work in production, and a test that waited a minute for it would be proving the clock.
+        //
+        // StrandedComponentSweepMinutes zero for the same reason, and it is SAFE rather than
+        // merely convenient: the age decides only which components are looked at, and what
+        // happens to one is decided by the durable state of its job. A component queued a
+        // microsecond ago has a Pending job with every attempt left, which the sweep leaves
+        // strictly alone — so this cannot make a test pass that production would fail.
         services.AddSingleton(new EmailInquiryAssemblyRecoveryOptions
         {
             Interval = TimeSpan.FromSeconds(30),
             BatchSizePerTenant = 50,
-            MinimumAge = TimeSpan.Zero
+            MinimumAge = TimeSpan.Zero,
+            StrandedComponentSweepMinutes = 0
         });
         services.AddScoped<IEmailInquiryAssemblyRecoveryService, EmailInquiryAssemblyRecoveryService>();
         // The sweep now REQUIRES the gate, so it must be present. This one admits everyone;
@@ -155,7 +162,15 @@ public static class EmailToLeadHarness
     /// <summary>A covering note and two priced schedules, in two ordinary column layouts the
     /// deterministic normalizer recognizes — so extraction is reproducible byte-for-byte and
     /// needs no model.</summary>
-    public static MimeMessage BuildMessage(string messageId, string subject = "RFQ 88-2410 Jubail expansion")
+    /// <param name="extraParts">
+    /// Appended after the two priced schedules, for a test whose subject is what an ADDITIONAL
+    /// part does to an otherwise perfect message — a terms-and-conditions PDF, a signature image.
+    /// The three parts above are unchanged, so every existing assertion about them still holds.
+    /// </param>
+    public static MimeMessage BuildMessage(
+        string messageId,
+        string subject = "RFQ 88-2410 Jubail expansion",
+        params MimeEntity[] extraParts)
     {
         const string valves =
             "Part Number,Description,Quantity,Unit\n"
@@ -170,6 +185,7 @@ public static class EmailToLeadHarness
         var mixed = new Multipart("mixed") { new TextPart("plain") { Text = BodyText } };
         mixed.Add(CsvAttachment("valves.csv", valves));
         mixed.Add(CsvAttachment("gaskets.csv", gaskets));
+        foreach (var part in extraParts) mixed.Add(part);
 
         var message = new MimeMessage { Subject = subject, Body = mixed };
         message.From.Add(new MailboxAddress("Buyer", "buyer@customer.example"));
@@ -288,6 +304,18 @@ public static class EmailToLeadHarness
     ///
     /// <para><paramref name="waitForAssemblySettlement"/> is false for exactly one caller: the
     /// recovery test, whose whole subject is the state that exists inside that window.</para>
+    ///
+    /// <para><b>DRAIN ONE TENANT COMPLETELY BEFORE THE NEXT ONE HAS ANY JOBS.</b> The worker this
+    /// starts covers the WHOLE queue, but the wait watches only <paramref name="businessUnitId"/>
+    /// — so a test that captures two tenants and then drains twice lets the first call stop a
+    /// worker that is mid-flight on the second tenant's job. A stopped worker abandons its lease
+    /// by design (ExtractionWorker: "Leave the lease to expire; another worker reclaims it after
+    /// shutdown"), and the claim SQL will not reclaim a Leased row until <c>LeaseExpiresAt</c>
+    /// passes — 60 seconds here, which is exactly <see cref="TestWaits.Liveness"/>. The second
+    /// drain then burns its entire window unable to claim the row and fails with every job
+    /// reading terminal, because the lease expired and the job finished while the failure message
+    /// was being built. It passes on a fast machine and fails on a loaded CI runner. Interleave
+    /// capture and drain per tenant instead.</para>
     /// </summary>
     public static async Task DrainQueueAsync(
         ServiceProvider services,
