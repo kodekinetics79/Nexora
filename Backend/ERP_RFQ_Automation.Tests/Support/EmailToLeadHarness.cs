@@ -134,11 +134,18 @@ public static class EmailToLeadHarness
 
         // MinimumAge zero: the guard exists so the sweep does not queue behind healthy in-flight
         // work in production, and a test that waited a minute for it would be proving the clock.
+        //
+        // StrandedComponentSweepMinutes zero for the same reason, and it is SAFE rather than
+        // merely convenient: the age decides only which components are looked at, and what
+        // happens to one is decided by the durable state of its job. A component queued a
+        // microsecond ago has a Pending job with every attempt left, which the sweep leaves
+        // strictly alone — so this cannot make a test pass that production would fail.
         services.AddSingleton(new EmailInquiryAssemblyRecoveryOptions
         {
             Interval = TimeSpan.FromSeconds(30),
             BatchSizePerTenant = 50,
-            MinimumAge = TimeSpan.Zero
+            MinimumAge = TimeSpan.Zero,
+            StrandedComponentSweepMinutes = 0
         });
         services.AddScoped<IEmailInquiryAssemblyRecoveryService, EmailInquiryAssemblyRecoveryService>();
         // The sweep now REQUIRES the gate, so it must be present. This one admits everyone;
@@ -155,7 +162,15 @@ public static class EmailToLeadHarness
     /// <summary>A covering note and two priced schedules, in two ordinary column layouts the
     /// deterministic normalizer recognizes — so extraction is reproducible byte-for-byte and
     /// needs no model.</summary>
-    public static MimeMessage BuildMessage(string messageId, string subject = "RFQ 88-2410 Jubail expansion")
+    /// <param name="extraParts">
+    /// Appended after the two priced schedules, for a test whose subject is what an ADDITIONAL
+    /// part does to an otherwise perfect message — a terms-and-conditions PDF, a signature image.
+    /// The three parts above are unchanged, so every existing assertion about them still holds.
+    /// </param>
+    public static MimeMessage BuildMessage(
+        string messageId,
+        string subject = "RFQ 88-2410 Jubail expansion",
+        params MimeEntity[] extraParts)
     {
         const string valves =
             "Part Number,Description,Quantity,Unit\n"
@@ -170,6 +185,7 @@ public static class EmailToLeadHarness
         var mixed = new Multipart("mixed") { new TextPart("plain") { Text = BodyText } };
         mixed.Add(CsvAttachment("valves.csv", valves));
         mixed.Add(CsvAttachment("gaskets.csv", gaskets));
+        foreach (var part in extraParts) mixed.Add(part);
 
         var message = new MimeMessage { Subject = subject, Body = mixed };
         message.From.Add(new MailboxAddress("Buyer", "buyer@customer.example"));

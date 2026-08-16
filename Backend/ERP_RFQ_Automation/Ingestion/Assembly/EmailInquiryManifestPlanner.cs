@@ -26,6 +26,16 @@ public static class EmailInquirySkipReasons
     /// <summary>The one reason that does NOT send the message to review.</summary>
     public const string NonCommercialInlineAsset = "non_commercial_inline_asset";
 
+    /// <summary>
+    /// A named attachment that is recognisably legal or corporate boilerplate — terms and
+    /// conditions, an NDA, a privacy notice, a company profile, a registration certificate.
+    ///
+    /// <para>The second reason that does not send the message to review, and it is reached only
+    /// through <see cref="NonCommercialAttachmentClassifier"/>, which never ignores a spreadsheet
+    /// and never ignores a name carrying commercial vocabulary.</para>
+    /// </summary>
+    public const string NonCommercialBoilerplate = "non_commercial_boilerplate";
+
     /// <summary>A forwarded message whose children carry the commercial content.</summary>
     public const string StructuralContainer = "structural_container";
 }
@@ -57,7 +67,20 @@ public enum EmailInquiryComponentDisposition
     /// producing duplicated line items on one inquiry and provenance that names two sources for
     /// one physical document.</para>
     /// </summary>
-    StructuralContainer = 3
+    StructuralContainer = 3,
+
+    /// <summary>
+    /// A named attachment whose FILENAME is unambiguously legal or corporate boilerplate — see
+    /// <see cref="NonCommercialAttachmentClassifier"/>. Recorded, terminal, and the second of the
+    /// dispositions that do not force review.
+    ///
+    /// <para>Kept distinct from <see cref="IgnoreInlineAsset"/> rather than folded into it. They
+    /// are proven non-commercial by completely different evidence — one by measured size and a
+    /// cid reference from the body, the other by an unambiguous name — and an operator asking
+    /// "why was this part not read?" must get the real answer. Folding them together would also
+    /// make the enum member name a lie the next reader would have to discover by experiment.</para>
+    /// </summary>
+    IgnoreNonCommercial = 4
 }
 
 /// <summary>
@@ -178,7 +201,15 @@ public static class EmailInquiryManifestPlanner
     /// would have made the guard blind for the only population it protects: a v1-captured
     /// message re-planned by v2 would pass the version check and then surface as a pile of
     /// misleading per-component mismatches instead of one true "the contract changed".</para>
-    public const int ContractVersion = 2;
+    /// <para><b>v3</b> — non-commercial boilerplate. A named attachment whose filename is
+    /// unambiguously legal or corporate paperwork (terms and conditions, an NDA, a privacy
+    /// notice, a company profile, a registration certificate) is now
+    /// <see cref="EmailInquiryComponentDisposition.IgnoreNonCommercial"/> rather than processed or
+    /// skipped. That changes the DISPOSITION of an existing part for identical bytes, which is
+    /// precisely the change this constant exists to record: a v2-captured message re-planned by
+    /// v3 must report "the contract changed" rather than a per-component disposition mismatch
+    /// that reads like evidence tampering.</para>
+    public const int ContractVersion = 3;
 
     public static async Task<EmailInquiryManifest> PlanAsync(
         MimeMessage message,
@@ -330,6 +361,30 @@ public static class EmailInquiryManifestPlanner
                     $"part {Segment(path, index)}", depth,
                     EmailInquirySkipReasons.AttachmentUnnamed,
                     "This attachment arrived without a filename."));
+                continue;
+            }
+
+            // BOILERPLATE, BY NAME ALONE — decided here, before any decode, because the whole
+            // point is that these parts cost the message nothing: no bytes retained, no evidence
+            // object, no extraction job, and no trip to a reviewer.
+            //
+            // It sits after the unnamed check so there is a name to judge, and before the
+            // container, allow-list and decode rules so that an unreadable "Terms &
+            // Conditions.pdf" and a perfectly readable one reach the same, correct answer. That
+            // symmetry is the fix: previously the unreadable one downgraded an entire RFQ to
+            // review while the readable one spent an extraction job learning that a legal notice
+            // contains no priced lines.
+            if (NonCommercialAttachmentClassifier.IsNonCommercialBoilerplate(
+                    part.FileName, CanonicalMimeType(part), out var boilerplatePattern))
+            {
+                components.Add(new EmailInquiryComponentPlan(
+                    key, EmailInquiryComponentKind.Attachment, ordinal(),
+                    part.FileName, CanonicalMimeType(part), 0, string.Empty,
+                    EmailInquiryComponentDisposition.IgnoreNonCommercial,
+                    EmailInquirySkipReasons.NonCommercialBoilerplate,
+                    $"Recognised as standard non-commercial paperwork from its name "
+                    + $"('{boilerplatePattern}'). Not treated as commercial content.",
+                    depth, ReadOnlyMemory<byte>.Empty));
                 continue;
             }
 

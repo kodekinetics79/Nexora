@@ -818,14 +818,17 @@ public sealed class ExtractionWorker : BackgroundService
 
             // Never overwrite a decision another layer already made — a security refusal or a
             // completed extraction outranks anything decided here.
-            if (component.Status is not (ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponentStatus.Pending
-                or ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponentStatus.Inspecting
-                or ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponentStatus.Extracting))
+            if (!ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponentClosure.IsClosable(
+                    component.Status))
                 return;
 
-            component.Status = IsInfrastructureFailure(errorCode)
-                ? ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponentStatus.FailedRecoverable
-                : ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponentStatus.Skipped;
+            // The infrastructure-vs-content rule lives in ONE place, shared with the
+            // stranded-component sweep that closes the barriers this path never reached. Two
+            // copies would drift, and the direction of the drift decides whether a customer's
+            // RFQ is held forever or quoted against a document nobody read.
+            component.Status = ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponentClosure
+                .StatusFor(errorCode);
+            component.UpdatedAtUtc = DateTimeOffset.UtcNow;
 
             await db.SaveChangesAsync(ct);
             _log.LogWarning(
@@ -833,6 +836,22 @@ public sealed class ExtractionWorker : BackgroundService
                 + "stopped trying ({ErrorCode}); its message can now finalize instead of waiting "
                 + "on a part that will never arrive.",
                 component.Id, component.Status, job.Id, errorCode);
+
+            // AND THE MESSAGE IS RE-EVALUATED, in the same best-effort block.
+            //
+            // Closing the component alone is only half the fix. The barrier's verdict is
+            // recomputed by the coordinator, never inferred by whoever wrote a component last, so
+            // a component that turns terminal without a re-evaluation leaves its message at
+            // Extracting with every part settled and nothing that would ever look again — the
+            // same perpetual "still being assembled" this whole path exists to end, moved one
+            // level up. Resolved with GetService because the lease and heartbeat harnesses
+            // compose a worker without the assembly capability at all.
+            if (scope.ServiceProvider.GetService<
+                    ERP_RFQ_Automation.Ingestion.Assembly.IEmailInquiryAssemblyCoordinator>()
+                is { } coordinator)
+            {
+                await coordinator.ReevaluateAsync(component.AssemblyId, job.BusinessUnitId, ct);
+            }
         }
         catch (Exception exception)
         {
@@ -853,15 +872,6 @@ public sealed class ExtractionWorker : BackgroundService
             // terminal, and the message finalizes into review rather than waiting forever.
             _ => "evidence_integrity_failure",
         };
-
-    /// <summary>
-    /// Whether the failure is about this deployment's plumbing rather than about the document.
-    /// Infrastructure faults HOLD a message (the content is still readable once fixed);
-    /// content faults finalize it into review.
-    /// </summary>
-    private static bool IsInfrastructureFailure(string errorCode) =>
-        errorCode is "evidence_missing" or "evidence_bucket_mismatch" or "storage_unavailable"
-            or "security_scanner_unavailable" or "ai_not_authorized";
 
     private async Task MarkIntakeFailureAsync(
         ExtractionJob job,

@@ -79,4 +79,27 @@ public static class EmailInquiryHoldReasons
         "A part of this message was processed without being linked back to the message, so no "
         + "inquiry was created from it on its own. The email and every part of it are retained; "
         + "reprocess the message to rebuild it as one inquiry.";
+
+    // =====================================================================================
+    // The stranded-component sweep. Five codes rather than one, because "why did this part
+    // never finish?" has five genuinely different answers and an operator deciding whether to
+    // reprocess a message, fix a bucket, or simply read it needs to know which.
+    // =====================================================================================
+
+    /// <summary>The component was never handed to the queue: no job id was ever recorded.</summary>
+    public const string StrandedWithoutJob = "stranded_no_extraction_job";
+
+    /// <summary>The component names a job whose row no longer exists.</summary>
+    public const string StrandedJobMissing = "stranded_extraction_job_missing";
+
+    /// <summary>The job succeeded but recorded no result the assembler could read back.</summary>
+    public const string StrandedResultMissing = "stranded_extraction_result_missing";
+
+    /// <summary>The job stopped trying for a reason retrying cannot change — a content fault.
+    /// Terminal and commercially significant: the message finalizes into review.</summary>
+    public const string StrandedJobStopped = "stranded_extraction_job_stopped";
+
+    /// <summary>The job stopped trying because a dependency was unavailable. The message is HELD
+    /// rather than finalized, because the content is still readable once the fault is fixed.</summary>
+    public const string StrandedInfrastructureFault = "stranded_infrastructure_fault";
 }
