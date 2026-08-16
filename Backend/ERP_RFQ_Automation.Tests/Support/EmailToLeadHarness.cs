@@ -33,8 +33,9 @@ namespace ERP_RFQ_Automation.Tests.Support;
 /// <para><b>What is real:</b> the migrated database, the queue and its advisory-lock claim, the
 /// ingestion gateway, the document reader against real evidence storage, the persister, the
 /// coordinator, the assembler and the recovery sweep. <b>What is substituted:</b> the language
-/// model, and only the language model — <see cref="RefusingLlm"/> throws on any call, so a test
-/// that reaches it fails rather than silently becoming non-deterministic.</para>
+/// model and malware engine. <see cref="RefusingLlm"/> throws on any unexpected model call and
+/// <see cref="NoThreatScanner"/> supplies the deterministic clean verdict needed to exercise
+/// the post-scan pipeline without installing an external scanner daemon.</para>
 /// </summary>
 public static class EmailToLeadHarness
 {
@@ -195,6 +196,34 @@ public static class EmailToLeadHarness
         return message;
     }
 
+    public static MimeMessage BuildBodyOnlyMessage(
+        string messageId,
+        string body = "Please quote 7 EA BODY-ONLY-700 pressure transmitters, delivery DDP Jubail.")
+    {
+        var message = new MimeMessage
+        {
+            Subject = "RFQ body-only pressure transmitters",
+            Body = new TextPart("plain") { Text = body }
+        };
+        message.From.Add(new MailboxAddress("Buyer", "buyer@customer.example"));
+        message.To.Add(new MailboxAddress("Nexora", "rfq@nexora.example"));
+        message.MessageId = messageId;
+        message.Date = new DateTimeOffset(2026, 8, 14, 9, 5, 0, TimeSpan.Zero);
+        return message;
+    }
+
+    public static MimePart Attachment(string fileName, string mimeType, byte[] content)
+    {
+        var slash = mimeType.IndexOf('/');
+        return new MimePart(mimeType[..slash], mimeType[(slash + 1)..])
+        {
+            Content = new MimeContent(new MemoryStream(content)),
+            ContentDisposition = new ContentDisposition(ContentDisposition.Attachment) { FileName = fileName },
+            ContentTransferEncoding = ContentEncoding.Base64,
+            FileName = fileName
+        };
+    }
+
     private static MimePart CsvAttachment(string fileName, string content) =>
         new("text", "csv")
         {
@@ -265,8 +294,9 @@ public static class EmailToLeadHarness
         var configuration = await context.EmailConfigurations.SingleAsync(c => c.Id == businessUnitId);
         var ingest = await context.EmailIngests.SingleAsync(i => i.MessageId == message.MessageId);
 
+        var bodyText = message.TextBody ?? string.Empty;
         var capture = await scope.ServiceProvider.GetRequiredService<IEmailInquiryCaptureService>()
-            .CaptureAsync(message, ingest, configuration, BodyText);
+            .CaptureAsync(message, ingest, configuration, bodyText);
 
         Assert.NotNull(capture.Assembly);
         Assert.False(capture.AlreadyCaptured,
@@ -282,7 +312,7 @@ public static class EmailToLeadHarness
 
         var components = await context.EmailInquiryComponents
             .Where(c => c.AssemblyId == assembly.Id).OrderBy(c => c.Ordinal).ToListAsync();
-        var plan = await EmailInquiryManifestPlanner.PlanAsync(message, assembly.MessageKey, BodyText);
+        var plan = await EmailInquiryManifestPlanner.PlanAsync(message, assembly.MessageKey, bodyText);
 
         var schedule = await EmailIngestEnqueuer.ScheduleAsync(
             assembly, components, plan, ingest, "buyer@customer.example",

@@ -4,6 +4,7 @@ using System.Text.Json;
 using Amazon.S3;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.Infrastructure.Storage;
+using ERP_RFQ_Automation.Ingestion.Assembly;
 using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Security.DocumentInspection;
@@ -214,6 +215,7 @@ public sealed class ExtractionDeadLetterService(
                 throw new InvalidOperationException("The dead-letter job changed. Refresh and retry.");
             await EnsureNoSecurityBlockerAsync(tenantId, job, ct);
             await EnsureIntakeLineageAsync(job, verifiedSource, actorId, ct);
+            await ReopenEmailComponentAsync(job, ct);
 
             job.Status = ExtractionStatus.Pending;
             job.MaxAttempts = Math.Max(job.MaxAttempts, job.Attempts) + AdditionalAttemptsPerRecovery;
@@ -228,6 +230,56 @@ public sealed class ExtractionDeadLetterService(
             await db.SaveChangesAsync(ct);
             return new(job.Id, job.BatchId, "RetryQueued", false, false);
         }, ct);
+    }
+
+    /// <summary>
+    /// Reopens the message-level barrier in the SAME audited transaction that queues the
+    /// governed dead-letter retry.
+    ///
+    /// A retry used to reset only the job and occurrence. The email component stayed
+    /// Skipped/FailedRecoverable, so a successful retry wrote a result the coordinator refused
+    /// to apply to a terminal component and the message never reached a Lead. The dead-letter
+    /// event already carries actor, reason and idempotency; reopening here keeps that governance
+    /// inseparable from the state change it authorizes.
+    /// </summary>
+    private async Task ReopenEmailComponentAsync(ExtractionJob job, CancellationToken ct)
+    {
+        if (job.EmailInquiryComponentId is not { } componentId)
+            return;
+
+        var component = await db.EmailInquiryComponents
+            .Include(x => x.Assembly)
+            .SingleOrDefaultAsync(x => x.BusinessUnitId == job.BusinessUnitId && x.Id == componentId, ct)
+            ?? throw new InvalidOperationException(
+                "The email extraction job references a missing inquiry component and cannot be retried.");
+
+        if (component.ExtractionJobId != job.Id)
+            throw new InvalidOperationException(
+                "The email inquiry component is not bound to this extraction job and cannot be retried.");
+        if (component.Assembly.AssembledLeadId is not null
+            || component.Assembly.Status == EmailInquiryAssemblyStatus.Assembled)
+            throw new InvalidOperationException(
+                "An email inquiry that already produced a Lead cannot be reopened by extraction recovery.");
+        if (component.Status is EmailInquiryComponentStatus.Completed
+            or EmailInquiryComponentStatus.RefusedSecurity
+            or EmailInquiryComponentStatus.Ignored
+            or EmailInquiryComponentStatus.StructuralOnly)
+            throw new InvalidOperationException(
+                $"The email inquiry component is {component.Status} and cannot be reopened for extraction.");
+
+        if (!EmailInquiryAssemblyStateMachine.CanGovernedExtractionRecoveryTransition(
+                component.Assembly.Status))
+            throw new InvalidOperationException(
+                $"The email inquiry assembly is {component.Assembly.Status} and cannot re-enter extraction.");
+
+        component.Status = EmailInquiryComponentStatus.Pending;
+        component.ReasonCode = null;
+        component.ReasonDetail = null;
+        component.UpdatedAtUtc = DateTimeOffset.UtcNow;
+
+        component.Assembly.Status = EmailInquiryAssemblyStatus.Extracting;
+        component.Assembly.StatusReason = "A governed extraction retry is queued for a previously blocked component.";
+        component.Assembly.UpdatedAtUtc = DateTimeOffset.UtcNow;
     }
 
     private async Task EnsureIntakeLineageAsync(

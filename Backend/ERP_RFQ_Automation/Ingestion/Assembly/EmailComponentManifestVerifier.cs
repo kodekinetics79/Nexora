@@ -187,7 +187,12 @@ public static class EmailComponentManifestVerifier
                     "This part was recorded with a different handling decision than the stored "
                     + "original now produces."));
             }
-            if (!string.Equals(component.ReasonCode, candidate.ReasonCode, StringComparison.Ordinal))
+            // Process components acquire runtime reason codes (queue outage, extraction hold)
+            // after capture. Those describe processing state, not a changed MIME disposition,
+            // and must not make a byte-identical replay fail manifest verification. Capture-time
+            // Skip/Ignore/Structural decisions remain exact.
+            if (candidate.Disposition != EmailInquiryComponentDisposition.Process
+                && !string.Equals(component.ReasonCode, candidate.ReasonCode, StringComparison.Ordinal))
             {
                 metadataBroken = true;
                 mismatches.Add(new EmailManifestMismatch(

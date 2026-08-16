@@ -132,6 +132,29 @@ public static class EmailInquiryAssemblyStateMachine
     }
 
     /// <summary>
+    /// The narrower authority used only by an audited dead-letter recovery command. Ordinary
+    /// reevaluation must not reopen NeedsReview, but a recovery carrying actor, reason and an
+    /// idempotency key may reopen its exact failed component atomically with the job retry.
+    /// </summary>
+    public static bool CanGovernedExtractionRecoveryTransition(EmailInquiryAssemblyStatus from)
+        => from is EmailInquiryAssemblyStatus.NeedsReview
+            or EmailInquiryAssemblyStatus.FailedRecoverable
+            or EmailInquiryAssemblyStatus.Extracting;
+
+    /// <summary>
+    /// Automatic replay is narrower than operator recovery: only an infrastructure hold may
+    /// re-enter scheduling, and only when the component has no durable job. The coordinator
+    /// enforces that component-level precondition before using this authority.
+    /// </summary>
+    public static bool CanAutomaticSchedulingRecoveryTransition(EmailInquiryAssemblyStatus from)
+        => from is EmailInquiryAssemblyStatus.FailedRecoverable
+            or EmailInquiryAssemblyStatus.Extracting;
+
+    /// <summary>Only the audited manual-triage command may reverse a NoInquiry decision.</summary>
+    public static bool CanGovernedTriageReopenTransition(EmailInquiryAssemblyStatus from)
+        => from == EmailInquiryAssemblyStatus.NoInquiry;
+
+    /// <summary>
     /// THE commercial gate.
     ///
     /// <para>Given what every expected component of a message currently is, decide what the

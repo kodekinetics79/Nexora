@@ -1,6 +1,7 @@
 using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.Infrastructure.Storage;
+using ERP_RFQ_Automation.Ingestion.Assembly;
 using ERP_RFQ_Automation.Security.DocumentInspection;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
@@ -11,6 +12,100 @@ namespace ERP_RFQ_Automation.Tests;
 [Collection(PostgreSqlIntegrationCollection.Name)]
 public sealed class ExtractionDeadLetterPostgreSqlTests(PostgreSqlTestDatabase database)
 {
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task Governed_retry_reopens_the_owned_email_component_and_message_atomically()
+    {
+        const long tenant = 98_305;
+        long jobId;
+        long componentId;
+        long assemblyId;
+        await using (var owner = database.ContextFor(null))
+        {
+            Seed.EnsureBusinessUnit(owner, tenant);
+            var config = Seed.EmailConfig(owner, 98_305, tenant);
+            var ingest = Seed.EmailIngest(owner, 98_305, config.Id, "Failed");
+            await owner.SaveChangesAsync();
+
+            var now = DateTimeOffset.UtcNow;
+            var assembly = new EmailInquiryAssembly
+            {
+                BusinessUnitId = tenant,
+                EmailIngestId = ingest.Id,
+                EmailConfigurationId = config.Id,
+                MessageKey = ingest.MessageId,
+                RawEvidenceUri = "s3://test-evidence/raw-mail/message.eml",
+                RawEvidenceSha256 = new string('a', 64),
+                ManifestContractVersion = EmailInquiryManifestPlanner.ContractVersion,
+                ExpectedComponentCount = 1,
+                Status = EmailInquiryAssemblyStatus.NeedsReview,
+                StatusReason = "extraction_dead_letter",
+                CreatedAtUtc = now,
+                UpdatedAtUtc = now
+            };
+            var component = new EmailInquiryComponent
+            {
+                BusinessUnitId = tenant,
+                ComponentKey = $"email:{ingest.MessageId}:body",
+                Kind = EmailInquiryComponentKind.Body,
+                Ordinal = 0,
+                MimeType = "text/plain",
+                ContentHash = new string('c', 64),
+                Status = EmailInquiryComponentStatus.Skipped,
+                ReasonCode = "processing_timeout",
+                ReasonDetail = "Extraction stopped after its retry budget.",
+                CreatedAtUtc = now,
+                UpdatedAtUtc = now
+            };
+            assembly.Components.Add(component);
+            owner.Add(assembly);
+            await owner.SaveChangesAsync();
+
+            var job = Job(tenant, 'c');
+            job.SourceType = ExtractionSourceType.Email;
+            job.EmailInquiryComponentId = component.Id;
+            owner.Add(job);
+            await owner.SaveChangesAsync();
+            component.ExtractionJobId = job.Id;
+            await owner.SaveChangesAsync();
+
+            jobId = job.Id;
+            componentId = component.Id;
+            assemblyId = assembly.Id;
+        }
+
+        await using var runtime = database.TenantContextWithRls(tenant);
+        var result = await Service(runtime).RecoverAsync(
+            tenant, jobId, "email-recovery-operator",
+            new("The transient extraction dependency is healthy.", "email-component-retry"), default);
+
+        Assert.Equal("RetryQueued", result.Status);
+        var componentAfter = await runtime.EmailInquiryComponents.AsNoTracking()
+            .SingleAsync(x => x.Id == componentId);
+        var assemblyAfter = await runtime.EmailInquiryAssemblies.AsNoTracking()
+            .SingleAsync(x => x.Id == assemblyId);
+        Assert.Equal(EmailInquiryComponentStatus.Pending, componentAfter.Status);
+        Assert.Null(componentAfter.ReasonCode);
+        Assert.Equal(EmailInquiryAssemblyStatus.Extracting, assemblyAfter.Status);
+        Assert.Null(assemblyAfter.AssembledLeadId);
+        Assert.Equal(ExtractionStatus.Pending,
+            (await runtime.Set<ExtractionJob>().AsNoTracking().SingleAsync(x => x.Id == jobId)).Status);
+        Assert.Single(await runtime.ExtractionDeadLetterEvents.AsNoTracking()
+            .Where(x => x.ExtractionJobId == jobId && x.IdempotencyKey == "email-component-retry")
+            .ToListAsync());
+
+        // This collection deliberately shares one migrated PostgreSQL database. Return the
+        // fixture to a terminal hold so later platform-wide recovery sweeps do not mistake this
+        // test's successfully reopened component for their own stranded work.
+        await runtime.Set<ExtractionJob>().Where(x => x.Id == jobId).ExecuteUpdateAsync(setters => setters
+            .SetProperty(x => x.Status, ExtractionStatus.DeadLetter));
+        await runtime.EmailInquiryComponents.Where(x => x.Id == componentId).ExecuteUpdateAsync(setters => setters
+            .SetProperty(x => x.Status, EmailInquiryComponentStatus.Skipped)
+            .SetProperty(x => x.ReasonCode, "test_fixture_terminal"));
+        await runtime.EmailInquiryAssemblies.Where(x => x.Id == assemblyId).ExecuteUpdateAsync(setters => setters
+            .SetProperty(x => x.Status, EmailInquiryAssemblyStatus.NeedsReview));
+    }
+
     [Fact]
     [Trait("Category", "PostgreSQL")]
     public async Task RuntimeRole_ExecutesAuthoritativeRecoveryThroughRls()

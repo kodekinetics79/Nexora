@@ -512,7 +512,7 @@ namespace ERP_RFQ_Automation.Services
                     ? new List<IMessageSummary>()
                     : (await inbox.FetchAsync(uids,
                         MessageSummaryItems.UniqueId | MessageSummaryItems.Envelope)).ToList();
-                var ledger = await LoadIngestedMessageIdsAsync(localContext, config, summaries);
+                var ledger = await LoadHandledMessageIdsAsync(localContext, config, summaries);
                 tally.Found = summaries.Count;
 
                 foreach (var summary in summaries)
@@ -608,7 +608,7 @@ namespace ERP_RFQ_Automation.Services
 
         /// <summary>The ingest keys already recorded for the messages in this window. One query
         /// per cycle, keyed on the RFC 5322 Message-Id.</summary>
-        private static async Task<HashSet<string>> LoadIngestedMessageIdsAsync(
+        private static async Task<HashSet<string>> LoadHandledMessageIdsAsync(
             ErpRfqAutomationContext context, EmailConfiguration config,
             IReadOnlyList<IMessageSummary> summaries)
         {
@@ -621,8 +621,28 @@ namespace ERP_RFQ_Automation.Services
             if (candidates.Count == 0)
                 return new HashSet<string>(StringComparer.Ordinal);
 
+            // An EmailIngest row is the START of intake, not proof that intake finished. Capture
+            // deliberately writes it before object storage so a failed attempt is visible. If
+            // every row were treated as handled, a storage outage would leave the message unread
+            // but the next poll would skip it forever. Only a canonical assembly whose
+            // processable components are all job-bound/settled is safe
+            // to suppress at the envelope stage. Raw evidence alone is not enough: capture commits
+            // before scheduling, so a crash in that window must download the message and resume.
+            // ParseStatus is deliberately NOT an alternative authority here. In particular, a
+            // governed manual reopen changes the assembly and checkpoint atomically; trusting an
+            // older Rejected/Noise string could strand that reopened message forever.
             var known = await context.EmailIngests
-                .Where(e => e.EmailConfigurationId == config.Id && candidates.Contains(e.MessageId))
+                .Where(e => e.EmailConfigurationId == config.Id
+                            && candidates.Contains(e.MessageId)
+                            && context.EmailInquiryAssemblies.Any(a =>
+                                a.BusinessUnitId == config.BusinessUnitId
+                                && a.EmailIngestId == e.Id
+                                && a.RawEvidenceUri != null
+                                && a.RawEvidenceUri != ""
+                                && !a.Components.Any(c =>
+                                    (c.Status == EmailInquiryComponentStatus.Pending
+                                     || c.Status == EmailInquiryComponentStatus.FailedRecoverable)
+                                    && c.ExtractionJobId == null)))
                 .Select(e => e.MessageId)
                 .ToListAsync();
             return new HashSet<string>(known, StringComparer.Ordinal);
@@ -852,61 +872,86 @@ namespace ERP_RFQ_Automation.Services
             // log line and no row anywhere. The RFC 5322 Message-Id is the identifier that is
             // stable for this message and different for the next one, and it is already the
             // durable ingestion key (unique index on EmailConfigurationID + MessageID).
-            if (await context.EmailIngests.AnyAsync(e =>
-                    e.EmailConfigurationId == config.Id && e.MessageId == messageId))
+            var ingest = await context.EmailIngests.SingleOrDefaultAsync(e =>
+                e.EmailConfigurationId == config.Id && e.MessageId == messageId);
+            if (ingest is not null)
             {
-                _logger.LogDebug("Skipping already-ingested email: {MessageId} (From: {From}, Subject: {Subject})",
-                    messageId, from, subject);
-                return true;
+                var hasFullyScheduledAssembly = await context.EmailInquiryAssemblies.AnyAsync(a =>
+                    a.BusinessUnitId == config.BusinessUnitId
+                    && a.EmailIngestId == ingest.Id
+                    && a.RawEvidenceUri != null
+                    && a.RawEvidenceUri != ""
+                    && !a.Components.Any(c =>
+                        (c.Status == EmailInquiryComponentStatus.Pending
+                         || c.Status == EmailInquiryComponentStatus.FailedRecoverable)
+                        && c.ExtractionJobId == null));
+                if (hasFullyScheduledAssembly || intake is null)
+                {
+                    _logger.LogDebug(
+                        "Skipping durably handled email: {MessageId} (From: {From}, Subject: {Subject})",
+                        messageId, from, subject);
+                    return true;
+                }
+
+                _logger.LogInformation(
+                    "Resuming incomplete email ingest {IngestId} for {MessageId}; no durable assembly exists yet.",
+                    ingest.Id, messageId);
+            }
+            else
+            {
+                // ING-01: persist a durable record for EVERY fetched message BEFORE
+                // classification, so a real RFQ the keyword filter misjudges is never silently
+                // dropped. This row is a resumable checkpoint, not the acknowledgement boundary.
+                ingest = new EmailIngest
+                {
+                    MessageId = messageId,
+                    EmailSubject = subject,
+                    FromEmail = from,
+                    ToEmail = to,
+                    EmailConfigurationId = config.Id,
+                    CreatedOn = DateTime.UtcNow,
+                    ParseStatus = STATUS_PENDING
+                };
+
+                // Local raw mail remains a compatibility copy. Canonical acknowledgement is
+                // based on the immutable evidence object written by EmailInquiryCaptureService.
+                var rawPath = Path.Combine(_rawEmailPath, $"{Guid.NewGuid()}.eml");
+                try
+                {
+                    message.WriteTo(rawPath);
+                    ingest.RawEmailPath = rawPath;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Failed to persist raw email bytes for {MessageId}. Will retry next cycle.", messageId);
+                    return false;
+                }
+
+                context.EmailIngests.Add(ingest);
+                try
+                {
+                    await context.SaveChangesAsync();
+                }
+                catch (DbUpdateException ex) when (IsDuplicateKeyException(ex))
+                {
+                    // A concurrent attempt inserted the checkpoint. Reload that winner and run
+                    // the same handled/resume decision instead of treating existence as success.
+                    _logger.LogWarning("Concurrent ingest checkpoint detected for {MessageId}; reloading it.", messageId);
+                    try { if (File.Exists(rawPath)) File.Delete(rawPath); } catch { /* best-effort cleanup */ }
+                    context.ChangeTracker.Clear();
+                    return await ProcessSingleEmailAsync(
+                        message, config, context, llmService, intake, tally);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Failed to persist EmailIngest for {MessageId}. Will retry next cycle.", messageId);
+                    try { if (File.Exists(rawPath)) File.Delete(rawPath); } catch { /* best-effort cleanup */ }
+                    return false;
+                }
             }
 
-            // ING-01: persist a durable record for EVERY fetched message BEFORE classification,
-            // so a real RFQ the keyword filter misjudges is never silently dropped.
-            var ingest = new EmailIngest
-            {
-                MessageId = messageId,
-                EmailSubject = subject,
-                FromEmail = from,
-                ToEmail = to,
-                EmailConfigurationId = config.Id,
-                CreatedOn = DateTime.UtcNow,
-                ParseStatus = STATUS_PENDING
-            };
-
-            // Save the raw email bytes first so the original is never lost, even for rejected mail.
-            var rawPath = Path.Combine(_rawEmailPath, $"{Guid.NewGuid()}.eml");
-            try
-            {
-                message.WriteTo(rawPath);
-                ingest.RawEmailPath = rawPath;
-            }
-            catch (Exception ex)
-            {
-                // If we cannot even persist the raw bytes, do NOT let the caller mark it seen.
-                _logger.LogError(ex, "Failed to persist raw email bytes for {MessageId}. Will retry next cycle.", messageId);
-                return false;
-            }
-
-            context.EmailIngests.Add(ingest);
-            try
-            {
-                await context.SaveChangesAsync();
-            }
-            catch (DbUpdateException ex) when (IsDuplicateKeyException(ex))
-            {
-                // A row already exists (concurrent/duplicate delivery) -> durable record present.
-                _logger.LogWarning("Duplicate messageId detected: {MessageId}", messageId);
-                return true;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to persist EmailIngest for {MessageId}. Will retry next cycle.", messageId);
-                try { if (File.Exists(rawPath)) File.Delete(rawPath); } catch { /* best-effort cleanup */ }
-                return false;
-            }
-
-            // From here a durable record exists: the caller may mark the message \Seen regardless
-            // of the classification/extraction outcome below.
+            // From here a resumable checkpoint exists. It is NOT yet an acknowledgement boundary:
+            // only canonical capture below makes the raw message durable enough to mark \Seen.
 
             // ING-07: RECOGNITION. The old gate treated "quote"/"quotation" as strong RFQ
             // evidence (so every supplier reply and order confirmation passed) while a bare
@@ -917,14 +962,56 @@ namespace ERP_RFQ_Automation.Services
             var bodyParts = EmailBodyNormalizer.Normalize(GetEmailBody(message));
             var senderPartyType = await SenderPartyResolver.ResolveAsync(
                 context, config.BusinessUnitId, message.From.Mailboxes.FirstOrDefault()?.Address);
-            var triage = DeterministicEmailTriage.Evaluate(
-                BuildTriageSignals(message, bodyParts, senderPartyType));
+            // A human override is a durable command, not a hint. If the process died after the
+            // governed reopen committed but before scheduling completed, the next poll must carry
+            // that same Uncertain/manual decision forward. Re-running the deterministic rules here
+            // would classify the same auto-submitted message as Noise again and undo the rescue.
+            var triage = ingest.ParseStatus == EmailTriagePersistenceStatuses.Reprocessing
+                ? new EmailTriageDecision(
+                    EmailTriageOutcome.Uncertain,
+                    new[] { EmailTriageReasonCodes.ManualReprocess },
+                    CommercialDocumentTypeHint: null,
+                    ThreadContinuation: !string.IsNullOrWhiteSpace(message.InReplyTo)
+                                        || message.References?.Count > 0)
+                : DeterministicEmailTriage.Evaluate(
+                    BuildTriageSignals(message, bodyParts, senderPartyType));
 
             // Persist the decision BEFORE branching on it: a message that is stopped must still
             // be recorded, with its reason, and be retrievable (raw .eml is already on disk).
             ingest.TriageOutcome = triage.Outcome.ToString();
             ingest.TriageReasonJson = SerializeReasonCodes(triage.ReasonCodes);
             ingest.TriageDecidedOn = DateTime.UtcNow;
+            await context.SaveChangesAsync();
+
+            EmailInquiryIntakeResult? intakeResult = null;
+            if (intake != null)
+            {
+                intakeResult = await EnqueueEmailForExtractionAsync(
+                    message, ingest, config, intake, triage, bodyParts);
+
+                // Document ingestion deliberately clears the shared scoped ChangeTracker before
+                // a retriable write. The checkpoint instance passed into intake may therefore be
+                // detached now; reacquire the authoritative row before recording the outcome.
+                ingest = await context.EmailIngests.SingleAsync(e => e.Id == ingest.Id);
+
+                // DO NOT ACKNOWLEDGE unless the raw bytes and manifest are durable. This applies
+                // to noise too: a false-positive rejection must remain replayable after a deploy.
+                if (!intakeResult.SafeToAcknowledge)
+                {
+                    _logger.LogError(
+                        "Durable capture did not complete for ingest {IngestId} ({Reason}); the "
+                        + "message stays unread and will be re-fetched.",
+                        ingest.Id, intakeResult.FailureReason ?? "unknown");
+                    return false;
+                }
+
+                if (tally is not null)
+                {
+                    tally.Captured++;
+                    tally.ComponentsScheduled += intakeResult.Scheduled + intakeResult.AlreadyScheduled;
+                    if (intakeResult.Held > 0) tally.HeldForReview++;
+                }
+            }
 
             if (triage.Outcome == EmailTriageOutcome.Noise)
             {
@@ -943,33 +1030,9 @@ namespace ERP_RFQ_Automation.Services
             // direct LLM extraction below. The pre-created EmailIngest is referenced via
             // the job's provenance sidecar so the produced lead(s) link to the REAL
             // ingest (from/subject) instead of a synthetic one.
-            if (intake != null)
+            if (intakeResult is not null)
             {
-                var result = await EnqueueEmailForExtractionAsync(
-                    message, ingest, config, intake, triage, bodyParts);
-
-                // DO NOT ACKNOWLEDGE unless the bytes are durable. A message marked \Seen whose
-                // raw copy was never stored is unrecoverable — the mailbox was the only other
-                // copy. Returning false leaves it unread for the next cycle.
-                if (!result.SafeToAcknowledge)
-                {
-                    _logger.LogError(
-                        "Durable capture did not complete for ingest {IngestId} ({Reason}); the "
-                        + "message stays unread and will be re-fetched.",
-                        ingest.Id, result.FailureReason ?? "unknown");
-                    return false;
-                }
-
-                if (tally is not null)
-                {
-                    // Captured means the BYTES are durable and an assembly exists, which is the
-                    // fact acknowledgement rests on — not "an extraction job was created".
-                    tally.Captured++;
-                    tally.ComponentsScheduled += result.Scheduled + result.AlreadyScheduled;
-                    if (result.Held > 0) tally.HeldForReview++;
-                }
-
-                if (result.Scheduled + result.AlreadyScheduled > 0)
+                if (intakeResult.Scheduled + intakeResult.AlreadyScheduled > 0)
                 {
                     ingest.ParseStatus = STATUS_QUEUED; // the barrier flips it when the message assembles
                 }

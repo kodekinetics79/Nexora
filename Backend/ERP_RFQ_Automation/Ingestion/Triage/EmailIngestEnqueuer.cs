@@ -162,7 +162,20 @@ public static class EmailIngestEnqueuer
             // its own, and the component is counted alreadyScheduled forever. Nothing sweeps
             // holds, so every assembly parks in FailedRecoverable and email-to-Lead throughput
             // goes to zero - the outage removed at 3a672dd, re-armed on a delay.
-            if (component.ExtractionJobId is { } existingJobId && !component.IsRecoverableHold)
+            if (component.ExtractionJobId is { } heldJobId && component.IsRecoverableHold)
+            {
+                // A job-bound hold belongs to governed dead-letter recovery. Re-submitting the
+                // same content returns that same exhausted job and merely makes the component
+                // look active while nothing can claim it.
+                logger.LogWarning(
+                    "Component {ComponentKey} of assembly {AssemblyId} remains held on job "
+                    + "{ExtractionJobId}; an audited dead-letter recovery is required.",
+                    component.ComponentKey, assembly.Id, heldJobId);
+                heldByFailure++;
+                continue;
+            }
+
+            if (component.ExtractionJobId is { } existingJobId)
             {
                 // A non-null id is NOT proof a job exists. Verified against the tenant's own
                 // jobs; if it has gone, the component is rescheduled rather than counted as done.
@@ -196,7 +209,8 @@ public static class EmailIngestEnqueuer
                     component.Id, ct);
 
                 await coordinator.RecordComponentQueuedAsync(
-                    assembly.BusinessUnitId, assembly.Id, component.ComponentKey, result.JobId, ct);
+                    assembly.BusinessUnitId, assembly.Id, component.ComponentKey, result.JobId, ct,
+                    result.StoragePath, result.SourceDocumentOccurrenceId);
                 scheduled++;
 
                 logger.LogInformation(

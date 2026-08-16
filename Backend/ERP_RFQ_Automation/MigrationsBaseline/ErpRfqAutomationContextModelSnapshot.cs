@@ -13507,6 +13507,11 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasIndex("BusinessUnitId", "TargetType", "TargetId")
                         .HasDatabaseName("IX_IamAuditEvents_BU_Target");
 
+                    b.HasIndex("BusinessUnitId", "Action", "CorrelationId")
+                        .IsUnique()
+                        .HasDatabaseName("UX_IamAuditEvents_EmailTriageReprocess_Idempotency")
+                        .HasFilter("\"Action\" = 'EmailTriageReprocessed' AND \"CorrelationId\" IS NOT NULL");
+
                     b.ToTable("IamAuditEvents", (string)null);
                 });
 

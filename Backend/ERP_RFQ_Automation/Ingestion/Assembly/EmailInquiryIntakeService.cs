@@ -120,6 +120,28 @@ public sealed class EmailInquiryIntakeService : IEmailInquiryIntakeService
 
         var assembly = capture.Assembly;
 
+        // Classification never outranks evidence durability. Noise is captured through the
+        // same immutable raw-mail boundary as an inquiry, then terminates explicitly without
+        // scheduling extraction. That makes a false-positive rejection reviewable/replayable
+        // after a restart instead of leaving its only copy on container-local disk.
+        if (triage.Outcome == EmailTriageOutcome.Noise)
+        {
+            await _coordinator.MarkNoInquiryAsync(
+                assembly,
+                $"triage_noise: {string.Join(',', triage.ReasonCodes)}",
+                ct);
+            return new EmailInquiryIntakeResult(
+                assembly.Id,
+                EmailIngestEnqueuer.DeriveBatchId(assembly.Id, assembly.MessageKey),
+                Scheduled: 0,
+                AlreadyScheduled: 0,
+                Held: 0,
+                assembly.ExpectedComponentCount,
+                capture.AlreadyCaptured,
+                capture.SafeToMarkSeen,
+                FailureReason: null);
+        }
+
         // Re-planned from the SAME bytes capture used, so the manifest verifier compares like
         // with like. A mismatch means the persisted components and the message no longer agree,
         // and ScheduleAsync holds the whole message rather than scheduling the subset that fits.
@@ -151,10 +173,14 @@ public sealed class EmailInquiryIntakeService : IEmailInquiryIntakeService
             schedule.Held,
             assembly.ExpectedComponentCount,
             capture.AlreadyCaptured,
-            // The mailbox may be told the message was read once the bytes are DURABLE. A part
-            // that could not be queued is a recoverable hold on a message we already own — it is
-            // visible, re-schedulable, and re-reading it from IMAP would only duplicate it.
-            capture.SafeToMarkSeen,
-            null);
+            // A compatible manifest with an unbound held part needs the original MIME bytes to
+            // retry scheduling, so it stays unread and the next poll resumes the same assembly.
+            // A manifest-contract refusal is durable/operator-visible and cannot improve by
+            // hammering the mailbox, so that permanent hold remains safe to acknowledge.
+            capture.SafeToMarkSeen
+                && (schedule.Held == 0 || schedule.Verdict != EmailManifestVerdict.Compatible),
+            schedule.Held > 0 && schedule.Verdict == EmailManifestVerdict.Compatible
+                ? "component_scheduling_incomplete"
+                : null);
     }
 }

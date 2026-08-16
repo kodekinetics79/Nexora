@@ -1,12 +1,22 @@
 using ERP_RFQ_Automation.Extraction;
+using ERP_RFQ_Automation.Extraction.Conversational;
+using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.Infrastructure.Storage;
 using ERP_RFQ_Automation.Ingestion.Assembly;
 using ERP_RFQ_Automation.Ingestion.Triage;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.MultiTenancy;
+using ERP_RFQ_Automation.Security.DocumentInspection;
+using ERP_RFQ_Automation.Services.DocumentIntelligence;
+using ERP_RFQ_Automation.Services.Interfaces;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using OfficeOpenXml;
+using QuestPDF.Fluent;
+using QuestPDF.Infrastructure;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 
 namespace ERP_RFQ_Automation.Tests;
 
@@ -178,6 +188,622 @@ public sealed class EmailToLeadVerticalSlicePostgreSqlTests(PostgreSqlTestDataba
             var context = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
             Assert.Equal(1, await context.Leads.AsNoTracking()
                 .CountAsync(l => l.BusinessUnitId == BusinessUnitId));
+        }
+    }
+
+    [Fact]
+    public async Task Body_only_inquiry_becomes_one_Lead_with_body_evidence_and_no_customer_file_attachments()
+    {
+        var businessUnitId = UniqueBusinessUnitId();
+        const string messageId = "vertical-body-only-0001@buyer.example";
+        await using (var connection = await _database.OpenConnectionAsync())
+            await EmailToLeadHarness.SeedTenantAsync(connection, businessUnitId, messageId);
+
+        var llm = new EmailToLeadHarness.RefusingLlm();
+        await using var services = EmailToLeadHarness.BuildGraph(
+            _database.ConnectionString, _storageRoot, llm,
+            registrations => registrations.AddScoped<IConversationalExtractionService, BodyOnlyExtractor>());
+
+        var message = EmailToLeadHarness.BuildBodyOnlyMessage(messageId);
+        var (_, assemblyId, schedule) = await EmailToLeadHarness.CaptureAndScheduleAsync(
+            services, businessUnitId, message, expectedComponentCount: 1);
+
+        Assert.Equal(1, schedule.Scheduled);
+        await EmailToLeadHarness.DrainQueueAsync(services, businessUnitId);
+
+        using var scope = services.CreateScope();
+        using var tenant = scope.ServiceProvider.GetRequiredService<ITenantScopeAccessor>().Push(businessUnitId);
+        var context = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+        var assembly = await context.EmailInquiryAssemblies.AsNoTracking().SingleAsync(a => a.Id == assemblyId);
+        var lead = Assert.Single(await context.Leads.AsNoTracking()
+            .Where(l => l.BusinessUnitId == businessUnitId).ToListAsync());
+        var line = Assert.Single(await context.LeadItems.AsNoTracking()
+            .Where(i => i.LeadId == lead.Id).ToListAsync());
+
+        Assert.Equal(EmailInquiryAssemblyStatus.Assembled, assembly.Status);
+        Assert.Equal(lead.Id, assembly.AssembledLeadId);
+        Assert.Contains("BODY-ONLY-700", line.ProductShortName);
+        Assert.Equal(7, line.Quantity);
+        var evidence = Assert.Single(await context.Attachments.AsNoTracking()
+            .Where(a => a.ParentType == "Lead" && a.ParentId == lead.Id).ToListAsync());
+        Assert.EndsWith("_body.txt", evidence.FileName);
+        Assert.NotNull(evidence.ContentSha256);
+    }
+
+    [Fact]
+    public async Task Governed_dead_letter_retry_runs_the_real_worker_and_assembles_exactly_one_Lead()
+    {
+        var businessUnitId = UniqueBusinessUnitId();
+        var messageId = $"vertical-dead-letter-recovery-{Guid.NewGuid():N}@buyer.example";
+        await using (var connection = await _database.OpenConnectionAsync())
+            await EmailToLeadHarness.SeedTenantAsync(connection, businessUnitId, messageId);
+
+        await using var services = EmailToLeadHarness.BuildGraph(
+            _database.ConnectionString, _storageRoot, new EmailToLeadHarness.RefusingLlm(),
+            registrations => registrations.AddScoped<IConversationalExtractionService, BodyOnlyExtractor>());
+
+        var (_, assemblyId, schedule) = await EmailToLeadHarness.CaptureAndScheduleAsync(
+            services, businessUnitId, EmailToLeadHarness.BuildBodyOnlyMessage(messageId),
+            expectedComponentCount: 1);
+        Assert.Equal(1, schedule.Scheduled);
+
+        long jobId;
+        long occurrenceId;
+        string componentKey;
+        using (var failedScope = services.CreateScope())
+        using (failedScope.ServiceProvider.GetRequiredService<ITenantScopeAccessor>().Push(businessUnitId))
+        {
+            var db = failedScope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+            var component = await db.EmailInquiryComponents.SingleAsync(x => x.AssemblyId == assemblyId);
+            componentKey = component.ComponentKey;
+            var job = await db.Set<ExtractionJob>().SingleAsync(x =>
+                x.BusinessUnitId == businessUnitId && x.EmailInquiryComponentId == component.Id);
+            jobId = job.Id;
+            occurrenceId = Assert.IsType<long>(job.SourceDocumentOccurrenceId);
+
+            // Establish the same durable terminal state produced when the worker exhausts its
+            // retry budget. The PostgreSQL job-status trigger must move the owned intake
+            // occurrence to DeadLetter in the same save; governed recovery refuses stale or
+            // unrelated lineage.
+            job.Status = ExtractionStatus.DeadLetter;
+            job.Attempts = job.MaxAttempts;
+            job.LastError = "simulated transient extraction dependency timeout";
+            job.LeasedBy = null;
+            job.LeaseExpiresAt = null;
+            job.UpdatedOn = DateTime.UtcNow;
+            await db.SaveChangesAsync();
+
+            await failedScope.ServiceProvider.GetRequiredService<IEmailInquiryAssemblyCoordinator>()
+                .RecordComponentOutcomeAsync(
+                    businessUnitId, assemblyId, componentKey,
+                    EmailInquiryComponentStatus.Skipped,
+                    "processing_timeout",
+                    "Extraction stopped after its retry budget.",
+                    occurrenceId);
+
+            Assert.Equal(IntakeOccurrenceStatus.DeadLetter,
+                await db.Set<SourceDocumentOccurrence>().Where(x => x.Id == occurrenceId)
+                    .Select(x => x.IntakeStatus).SingleAsync());
+            Assert.Equal(EmailInquiryAssemblyStatus.NeedsReview,
+                await db.EmailInquiryAssemblies.Where(x => x.Id == assemblyId)
+                    .Select(x => x.Status).SingleAsync());
+        }
+
+        const string recoveryKey = "email-to-lead-full-recovery-1";
+        using (var recoveryScope = services.CreateScope())
+        using (recoveryScope.ServiceProvider.GetRequiredService<ITenantScopeAccessor>().Push(businessUnitId))
+        {
+            var db = recoveryScope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+            var recovery = new ExtractionDeadLetterService(
+                db,
+                recoveryScope.ServiceProvider.GetRequiredService<IEvidenceObjectStorage>(),
+                recoveryScope.ServiceProvider.GetRequiredService<IMalwareScanner>());
+            var command = new RecoverExtractionDeadLetterCommand(
+                "The transient extraction dependency is healthy and the source was reverified.",
+                recoveryKey);
+
+            var queued = await recovery.RecoverAsync(
+                businessUnitId, jobId, "email-recovery-operator", command, default);
+            var replay = await recovery.RecoverAsync(
+                businessUnitId, jobId, "email-recovery-operator", command, default);
+
+            Assert.Equal("RetryQueued", queued.Status);
+            Assert.False(queued.IdempotentReplay);
+            Assert.Equal("RetryQueued", replay.Status);
+            Assert.True(replay.IdempotentReplay);
+            Assert.Equal(ExtractionStatus.Pending,
+                await db.Set<ExtractionJob>().Where(x => x.Id == jobId).Select(x => x.Status).SingleAsync());
+            Assert.Equal(IntakeOccurrenceStatus.Queued,
+                await db.Set<SourceDocumentOccurrence>().Where(x => x.Id == occurrenceId)
+                    .Select(x => x.IntakeStatus).SingleAsync());
+            Assert.Equal(EmailInquiryComponentStatus.Pending,
+                await db.EmailInquiryComponents.Where(x => x.ComponentKey == componentKey)
+                    .Select(x => x.Status).SingleAsync());
+            Assert.Equal(EmailInquiryAssemblyStatus.Extracting,
+                await db.EmailInquiryAssemblies.Where(x => x.Id == assemblyId)
+                    .Select(x => x.Status).SingleAsync());
+            Assert.Equal(1, await db.ExtractionDeadLetterEvents.CountAsync(x =>
+                x.BusinessUnitId == businessUnitId
+                && x.ExtractionJobId == jobId
+                && x.IdempotencyKey == recoveryKey
+                && x.Action == ExtractionDeadLetterAction.RetryQueued));
+        }
+
+        // This is the production queue and worker, not a direct call to the assembler. Its
+        // successful completion must close the component, cross the message barrier and create
+        // one Lead. A second drain proves the queue replay cannot manufacture another Lead.
+        await EmailToLeadHarness.DrainQueueAsync(services, businessUnitId);
+        await EmailToLeadHarness.DrainQueueAsync(services, businessUnitId);
+
+        using var verify = services.CreateScope();
+        using var tenant = verify.ServiceProvider.GetRequiredService<ITenantScopeAccessor>().Push(businessUnitId);
+        var context = verify.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+        var assembly = await context.EmailInquiryAssemblies.AsNoTracking().SingleAsync(x => x.Id == assemblyId);
+        var componentAfter = await context.EmailInquiryComponents.AsNoTracking()
+            .SingleAsync(x => x.AssemblyId == assemblyId);
+        var jobAfter = await context.Set<ExtractionJob>().AsNoTracking().SingleAsync(x => x.Id == jobId);
+        var lead = Assert.Single(await context.Leads.AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId).ToListAsync());
+        var line = Assert.Single(await context.LeadItems.AsNoTracking()
+            .Where(x => x.LeadId == lead.Id).ToListAsync());
+
+        Assert.Equal(ExtractionStatus.Succeeded, jobAfter.Status);
+        Assert.Equal(EmailInquiryComponentStatus.Completed, componentAfter.Status);
+        Assert.Equal(EmailInquiryAssemblyStatus.Assembled, assembly.Status);
+        Assert.Equal(lead.Id, assembly.AssembledLeadId);
+        Assert.Contains("BODY-ONLY-700", line.ProductShortName);
+        Assert.Equal(7, line.Quantity);
+        Assert.Equal(1, await context.ExtractionDeadLetterEvents.CountAsync(x =>
+            x.BusinessUnitId == businessUnitId
+            && x.ExtractionJobId == jobId
+            && x.IdempotencyKey == recoveryKey));
+    }
+
+    [Fact]
+    public async Task Unsupported_commercial_attachment_holds_the_whole_message_without_a_partial_Lead()
+    {
+        var businessUnitId = UniqueBusinessUnitId();
+        const string messageId = "vertical-unsupported-0001@buyer.example";
+        await using (var connection = await _database.OpenConnectionAsync())
+            await EmailToLeadHarness.SeedTenantAsync(connection, businessUnitId, messageId);
+
+        var llm = new EmailToLeadHarness.RefusingLlm();
+        await using var services = EmailToLeadHarness.BuildGraph(
+            _database.ConnectionString, _storageRoot, llm);
+        var unsupported = EmailToLeadHarness.Attachment(
+            "commercial-drawing.dwg", "application/acad", [0x41, 0x43, 0x31, 0x30]);
+        var message = EmailToLeadHarness.BuildMessage(messageId, extraParts: unsupported);
+
+        var (_, assemblyId, schedule) = await EmailToLeadHarness.CaptureAndScheduleAsync(
+            services, businessUnitId, message, expectedComponentCount: 4);
+        Assert.Equal(3, schedule.Scheduled);
+        await EmailToLeadHarness.DrainQueueAsync(services, businessUnitId);
+
+        using var scope = services.CreateScope();
+        using var tenant = scope.ServiceProvider.GetRequiredService<ITenantScopeAccessor>().Push(businessUnitId);
+        var context = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+        var assembly = await context.EmailInquiryAssemblies.AsNoTracking().SingleAsync(a => a.Id == assemblyId);
+        var refused = await context.EmailInquiryComponents.AsNoTracking().SingleAsync(c =>
+            c.AssemblyId == assemblyId && c.FileName == "commercial-drawing.dwg");
+
+        Assert.Equal(EmailInquiryAssemblyStatus.NeedsReview, assembly.Status);
+        Assert.Null(assembly.AssembledLeadId);
+        Assert.Equal(EmailInquiryComponentStatus.Skipped, refused.Status);
+        Assert.Equal(EmailInquirySkipReasons.UnsupportedFileType, refused.ReasonCode);
+        Assert.Equal(0, await context.Leads.AsNoTracking()
+            .CountAsync(l => l.BusinessUnitId == businessUnitId));
+    }
+
+    [Fact]
+    public async Task Native_PDF_and_XLSX_in_one_email_become_one_Lead_with_every_attachment_line()
+    {
+        var businessUnitId = UniqueBusinessUnitId();
+        const string messageId = "vertical-pdf-xlsx-0001@buyer.example";
+        await using (var connection = await _database.OpenConnectionAsync())
+            await EmailToLeadHarness.SeedTenantAsync(connection, businessUnitId, messageId);
+
+        var refusingLlm = new EmailToLeadHarness.RefusingLlm();
+        var documents = new NativeDocumentExtractor();
+        await using var services = EmailToLeadHarness.BuildGraph(
+            _database.ConnectionString, _storageRoot, refusingLlm,
+            registrations => registrations.AddScoped<IChunkedExtractionService>(_ => documents));
+
+        var pdf = EmailToLeadHarness.Attachment(
+            "native-requirement.pdf", "application/pdf", NativePdf());
+        var xlsx = EmailToLeadHarness.Attachment(
+            "priced-schedule.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            NativeXlsx());
+        var message = EmailToLeadHarness.BuildBodyOnlyMessage(
+            messageId,
+            "Please quote the attached native PDF requirement and priced Excel schedule.");
+        // SeedTenant creates the durable ingest row the mailbox poller would ordinarily create.
+        // Keep its subject aligned with the MIME message so the provenance assertion is real.
+        message.Subject = "RFQ 88-2410 Jubail expansion";
+        message.Body = new MimeKit.Multipart("mixed") { message.Body, pdf, xlsx };
+
+        var (_, assemblyId, schedule) = await EmailToLeadHarness.CaptureAndScheduleAsync(
+            services, businessUnitId, message, expectedComponentCount: 3);
+        Assert.Equal(3, schedule.Scheduled);
+        Assert.Equal(0, schedule.Held);
+
+        await EmailToLeadHarness.DrainQueueAsync(services, businessUnitId);
+
+        using var scope = services.CreateScope();
+        using var tenant = scope.ServiceProvider.GetRequiredService<ITenantScopeAccessor>().Push(businessUnitId);
+        var context = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+        var assembly = await context.EmailInquiryAssemblies.AsNoTracking().SingleAsync(a => a.Id == assemblyId);
+        var lead = Assert.Single(await context.Leads.AsNoTracking()
+            .Where(l => l.BusinessUnitId == businessUnitId).ToListAsync());
+        var lines = await context.LeadItems.AsNoTracking()
+            .Where(i => i.LeadId == lead.Id).OrderBy(i => i.Id).ToListAsync();
+
+        Assert.Equal(EmailInquiryAssemblyStatus.Assembled, assembly.Status);
+        Assert.Equal(lead.Id, assembly.AssembledLeadId);
+        Assert.Equal(2, lines.Count);
+        var pdfLine = Assert.Single(lines.Where(l =>
+            l.ProductShortName != null && l.ProductShortName.Contains("PDF-900", StringComparison.Ordinal)));
+        Assert.Equal(9, pdfLine.Quantity);
+        var xlsxLine = Assert.Single(lines.Where(l => l.ManufacturerPartNumber == "XLSX-800"));
+        Assert.Equal(8, xlsxLine.Quantity);
+        Assert.True(documents.NativePdfSeen);
+        Assert.Equal("native-requirement.pdf", documents.NativePdfDocumentName);
+        Assert.Equal(ExtractionProcessingPath.NativeParser, documents.NativePdfProcessingPath);
+        Assert.Contains("PDF-900", documents.NativePdfText, StringComparison.Ordinal);
+        Assert.True(documents.NativeXlsxSeen);
+        Assert.Equal("priced-schedule.xlsx", documents.NativeXlsxDocumentName);
+        Assert.Equal(0, refusingLlm.CallCount);
+
+        var ingest = await context.EmailIngests.AsNoTracking().SingleAsync(i => i.Id == assembly.EmailIngestId);
+        Assert.Equal(assembly.EmailIngestId, lead.EmailIngestsId);
+        Assert.Equal(messageId, ingest.MessageId);
+        Assert.Equal(message.Subject, ingest.EmailSubject);
+        Assert.Equal("buyer@customer.example", ingest.FromEmail);
+        Assert.Equal(message.Date, assembly.ReceivedAtUtc);
+
+        var components = await context.EmailInquiryComponents.AsNoTracking()
+            .Where(c => c.AssemblyId == assemblyId).OrderBy(c => c.Ordinal).ToListAsync();
+        Assert.EndsWith("_body.txt", components[0].FileName, StringComparison.Ordinal);
+        Assert.Equal("native-requirement.pdf", components[1].FileName);
+        Assert.Equal("priced-schedule.xlsx", components[2].FileName);
+        Assert.All(components, c => Assert.Equal(EmailInquiryComponentStatus.Completed, c.Status));
+        Assert.Equal(3, await context.Set<EmailInquiryComponentResult>().AsNoTracking()
+            .CountAsync(r => r.AssemblyId == assemblyId));
+
+        Assert.All(components, component =>
+            Assert.False(string.IsNullOrWhiteSpace(component.EvidenceUri)));
+    }
+
+    [Fact]
+    public async Task Scheduling_outage_stays_unacknowledged_then_repoll_resumes_to_exactly_one_Lead()
+    {
+        var businessUnitId = UniqueBusinessUnitId();
+        var messageId = $"vertical-scheduling-retry-{Guid.NewGuid():N}@buyer.example";
+        await using (var connection = await _database.OpenConnectionAsync())
+            await EmailToLeadHarness.SeedTenantAsync(connection, businessUnitId, messageId);
+        var message = EmailToLeadHarness.BuildMessage(messageId);
+        long assemblyId;
+
+        await using (var failing = EmailToLeadHarness.BuildGraph(
+            _database.ConnectionString, _storageRoot, new EmailToLeadHarness.RefusingLlm(),
+            registrations =>
+            {
+                registrations.RemoveAll<IDocumentIngestion>();
+                registrations.AddScoped<IDocumentIngestion, RefusingDocumentIngestion>();
+            }))
+        using (var scope = failing.CreateScope())
+        using (scope.ServiceProvider.GetRequiredService<ITenantScopeAccessor>().Push(businessUnitId))
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+            Assert.IsType<RefusingDocumentIngestion>(
+                scope.ServiceProvider.GetRequiredService<IDocumentIngestion>());
+            var result = await scope.ServiceProvider.GetRequiredService<IEmailInquiryIntakeService>()
+                .CaptureAndScheduleAsync(
+                    message,
+                    await db.EmailIngests.SingleAsync(x => x.MessageId == messageId),
+                    await db.EmailConfigurations.SingleAsync(x => x.Id == businessUnitId),
+                    EmailToLeadHarness.BodyText,
+                    new EmailTriageDecision(EmailTriageOutcome.Inquiry, [], null, false),
+                    "buyer@customer.example");
+            Assert.False(result.SafeToAcknowledge);
+            Assert.Equal(3, result.Held);
+            assemblyId = result.AssemblyId!.Value;
+            var held = await db.EmailInquiryComponents.AsNoTracking()
+                .Where(x => x.AssemblyId == assemblyId).ToListAsync();
+            Assert.All(held, component => Assert.Null(component.ExtractionJobId));
+        }
+
+        var capturedLog = new CapturingLogger<EmailInquiryIntakeService>();
+        await using var recovered = EmailToLeadHarness.BuildGraph(
+            _database.ConnectionString, _storageRoot, new EmailToLeadHarness.RefusingLlm(),
+            registrations => registrations.AddSingleton<ILogger<EmailInquiryIntakeService>>(capturedLog));
+        using (var scope = recovered.CreateScope())
+        using (scope.ServiceProvider.GetRequiredService<ITenantScopeAccessor>().Push(businessUnitId))
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+            var result = await scope.ServiceProvider.GetRequiredService<IEmailInquiryIntakeService>()
+                .CaptureAndScheduleAsync(
+                    message,
+                    await db.EmailIngests.SingleAsync(x => x.MessageId == messageId),
+                    await db.EmailConfigurations.SingleAsync(x => x.Id == businessUnitId),
+                    EmailToLeadHarness.BodyText,
+                    new EmailTriageDecision(EmailTriageOutcome.Inquiry, [], null, false),
+                    "buyer@customer.example");
+            Assert.True(result.SafeToAcknowledge);
+            Assert.True(result.AlreadyCaptured);
+            Assert.True(result.Scheduled == 3,
+                $"Expected three resumed jobs; got scheduled={result.Scheduled}, "
+                + $"already={result.AlreadyScheduled}, held={result.Held}, failure={result.FailureReason}; "
+                + $"errors={string.Join(" | ", capturedLog.Exceptions.Select(x => x.ToString()))}.");
+            Assert.Equal(0, result.Held);
+        }
+
+        await EmailToLeadHarness.DrainQueueAsync(recovered, businessUnitId);
+        using var verify = recovered.CreateScope();
+        using var tenant = verify.ServiceProvider.GetRequiredService<ITenantScopeAccessor>().Push(businessUnitId);
+        var context = verify.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+        var assembly = await context.EmailInquiryAssemblies.AsNoTracking().SingleAsync(x => x.Id == assemblyId);
+        Assert.Equal(EmailInquiryAssemblyStatus.Assembled, assembly.Status);
+        Assert.NotNull(assembly.AssembledLeadId);
+        Assert.Equal(1, await context.Leads.CountAsync(x => x.BusinessUnitId == businessUnitId));
+    }
+
+    [Fact]
+    public async Task Noise_is_durably_captured_terminalized_and_invisible_to_stranded_recovery()
+    {
+        var businessUnitId = UniqueBusinessUnitId();
+        const string messageId = "vertical-noise-0001@buyer.example";
+        await using (var connection = await _database.OpenConnectionAsync())
+            await EmailToLeadHarness.SeedTenantAsync(connection, businessUnitId, messageId);
+
+        await using var services = EmailToLeadHarness.BuildGraph(
+            _database.ConnectionString, _storageRoot, new EmailToLeadHarness.RefusingLlm());
+        long assemblyId;
+        using (var scope = services.CreateScope())
+        using (scope.ServiceProvider.GetRequiredService<ITenantScopeAccessor>().Push(businessUnitId))
+        {
+            var context = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+            var configuration = await context.EmailConfigurations.SingleAsync(x => x.Id == businessUnitId);
+            var ingest = await context.EmailIngests.SingleAsync(x => x.MessageId == messageId);
+            var result = await scope.ServiceProvider.GetRequiredService<IEmailInquiryIntakeService>()
+                .CaptureAndScheduleAsync(
+                    EmailToLeadHarness.BuildMessage(messageId), ingest, configuration,
+                    EmailToLeadHarness.BodyText,
+                    new EmailTriageDecision(
+                        EmailTriageOutcome.Noise, [EmailTriageReasonCodes.AutoSubmittedHeader], null, false),
+                    "buyer@customer.example");
+            Assert.True(result.SafeToAcknowledge);
+            Assert.Equal(0, result.Scheduled);
+            assemblyId = result.AssemblyId!.Value;
+        }
+
+        EmailInquiryRecoverySweepResult sweep;
+        using (var sweepScope = services.CreateScope())
+            sweep = await sweepScope.ServiceProvider.GetRequiredService<IEmailInquiryAssemblyRecoveryService>()
+                .SweepOnceAsync();
+        Assert.Equal(0, sweep.StrandedComponents.Examined);
+
+        using var verify = services.CreateScope();
+        using var tenant = verify.ServiceProvider.GetRequiredService<ITenantScopeAccessor>().Push(businessUnitId);
+        var db = verify.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+        var assembly = await db.EmailInquiryAssemblies.AsNoTracking().SingleAsync(x => x.Id == assemblyId);
+        var components = await db.EmailInquiryComponents.AsNoTracking()
+            .Where(x => x.AssemblyId == assemblyId).ToListAsync();
+        Assert.Equal(EmailInquiryAssemblyStatus.NoInquiry, assembly.Status);
+        Assert.All(components, component => Assert.True(component.IsTerminal));
+        Assert.All(components, component => Assert.Equal(EmailInquiryComponentStatus.Ignored, component.Status));
+        Assert.Equal(0, await db.Leads.CountAsync(x => x.BusinessUnitId == businessUnitId));
+    }
+
+    [Fact]
+    public async Task Governed_manual_reprocess_reopens_durable_noise_and_creates_exactly_one_Lead()
+    {
+        var businessUnitId = UniqueBusinessUnitId();
+        const string messageId = "vertical-noise-reprocess-0001@buyer.example";
+        await using (var connection = await _database.OpenConnectionAsync())
+            await EmailToLeadHarness.SeedTenantAsync(connection, businessUnitId, messageId);
+
+        await using var services = EmailToLeadHarness.BuildGraph(
+            _database.ConnectionString, _storageRoot, new EmailToLeadHarness.RefusingLlm());
+        long ingestId;
+        using (var scope = services.CreateScope())
+        using (scope.ServiceProvider.GetRequiredService<ITenantScopeAccessor>().Push(businessUnitId))
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+            var ingest = await db.EmailIngests.SingleAsync(x => x.MessageId == messageId);
+            ingestId = ingest.Id;
+            var result = await scope.ServiceProvider.GetRequiredService<IEmailInquiryIntakeService>()
+                .CaptureAndScheduleAsync(
+                    EmailToLeadHarness.BuildMessage(messageId), ingest,
+                    await db.EmailConfigurations.SingleAsync(x => x.Id == businessUnitId),
+                    EmailToLeadHarness.BodyText,
+                    new EmailTriageDecision(
+                        EmailTriageOutcome.Noise, [EmailTriageReasonCodes.AutoSubmittedHeader], null, false),
+                    "buyer@customer.example");
+            Assert.True(result.SafeToAcknowledge);
+        }
+
+        using (var scope = services.CreateScope())
+        using (scope.ServiceProvider.GetRequiredService<ITenantScopeAccessor>().Push(businessUnitId))
+        {
+            var service = new EmailTriageService(
+                scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>(),
+                scope.ServiceProvider.GetRequiredService<IEmailInquiryIntakeService>(),
+                scope.ServiceProvider.GetRequiredService<IRawEmailEvidenceReader>(),
+                new NoopLogger<EmailTriageService>());
+            var result = await service.ReprocessAsync(
+                businessUnitId, ingestId, "operator@tenant.example",
+                "Buyer confirmed this automated-looking message is an RFQ.", "noise-reopen-1");
+            Assert.Equal(3, result.Enqueued);
+        }
+
+        await EmailToLeadHarness.DrainQueueAsync(services, businessUnitId);
+        using var verify = services.CreateScope();
+        using var tenant = verify.ServiceProvider.GetRequiredService<ITenantScopeAccessor>().Push(businessUnitId);
+        var context = verify.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+        var assembly = await context.EmailInquiryAssemblies.AsNoTracking()
+            .SingleAsync(x => x.EmailIngestId == ingestId);
+        Assert.Equal(EmailInquiryAssemblyStatus.Assembled, assembly.Status);
+        Assert.NotNull(assembly.AssembledLeadId);
+        Assert.Equal(1, await context.Leads.CountAsync(x => x.BusinessUnitId == businessUnitId));
+        var checkpointBeforeReplay = await context.EmailIngests.AsNoTracking()
+            .Where(x => x.Id == ingestId).Select(x => x.ParseStatus).SingleAsync();
+        var replayService = new EmailTriageService(
+            context,
+            verify.ServiceProvider.GetRequiredService<IEmailInquiryIntakeService>(),
+            verify.ServiceProvider.GetRequiredService<IRawEmailEvidenceReader>(),
+            new NoopLogger<EmailTriageService>());
+        var replay = await replayService.ReprocessAsync(
+            businessUnitId, ingestId, "operator@tenant.example",
+            "Buyer confirmed this automated-looking message is an RFQ.", "noise-reopen-1");
+        Assert.True(replay.Replayed);
+        Assert.Equal(0, replay.Enqueued);
+        Assert.Equal(checkpointBeforeReplay, replay.Status);
+        Assert.Equal(checkpointBeforeReplay, await context.EmailIngests.AsNoTracking()
+            .Where(x => x.Id == ingestId).Select(x => x.ParseStatus).SingleAsync());
+        Assert.Equal(1, await context.Leads.CountAsync(x => x.BusinessUnitId == businessUnitId));
+        var audit = Assert.Single(await context.IamAuditEvents.AsNoTracking().Where(x =>
+            x.BusinessUnitId == businessUnitId
+            && x.Action == "EmailTriageReprocessed"
+            && x.TargetId == ingestId
+            && x.CorrelationId == "noise-reopen-1").ToListAsync());
+        Assert.Equal("operator@tenant.example", audit.TargetLabel);
+        Assert.Contains("requestHash", audit.AfterJson);
+    }
+
+    private sealed class BodyOnlyExtractor : IConversationalExtractionService
+    {
+        public Task<ChunkedExtractionOutcome> ExtractAsync(
+            DocumentExtractionInput input, bool threadContinuation, CancellationToken ct = default)
+            => Task.FromResult(new ChunkedExtractionOutcome
+            {
+                Status = ExtractionOutcomeStatus.Ok,
+                Result = Ext.Result([Ext.Item(0.98, "BODY-ONLY-700 pressure transmitter", 7)], 0.98),
+                ExpectedItemCount = 1,
+                ExtractedItemCount = 1,
+                ProcessingPath = ExtractionProcessingPath.NativeParser
+            });
+    }
+
+    /// <summary>
+    /// The one intentional semantic-boundary test double in this vertical test. The real PDF
+    /// reader must first recover the native text layer, then the real worker routes that input
+    /// here. XLSX must arrive as structured rows, proving the real workbook reader ran.
+    /// </summary>
+    private sealed class NativeDocumentExtractor : IChunkedExtractionService
+    {
+        private int _nativePdfSeen;
+        private int _nativeXlsxSeen;
+        public bool NativePdfSeen => Volatile.Read(ref _nativePdfSeen) == 1;
+        public bool NativeXlsxSeen => Volatile.Read(ref _nativeXlsxSeen) == 1;
+        public string? NativePdfDocumentName { get; private set; }
+        public string? NativeXlsxDocumentName { get; private set; }
+        public string NativePdfText { get; private set; } = string.Empty;
+        public ExtractionProcessingPath NativePdfProcessingPath { get; private set; }
+
+        public Task<ChunkedExtractionOutcome> ExtractAsync(
+            DocumentExtractionInput input, CancellationToken ct = default)
+            => input.IsStructured && input.StructuredRows is { Count: > 0 }
+                ? ExtractStructuredAsync(input.StructuredRows, input.BusinessUnitId,
+                    input.SourceDocumentName, ct, input.DocumentNarrative)
+                : ExtractUnstructuredAsync(input, ct);
+
+        public Task<ChunkedExtractionOutcome> ExtractUnstructuredAsync(
+            DocumentExtractionInput input, CancellationToken ct = default)
+        {
+            NativePdfDocumentName = input.SourceDocumentName;
+            NativePdfProcessingPath = input.ProcessingPath;
+            NativePdfText = string.Join('\n',
+                new[] { input.HeaderText }.Concat(input.LineItemRegions ?? []));
+            Assert.Equal("native-requirement.pdf", input.SourceDocumentName);
+            Assert.Equal(ExtractionProcessingPath.NativeParser, input.ProcessingPath);
+            Assert.Contains("PDF-900", NativePdfText, StringComparison.Ordinal);
+            Interlocked.Exchange(ref _nativePdfSeen, 1);
+            return Task.FromResult(Success(Ext.Item(0.99, "PDF-900 pressure gauge", 9),
+                ExtractionProcessingPath.NativeParser));
+        }
+
+        public Task<ChunkedExtractionOutcome> ExtractStructuredAsync(
+            IReadOnlyList<RfqSpreadsheetRow> rows, long businessUnitId, string sourceName,
+            CancellationToken ct = default, string? documentNarrative = null)
+        {
+            NativeXlsxDocumentName = sourceName;
+            Assert.Equal("priced-schedule.xlsx", sourceName);
+            var row = Assert.Single(rows);
+            Assert.Equal("XLSX-800", row.ManufacturerPartNumber);
+            Assert.Equal("8", row.Quantity);
+            Assert.Equal("EA", row.UnitOfMeasure);
+            Interlocked.Exchange(ref _nativeXlsxSeen, 1);
+            var item = Ext.Item(0.99, row.ProductName, int.Parse(row.Quantity!)) with
+            {
+                ManufacturerPartNumber = row.ManufacturerPartNumber,
+                UnitOfMeasure = row.UnitOfMeasure
+            };
+            return Task.FromResult(Success(item, ExtractionProcessingPath.DeterministicRules));
+        }
+
+        private static ChunkedExtractionOutcome Success(
+            LeadItemData item, ExtractionProcessingPath path) => new()
+        {
+            Status = ExtractionOutcomeStatus.Ok,
+            Result = Ext.Result([item], 0.99),
+            ExpectedItemCount = 1,
+            ExtractedItemCount = 1,
+            ProcessingPath = path
+        };
+    }
+
+    private static byte[] NativePdf()
+    {
+        QuestPDF.Settings.License = LicenseType.Community;
+        return QuestPDF.Fluent.Document.Create(container => container.Page(page =>
+        {
+            page.Margin(30);
+            page.Content().Text(
+                "Customer RFQ PDF-2026-900. Please supply nine pressure gauges, manufacturer "
+                + "part PDF-900, quantity 9 EA, stainless steel wetted parts, delivery DDP Jubail. "
+                + "This paragraph is intentionally long enough to constitute a genuine native "
+                + "PDF text layer rather than a footer or signature artefact.").FontSize(14);
+        })).GeneratePdf();
+    }
+
+    private static byte[] NativeXlsx()
+    {
+        ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
+        using var package = new ExcelPackage();
+        var sheet = package.Workbook.Worksheets.Add("Priced Schedule");
+        sheet.Cells[1, 1].Value = "Part Number";
+        sheet.Cells[1, 2].Value = "Description";
+        sheet.Cells[1, 3].Value = "Quantity";
+        sheet.Cells[1, 4].Value = "Unit";
+        sheet.Cells[2, 1].Value = "XLSX-800";
+        sheet.Cells[2, 2].Value = "Temperature transmitter with thermowell";
+        sheet.Cells[2, 3].Value = 8;
+        sheet.Cells[2, 4].Value = "EA";
+        return package.GetAsByteArray();
+    }
+
+    private sealed class RefusingDocumentIngestion : IDocumentIngestion
+    {
+        public Task<IngestedDocument> IngestAsync(
+            byte[] bytes, string fileName, long businessUnitId, ExtractionSourceType sourceType,
+            Guid? batchId = null, int priority = 0, ExtractionJobMetadata? metadata = null,
+            long? emailInquiryComponentId = null, CancellationToken ct = default)
+            => throw new InvalidOperationException("simulated durable queue outage");
+    }
+
+    private static long UniqueBusinessUnitId()
+        => 941_000_000L + Random.Shared.Next(1, 900_000);
+
+    private sealed class CapturingLogger<T> : ILogger<T>
+    {
+        public List<Exception> Exceptions { get; } = [];
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state,
+            Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (exception is not null) Exceptions.Add(exception);
         }
     }
 

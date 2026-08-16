@@ -408,8 +408,10 @@ public sealed class EmailInquiryStrandedComponentSweepPostgreSqlTests(PostgreSql
 
         public Task RecordComponentQueuedAsync(
             long businessUnitId, long assemblyId, string componentKey, long extractionJobId,
-            CancellationToken ct = default)
-            => inner.RecordComponentQueuedAsync(businessUnitId, assemblyId, componentKey, extractionJobId, ct);
+            CancellationToken ct = default, string? evidenceUri = null,
+            long? sourceDocumentOccurrenceId = null)
+            => inner.RecordComponentQueuedAsync(businessUnitId, assemblyId, componentKey,
+                extractionJobId, ct, evidenceUri, sourceDocumentOccurrenceId);
 
         public Task RecordComponentOutcomeAsync(
             long businessUnitId, long assemblyId, string componentKey,

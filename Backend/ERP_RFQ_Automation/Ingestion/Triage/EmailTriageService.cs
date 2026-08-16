@@ -1,12 +1,16 @@
 using System;
 using System.Collections.Generic;
+using System.Data;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.Extraction;
+using ERP_RFQ_Automation.Ingestion.Assembly;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -421,6 +425,15 @@ public sealed class EmailTriageService : IEmailTriageService
             throw new ArgumentException("A reason is required to reprocess a message.", nameof(reason));
         if (string.IsNullOrWhiteSpace(idempotencyKey))
             throw new ArgumentException("An idempotency key is required.", nameof(idempotencyKey));
+        if (string.IsNullOrWhiteSpace(actor))
+            throw new ArgumentException("An actor is required.", nameof(actor));
+        actor = actor.Trim();
+        reason = reason.Trim();
+        idempotencyKey = idempotencyKey.Trim();
+        if (actor.Length > 256)
+            throw new ArgumentException("The actor identifier cannot exceed 256 characters.", nameof(actor));
+        if (idempotencyKey.Length > 64)
+            throw new ArgumentException("The idempotency key cannot exceed 64 characters.", nameof(idempotencyKey));
 
         var ingest = await _context.EmailIngests
             .Include(e => e.EmailConfiguration)
@@ -449,12 +462,56 @@ public sealed class EmailTriageService : IEmailTriageService
             CommercialDocumentTypeHint: null,
             ThreadContinuation: !string.IsNullOrWhiteSpace(message.InReplyTo) || message.References?.Count > 0);
 
+        var governanceReplay = await GovernedReopenAsync(
+            businessUnitId, ingest.Id, actor, reason, idempotencyKey, ct);
+
+        // GovernedReopen runs under the provider execution strategy and clears tracked state on
+        // every attempt. Reacquire both the checkpoint and mailbox ownership before handing them
+        // to canonical intake.
+        ingest = await _context.EmailIngests
+            .Include(e => e.EmailConfiguration)
+            .SingleAsync(e => e.Id == id && e.EmailConfiguration.BusinessUnitId == businessUnitId, ct);
+
+        // Once the original governed command has crossed the extraction barrier, replaying its
+        // HTTP request must not walk the checkpoint backwards. In particular an Assembled email
+        // already owns its one Lead; canonical intake has nothing left to schedule and would
+        // otherwise be misread below as "nothing to extract".
+        if (governanceReplay)
+        {
+            var progressed = await _context.EmailInquiryAssemblies.AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId && x.EmailIngestId == ingest.Id)
+                .Select(x => new { x.Id, x.MessageKey, x.Status })
+                .SingleOrDefaultAsync(ct);
+            if (progressed is not null && progressed.Status is
+                    EmailInquiryAssemblyStatus.ReadyForAssembly
+                    or EmailInquiryAssemblyStatus.Assembled
+                    or EmailInquiryAssemblyStatus.NeedsReview
+                    or EmailInquiryAssemblyStatus.RejectedSecurity
+                    or EmailInquiryAssemblyStatus.NoInquiry)
+            {
+                return new EmailTriageReprocessResult(
+                    ingest.Id,
+                    EmailIngestEnqueuer.DeriveBatchId(progressed.Id, progressed.MessageKey),
+                    Enqueued: 0,
+                    Outcome: ingest.TriageOutcome ?? EmailTriageOutcome.Uncertain.ToString(),
+                    Status: ingest.ParseStatus ?? progressed.Status.ToString(),
+                    Replayed: true);
+            }
+        }
+
         // The SAME canonical intake the poller uses. Capture is idempotent, so a reprocess of an
         // already-captured message resolves the existing assembly and re-schedules only the
         // components that still need it — no second assembly, no duplicated component jobs.
         var result = await _intake.CaptureAndScheduleAsync(
             message, ingest, ingest.EmailConfiguration, parts.Fresh, decision,
             ingest.FromEmail, ct);
+
+        // The document-ingestion execution strategy clears the scoped ChangeTracker. Reload the
+        // checkpoint so the status below is a durable write rather than a mutation of a detached
+        // object left over from before scheduling.
+        ingest = await _context.EmailIngests
+            .Include(e => e.EmailConfiguration)
+            .SingleAsync(e => e.Id == id && e.EmailConfiguration.BusinessUnitId == businessUnitId, ct);
 
         if (!result.SafeToAcknowledge)
             throw new InvalidOperationException(
@@ -479,6 +536,150 @@ public sealed class EmailTriageService : IEmailTriageService
             ingest.Id, result.BatchId, queued,
             EmailTriageOutcome.Uncertain.ToString(), ingest.ParseStatus!,
             Replayed: result.Scheduled == 0 && result.AlreadyScheduled > 0);
+    }
+
+    private async Task<bool> GovernedReopenAsync(
+        long businessUnitId, long ingestId, string actor, string reason, string idempotencyKey,
+        CancellationToken ct)
+    {
+        const string action = "EmailTriageReprocessed";
+        var requestHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
+            $"{businessUnitId}\n{ingestId}\n{actor}\n{reason}"))).ToLowerInvariant();
+
+        return await _context.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        {
+            // An execution strategy may repeat this delegate on the same DbContext. Never let
+            // attempt one's tracked state leak into attempt two.
+            _context.ChangeTracker.Clear();
+            await using var transaction = _context.Database.IsRelational()
+                ? await _context.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, ct)
+                : null;
+
+            if (_context.Database.IsNpgsql())
+            {
+                // Lock the command key first on every path, then the aggregate. The first makes
+                // one key globally single-use inside a tenant; the second serializes different
+                // operator commands aimed at the same email.
+                var commandLock = $"email-triage-idempotency:{businessUnitId}:{idempotencyKey}";
+                var aggregateLock = $"email-triage-aggregate:{businessUnitId}:{ingestId}";
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT pg_advisory_xact_lock(hashtextextended({commandLock}, 0))", ct);
+                await _context.Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT pg_advisory_xact_lock(hashtextextended({aggregateLock}, 0))", ct);
+            }
+
+            // Idempotency is tenant + command, not tenant + target. Reusing a key for another
+            // email is a conflicting request, not a fresh command.
+            var existing = await _context.IamAuditEvents.AsNoTracking().SingleOrDefaultAsync(x =>
+                x.BusinessUnitId == businessUnitId
+                && x.Action == action
+                && x.CorrelationId == idempotencyKey, ct);
+            if (existing is not null)
+            {
+                if (existing.TargetType != "EmailIngest"
+                    || existing.TargetId != ingestId
+                    || !AuditCarriesExactRequestHash(existing.AfterJson, requestHash))
+                    throw new InvalidOperationException(
+                        "That idempotency key was already used for a different reprocess request.");
+                if (transaction is not null) await transaction.CommitAsync(ct);
+                return true;
+            }
+
+            var authoritativeIngest = await _context.EmailIngests
+                .Include(x => x.EmailConfiguration)
+                .SingleOrDefaultAsync(x => x.Id == ingestId
+                    && x.EmailConfiguration.BusinessUnitId == businessUnitId, ct)
+                ?? throw new KeyNotFoundException(
+                    $"Email ingest {ingestId} was not found for this tenant.");
+            var assembly = await _context.EmailInquiryAssemblies
+                .Include(x => x.Components)
+                .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId
+                                           && x.EmailIngestId == ingestId, ct);
+
+            // A first command may rescue either a canonical NoInquiry assembly or a legacy
+            // rejected row that predates canonical capture. Progressed/assembled messages are not
+            // silently rewritten; only a replay of their original audit may resume them above.
+            if (assembly is not null)
+            {
+                if (!EmailInquiryAssemblyStateMachine.CanGovernedTriageReopenTransition(assembly.Status))
+                    throw new InvalidOperationException(
+                        $"Email ingest {ingestId} is already {assembly.Status} and cannot be manually reopened.");
+
+                var rejectedComponents = assembly.Components.Where(x =>
+                        x.Status == EmailInquiryComponentStatus.Ignored
+                        && x.ReasonCode == "no_inquiry")
+                    .ToList();
+                if (rejectedComponents.Count == 0)
+                    throw new InvalidOperationException(
+                        $"Email ingest {ingestId} was not closed by the triage gate and cannot be manually reopened.");
+
+                foreach (var component in rejectedComponents)
+                {
+                    component.Status = EmailInquiryComponentStatus.Pending;
+                    component.ReasonCode = null;
+                    component.ReasonDetail = null;
+                    component.UpdatedAtUtc = DateTimeOffset.UtcNow;
+                }
+                assembly.Status = EmailInquiryAssemblyStatus.Captured;
+                assembly.StatusReason = "Reopened by a governed manual triage decision.";
+                assembly.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            }
+            else if (authoritativeIngest.ParseStatus != "Rejected"
+                     || authoritativeIngest.TriageOutcome != EmailTriageOutcome.Noise.ToString())
+            {
+                throw new InvalidOperationException(
+                    $"Email ingest {ingestId} is not a rejected triage decision and cannot be manually reopened.");
+            }
+
+            var beforeOutcome = authoritativeIngest.TriageOutcome;
+            var beforeStatus = authoritativeIngest.ParseStatus;
+            authoritativeIngest.TriageOutcome = EmailTriageOutcome.Uncertain.ToString();
+            authoritativeIngest.TriageReasonJson = JsonSerializer.Serialize(
+                new[] { EmailTriageReasonCodes.ManualReprocess });
+            authoritativeIngest.TriageDecidedOn = DateTime.UtcNow;
+            authoritativeIngest.ParseStatus = EmailTriagePersistenceStatuses.Reprocessing;
+            authoritativeIngest.ParsedAt = null;
+
+            _context.IamAuditEvents.Add(new IamAuditEvent
+            {
+                BusinessUnitId = businessUnitId,
+                ActorUserId = long.TryParse(actor, out var actorUserId) ? actorUserId : null,
+                ActorRoleId = null,
+                Action = action,
+                TargetType = "EmailIngest",
+                TargetId = ingestId,
+                TargetLabel = actor,
+                BeforeJson = JsonSerializer.Serialize(new { outcome = beforeOutcome, status = beforeStatus }),
+                AfterJson = JsonSerializer.Serialize(new
+                {
+                    outcome = EmailTriageOutcome.Uncertain.ToString(),
+                    status = EmailTriagePersistenceStatuses.Reprocessing,
+                    requestHash
+                }),
+                Reason = reason.Length <= 512 ? reason : reason[..512],
+                CorrelationId = idempotencyKey,
+                OccurredOn = DateTime.UtcNow
+            });
+            await _context.SaveChangesAsync(ct);
+            if (transaction is not null) await transaction.CommitAsync(ct);
+            return false;
+        });
+    }
+
+    private static bool AuditCarriesExactRequestHash(string? afterJson, string expectedHash)
+    {
+        if (string.IsNullOrWhiteSpace(afterJson)) return false;
+        try
+        {
+            using var json = JsonDocument.Parse(afterJson);
+            return json.RootElement.TryGetProperty("requestHash", out var value)
+                   && value.ValueKind == JsonValueKind.String
+                   && string.Equals(value.GetString(), expectedHash, StringComparison.Ordinal);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
     }
 
     private static bool IsBodyDocument(string? fileName)

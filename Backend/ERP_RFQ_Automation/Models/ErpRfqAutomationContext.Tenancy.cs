@@ -913,6 +913,10 @@ public partial class ErpRfqAutomationContext
                 .HasDatabaseName("IX_IamAuditEvents_BU_OccurredOn");
             entity.HasIndex(e => new { e.BusinessUnitId, e.TargetType, e.TargetId })
                 .HasDatabaseName("IX_IamAuditEvents_BU_Target");
+            entity.HasIndex(e => new { e.BusinessUnitId, e.Action, e.CorrelationId })
+                .IsUnique()
+                .HasFilter("\"Action\" = 'EmailTriageReprocessed' AND \"CorrelationId\" IS NOT NULL")
+                .HasDatabaseName("UX_IamAuditEvents_EmailTriageReprocess_Idempotency");
 
             // ActorUserId and TargetId deliberately carry NO foreign key: the record of who
             // deleted a user must survive that user's deletion. BusinessUnitId does, because a

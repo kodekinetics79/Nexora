@@ -87,6 +87,12 @@ namespace ERP_RFQ_Automation.DTOs.Lead
         public long BusinessUnitId { get; set; }
         public string? BusinessUnitName { get; set; }
         public long? EmailIngestsId { get; set; }
+        /// <summary>Immutable RFC message identity for email-origin leads.</summary>
+        public string? EmailMessageId { get; set; }
+        public string? EmailSubject { get; set; }
+        public string? EmailSender { get; set; }
+        /// <summary>The sender-authored message date captured with the canonical assembly.</summary>
+        public DateTimeOffset? EmailReceivedAtUtc { get; set; }
         public DateTime? ModifiedDate { get; set; }
         public string? EmailSource { get; set; }
         public string? Clientemail { get; set; }
