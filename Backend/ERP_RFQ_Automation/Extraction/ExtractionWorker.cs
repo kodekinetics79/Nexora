@@ -347,6 +347,7 @@ public sealed class ExtractionWorker : BackgroundService
                 else
                 {
                     await MarkIntakeFailureAsync(job, errorCode, workToken, permanent: permanent);
+                    await CloseAssemblyComponentAsync(job, errorCode, permanent, workToken);
                     RecordFailureMetrics(job, errorCode, failureReason, ElapsedMs(), permanent: permanent);
                 }
                 return true;
@@ -447,6 +448,7 @@ public sealed class ExtractionWorker : BackgroundService
                 else
                 {
                     await MarkIntakeFailureAsync(job, parseReason, CancellationToken.None, permanent: true);
+                    await CloseAssemblyComponentAsync(job, parseReason, permanent: true, CancellationToken.None);
                     // FailPermanentlyAsync dead-letters immediately, regardless of attempts.
                     RecordFailureMetrics(job, parseReason, ex.Message, ElapsedMs(), permanent: true);
                 }
@@ -482,6 +484,11 @@ public sealed class ExtractionWorker : BackgroundService
                 else
                 {
                     await MarkIntakeFailureAsync(job, "evidence_integrity_failure", CancellationToken.None);
+                    // Evidence faults are this deployment's plumbing, not the document's fault:
+                    // the component HOLDS the message rather than finalizing a lead that is
+                    // missing content which still exists and will be readable once fixed.
+                    await CloseAssemblyComponentAsync(
+                        job, EvidenceErrorCodeFor(ex), permanent: false, CancellationToken.None);
                     RecordFailureMetrics(job, "evidence_integrity_failure",
                         "Evidence integrity failure: " + ex.Message, ElapsedMs());
                 }
@@ -762,6 +769,100 @@ public sealed class ExtractionWorker : BackgroundService
     /// into a second failure recording for a job that has already been failed.
     /// </para>
     /// </summary>
+    /// <summary>
+    /// Closes the email-assembly barrier for a job that has stopped trying.
+    ///
+    /// <para><b>Why this exists.</b> One message is fanned out into components — the body and
+    /// each attachment — and the assembly state machine will not finalize the message until
+    /// EVERY component is terminal. Nothing on the failure path used to tell a component its
+    /// job had died, so a component whose extraction dead-lettered stayed at
+    /// <c>Extracting</c> forever. The message then produced NOTHING: no lead, no review item,
+    /// no error anyone could see — only "1 of 4 parts assembled" in perpetuity. A single
+    /// unreadable Terms &amp; Conditions PDF silently swallowed an entire RFQ whose body and
+    /// other attachments had extracted perfectly.</para>
+    ///
+    /// <para>The distinction below is the whole point, and it is the one the state machine
+    /// already knows how to act on. An INFRASTRUCTURE fault (storage unreachable, the object
+    /// missing, the bucket misconfigured, the scanner down) is
+    /// <see cref="ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponentStatus.FailedRecoverable"/>: the message is HELD, not
+    /// finalized, because the content is presumed readable once the fault is fixed and a lead
+    /// built without it would be priced against a document that still exists. A CONTENT fault
+    /// (unsupported format, unreadable file, a refusal that retrying cannot change) is
+    /// <see cref="ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponentStatus.Skipped"/>: terminal and commercially
+    /// significant, which finalizes the message into review with a lead built from what WAS
+    /// captured, and says plainly that one part could not be read.</para>
+    ///
+    /// <para>Either way the message becomes visible to a human. What it must never do again is
+    /// disappear.</para>
+    /// </summary>
+    private async Task CloseAssemblyComponentAsync(
+        ExtractionJob job,
+        string errorCode,
+        bool permanent,
+        CancellationToken ct)
+    {
+        // Only a job that has stopped trying closes a barrier. A retryable attempt with budget
+        // left is still in flight, and the component is correctly still Extracting.
+        if (!permanent && job.Attempts < job.MaxAttempts) return;
+
+        try
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+            if (db.Model.FindEntityType(typeof(ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponent)) is null) return;
+
+            var component = await db.Set<ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponent>()
+                .SingleOrDefaultAsync(
+                    x => x.BusinessUnitId == job.BusinessUnitId && x.ExtractionJobId == job.Id, ct);
+            if (component is null) return;
+
+            // Never overwrite a decision another layer already made — a security refusal or a
+            // completed extraction outranks anything decided here.
+            if (component.Status is not (ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponentStatus.Pending
+                or ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponentStatus.Inspecting
+                or ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponentStatus.Extracting))
+                return;
+
+            component.Status = IsInfrastructureFailure(errorCode)
+                ? ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponentStatus.FailedRecoverable
+                : ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponentStatus.Skipped;
+
+            await db.SaveChangesAsync(ct);
+            _log.LogWarning(
+                "Assembly component {ComponentId} closed as {Status} because extraction job {JobId} "
+                + "stopped trying ({ErrorCode}); its message can now finalize instead of waiting "
+                + "on a part that will never arrive.",
+                component.Id, component.Status, job.Id, errorCode);
+        }
+        catch (Exception exception)
+        {
+            // Best-effort: never fail a job for being unable to annotate its component. The
+            // stranded-component sweep is the backstop.
+            _log.LogError(exception,
+                "Could not close the assembly component for extraction job {JobId}.", job.Id);
+        }
+    }
+
+    /// <summary>Maps an evidence fault to the error code its component disposition keys on.</summary>
+    private static string EvidenceErrorCodeFor(EvidenceIntegrityException exception) =>
+        exception.Code switch
+        {
+            EvidenceIntegrityException.ObjectMissingCode => "evidence_missing",
+            EvidenceIntegrityException.BucketMismatchCode => "evidence_bucket_mismatch",
+            // A genuine digest mismatch is the document being WRONG, not the plumbing: it is
+            // terminal, and the message finalizes into review rather than waiting forever.
+            _ => "evidence_integrity_failure",
+        };
+
+    /// <summary>
+    /// Whether the failure is about this deployment's plumbing rather than about the document.
+    /// Infrastructure faults HOLD a message (the content is still readable once fixed);
+    /// content faults finalize it into review.
+    /// </summary>
+    private static bool IsInfrastructureFailure(string errorCode) =>
+        errorCode is "evidence_missing" or "evidence_bucket_mismatch" or "storage_unavailable"
+            or "security_scanner_unavailable" or "ai_not_authorized";
+
     private async Task MarkIntakeFailureAsync(
         ExtractionJob job,
         string errorCode,
