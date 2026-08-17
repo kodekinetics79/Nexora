@@ -94,10 +94,70 @@ public static class EmailBodyNormalizer
     /// <summary>The number of trailing non-empty lines that may form a signature block.</summary>
     private const int MaxSignatureLines = 8;
 
+    /// <summary>
+    /// Replaces control characters the text inspector refuses with the whitespace they stand
+    /// for, and drops the rest.
+    ///
+    /// <para>VERTICAL TAB and FORM FEED become newlines because that is what they mean in a
+    /// mail body — Outlook writes VT for a soft line break, and turning it into a space would
+    /// run two lines of a quantity table into one. NUL and the remaining C0/C1 controls carry
+    /// no textual meaning and are removed outright.</para>
+    ///
+    /// <para>CR, LF and TAB pass through untouched: the inspector accepts them and the
+    /// line-splitting below depends on them.</para>
+    /// </summary>
+    internal static string SanitizeControlCharacters(string body)
+    {
+        // Overwhelmingly the common case — walk once, allocate nothing.
+        var needsWork = false;
+        foreach (var character in body)
+        {
+            if (char.IsControl(character) && character is not '\r' and not '\n' and not '\t')
+            {
+                needsWork = true;
+                break;
+            }
+        }
+        if (!needsWork) return body;
+
+        var builder = new System.Text.StringBuilder(body.Length);
+        foreach (var character in body)
+        {
+            if (!char.IsControl(character) || character is '\r' or '\n' or '\t')
+            {
+                builder.Append(character);
+                continue;
+            }
+            // A soft break is still a break.
+            if (character is '\v' or '\f') builder.Append('\n');
+            // Everything else is noise with no textual meaning: dropped.
+        }
+        return builder.ToString();
+    }
+
     public static EmailBodyParts Normalize(string? body)
     {
         if (string.IsNullOrWhiteSpace(body))
             return new EmailBodyParts(string.Empty, string.Empty, null, 0, true);
+
+        // CONTROL CHARACTERS OUT, FIRST.
+        //
+        // The normalized body is written to disk as `<subject>_body.txt` and then put through
+        // DocumentFileInspectionService, which refuses any control character other than
+        // CR/LF/TAB/FF — a rule written for files a stranger uploads. The body file is not
+        // that: it is OUR artifact, generated from the message we just parsed, and it inherits
+        // whatever the sender's client emitted.
+        //
+        // Outlook emits VERTICAL TAB (U+000B) as a soft line break inside a paragraph, so a
+        // perfectly ordinary forwarded enquiry failed inspection with "The text file contains
+        // binary or unsafe control characters". That refusal held the body component, the
+        // barrier could never be satisfied, and the message could never become a Lead however
+        // many attachments read cleanly — measured on a live customer RFQ.
+        //
+        // Cleaning here rather than relaxing the inspector is the important half: the gate
+        // still protects genuine uploads byte-for-byte, and we stop handing it text we
+        // ourselves made unclean.
+        body = SanitizeControlCharacters(body);
 
         var lines = body.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
 
