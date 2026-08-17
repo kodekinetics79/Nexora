@@ -209,7 +209,21 @@ public static class EmailInquiryManifestPlanner
     /// precisely the change this constant exists to record: a v2-captured message re-planned by
     /// v3 must report "the contract changed" rather than a per-component disposition mismatch
     /// that reads like evidence tampering.</para>
-    public const int ContractVersion = 3;
+    ///
+    /// <para><b>v4</b> — control characters are stripped from the body before it becomes a
+    /// component (<c>EmailBodyNormalizer.SanitizeControlCharacters</c>). Outlook writes
+    /// VERTICAL TAB as a soft line break, which failed the text inspection applied to the
+    /// generated <c>_body.txt</c> and held the whole message; removing it was the fix. But it
+    /// changes the BYTES the planner produces from an identical stored original, so the body
+    /// component's length and hash no longer match what a v3 capture recorded.
+    ///
+    /// <para>Observed in production the moment the fix deployed: a v3-captured message
+    /// re-planned by v4 reported <c>ComponentMetadataMismatch</c> — "the stored original no
+    /// longer matches what was recorded when this message arrived" — which reads as evidence
+    /// tampering and held every component. Every message captured before the fix would have
+    /// been permanently unrecoverable. That is precisely the failure this constant exists to
+    /// prevent, and forgetting to bump it is precisely how it happens.</para></para>
+    public const int ContractVersion = 4;
 
     public static async Task<EmailInquiryManifest> PlanAsync(
         MimeMessage message,
