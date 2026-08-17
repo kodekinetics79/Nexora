@@ -133,4 +133,66 @@ public sealed class LineItemRegionGrouperTests
 
         Assert.Equal(3, LineItemRegionGrouper.Group(lines).Count);
     }
+
+    // ---------------------------------------------------------------- cost controls
+
+    [Fact]
+    public void A_document_full_of_numbered_paragraphs_is_not_read_as_an_item_list()
+    {
+        // THE 54-PAGE .docx. Contract prose numbers its clauses, and those numbers restart per
+        // section rather than running 1..n. Treating each as a line item reported 1,603 items,
+        // planned 70 chunks, spent an entire monthly token budget and returned 24 real items.
+        var lines = new List<string>();
+        foreach (var section in new[] { "SCOPE", "DELIVERY", "WARRANTY", "PAYMENT" })
+        {
+            lines.Add(section);
+            for (var clause = 1; clause <= 6; clause++)
+            {
+                lines.Add($"{clause}. The supplier shall observe the requirements of this section");
+                lines.Add("   and shall provide evidence of compliance on request.");
+            }
+        }
+
+        var regions = LineItemRegionGrouper.Group(lines);
+
+        // Restarting ordinals are prose, so the document is returned ungrouped rather than
+        // shredded into dozens of "items".
+        Assert.Equal(lines.Count, regions.Count);
+    }
+
+    [Fact]
+    public void A_genuine_numbered_item_list_still_groups()
+    {
+        // The counterpart: ordinals that RUN are a real item list and must keep working.
+        var lines = new List<string>();
+        for (var item = 1; item <= 8; item++)
+        {
+            lines.Add($"{item}. VALVE, BALL, 2IN CLASS 300");
+            lines.Add("   material: stainless steel");
+            lines.Add("   quantity: 4 EA");
+        }
+
+        var regions = LineItemRegionGrouper.Group(lines);
+
+        Assert.Equal(8, regions.Count);
+        Assert.All(regions, r => Assert.Contains("quantity: 4 EA", r));
+    }
+
+    [Fact]
+    public void An_item_claimed_on_more_than_every_other_line_is_treated_as_mis_read()
+    {
+        // The density guard. Codes on almost every line cannot all be items — a real item
+        // carries a description, a quantity and a unit, so it occupies several lines.
+        var lines = new List<string>();
+        for (var i = 0; i < 40; i++)
+        {
+            lines.Add($"90600{i:D4}");
+            lines.Add("ref");
+        }
+        lines.RemoveAt(lines.Count - 1); // tip the ratio past one-in-two
+
+        var regions = LineItemRegionGrouper.Group(lines);
+
+        Assert.Equal(lines.Count, regions.Count);
+    }
 }
