@@ -549,6 +549,16 @@ const LeadDetailPage: React.FC = () => {
         open={resolveClientOpen}
         leadId={lead.id}
         lead={lead}
+        // What the message actually said about the buying organisation, so creating a client
+        // starts from the enquiry rather than from whatever the operator retyped into search.
+        // Only these two become field values; the evidence snippet and buyer name are shown as
+        // context so the operator can judge whether the extracted name is the right one.
+        prefill={{
+          name: lead.customerCompanyNameExtracted,
+          email: lead.clientemail,
+          contactName: lead.buyersName,
+          evidence: lead.customerCompanyEvidence,
+        }}
         onClose={() => setResolveClientOpen(false)}
         onResolved={() => queryClient.invalidateQueries({ queryKey: ['lead-detail', Number(id)] })}
       />

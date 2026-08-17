@@ -108,10 +108,23 @@ export interface ClientSelection {
 export interface ResolveClientDialogProps {
   open: boolean;
   /**
-   * Evidence from the enquiry used to pre-fill the "create client" form. Optional: the
-   * dialog falls back to whatever the operator typed in the search box.
+   * Evidence from the enquiry used to pre-fill the "create client" form.
+   *
+   * Only `name` and `email` are ever populated from extraction, because only those two are
+   * actually read off the message. Addresses, tax and registration numbers are NOT guessed —
+   * a plausible-looking invented address on a customer record is worse than an empty one, and
+   * this dialog's whole reason for existing is that a wrong client beats no client only in the
+   * eyes of someone who never has to unpick it. The remaining fields are offered blank so the
+   * operator can complete the record here instead of making a second trip to Customers.
    */
-  prefill?: { name?: string | null; email?: string | null } | null;
+  prefill?: {
+    name?: string | null;
+    email?: string | null;
+    /** Buyer's personal name, shown as context. Not a customer field. */
+    contactName?: string | null;
+    /** Verbatim snippet that named the organisation, so the operator can judge the name. */
+    evidence?: string | null;
+  } | null;
   /** Lead to resolve. Null keeps the dialog closed. */
   leadId: number | null;
   /**
@@ -173,6 +186,12 @@ const ResolveClientDialog: React.FC<ResolveClientDialogProps> = ({
   const [creating, setCreating] = React.useState(false);
   const [newName, setNewName] = React.useState('');
   const [newEmail, setNewEmail] = React.useState('');
+  const [newDetails, setNewDetails] = React.useState({
+    billingAddressLine1: '', billingCity: '', billingState: '', billingCountry: '',
+    billingPostalCode: '', commercialRegistrationNumber: '', taxRegistrationNumber: '', sector: '',
+  });
+  const setDetail = (key: keyof typeof newDetails) => (event: React.ChangeEvent<HTMLInputElement>) =>
+    setNewDetails((current) => ({ ...current, [key]: event.target.value }));
 
   const isOpen = open && leadId != null;
   const deferred = typeof onSelect === 'function';
@@ -183,9 +202,19 @@ const ResolveClientDialog: React.FC<ResolveClientDialogProps> = ({
     if (!isOpen) return;
     setSelectedCustomerId(null);
     setSelectedContactId('');
-    setSearchTerm('');
-    setDebouncedTerm('');
-  }, [isOpen, leadId]);
+    // Opens on the organisation the message named, so the search has already been run by the
+    // time the operator looks at it. Typing the company name back in by hand was busywork the
+    // enquiry had already done — and it is what made "no match" feel like a dead end rather
+    // than the start of creating the client.
+    const opening = prefill?.name?.trim() ?? '';
+    setSearchTerm(opening);
+    setDebouncedTerm(opening);
+    setCreating(false);
+    setNewDetails({
+      billingAddressLine1: '', billingCity: '', billingState: '', billingCountry: '',
+      billingPostalCode: '', commercialRegistrationNumber: '', taxRegistrationNumber: '', sector: '',
+    });
+  }, [isOpen, leadId, prefill?.name]);
 
   React.useEffect(() => {
     const handle = setTimeout(() => setDebouncedTerm(searchTerm.trim()), 300);
@@ -288,6 +317,19 @@ const ResolveClientDialog: React.FC<ResolveClientDialogProps> = ({
       const form = new FormData();
       form.append('Name', newName.trim());
       if (newEmail.trim()) form.append('ContactEmail', newEmail.trim());
+      // Only non-empty optional fields are sent. An empty string is not "no value" to a
+      // server that stores what it is given — it is a blank that later reads as answered.
+      const optional: Array<[string, string]> = [
+        ['BillingAddressLine1', newDetails.billingAddressLine1],
+        ['BillingCity', newDetails.billingCity],
+        ['BillingState', newDetails.billingState],
+        ['BillingCountry', newDetails.billingCountry],
+        ['BillingPostalCode', newDetails.billingPostalCode],
+        ['CommercialRegistrationNumber', newDetails.commercialRegistrationNumber],
+        ['TaxRegistrationNumber', newDetails.taxRegistrationNumber],
+        ['Sector', newDetails.sector],
+      ];
+      for (const [field, value] of optional) if (value.trim()) form.append(field, value.trim());
       return customerService.create(form);
     },
     onSuccess: (created) => {
@@ -439,10 +481,19 @@ const ResolveClientDialog: React.FC<ResolveClientDialogProps> = ({
             <Typography variant="subtitle2" sx={{ fontWeight: 800, mb: 0.5 }}>
               New client
             </Typography>
-            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1.5 }}>
-              Pre-filled from this enquiry. Correct anything that is wrong before you save —
-              what the sender wrote is evidence, not gospel.
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
+              Name and email are pre-filled from this enquiry — correct anything that is wrong
+              before you save. The rest is blank on purpose: nothing below was stated in the
+              message, and a guessed address is worse than an empty one.
             </Typography>
+            {prefill?.evidence && (
+              <Alert severity="info" sx={{ mb: 1.5, py: 0.25 }}>
+                <Typography variant="caption" sx={{ display: 'block' }}>
+                  The message named the organisation here: “{prefill.evidence}”
+                  {prefill.contactName ? ` — buyer contact ${prefill.contactName}.` : '.'}
+                </Typography>
+              </Alert>
+            )}
             <Stack spacing={1.5}>
               <TextField
                 size="small" fullWidth required autoFocus
@@ -455,12 +506,41 @@ const ResolveClientDialog: React.FC<ResolveClientDialogProps> = ({
               />
               <TextField
                 size="small" fullWidth
-                label="Contact email (optional)"
+                label="Contact email"
                 value={newEmail}
                 onChange={(e) => setNewEmail(e.target.value)}
                 disabled={createClient.isPending}
-                helperText="Usually the address this enquiry arrived from."
+                helperText="The address this enquiry arrived from."
               />
+              <Divider textAlign="left" sx={{ pt: 0.5 }}>
+                <Typography variant="caption" color="text.secondary">
+                  Optional — complete now or later in Customers
+                </Typography>
+              </Divider>
+              <TextField size="small" fullWidth label="Address" value={newDetails.billingAddressLine1}
+                onChange={setDetail('billingAddressLine1')} disabled={createClient.isPending} />
+              <Stack direction="row" spacing={1.5}>
+                <TextField size="small" fullWidth label="City" value={newDetails.billingCity}
+                  onChange={setDetail('billingCity')} disabled={createClient.isPending} />
+                <TextField size="small" fullWidth label="State / region" value={newDetails.billingState}
+                  onChange={setDetail('billingState')} disabled={createClient.isPending} />
+              </Stack>
+              <Stack direction="row" spacing={1.5}>
+                <TextField size="small" fullWidth label="Country" value={newDetails.billingCountry}
+                  onChange={setDetail('billingCountry')} disabled={createClient.isPending} />
+                <TextField size="small" fullWidth label="Postal code" value={newDetails.billingPostalCode}
+                  onChange={setDetail('billingPostalCode')} disabled={createClient.isPending} />
+              </Stack>
+              <Stack direction="row" spacing={1.5}>
+                <TextField size="small" fullWidth label="Commercial registration no."
+                  value={newDetails.commercialRegistrationNumber}
+                  onChange={setDetail('commercialRegistrationNumber')} disabled={createClient.isPending} />
+                <TextField size="small" fullWidth label="Tax registration no."
+                  value={newDetails.taxRegistrationNumber}
+                  onChange={setDetail('taxRegistrationNumber')} disabled={createClient.isPending} />
+              </Stack>
+              <TextField size="small" fullWidth label="Sector" value={newDetails.sector}
+                onChange={setDetail('sector')} disabled={createClient.isPending} />
               <Stack direction="row" spacing={1} sx={{ justifyContent: 'flex-end' }}>
                 <Button onClick={() => setCreating(false)} color="inherit" disabled={createClient.isPending}>
                   Cancel
