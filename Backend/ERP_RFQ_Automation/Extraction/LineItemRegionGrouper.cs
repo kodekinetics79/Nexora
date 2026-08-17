@@ -62,6 +62,12 @@ public static class LineItemRegionGrouper
     private const int MinimumBoundaries = 2;
 
     /// <summary>
+    /// How much of a document's ordinals the longest increasing run must cover before the
+    /// ordinals are believed to be an item list. See <see cref="SequentialOrdinalStarts"/>.
+    /// </summary>
+    private const int DominantRunPercent = 80;
+
+    /// <summary>
     /// Returns one entry per detected line item, each carrying that item's full text. Returns
     /// <paramref name="lines"/> unchanged when no item structure is recognisable.
     /// </summary>
@@ -69,13 +75,35 @@ public static class LineItemRegionGrouper
     {
         if (lines is null || lines.Count == 0) return Array.Empty<string>();
 
+        // HIGH-PRECISION SHAPES FIRST. A standalone material code and an explicitly labelled
+        // item are unambiguous: specification prose never looks like either. An ordinal prefix
+        // is different — "1." opens a line item on a bid list and a numbered CLAUSE in a
+        // contract, and a 54-page Word RFQ is full of the latter.
         var starts = new List<int>();
         for (var i = 0; i < lines.Count; i++)
-            if (StartsItem(lines[i])) starts.Add(i);
+            if (StandaloneCode.IsMatch(lines[i]) || LabelledItem.IsMatch(lines[i])) starts.Add(i);
+
+        // Only when the precise shapes find nothing is the ordinal considered, and then only
+        // if the ordinals RUN — a real item list numbers 1, 2, 3, 4 in order, while numbered
+        // clauses scattered through prose restart and repeat.
+        if (starts.Count < MinimumBoundaries)
+            starts = SequentialOrdinalStarts(lines);
 
         // Not enough structure to be sure. Keep today's behaviour rather than trade one wrong
         // answer for another.
         if (starts.Count < MinimumBoundaries) return lines;
+
+        // OVER-DETECTION GUARD, and it is a COST control as much as a correctness one.
+        //
+        // The chunk plan is derived from this count, and every chunk resends the full
+        // extraction prompt — so an inflated region count multiplies the bill directly. A real
+        // line item carries a description, a quantity and a unit, so it occupies several lines;
+        // a document claiming an item on more than every other line is being mis-read.
+        //
+        // Measured: a 54-page .docx reported 1,603 items and planned 70 chunks. It consumed an
+        // entire monthly token budget, was refused partway at chunk 49, and returned 24 real
+        // line items. Almost every "item" was a numbered paragraph.
+        if (starts.Count * 2 > lines.Count) return lines;
 
         var regions = new List<string>(starts.Count + 1);
 
@@ -94,6 +122,53 @@ public static class LineItemRegionGrouper
         }
 
         return regions;
+    }
+
+
+    /// <summary>
+    /// Ordinal starts, but only when they form a genuine run.
+    ///
+    /// <para>A bid list numbers its items 1, 2, 3, 4 in order. A contract numbers clauses too,
+    /// and restarts per section — so an ordinal that does not increase on the previous one is
+    /// evidence of prose, not of an item list. Requiring a mostly-increasing sequence keeps the
+    /// rule useful on real item lists and silent on documents full of numbered paragraphs.</para>
+    /// </summary>
+    private static List<int> SequentialOrdinalStarts(IReadOnlyList<string> lines)
+    {
+        var candidates = new List<(int Line, int Ordinal)>();
+        for (var i = 0; i < lines.Count; i++)
+        {
+            var match = OrdinalPrefix.Match(lines[i]);
+            if (!match.Success) continue;
+            var digits = new string(lines[i].SkipWhile(c => !char.IsDigit(c)).TakeWhile(char.IsDigit).ToArray());
+            if (int.TryParse(digits, out var ordinal)) candidates.Add((i, ordinal));
+        }
+        if (candidates.Count < MinimumBoundaries) return new List<int>();
+
+        // The longest strictly-increasing run wins. Anything outside it is prose that happens
+        // to be numbered.
+        var best = new List<int>();
+        var run = new List<int> { 0 };
+        for (var i = 1; i < candidates.Count; i++)
+        {
+            if (candidates[i].Ordinal > candidates[i - 1].Ordinal) run.Add(i);
+            else { if (run.Count > best.Count) best = run; run = new List<int> { i }; }
+        }
+        if (run.Count > best.Count) best = run;
+
+        // THE RUN MUST DOMINATE, not merely exist.
+        //
+        // A real item list numbers 1..n once, so its longest increasing run IS essentially every
+        // ordinal in the document. Contract prose numbers clauses and restarts them per section,
+        // so its longest run is a small fraction of the total — four sections of six clauses
+        // yields a run of six out of twenty-four candidates. Requiring the run to cover most of
+        // the candidates is what separates the two, and a bare "is there a run of two or more"
+        // did not: it grouped a contract on its first six clauses.
+        var dominates = best.Count * 100 >= candidates.Count * DominantRunPercent;
+
+        return best.Count >= MinimumBoundaries && dominates
+            ? best.Select(index => candidates[index].Line).ToList()
+            : new List<int>();
     }
 
     private static bool StartsItem(string? line)

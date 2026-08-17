@@ -295,6 +295,23 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
     //   3. This absolute item ceiling, unchanged.
     private const int MaxItemsPerChunk = 200;
     private const int MaxChunkChars = 24_000;
+
+    /// <summary>
+    /// The most model calls one document may cost. Reached BEFORE any spending, so a runaway
+    /// plan is refused rather than discovered halfway through.
+    ///
+    /// <para>Every chunk resends the full extraction prompt — roughly 2,000 tokens of
+    /// instructions before a single line item is read — so the chunk count multiplies the bill
+    /// directly. A 54-page .docx whose regions were over-detected planned SEVENTY chunks,
+    /// consumed an entire tenant's monthly token budget, was refused partway at chunk 49 with
+    /// `hard_budget_exceeded`, and returned 24 real line items. The spend was irreversible and
+    /// the operator learned about it afterwards.</para>
+    ///
+    /// <para>Thirty covers the largest genuine bid list seen in the corpus (138 items at 23 per
+    /// chunk is six) with a wide margin. Beyond it the document is either mis-parsed or genuinely
+    /// too large to price automatically, and both deserve a human before the money is spent.</para>
+    /// </summary>
+    internal const int MaxChunksPerDocument = 30;
     private const int HeaderContextBudget = 6_000;
     private const double MinAcceptableConfidence = 0.60;
 
@@ -504,6 +521,22 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
 
         var itemsPerChunk = ItemsPerChunk();
         var chunks = BuildChunks(input.LineItemRegions, itemsPerChunk);
+
+        // PRE-FLIGHT COST GATE. Refuse before the first model call, not after the fortieth.
+        if (chunks.Count > MaxChunksPerDocument)
+        {
+            _log.LogWarning(
+                "Refusing {Document} before extraction: {Chunks} chunk(s) for {Expected} detected "
+                + "item(s) exceeds the {Limit}-chunk ceiling. No model call was made.",
+                input.SourceDocumentName, chunks.Count, expected, MaxChunksPerDocument);
+            return Failed(expected,
+                $"This document was read as {expected} line item(s), which would take "
+                + $"{chunks.Count} model calls — more than the {MaxChunksPerDocument} allowed for "
+                + "one document. Nothing was charged. It is either larger than the automatic "
+                + "reader handles or its layout was mis-read; a person should look before it is "
+                + "processed.", input);
+        }
+
         diagnostics.Add($"Document split into {chunks.Count} chunk(s) for {expected} line item(s).");
         _log.LogInformation(
             "Chunk plan for {Document}: {Chunks} chunk(s), {Expected} item(s), <={ItemsPerChunk} item(s) per chunk "
