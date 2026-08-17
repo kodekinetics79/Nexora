@@ -256,7 +256,13 @@ const LeadsPage: React.FC = () => {
     {
       field: 'nexoraSerial',
       headerName: 'Nexora Serial',
-      width: 180,
+      // WIDE ENOUGH FOR THE WHOLE SERIAL, and that is a correctness requirement rather than
+      // cosmetics. The serial is `NOOR-SONS-LLC-2026-000059` — 25 characters, and the only
+      // part that differs between two leads of the same tenant and year is the tail. At 180px
+      // the bold monospace clipped it to `NOOR-SONS-LLC-2026-000`, so every lead on the list
+      // rendered an IDENTICAL identifier: two different inquiries, indistinguishable at a
+      // glance, with no visual cue that anything had been cut.
+      width: 260,
       valueGetter: (_value, row) => row.nexoraSerial || row.commercialCaseReference || '',
       renderCell: (p) => {
         const serial = p.row.nexoraSerial || p.row.commercialCaseReference;

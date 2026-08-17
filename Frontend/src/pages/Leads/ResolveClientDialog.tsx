@@ -5,6 +5,7 @@ import {
   DialogTitle, Divider, FormControl, FormControlLabel, FormLabel, MenuItem, Radio,
   RadioGroup, Stack, TextField, Typography,
 } from '@mui/material';
+import { AddBusiness as AddBusinessIcon } from '@mui/icons-material';
 import { toast } from 'react-hot-toast';
 import leadService, {
   type ClientCandidateDTO, type LeadItemResponseDTO, type LeadResponseDTO,
@@ -24,9 +25,16 @@ import { candidateExplanation, clientCandidates, confidencePercent, type ClientI
  * then a search over the tenant's real customers. Two things are deliberately
  * absent:
  *
- *  - No "create new customer". Inventing a customer record from extracted text
- *    is exactly how a wrong client gets onto a lead, and a wrong client is worse
- *    than an unresolved one. New customers are created in Customers, on purpose.
+ *  - Creating a client here IS allowed, but only as an explicit, editable act.
+ *    This reverses an earlier decision to forbid it outright, whose reasoning —
+ *    inventing a customer from extracted text is how a wrong client gets onto a
+ *    lead, and a wrong client is worse than an unresolved one — still stands and
+ *    is what shapes the flow. The mitigation is that nothing is inferred and
+ *    written in one step: the form opens pre-filled from the enquiry, every field
+ *    stays editable, creating a client only SELECTS it, and linking it to the lead
+ *    remains the separate Confirm action it always was. The alternative in
+ *    practice was worse — an operator holding a genuine inquiry from a new buyer
+ *    had no way forward without abandoning the lead.
  *  - No way to write a "suggested" state. The machine proposes; a person either
  *    confirms a real customer or leaves the lead unresolved.
  */
@@ -99,6 +107,11 @@ export interface ClientSelection {
 
 export interface ResolveClientDialogProps {
   open: boolean;
+  /**
+   * Evidence from the enquiry used to pre-fill the "create client" form. Optional: the
+   * dialog falls back to whatever the operator typed in the search box.
+   */
+  prefill?: { name?: string | null; email?: string | null } | null;
   /** Lead to resolve. Null keeps the dialog closed. */
   leadId: number | null;
   /**
@@ -148,13 +161,18 @@ const CandidateRow: React.FC<{ candidate: ClientCandidateDTO }> = ({ candidate }
 };
 
 const ResolveClientDialog: React.FC<ResolveClientDialogProps> = ({
-  open, leadId, lead, onClose, onResolved, onSelect,
+  open, leadId, lead, onClose, onResolved, onSelect, prefill,
 }) => {
   const queryClient = useQueryClient();
   const [selectedCustomerId, setSelectedCustomerId] = React.useState<number | null>(null);
   const [selectedContactId, setSelectedContactId] = React.useState<number | ''>('');
   const [searchTerm, setSearchTerm] = React.useState('');
   const [debouncedTerm, setDebouncedTerm] = React.useState('');
+  // Inline client creation. Held here rather than in a nested dialog so the operator never
+  // loses the lead they were resolving.
+  const [creating, setCreating] = React.useState(false);
+  const [newName, setNewName] = React.useState('');
+  const [newEmail, setNewEmail] = React.useState('');
 
   const isOpen = open && leadId != null;
   const deferred = typeof onSelect === 'function';
@@ -260,6 +278,29 @@ const ResolveClientDialog: React.FC<ResolveClientDialogProps> = ({
     onClose();
   };
 
+  /**
+   * Creates the client, then SELECTS it — it does not link the lead. Linking stays with the
+   * existing Confirm button so the operator still makes that call explicitly, and a mis-typed
+   * name is corrected before anything is attached to the inquiry.
+   */
+  const createClient = useMutation({
+    mutationFn: async () => {
+      const form = new FormData();
+      form.append('Name', newName.trim());
+      if (newEmail.trim()) form.append('ContactEmail', newEmail.trim());
+      return customerService.create(form);
+    },
+    onSuccess: (created) => {
+      const id = Number((created as { id?: number | string }).id);
+      queryClient.invalidateQueries({ queryKey: ['customer-search'] });
+      setCreating(false);
+      setSearchTerm(newName.trim());
+      if (Number.isFinite(id) && id > 0) setSelectedCustomerId(id);
+      toast.success(`Client “${newName.trim()}” created — confirm to link it to this lead.`);
+    },
+    onError: (error) => toast.error(presentableErrorMessage(error, 'The client could not be created.')),
+  });
+
   const handleConfirm = () => {
     if (selectedCustomerId == null) return;
     const contactId = selectedContactId === '' ? null : selectedContactId;
@@ -364,13 +405,79 @@ const ResolveClientDialog: React.FC<ResolveClientDialogProps> = ({
               />
             ))}
 
-            {debouncedTerm.length >= 2 && !searchQuery.isFetching && !searchQuery.isError && searchResults.length === 0 && (
-              <Typography variant="body2" color="text.secondary" sx={{ py: 0.5 }}>
-                No client matches “{debouncedTerm}”. Clients are created in the Customers area, not here.
-              </Typography>
+            {debouncedTerm.length >= 2 && !searchQuery.isFetching && !searchQuery.isError && searchResults.length === 0 && !creating && (
+              <Box sx={{ py: 0.5 }}>
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                  No client matches “{debouncedTerm}”.
+                </Typography>
+                {/* A DEAD END IS NOT AN ANSWER. This used to say "clients are created in the
+                    Customers area, not here", which leaves the operator holding a real inquiry
+                    from a real buyer and no way forward without abandoning the lead. The
+                    enquiry itself is the best evidence of who the client is, so the form below
+                    opens pre-filled from it — and stays editable, because extracted evidence is
+                    a starting point rather than a fact. */}
+                <Button
+                  size="small"
+                  variant="outlined"
+                  startIcon={<AddBusinessIcon />}
+                  onClick={() => {
+                    setNewName(prefill?.name?.trim() || debouncedTerm);
+                    setNewEmail(prefill?.email?.trim() || '');
+                    setCreating(true);
+                  }}
+                  sx={{ fontWeight: 700 }}
+                >
+                  Create “{debouncedTerm}” as a new client
+                </Button>
+              </Box>
             )}
           </RadioGroup>
         </FormControl>
+
+        {creating && (
+          <Box sx={{ mt: 2, p: 2, border: '1px solid', borderColor: 'divider', borderRadius: 2 }}>
+            <Typography variant="subtitle2" sx={{ fontWeight: 800, mb: 0.5 }}>
+              New client
+            </Typography>
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1.5 }}>
+              Pre-filled from this enquiry. Correct anything that is wrong before you save —
+              what the sender wrote is evidence, not gospel.
+            </Typography>
+            <Stack spacing={1.5}>
+              <TextField
+                size="small" fullWidth required autoFocus
+                label="Client name"
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                disabled={createClient.isPending}
+                error={newName.trim().length === 0}
+                helperText={newName.trim().length === 0 ? 'A client needs a name.' : ' '}
+              />
+              <TextField
+                size="small" fullWidth
+                label="Contact email (optional)"
+                value={newEmail}
+                onChange={(e) => setNewEmail(e.target.value)}
+                disabled={createClient.isPending}
+                helperText="Usually the address this enquiry arrived from."
+              />
+              <Stack direction="row" spacing={1} sx={{ justifyContent: 'flex-end' }}>
+                <Button onClick={() => setCreating(false)} color="inherit" disabled={createClient.isPending}>
+                  Cancel
+                </Button>
+                <Button
+                  variant="contained"
+                  disabled={newName.trim().length === 0 || createClient.isPending}
+                  startIcon={createClient.isPending ? <CircularProgress size={16} color="inherit" /> : undefined}
+                  onClick={() => createClient.mutate()}
+                  sx={{ fontWeight: 700 }}
+                >
+                  Create client
+                </Button>
+              </Stack>
+            </Stack>
+          </Box>
+        )}
 
         {selectedCustomerId != null && (
           <Box sx={{ mt: 2 }}>
