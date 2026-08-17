@@ -463,7 +463,10 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
 
         var headerCount = Math.Min(HeaderLineCount, lines.Count);
         var header = string.Join('\n', lines.Take(headerCount));
-        var regions = lines.Skip(headerCount).ToList();
+        // GROUPED INTO ITEMS, not one region per line — see LineItemRegionGrouper. The
+        // per-line split made a chunk a slice of one item's specification rather than a set of
+        // whole items, and cost 250 of 259 line items on a real customer bid list.
+        var regions = LineItemRegionGrouper.Group(lines.Skip(headerCount).ToList()).ToList();
         if (regions.Count == 0 && lines.Count > 0)
             regions = lines; // whole-doc pass when the body is short
 

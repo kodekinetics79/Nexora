@@ -1033,10 +1033,16 @@ public sealed class DefaultExtractionDocumentReader : IExtractionDocumentReader
             }
         }
 
-        // Unstructured baseline: top slice as header context, remaining lines as item regions.
+        // Unstructured baseline: top slice as header context, the rest GROUPED INTO ITEMS.
+        //
+        // Grouping is not cosmetic. `lines.Skip(n)` used to be handed straight through as the
+        // item regions, so one LINE was one "item": chunking then cut every 23 lines, straight
+        // through the middle of each item's specification block, and the model was asked to
+        // find whole line items in fragments carrying no code and no quantity. See
+        // LineItemRegionGrouper for the measurements.
         var headerLineCount = Math.Min(20, lines.Count);
         var header = string.Join('\n', lines.Take(headerLineCount));
-        var regions = lines.Skip(headerLineCount).ToList();
+        var regions = LineItemRegionGrouper.Group(lines.Skip(headerLineCount).ToList()).ToList();
         if (regions.Count == 0 && lines.Count > 0)
             regions = lines; // whole-doc pass
 
