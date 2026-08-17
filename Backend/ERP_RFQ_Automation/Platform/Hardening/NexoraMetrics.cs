@@ -357,10 +357,17 @@ public sealed class NexoraMetrics : IDisposable
     /// <paramref name="cost"/> is null for an unpriced call — no cost series is emitted
     /// rather than a misleading zero.
     /// </summary>
+    /// <param name="reservedTokens">
+    /// What the governance ledger HELD for this call, recorded beside what it actually cost.
+    /// Without the pair, an over-reservation is invisible until it starts refusing documents
+    /// as <c>document_budget_exceeded</c> — which is exactly how a byte count added to a token
+    /// count went unnoticed while reserving roughly fifteen times real consumption. An operator
+    /// sizing a per-document ceiling has no other evidence to size it from.
+    /// </param>
     public void LlmSettled(
         long inputTokens, long outputTokens, long? businessUnitId = null,
         string? provider = null, string? model = null, string? providerClass = null,
-        decimal? cost = null, string? currency = null)
+        decimal? cost = null, string? currency = null, long reservedTokens = 0)
     {
         var tags = new TagList { { "tenant.id", businessUnitId } };
         if (!string.IsNullOrWhiteSpace(provider)) tags.Add("llm.provider", provider);
@@ -378,6 +385,12 @@ public sealed class NexoraMetrics : IDisposable
             var outbound = tags;
             outbound.Add("llm.direction", "output");
             _llmTokens.Add(outputTokens, outbound);
+        }
+        if (reservedTokens > 0)
+        {
+            var held = tags;
+            held.Add("llm.direction", "reserved");
+            _llmTokens.Add(reservedTokens, held);
         }
         if (cost is { } amount && amount > 0m && !string.IsNullOrWhiteSpace(currency))
         {

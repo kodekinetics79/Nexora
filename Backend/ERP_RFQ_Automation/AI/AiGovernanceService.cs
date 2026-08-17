@@ -189,7 +189,21 @@ public sealed class AiGovernanceService : IAiGovernanceService
         var inputBytes = Encoding.UTF8.GetByteCount(input);
         if (maximumInputBytes <= 0 || inputBytes > maximumInputBytes)
             throw new AiPolicyDeniedException("input_too_large");
-        var perAttempt = checked((long)maximumInputBytes + Math.Max(1, maximumOutputTokens));
+        // TOKENS + TOKENS. This used to be `maximumInputBytes + maximumOutputTokens` — a BYTE
+        // count added to a TOKEN count, with the realistic estimate computed one line above
+        // (`estimatedInput`) and then discarded.
+        //
+        // The unit error was not academic. Bytes run about four to one against tokens, and the
+        // sum is then multiplied by the attempt count, so a 384-byte email reserved ~29,000
+        // tokens against ~2,000 actually consumed, and every chunk of a multi-chunk document
+        // reserved the same again. That is what made MaxTokensPerDocument × 5 refuse ordinary
+        // documents with `document_budget_exceeded`, and it is why the ceiling had to be set
+        // roughly fifteen times higher than real consumption to let anything through.
+        //
+        // The remaining safety margin is the attempt multiplier below: the reserve still covers
+        // every retry the caller is allowed, and settlement replaces it with the provider's own
+        // counts the moment the call returns.
+        var perAttempt = checked(EstimateTokens(maximumInputBytes) + Math.Max(1, maximumOutputTokens));
         var reserve = checked(perAttempt * Math.Max(1, maximumAttempts));
         var period = AiPolicyDenials.BudgetPeriodStart(now);
 
@@ -515,6 +529,8 @@ public sealed class AiGovernanceService : IAiGovernanceService
             budget.UpdatedOn = DateTime.UtcNow;
             await db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
+
+
             settled = new SettledCall(
                 request.InputTokens, request.OutputTokens, request.Provider, request.Model,
                 request.ProviderClass.ToString(), request.EstimatedCost, request.CostCurrency);
@@ -527,7 +543,8 @@ public sealed class AiGovernanceService : IAiGovernanceService
             // keys and request ids are NOT tagged — each is unique per call.
             _metrics?.LlmSettled(
                 call.InputTokens, call.OutputTokens, reservation.BusinessUnitId,
-                call.Provider, call.Model, call.ProviderClass, call.Cost, call.Currency);
+                call.Provider, call.Model, call.ProviderClass, call.Cost, call.Currency,
+                reservation.ReservedTokens);
         }
     }
 
