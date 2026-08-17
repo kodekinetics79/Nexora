@@ -1,6 +1,6 @@
 import React from 'react';
 import { Button, CircularProgress, Menu, MenuItem, Tooltip } from '@mui/material';
-import { AccountTree as LifecycleIcon } from '@mui/icons-material';
+import { AccountTree as LifecycleIcon, ArrowDropDown as ArrowDropDownIcon } from '@mui/icons-material';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSnackbar } from 'notistack';
 import lifecycleService, { isLeadLoss, type LifecycleAggregate, type LifecycleTransitionOption } from '../../api/services/commercialLifecycleService';
@@ -46,12 +46,25 @@ const LifecycleActions: React.FC<Props> = ({ aggregate, id, onChanged }) => {
     else mutation.mutate({ option });
   };
   return <>
-    <Tooltip title={state ? `Current state: ${state.currentStatusCode}` : 'Lifecycle'}>
+    {/* THIS IS A BUTTON, AND IT HAS TO LOOK LIKE ONE.
+        Rendering the current status as the label makes it read as a status badge — users
+        reported "I don't see any option to qualify" while looking straight at it. The label
+        now leads with the verb and the caret advertises the menu, so the one control that
+        advances a lead is not mistaken for decoration. */}
+    <Tooltip title={
+      state
+        ? state.allowedTransitions.length > 0
+          ? `Currently ${state.currentStatusCode.replaceAll('_', ' ')} — click to advance`
+          : `Currently ${state.currentStatusCode.replaceAll('_', ' ')} — no moves available`
+        : 'Lifecycle'
+    }>
       <span>
-        <Button size="small" variant="outlined" startIcon={mutation.isPending || stateQuery.isLoading ? <CircularProgress size={16} /> : <LifecycleIcon />}
+        <Button size="small" variant="outlined"
+          startIcon={mutation.isPending || stateQuery.isLoading ? <CircularProgress size={16} /> : <LifecycleIcon />}
+          endIcon={state && state.allowedTransitions.length > 0 ? <ArrowDropDownIcon /> : undefined}
           disabled={!state || state.allowedTransitions.length === 0 || mutation.isPending}
           onClick={(event) => setAnchor(event.currentTarget)}>
-          {state?.currentStatusCode.replaceAll('_', ' ') || 'Lifecycle'}
+          {state ? `Advance · ${state.currentStatusCode.replaceAll('_', ' ')}` : 'Lifecycle'}
         </Button>
       </span>
     </Tooltip>
