@@ -297,21 +297,30 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
     private const int MaxChunkChars = 24_000;
 
     /// <summary>
-    /// The most model calls one document may cost. Reached BEFORE any spending, so a runaway
-    /// plan is refused rather than discovered halfway through.
+    /// A RUNAWAY BACKSTOP, not a business limit. The most model calls one document may cost
+    /// before a person is asked to look. Reached BEFORE any spending, so a runaway plan is
+    /// refused rather than discovered halfway through.
     ///
-    /// <para>Every chunk resends the full extraction prompt — roughly 2,000 tokens of
-    /// instructions before a single line item is read — so the chunk count multiplies the bill
-    /// directly. A 54-page .docx whose regions were over-detected planned SEVENTY chunks,
+    /// <para><b>Why it is this high.</b> Aramco and SEC send genuinely enormous bid lists —
+    /// that is the customer's core traffic, not an edge case — so a ceiling tight enough to
+    /// catch a mis-parsed document would refuse the documents the business exists to quote.
+    /// Chunk count cannot tell those two apart: a real 1,000-item bid list and a 54-page
+    /// contract shredded into 1,603 false items produce similar plans.</para>
+    ///
+    /// <para>The thing that actually separates them is
+    /// <see cref="LineItemRegionGrouper"/>'s dominance and density rules, which stop prose
+    /// being read as an item list in the first place. This constant only catches what survives
+    /// that — a document so large it deserves a human decision before the money is spent, and
+    /// at 150 chunks that is roughly 3,400 line items.</para>
+    ///
+    /// <para>Measured before both guards existed: a 54-page .docx planned SEVENTY chunks,
     /// consumed an entire tenant's monthly token budget, was refused partway at chunk 49 with
     /// `hard_budget_exceeded`, and returned 24 real line items. The spend was irreversible and
     /// the operator learned about it afterwards.</para>
     ///
-    /// <para>Thirty covers the largest genuine bid list seen in the corpus (138 items at 23 per
-    /// chunk is six) with a wide margin. Beyond it the document is either mis-parsed or genuinely
-    /// too large to price automatically, and both deserve a human before the money is spent.</para>
+    /// <para>Configurable per deployment via <c>Extraction:MaxChunksPerDocument</c>.</para>
     /// </summary>
-    internal const int MaxChunksPerDocument = 30;
+    internal const int DefaultMaxChunksPerDocument = 150;
     private const int HeaderContextBudget = 6_000;
     private const double MinAcceptableConfidence = 0.60;
 
@@ -332,17 +341,24 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
     /// before. There is no configuration, and no missing registration, that turns
     /// unstructured external processing on by accident.
     /// </param>
+    /// <summary>Effective ceiling — <c>Extraction:MaxChunksPerDocument</c>, else the default.</summary>
+    private readonly int _maxChunksPerDocument;
+
     public ChunkedExtractionService(
         ILLMService llm,
         ICanonicalRfqNormalizer normalizer,
         ILogger<ChunkedExtractionService> log,
         IAiExternalProviderTrust? externalProviderTrust = null,
-        ERP_RFQ_Automation.Platform.Hardening.NexoraMetrics? metrics = null)
+        ERP_RFQ_Automation.Platform.Hardening.NexoraMetrics? metrics = null,
+        IConfiguration? configuration = null)
     {
         _llm = llm;
         _normalizer = normalizer;
         _log = log;
         _externalProviderTrust = externalProviderTrust;
+        _maxChunksPerDocument =
+            int.TryParse(configuration?["Extraction:MaxChunksPerDocument"], out var configured)
+            && configured > 0 ? configured : DefaultMaxChunksPerDocument;
         _metrics = metrics;
     }
 
@@ -523,15 +539,15 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         var chunks = BuildChunks(input.LineItemRegions, itemsPerChunk);
 
         // PRE-FLIGHT COST GATE. Refuse before the first model call, not after the fortieth.
-        if (chunks.Count > MaxChunksPerDocument)
+        if (chunks.Count > _maxChunksPerDocument)
         {
             _log.LogWarning(
                 "Refusing {Document} before extraction: {Chunks} chunk(s) for {Expected} detected "
                 + "item(s) exceeds the {Limit}-chunk ceiling. No model call was made.",
-                input.SourceDocumentName, chunks.Count, expected, MaxChunksPerDocument);
+                input.SourceDocumentName, chunks.Count, expected, _maxChunksPerDocument);
             return Failed(expected,
                 $"This document was read as {expected} line item(s), which would take "
-                + $"{chunks.Count} model calls — more than the {MaxChunksPerDocument} allowed for "
+                + $"{chunks.Count} model calls — more than the {_maxChunksPerDocument} allowed for "
                 + "one document. Nothing was charged. It is either larger than the automatic "
                 + "reader handles or its layout was mis-read; a person should look before it is "
                 + "processed.", input);
