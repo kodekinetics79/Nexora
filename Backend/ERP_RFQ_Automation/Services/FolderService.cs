@@ -183,13 +183,18 @@ namespace ERP_RFQ_Automation.Services
             Directory.CreateDirectory(aramco);
             Directory.CreateDirectory(shared);
             var report = new FolderProcessingReport();
+            // ONE filter for all three folders. These used to differ — .doc for SEC, .docx for
+            // Aramco, five types for Shared — and the mismatch was live: the Aramco corpus is
+            // entirely .doc, so its own folder skipped every file it was given. See
+            // WatchedFolderExtensions for why the extension gate never protected anything that
+            // byte-level inspection does not already protect better.
+            bool Readable(string ext) => WatchedFolderExtensions.Contains(ext);
             await EnqueueFolderFilesAsync(
-                sec, "SEC Leads", IsSupportedExtension, businessUnitId, report, cancellationToken);
+                sec, "SEC Leads", Readable, businessUnitId, report, cancellationToken);
             await EnqueueFolderFilesAsync(
-                aramco, "Aramco Leads", ext => ext == ".docx", businessUnitId, report, cancellationToken);
+                aramco, "Aramco Leads", Readable, businessUnitId, report, cancellationToken);
             await EnqueueFolderFilesAsync(
-                shared, "Shared Leads", ext => SharedFolderExtensions.Contains(ext),
-                businessUnitId, report, cancellationToken);
+                shared, "Shared Leads", Readable, businessUnitId, report, cancellationToken);
             return report;
         }
 
@@ -952,11 +957,30 @@ namespace ERP_RFQ_Automation.Services
         private LeadItem CreateLeadItem(long leadId, LeadItemData aiItem)
             => LeadItemMapper.Map(aiItem, ParseDate, leadId);
 
+        /// <summary>
+        /// A human label for the format a folder document arrived in. It is shown to reviewers
+        /// as the Lead's source, so it names the FORMAT and never a customer: ".doc" used to
+        /// read "SEC Word Document", which mislabelled every legacy Word file that came from
+        /// anyone else — and the Aramco corpus is entirely .doc.
+        ///
+        /// <para>Every extension the folder door now accepts has an entry. "Unknown" previously
+        /// covered everything but Word, so the moment the door widened it would have become the
+        /// most common answer on the screen.</para>
+        /// </summary>
         private string GetFileTypeLabel(string ext) => ext switch
         {
-            ".doc"  => "SEC Word Document",
-            ".docx" => "Word DOCX",
-            _       => "Unknown"
+            ".doc"                  => "Word Document (legacy)",
+            ".docx"                 => "Word Document",
+            ".pdf"                  => "PDF Document",
+            ".xls"                  => "Excel Workbook (legacy)",
+            ".xlsx" or ".xlsm"      => "Excel Workbook",
+            ".csv"                  => "CSV Spreadsheet",
+            ".txt"                  => "Text Document",
+            ".htm" or ".html"       => "Web Page",
+            ".eml" or ".msg"        => "Email Message",
+            ".png" or ".jpg" or ".jpeg" or ".gif"
+                or ".bmp" or ".tif" or ".tiff" or ".webp" => "Scanned Image",
+            _                       => "Document"
         };
 
         private bool IsSupportedExtension(string ext) => ext == ".doc";
@@ -1349,28 +1373,44 @@ namespace ERP_RFQ_Automation.Services
                 "Tenants", businessUnitId.ToString(CultureInfo.InvariantCulture), "Watched", folder);
         }
 
-        // The Shared watched-folder accepts general trading documents. This is a
-        // DELIBERATELY narrower set than the full DocumentIntakeAllowList (no images or
-        // free text from an unattended folder), but it must remain a SUBSET of that
-        // allow-list so nothing a folder accepts is later rejected by security
-        // inspection — asserted by DocumentIntakeAllowListTests. Both the upload gate
-        // and the watcher use THIS single set so the two sites cannot drift apart.
-        internal static readonly IReadOnlySet<string> SharedFolderExtensions =
-            new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            {
-                ".doc", ".docx", ".pdf", ".xlsx", ".xls"
-            };
+        /// <summary>
+        /// What a watched folder accepts: EXACTLY what every other intake door accepts.
+        ///
+        /// <para>This is the allow-list object itself, not a copy of it, so the folder door
+        /// cannot drift from inspection and from the extraction reader the way it previously
+        /// did.</para>
+        ///
+        /// <para><b>Why the per-folder lists went away.</b> Each folder used to carry its own
+        /// narrow filter — SEC accepted only <c>.doc</c>, Aramco only <c>.docx</c>, Shared five
+        /// document types — on the reasoning that a customer-specific door should be tight. In
+        /// practice it silently discarded real work: every Aramco bid list in the live corpus is
+        /// a <c>.doc</c>, so the folder named after that customer rejected that customer's own
+        /// documents, and the file was skipped with nothing raised to anyone.</para>
+        ///
+        /// <para><b>Why the extension gate was not protecting anything.</b> A filename is a
+        /// claim, and this gate believed it in both directions: a hostile <c>.exe</c> renamed to
+        /// <c>.doc</c> passed it, and a genuine <c>.doc</c> named <c>.docx</c> was refused. The
+        /// gate that actually decides is <c>DocumentFileInspectionService</c>, which types every
+        /// file from its BYTES and is unaffected by this change. Removing a filter that a rename
+        /// defeats costs no security and stops discarding readable documents.</para>
+        ///
+        /// <para>Narrowing a door again is a legitimate decision, but it belongs in tenant
+        /// configuration where a customer can see and change it — not compiled into three
+        /// hard-coded lists whose disagreement is invisible until a bid goes missing.</para>
+        /// </summary>
+        internal static readonly IReadOnlySet<string> WatchedFolderExtensions =
+            ERP_RFQ_Automation.Security.DocumentInspection.DocumentIntakeAllowList.Extensions;
 
+        /// <summary>
+        /// What may be uploaded INTO a watched folder. The folder chosen says who the document
+        /// is from; it does not say what a document is allowed to be, so every folder takes the
+        /// same set — the one the sweep will later read. When these two disagreed, a file could
+        /// be accepted by the upload and then skipped for ever by the sweep that followed it.
+        /// </summary>
         private static bool IsAllowedUploadExtension(string folderType, string extension)
-            => folderType.Trim().ToUpperInvariant() switch
-            {
-                // SEC and Aramco are deliberately narrow, customer-specific doors
-                // (SEC sends legacy .doc, Aramco sends .docx) — do not widen them.
-                "SEC" or "CUSTOMER1" => extension == ".doc",
-                "ARAMCO" or "CUSTOMER2" => extension == ".docx",
-                "SHARED" => SharedFolderExtensions.Contains(extension),
-                _ => false
-            };
+            => folderType.Trim().ToUpperInvariant() is "SEC" or "CUSTOMER1"
+                or "ARAMCO" or "CUSTOMER2" or "SHARED"
+               && WatchedFolderExtensions.Contains(extension);
 
         public IReadOnlyList<long> DiscoverTenantFolderIds()
         {
