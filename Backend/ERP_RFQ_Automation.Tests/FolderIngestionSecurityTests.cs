@@ -294,6 +294,107 @@ public sealed class FolderIngestionSecurityTests
         }
     }
 
+    // ------------------------------------------------- what a folder is allowed to read
+
+    [Fact]
+    public async Task AramcoFolder_ReadsTheLegacyDocFormatItsCustomerActuallySends()
+    {
+        // THE DEFECT, EXACTLY. The Aramco watched folder was gated to `ext == ".docx"`, and
+        // every Aramco bid list in the live corpus is a legacy .doc. The folder named after
+        // that customer therefore skipped that customer's own documents, silently: the sweep
+        // logged nothing, raised nothing, and left the file sitting there for ever.
+        var root = TempRoot();
+        try
+        {
+            using var database = new TestDb();
+            await using var context = database.ContextFor(null);
+            var ingestion = new RecordingIngestion();
+            var (service, storage) = Service(context, root, ingestion);
+
+            await service.SaveFilesToSharedFolderAsync(
+                new List<IFormFile> { FormFile("aramco-bid-C001046933.doc") }, "Aramco", 42);
+
+            var report = await service.ProcessAllFoldersAsync(42);
+
+            Assert.Equal(1, report.Enqueued);
+            Assert.Equal(0, report.Rejected);
+            Assert.Contains("aramco-bid-C001046933.doc", Assert.Single(ingestion.Requests).FileName);
+            // Read means CONSUMED: the file leaves the watched folder rather than being swept
+            // again on every cycle for ever.
+            Assert.Empty(Directory.GetFiles(storage.GetPath("Tenants", "42", "Watched", "Aramco")));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("SEC")]
+    [InlineData("Aramco")]
+    [InlineData("Shared")]
+    public async Task EveryWatchedFolder_AcceptsEveryFormatIntakeCanRead(string folderType)
+    {
+        // The three folders used to disagree about file types — .doc here, .docx there, five
+        // formats in the third — so which folder a document was filed in decided whether it was
+        // read at all. The folder says who a document is FROM; it has never had anything to say
+        // about what a document is allowed to BE.
+        //
+        // Both halves are covered: SaveFilesToSharedFolderAsync throws if the upload gate
+        // refuses a format, and Enqueued falling short of the count catches a sweep filter that
+        // silently skips one.
+        var root = TempRoot();
+        try
+        {
+            using var database = new TestDb();
+            await using var context = database.ContextFor(null);
+            var ingestion = new RecordingIngestion();
+            var (service, _) = Service(context, root, ingestion);
+
+            var formats = ERP_RFQ_Automation.Security.DocumentInspection
+                .DocumentIntakeAllowList.Extensions
+                .OrderBy(x => x, StringComparer.Ordinal).ToList();
+
+            await service.SaveFilesToSharedFolderAsync(
+                formats.Select((ext, i) => (IFormFile)FormFile($"bid-{i}{ext}")).ToList(),
+                folderType, 42);
+
+            var report = await service.ProcessAllFoldersAsync(42);
+
+            Assert.Equal(formats.Count, report.Enqueued);
+            Assert.Equal(0, report.Rejected);
+            Assert.Equal(0, report.Failed);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task AFormatInspectionWouldRefuse_IsStillRefusedAtTheFolderDoor()
+    {
+        // Widening the door must not mean opening it. An extension inspection does not admit is
+        // refused before anything is written to disk — the folder door and the inspection layer
+        // read from ONE list, so they cannot drift into disagreeing about this.
+        var root = TempRoot();
+        try
+        {
+            using var database = new TestDb();
+            await using var context = database.ContextFor(null);
+            var (service, storage) = Service(context, root, new RecordingIngestion());
+
+            await Assert.ThrowsAsync<ArgumentException>(() => service.SaveFilesToSharedFolderAsync(
+                new List<IFormFile> { FormFile("payload.exe") }, "Shared", 42));
+
+            Assert.Empty(Directory.GetFiles(storage.GetPath("Tenants", "42", "Watched", "Shared")));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     private static FormFile FormFile(string name)
     {
         var bytes = "%PDF-1.7\nRFQ"u8.ToArray();
