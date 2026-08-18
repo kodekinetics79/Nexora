@@ -1130,12 +1130,34 @@ namespace ERP_RFQ_Automation.Repositories
             // offered for review and then refused at submit: the approval path was closed
             // for them, and with it the ONLY source of measured correction evidence the
             // product has. An upload-door lead has no ParseStatus to read, so its review
-            // state is the lead's own — untriaged, unverified — plus the same authoritative
+            // state is the lead's own — unverified, plus the same authoritative
             // source-document evidence approval already demands.
+            //
+            // LIFECYCLE POSITION IS NOT REVIEW STATE, and treating it as one was a ONE-WAY TRAP.
+            //
+            // This condition also required LeadStatusId == null, as a proxy for "untriaged".
+            // But advancing the governed lifecycle SETS LeadStatusId, and the very first hop a
+            // user can make from the lead screen — RECEIVED -> PENDING_IDENTIFICATION — does
+            // exactly that. From that moment the approval path was shut. QUALIFIED, however,
+            // REQUIRES the approval (LifecycleApplicationService: "AI-extracted commercial facts
+            // must be approved before the lead can be qualified"), and the lifecycle offers no
+            // edge back to PENDING_IDENTIFICATION. So an upload-door lead advanced before its
+            // figures were approved could never be qualified, never become an RFQ, and never be
+            // recovered — with no message saying why.
+            //
+            // Reproduced on the live tenant: lead 467 was approvable while LeadStatusId was
+            // null, and returned 409 "This lead is no longer awaiting extraction review" once
+            // it was UNDER_REVIEW. Leads 466 and 467 both reached that dead end.
+            //
+            // The question this gate exists to ask is whether the extracted facts have been
+            // verified yet, and whether there is authoritative evidence to verify them against.
+            // Both remaining clauses ask exactly that. The lifecycle clause asked something else
+            // entirely and is simply dropped: approving is now idempotent with respect to where
+            // the lead sits, so it can be done before advancing, after advancing, or from the
+            // dead end a lead is already in.
             var awaitingReview = lead.EmailIngests != null
                 ? string.Equals(lead.EmailIngests.ParseStatus, "NeedsReview", StringComparison.OrdinalIgnoreCase)
-                : lead.LeadStatusId == null
-                  && !lead.CommercialFactsVerified
+                : !lead.CommercialFactsVerified
                   && (await SourceOccurrenceIdsAsync(lead.Id, businessUnitId)).Count > 0;
             if (!awaitingReview)
                 throw new LeadReviewConflictException("This lead is no longer awaiting extraction review.");

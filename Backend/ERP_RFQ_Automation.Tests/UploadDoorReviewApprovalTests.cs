@@ -179,7 +179,62 @@ public class UploadDoorReviewApprovalTests
     }
 
     /// <summary>A lead as the upload door leaves it: no EmailIngest, real document evidence.</summary>
-    private static Lead SeedUploadDoorLead(ErpRfqAutomationContext context, long leadId)
+    [Fact]
+    public async Task An_upload_door_lead_can_still_be_approved_after_its_lifecycle_has_advanced()
+    {
+        // THE ONE-WAY TRAP, reproduced on the live tenant before it was written down.
+        //
+        // The gate also required LeadStatusId == null, as a proxy for "untriaged". But advancing
+        // the governed lifecycle SETS LeadStatusId, and the first hop available from the lead
+        // screen — RECEIVED -> PENDING_IDENTIFICATION — does exactly that. From that moment:
+        //
+        //   * approval returned 409 "This lead is no longer awaiting extraction review"
+        //   * QUALIFIED refused, because it REQUIRES that approval
+        //   * and no edge leads back to PENDING_IDENTIFICATION
+        //
+        // So the lead could never be qualified, never become an RFQ, and never be recovered.
+        // Leads 466 and 467 both reached that dead end during a demo rehearsal.
+        //
+        // Lifecycle position is not review state. Approval must not depend on it.
+        using var db = new TestDb();
+        using (var seed = db.ContextFor(null))
+        {
+            // Stand the lead up in exactly the state a lifecycle advance leaves behind: a
+            // status is set. It is applied at creation because the governance interceptor
+            // rightly refuses a direct status CHANGE outside a lifecycle command.
+            var status = Seed.LeadStatus(seed, 24, Bu, "Under Review");
+            SeedUploadDoorLead(seed, 305, status.SetupId);
+            seed.SaveChanges();
+        }
+
+        using (var ctx = db.ContextFor(Bu))
+        {
+            var response = await new LeadRepository(ctx).SubmitLeadReviewAsync(305, Bu,
+                new LeadReviewSubmitDTO
+                {
+                    ExpectedVersion = 1,
+                    Action = "approve",
+                    Reason = "Checked against the uploaded workbook.",
+                    Items = new()
+                    {
+                        new LeadItemReviewDTO
+                        {
+                            Id = 1, LineItemNo = "L1", Quantity = 4, ProductShortName = "Sealed Fitting"
+                        }
+                    }
+                }, reviewedBy: "reviewer@example.com");
+            Assert.NotNull(response);
+        }
+
+        using var verify = db.ContextFor(Bu);
+        var approved = verify.Leads.Single(l => l.Id == 305);
+        // The point of the fix: approval succeeds, so QUALIFIED becomes reachable.
+        Assert.True(approved.CommercialFactsVerified);
+        Assert.False(approved.RequiresCommercialReview);
+    }
+
+    private static Lead SeedUploadDoorLead(
+        ErpRfqAutomationContext context, long leadId, long? leadStatusId = null)
     {
         Seed.EnsureBusinessUnit(context, Bu);
         var lead = new Lead
@@ -193,6 +248,7 @@ public class UploadDoorReviewApprovalTests
             CreatedDate = DateTime.UtcNow,
             BusinessUnitId = Bu,
             EmailIngestsId = null,
+            LeadStatusId = leadStatusId,
             LeadItems = { Seed.LeadItem(1, "L1", 4, "Sealed Fitting") }
         };
         context.Leads.Add(lead);
