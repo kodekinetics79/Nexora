@@ -46,6 +46,22 @@ public static class TypedEntitlementCatalog
 
     public static bool IsRuntimeAvailable(string key) => RuntimeAvailableKeys.Contains(key);
 
+    /// <summary>
+    /// The catalogue in the order an operator should be shown it: the five product modules first,
+    /// then the capabilities that cut across them.
+    ///
+    /// <para><see cref="Keys"/> is a hash set and enumerates in whatever order it likes, and
+    /// <c>Keys.Order()</c> sorts alphabetically — which interleaves the two groups and puts
+    /// <c>capability.api</c> above <c>module.rfq</c>. Neither is a presentation order. This list is,
+    /// and it is server-owned so the console does not have to re-derive one and drift from it.</para>
+    /// </summary>
+    public static readonly IReadOnlyList<string> OrderedKeys =
+    [
+        Rfq, Quotes, Orders, Procurement, Inventory,
+        Ai, Ocr, EmailIntake, SupplierSearch, Integrations, Exports,
+        Api, Automation, Sso, Scim, DedicatedResources
+    ];
+
     public static string RequireKnown(string key)
         => Keys.Contains(key)
             ? key

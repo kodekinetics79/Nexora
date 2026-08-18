@@ -350,9 +350,13 @@ export default function PlansFlagsPage() {
               />
             </Stack>
             <Box>
-              <Typography variant="subtitle2" sx={{ fontWeight: 800, mb: 0.5 }}>Feature entitlements</Typography>
+              <Typography variant="subtitle2" sx={{ fontWeight: 800, mb: 0.5 }}>
+                Starting modules for new customers
+              </Typography>
               <Typography variant="caption" color="text.secondary">
-                Closed server-owned catalogue. Unselected features are explicitly written as false.
+                Copied into a tenant when it is PROVISIONED, and never read again. Module access is
+                decided per customer on that customer&rsquo;s Modules tab, so editing this cannot
+                grant or revoke anything for a tenant that already exists.
               </Typography>
               {(['Modules', 'Capabilities'] as const).map((group) => (
                 <Box key={group} sx={{ mt: 1.5 }}>
@@ -367,7 +371,19 @@ export default function PlansFlagsPage() {
                               ? [...form.entitlements, entry.key]
                               : form.entitlements.filter((key) => key !== entry.key),
                           })} />}
-                          label={<Box><Typography variant="body2">{entry.label}</Typography><Typography variant="caption" color="text.secondary">{entry.key}</Typography></Box>}
+                          label={(
+                            <Box>
+                              <Typography variant="body2">
+                                {entry.label}
+                                {!entry.available && (
+                                  <Typography component="span" variant="caption" sx={{ ml: 0.75, fontWeight: 700 }} color="warning.main">
+                                    NOT BUILT YET
+                                  </Typography>
+                                )}
+                              </Typography>
+                              <Typography variant="caption" color="text.secondary">{entry.key}</Typography>
+                            </Box>
+                          )}
                         />
                       </Grid>
                     ))}
@@ -376,8 +392,9 @@ export default function PlansFlagsPage() {
               ))}
               {form.entitlements.length === 0 && (
                 <Alert severity="warning" sx={{ mt: 1.5 }}>
-                  <AlertTitle>No product features enabled</AlertTitle>
-                  This plan will grant quotas but deny every closed-catalogue module and capability.
+                  <AlertTitle>New customers on this plan start with nothing</AlertTitle>
+                  They will be provisioned with quotas but no modules, and somebody has to grant
+                  each one on the customer&rsquo;s Modules tab before they can do any work.
                 </Alert>
               )}
               {form.unknownEntitlements.length > 0 && (

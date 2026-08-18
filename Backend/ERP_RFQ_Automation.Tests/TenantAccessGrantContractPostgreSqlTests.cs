@@ -79,7 +79,12 @@ public sealed class TenantAccessGrantContractPostgreSqlTests : IAsyncLifetime
                 "Id" bigint PRIMARY KEY,
                 "PrimaryBusinessUnitId" bigint,
                 "Status" text NOT NULL,
-                "PlanId" bigint);
+                "PlanId" bigint,
+                -- Projected by CoreQuery since 20260818013530. This fixture asserts privileges,
+                -- not storage shape, so no default or NOT NULL here — and its absence is what the
+                -- 42703 branch in CanSelectAsync turned into a reported missing grant rather than
+                -- a crash, which is the drift this whole contract exists to catch.
+                "Entitlements" jsonb);
             CREATE TABLE platform."Plans" (
                 "Id" bigint PRIMARY KEY,
                 "Code" text NOT NULL,

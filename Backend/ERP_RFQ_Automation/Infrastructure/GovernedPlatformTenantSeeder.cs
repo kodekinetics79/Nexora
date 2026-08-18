@@ -124,6 +124,11 @@ internal static class GovernedPlatformTenantSeeder
                 Slug = slug,
                 Status = TenantStatus.Active,
                 PlanId = plan.Id,
+                // Copied from the seeded plan for the same reason provisioning copies it: the
+                // tenant's own column is what [RequiresEntitlement] reads now, so a seeded
+                // workspace left on the {} default would come up with every module denied and the
+                // seed would grant nothing it claims to grant.
+                Entitlements = TypedEntitlementCatalog.Complete(plan.Features),
                 PrimaryBusinessUnitId = businessUnit.Id,
                 BillingMode = TenantBillingMode.Internal,
                 BillingModeReason = billingModeReason,
@@ -155,16 +160,41 @@ internal static class GovernedPlatformTenantSeeder
             return;
         }
 
-        // A tenant with no plan cannot be entitled to anything; attach the plan and say so.
-        // Everything else about an existing tenant — its status above all — is left untouched.
+        // A tenant with no plan has no capacity; attach the plan and say so. Everything else about
+        // an existing tenant — its status above all — is left untouched.
+        var attachedPlan = false;
         if (tenant.PlanId is null)
         {
             tenant.PlanId = plan.Id;
+            attachedPlan = true;
+        }
+
+        // Since 20260818013530 the plan no longer decides what a tenant may open, so attaching one
+        // is no longer enough to make a seeded workspace usable: the tenant's own grant is what
+        // [RequiresEntitlement] reads, and a pre-existing row created before that migration — or by
+        // a fixture that predates it — carries the closed default.
+        //
+        // Guarded on the grant still being EMPTY. A seeder that overwrote a decided grant would
+        // quietly re-open, on every boot, a module an operator had deliberately revoked; and this
+        // runs against whatever database it is pointed at. Empty is unambiguously "nobody has
+        // decided yet", which is the only state it is safe to fill.
+        if (!TypedEntitlementCatalog.TryParse(tenant.Entitlements, out var granted, out _)
+            || !granted.Values.Any(enabled => enabled))
+        {
+            tenant.Entitlements = TypedEntitlementCatalog.Complete(plan.Features);
+            attachedPlan = true;
+            logger.LogInformation(
+                "Seeded module grants for platform tenant {TenantId} from plan '{PlanCode}': its own "
+                + "grant was empty, so every module was denied.", tenant.Id, planCode);
+        }
+
+        if (attachedPlan)
+        {
             tenant.ModifiedBy = actor;
             tenant.ModifiedOn = now;
             await db.SaveChangesAsync();
             logger.LogInformation(
-                "Attached plan '{PlanCode}' to existing platform tenant {TenantId}, which had none.",
+                "Ensured plan '{PlanCode}' and module grants on existing platform tenant {TenantId}.",
                 planCode, tenant.Id);
         }
     }

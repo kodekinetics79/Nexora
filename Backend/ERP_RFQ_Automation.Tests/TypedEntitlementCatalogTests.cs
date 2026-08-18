@@ -21,20 +21,14 @@ public sealed class TypedEntitlementCatalogTests
     {
         const long businessUnitId = 44;
         var denied = new EntitlementService(
-            new FixedAccess(new TenantAccessSnapshot(
-                businessUnitId, 9, TenantStatus.Active,
-                new PlanSnapshot(2, "paid", 1, 2, 100, 5, "{}"))),
-            null!);
+            new FixedAccess(Tenant(businessUnitId, "{}")), null!);
 
         var absent = await denied.CheckFeatureAsync(businessUnitId, TypedEntitlementCatalog.Exports);
         Assert.False(absent.Allowed);
 
         var enabled = new EntitlementService(
-            new FixedAccess(new TenantAccessSnapshot(
-                businessUnitId, 9, TenantStatus.Active,
-                new PlanSnapshot(2, "paid", 1, 2, 100, 5,
-                    $"{{\"{TypedEntitlementCatalog.Exports}\":true}}"))),
-            null!);
+            new FixedAccess(Tenant(businessUnitId,
+                $"{{\"{TypedEntitlementCatalog.Exports}\":true}}")), null!);
         Assert.True((await enabled.CheckFeatureAsync(
             businessUnitId, TypedEntitlementCatalog.Exports)).Allowed);
 
@@ -43,6 +37,83 @@ public sealed class TypedEntitlementCatalogTests
         Assert.False((await legacy.CheckFeatureAsync(
             businessUnitId, TypedEntitlementCatalog.Exports)).Allowed);
     }
+
+    /// <summary>
+    /// 20260818013530 moved module access off the plan and onto the customer. These four assertions
+    /// are the whole reason it exists: two tenants on the SAME plan must be able to differ, and the
+    /// plan must stop being able to answer for either of them.
+    /// </summary>
+    [Fact]
+    public async Task Two_tenants_on_the_same_plan_can_hold_different_modules()
+    {
+        // One plan object, shared. Before this change it was the only thing consulted, so these
+        // two tenants could not have differed without one of them being moved to another plan —
+        // which would also have moved their seats, their document quota and their price.
+        var shared = new PlanSnapshot(2, "growth", 1, 2, 100, 5,
+            $"{{\"{TypedEntitlementCatalog.Orders}\":true}}");
+
+        var granted = new EntitlementService(new FixedAccess(
+            new TenantAccessSnapshot(10, 1, TenantStatus.Active, shared)
+            {
+                Entitlements = $"{{\"{TypedEntitlementCatalog.Orders}\":true}}"
+            }), null!);
+        var revoked = new EntitlementService(new FixedAccess(
+            new TenantAccessSnapshot(11, 2, TenantStatus.Active, shared)
+            {
+                Entitlements = $"{{\"{TypedEntitlementCatalog.Orders}\":false}}"
+            }), null!);
+
+        Assert.True((await granted.CheckFeatureAsync(10, TypedEntitlementCatalog.Orders)).Allowed);
+
+        var denial = await revoked.CheckFeatureAsync(11, TypedEntitlementCatalog.Orders);
+        Assert.False(denial.Allowed);
+        // The message must send the operator to the screen that actually owns the decision.
+        Assert.Contains("per customer", denial.Reason);
+    }
+
+    [Fact]
+    public async Task Plan_features_no_longer_grant_anything_on_their_own()
+    {
+        // The plan says yes and the tenant says nothing. Under the old resolution this permitted;
+        // it must now deny, or a plan edit would silently re-open a module somebody revoked.
+        var service = new EntitlementService(new FixedAccess(
+            new TenantAccessSnapshot(12, 3, TenantStatus.Active,
+                new PlanSnapshot(2, "growth", 1, 2, 100, 5,
+                    $"{{\"{TypedEntitlementCatalog.Quotes}\":true}}"))), null!);
+
+        Assert.False((await service.CheckFeatureAsync(12, TypedEntitlementCatalog.Quotes)).Allowed);
+    }
+
+    [Fact]
+    public async Task A_tenant_with_no_plan_is_denied_by_its_grant_not_by_its_billing_gap()
+    {
+        // A missing plan used to deny every feature by itself. It no longer speaks to scope at
+        // all — but a plan-less tenant still ends up denied, because the backfill left it on {}.
+        // The distinction matters for the message: "nothing was granted" is actionable and
+        // "no plan is assigned" sent operators to the wrong screen.
+        var service = new EntitlementService(new FixedAccess(
+            new TenantAccessSnapshot(13, 4, TenantStatus.Active, null)), null!);
+
+        var denial = await service.CheckFeatureAsync(13, TypedEntitlementCatalog.Rfq);
+        Assert.False(denial.Allowed);
+        Assert.DoesNotContain("no assigned plan", denial.Reason);
+
+        // ...and granting it works with no plan at all, because access and capacity are now
+        // separate decisions.
+        var withGrant = new EntitlementService(new FixedAccess(
+            new TenantAccessSnapshot(13, 4, TenantStatus.Active, null)
+            {
+                Entitlements = $"{{\"{TypedEntitlementCatalog.Rfq}\":true}}"
+            }), null!);
+        Assert.True((await withGrant.CheckFeatureAsync(13, TypedEntitlementCatalog.Rfq)).Allowed);
+    }
+
+    /// <summary>A tenant snapshot carrying one enabled key and an otherwise ordinary plan.</summary>
+    private static TenantAccessSnapshot Tenant(long businessUnitId, string entitlements)
+        => new(businessUnitId, 9, TenantStatus.Active, new PlanSnapshot(2, "paid", 1, 2, 100, 5, "{}"))
+        {
+            Entitlements = entitlements
+        };
 
     [Theory]
     [InlineData(TypedEntitlementCatalog.Api)]
@@ -54,8 +125,12 @@ public sealed class TypedEntitlementCatalogTests
     {
         var service = new EntitlementService(
             new FixedAccess(new TenantAccessSnapshot(
-                44, 9, TenantStatus.Active,
-                new PlanSnapshot(2, "future", 1, 2, 100, 5, $"{{\"{key}\":true}}"))),
+                44, 9, TenantStatus.Active, new PlanSnapshot(2, "future", 1, 2, 100, 5, "{}"))
+            {
+                // Granted on the TENANT and still refused: the runtime boundary check runs before
+                // the grant is even read, so an operator cannot sell a capability into existence.
+                Entitlements = $"{{\"{key}\":true}}"
+            }),
             null!);
 
         var decision = await service.CheckFeatureAsync(44, key);
