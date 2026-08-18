@@ -122,6 +122,24 @@ public sealed record TenantAccessSnapshot(
     public TenantBillingMode? BillingMode { get; init; }
 
     /// <summary>
+    /// The modules and capabilities THIS tenant has been granted, as the closed-catalogue JSON
+    /// object stored on <c>Tenants."Entitlements"</c>. The authority for every typed feature
+    /// check — <see cref="Plan"/> now answers only for capacity (seats, documents, concurrency)
+    /// and scheduling weight.
+    ///
+    /// <para>Init-only with a store-shaped default rather than positional, so the nine existing
+    /// snapshot constructions — including <see cref="Unresolved"/> and the legacy-BU one, neither
+    /// of which has a tenant row to read it from — keep compiling and keep meaning what they
+    /// meant.</para>
+    ///
+    /// <para><b>The default denies, and that is the point.</b> <c>{}</c> parses cleanly and
+    /// enables nothing, so any path that produces a snapshot without reading the column grants no
+    /// module rather than every module. An access grant is the one field where the safe default
+    /// and the convenient default are not the same, and this picks the safe one.</para>
+    /// </summary>
+    public string Entitlements { get; init; } = "{}";
+
+    /// <summary>
     /// When the tenant row was created. Carried because the grace window for a plan-less
     /// tenant is measured from provisioning: a tenant created a minute ago is mid-setup,
     /// a tenant created last quarter with no plan is revenue on the floor.

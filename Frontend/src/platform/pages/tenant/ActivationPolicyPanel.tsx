@@ -78,6 +78,7 @@ const SURFACE_TAB: Record<Exclude<ActivationRemediationSurface, 'platform.plans'
   'tenant.profile-access': 'profile-access',
   'tenant.commercial': 'commercial',
   'tenant.data-storage': 'data-storage',
+  'tenant.modules': 'entitlements',
 };
 
 /**

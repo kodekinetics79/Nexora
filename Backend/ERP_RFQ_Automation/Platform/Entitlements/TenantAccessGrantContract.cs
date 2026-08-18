@@ -58,6 +58,10 @@ public static class TenantAccessGrantContract
         new("platform.\"Tenants\"", "PrimaryBusinessUnitId"),
         new("platform.\"Tenants\"", "Status"),
         new("platform.\"Tenants\"", "PlanId"),
+        // Granted by 20260818013530, in the same migration that creates it — the whole point of
+        // this contract is that a projected column and its grant must never ship apart again.
+        // This is the column that decides which modules a customer can reach.
+        new("platform.\"Tenants\"", "Entitlements"),
 
         // platform."Plans" — every field of PlanSnapshot. Name is deliberately NOT here and
         // deliberately not projected: it is not granted to the tenant plane, which is why a plan

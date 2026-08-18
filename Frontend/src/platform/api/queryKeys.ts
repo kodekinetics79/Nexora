@@ -19,6 +19,9 @@ export const platformKeys = {
   // a mutation on one user invalidates the roster it came from and nothing wider.
   tenantUsers: (id: string) => [...platformKeys.all, 'tenant', id, 'users'] as const,
   tenantRoles: (id: string) => [...platformKeys.all, 'tenant', id, 'roles'] as const,
+  // Nested under the tenant so saving a module grant invalidates that tenant's screens and
+  // nothing wider — and so it is NOT confused with plans(), which is now a different question.
+  tenantModules: (id: string) => [...platformKeys.all, 'tenant', id, 'modules'] as const,
   queue: () => [...platformKeys.all, 'queue'] as const,
   jobs: (filter?: unknown) => [...platformKeys.all, 'jobs', filter ?? null] as const,
   plans: () => [...platformKeys.all, 'plans'] as const,

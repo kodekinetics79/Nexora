@@ -18,7 +18,7 @@ import AuditTab from './tenant/AuditTab';
 import LifecycleTab from './tenant/LifecycleTab';
 import ActivationPolicyPanel from './tenant/ActivationPolicyPanel';
 import AiGovernanceTab from './tenant/AiGovernanceTab';
-import EntitlementsTab from './tenant/EntitlementsTab';
+import ModulesTab from './tenant/ModulesTab';
 import DataStorageTab from './tenant/DataStorageTab';
 import ProfileAccessTab from './tenant/ProfileAccessTab';
 import ProvisioningDiagnosticsTab from './tenant/ProvisioningDiagnosticsTab';
@@ -47,7 +47,10 @@ const TABS = [
   // how "Provisioning failed." stayed the whole story for as long as it did.
   { key: 'provisioning', label: 'Provisioning' },
   { key: 'commercial', label: 'Commercial' },
-  { key: 'entitlements', label: 'Entitlements' },
+  // Named "Modules" rather than "Entitlements" because that is the noun an operator uses when
+  // they arrive here, and because the screen is now a control rather than a report. The URL key
+  // stays `entitlements` so links already pasted into tickets keep opening the right tab.
+  { key: 'entitlements', label: 'Modules' },
   { key: 'support', label: 'Support' },
   { key: 'audit', label: 'Audit' },
   { key: 'lifecycle', label: 'Lifecycle' },
@@ -177,7 +180,7 @@ export default function TenantDetailPage() {
       {tab === 'users' && permissions.canAdministerTenants && <UsersTab tenant={tenant} />}
       {tab === 'provisioning' && <ProvisioningDiagnosticsTab tenant={tenant} />}
       {tab === 'commercial' && <CommercialTab tenant={tenant} />}
-      {tab === 'entitlements' && <EntitlementsTab tenant={tenant} />}
+      {tab === 'entitlements' && <ModulesTab tenant={tenant} />}
       {tab === 'support' && permissions.canAdministerTenants && <SupportTab tenant={tenant} />}
       {tab === 'audit' && <AuditTab tenant={tenant} />}
       {tab === 'lifecycle' && <LifecycleTab tenant={tenant} />}

@@ -168,14 +168,21 @@ public sealed class EntitlementService : IEntitlementService
             return EntitlementDecision.Deny(0, 0,
                 $"Entitlement '{entitlement}' is unavailable because no governed platform tenant owns this business unit.");
 
-        if (access.Plan is null)
-            return EntitlementDecision.Deny(0, 0,
-                $"Entitlement '{entitlement}' is unavailable because this tenant has no assigned plan.");
-
-        return TypedEntitlementCatalog.IsEnabled(access.Plan.Features, entitlement)
+        // Read from the TENANT, not from its plan. Module access is a decision about this
+        // customer; a plan decides capacity and price. The absence of a plan therefore no longer
+        // denies here — it never told us anything about scope, and using it as a proxy is what
+        // forced an operator to move a customer's seats and price in order to change what that
+        // customer could open. A tenant with no plan still denies in practice, because the
+        // 20260818013530 backfill left it on {}; the difference is that it now denies because
+        // nothing was granted rather than because a commercial field was blank.
+        //
+        // Quota checks above are unaffected: seats, documents and concurrency still come from the
+        // plan, and still fall back to UnplannedTenantAllowance when there is none.
+        return TypedEntitlementCatalog.IsEnabled(access.Entitlements, entitlement)
             ? EntitlementDecision.Permit(1, 1)
             : EntitlementDecision.Deny(0, 0,
-                $"The '{access.Plan.Code}' plan does not enable entitlement '{entitlement}'.");
+                $"This tenant is not granted '{entitlement}'. Module and capability access is set "
+                + "per customer on the tenant's Modules screen in the platform console.");
     }
 
     public async Task<double> GetQueueWeightAsync(long businessUnitId, double fallbackWeight, CancellationToken ct = default)

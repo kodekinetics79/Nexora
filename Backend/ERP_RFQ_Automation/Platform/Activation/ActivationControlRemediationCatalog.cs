@@ -14,6 +14,7 @@ public static class ActivationRemediationSurfaces
     public const string TenantProfileAccess = "tenant.profile-access";
     public const string TenantCommercial = "tenant.commercial";
     public const string TenantDataStorage = "tenant.data-storage";
+    public const string TenantModules = "tenant.modules";
     public const string PlatformPlans = "platform.plans";
 }
 
@@ -55,6 +56,9 @@ public static class ActivationRemediationActions
 
     /// <summary>POST|PUT /api/platform/plans — the plan catalogue, not this tenant.</summary>
     public const string PlatformPlanEntitlements = "platform.plan-entitlements";
+
+    /// <summary>PUT /api/platform/tenants/{id}/modules — this customer's own module grants.</summary>
+    public const string TenantModuleGrants = "tenant.module-grants";
 }
 
 /// <summary>
@@ -181,14 +185,20 @@ public static class ActivationControlRemediationCatalog
             + "of the invoicing details, and the billing start date is part of the commercial terms. Both "
             + "are on Commercial and both carry the Billing policy."),
 
+        // Points at the tenant, not the plan catalogue, because 20260818013530 moved module access
+        // onto the customer. The old remedy sent the operator to a screen whose every edit moved
+        // every tenant on that plan — which is exactly the blast radius this control usually does
+        // NOT want. The plan half of the control (unbounded seat/document/extraction limits) is
+        // still a plan fix and the hint says so, rather than pretending one screen owns both.
         ["entitlements.typed-hard-limits"] = Remedy(
-            ActivationRemediationSurfaces.PlatformPlans,
-            ActivationRemediationActions.PlatformPlanEntitlements,
-            "Fix the plan's entitlements",
-            ActivationRemediationAuthorities.Owner,
-            "The unbounded limits belong to the PLAN, not to this tenant, so the fix is on the plan "
-            + "catalogue and it moves every tenant on that plan. Assigning a different, already-bounded "
-            + "plan is the other option and is the safer one when only this customer is stuck."),
+            ActivationRemediationSurfaces.TenantModules,
+            ActivationRemediationActions.TenantModuleGrants,
+            "Set this customer's modules",
+            ActivationRemediationAuthorities.Billing,
+            "Every module and capability has to be explicitly on or off for this customer before it "
+            + "can be activated — an undecided one is not the same as a denied one. If the control "
+            + "still blocks after that, the remaining half is the PLAN's seat, document or extraction "
+            + "limit being unbounded, and fixing that on the plan moves every tenant on it."),
 
         ["security.privileged-mfa-policy"] = Remedy(
             ActivationRemediationSurfaces.TenantActivation,

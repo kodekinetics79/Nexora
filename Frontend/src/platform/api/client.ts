@@ -109,6 +109,7 @@ import type {
   RecordActivationControlEvidenceInput,
   RecordTenantDataRecoveryEvidenceInput,
   UpsertPlanInput,
+  TenantModules,
 } from '../types';
 
 export interface AuditQuery {
@@ -240,6 +241,20 @@ export interface PlatformApi {
   archiveTenant(id: string, reason: string): Promise<Tenant>;
   restoreTenant(id: string, reason: string): Promise<Tenant>;
   changeTenantPlan(id: string, planId: string, reason?: string): Promise<Tenant>;
+  /**
+   * What THIS customer can open. Readable by every platform role; writable only under
+   * `Platform.Billing`, the same authority that assigns a plan.
+   */
+  getTenantModules(id: string): Promise<TenantModules>;
+  /**
+   * Replace the whole grant. Wholesale rather than a patch because "off" and "undecided" are
+   * different states to the activation policy, and a partial write cannot tell them apart.
+   */
+  updateTenantModules(
+    id: string,
+    modules: Record<string, boolean>,
+    reason: string,
+  ): Promise<TenantModules>;
   impersonateTenant(id: string, reason: string): Promise<ImpersonationTicket>;
   listImpersonationSessions(): Promise<ImpersonationSession[]>;
   revokeImpersonation(jti: string): Promise<ImpersonationSession>;
@@ -1199,6 +1214,13 @@ const httpPlatformApi: PlatformApi = {
       planId: Number(planId),
       reason,
     })).data),
+  getTenantModules: async (id) =>
+    (await platformHttp.get<TenantModules>(`/api/platform/tenants/${id}/modules`)).data,
+  updateTenantModules: async (id, modules, reason) =>
+    (await platformHttp.put<TenantModules>(`/api/platform/tenants/${id}/modules`, {
+      modules,
+      reason,
+    })).data,
   impersonateTenant: async (id, reason) => {
     const response = (await platformHttp.post<BackendImpersonation>(`/api/platform/tenants/${id}/impersonate`, { reason })).data;
     return {

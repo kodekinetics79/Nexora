@@ -790,6 +790,12 @@ public partial class ErpRfqAutomationContext
             e.Property(x => x.DeploymentProfileReason).HasMaxLength(1000);
             e.Property(x => x.DeploymentProfileApprovedBy).HasMaxLength(320);
 
+            // Per-tenant module/capability grants. jsonb with a store default of {} and NOT NULL,
+            // for the same reason DeploymentProfile defaults to Production: a row written by
+            // something that does not know about this column must land on the CLOSED value. An
+            // empty object denies every key, which is the safe direction for an access grant.
+            e.Property(x => x.Entitlements).HasColumnType("jsonb").HasDefaultValue("{}").IsRequired();
+
             // No navigation to RateCard: the billing aggregate sits above the platform model in
             // the dependency order, so the pin is carried as a plain id and resolved by
             // BillingStatementService. Indexed because the billing run sweeps tenants by card.
