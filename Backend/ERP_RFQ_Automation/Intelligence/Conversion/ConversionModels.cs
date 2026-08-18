@@ -86,6 +86,23 @@ public sealed class ConvertRequest
     public string? WarningAcknowledgementReason { get; set; }
 
     /// <summary>
+    /// The currency this inquiry is quoted in, applied to every converted line that does not
+    /// state one and is not given a per-line override.
+    ///
+    /// <para>Conversion requires a currency on every line, and many real bid lists never state
+    /// one — an Aramco materials list names quantities and units and says nothing about money.
+    /// Before this existed the only writer of a line's currency was the extraction-review path,
+    /// which closes the moment the figures are approved. Approval is also what makes a lead
+    /// QUALIFIED, and only a QUALIFIED lead may convert. So an approved bid with no stated
+    /// currency could never become an RFQ, and nothing on the screen said why.</para>
+    ///
+    /// <para>It is stated here rather than inferred from the customer's country, because a
+    /// Saudi buyer routinely quotes in USD and a guess that is wrong by an exchange rate is
+    /// worse than a question. One value the operator fills in, recorded on the RFQ.</para>
+    /// </summary>
+    public string? Currency { get; set; }
+
+    /// <summary>
     /// Acknowledges every soft-flagged line in one action, without ticking each one.
     ///
     /// <para>A real SEC bid list runs to 84 lines and it is normal for most of them to raise
@@ -130,4 +147,12 @@ public sealed class ConvertRequestItem
     /// <summary>Per-line explanation. Falls back to
     /// <see cref="ConvertRequest.WarningAcknowledgementReason"/> when omitted.</summary>
     public string? AcknowledgementReason { get; set; }
+
+    /// <summary>
+    /// Corrected currency for this line; falls back to <see cref="ConvertRequest.Currency"/>,
+    /// then to the lead line's own value. Present for the same reason Quantity and
+    /// UnitOfMeasure are: the operator is looking at the line when the blocker appears, so the
+    /// correction belongs where the complaint is raised.
+    /// </summary>
+    public string? Currency { get; set; }
 }

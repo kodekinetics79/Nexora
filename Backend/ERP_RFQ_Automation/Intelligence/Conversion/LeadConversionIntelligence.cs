@@ -181,7 +181,7 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
         // Header + per-line requirements, evaluated over the lines actually being converted with
         // the caller's corrections applied. Runs AFTER `included`/`choices` exist, because
         // checking the lead's raw stored lines ignored both exclusions and corrections (A-9).
-        var blockers = FindConversionBlockers(lead, included, choices);
+        var blockers = FindConversionBlockers(lead, included, choices, request);
         if (blockers.Count > 0)
             throw new InvalidOperationException($"Review these required inquiry fields before creating the RFQ: {string.Join("; ", blockers)}.");
 
@@ -291,7 +291,7 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
                     ProductShortDescription = li.ProductShortDescription,
                     Alternative = li.Alternative,
                     BuyerName = li.BuyerName,
-                    Currency = li.Currency,
+                    Currency = EffectiveCurrency(li, choice, request),
                     UnitOfMeasure = uomText,
                     UomId = uomId,
                     UnitPrice = li.UnitPrice,
@@ -360,10 +360,30 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
     /// <para>Nothing is relaxed. An included line must still carry a description, a positive
     /// quantity, a unit and a currency — the values are simply the ones being converted.</para>
     /// </summary>
+    /// <summary>
+    /// The currency this line will actually be written with: the caller's per-line correction,
+    /// then the conversion's header currency, then whatever the document stated.
+    ///
+    /// <para>Resolved in ONE place and used by both the blocker check and the RFQ line, so the
+    /// conversion cannot refuse a value it would then have written, or write one it never
+    /// checked. Trimmed and upper-cased to match the three-letter form the review path already
+    /// validates, so the same line does not end up as "usd" here and "USD" there.</para>
+    /// </summary>
+    private static string? EffectiveCurrency(
+        LeadItem line, ConvertRequestItem? choice, ConvertRequest request)
+    {
+        var value = Pick(choice?.Currency) ?? Pick(request?.Currency) ?? Pick(line.Currency);
+        return value?.ToUpperInvariant();
+
+        static string? Pick(string? candidate) =>
+            string.IsNullOrWhiteSpace(candidate) ? null : candidate.Trim();
+    }
+
     private static List<string> FindConversionBlockers(
         Lead lead,
         IReadOnlyList<LeadItem> includedLines,
-        IReadOnlyDictionary<long, ConvertRequestItem> choices)
+        IReadOnlyDictionary<long, ConvertRequestItem> choices,
+        ConvertRequest request)
     {
         var blockers = new List<string>();
         if (!lead.CustomerId.HasValue) blockers.Add("customer");
@@ -394,7 +414,14 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
             // line would have converted with nothing in it.
             if (quantity is null or <= 0) blockers.Add($"{label} quantity");
             if (string.IsNullOrWhiteSpace(unitOfMeasure)) blockers.Add($"{label} unit");
-            if (string.IsNullOrWhiteSpace(line.Currency)) blockers.Add($"{label} currency");
+            // Currency read the STORED line only, while quantity and unit both honoured the
+            // caller's correction. That asymmetry was a dead end: the sole writer of a line's
+            // currency is the extraction-review path, which closes once the figures are
+            // approved — and approving is what makes the lead QUALIFIED, which conversion
+            // requires. An approved bid that never stated a currency, which is every Aramco
+            // materials list, could therefore never be converted and never be corrected.
+            if (string.IsNullOrWhiteSpace(EffectiveCurrency(line, choice, request)))
+                blockers.Add($"{label} currency");
         }
 
         return blockers;
