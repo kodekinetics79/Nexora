@@ -85,7 +85,8 @@ public sealed class CommercialLineResolutionApplicationService(
             var prior = latest.FirstOrDefault(x => x.LeadLineId == line.Id);
             if (!forceRefresh && prior is not null && prior.ResourceLimit >= resourceLimit) continue;
             var snapshot = ParseSnapshot(line.SnapshotJson);
-            var requestedPart = First(snapshot.Part, snapshot.MaterialCode, snapshot.Description, $"LINE-{line.LineNumber}");
+            var requestedPart = PartKey(
+                First(snapshot.Part, snapshot.MaterialCode, snapshot.Description, $"LINE-{line.LineNumber}"));
             var quantity = snapshot.Quantity > 0m ? snapshot.Quantity : 1m;
             if (IsServiceLine(snapshot))
             {
@@ -290,6 +291,39 @@ public sealed class CommercialLineResolutionApplicationService(
             Text("description", "ProductShortDescription", "productShortDescription", "ItemText", "itemText"),
             Number("quantity", "Quantity"));
     }
+
+    /// <summary>
+    /// The width of <c>LeadLineCommercialResolution.RequestedPartNumber</c>, which is also the
+    /// width of the related-resource <c>Value</c> the same string is written to. Kept beside the
+    /// only code that produces the value so the two cannot drift.
+    /// </summary>
+    private const int RequestedPartNumberMaxLength = 200;
+
+    /// <summary>
+    /// Bounds the line's identifying key to the column that stores it.
+    ///
+    /// <para>The key falls back through part number, then material code, then DESCRIPTION. On a
+    /// bid list that states neither code — every line of the Siemens turbine spares bid on lead
+    /// 466 — the description is what lands here, and those run to several hundred characters:</para>
+    /// <code>
+    /// KEY:SHAFT,SQUARE,10 MM X 10 MM LG,X22CRMOV12-1 ADDITIONAL DATA: ITEM ADDITIONAL
+    /// DESCRIPTION #MBRTM10A00-A01,0002,SYSTEM PARENT EQUIPMENT INFORMATION FOR SIEMENS …
+    /// </code>
+    /// <para>Postgres refused the insert with <c>22001: value too long for type character
+    /// varying(200)</c>, EF surfaced <c>DbUpdateException</c> — which the controller does not map,
+    /// so it escaped as a 500 — and the lead screen said "An unexpected error occurred." Supplier
+    /// resolution was unavailable for the whole lead, and the richer the bid the more certain the
+    /// failure.</para>
+    ///
+    /// <para>Truncating is right here because this is a LOOKUP KEY, not a record of the document:
+    /// the untouched description is already persisted on the line snapshot and is what a reviewer
+    /// reads. A key trimmed at a bounded length still matches products and suppliers; a 500 finds
+    /// nothing at all.</para>
+    /// </summary>
+    private static string PartKey(string value) =>
+        value.Length <= RequestedPartNumberMaxLength
+            ? value
+            : value[..RequestedPartNumberMaxLength].TrimEnd();
 
     private static string First(params string?[] values) =>
         values.First(x => !string.IsNullOrWhiteSpace(x))!.Trim();

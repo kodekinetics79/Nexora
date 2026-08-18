@@ -187,6 +187,43 @@ public sealed class CommercialLineResolutionApplicationServiceTests
             new LeadLineCommercialResolutionService(new FulfilmentRouteService(), local));
     }
 
+    [Fact]
+    public async Task A_line_identified_only_by_a_long_description_still_resolves()
+    {
+        // PRODUCTION, LEAD 466 — the Siemens turbine spares bid. Not one of its 21 lines states a
+        // part number or a material code, so the identifying key falls through to the DESCRIPTION,
+        // and those descriptions run to several hundred characters. RequestedPartNumber is
+        // varchar(200), so Postgres refused the insert with
+        //
+        //   22001: value too long for type character varying(200)
+        //
+        // EF raised DbUpdateException, which ResolveLead does not map, so it escaped as a 500 and
+        // the screen said "An unexpected error occurred."
+        //
+        // The richer the bid, the more certain the failure — which is exactly backwards.
+        var description = "KEY:SHAFT,SQUARE,10 MM X 10 MM LG,X22CRMOV12-1 ADDITIONAL DATA: ITEM "
+            + "ADDITIONAL DESCRIPTION #MBRTM10A00-A01,0002,SYSTEM PARENT EQUIPMENT INFORMATION FOR "
+            + "SIEMENS GAS TURBINE MODEL # V94.2 (SGT5-2000E); SIEMENS (LM/FH): FYNMPGDATE, "
+            + "STANDARD/SPECIFICATION: ASTM, ADDITIONAL DATA: ITEM ADDITIONAL DESCRIPTION";
+        Assert.True(description.Length > 200, "the fixture must exceed the column width to be a test");
+
+        using var database = new TestDb();
+        await SeedRevisionWithSnapshotAsync(database, 1, 483,
+            JsonSerializer.Serialize(new { description, quantity = 176m }));
+
+        await using var context = database.ContextFor(null);
+        var service = Service(context, ProductResolutionDecisionState.Unresolved, 0);
+
+        var row = Assert.Single(await service.ResolveLeadAsync(1, 483, 10));
+
+        Assert.Equal(176m, row.RequestedQuantity);
+        Assert.True(row.RequestedPartNumber.Length <= 200);
+        // Truncation is acceptable ONLY because this is a lookup key — the untouched description
+        // stays on the line snapshot, which is what a reviewer actually reads. So the key must
+        // still begin with the real identifying text rather than being blanked or hashed.
+        Assert.StartsWith("KEY:SHAFT,SQUARE,10 MM X 10 MM LG", row.RequestedPartNumber);
+    }
+
     /// <summary>
     /// Seeds one revision line with the snapshot JSON EXACTLY as given. The typed seeder below
     /// cannot express "quantity": null, and that is precisely the shape the defect needed.
