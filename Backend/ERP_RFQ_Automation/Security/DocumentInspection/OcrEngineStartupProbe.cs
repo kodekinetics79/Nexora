@@ -176,9 +176,11 @@ public sealed class OcrEngineStartupProbe : IHostedService, IDisposable
             return new OcrEngineProbeResult(
                 OcrEngineProbeStatus.EngineUnavailable, null, languages,
                 "The Tesseract OCR engine could not be loaded in this container, so every scanned PDF "
-                + "and every image will return no text. Install the native libraries "
-                + "(libtesseract, libleptonica) in the runtime image.",
-                $"{exception.GetType().Name}: {exception.Message}");
+                + "and every image will return no text. Read the DETAIL below before installing "
+                + "anything: the packages are usually already present, and the load fails on the "
+                + "NAMES the wrapper probes for (libtesseract50.so, libleptonica-1.82.0.so, in an "
+                + "x64/ directory beside the assembly).",
+                Detail(exception));
         }
 
         try
@@ -192,13 +194,36 @@ public sealed class OcrEngineStartupProbe : IHostedService, IDisposable
                 OcrEngineProbeStatus.RasterizerUnavailable, version, languages,
                 "Tesseract loaded, but the pdfium PDF rasteriser did not. Images will OCR; SCANNED PDFs "
                 + "will not, because their pages cannot be turned into rasters to recognise.",
-                $"{exception.GetType().Name}: {exception.Message}");
+                Detail(exception));
         }
 
         return new OcrEngineProbeResult(
             OcrEngineProbeStatus.Operational, version, languages,
             $"Tesseract {version} loaded language data [{string.Join(", ", languages)}] and completed a "
             + "recognition pass; the pdfium rasteriser loaded.");
+    }
+
+    /// <summary>
+    /// The whole exception chain, because the outer one says nothing.
+    ///
+    /// <para>A native load failure surfaces as <c>TargetInvocationException</c>, whose message is
+    /// the fixed sentence "Exception has been thrown by the target of an invocation." This probe
+    /// reported exactly that and stopped, so production logged only that OCR was unavailable —
+    /// and the remedy it suggested, install the native libraries, was WRONG, because they were
+    /// already installed. Diagnosing it meant rebuilding the container by hand.</para>
+    ///
+    /// <para>The sentence that actually identifies the fault is one level down:</para>
+    /// <code>DllNotFoundException: Failed to find library "libleptonica-1.82.0.so" for platform x64.</code>
+    ///
+    /// <para>Bounded to five links so a deep chain cannot flood the log.</para>
+    /// </summary>
+    private static string Detail(Exception exception)
+    {
+        var parts = new List<string>();
+        for (var current = exception; current is not null && parts.Count < 5;
+             current = current.InnerException)
+            parts.Add($"{current.GetType().Name}: {current.Message}");
+        return string.Join(" -> ", parts);
     }
 
     private static IReadOnlyList<string> ReadLanguages(string tessDataPath)
