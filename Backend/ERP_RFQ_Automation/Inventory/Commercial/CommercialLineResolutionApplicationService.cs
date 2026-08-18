@@ -264,7 +264,24 @@ public sealed class CommercialLineResolutionApplicationService(
         decimal Number(params string[] names)
         {
             foreach (var name in names)
-                if (root.TryGetProperty(name, out var value) && value.TryGetDecimal(out var number)) return number;
+                // ValueKind IS THE GUARD. JsonElement.TryGetDecimal does not return false for an
+                // element that is not a number — it THROWS InvalidOperationException. The Try
+                // prefix covers a value that will not fit a decimal, nothing more. Text() above
+                // gets this right; this did not, and the asymmetry is the whole defect.
+                //
+                // A line whose quantity the document did not state is serialised as
+                // "quantity": null — deliberately, because the extractor is instructed to
+                // return null rather than invent a number, and a line a reviewer can correct is
+                // better than one that never existed. Reading it threw, ResolveLead mapped
+                // InvalidOperationException to 409, and the lead screen showed the raw serializer
+                // sentence "The requested operation requires an element of type 'Number', but the
+                // target element has type 'Null'." ONE unquantified line took out supplier
+                // resolution for the ENTIRE lead — observed on lead 470 in production.
+                if (root.TryGetProperty(name, out var value)
+                    && value.ValueKind == JsonValueKind.Number
+                    && value.TryGetDecimal(out var number)) return number;
+            // Zero is the honest answer for "not stated", and the caller already treats it as
+            // such: `snapshot.Quantity > 0m ? snapshot.Quantity : 1m`.
             return 0m;
         }
         return new(Text("part", "ManufacturerPartNumber", "manufacturerPartNumber"),

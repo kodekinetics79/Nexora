@@ -112,6 +112,71 @@ public sealed class CommercialLineResolutionApplicationServiceTests
         Assert.Contains("LocalDeterministicServiceClassification", row.ProductResolutionJson);
     }
 
+    [Fact]
+    public async Task A_line_whose_quantity_the_document_did_not_state_still_resolves()
+    {
+        // PRODUCTION, LEAD 470. An Aramco bid line carried no quantity, so the extractor wrote
+        // "quantity": null — exactly what it is instructed to do rather than invent a number.
+        // ParseSnapshot called JsonElement.TryGetDecimal on it, which THROWS for a non-number
+        // element instead of returning false, ResolveLead mapped that InvalidOperationException
+        // to 409, and the lead screen rendered the raw serializer sentence:
+        //
+        //   "The requested operation requires an element of type 'Number', but the target
+        //    element has type 'Null'."
+        //
+        // One unquantified line took out supplier resolution for the WHOLE lead — the step the
+        // product exists to perform.
+        using var database = new TestDb();
+        await SeedRevisionWithSnapshotAsync(database, 1, 480,
+            """{"part":"TUBING-METALLIC-316L","quantity":null}""");
+
+        await using var context = database.ContextFor(null);
+        var service = Service(context, ProductResolutionDecisionState.Unresolved, 0);
+
+        var row = Assert.Single(await service.ResolveLeadAsync(1, 480, 10));
+
+        Assert.Equal("TUBING-METALLIC-316L", row.RequestedPartNumber);
+        // "Not stated" becomes one, never zero: a quantity of zero cannot be sourced, and the
+        // caller's `> 0m ? quantity : 1m` fallback is what makes the line reviewable.
+        Assert.Equal(1m, row.RequestedQuantity);
+    }
+
+    [Theory]
+    [InlineData("null")]          // the observed case
+    [InlineData("\"200\"")]       // a quantity the sender wrote as text
+    [InlineData("true")]          // nonsense, but it must not take the lead down
+    [InlineData("[]")]
+    [InlineData("{}")]
+    public async Task No_shape_of_quantity_can_take_down_the_whole_lead(string quantityJson)
+    {
+        // The guard is on ValueKind, so it holds for every non-number shape rather than only the
+        // one that was reported. A malformed quantity is a line-level data problem; it must never
+        // become a lead-level outage.
+        using var database = new TestDb();
+        await SeedRevisionWithSnapshotAsync(database, 1, 481,
+            $$"""{"part":"VALVE-BALL-2IN","quantity":{{quantityJson}}}""");
+
+        await using var context = database.ContextFor(null);
+        var service = Service(context, ProductResolutionDecisionState.Unresolved, 0);
+
+        var row = Assert.Single(await service.ResolveLeadAsync(1, 481, 10));
+        Assert.Equal(1m, row.RequestedQuantity);
+    }
+
+    [Fact]
+    public async Task A_real_quantity_is_still_read()
+    {
+        // The control. Guarding the read must not stop it working.
+        using var database = new TestDb();
+        await SeedRevisionWithSnapshotAsync(database, 1, 482,
+            """{"part":"CABLE-TRAY-300MM","quantity":40}""");
+
+        await using var context = database.ContextFor(null);
+        var service = Service(context, ProductResolutionDecisionState.Unresolved, 0);
+
+        Assert.Equal(40m, Assert.Single(await service.ResolveLeadAsync(1, 482, 10)).RequestedQuantity);
+    }
+
     private static CommercialLineResolutionApplicationService Service(
         ERP_RFQ_Automation.Models.ErpRfqAutomationContext context,
         ProductResolutionDecisionState state, long candidateId)
@@ -120,6 +185,35 @@ public sealed class CommercialLineResolutionApplicationServiceTests
         var local = new LocalRelatedResourceSearch(new EmptyResourceRepository());
         return new CommercialLineResolutionApplicationService(context, product,
             new LeadLineCommercialResolutionService(new FulfilmentRouteService(), local));
+    }
+
+    /// <summary>
+    /// Seeds one revision line with the snapshot JSON EXACTLY as given. The typed seeder below
+    /// cannot express "quantity": null, and that is precisely the shape the defect needed.
+    /// </summary>
+    private static async Task SeedRevisionWithSnapshotAsync(
+        TestDb database, long tenant, long leadId, string snapshotJson)
+    {
+        await using var context = database.ContextFor(null);
+        var lead = Seed.Lead(context, leadId, tenant);
+        var batch = new LeadIngestionBatch { Id = Guid.NewGuid(), BusinessUnitId = tenant,
+            SourceChannel = "Test", CreatedBy = "test", CreatedAtUtc = DateTimeOffset.UtcNow,
+            UpdatedAtUtc = DateTimeOffset.UtcNow };
+        var occurrence = new LeadIngestionOccurrence { BusinessUnitId = tenant, Batch = batch,
+            SourceChannel = "Test", IdempotencyKey = $"occurrence-{leadId}",
+            LogicalInquiryFingerprint = new string('a', 64), Classification = LeadOccurrenceClassification.New,
+            ProcessingPath = LeadProcessingPath.Deterministic, IngestedAtUtc = DateTimeOffset.UtcNow,
+            CreatedAtUtc = DateTimeOffset.UtcNow, ActorId = "test", CorrelationId = $"test-{leadId}" };
+        var revision = new LeadRevision { BusinessUnitId = tenant, Lead = lead, RevisionNumber = 1,
+            EstablishedByOccurrence = occurrence, LogicalInquiryFingerprint = new string('b', 64),
+            SnapshotJson = "{}", CreatedAtUtc = DateTimeOffset.UtcNow, CreatedBy = "test",
+            ProcessingPath = LeadProcessingPath.Deterministic };
+        revision.Items.Add(new LeadItemRevision { BusinessUnitId = tenant, LineNumber = 1,
+            LineFingerprint = new string('c', 64), SnapshotJson = snapshotJson });
+        context.Add(revision);
+        await context.SaveChangesAsync();
+        lead.CurrentRevisionId = revision.Id; lead.CurrentRevisionNumber = 1;
+        await context.SaveChangesAsync();
     }
 
     private static async Task SeedRevisionAsync(TestDb database, long tenant, long leadId, string part,
