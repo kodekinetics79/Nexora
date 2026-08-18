@@ -370,7 +370,49 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         if (input.IsStructured && input.StructuredRows is { Count: > 0 })
             return ExtractStructuredAsync(input.StructuredRows, input.BusinessUnitId, input.SourceDocumentName, ct,
                 input.DocumentNarrative);
+
+        // ---- TEMPLATE PATH: a document we can read ourselves costs nothing to read. --------
+        //
+        // Tried BEFORE the model, because the model is the expensive answer to a question a
+        // known layout has already answered. A customer's own bidding system emits the same
+        // shape every time; paying per token to rediscover it on every document is the cost
+        // structure this exists to remove — and it removes it for the LARGEST documents, which
+        // is where per-token pricing hurts most.
+        //
+        // A refusal here is a routing decision, not a failure: the document falls through and
+        // is read by the model exactly as before. Nothing is lost by trying.
+        if (Templates.AramcoBidListExtraction.TryExtract(
+                DocumentTextOf(input), input.SourceDocumentName, out var templateRejection) is { } templated)
+        {
+            _log.LogInformation(
+                "{Document} was read from the Aramco bid list template: {Items} line item(s), no model call.",
+                input.SourceDocumentName, templated.ExtractedItemCount);
+            return Task.FromResult(templated);
+        }
+
+        if (templateRejection is not null)
+        {
+            // Loud on purpose. A template that starts refusing is either a layout change at the
+            // sender or a defect here, and both are worth knowing about BEFORE the bill arrives.
+            _log.LogWarning(
+                "{Document} carries the Aramco masthead but was refused by the template ({Reason}); "
+                + "falling through to the model.", input.SourceDocumentName, templateRejection);
+        }
+
         return ExtractUnstructuredAsync(input, ct);
+    }
+
+    /// <summary>
+    /// Reassembles the document text the readers split into header and item regions. The
+    /// template parser works on the document as printed, not on the pipeline's view of it.
+    /// </summary>
+    private static string DocumentTextOf(DocumentExtractionInput input)
+    {
+        if (input.LineItemRegions.Count == 0) return input.HeaderText;
+        var builder = new StringBuilder(input.HeaderText.Length + 64 * input.LineItemRegions.Count);
+        if (!string.IsNullOrEmpty(input.HeaderText)) builder.Append(input.HeaderText).Append('\n');
+        foreach (var region in input.LineItemRegions) builder.Append(region).Append('\n');
+        return builder.ToString();
     }
 
     public async Task<ChunkedExtractionOutcome> ExtractUnstructuredAsync(DocumentExtractionInput input, CancellationToken ct = default)
