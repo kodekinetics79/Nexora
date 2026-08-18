@@ -482,7 +482,7 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
 
         var blocked = new List<string>();
         var unacknowledged = new List<string>();
-        var acknowledged = new List<string>();
+        var acknowledged = new List<(string Line, string Attention, string Reason)>();
         var batchReason = request.WarningAcknowledgementReason?.Trim();
 
         foreach (var li in included)
@@ -529,7 +529,7 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
                     $"Acknowledging the warning on {Label(li)} requires a reason of at least " +
                     $"{MinimumAcknowledgementReasonLength} characters. An acknowledgement without an explanation is not an audit trail.");
 
-            acknowledged.Add($"{Label(li)} ({r.AttentionReason}) — {reason}");
+            acknowledged.Add((Label(li), r.AttentionReason ?? "warning", reason!));
         }
 
         if (blocked.Count > 0)
@@ -542,7 +542,74 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
                 "These lines carry extraction warnings that must be corrected or explicitly acknowledged with a reason before " +
                 $"the RFQ is created: {string.Join("; ", unacknowledged)}.");
 
-        return acknowledged.Count > 0 ? string.Join(" | ", acknowledged) : null;
+        return SummariseAcknowledgements(acknowledged);
+    }
+
+    /// <summary>
+    /// The lifecycle event's ReasonNotes column holds 1000 characters, and it is the ONLY place
+    /// a converted-over-warning acknowledgement is recorded — nothing is written to the RFQ
+    /// line — so this must stay inside the limit without losing what a reader needs.
+    ///
+    /// <para><b>Why it overflowed.</b> The summary listed every acknowledged line verbatim and
+    /// joined them. At roughly ninety characters a line that passes 1000 at about a dozen lines,
+    /// and LifecycleApplicationService then threw LifecycleValidationException, which the
+    /// conversion did not map — so it escaped as a 500 reading "The lead could not be converted
+    /// to an RFQ." Observed on lead 466: 21 acknowledged lines, conversion impossible. The
+    /// bigger the bid, the more certain the failure, which is exactly backwards.</para>
+    ///
+    /// <para><b>Why grouping rather than truncating.</b> Acknowledgements repeat: one batch
+    /// reason usually covers every line, so the old note said the same sentence twenty-one
+    /// times. Collapsing identical (attention, reason) pairs keeps every fact a reader
+    /// needs — how many lines, which lines, why they were flagged, what the operator said —
+    /// and costs a fraction of the space. Truncation would have dropped audit evidence
+    /// silently; this drops only repetition.</para>
+    ///
+    /// <para>If even the grouped form is too long, the remainder is stated as a count rather
+    /// than cut mid-sentence, so the note is never a fragment.</para>
+    /// </summary>
+    private const int MaximumAcknowledgementNoteLength = 1000;
+
+    private static string? SummariseAcknowledgements(
+        IReadOnlyList<(string Line, string Attention, string Reason)> acknowledged)
+    {
+        if (acknowledged.Count == 0) return null;
+
+        var groups = acknowledged
+            .GroupBy(a => (a.Attention, a.Reason))
+            .Select(g => new
+            {
+                g.Key.Attention,
+                g.Key.Reason,
+                Lines = g.Select(x => x.Line).ToList(),
+            })
+            .OrderByDescending(g => g.Lines.Count)
+            .ToList();
+
+        var parts = new List<string>();
+        var omitted = 0;
+        foreach (var group in groups)
+        {
+            // Name the lines while they fit; past a handful the count is the useful fact and
+            // the identifiers are noise.
+            var named = group.Lines.Count <= 6
+                ? string.Join(", ", group.Lines)
+                : $"{string.Join(", ", group.Lines.Take(6))} +{group.Lines.Count - 6} more";
+            var part = $"{group.Lines.Count} line(s) [{named}] ({group.Attention}) — {group.Reason}";
+
+            var projected = parts.Count == 0 ? part.Length : parts.Sum(x => x.Length + 3) + part.Length;
+            if (projected > MaximumAcknowledgementNoteLength - 40) { omitted += group.Lines.Count; continue; }
+            parts.Add(part);
+        }
+
+        if (parts.Count == 0)
+            parts.Add($"{acknowledged.Count} line(s) converted over acknowledged warnings.");
+        else if (omitted > 0)
+            parts.Add($"+{omitted} further line(s) acknowledged");
+
+        var note = string.Join(" | ", parts);
+        return note.Length <= MaximumAcknowledgementNoteLength
+            ? note
+            : note[..MaximumAcknowledgementNoteLength];
     }
 
     private sealed record Candidate(long Id, string? ProductName, string PartNo, string? ModelNo, string? Description);

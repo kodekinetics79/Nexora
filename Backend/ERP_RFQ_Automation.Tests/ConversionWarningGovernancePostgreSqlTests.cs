@@ -452,4 +452,56 @@ public sealed class ConversionWarningGovernancePostgreSqlTests
             Assert.Equal("SAR", line.Currency);
         }
     }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task A_bid_with_many_acknowledged_lines_still_converts()
+    {
+        // LEAD 466, 21 LINES, HTTP 500 "The lead could not be converted to an RFQ."
+        //
+        // The lifecycle event's ReasonNotes column holds 1000 characters, and the conversion
+        // summary listed every acknowledged line verbatim. At roughly ninety characters a line
+        // that passes 1000 at about a dozen lines; LifecycleApplicationService threw
+        // LifecycleValidationException, the conversion did not map it, and it escaped as a 500.
+        //
+        // The bigger the bid, the more certain the failure — the same shape as the varchar(200)
+        // overflow on RequestedPartNumber, and just as backwards.
+        var lines = Enumerable.Range(1, 20)
+            .Select(i => LineWithoutCurrency(i.ToString(), 10 + i, $"9020172{i:D2}"))
+            .ToArray();
+        var leadId = await QualifiedLeadAsync(lines);
+
+        long[] itemIds;
+        await using (var read = _database.ContextFor(null))
+            itemIds = await read.LeadItems.AsNoTracking()
+                .Where(x => x.LeadId == leadId).Select(x => x.Id).ToArrayAsync();
+
+        var rfqId = await ConvertAsync(leadId, new ConvertRequest
+        {
+            ActingUser = "sara@nexora.sa",
+            Currency = "USD",
+            // A realistic reason, not a token one: brevity here would hide the overflow.
+            WarningAcknowledgementReason =
+                "Reviewed against the source Aramco bid list and confirmed with the buyer.",
+            Items = itemIds.Select(id => new ConvertRequestItem
+            {
+                LeadItemId = id, AcknowledgeWarning = true,
+            }).ToList(),
+        });
+
+        await using var owner = _database.ContextFor(null);
+        Assert.Equal(20, await owner.Rfqitems.AsNoTracking().CountAsync(x => x.Rfqid == rfqId));
+
+        // The acknowledgement survives as evidence, within the column's limit. Nothing else
+        // records it, so an empty or truncated-to-nothing note would lose the audit trail.
+        var note = await owner.Set<CommercialLifecycleEvent>().AsNoTracking()
+            .Where(e => e.AggregateType == "Lead" && e.AggregateId == leadId)
+            .OrderByDescending(e => e.Id)
+            .Select(e => e.ReasonNotes)
+            .FirstOrDefaultAsync();
+        Assert.False(string.IsNullOrWhiteSpace(note));
+        Assert.True(note!.Length <= 1000, $"reason notes were {note.Length} characters");
+        Assert.Contains("20 line(s)", note);
+        Assert.Contains("Reviewed against the source Aramco bid list", note);
+    }
 }
