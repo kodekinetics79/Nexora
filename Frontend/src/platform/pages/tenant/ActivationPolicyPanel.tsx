@@ -129,6 +129,7 @@ export default function ActivationPolicyPanel({ tenant }: { tenant: Tenant }) {
   const [resolver, setResolver] = useState<InlineResolverAction | null>(null);
   const [confirmActivation, setConfirmActivation] = useState(false);
   const [profileDraft, setProfileDraft] = useState<TenantDeploymentProfile | null>(null);
+
   const [profileReason, setProfileReason] = useState('');
   const decisionQuery = useQuery({
     queryKey: platformKeys.tenantActivationDecision(tenant.id),
@@ -184,6 +185,25 @@ export default function ActivationPolicyPanel({ tenant }: { tenant: Tenant }) {
   }
 
   const decision = decisionQuery.data;
+
+  /**
+   * The two halves of what the server will accept, kept apart because the console had them
+   * conflated and the conflation stranded a real tenant.
+   *
+   * <p>The button used to be `disabled={tenant.status !== 'provisioning'}`, which reads the
+   * server's rule as "a live tenant's profile is frozen". It is not. `SetDeploymentProfile`
+   * refuses only to LOOSEN a live tenant — relabelling it onto a profile that defers production
+   * controls would restate the basis of an activation already taken and audited — and says so in
+   * as many words: "Tightening back to PRODUCTION is always available."</p>
+   *
+   * <p>The cost of the conflation is not theoretical. A tenant activated under LOCAL_TEST is
+   * permanently uncertifiable while it stays there, and the one action that fixes it — tighten to
+   * PRODUCTION — was the action the console greyed out. Nothing on the screen said why, or that
+   * the server would have allowed it. That is the failure this file's own RoleGate warns about:
+   * hiding a control from somebody who could have fixed it in ten seconds.</p>
+   */
+  const canLoosenProfile = tenant.status === 'provisioning';
+  const canTightenProfile = decision?.deploymentProfile !== 'PRODUCTION';
   const evidenceValid = Boolean(evidence && isActivationEvidenceValid(evidence));
   const canActivate = tenant.status === 'provisioning' && decision.ready;
 
@@ -305,13 +325,24 @@ export default function ActivationPolicyPanel({ tenant }: { tenant: Tenant }) {
               </Typography>
             )}
           </Box>
-          <RoleGate allowed={canChangeProfile} requirement="Only the platform Owner can change a deployment profile.">
+          <RoleGate
+            allowed={canChangeProfile && (canLoosenProfile || canTightenProfile)}
+            requirement={canChangeProfile
+              ? 'This tenant is live and already on PRODUCTION, the strictest profile. A live tenant '
+                + 'cannot be relabelled onto one that defers production controls.'
+              : 'Only the platform Owner can change a deployment profile.'}
+          >
             {(disabled) => (
               <Button
                 variant="outlined"
-                disabled={disabled || tenant.status !== 'provisioning'}
-                onClick={() => { setProfileDraft(decision.deploymentProfile); setProfileReason(''); }}>
-                Change profile
+                disabled={disabled}
+                onClick={() => {
+                  // A live tenant may only tighten, so open on the one profile the server will
+                  // accept rather than on its current one — which it would refuse as a no-op.
+                  setProfileDraft(canLoosenProfile ? decision.deploymentProfile : 'PRODUCTION');
+                  setProfileReason('');
+                }}>
+                {canLoosenProfile ? 'Change profile' : 'Tighten to PRODUCTION'}
               </Button>
             )}
           </RoleGate>
@@ -428,16 +459,24 @@ export default function ActivationPolicyPanel({ tenant }: { tenant: Tenant }) {
     <Dialog open={Boolean(profileDraft)} onClose={() => setProfileDraft(null)} fullWidth maxWidth="sm">
       <DialogTitle sx={{ fontWeight: 800 }}>Deployment profile for {tenant.name}</DialogTitle>
       <DialogContent dividers>{profileDraft && <Stack spacing={2}>
-        <Alert severity="warning">
-          A non-PRODUCTION profile defers prerequisites that this side cannot stand up; it does not satisfy
-          them. Every deferred control keeps reporting as a production blocker, and this tenant cannot be
-          certified production-ready while any of them is deferred.
-        </Alert>
+        {canLoosenProfile ? (
+          <Alert severity="warning">
+            A non-PRODUCTION profile defers prerequisites that this side cannot stand up; it does not satisfy
+            them. Every deferred control keeps reporting as a production blocker, and this tenant cannot be
+            certified production-ready while any of them is deferred.
+          </Alert>
+        ) : (
+          <Alert severity="info">
+            This tenant is live, so it can only be TIGHTENED. Moving it to PRODUCTION puts every deferred
+            prerequisite back on the activation gate — which is what it must pass to be certified
+            production-ready. Deferred controls were never satisfied, only postponed.
+          </Alert>
+        )}
         <FormControl fullWidth>
           <InputLabel id="tenant-deployment-profile">Profile</InputLabel>
           <Select labelId="tenant-deployment-profile" label="Profile" value={profileDraft}
             onChange={(event) => setProfileDraft(event.target.value as TenantDeploymentProfile)}>
-            {TENANT_DEPLOYMENT_PROFILES.map((profile) => (
+            {(canLoosenProfile ? TENANT_DEPLOYMENT_PROFILES : ['PRODUCTION' as const]).map((profile) => (
               <MenuItem key={profile} value={profile}>{profile}</MenuItem>
             ))}
           </Select>
