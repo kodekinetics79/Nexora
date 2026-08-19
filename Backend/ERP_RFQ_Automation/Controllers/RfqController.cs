@@ -158,6 +158,72 @@ namespace ERP_RFQ_Automation.Controllers
             }
         }
 
+        /// <summary>
+        /// Binds ONE line to the catalogue product it actually is.
+        ///
+        /// <para>The matcher auto-assigns only above its confidence floor and refuses to guess
+        /// below it. That refusal is correct — a line silently bound to the wrong product prices
+        /// the wrong thing while looking perfectly right — but it leaves lines needing a human
+        /// answer, and until now there was nowhere to give one. An unresolved line makes every
+        /// supplier offer against it ineligible, which blocks the award and leaves the customer
+        /// quote at zero.</para>
+        ///
+        /// <para>Deliberately NOT done through <c>PUT /api/Rfq/{id}</c>: that path calls
+        /// RemoveRange on the RFQ's lines and recreates them, which would discard participation
+        /// decisions and orphan every sourcing case, solicitation and supplier quote that
+        /// references a line by id. Resolving a product must touch one line and nothing else.</para>
+        ///
+        /// <para>Gated on <c>RFQ Management:Edit</c>, like participation: saying what a line IS
+        /// is a commercial act, not a view.</para>
+        /// </summary>
+        [HttpPost("{id}/lines/{lineId}/resolve-product")]
+        [RequireModulePermission("RFQ Management", PermissionAction.Edit)]
+        public async Task<ActionResult> ResolveLineProduct(
+            long id, long lineId, [FromBody] RfqLineProductResolutionRequestDTO request, CancellationToken ct)
+        {
+            if (request is null)
+                return BadRequest(Problem(StatusCodes.Status400BadRequest, "Invalid request", "A product is required."));
+            if (!TryGetAuthenticatedBusinessUnitId(out var businessUnitId))
+                return BadRequest(Problem(StatusCodes.Status400BadRequest, "Invalid request", "Business Unit ID is required."));
+            var actor = User.FindFirst(ClaimTypes.Email)?.Value ?? User.Identity?.Name;
+            if (string.IsNullOrWhiteSpace(actor)) return Unauthorized();
+
+            // Tenant-scoped by the RFQ, and the line must belong to THAT RFQ — never trust a
+            // caller-supplied line id to be inside the RFQ they named.
+            var line = await _context.Rfqitems
+                .Include(item => item.Rfq)
+                .SingleOrDefaultAsync(item => item.Id == lineId
+                                              && item.Rfqid == id
+                                              && item.Rfq.BusinessUnitId == businessUnitId, ct);
+            if (line is null) return NotFound();
+
+            // The product must be visible to THIS tenant. Binding a line to another tenant's
+            // product would leak its catalogue through the quote that follows.
+            var productExists = await _context.Products.AsNoTracking()
+                .AnyAsync(p => p.Id == request.ProductId && p.Buid == businessUnitId, ct);
+            if (!productExists)
+                return BadRequest(Problem(StatusCodes.Status400BadRequest, "Unknown product",
+                    "The selected product was not found in this tenant."));
+
+            try
+            {
+                line.ResolveProduct(request.ProductId, request.Reason, actor!, DateTime.UtcNow);
+                await _context.SaveChangesAsync(ct);
+                return Ok(new
+                {
+                    lineId = line.Id,
+                    productId = line.ProductId,
+                    productResolvedBy = line.ProductResolvedBy,
+                    productResolvedOn = line.ProductResolvedOn,
+                    productResolutionReason = line.ProductResolutionReason
+                });
+            }
+            catch (ArgumentException ex)
+            {
+                return BadRequest(Problem(StatusCodes.Status400BadRequest, "Invalid product", ex.Message));
+            }
+        }
+
         [HttpPost("{id}/prepare-quote-draft")]
         [RequireModulePermission("RFQ Management", PermissionAction.View)]
         [RequireModulePermission("Quotations", PermissionAction.Create)]
