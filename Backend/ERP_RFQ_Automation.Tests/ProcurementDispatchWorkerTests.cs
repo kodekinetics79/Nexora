@@ -92,6 +92,48 @@ public sealed class ProcurementDispatchWorkerTests
     }
 
     [Fact]
+    public async Task A_claim_fenced_twice_does_not_wedge_the_queue()
+    {
+        // THE POISON LOOP, observed in production on 2026-08-19.
+        //
+        // Fencing a stale claim writes SUPPLIER_SOLICITATION_DELIVERY_UNCERTAIN, whose
+        // idempotency key is message + attempt + type. Fencing does not increment the attempt —
+        // a fence is not a delivery attempt — so fencing the same claim twice produced an
+        // identical key, violated the unique index, and failed the whole SaveChanges. The
+        // message then stayed PROCESSING with an expired lease, the next cycle found the same
+        // stale claim, and ProcessOneAsync threw roughly every twelve seconds for ever.
+        //
+        // The worker handles one message per cycle, so that single row stopped EVERY supplier
+        // RFQ and customer quote in the deployment, silently. A healthy solicitation sat behind
+        // it in PENDINGDISPATCH and was never touched.
+        using var fixture = new DispatchFixture(new RecordingNotification
+        {
+            Exception = new InvalidOperationException("Ambiguous provider outcome")
+        });
+        fixture.SeedPending();
+
+        // First pass fences it and records the event.
+        Assert.True(await fixture.Worker.ProcessOneAsync(default));
+        var first = await fixture.StateAsync();
+        Assert.Equal("DELIVERY_UNCERTAIN", first.Message.LastErrorCode);
+        Assert.Equal("SUPPLIER_SOLICITATION_DELIVERY_UNCERTAIN", Assert.Single(first.Events).EventType);
+
+        // Put it back exactly as the crash left it: PROCESSING, lease expired, attempt
+        // unchanged — so fencing computes the SAME idempotency key it already wrote.
+        await fixture.ReopenStaleClaimAsync();
+
+        // This must not throw, and must not leave the row PROCESSING for the next cycle.
+        var exception = await Record.ExceptionAsync(() => fixture.Worker.ProcessOneAsync(default));
+        Assert.Null(exception);
+
+        var after = await fixture.StateAsync();
+        Assert.Equal(ProcurementOutboxStatuses.Failed, after.Message.Status);
+        Assert.Null(after.Message.LeaseOwner);
+        // Still ONE event: the second fence is the same fact, so it is recorded once.
+        Assert.Single(after.Events);
+    }
+
+    [Fact]
     public async Task Setup_failure_before_provider_invocation_is_retryable()
     {
         using var fixture = new DispatchFixture(registerNotification: false);
@@ -365,6 +407,23 @@ public sealed class ProcurementDispatchWorkerTests
                 UpdatedOn = now
             });
             db.SaveChanges();
+        }
+
+        /// <summary>
+        /// Returns the outbox row to the state the crash loop left it in: claimed, lease
+        /// expired, attempt count unchanged. The next cycle will treat it as a stale claim and
+        /// fence it again — with the idempotency key it has already written.
+        /// </summary>
+        public async Task ReopenStaleClaimAsync()
+        {
+            await using var db = _database.ContextFor(null);
+            var message = await db.ProcurementOutboxMessages.SingleAsync();
+            message.Status = ProcurementOutboxStatuses.Processing;
+            message.LeaseOwner = "stale-worker";
+            message.LeaseToken = Guid.NewGuid();
+            message.LeaseUntil = DateTime.UtcNow.AddMinutes(-5);
+            message.NextAttemptOn = DateTime.UtcNow.AddMinutes(-1);
+            await db.SaveChangesAsync();
         }
 
         public async Task<(ProcurementOutboxMessage Message, SupplierSolicitation Solicitation, List<ProcurementEvent> Events)> StateAsync()
