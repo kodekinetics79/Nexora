@@ -522,7 +522,21 @@ public sealed class DocumentFileInspectionServiceTests
         {
             Host = IPAddress.Loopback.ToString(),
             Port = port,
-            Timeout = TimeSpan.FromSeconds(2),
+            // A LIVENESS BOUND, NOT A TIMING ASSERTION.
+            //
+            // Two seconds turned this test into a statement about how busy the runner was. The
+            // scan is a loopback round-trip against a listener in the same process — microseconds
+            // when anything is scheduled — but CI has two cores, xUnit runs collections in
+            // parallel and the Testcontainers fixtures hold pool threads while PostgreSQL starts,
+            // so the socket continuation can wait tens of seconds for a thread. It failed on
+            // 2026-08-19 on a comment-only PR, and the identical commit passed on the same
+            // workflow's pull_request run minutes earlier.
+            //
+            // The deliberate-timeout sibling below still uses 100ms, because THAT test is
+            // asserting the timeout. This one asserts parsing, so the bound only has to be long
+            // enough that a hang is still reported instead of hanging the suite. Same reasoning
+            // as TestWaits.Liveness, which was raised for exactly this failure mode.
+            Timeout = TestWaits.Liveness,
             SignatureVersion = "test-db-1"
         });
         await using var content = new MemoryStream("safe content"u8.ToArray());
