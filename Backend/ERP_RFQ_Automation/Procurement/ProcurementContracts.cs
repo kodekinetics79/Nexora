@@ -19,6 +19,25 @@ public interface IProcurementApplicationService
         long businessUnitId, string? search, int limit, CancellationToken ct = default);
     Task<SolicitationResult> CreateSolicitationAsync(CreateSolicitationCommand command, CancellationToken ct = default);
     Task<SolicitationResult> RetrySolicitationAsync(RetrySolicitationCommand command, CancellationToken ct = default);
+
+    /// <summary>
+    /// Records that a Supplier RFQ reached the supplier by a route Nexora did not drive — a phone
+    /// call, a hand-over, the supplier's own portal, or the buyer's own mailbox — and advances the
+    /// solicitation to Sent on the strength of that record.
+    ///
+    /// <para>The response-capture guard requires a solicitation that actually reached the supplier,
+    /// and it stays exactly as it is. Until this existed the only thing that could satisfy it was
+    /// the dispatch worker delivering an email, so a buyer holding a price taken over the phone —
+    /// or working on any deployment without outbound mail configured — had no way to record it,
+    /// while the Supplier Quote Inbox happily wrote the same canonical revision with no email at
+    /// all. This gives the buyer a legitimate way to satisfy the guard rather than a way around
+    /// it.</para>
+    /// </summary>
+    Task<RecordedSolicitationDeliveryResult> RecordSolicitationDeliveryAsync(
+        RecordSolicitationDeliveryCommand command, CancellationToken ct = default)
+        => throw new NotSupportedException(
+            "Recorded Supplier RFQ delivery is not supported by this procurement adapter.");
+
     Task<SupplierQuoteResult> CaptureSupplierQuoteAsync(CaptureSupplierQuoteCommand command, CancellationToken ct = default);
     Task<QuoteComparisonResult> CompareQuotesAsync(long businessUnitId, long rfqItemId, CancellationToken ct = default);
     Task<AwardResult> ApproveAwardAsync(ApproveAwardCommand command, CancellationToken ct = default);
@@ -216,6 +235,49 @@ public sealed record RetrySolicitationCommand(
     string Actor,
     string CorrelationId);
 
+/// <summary>
+/// A buyer's statement that the Supplier RFQ reached the supplier some way other than by a Nexora
+/// email.
+///
+/// <para><paramref name="Note"/> is mandatory and is the point of the whole command: it is the only
+/// account of a conversation Nexora never saw. <paramref name="Actor"/> is the authenticated user
+/// recording it and is never taken from a request body. The timestamp is the server's, not the
+/// caller's — a delivery is recorded when it is recorded.</para>
+/// </summary>
+public sealed record RecordSolicitationDeliveryCommand(
+    long BusinessUnitId,
+    long SolicitationId,
+    string DeliveryChannel,
+    string Note,
+    long ExpectedVersion,
+    string IdempotencyKey,
+    string Actor,
+    string CorrelationId);
+
+/// <summary>
+/// A delivery a buyer recorded by hand, projected for the workbench.
+///
+/// <para>Kept structurally separate from the email delivery fields on
+/// <see cref="SolicitationView"/> (<c>ProviderReference</c>, <c>AttemptCount</c>,
+/// <c>LastErrorCode</c>) so no screen or report can render a phone call as a provider-confirmed
+/// email. A solicitation has at most one of the two.</para>
+/// </summary>
+public sealed record RecordedSolicitationDeliveryView(
+    string Channel,
+    string Note,
+    string RecordedBy,
+    DateTime RecordedOn);
+
+public sealed record RecordedSolicitationDeliveryResult(
+    long SolicitationId,
+    string Status,
+    string Channel,
+    string Note,
+    string RecordedBy,
+    DateTime RecordedOn,
+    long Version,
+    bool Replayed);
+
 public sealed record ApproveAwardCommand(
     long BusinessUnitId,
     long SupplierQuotedItemId,
@@ -399,11 +461,20 @@ public sealed record CustomerQuoteDraftLineView(long QuoteItemId, long RfqItemId
 public sealed record SourcingLineView(long Id, long RfqId, long? ProductId, long? SourcingCaseId, string? PartNumber,
     string Description, decimal RequestedQuantity, decimal AvailableQuantity, decimal ReservedQuantity,
     decimal ShortfallQuantity, DateTime? RequiredOn, string Resolution, DateTime ResolutionCheckedOn);
+/// <summary>
+/// <paramref name="ProviderReference"/>, <paramref name="AttemptCount"/> and
+/// <paramref name="LastErrorCode"/> describe a Nexora email delivery and come from the dispatch
+/// outbox. <paramref name="RecordedDelivery"/> describes a delivery the buyer made personally and
+/// comes from <c>supplier_solicitation_delivery_records</c>. A solicitation carries at most one of
+/// the two, and they are separate fields so that a caller cannot present a phone call as a
+/// provider-confirmed email.
+/// </summary>
 public sealed record SolicitationView(long Id, long RfqId, long SupplierId, string SupplierName,
     string? SupplierEmail, IReadOnlyCollection<long> RfqItemIds, string Status, string Channel,
     int AttemptCount, string? ProviderReference,
     string? LastErrorCode, DateTime? SentOn, DateTime? RespondedOn, DateTime UpdatedOn, long Version,
-    DateTime? DueOn = null);
+    DateTime? DueOn = null,
+    RecordedSolicitationDeliveryView? RecordedDelivery = null);
 public sealed record SupplierOfferView(long Id, long SolicitationId, long RfqItemId, long SupplierId,
     string SupplierName, string? QuoteReference, int QuoteRevision, long CurrencyId, string CurrencyCode,
     decimal Quantity, decimal? AvailableQuantity, decimal UnitPrice, decimal FreightCost, decimal DutyCost,

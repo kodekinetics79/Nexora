@@ -3,6 +3,7 @@ using System;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace ERP_RFQ_Automation.Migrations
 {
     [DbContext(typeof(ErpRfqAutomationContext))]
-    partial class ErpRfqAutomationContextModelSnapshot : ModelSnapshot
+    [Migration("20260819190000_SolicitationDeliveryRecordedByAPerson")]
+    partial class SolicitationDeliveryRecordedByAPerson
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -9912,9 +9915,6 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("timestamp without time zone")
                         .HasDefaultValueSql("now()");
 
-                    b.Property<long?>("EmailInquiryComponentId")
-                        .HasColumnType("bigint");
-
                     b.Property<string>("FileName")
                         .HasMaxLength(512)
                         .HasColumnType("character varying(512)");
@@ -9982,10 +9982,6 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.HasIndex("BusinessUnitId", "ContentHash")
                         .HasDatabaseName("IX_ExtractionJobs_BU_ContentHash");
-
-                    b.HasIndex("BusinessUnitId", "EmailInquiryComponentId")
-                        .IsUnique()
-                        .HasFilter("\"EmailInquiryComponentId\" IS NOT NULL");
 
                     b.HasIndex("BusinessUnitId", "SourceDocumentOccurrenceId")
                         .IsUnique()
@@ -10994,275 +10990,6 @@ namespace ERP_RFQ_Automation.Migrations
 
                             t.HasCheckConstraint("CK_supplier_shipment_lines_ReceivedQuantity", "\"ReceivedQuantity\" >= 0 AND \"ReceivedQuantity\" <= \"ShippedQuantity\"");
                         });
-                });
-
-            modelBuilder.Entity("ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssembly", b =>
-                {
-                    b.Property<long>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("bigint");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
-
-                    b.Property<long?>("AssembledLeadId")
-                        .HasColumnType("bigint");
-
-                    b.Property<long>("BusinessUnitId")
-                        .HasColumnType("bigint");
-
-                    b.Property<int>("CompletedComponentCount")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("ConcurrencyVersion")
-                        .IsConcurrencyToken()
-                        .HasColumnType("integer");
-
-                    b.Property<DateTimeOffset>("CreatedAtUtc")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<long>("EmailConfigurationId")
-                        .HasColumnType("bigint");
-
-                    b.Property<long>("EmailIngestId")
-                        .HasColumnType("bigint");
-
-                    b.Property<int>("ExpectedComponentCount")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("ManifestContractVersion")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("MessageKey")
-                        .IsRequired()
-                        .HasMaxLength(255)
-                        .HasColumnType("character varying(255)");
-
-                    b.Property<string>("RawEvidenceSha256")
-                        .HasMaxLength(64)
-                        .HasColumnType("character(64)")
-                        .IsFixedLength();
-
-                    b.Property<string>("RawEvidenceUri")
-                        .HasMaxLength(1024)
-                        .HasColumnType("character varying(1024)");
-
-                    b.Property<string>("RawEvidenceVersionId")
-                        .HasMaxLength(256)
-                        .HasColumnType("character varying(256)");
-
-                    b.Property<DateTimeOffset?>("ReceivedAtUtc")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("RecipientsJson")
-                        .HasColumnType("jsonb");
-
-                    b.Property<string>("SenderAddress")
-                        .HasMaxLength(512)
-                        .HasColumnType("character varying(512)");
-
-                    b.Property<string>("SkippedPartsJson")
-                        .HasColumnType("jsonb");
-
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
-
-                    b.Property<string>("StatusReason")
-                        .HasMaxLength(1000)
-                        .HasColumnType("character varying(1000)");
-
-                    b.Property<string>("Subject")
-                        .HasMaxLength(1000)
-                        .HasColumnType("character varying(1000)");
-
-                    b.Property<DateTimeOffset>("UpdatedAtUtc")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("EmailIngestId")
-                        .IsUnique();
-
-                    b.HasIndex("BusinessUnitId", "AssembledLeadId");
-
-                    b.HasIndex("BusinessUnitId", "EmailConfigurationId", "MessageKey")
-                        .IsUnique();
-
-                    b.HasIndex("BusinessUnitId", "Status", "UpdatedAtUtc");
-
-                    b.ToTable("EmailInquiryAssemblies", (string)null);
-                });
-
-            modelBuilder.Entity("ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponent", b =>
-                {
-                    b.Property<long>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("bigint");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
-
-                    b.Property<long>("AssemblyId")
-                        .HasColumnType("bigint");
-
-                    b.Property<long>("BusinessUnitId")
-                        .HasColumnType("bigint");
-
-                    b.Property<long?>("ByteSize")
-                        .HasColumnType("bigint");
-
-                    b.Property<string>("ComponentKey")
-                        .IsRequired()
-                        .HasMaxLength(512)
-                        .HasColumnType("character varying(512)");
-
-                    b.Property<int>("ConcurrencyVersion")
-                        .IsConcurrencyToken()
-                        .HasColumnType("integer");
-
-                    b.Property<string>("ContentHash")
-                        .HasMaxLength(64)
-                        .HasColumnType("character(64)")
-                        .IsFixedLength();
-
-                    b.Property<DateTimeOffset>("CreatedAtUtc")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("EvidenceUri")
-                        .HasMaxLength(1024)
-                        .HasColumnType("character varying(1024)");
-
-                    b.Property<long?>("ExtractionJobId")
-                        .HasColumnType("bigint");
-
-                    b.Property<string>("FileName")
-                        .HasMaxLength(512)
-                        .HasColumnType("character varying(512)");
-
-                    b.Property<string>("Kind")
-                        .IsRequired()
-                        .HasMaxLength(24)
-                        .HasColumnType("character varying(24)");
-
-                    b.Property<string>("MimeType")
-                        .HasMaxLength(255)
-                        .HasColumnType("character varying(255)");
-
-                    b.Property<int>("NestingDepth")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("Ordinal")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("ReasonCode")
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
-
-                    b.Property<string>("ReasonDetail")
-                        .HasMaxLength(1000)
-                        .HasColumnType("character varying(1000)");
-
-                    b.Property<long?>("SourceDocumentOccurrenceId")
-                        .HasColumnType("bigint");
-
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .HasMaxLength(24)
-                        .HasColumnType("character varying(24)");
-
-                    b.Property<DateTimeOffset>("UpdatedAtUtc")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("BusinessUnitId", "ExtractionJobId");
-
-                    b.HasIndex("BusinessUnitId", "Status");
-
-                    b.HasIndex("BusinessUnitId", "AssemblyId", "ComponentKey")
-                        .IsUnique();
-
-                    b.HasIndex("BusinessUnitId", "AssemblyId", "Ordinal")
-                        .IsUnique();
-
-                    b.ToTable("EmailInquiryComponents", (string)null);
-                });
-
-            modelBuilder.Entity("ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponentResult", b =>
-                {
-                    b.Property<long>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("bigint");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
-
-                    b.Property<string>("AiProviderClass")
-                        .HasMaxLength(24)
-                        .HasColumnType("character varying(24)");
-
-                    b.Property<long>("AssemblyId")
-                        .HasColumnType("bigint");
-
-                    b.Property<long>("BusinessUnitId")
-                        .HasColumnType("bigint");
-
-                    b.Property<long>("ComponentId")
-                        .HasColumnType("bigint");
-
-                    b.Property<int>("ConcurrencyVersion")
-                        .IsConcurrencyToken()
-                        .HasColumnType("integer");
-
-                    b.Property<DateTimeOffset>("CreatedAtUtc")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("DiagnosticsJson")
-                        .HasColumnType("jsonb");
-
-                    b.Property<int>("ExpectedItemCount")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("ExtractedItemCount")
-                        .HasColumnType("integer");
-
-                    b.Property<long>("ExtractionJobId")
-                        .HasColumnType("bigint");
-
-                    b.Property<decimal?>("HeaderConfidence")
-                        .HasPrecision(5, 4)
-                        .HasColumnType("numeric(5,4)");
-
-                    b.Property<string>("ModelIdentifier")
-                        .HasMaxLength(256)
-                        .HasColumnType("character varying(256)");
-
-                    b.Property<int>("PayloadContractVersion")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("PayloadJson")
-                        .IsRequired()
-                        .HasColumnType("jsonb");
-
-                    b.Property<string>("ProcessingPath")
-                        .IsRequired()
-                        .HasMaxLength(48)
-                        .HasColumnType("character varying(48)");
-
-                    b.Property<string>("ReviewReason")
-                        .HasMaxLength(1000)
-                        .HasColumnType("character varying(1000)");
-
-                    b.Property<DateTimeOffset>("UpdatedAtUtc")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("BusinessUnitId", "AssemblyId");
-
-                    b.HasIndex("BusinessUnitId", "ComponentId")
-                        .IsUnique();
-
-                    b.ToTable("EmailInquiryComponentResults", (string)null);
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.Intelligence.Pricing.QuotePriceAttestation", b =>
@@ -13504,11 +13231,6 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasIndex("BusinessUnitId", "OccurredOn")
                         .HasDatabaseName("IX_IamAuditEvents_BU_OccurredOn");
 
-                    b.HasIndex("BusinessUnitId", "Action", "CorrelationId")
-                        .IsUnique()
-                        .HasDatabaseName("UX_IamAuditEvents_EmailTriageReprocess_Idempotency")
-                        .HasFilter("\"Action\" = 'EmailTriageReprocessed' AND \"CorrelationId\" IS NOT NULL");
-
                     b.HasIndex("BusinessUnitId", "TargetType", "TargetId")
                         .HasDatabaseName("IX_IamAuditEvents_BU_Target");
 
@@ -15297,9 +15019,6 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<decimal?>("DiscountValue")
                         .HasColumnType("decimal(18, 2)");
-
-                    b.Property<decimal?>("HeaderDiscountAllocated")
-                        .HasColumnType("decimal(18, 6)");
 
                     b.Property<string>("ItemDescription")
                         .HasColumnType("text");
@@ -19022,12 +18741,6 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<string>("DeploymentProfileReason")
                         .HasMaxLength(1000)
                         .HasColumnType("character varying(1000)");
-
-                    b.Property<string>("Entitlements")
-                        .IsRequired()
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("jsonb")
-                        .HasDefaultValue("{}");
 
                     b.Property<string>("Industry")
                         .HasMaxLength(128)
@@ -24847,12 +24560,6 @@ namespace ERP_RFQ_Automation.Migrations
 
             modelBuilder.Entity("ERP_RFQ_Automation.Extraction.ExtractionJob", b =>
                 {
-                    b.HasOne("ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponent", null)
-                        .WithMany()
-                        .HasForeignKey("BusinessUnitId", "EmailInquiryComponentId")
-                        .HasPrincipalKey("BusinessUnitId", "Id")
-                        .OnDelete(DeleteBehavior.Restrict);
-
                     b.HasOne("ERP_RFQ_Automation.DocumentIntelligence.Persistence.SourceDocumentOccurrence", null)
                         .WithMany()
                         .HasForeignKey("BusinessUnitId", "SourceDocumentOccurrenceId")
@@ -24998,41 +24705,6 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasPrincipalKey("BusinessUnitId", "Id")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
-                });
-
-            modelBuilder.Entity("ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssembly", b =>
-                {
-                    b.HasOne("ERP_RFQ_Automation.Models.EmailIngest", "EmailIngest")
-                        .WithOne()
-                        .HasForeignKey("ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssembly", "EmailIngestId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.Navigation("EmailIngest");
-                });
-
-            modelBuilder.Entity("ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponent", b =>
-                {
-                    b.HasOne("ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssembly", "Assembly")
-                        .WithMany("Components")
-                        .HasForeignKey("BusinessUnitId", "AssemblyId")
-                        .HasPrincipalKey("BusinessUnitId", "Id")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("Assembly");
-                });
-
-            modelBuilder.Entity("ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponentResult", b =>
-                {
-                    b.HasOne("ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponent", "Component")
-                        .WithMany()
-                        .HasForeignKey("BusinessUnitId", "ComponentId")
-                        .HasPrincipalKey("BusinessUnitId", "Id")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("Component");
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.Intelligence.Pricing.QuotePriceAttestation", b =>
@@ -27738,11 +27410,6 @@ namespace ERP_RFQ_Automation.Migrations
             modelBuilder.Entity("ERP_RFQ_Automation.InboundLogistics.SupplierShipment", b =>
                 {
                     b.Navigation("Lines");
-                });
-
-            modelBuilder.Entity("ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssembly", b =>
-                {
-                    b.Navigation("Components");
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.Intelligence.Pricing.QuotePriceAttestation", b =>

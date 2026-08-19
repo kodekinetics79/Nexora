@@ -99,6 +99,24 @@ public sealed class ProcurementController(
         => ExecuteAsync(async () => Ok(await service.RetrySolicitationAsync(new RetrySolicitationCommand(
             TenantId(), solicitationId, IdempotencyKey(), Actor(), CorrelationId()), RequestAborted)));
 
+    /// <summary>
+    /// Records that a Supplier RFQ reached the supplier by a route Nexora did not drive — a phone
+    /// call, a hand-over, the supplier's own portal, or the buyer's own mailbox.
+    ///
+    /// <para>The recording user comes from the authenticated principal, never from the body: this
+    /// record is the sole evidence that the supplier was contacted, and a caller that could name
+    /// its own recorder could attribute a delivery that never happened to somebody else.</para>
+    /// </summary>
+    [HttpPost("solicitations/{solicitationId:long}/delivery-record")]
+    [RequireModulePermission("RFQ Management", PermissionAction.Edit)]
+    [RequireModulePermission("Supplier History", PermissionAction.Create)]
+    public Task<IActionResult> RecordSolicitationDelivery(long solicitationId,
+        [FromBody] RecordSolicitationDeliveryRequest request)
+        => ExecuteAsync(async () => Ok(await service.RecordSolicitationDeliveryAsync(
+            new RecordSolicitationDeliveryCommand(TenantId(), solicitationId, request.DeliveryChannel,
+                request.Note, request.ExpectedVersion, IdempotencyKey(), Actor(), CorrelationId()),
+            RequestAborted)));
+
     [HttpPost("supplier-quotes")]
     [RequireModulePermission("Supplier History", PermissionAction.Create)]
     public Task<IActionResult> CaptureSupplierQuote([FromBody] CaptureSupplierQuoteRequest request)
@@ -360,6 +378,16 @@ public sealed record SearchSourcingCandidatesRequest(int Limit, long ExpectedVer
 
 public sealed record PrepareSupplierRfqRequest(long SupplierId, DateTime? DueOn, long ExpectedVersion);
 public sealed record QueuePreparedSupplierRfqRequest(long ExpectedSourcingCaseVersion, long ExpectedSolicitationVersion);
+
+/// <summary>
+/// Carries no actor and no timestamp. Both are server-authoritative: the recorder is the
+/// authenticated principal and the moment is the server's clock, so neither can be asserted by a
+/// caller.
+/// </summary>
+public sealed record RecordSolicitationDeliveryRequest(
+    string DeliveryChannel,
+    string Note,
+    long ExpectedVersion);
 
 public sealed record CaptureSupplierQuoteRequest(
     long SolicitationId,

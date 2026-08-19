@@ -198,9 +198,8 @@ namespace ERP_RFQ_Automation.Controllers
         public async Task<ActionResult<ProductResponseDTO>> Create([FromForm] ProductCreateRequestDTO request)
         {
             if (!ModelState.IsValid) return BadRequest(ModelState);
-            
+
             if (!TryGetTenantId(out var claimBUId)) return Forbid();
-            request.Buid = claimBUId;
 
             var product = new Product
             {
@@ -232,7 +231,7 @@ namespace ERP_RFQ_Automation.Controllers
                 LeadTime = request.LeadTime,
                 Hscode = request.Hscode,
                 CountryOfOrigin = request.CountryOfOrigin,
-                Buid = request.Buid,
+                Buid = claimBUId,
                 IsActive = request.IsActive,
                 IsCatalogItem = request.IsCatalogItem,
                 SubCategoryId = request.SubCategoryId,
@@ -242,7 +241,7 @@ namespace ERP_RFQ_Automation.Controllers
             await _repository.AddAsync(product, request.Attachments);
 
             // Reload the product to include attachments
-            var savedProduct = await _repository.GetByIdAsync(product.Id, request.Buid);
+            var savedProduct = await _repository.GetByIdAsync(product.Id, claimBUId);
 
             var images = savedProduct.ProductAttachments.Where(a => IsImage(a.FileName)).Select(a => new ProductAttachmentDTO
             {
@@ -270,7 +269,7 @@ namespace ERP_RFQ_Automation.Controllers
                 Description = savedProduct.Description,
                 CategoryId = savedProduct.CategoryId,
                 CategoryName = savedProduct.Category?.CategoryName,
-                QtyOnHand = await _context.Set<Models.Inventory>().AsNoTracking().Where(x => x.Buid == request.Buid &&
+                QtyOnHand = await _context.Set<Models.Inventory>().AsNoTracking().Where(x => x.Buid == claimBUId &&
                     x.ProductId == savedProduct.Id).SumAsync(x => (decimal?)x.QtyOnHand) ?? 0m,
                 ReorderPoint = savedProduct.ReorderPoint,
                 UomId = savedProduct.UomId,
@@ -320,11 +319,10 @@ namespace ERP_RFQ_Automation.Controllers
         public async Task<ActionResult<ProductResponseDTO>> Update(long id, [FromForm] ProductUpdateRequestDTO request)
         {
             if (!ModelState.IsValid) return BadRequest(ModelState);
-            
-            if (!TryGetTenantId(out var claimBUId)) return Forbid();
-            request.Buid = claimBUId;
 
-            var product = await _repository.GetByIdAsync(id, request.Buid);
+            if (!TryGetTenantId(out var claimBUId)) return Forbid();
+
+            var product = await _repository.GetByIdAsync(id, claimBUId);
             product.ProductName = request.ProductName;
             product.PartNo = request.PartNo;
             product.ModelNo = request.ModelNo;
@@ -358,7 +356,7 @@ namespace ERP_RFQ_Automation.Controllers
             product.ModifiedBy = Actor();
             product.ModifiedOn = DateTime.UtcNow;
 
-            await _repository.UpdateAsync(product, request.Buid, request.Attachments);
+            await _repository.UpdateAsync(product, claimBUId, request.Attachments);
 
             // FR-INV-04. Push the reorder point down to the stock rows that actually drive the
             // alert.
@@ -376,7 +374,7 @@ namespace ERP_RFQ_Automation.Controllers
             // evaluated at; the item master supplies the default for every location that has not
             // been given its own.
             var stockRows = await _context.Set<Models.Inventory>()
-                .Where(x => x.Buid == request.Buid && x.ProductId == id
+                .Where(x => x.Buid == claimBUId && x.ProductId == id
                             && x.ReorderPoint != product.ReorderPoint)
                 .ToListAsync();
             if (stockRows.Count > 0)
@@ -391,7 +389,7 @@ namespace ERP_RFQ_Automation.Controllers
             }
 
             // Reload the product to include attachments
-            var savedProduct = await _repository.GetByIdAsync(id, request.Buid);
+            var savedProduct = await _repository.GetByIdAsync(id, claimBUId);
 
             var images = savedProduct.ProductAttachments.Where(a => IsImage(a.FileName)).Select(a => new ProductAttachmentDTO
             {
@@ -419,7 +417,7 @@ namespace ERP_RFQ_Automation.Controllers
                 Description = savedProduct.Description,
                 CategoryId = savedProduct.CategoryId,
                 CategoryName = savedProduct.Category?.CategoryName,
-                QtyOnHand = await _context.Set<Models.Inventory>().AsNoTracking().Where(x => x.Buid == request.Buid &&
+                QtyOnHand = await _context.Set<Models.Inventory>().AsNoTracking().Where(x => x.Buid == claimBUId &&
                     x.ProductId == savedProduct.Id).SumAsync(x => (decimal?)x.QtyOnHand) ?? 0m,
                 ReorderPoint = savedProduct.ReorderPoint,
                 UomId = savedProduct.UomId,

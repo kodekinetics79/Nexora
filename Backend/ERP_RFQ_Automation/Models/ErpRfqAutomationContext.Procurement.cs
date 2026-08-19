@@ -16,6 +16,8 @@ public partial class ErpRfqAutomationContext
     public DbSet<GoodsReceiptLine> GoodsReceiptLines => Set<GoodsReceiptLine>();
     public DbSet<ProcurementEvent> ProcurementEvents => Set<ProcurementEvent>();
     public DbSet<ProcurementOutboxMessage> ProcurementOutboxMessages => Set<ProcurementOutboxMessage>();
+    public DbSet<SupplierSolicitationDeliveryRecord> SupplierSolicitationDeliveryRecords =>
+        Set<SupplierSolicitationDeliveryRecord>();
     public DbSet<ProcurementHandoff> ProcurementHandoffs => Set<ProcurementHandoff>();
     public DbSet<ProcurementCallbackReceipt> ProcurementCallbackReceipts => Set<ProcurementCallbackReceipt>();
 
@@ -466,6 +468,44 @@ public partial class ErpRfqAutomationContext
             entity.HasOne<SupplierSolicitation>().WithMany()
                 .HasForeignKey(x => new { x.BusinessUnitId, x.SupplierSolicitationId })
                 .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasQueryFilter(x => CurrentTenantId == null || x.BusinessUnitId == CurrentTenantId);
+        });
+        modelBuilder.Entity<SupplierSolicitationDeliveryRecord>(entity =>
+        {
+            entity.ToTable("supplier_solicitation_delivery_records", table =>
+            {
+                // The closed channel set is a constraint, not a convention. A free-text channel
+                // would let "email" be written here and read back as a system delivery that never
+                // happened.
+                table.HasCheckConstraint("CK_supplier_solicitation_delivery_records_Channel",
+                    "\"Channel\" IN ('Phone','InPerson','SupplierPortal','BuyerEmail')");
+                // A blank note passes a NOT NULL and says nothing. The account of what happened is
+                // the whole of this evidence, so emptiness is refused in the database as well as in
+                // the service. trim(), not btrim(): the portable lane builds this schema on SQLite
+                // with EnsureCreated and btrim is PostgreSQL-only.
+                table.HasCheckConstraint("CK_supplier_solicitation_delivery_records_Note",
+                    "trim(\"Note\") <> ''");
+            });
+            entity.HasKey(x => x.Id);
+            entity.HasAlternateKey(x => new { x.BusinessUnitId, x.Id });
+            entity.Property(x => x.Channel).HasMaxLength(40).IsRequired();
+            entity.Property(x => x.Note).HasMaxLength(1000).IsRequired();
+            entity.Property(x => x.RecordedBy).HasMaxLength(255).IsRequired();
+            entity.Property(x => x.CorrelationId).HasMaxLength(160).IsRequired();
+            entity.Property(x => x.IdempotencyKey).HasMaxLength(160).IsRequired();
+            entity.Property(x => x.RequestHash).HasMaxLength(64).IsRequired();
+            entity.Property(x => x.CreatedOn).HasDefaultValueSql("now()");
+            // One solicitation, one story about how it was delivered. Without this a second record
+            // could name a different channel and the audit would no longer say what happened.
+            entity.HasIndex(x => new { x.BusinessUnitId, x.SupplierSolicitationId }).IsUnique()
+                .HasDatabaseName("UX_SupplierSolicitationDeliveryRecords_BU_Solicitation");
+            entity.HasIndex(x => new { x.BusinessUnitId, x.IdempotencyKey }).IsUnique()
+                .HasDatabaseName("UX_SupplierSolicitationDeliveryRecords_BU_IdempotencyKey");
+            entity.HasOne<SupplierSolicitation>().WithMany()
+                .HasForeignKey(x => new { x.BusinessUnitId, x.SupplierSolicitationId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<BusinessUnit>().WithMany().HasForeignKey(x => x.BusinessUnitId)
+                .OnDelete(DeleteBehavior.Restrict);
             entity.HasQueryFilter(x => CurrentTenantId == null || x.BusinessUnitId == CurrentTenantId);
         });
     }

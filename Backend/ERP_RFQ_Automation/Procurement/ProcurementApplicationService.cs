@@ -643,6 +643,13 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
         var outbox = await _db.ProcurementOutboxMessages.AsNoTracking()
             .Where(x => x.BusinessUnitId == businessUnitId && solicitations.Select(s => s.Id).Contains(x.SupplierSolicitationId))
             .ToDictionaryAsync(x => x.SupplierSolicitationId, ct);
+        // Read separately from the outbox above, and projected into its own field below, because a
+        // delivery a buyer made by hand is not an email Nexora sent. Folding it into
+        // ProviderReference would put "phoned Ahmed" where a mail provider's acceptance reference
+        // belongs and quietly claim a receipt nobody issued.
+        var recordedDeliveries = await _db.SupplierSolicitationDeliveryRecords.AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId && solicitations.Select(s => s.Id).Contains(x.SupplierSolicitationId))
+            .ToDictionaryAsync(x => x.SupplierSolicitationId, ct);
         // Which of these lines will the lot recorder demand a declaration for? The receipt screen
         // cannot ask for a batch number or a serial list unless it is told, and a product whose row
         // cannot be read is UNTRACKED here for exactly the same reason it would be at receipt time —
@@ -767,12 +774,15 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             {
                 var supplier = supplierNames.GetValueOrDefault(x.SupplierId);
                 var delivery = outbox.GetValueOrDefault(x.Id);
+                var recorded = recordedDeliveries.GetValueOrDefault(x.Id);
                 var solicitedLineIds = JsonSerializer.Deserialize<long[]>(x.RequestedRfqItemIdsJson) ?? [];
                 return new SolicitationView(x.Id, x.RfqId, x.SupplierId, supplier?.Name ?? $"Supplier {x.SupplierId}",
                     supplier?.ContactEmail, solicitedLineIds, x.Status.ToString().ToUpperInvariant(), x.Channel,
                     delivery?.AttemptCount ?? 0,
                     delivery?.ProviderReference, delivery?.LastErrorCode, x.SentOn == default ? null : x.SentOn,
-                    x.RespondedOn, x.UpdatedOn, x.Version, x.DueOn);
+                    x.RespondedOn, x.UpdatedOn, x.Version, x.DueOn,
+                    recorded is null ? null : new RecordedSolicitationDeliveryView(
+                        recorded.Channel, recorded.Note, recorded.RecordedBy, recorded.RecordedOn));
             }).ToArray(), offerViews, awardViews, poViews,
             customerDraft is null ? null : new CustomerQuoteDraftView(customerDraft.Id, customerDraft.QuoteNo,
                 customerDraft.CurrencyId, customerDraft.QuoteItems.Where(x => x.RfqitemId.HasValue)
@@ -1012,6 +1022,156 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             await tx.CommitAsync(ct);
             return new SolicitationResult(solicitation.Id, solicitation.Status.ToString(), false);
         });
+    }
+
+    /// <summary>
+    /// Records that a Supplier RFQ reached the supplier by a route Nexora did not drive, and
+    /// advances it to Sent on the strength of that record.
+    ///
+    /// <para>The capture guard in <see cref="CaptureSupplierQuoteAsync"/> is untouched: a supplier
+    /// response still requires a solicitation that reached the supplier. What was missing was any
+    /// way to say so truthfully. Only <c>ProcurementDispatchWorker</c> delivering an email could
+    /// advance a solicitation, so on a deployment with no outbound mail — and for every supplier
+    /// contacted by phone, in person or through their own portal — a buyer holding a price could
+    /// not record it, while the Supplier Quote Inbox wrote the same canonical revision with no
+    /// email at all. Two doors, one requirement, and the workbench was the one that refused.</para>
+    ///
+    /// <para>The evidence is a <see cref="SupplierSolicitationDeliveryRecord"/>: channel, the
+    /// buyer's mandatory account of what happened, the authenticated actor, and a server
+    /// timestamp. It is a different table from the dispatch outbox, and the solicitation's channel
+    /// stops saying "Email", so nothing downstream can read this as a provider-confirmed
+    /// email.</para>
+    /// </summary>
+    public async Task<RecordedSolicitationDeliveryResult> RecordSolicitationDeliveryAsync(
+        RecordSolicitationDeliveryCommand command, CancellationToken ct = default)
+    {
+        ValidateCommand(command.BusinessUnitId, command.IdempotencyKey, command.Actor, command.CorrelationId);
+        var channel = command.DeliveryChannel?.Trim() ?? string.Empty;
+        // Email is excluded by name, not by omission. A hand-recorded "Email" would sit in the same
+        // column the dispatch worker writes after a provider accepted the message, and the two
+        // would be indistinguishable — an unverifiable claim wearing a verified receipt's clothes.
+        if (string.Equals(channel, SolicitationDeliveryChannels.Email, StringComparison.OrdinalIgnoreCase))
+            throw new ProcurementValidationException(
+                "An email sent by Nexora is recorded automatically when the supplier's mail server accepts it, so it cannot be entered by hand. Choose how you reached the supplier yourself.");
+        if (!SolicitationDeliveryChannels.RecordedByBuyer.Contains(channel))
+            throw new ProcurementValidationException(
+                "State how you reached the supplier: by phone, in person, through their own portal, or from your own email.");
+        var note = command.Note?.Trim() ?? string.Empty;
+        if (note.Length is 0 or > 1000)
+            throw new ProcurementValidationException(
+                "Say what happened when you reached the supplier, in up to 1000 characters.");
+        var hash = Hash(new { command.SolicitationId, channel, note, command.ExpectedVersion });
+        var strategy = _db.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(async () =>
+        {
+            _db.ChangeTracker.Clear();
+            await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+            var replayEvent = await _db.ProcurementEvents.AsNoTracking().SingleOrDefaultAsync(x =>
+                x.BusinessUnitId == command.BusinessUnitId
+                && x.EventType == "SUPPLIER_SOLICITATION_DELIVERY_RECORDED"
+                && x.IdempotencyKey == command.IdempotencyKey.Trim(), ct);
+            if (replayEvent is not null)
+            {
+                using var payload = JsonDocument.Parse(replayEvent.PayloadJson);
+                EnsureReplay(payload.RootElement.GetProperty("requestHash").GetString(), hash);
+                var replaySolicitation = await _db.Set<SupplierSolicitation>().AsNoTracking().SingleAsync(x =>
+                    x.BusinessUnitId == command.BusinessUnitId && x.Id == replayEvent.AggregateId, ct);
+                var replayRecord = await _db.SupplierSolicitationDeliveryRecords.AsNoTracking().SingleAsync(x =>
+                    x.BusinessUnitId == command.BusinessUnitId
+                    && x.SupplierSolicitationId == replaySolicitation.Id, ct);
+                await tx.CommitAsync(ct);
+                return new RecordedSolicitationDeliveryResult(replaySolicitation.Id,
+                    replaySolicitation.Status.ToString(), replayRecord.Channel, replayRecord.Note,
+                    replayRecord.RecordedBy, replayRecord.RecordedOn, replaySolicitation.Version, true);
+            }
+
+            var solicitation = await _db.Set<SupplierSolicitation>().SingleOrDefaultAsync(x =>
+                x.BusinessUnitId == command.BusinessUnitId && x.Id == command.SolicitationId, ct)
+                ?? throw new ProcurementValidationException("Solicitation was not found in the authenticated tenant.");
+            if (solicitation.Version != command.ExpectedVersion)
+                throw new ProcurementConflictException(
+                    "The Supplier RFQ changed; refresh before recording how it was delivered.");
+            if (solicitation.Status is not (SolicitationStatus.PendingDispatch or SolicitationStatus.DeliveryFailed))
+                throw new ProcurementConflictException(
+                    "This Supplier RFQ already has delivery evidence, so how it reached the supplier cannot be recorded again.");
+            // A message the worker is about to send, or is sending now, would deliver the same RFQ
+            // a second time after the buyer had already handed it over by hand. Recording waits
+            // until that attempt has finished and failed; the retry route covers the other case.
+            var queued = await _db.ProcurementOutboxMessages.AsNoTracking().SingleOrDefaultAsync(x =>
+                x.BusinessUnitId == command.BusinessUnitId && x.SupplierSolicitationId == solicitation.Id, ct);
+            if (queued is not null && queued.Status is ProcurementOutboxStatuses.Pending
+                    or ProcurementOutboxStatuses.Processing)
+                throw new ProcurementConflictException(
+                    "Nexora is still trying to email this Supplier RFQ. Wait for that attempt to finish before recording how you reached the supplier.");
+            if (await _db.SupplierSolicitationDeliveryRecords.AnyAsync(x =>
+                    x.BusinessUnitId == command.BusinessUnitId
+                    && x.SupplierSolicitationId == solicitation.Id, ct))
+                throw new ProcurementConflictException(
+                    "How this Supplier RFQ reached the supplier has already been recorded.");
+            // The same governance QueuePreparedSupplierRfqAsync applies before a Supplier RFQ goes
+            // out. Recording a delivery has the identical consequence — the solicitation counts as
+            // sent and its responses become capturable — so a supplier who has since been blocked
+            // must not become quotable through this door.
+            await RequireSupplierAsync(command.BusinessUnitId, solicitation.SupplierId, ct);
+
+            var now = DateTime.UtcNow;
+            _db.SupplierSolicitationDeliveryRecords.Add(new SupplierSolicitationDeliveryRecord
+            {
+                BusinessUnitId = command.BusinessUnitId,
+                SupplierSolicitationId = solicitation.Id,
+                Channel = channel,
+                Note = note,
+                RecordedBy = command.Actor.Trim(),
+                RecordedOn = now,
+                CorrelationId = command.CorrelationId.Trim(),
+                IdempotencyKey = command.IdempotencyKey.Trim(),
+                RequestHash = hash,
+                CreatedOn = now
+            });
+            solicitation.Status = SolicitationStatus.Sent;
+            solicitation.SentOn = now;
+            // The channel stops saying "Email" the moment it stops being true. Anything that reads
+            // it — the workbench, a report, a future dispatch decision — now sees the real route.
+            solicitation.Channel = channel;
+            solicitation.UpdatedOn = now;
+            solicitation.Version++;
+            await AdvanceSourcingCaseToOutreachSentAsync(command.BusinessUnitId, solicitation, command.Actor, now, ct);
+            AddEvent(command.BusinessUnitId, "SupplierSolicitation", solicitation.Id, solicitation.Version,
+                "SUPPLIER_SOLICITATION_DELIVERY_RECORDED", command.Actor, command.CorrelationId,
+                command.IdempotencyKey, JsonSerializer.Serialize(new
+                {
+                    requestHash = hash,
+                    channel,
+                    note,
+                    recordedBy = command.Actor.Trim(),
+                    recordedOn = now,
+                    solicitation.SupplierId
+                }), now);
+            await _db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
+            return new RecordedSolicitationDeliveryResult(solicitation.Id, solicitation.Status.ToString(),
+                channel, note, command.Actor.Trim(), now, solicitation.Version, false);
+        });
+    }
+
+    /// <summary>
+    /// Moves the Sourcing Case behind a solicitation to OUTREACH_SENT, exactly as
+    /// <c>ProcurementDispatchWorker</c> does after a successful email. A case left on
+    /// OUTREACH_READY after its RFQ genuinely reached the supplier tells the buyer to dispatch
+    /// something that is already with them.
+    /// </summary>
+    private async Task AdvanceSourcingCaseToOutreachSentAsync(long businessUnitId,
+        SupplierSolicitation solicitation, string actor, DateTime now, CancellationToken ct)
+    {
+        if (!solicitation.SourcingCaseId.HasValue) return;
+        var sourcingCase = await _db.SourcingCases.SingleOrDefaultAsync(x =>
+            x.BusinessUnitId == businessUnitId && x.Id == solicitation.SourcingCaseId.Value, ct);
+        if (sourcingCase is null) return;
+        sourcingCase.Status = SourcingCaseStatuses.OutreachSent;
+        sourcingCase.NextAction = "Track Supplier response";
+        sourcingCase.Version++;
+        sourcingCase.UpdatedOn = now;
+        sourcingCase.UpdatedBy = actor.Trim();
     }
 
     public async Task<SupplierQuoteResult> CaptureSupplierQuoteAsync(CaptureSupplierQuoteCommand command, CancellationToken ct = default)
