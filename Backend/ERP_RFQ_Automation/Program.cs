@@ -536,6 +536,8 @@ builder.Services.AddScoped<LeadUploaderService>();
 builder.Services.AddScoped<RfqUploaderService>();
 builder.Services.AddScoped<ICanonicalRfqNormalizer, CanonicalRfqNormalizer>();
 builder.Services.AddScoped<QuotationUploaderService>();
+builder.Services.AddScoped<QuoteBackfillSpine>();
+builder.Services.AddScoped<QuoteBackfillService>();
 builder.Services.AddScoped<FolderService>();
 builder.Services.AddScoped<IEmailService, EmailService>();
 builder.Services.AddScoped<ILLMService, OllamaLlmService>();

@@ -187,6 +187,12 @@ namespace ERP_RFQ_Automation.Services
             var quote = new Quote
             {
                 QuoteNo = quoteNo,
+                // Back-fill carries the customer's own number and marks its origin; both are
+                // null/PIPELINE for a quote this system produced, so the default path is unchanged.
+                ExternalQuoteReference = string.IsNullOrWhiteSpace(request.ExternalQuoteReference)
+                    ? null : request.ExternalQuoteReference.Trim(),
+                Origin = Models.QuoteOrigin.IsKnown(request.Origin)
+                    ? request.Origin! : Models.QuoteOrigin.Pipeline,
                 Rfqid = request.RfqId,
                 CustomerId = request.CustomerId,
                 BusinessUnitId = request.BusinessUnitId,
