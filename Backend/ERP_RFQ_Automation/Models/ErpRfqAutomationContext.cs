@@ -1087,6 +1087,10 @@ public partial class ErpRfqAutomationContext : DbContext
                 "\"TaxCategory\" IS NULL OR \"TaxCategory\" = 'STANDARD' OR " +
                 "(\"TaxCategoryReason\" IS NOT NULL AND \"TaxCategoryReason\" <> '')");
             entity.Property(e => e.TotalAmount).HasColumnType("decimal(18, 6)");
+            // The line's share of the quote-level discount. Nullable on purpose: null marks a row
+            // written before the allocation existed, whose tax was derived on a base that ignored
+            // the header discount. A default of 0 would erase that distinction on read.
+            entity.Property(e => e.HeaderDiscountAllocated).HasColumnType("decimal(18, 6)");
             // Mirrors Rfqitem.UnitOfMeasure (max 200).
             entity.Property(e => e.UnitOfMeasure).HasMaxLength(200);
             entity.Property(e => e.UnitPrice).HasColumnType("decimal(18, 6)");

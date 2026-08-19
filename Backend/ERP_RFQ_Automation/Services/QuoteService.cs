@@ -593,10 +593,19 @@ namespace ERP_RFQ_Automation.Services
                 .Where(s => discountTypeIds.Contains(s.SetupId))
                 .ToDictionaryAsync(s => s.SetupId, s => s.SetupCode); // Assuming SetupCode is PERCENTAGE or FIXED
 
-            decimal quoteSubTotal = 0;
+            // ---------------------------------------------------------------- pass 1: line nets
+            // Every line's net BEFORE the header discount, which is the weight the header discount
+            // is allocated by and the base the header percentage is taken on. Tax is NOT derived
+            // yet: it cannot be, because the taxable base is not known until the header discount
+            // has been shared out below.
+            var lineNets = new decimal[quote.QuoteItems.Count];
+            var items = quote.QuoteItems.ToList();
+            decimal netSubTotal = 0;
 
-            foreach (var item in quote.QuoteItems)
+            for (var index = 0; index < items.Count; index++)
             {
+                var item = items[index];
+
                 // FIN-09: round the gross line value to currency scale before applying discount.
                 decimal itemTotal = RoundCurrency(item.Quantity * item.UnitPrice);
                 decimal itemDiscountAmount = 0;
@@ -617,46 +626,30 @@ namespace ERP_RFQ_Automation.Services
                 // FIN-09: round the discount to currency scale as well.
                 itemDiscountAmount = RoundCurrency(itemDiscountAmount);
 
-                // Ensure discount doesn't exceed total? Optional business rule.
+                // A discount larger than the line is a data error, not a negative supply.
                 if (itemDiscountAmount > itemTotal) itemDiscountAmount = itemTotal;
 
-                // Item TotalAmount usually stores the Net Amount? Or Gross? 
-                // Based on previous code: TotalAmount = Quantity * UnitPrice. It didn't account for discount.
-                // But usually TotalAmount on line item is (Qty * Price) - Discount.
-                // Let's assume TotalAmount is the final line amount.
-                item.Discount = itemDiscountAmount; // Store calculated amount in 'Discount' column?
-                // QuoteItem has 'Discount' (decimal) and now 'DiscountValue' (decimal).
-                // 'Discount' was likely the amount. 'DiscountValue' is the input value (e.g. 10 for 10%).
-                // YES.
+                // 'Discount' is the resolved AMOUNT; 'DiscountValue' is the input the user typed
+                // (10 meaning 10%). Only the line's own discount lives here — the header's share is
+                // kept separately in HeaderDiscountAllocated so the two never merge into one
+                // unattributable number.
+                item.Discount = itemDiscountAmount;
 
-                // R17/R19: derive the line's output tax from the net consideration the customer
-                // actually pays for this line. The category is normalised first so a null on a
-                // pre-R19 row is read as STANDARD rather than dropping through as "unknown".
-                var taxCategory = QuoteLineTaxCategories.Normalize(item.TaxCategory);
-                item.TaxCategory = taxCategory;
-                var taxableBase = OutputTaxFormula.TaxableBase(itemTotal, itemDiscountAmount);
-                var derivedTax = OutputTaxFormula.Derive(taxableBase, outputTaxRatePercent, taxCategory);
-                item.TaxAmount = derivedTax;
-                // Null here — and only here — means "never derived", which is what the send gate
-                // refuses on. A zero-rated line records the 0 it was actually taxed at.
-                item.TaxRatePercentApplied = derivedTax is null
-                    ? null
-                    : OutputTaxFormula.EffectiveRatePercent(outputTaxRatePercent, taxCategory);
-
-                // FIN-09: round each line net to currency scale before summing so the printed
-                // line totals reconcile with the printed grand total.
-                item.TotalAmount = RoundCurrency(taxableBase + (derivedTax ?? 0m));
-                quoteSubTotal += item.TotalAmount;
+                lineNets[index] = itemTotal - itemDiscountAmount;
+                netSubTotal += lineNets[index];
             }
 
-            // Quote Header Discount
+            // ------------------------------------------------------- header discount, on the NET
+            // Taken on the tax-EXCLUSIVE subtotal. It used to be taken on a subtotal that already
+            // included each line's tax, which quietly made the rep's "10%" worth 11.5% and put the
+            // create screen and the server 150.00 apart on a 10,000.00 quote.
             decimal quoteDiscountAmount = 0;
             if (quote.DiscountTypeId.HasValue && quote.DiscountValue.HasValue && discountTypes.ContainsKey(quote.DiscountTypeId.Value))
             {
                 string code = discountTypes[quote.DiscountTypeId.Value].ToUpper();
                 if (code == "PERCENTAGE")
                 {
-                    quoteDiscountAmount = quoteSubTotal * (quote.DiscountValue.Value / 100);
+                    quoteDiscountAmount = netSubTotal * (quote.DiscountValue.Value / 100);
                 }
                 else if (code == "FIXED")
                 {
@@ -665,10 +658,106 @@ namespace ERP_RFQ_Automation.Services
             }
 
             quoteDiscountAmount = RoundCurrency(quoteDiscountAmount);
-            if (quoteDiscountAmount > quoteSubTotal) quoteDiscountAmount = quoteSubTotal;
+            if (quoteDiscountAmount > netSubTotal) quoteDiscountAmount = netSubTotal;
+            if (quoteDiscountAmount < 0) quoteDiscountAmount = 0;
 
-            quote.TotalAmount = RoundCurrency(quoteSubTotal - quoteDiscountAmount);
+            // ------------------------------------------------------------------- allocation
+            // Share the header discount across lines in proportion to their net, using largest
+            // remainder so the shares sum EXACTLY to the header discount. Rounding each share
+            // independently would leave a residual that shows up as the printed total disagreeing
+            // with the sum of the printed lines.
+            var allocations = AllocateProRata(quoteDiscountAmount, lineNets);
+
+            // ----------------------------------------------------- pass 2: taxable base and tax
+            decimal quoteNetTotal = 0;
+            decimal quoteTaxTotal = 0;
+
+            for (var index = 0; index < items.Count; index++)
+            {
+                var item = items[index];
+                var allocated = allocations[index];
+                item.HeaderDiscountAllocated = allocated;
+
+                // R17/R19: derive the line's output tax from the net consideration the customer
+                // actually pays for this line — after its own discount AND its share of the header
+                // discount. Deriving it before the header discount overstated the VAT on every
+                // discounted quote, and VAT stated on a document is VAT that is owed.
+                var taxCategory = QuoteLineTaxCategories.Normalize(item.TaxCategory);
+                item.TaxCategory = taxCategory;
+                var taxableBase = OutputTaxFormula.TaxableBase(lineNets[index], allocated);
+                var derivedTax = OutputTaxFormula.Derive(taxableBase, outputTaxRatePercent, taxCategory);
+                item.TaxAmount = derivedTax;
+                // Null here — and only here — means "never derived", which is what the send gate
+                // refuses on. A zero-rated line records the 0 it was actually taxed at.
+                item.TaxRatePercentApplied = derivedTax is null
+                    ? null
+                    : OutputTaxFormula.EffectiveRatePercent(outputTaxRatePercent, taxCategory);
+
+                // FIN-09 / calculation version 2: the stored line total is the taxable base PLUS
+                // the line's tax. Presentation is a separate question — the printed document shows
+                // the base and states tax once at the end (QuoteItem.TaxableBase).
+                item.TotalAmount = RoundCurrency(taxableBase + (derivedTax ?? 0m));
+                quoteNetTotal += taxableBase;
+                quoteTaxTotal += derivedTax ?? 0m;
+            }
+
+            quote.TotalAmount = RoundCurrency(quoteNetTotal + quoteTaxTotal);
             quote.FinancialCalculationVersion = 2;
+        }
+
+        /// <summary>
+        /// Splits <paramref name="amount"/> across <paramref name="weights"/> in proportion to each
+        /// weight, at currency scale, guaranteeing the parts sum EXACTLY back to the amount.
+        ///
+        /// <para>Largest-remainder: round every share down, then hand the leftover halalas out one
+        /// at a time to the lines whose truncated remainder was biggest, tie-broken by the larger
+        /// weight so the residual lands on the line best able to absorb it. Rounding each share
+        /// independently instead would leave the document's total disagreeing with the sum of its
+        /// own lines by a halala or two — the class of defect a buyer's accounts-payable clerk
+        /// finds and a seller cannot explain.</para>
+        ///
+        /// <para>A zero or negative total weight means there is nothing to apportion against, so
+        /// nothing is allocated rather than the amount being dumped on an arbitrary line.</para>
+        /// </summary>
+        private static decimal[] AllocateProRata(decimal amount, decimal[] weights)
+        {
+            var allocations = new decimal[weights.Length];
+            if (weights.Length == 0 || amount <= 0m) return allocations;
+
+            decimal totalWeight = 0m;
+            foreach (var weight in weights) totalWeight += weight > 0m ? weight : 0m;
+            if (totalWeight <= 0m) return allocations;
+
+            const decimal unit = 0.01m;
+            var remainders = new (int Index, decimal Remainder, decimal Weight)[weights.Length];
+            decimal allocated = 0m;
+
+            for (var index = 0; index < weights.Length; index++)
+            {
+                var weight = weights[index] > 0m ? weights[index] : 0m;
+                var exact = amount * weight / totalWeight;
+                // Truncate toward zero, never away: the sum of the floors can only be short of the
+                // amount, so the leftover is always distributable and never has to be clawed back.
+                var floored = Math.Floor(exact / unit) * unit;
+                allocations[index] = floored;
+                allocated += floored;
+                remainders[index] = (index, exact - floored, weight);
+            }
+
+            var leftover = decimal.Round(amount - allocated, 2, MidpointRounding.AwayFromZero);
+            if (leftover <= 0m) return allocations;
+
+            foreach (var candidate in remainders
+                         .Where(r => r.Weight > 0m)
+                         .OrderByDescending(r => r.Remainder)
+                         .ThenByDescending(r => r.Weight))
+            {
+                if (leftover < unit) break;
+                allocations[candidate.Index] += unit;
+                leftover -= unit;
+            }
+
+            return allocations;
         }
 
         // Rounds a monetary value to the 2-decimal currency scale used on printed documents
@@ -1028,13 +1117,38 @@ namespace ERP_RFQ_Automation.Services
             decimal totalItemDiscounts = quote.QuoteItems.Sum(i => RoundCurrency(i.Discount ?? 0));
             decimal totalTax = quote.QuoteItems.Sum(i => RoundCurrency(i.TaxAmount ?? 0));
 
-            decimal headerDiscount = 0;
-            if (quote.DiscountTypeId.HasValue && quote.DiscountValue.HasValue)
+            // The header discount is READ from the per-line allocation, not reconstructed by
+            // subtracting the stored total from a sum of line values. The reconstruction printed
+            // the discount 15% too large, because the figures it subtracted had tax in them and the
+            // one it compared against did not: a rep who entered 10% on a 10,000.00 quote saw
+            // 1,150.00 on the customer's copy. Legacy rows written before the allocation column
+            // existed carry null, and for those the old inference is still the only answer
+            // available — so it stays, scoped to exactly those rows.
+            decimal headerDiscount = quote.QuoteItems.Sum(i => RoundCurrency(i.HeaderDiscountAllocated ?? 0));
+            if (headerDiscount == 0
+                && quote.QuoteItems.All(i => i.HeaderDiscountAllocated is null)
+                && quote.DiscountTypeId.HasValue && quote.DiscountValue.HasValue)
             {
                 decimal itemsNetTotal = subTotal - totalItemDiscounts + totalTax;
                 headerDiscount = itemsNetTotal - (quote.TotalAmount ?? 0);
                 if (headerDiscount < 0) headerDiscount = 0;
             }
+
+            // What the line column adds up to: every line's taxable base, tax excluded.
+            decimal netExcludingTax = quote.QuoteItems.Sum(i => RoundCurrency(i.TaxableBase));
+
+            // Name the rate on the document when every taxed line shares one — "VAT 15%" is what a
+            // buyer's finance team checks against. When a quote mixes treatments (a zero-rated
+            // export line beside a standard one) no single rate is true of the total, so the label
+            // stays bare and the per-line breakdown below carries the detail.
+            var appliedRates = quote.QuoteItems
+                .Where(i => i.TaxRatePercentApplied is > 0m)
+                .Select(i => i.TaxRatePercentApplied!.Value)
+                .Distinct()
+                .ToList();
+            string taxRateLabel = appliedRates.Count == 1
+                ? $" {decimal.Round(appliedRates[0], 2).ToString("0.##")}%"
+                : string.Empty;
 
             // The buyer's own RFQ number: Lead.Rfqno is the value the customer sent us;
             // Rfq.Rfqno equals it when it existed and is a synthetic internal serial otherwise,
@@ -1189,7 +1303,12 @@ namespace ERP_RFQ_Automation.Services
                                 table.Cell().Element(RowStyle).AlignRight().Text(item.x.Quantity.ToString("N0"));
                                 table.Cell().Element(RowStyle).Text(item.x.UnitOfMeasure ?? string.Empty);
                                 table.Cell().Element(RowStyle).AlignRight().Text(item.x.UnitPrice.ToString("N2"));
-                                table.Cell().Element(RowStyle).AlignRight().Text(item.x.TotalAmount.ToString("N2")).Bold();
+                                // The line's own consideration, tax EXCLUDED. The stored TotalAmount
+                                // carries the line's tax inside it (calculation version 2), so
+                                // printing it here put VAT in the line column and then added the
+                                // same VAT again in the summary below — the printed lines could not
+                                // be added up to the printed subtotal.
+                                table.Cell().Element(RowStyle).AlignRight().Text(item.x.TaxableBase.ToString("N2")).Bold();
                             }
                         });
 
@@ -1226,10 +1345,15 @@ namespace ERP_RFQ_Automation.Services
 
                                 c.Item().PaddingTop(10).Column(inner =>
                                 {
+                                    // Read top to bottom this is the arithmetic itself: gross, what
+                                    // came off it, the net the tax is charged on, the tax, the total.
+                                    // "Total excluding VAT" is the line column's own sum, so a buyer
+                                    // can add up the page and arrive here.
                                     FinancialRow("Subtotal", subTotal);
                                     if (totalItemDiscounts > 0) FinancialRow("Item Discounts", -totalItemDiscounts);
                                     if (headerDiscount > 0) FinancialRow("Additional Discount", -headerDiscount);
-                                    if (totalTax > 0) FinancialRow("Tax / VAT", totalTax);
+                                    FinancialRow("Total excluding VAT", netExcludingTax);
+                                    if (totalTax > 0) FinancialRow($"VAT{taxRateLabel}", totalTax);
 
                                     inner.Item().PaddingVertical(5).LineHorizontal(1).LineColor(Colors.Grey.Lighten3);
 
