@@ -140,6 +140,22 @@ public static class TenantLifecycleActions
 /// </summary>
 public static class TenantOffboardingDisclosure
 {
+    /// <summary>
+    /// Shown ONLY on a tenant whose commercial-evidence gates were skipped, because a destructive
+    /// screen must never quietly ask for less than it usually does. An operator who has offboarded
+    /// a real customer knows this flow demands closed books and a reconciled accounting receipt; if
+    /// those requirements simply vanish on the next tenant with no explanation, the reasonable
+    /// conclusion is that the gate is unreliable rather than that this tenant has no books.
+    /// </summary>
+    public const string NoCommercialEvidenceRequired =
+        "This tenant is on a non-production deployment profile and has no billing statements and "
+        + "no invoices, so the commercial closure evidence a departing customer requires — a Final "
+        + "billing statement, a finalized invoice and a reconciled accounting acknowledgement — "
+        + "does not apply and was not asked for. There are no books to close and nobody to hand "
+        + "them to. Every other requirement is unchanged: the tenant must be archived, free of "
+        + "legal holds, have its personal data erased, produce a valid export, and serve the full "
+        + "retention window before it can be purged.";
+
     public const string Irreversible =
         "A purge destroys this tenant's business records permanently. There is no undo, no "
         + "recycle bin and no backup this platform can restore from — the retention window before "

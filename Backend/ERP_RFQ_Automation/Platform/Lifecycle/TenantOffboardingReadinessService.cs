@@ -30,6 +30,17 @@ public interface ITenantOffboardingReadinessService
 {
     Task<TenantOffboardingReadinessResult> AssessAsync(
         Tenant tenant, TenantOffboardingReadinessPhase phase, CancellationToken ct = default);
+
+    /// <summary>
+    /// Whether this tenant's books have to be closed and handed over before its records may be
+    /// destroyed. False only for a tenant that never had a customer — see the rule in
+    /// <see cref="TenantOffboardingReadinessService.AssessAsync"/>.
+    ///
+    /// <para>Exposed rather than re-derived by callers so the gate and the screen describing the
+    /// gate cannot disagree. A console that said "commercial evidence not required" over a server
+    /// that still required it would be worse than saying nothing.</para>
+    /// </summary>
+    Task<bool> CommercialEvidenceAppliesAsync(Tenant tenant, CancellationToken ct = default);
 }
 
 /// <summary>
@@ -67,6 +78,36 @@ public sealed class TenantOffboardingReadinessService(ErpRfqAutomationContext db
             .ToListAsync(ct);
         var finalStatement = statements.FirstOrDefault();
         DateTime evidenceCompletedOn = tenant.ModifiedOn ?? tenant.CreatedOn;
+
+        // The commercial block below asks one question in five parts: were this customer's books
+        // closed and handed over before their records were destroyed. On a tenant that never had a
+        // customer there is no answer to give — and, worse, no way to give one. A never-invoiced
+        // trial tenant cannot produce a Final billing statement, a finalized subscription invoice
+        // or a reconciled acknowledgement receipt from an external accounting system, so every one
+        // of those gates fails permanently and the tenant can never be deleted. That is not a
+        // safeguard protecting anybody; it is an unsatisfiable condition, and before this change it
+        // applied to every tenant on the platform, none of which had been through a billed cycle.
+        //
+        // So the block is skipped when it is provably VACUOUS — not waived. Two facts must hold,
+        // and they guard different things:
+        //
+        //   * a non-PRODUCTION deployment profile, which is an Owner stating in writing, with a
+        //     reason and an audit record, that this is not a customer. It is a decision somebody
+        //     is accountable for, not an inference from an empty table.
+        //   * no commercial footprint at all. This is the fact the label cannot fake: a tenant
+        //     carrying a statement or an invoice has books to close, whatever it is labelled, and
+        //     every gate below applies to it unchanged. Relabelling a tenant LOCAL_TEST can
+        //     therefore never be used to walk away from reconciliation.
+        //
+        // Everything structural stays: archived-first, legal hold, personal-data erasure proof, the
+        // export receipt, the retention window, two-person approval and the full audit trail.
+        if (!await CommercialEvidenceAppliesAsync(tenant, ct))
+        {
+            // evidenceCompletedOn stays at the tenant's own last-modified instant, so the export
+            // gate below still binds: an export has to be taken AFTER the tenant was last changed.
+            // Archiving changes it, which is why the working order is archive, then export.
+            return await AssessExportAsync(tenant, failures, evidenceCompletedOn, ct);
+        }
 
         if (finalStatement is null)
         {
@@ -123,6 +164,24 @@ public sealed class TenantOffboardingReadinessService(ErpRfqAutomationContext db
             }
         }
 
+        return await AssessExportAsync(tenant, failures, evidenceCompletedOn, ct);
+    }
+
+    /// <summary>
+    /// The export gate, which binds on every tenant including one with no books to close.
+    ///
+    /// <para>Nothing is destroyed until this platform can prove the data came out first. On a
+    /// tenant with a customer that is a handback; on one without, it is still the last cheap check
+    /// that the export path works against this tenant's rows before the rows stop existing.</para>
+    ///
+    /// <para>The failure detail names the instant the export has to beat, because
+    /// "after the financial closure evidence" is meaningless on a tenant that has none — and an
+    /// operator reading it would go looking for billing evidence that was never required.</para>
+    /// </summary>
+    private async Task<TenantOffboardingReadinessResult> AssessExportAsync(
+        Tenant tenant, List<TenantOffboardingReadinessFailure> failures,
+        DateTime evidenceCompletedOn, CancellationToken ct)
+    {
         var exportReceipt = await db.Set<TenantExportReceipt>().AsNoTracking()
             .Where(x => x.TenantId == tenant.Id)
             .OrderByDescending(x => x.CompletedOn).ThenByDescending(x => x.Id)
@@ -131,10 +190,21 @@ public sealed class TenantOffboardingReadinessService(ErpRfqAutomationContext db
                                   || exportReceipt.SizeBytes <= 0
                                   || !IsSha256(exportReceipt.ContentSha256))
             failures.Add(new(TenantOffboardingReadinessCodes.ExportReceiptMissing,
-                "A valid customer export completed after the financial closure evidence is required."));
+                "A valid customer export completed after "
+                + $"{evidenceCompletedOn:yyyy-MM-dd HH:mm} UTC is required. Take the export after "
+                + "archiving the tenant, because archiving moves that instant forward."));
 
         return new(failures.Count == 0, failures);
     }
+
+    /// <inheritdoc />
+    public async Task<bool> CommercialEvidenceAppliesAsync(
+        Tenant tenant, CancellationToken ct = default)
+        => tenant.DeploymentProfile == TenantDeploymentProfile.Production
+           || await db.Set<BillingStatement>().AsNoTracking()
+               .AnyAsync(x => x.TenantId == tenant.Id, ct)
+           || await db.Set<SubscriptionInvoice>().AsNoTracking()
+               .AnyAsync(x => x.TenantId == tenant.Id, ct);
 
     private static DateTime Max(DateTime value, DateTime? candidate) =>
         candidate is not null && candidate.Value > value ? candidate.Value : value;

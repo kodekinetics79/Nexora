@@ -208,6 +208,12 @@ public static class TenantLifecycleHarness
         public Task<TenantOffboardingReadinessResult> AssessAsync(
             Tenant tenant, TenantOffboardingReadinessPhase phase, CancellationToken ct = default) =>
             Task.FromResult(new TenantOffboardingReadinessResult(true, []));
+
+        // True, not false: this double waives the GATE, and saying commercial evidence did not
+        // apply would put a disclosure on the status claiming the tenant has no books when the
+        // fixtures using it generally do.
+        public Task<bool> CommercialEvidenceAppliesAsync(
+            Tenant tenant, CancellationToken ct = default) => Task.FromResult(true);
     }
 }
 
