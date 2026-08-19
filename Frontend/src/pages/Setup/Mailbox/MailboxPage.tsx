@@ -399,18 +399,36 @@ const MailboxPage: React.FC = () => {
         {(saveMutation.isPending || testMutation.isPending) && <LinearProgress />}
         <DialogContent dividers>
           <Stack spacing={2.5} sx={{ pt: 1 }}>
-            <ToggleButtonGroup
-              exclusive fullWidth size="small" value={form.protocol}
-              onChange={(_, value) => value && setProtocol(value)}
-              disabled={!!editing}
-            >
-              <ToggleButton value="IMAP" sx={{ fontWeight: 800, gap: 1 }}>
-                <InboxIcon fontSize="small" /> Receive leads (IMAP)
-              </ToggleButton>
-              <ToggleButton value="SMTP" sx={{ fontWeight: 800, gap: 1 }}>
-                <SmtpIcon fontSize="small" /> Send quotes (SMTP)
-              </ToggleButton>
-            </ToggleButtonGroup>
+            {/*
+              The direction of an EXISTING mailbox is deliberately fixed: turning a live
+              receiving inbox into a sender would strand its poll history and silently change
+              what its credentials are used for. But a locked toggle with no explanation reads
+              as a broken control — someone trying to add sending opened Edit, found "Send
+              quotes (SMTP)" inert, and reasonably concluded the feature did not work. The
+              lock stays; the silence does not.
+            */}
+            <Stack spacing={0.75}>
+              <ToggleButtonGroup
+                exclusive fullWidth size="small" value={form.protocol}
+                onChange={(_, value) => value && setProtocol(value)}
+                disabled={!!editing}
+              >
+                <ToggleButton value="IMAP" sx={{ fontWeight: 800, gap: 1 }}>
+                  <InboxIcon fontSize="small" /> Receive leads (IMAP)
+                </ToggleButton>
+                <ToggleButton value="SMTP" sx={{ fontWeight: 800, gap: 1 }}>
+                  <SmtpIcon fontSize="small" /> Send quotes (SMTP)
+                </ToggleButton>
+              </ToggleButtonGroup>
+              {editing && (
+                <Alert severity="info" sx={{ py: 0.25 }}>
+                  This mailbox {form.protocol === 'IMAP' ? 'receives' : 'sends'}, and that cannot
+                  be changed after it is created. To {form.protocol === 'IMAP' ? 'send' : 'receive'}{' '}
+                  as well, close this and choose <strong>Add mailbox</strong> — receiving and
+                  sending are separate accounts, on different servers and ports.
+                </Alert>
+              )}
+            </Stack>
 
             <ProviderPicker
               providers={mailboxProviders}
