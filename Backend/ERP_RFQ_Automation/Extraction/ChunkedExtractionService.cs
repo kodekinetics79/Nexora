@@ -371,34 +371,6 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             return ExtractStructuredAsync(input.StructuredRows, input.BusinessUnitId, input.SourceDocumentName, ct,
                 input.DocumentNarrative);
 
-        // ---- TEMPLATE PATH: a document we can read ourselves costs nothing to read. --------
-        //
-        // Tried BEFORE the model, because the model is the expensive answer to a question a
-        // known layout has already answered. A customer's own bidding system emits the same
-        // shape every time; paying per token to rediscover it on every document is the cost
-        // structure this exists to remove — and it removes it for the LARGEST documents, which
-        // is where per-token pricing hurts most.
-        //
-        // A refusal here is a routing decision, not a failure: the document falls through and
-        // is read by the model exactly as before. Nothing is lost by trying.
-        if (Templates.AramcoBidListExtraction.TryExtract(
-                DocumentTextOf(input), input.SourceDocumentName, out var templateRejection) is { } templated)
-        {
-            _log.LogInformation(
-                "{Document} was read from the Aramco bid list template: {Items} line item(s), no model call.",
-                input.SourceDocumentName, templated.ExtractedItemCount);
-            return Task.FromResult(templated);
-        }
-
-        if (templateRejection is not null)
-        {
-            // Loud on purpose. A template that starts refusing is either a layout change at the
-            // sender or a defect here, and both are worth knowing about BEFORE the bill arrives.
-            _log.LogWarning(
-                "{Document} carries the Aramco masthead but was refused by the template ({Reason}); "
-                + "falling through to the model.", input.SourceDocumentName, templateRejection);
-        }
-
         return ExtractUnstructuredAsync(input, ct);
     }
 
@@ -417,6 +389,41 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
 
     public async Task<ChunkedExtractionOutcome> ExtractUnstructuredAsync(DocumentExtractionInput input, CancellationToken ct = default)
     {
+        // ---- TEMPLATE PATH: a document we can read ourselves costs nothing to read. --------
+        //
+        // THIS IS THE DOOR WHERE MONEY IS SPENT, which is why the check lives here.
+        //
+        // It used to sit in ExtractAsync, one level up. ExtractionWorker — the path every real
+        // document takes — calls ExtractUnstructuredAsync directly, so the template was never
+        // consulted in production even once: zero hits since it shipped, while the parser
+        // recognises and parses the very documents that went to the model. Two Aramco bid lists
+        // uploaded on 2026-08-19 were read externally and returned 2 of 3 and 11 of 42 line
+        // items; the parser reads both cleanly, for nothing.
+        //
+        // Putting the guard on the paid call rather than on a dispatcher makes that class of
+        // mistake unreachable: a caller can skip a convenience method, but it cannot skip the
+        // model call it is trying to make.
+        //
+        // A refusal is a routing decision, not a failure — the document falls through and is
+        // read by the model exactly as before. Nothing is lost by trying.
+        if (Templates.AramcoBidListExtraction.TryExtract(
+                DocumentTextOf(input), input.SourceDocumentName, out var templateRejection) is { } templated)
+        {
+            _log.LogInformation(
+                "{Document} was read from the Aramco bid list template: {Items} line item(s), no model call.",
+                input.SourceDocumentName, templated.ExtractedItemCount);
+            return templated;
+        }
+
+        if (templateRejection is not null)
+        {
+            // Loud on purpose. A template that starts refusing is either a layout change at the
+            // sender or a defect here, and both are worth knowing about BEFORE the bill arrives.
+            _log.LogWarning(
+                "{Document} carries the Aramco masthead but was refused by the template ({Reason}); "
+                + "falling through to the model.", input.SourceDocumentName, templateRejection);
+        }
+
         var expected = input.LineItemRegions.Count;
         var diagnostics = new List<string>();
 
