@@ -278,6 +278,92 @@ public class ChunkedExtractionServiceTests
 
     /// <summary>An LLM whose governance layer refuses every reservation — the exact shape of
     /// the production duplicate-key refusal, thrown before any provider call.</summary>
+    // ------------------------------------------------- the template must be REACHABLE
+
+    [Fact]
+    public async Task The_model_path_consults_the_template_before_spending_anything()
+    {
+        // THE DEFECT THIS EXISTS TO PREVENT, and it survived a whole suite of green tests.
+        //
+        // Every other Aramco test calls AramcoBidListExtraction.TryExtract directly. They prove
+        // the parser WORKS; none proved it was REACHABLE. The guard sat in ExtractAsync, while
+        // ExtractionWorker — the path every real document takes — calls ExtractUnstructuredAsync.
+        // So the template was never consulted in production: zero hits since it shipped, while
+        // two Aramco bid lists uploaded on 2026-08-19 went to an external model and came back
+        // with 2 of 3 and 11 of 42 line items.
+        //
+        // This test asserts the wiring rather than the parsing: hand the PAID entry point a
+        // document the template can read, and no model may be called at all.
+        var llm = new ExplodingLlm();
+        var service = NewService(llm);
+
+        var outcome = await service.ExtractUnstructuredAsync(new DocumentExtractionInput
+        {
+            BusinessUnitId = 1,
+            SourceDocumentName = "C001046164.doc",
+            HeaderText = AramcoFixture,
+            LineItemRegions = Array.Empty<string>(),
+        });
+
+        Assert.False(llm.WasCalled, "the template was skipped and the document went to the model");
+        Assert.Equal(1, outcome.ExtractedItemCount);
+        Assert.Null(outcome.AiProviderClass);   // nothing external was involved
+    }
+
+    /// <summary>A minimal but genuine bid list: masthead, the six column headers, one record.</summary>
+    private const string AramcoFixture = """
+        MATERIALS E-BIDDING SYSTEM
+        Bid Materials List (Low Value Bid)
+        Vendor Code
+        Vendname
+        Bidno
+        Bid Date
+        Bid Close
+        2004414
+        ALI ZAID AL-QURAISHI&PARTNERS EL
+        C001046164
+        2/12/2021
+        2/24/2021
+        Address
+        Buyer
+        Buyer Tel
+        Saudi Arabia
+        2GH-MEYASSAR MARAKSHI
+        012-6537914-
+        Bid Line
+        Item No
+        Ship To
+        Req Unit
+        Req Qty
+        Resp Qty
+        10
+        902017274
+        3801
+        EA
+        176
+        KEY:SHAFT,SQUARE,10 MM X 10 MM LG
+        """;
+
+    /// <summary>Fails loudly if anything asks it to think. The point of the test is that
+    /// nothing should.</summary>
+    private sealed class ExplodingLlm : ILLMService
+    {
+        public bool WasCalled { get; private set; }
+        public AiProviderClass ProviderClass => AiProviderClass.External;
+
+        public Task<LeadExtractionResult?> ExtractLeadDataAsync(
+            string fullText, AiCallContext context, CancellationToken cancellationToken = default)
+        {
+            WasCalled = true;
+            throw new InvalidOperationException(
+                "The model must not be called for a document the template can read.");
+        }
+
+        public Task<BoqDraftResult?> DraftServiceBoqAsync(
+            string scopeText, AiCallContext context, CancellationToken cancellationToken = default)
+            => Task.FromResult<BoqDraftResult?>(null);
+    }
+
     private sealed class GovernanceRefusingLlm : ILLMService
     {
         private readonly string _code;
