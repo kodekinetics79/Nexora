@@ -161,6 +161,16 @@ namespace ERP_RFQ_Automation.Services
             return LegacyQuoteStatusIds.TryGetValue(code, out var legacyId) ? legacyId : null;
         }
 
+        /// <summary>
+        /// Attribution for a created quote. The controller stamps this from the validated token
+        /// before the request ever reaches here, so the fallback is a belt-and-braces default
+        /// rather than an expected path — but the DTO no longer forces a value, and a service
+        /// should not depend on a caller having remembered. Never a blank string: Quote.CreatedBy
+        /// is non-nullable, and an empty actor is a worse audit record than a named default.
+        /// </summary>
+        private static string Actor(string? candidate)
+            => string.IsNullOrWhiteSpace(candidate) ? "System" : candidate.Trim();
+
         public async Task<QuoteResponseDTO> CreateQuoteAsync(QuoteCreateRequestDTO request)
         {
             var quoteNo = request.QuoteNo;
@@ -187,7 +197,7 @@ namespace ERP_RFQ_Automation.Services
                     : await ResolveQuoteStatusIdAsync("DRAFT", request.BusinessUnitId), // default: DRAFT (resolved via SetupMaster; legacy id 42 fallback)
                 CurrencyId = request.CurrencyId,
                 HeaderRemarks = request.HeaderRemarks,
-                CreatedBy = request.CreatedBy,
+                CreatedBy = Actor(request.CreatedBy),
                 CreatedDate = DateTime.UtcNow,
                 DiscountTypeId = request.DiscountTypeId,
                 DiscountValue = request.DiscountValue,
@@ -208,7 +218,7 @@ namespace ERP_RFQ_Automation.Services
                     TaxCategory = QuoteLineTaxCategories.Normalize(i.TaxCategory),
                     TaxCategoryReason = i.TaxCategoryReason?.Trim(),
                     DeliveryLeadTime = i.DeliveryLeadTime,
-                    CreatedBy = request.CreatedBy,
+                    CreatedBy = Actor(request.CreatedBy),
                     CreatedDate = DateTime.UtcNow
                 }).ToList()
             };
