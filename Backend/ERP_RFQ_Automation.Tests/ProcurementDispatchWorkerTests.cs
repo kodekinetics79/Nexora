@@ -110,13 +110,16 @@ public sealed class ProcurementDispatchWorkerTests
         {
             Exception = new InvalidOperationException("Ambiguous provider outcome")
         });
-        fixture.SeedPending();
+        fixture.SeedPending(withSourcingCase: true);
 
-        // First pass fences it and records the event.
+        // First pass fences it and records the events.
         Assert.True(await fixture.Worker.ProcessOneAsync(default));
         var first = await fixture.StateAsync();
         Assert.Equal("DELIVERY_UNCERTAIN", first.Message.LastErrorCode);
-        Assert.Equal("SUPPLIER_SOLICITATION_DELIVERY_UNCERTAIN", Assert.Single(first.Events).EventType);
+        Assert.Contains(first.Events, e => e.EventType == "SUPPLIER_SOLICITATION_DELIVERY_UNCERTAIN");
+        // The sourcing-case event too — the one #56 missed, and the reason the loop survived it.
+        Assert.Contains(first.Events, e => e.EventType == "SOURCING_CASE_DELIVERY_REVIEW_REQUIRED");
+        var firstCount = first.Events.Count;
 
         // Put it back exactly as the crash left it: PROCESSING, lease expired, attempt
         // unchanged — so fencing computes the SAME idempotency key it already wrote.
@@ -129,8 +132,8 @@ public sealed class ProcurementDispatchWorkerTests
         var after = await fixture.StateAsync();
         Assert.Equal(ProcurementOutboxStatuses.Failed, after.Message.Status);
         Assert.Null(after.Message.LeaseOwner);
-        // Still ONE event: the second fence is the same fact, so it is recorded once.
-        Assert.Single(after.Events);
+        // No event written twice: a second fence is the same fact, for BOTH aggregates.
+        Assert.Equal(firstCount, after.Events.Count);
     }
 
     [Fact]
@@ -320,6 +323,9 @@ public sealed class ProcurementDispatchWorkerTests
     {
         private const long Tenant = 72_001;
         public const long Rfq = 72_010;
+        public const long SourcingCase = 72_040;
+        public const long DemandLine = 72_050;
+        public const long RfqItem = 72_060;
         private const long Supplier = 72_020;
         private const long Solicitation = 72_030;
         private const long Message = 72_040;
@@ -362,7 +368,8 @@ public sealed class ProcurementDispatchWorkerTests
             string? payloadJson = null,
             string status = ProcurementOutboxStatuses.Pending,
             int attemptCount = 0,
-            DateTime? updatedOn = null)
+            DateTime? updatedOn = null,
+            bool withSourcingCase = false)
         {
             using var db = _database.ContextFor(null);
             db.Set<Tenant>().Add(new Tenant
@@ -382,8 +389,37 @@ public sealed class ProcurementDispatchWorkerTests
             governedSupplier.ComplianceStatus = SupplierComplianceStatuses.Cleared;
             governedSupplier.RiskStatus = SupplierRiskStatuses.Low;
             governedSupplier.ReadinessStatus = SupplierReadinessStatuses.Ready;
-            AgentSeed.Solicitation(db, Solicitation, Tenant, Rfq, Supplier, SolicitationStatus.PendingDispatch);
             var now = updatedOn ?? DateTime.UtcNow;
+            var seededSolicitation = AgentSeed.Solicitation(
+                db, Solicitation, Tenant, Rfq, Supplier, SolicitationStatus.PendingDispatch);
+
+            // A REAL solicitation belongs to a sourcing case, and the default fixture's does not.
+            // UpdateSourcingCaseLifecycleAsync returns immediately when SourcingCaseId is null,
+            // so half the fencing path — including the sourcing-case event that kept production
+            // crash-looping after #56 — is never exercised without this. Opt-in so the tests
+            // written against the simpler shape keep working unchanged.
+            if (withSourcingCase)
+            {
+                AgentSeed.RfqItem(db, RfqItem, Rfq, "Dispatch fixture item", 10);
+                db.Set<CommercialDemandLine>().Add(new CommercialDemandLine
+                {
+                    Id = DemandLine, BusinessUnitId = Tenant, RfqId = Rfq, RfqItemId = RfqItem,
+                    NexoraSerial = "NXR-DISPATCH", IdentityKey = "dispatch-line",
+                    CreatedBy = "tests", CreatedOn = now,
+                });
+                db.Set<SourcingCase>().Add(new SourcingCase
+                {
+                    Id = SourcingCase, BusinessUnitId = Tenant, CommercialDemandLineId = DemandLine,
+                    RfqId = Rfq, RfqItemId = RfqItem, NexoraSerial = "NXR-DISPATCH",
+                    Description = "Dispatch fixture line", RequestedQuantity = 10m,
+                    StockQuantity = 0m, UnfulfilledQuantity = 10m, SearchLimit = 10,
+                    Status = SourcingCaseStatuses.OutreachReady, NextAction = "Review known suppliers",
+                    ShortageDecisionKey = "dispatch-shortage", IdempotencyKey = "dispatch-case",
+                    RequestHash = new string('E', 64), CreatedBy = "tests", UpdatedBy = "tests",
+                    CreatedOn = now, UpdatedOn = now,
+                });
+                seededSolicitation.SourcingCaseId = SourcingCase;
+            }
             db.ProcurementOutboxMessages.Add(new ProcurementOutboxMessage
             {
                 Id = Message,

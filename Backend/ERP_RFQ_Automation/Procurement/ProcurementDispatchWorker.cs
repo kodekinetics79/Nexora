@@ -389,13 +389,7 @@ public sealed class ProcurementDispatchWorker : BackgroundService
         //
         // The recovery path must therefore be able to run twice. Skipping the duplicate lets
         // the status and lease release commit, which is the part that actually frees the queue.
-        var alreadyRecorded = await db.ProcurementEvents
-            .AsNoTracking()
-            .AnyAsync(x => x.BusinessUnitId == message.BusinessUnitId
-                        && x.EventType == "SUPPLIER_SOLICITATION_DELIVERY_UNCERTAIN"
-                        && x.IdempotencyKey == EventKey(message, "SUPPLIER_SOLICITATION_DELIVERY_UNCERTAIN"), ct);
-        if (!alreadyRecorded)
-            AddEvent(db, message, solicitation, "SUPPLIER_SOLICITATION_DELIVERY_UNCERTAIN", now);
+        await AddEventIfNewAsync(db, message, solicitation, "SUPPLIER_SOLICITATION_DELIVERY_UNCERTAIN", now, ct);
 
         await UpdateSourcingCaseLifecycleAsync(db, message, solicitation, sent: false, terminalFailure: true, now, ct);
         await db.SaveChangesAsync(ct);
@@ -544,18 +538,27 @@ public sealed class ProcurementDispatchWorker : BackgroundService
         sourcingCase.Version++;
         sourcingCase.UpdatedOn = now;
         sourcingCase.UpdatedBy = "procurement-dispatch-worker";
+        // Same gate as the solicitation event, for the same reason: fencing does not increment
+        // the attempt, so a second fence recomputes this exact key. #56 guarded only the
+        // solicitation event and the loop continued on THIS one — which is why the check now
+        // lives in one place that every dispatch event passes through.
+        var caseEventType = sent ? "SOURCING_CASE_OUTREACH_SENT"
+            : terminalFailure ? "SOURCING_CASE_DELIVERY_REVIEW_REQUIRED"
+            : "SOURCING_CASE_DELIVERY_RETRY_SCHEDULED";
+        var caseKey = $"dispatch:{message.Id}:attempt:{message.AttemptCount}:sourcing-case";
+        if (await EventAlreadyRecordedAsync(db, message.BusinessUnitId, caseEventType, caseKey, ct))
+            return;
+
         db.ProcurementEvents.Add(new ProcurementEvent
         {
             BusinessUnitId = message.BusinessUnitId,
             AggregateType = "SourcingCase",
             AggregateId = sourcingCase.Id,
             AggregateVersion = sourcingCase.Version,
-            EventType = sent ? "SOURCING_CASE_OUTREACH_SENT"
-                : terminalFailure ? "SOURCING_CASE_DELIVERY_REVIEW_REQUIRED"
-                : "SOURCING_CASE_DELIVERY_RETRY_SCHEDULED",
+            EventType = caseEventType,
             Actor = "procurement-dispatch-worker",
             CorrelationId = message.OriginCorrelationId ?? $"dispatch:{message.Id}:attempt:{message.AttemptCount}",
-            IdempotencyKey = $"dispatch:{message.Id}:attempt:{message.AttemptCount}:sourcing-case",
+            IdempotencyKey = caseKey,
             PayloadJson = JsonSerializer.Serialize(new
             {
                 SupplierSolicitationId = solicitation.Id,
@@ -566,6 +569,44 @@ public sealed class ProcurementDispatchWorker : BackgroundService
             }),
             OccurredOn = now
         });
+    }
+
+    /// <summary>
+    /// Has this exact dispatch event already been recorded?
+    ///
+    /// <para>EVERY event this worker writes is keyed on message + attempt + type, and fencing a
+    /// stale claim does not increment the attempt — correctly, because a fence is not a delivery
+    /// attempt. So any path that can run twice recomputes a key it has already written, the
+    /// insert violates
+    /// <c>IX_procurement_events_BusinessUnitId_EventType_IdempotencyKey</c>, and the whole
+    /// SaveChanges fails — including the lease release that would have freed the row. The
+    /// message stays PROCESSING, the next cycle fences it again, and the worker crash-loops.
+    /// Because it handles one message per cycle, that single row stops ALL outbound procurement
+    /// mail for every tenant.</para>
+    ///
+    /// <para><b>Why this is a shared gate rather than another guard.</b> #56 fixed exactly one
+    /// event, <c>SUPPLIER_SOLICITATION_DELIVERY_UNCERTAIN</c>, and the loop continued in
+    /// production on the sourcing-case event written a few lines later — same flaw, same
+    /// key shape, missed because the fix was aimed at the symptom that had been read in the
+    /// logs. Guarding events one at a time leaves the next one to reintroduce it. Everything
+    /// this worker records now passes through here.</para>
+    /// </summary>
+    private static Task<bool> EventAlreadyRecordedAsync(
+        ErpRfqAutomationContext db, long businessUnitId, string eventType, string idempotencyKey,
+        CancellationToken ct)
+        => db.ProcurementEvents.AsNoTracking().AnyAsync(
+            x => x.BusinessUnitId == businessUnitId
+              && x.EventType == eventType
+              && x.IdempotencyKey == idempotencyKey, ct);
+
+    /// <summary>Records a solicitation event unless that exact fact is already on the ledger.</summary>
+    private static async Task AddEventIfNewAsync(
+        ErpRfqAutomationContext db, ProcurementOutboxMessage message, SupplierSolicitation solicitation,
+        string eventType, DateTime occurredOn, CancellationToken ct)
+    {
+        if (await EventAlreadyRecordedAsync(db, message.BusinessUnitId, eventType, EventKey(message, eventType), ct))
+            return;
+        AddEvent(db, message, solicitation, eventType, occurredOn);
     }
 
     /// <summary>
