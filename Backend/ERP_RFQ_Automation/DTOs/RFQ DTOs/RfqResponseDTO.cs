@@ -247,3 +247,15 @@ namespace ERP_RFQ_Automation.DTOs.RfqDTOs
         public int TotalPages { get; set; }
     }
 }
+
+namespace ERP_RFQ_Automation.DTOs.RfqDTOs
+{
+    /// <summary>A person's answer to "which catalogue product is this line?"</summary>
+    public class RfqLineProductResolutionRequestDTO
+    {
+        public long ProductId { get; set; }
+
+        /// <summary>Why this product. Optional, but the thing a later reader will want.</summary>
+        public string? Reason { get; set; }
+    }
+}

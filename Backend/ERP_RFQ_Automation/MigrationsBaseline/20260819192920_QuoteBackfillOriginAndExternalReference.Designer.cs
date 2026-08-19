@@ -3,17 +3,20 @@ using System;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
 #nullable disable
 
-namespace ERP_RFQ_Automation.Migrations
+namespace ERP_RFQ_Automation.MigrationsBaseline
 {
     [DbContext(typeof(ErpRfqAutomationContext))]
-    partial class ErpRfqAutomationContextModelSnapshot : ModelSnapshot
+    [Migration("20260819192920_QuoteBackfillOriginAndExternalReference")]
+    partial class QuoteBackfillOriginAndExternalReference
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -15786,17 +15789,6 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint")
                         .HasColumnName("ProductID");
 
-                    b.Property<string>("ProductResolutionReason")
-                        .HasMaxLength(500)
-                        .HasColumnType("character varying(500)");
-
-                    b.Property<string>("ProductResolvedBy")
-                        .HasMaxLength(255)
-                        .HasColumnType("character varying(255)");
-
-                    b.Property<DateTime?>("ProductResolvedOn")
-                        .HasColumnType("timestamp without time zone");
-
                     b.Property<string>("ProductShortDescription")
                         .HasColumnType("text");
 
@@ -15865,8 +15857,6 @@ namespace ERP_RFQ_Automation.Migrations
                             t.HasCheckConstraint("CK_RFQItems_Participation_Decision", "\"ParticipationDecision\" IN ('Pending','Quote','NoQuote')");
 
                             t.HasCheckConstraint("CK_RFQItems_Quantity_Positive", "\"Quantity\" > 0");
-
-                            t.HasCheckConstraint("CK_Rfqitems_ProductResolution", "(\"ProductResolvedBy\" IS NULL AND \"ProductResolvedOn\" IS NULL) OR (\"ProductResolvedBy\" IS NOT NULL AND trim(\"ProductResolvedBy\") <> '' AND \"ProductResolvedOn\" IS NOT NULL)");
                         });
                 });
 

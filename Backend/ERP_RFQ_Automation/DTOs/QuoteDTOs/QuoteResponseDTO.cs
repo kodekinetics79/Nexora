@@ -167,6 +167,12 @@ namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
         public decimal? TotalAmount { get; set; }
         public string? HeaderRemarks { get; set; }
 
+        /// <summary>The number the customer already knows a back-filled quote by. Null for pipeline quotes.</summary>
+        public string? ExternalQuoteReference { get; set; }
+
+        /// <summary>PIPELINE (default) or BACKFILL. See <see cref="Models.QuoteOrigin"/>.</summary>
+        public string? Origin { get; set; }
+
         /// <summary>
         /// Set by the server from the validated token; a value sent here is discarded.
         ///

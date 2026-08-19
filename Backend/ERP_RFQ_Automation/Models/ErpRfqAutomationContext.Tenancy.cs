@@ -350,6 +350,8 @@ public partial class ErpRfqAutomationContext
         // Reasoned, audited quote removal + the tombstone that outlives a discarded draft.
         // See Models/ErpRfqAutomationContext.QuoteRemoval.cs.
         ConfigureQuoteRemovalModel(modelBuilder);
+        ConfigureQuoteBackfillModel(modelBuilder);
+        ConfigureRfqLineProductResolutionModel(modelBuilder);
         modelBuilder.Entity<ERP_RFQ_Automation.Inventory.StockReservation>()
             .HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<CustomerIdentifier>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
