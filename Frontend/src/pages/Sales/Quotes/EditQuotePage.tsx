@@ -25,6 +25,7 @@ import {
   TAX_CATEGORIES, TAX_CATEGORY_STANDARD, taxCategoryLabel, taxCategoryRequiresReason,
 } from '../../../constants/taxCategories';
 import { toast } from 'react-hot-toast';
+import { calculateQuoteTotals, type DiscountKind } from './quoteTotals';
 
 interface QuoteItem {
   id?: number;
@@ -144,31 +145,47 @@ const EditQuotePage: React.FC = () => {
   });
   const outputTaxRatePercent = commercialPolicy?.outputTaxRatePercent ?? null;
 
-  // Calculate Totals
-  const subtotal = useMemo(() => {
-    return items.filter(i => !i.isDeleted).reduce((sum, item) => {
-      const itemTotal = item.quantity * item.unitPrice;
-      let itemDiscount = 0;
-      const type = discountTypes.find(t => t.setupId === item.discountTypeId);
-      if (type) {
-        if (type.setupCode === 'PERCENTAGE') itemDiscount = itemTotal * (item.discountValue / 100);
-        else if (type.setupCode === 'FIXED') itemDiscount = item.discountValue;
-      }
-      return sum + (itemTotal - itemDiscount);
-    }, 0);
-  }, [items, discountTypes]);
+  // Totals. Same shared implementation as the create screen and the server (quoteTotals.ts): the
+  // header discount comes off the tax-EXCLUSIVE net, is allocated across lines pro rata, and each
+  // line's tax follows the discounted base. This page previously previewed a header discount taken
+  // on an ex-VAT subtotal while the server took it on a VAT-inclusive one, and summed each line's
+  // tax from BEFORE the header discount — so it showed a total the server never saved and a VAT
+  // figure larger than the one that was due.
+  const liveItems = useMemo(() => items.filter(i => !i.isDeleted), [items]);
 
-  const totalTax = useMemo(() => items.filter(i => !i.isDeleted).reduce((sum, item) => sum + (item.taxAmount || 0), 0), [items]);
-  
-  const calculatedHeaderDiscount = useMemo(() => {
-    const type = discountTypes.find(t => t.setupId === discountTypeId);
-    if (!type) return 0;
-    if (type.setupCode === 'PERCENTAGE') return subtotal * (discountValue / 100);
-    else if (type.setupCode === 'FIXED') return discountValue;
-    return 0;
-  }, [subtotal, discountTypeId, discountValue, discountTypes]);
+  const discountKindOf = (id: number | null): DiscountKind => {
+    const code = discountTypes.find(t => t.setupId === id)?.setupCode?.toUpperCase();
+    return code === 'PERCENTAGE' ? 'PERCENTAGE' : code === 'FIXED' ? 'FIXED' : null;
+  };
 
-  const grandTotal = subtotal - calculatedHeaderDiscount + totalTax;
+  const totals = useMemo(() => calculateQuoteTotals(
+    liveItems.map(item => ({
+      quantity: item.quantity,
+      unitPrice: item.unitPrice,
+      discountKind: discountKindOf(item.discountTypeId),
+      discountValue: item.discountValue,
+      taxCategory: item.taxCategory,
+    })),
+    discountKindOf(discountTypeId),
+    discountValue,
+    outputTaxRatePercent,
+  ), [liveItems, discountTypes, discountTypeId, discountValue, outputTaxRatePercent]);
+
+  // The render loop walks `items` (deleted rows included, hidden); `totals.lines` is indexed over
+  // the live rows only. This maps one to the other so a line never reads another line's figures.
+  const pricedByItemIndex = useMemo(() => {
+    const map = new Map<number, (typeof totals.lines)[number]>();
+    let live = 0;
+    items.forEach((item, index) => {
+      if (!item.isDeleted) map.set(index, totals.lines[live++]);
+    });
+    return map;
+  }, [items, totals]);
+
+  const subtotal = totals.grossSubTotal - totals.totalLineDiscounts;
+  const totalTax = totals.totalTax;
+  const calculatedHeaderDiscount = totals.headerDiscount;
+  const grandTotal = totals.grandTotal;
 
   const updateMutation = useMutation({
     mutationFn: (data: any) => quoteService.update(Number(id), data),
@@ -200,7 +217,9 @@ const EditQuotePage: React.FC = () => {
         if (prod) {
             item.productName = prod.productName || '';
             item.itemDescription = prod.description || prod.productName || '';
-            item.unitPrice = prod.sellingPrice || prod.unitCost || 0;
+            // D5: seed from the SELLING price only. Falling back to `unitCost` quoted any product
+            // without a list price at cost — a zero-margin line with nothing on screen saying so.
+            item.unitPrice = prod.sellingPrice ?? 0;
         }
     }
 
@@ -214,16 +233,11 @@ const EditQuotePage: React.FC = () => {
     item.totalAmount = itemRawTotal - itemDiscount;
     item.discount = itemDiscount;
 
-    // Preview the derivation the server will perform on save, using the same rule: the tenant's
-    // rate on a standard-rated line, zero on any other category, and NOTHING when the line is
-    // standard-rated and the tenant has stated no rate. That last case is why the rate is nullable
-    // — showing zero there would be the defect this whole change exists to remove.
+    // Tax is no longer derived per line here: the header discount has to be shared across the
+    // whole quote before any line's taxable base is known. `totals` above owns that, and the
+    // server recomputes all of it on save regardless.
     const effectiveRate = item.taxCategory === TAX_CATEGORY_STANDARD ? outputTaxRatePercent : 0;
-    const taxableBase = Math.max(0, Math.round((itemRawTotal - itemDiscount) * 100) / 100);
     item.taxRatePercentApplied = effectiveRate;
-    item.taxAmount = effectiveRate === null
-      ? 0
-      : Math.round(taxableBase * effectiveRate) / 100;
     // A line that goes back to standard rated carries no reason to state.
     if (!taxCategoryRequiresReason(item.taxCategory)) item.taxCategoryReason = '';
 
@@ -260,14 +274,15 @@ const EditQuotePage: React.FC = () => {
       discountTypeId, discountValue, statusId,
       modifiedBy: userData?.userName || 'System',
       totalAmount: grandTotal,
-      quoteItems: items.map(item => ({
+      quoteItems: items.map((item, index) => ({
         id: item.id, productId: item.productId, itemDescription: item.itemDescription || item.productName,
-        quantity: item.quantity, unitPrice: item.unitPrice, totalAmount: item.totalAmount,
+        quantity: item.quantity, unitPrice: item.unitPrice,
+        totalAmount: pricedByItemIndex.get(index)?.taxableBase ?? 0,
         unitOfMeasure: item.unitOfMeasure || null, customerLineRef: item.customerLineRef || null,
         discountTypeId: item.discountTypeId, discountValue: item.discountValue,
         // taxAmount is sent for wire compatibility only — the server re-derives it and discards
         // whatever arrives here. The category and its reason ARE the user's input.
-        taxAmount: item.taxAmount,
+        taxAmount: pricedByItemIndex.get(index)?.taxAmount ?? 0,
         taxCategory: item.taxCategory,
         taxCategoryReason: item.taxCategoryReason.trim() || null,
         deliveryLeadTime: item.deliveryLeadTime,
@@ -456,10 +471,10 @@ const EditQuotePage: React.FC = () => {
                             </MenuItem>
                           ))}
                         </Select>
-                        <Typography variant="caption" color={item.taxRatePercentApplied === null ? 'warning.main' : 'text.secondary'}>
-                          {item.taxRatePercentApplied === null
-                            ? 'Tax not calculated yet'
-                            : `$ ${item.taxAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })} @ ${item.taxRatePercentApplied}%`}
+                        <Typography variant="caption" color={pricedByItemIndex.get(index)?.taxAmount === null ? 'warning.main' : 'text.secondary'}>
+                          {pricedByItemIndex.get(index)?.taxAmount === null
+                            ? 'No output tax rate configured — this quote cannot be sent'
+                            : `${(pricedByItemIndex.get(index)?.taxAmount ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })} @ ${item.taxCategory === TAX_CATEGORY_STANDARD ? outputTaxRatePercent : 0}%`}
                         </Typography>
                         {taxCategoryRequiresReason(item.taxCategory) && (
                           <TextField
@@ -473,7 +488,7 @@ const EditQuotePage: React.FC = () => {
                       </Stack>
                     </TableCell>
                     <TableCell align="center">
-                      <Typography sx={{ fontWeight: 700, fontSize: '0.875rem' }}>$ {item.totalAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</Typography>
+                      <Typography sx={{ fontWeight: 700, fontSize: '0.875rem' }}>{(pricedByItemIndex.get(index)?.net ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}</Typography>
                     </TableCell>
                     <TableCell align="center">
                       <IconButton color="error" size="small" onClick={() => removeItem(index)}><DeleteIcon fontSize="small" /></IconButton>

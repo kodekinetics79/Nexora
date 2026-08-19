@@ -20,6 +20,8 @@ import quoteService from '../../../api/services/quoteService';
 import commercialPolicyService from '../../../api/services/commercialPolicyService';
 import setupService from '../../../api/services/setupService';
 import productService from '../../../api/services/productService';
+import currencyService from '../../../api/services/currencyService';
+import { calculateQuoteTotals, type DiscountKind } from './quoteTotals';
 import CustomerContextPanel from './CustomerContextPanel';
 import { toast } from 'react-hot-toast';
 
@@ -49,6 +51,11 @@ const CreateQuotePage: React.FC = () => {
   const [quoteDate, setQuoteDate] = useState(new Date().toISOString().split('T')[0]);
   const [validUntil, setValidUntil] = useState(new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]);
   const [headerRemarks, setHeaderRemarks] = useState('');
+  // D6: the quote's currency. It used to be omitted from the payload entirely, so every quote this
+  // screen created stored a null CurrencyId and the PDF fell back to "USD" — a Riyadh trader
+  // emailing dollar-denominated quotations. A null currency also makes QuoteStatsDTO's pipeline
+  // total unanswerable by design, so the dashboard figure could never resolve either.
+  const [currencyId, setCurrencyId] = useState<number | null>(null);
   
   // Header Discount
   const [discountTypeId, setDiscountTypeId] = useState<number | null>(null);
@@ -73,6 +80,20 @@ const CreateQuotePage: React.FC = () => {
     queryFn: () => setupService.getAll({ setupType: 'DiscountType', pageSize: 50 }).then(r => r.items),
   });
 
+  const { data: currencies = [] } = useQuery({
+    queryKey: ['currencies-list', businessUnitId],
+    queryFn: () => currencyService.getAll({ pageSize: 100, businessUnitId }).then(r => r.items),
+  });
+  // Default to the tenant's base currency rather than leaving it unset: unset is the state that
+  // produced the defect, and a trader's own currency is the only sane opening guess.
+  React.useEffect(() => {
+    if (currencyId === null && currencies.length > 0) {
+      setCurrencyId((currencies.find(c => c.isBaseCurrency) ?? currencies[0]).id);
+    }
+  }, [currencies, currencyId]);
+  const selectedCurrency = currencies.find(c => c.id === currencyId) ?? null;
+  const currencyLabel = selectedCurrency?.symbol || selectedCurrency?.code || '';
+
   // The business unit's output tax rate, so this screen previews the tax the server will derive
   // instead of showing a flat zero. Null means the tenant has stated no rate — the quote will save
   // but cannot be sent until one is set in Commercial Policy settings.
@@ -82,31 +103,28 @@ const CreateQuotePage: React.FC = () => {
   });
   const outputTaxRatePercent = commercialPolicy?.outputTaxRatePercent ?? null;
 
-  // Calculate Totals
-  const subtotal = useMemo(() => {
-    return items.reduce((sum, item) => {
-      const itemTotal = item.quantity * item.unitPrice;
-      let itemDiscount = 0;
-      const type = discountTypes.find(t => t.setupId === item.discountTypeId);
-      if (type) {
-        if (type.setupCode === 'PERCENTAGE') itemDiscount = itemTotal * (item.discountValue / 100);
-        else if (type.setupCode === 'FIXED') itemDiscount = item.discountValue;
-      }
-      return sum + (itemTotal - itemDiscount);
-    }, 0);
-  }, [items, discountTypes]);
+  // Totals. One shared implementation with the server (see quoteTotals.ts): the header discount
+  // comes off the tax-EXCLUSIVE net, is allocated across lines pro rata, and each line's tax is
+  // derived from what is left. This screen used to take the header discount off an ex-VAT subtotal
+  // while the server took it off a VAT-inclusive one, so the rep was shown a total the server never
+  // saved, and the VAT stated was the VAT on the pre-discount base.
+  const discountKindOf = (id: number | null): DiscountKind => {
+    const code = discountTypes.find(t => t.setupId === id)?.setupCode?.toUpperCase();
+    return code === 'PERCENTAGE' ? 'PERCENTAGE' : code === 'FIXED' ? 'FIXED' : null;
+  };
 
-  const totalTax = useMemo(() => items.reduce((sum, item) => sum + (item.taxAmount || 0), 0), [items]);
-  
-  const calculatedHeaderDiscount = useMemo(() => {
-    const type = discountTypes.find(t => t.setupId === discountTypeId);
-    if (!type) return 0;
-    if (type.setupCode === 'PERCENTAGE') return subtotal * (discountValue / 100);
-    else if (type.setupCode === 'FIXED') return discountValue;
-    return 0;
-  }, [subtotal, discountTypeId, discountValue, discountTypes]);
-
-  const grandTotal = subtotal - calculatedHeaderDiscount + totalTax;
+  const totals = useMemo(() => calculateQuoteTotals(
+    items.map(item => ({
+      quantity: item.quantity,
+      unitPrice: item.unitPrice,
+      discountKind: discountKindOf(item.discountTypeId),
+      discountValue: item.discountValue,
+      taxCategory: 'STANDARD',
+    })),
+    discountKindOf(discountTypeId),
+    discountValue,
+    outputTaxRatePercent,
+  ), [items, discountTypes, discountTypeId, discountValue, outputTaxRatePercent]);
 
   // Mutations
   const createMutation = useMutation({
@@ -131,36 +149,22 @@ const CreateQuotePage: React.FC = () => {
   const updateItem = (index: number, fields: Partial<QuoteItem>) => {
     const newItems = [...items];
     const item = { ...newItems[index], ...fields };
-    
-    // If product changed, update description and unit price
+
+    // If product changed, update description and price
     if (fields.productId !== undefined) {
         const prod = products.find(p => p.id === fields.productId);
         if (prod) {
             item.productName = prod.productName || '';
             item.itemDescription = prod.description || prod.productName || '';
-            item.unitPrice = prod.sellingPrice || prod.unitCost || 0;
+            // D5: seed from the SELLING price only. This used to fall back to `unitCost`, so any
+            // product without a list price was quoted at cost — a zero-margin quote, with nothing
+            // on screen saying so. A blank price the rep has to fill in is the honest failure.
+            item.unitPrice = prod.sellingPrice ?? 0;
         }
     }
 
-    const itemRawTotal = item.quantity * item.unitPrice;
-    let itemDiscount = 0;
-    const type = discountTypes.find(t => t.setupId === item.discountTypeId);
-    if (type) {
-      if (type.setupCode === 'PERCENTAGE') itemDiscount = itemRawTotal * (item.discountValue / 100);
-      else if (type.setupCode === 'FIXED') itemDiscount = item.discountValue;
-    }
-    item.totalAmount = itemRawTotal - itemDiscount;
-    item.discount = itemDiscount;
-
-    // R17: preview the output tax the server will DERIVE on save. This screen used to send and
-    // display a flat zero, so the quote it created came back carrying tax the create page had said
-    // was nil. Every line created here is standard rated; a non-standard treatment is stated on the
-    // edit screen, which is where the reason for it can be captured.
-    const taxableBase = Math.max(0, Math.round((itemRawTotal - itemDiscount) * 100) / 100);
-    item.taxAmount = outputTaxRatePercent === null
-      ? 0
-      : Math.round(taxableBase * outputTaxRatePercent) / 100;
-
+    // Line tax and line totals are quote-wide now, because the header discount has to be shared
+    // out before any line's taxable base is known. See `totals` above.
     newItems[index] = item;
     setItems(newItems);
   };
@@ -169,7 +173,14 @@ const CreateQuotePage: React.FC = () => {
     setItems(items.filter((_, i) => i !== index));
   };
 
+  const money = (value: number) =>
+    `${currencyLabel} ${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`.trim();
+
   const handleSubmit = () => {
+    if (!currencyId) {
+      toast.error('Select the currency this quote is priced in');
+      return;
+    }
     if (!rfqId) {
       toast.error('Please select the RFQ this quote belongs to');
       return;
@@ -186,17 +197,20 @@ const CreateQuotePage: React.FC = () => {
     const payload = {
       customerId, contactId: selectedRfq?.contactId ?? null, rfqId, businessUnitId, quoteDate, validUntil, headerRemarks,
       discountTypeId, discountValue,
+      currencyId,
       createdBy: userData?.userName || 'System',
-      totalAmount: grandTotal,
-      quoteItems: items.map(item => ({
+      totalAmount: totals.grandTotal,
+      // Every money figure below is recomputed server-side and these are ignored; they are sent
+      // only so the request is a complete record of what the rep was looking at.
+      quoteItems: items.map((item, index) => ({
         productId: item.productId,
         itemDescription: item.itemDescription || item.productName,
         quantity: item.quantity,
         unitPrice: item.unitPrice,
-        totalAmount: item.totalAmount,
+        totalAmount: totals.lines[index]?.taxableBase ?? 0,
         discountTypeId: item.discountTypeId,
         discountValue: item.discountValue,
-        taxAmount: item.taxAmount,
+        taxAmount: totals.lines[index]?.taxAmount ?? 0,
         deliveryLeadTime: item.deliveryLeadTime
       }))
     };
@@ -286,7 +300,17 @@ const CreateQuotePage: React.FC = () => {
               <Grid size={{ xs: 12, md: 2 }}>
                 <TextField fullWidth type="date" label="Valid Until" size="small" value={validUntil} onChange={(e) => setValidUntil(e.target.value)} slotProps={{ inputLabel: { shrink: true } }} />
               </Grid>
-              <Grid size={{ xs: 12, md: 8 }}>
+              <Grid size={{ xs: 12, md: 2 }}>
+                <FormControl fullWidth size="small">
+                  <InputLabel>Currency</InputLabel>
+                  <Select value={currencyId ?? ''} label="Currency" onChange={(e) => setCurrencyId(Number(e.target.value) || null)}>
+                    {currencies.map(c => (
+                      <MenuItem key={c.id} value={c.id}>{c.code}{c.isBaseCurrency ? ' (base)' : ''}</MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+              </Grid>
+              <Grid size={{ xs: 12, md: 6 }}>
                 <TextField fullWidth label="Header Remarks / Terms" size="small" value={headerRemarks} onChange={(e) => setHeaderRemarks(e.target.value)} />
               </Grid>
               <Grid size={{ xs: 12, md: 2 }}>
@@ -303,7 +327,7 @@ const CreateQuotePage: React.FC = () => {
               <Grid size={{ xs: 12, md: 2 }}>
                 <TextField 
                   fullWidth type="number" label="Disc. Val" size="small" value={discountValue} onChange={(e) => setDiscountValue(Number(e.target.value))}
-                  slotProps={{ input: { endAdornment: <InputAdornment position="end">{discountTypes.find(t => t.setupId === discountTypeId)?.setupCode === 'PERCENTAGE' ? '%' : '$'}</InputAdornment> } }}
+                  slotProps={{ input: { endAdornment: <InputAdornment position="end">{discountTypes.find(t => t.setupId === discountTypeId)?.setupCode === 'PERCENTAGE' ? '%' : currencyLabel}</InputAdornment> } }}
                 />
               </Grid>
             </Grid>
@@ -352,7 +376,7 @@ const CreateQuotePage: React.FC = () => {
                     <TableCell align="center">
                       <TextField 
                         type="number" size="small" variant="standard" sx={{ width: 90 }} 
-                        slotProps={{ input: { startAdornment: <Typography variant="caption" sx={{ mr: 0.5 }}>$</Typography> } }} 
+                        slotProps={{ input: { startAdornment: <Typography variant="caption" sx={{ mr: 0.5 }}>{currencyLabel}</Typography> } }} 
                         value={item.unitPrice} onChange={(e) => updateItem(index, { unitPrice: Number(e.target.value) })} 
                       />
                     </TableCell>
@@ -364,7 +388,7 @@ const CreateQuotePage: React.FC = () => {
                                 onChange={(e) => updateItem(index, { discountTypeId: Number(e.target.value) || null })}
                             >
                                 <MenuItem value=""><Typography variant="caption">N/A</Typography></MenuItem>
-                                {discountTypes.map(t => <MenuItem key={t.setupId} value={t.setupId}><Typography variant="caption">{t.setupCode === 'PERCENTAGE' ? '%' : '$'}</Typography></MenuItem>)}
+                                {discountTypes.map(t => <MenuItem key={t.setupId} value={t.setupId}><Typography variant="caption">{t.setupCode === 'PERCENTAGE' ? '%' : currencyLabel}</Typography></MenuItem>)}
                             </Select>
                             <TextField 
                                 type="number" size="small" variant="standard" sx={{ width: 40 }} 
@@ -373,7 +397,7 @@ const CreateQuotePage: React.FC = () => {
                         </Stack>
                     </TableCell>
                     <TableCell align="center">
-                      <Typography sx={{ fontWeight: 700, fontSize: '0.875rem' }}>$ {item.totalAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</Typography>
+                      <Typography sx={{ fontWeight: 700, fontSize: '0.875rem' }}>{money(totals.lines[index]?.net ?? 0)}</Typography>
                     </TableCell>
                     <TableCell align="center">
                       <IconButton color="error" size="small" onClick={() => removeItem(index)}><DeleteIcon fontSize="small" /></IconButton>
@@ -390,28 +414,51 @@ const CreateQuotePage: React.FC = () => {
             <CardContent sx={{ p: 2 }}>
               <Typography variant="subtitle1" sx={{ fontWeight: 800, mb: 1.5, color: 'primary.dark' }}>Summary</Typography>
               <Stack spacing={1.5}>
+                {/* Reads top to bottom as the arithmetic itself, and in the same order as the
+                    printed quotation: gross, what comes off it, the net VAT is charged on, the VAT,
+                    the total. "Total excl. VAT" is the sum of the line column. */}
                 <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
                   <Typography variant="body2" color="text.secondary">Gross Total</Typography>
-                  <Typography variant="body2" sx={{ fontWeight: 700 }}>$ {subtotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}</Typography>
+                  <Typography variant="body2" sx={{ fontWeight: 700 }}>{money(totals.grossSubTotal)}</Typography>
                 </Box>
-                {calculatedHeaderDiscount > 0 && (
+                {totals.totalLineDiscounts > 0 && (
+                  <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <Typography variant="body2" color="error">Item Discounts</Typography>
+                    <Typography variant="body2" color="error" sx={{ fontWeight: 700 }}>- {money(totals.totalLineDiscounts)}</Typography>
+                  </Box>
+                )}
+                {totals.headerDiscount > 0 && (
                   <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
                     <Typography variant="body2" color="error">Addit. Discount</Typography>
-                    <Typography variant="body2" color="error" sx={{ fontWeight: 700 }}>- $ {calculatedHeaderDiscount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</Typography>
+                    <Typography variant="body2" color="error" sx={{ fontWeight: 700 }}>- {money(totals.headerDiscount)}</Typography>
                   </Box>
                 )}
                 <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
-                  <Typography variant="body2" color="text.secondary">Tax Amount</Typography>
-                  <Typography variant="body2" sx={{ fontWeight: 700 }}>$ {totalTax.toLocaleString(undefined, { minimumFractionDigits: 2 })}</Typography>
+                  <Typography variant="body2" color="text.secondary">Total excl. VAT</Typography>
+                  <Typography variant="body2" sx={{ fontWeight: 700 }}>{money(totals.netExcludingTax)}</Typography>
+                </Box>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <Typography variant="body2" color="text.secondary">
+                    VAT{outputTaxRatePercent !== null ? ` ${outputTaxRatePercent}%` : ''}
+                  </Typography>
+                  <Typography variant="body2" sx={{ fontWeight: 700 }}>{money(totals.totalTax)}</Typography>
                 </Box>
                 <Divider />
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <Typography variant="h6" sx={{ fontWeight: 900 }}>Total</Typography>
                   <Typography variant="h5" sx={{ fontWeight: 900, color: 'primary.main' }}>
-                    $ {grandTotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                    {money(totals.grandTotal)}
                   </Typography>
                 </Box>
               </Stack>
+              {/* The send gate refuses a standard-rated line with no derived tax, so say so here
+                  rather than letting the rep find out after the quote is written. */}
+              {totals.hasUnderivedTax && (
+                <Alert severity="warning" sx={{ mt: 1.5 }}>
+                  No output tax rate is configured for this business unit, so VAT cannot be
+                  calculated and this quote cannot be sent. Set it in Setup &rarr; Commercial Policy.
+                </Alert>
+              )}
             </CardContent>
           </Card>
 
