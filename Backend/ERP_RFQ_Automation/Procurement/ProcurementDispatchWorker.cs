@@ -369,7 +369,34 @@ public sealed class ProcurementDispatchWorker : BackgroundService
         solicitation.Status = SolicitationStatus.DeliveryFailed;
         solicitation.UpdatedOn = now;
         solicitation.Version++;
-        AddEvent(db, message, solicitation, "SUPPLIER_SOLICITATION_DELIVERY_UNCERTAIN", now);
+
+        // FENCING THE SAME CLAIM TWICE IS THE SAME FACT, NOT A NEW ONE — and writing it twice
+        // used to halt every outbound RFQ in the system.
+        //
+        // The event's idempotency key is message + attempt + type, and fencing does not
+        // increment the attempt: a fence is not a delivery attempt. So a second fence of the
+        // same stale claim produced an identical key, violated
+        // IX_procurement_events_BusinessUnitId_EventType_IdempotencyKey, and took down the whole
+        // SaveChanges. The message therefore stayed PROCESSING with an expired lease, the next
+        // cycle found the same stale claim and fenced it again, and ProcessOneAsync threw on
+        // every pass — roughly every twelve seconds, for ever.
+        //
+        // Nothing else could be dispatched behind it. The worker processes one message per
+        // cycle, so a single poisoned row stopped supplier RFQs and customer quotes for the
+        // entire deployment, with no alert saying so. Observed in production on 2026-08-19:
+        // solicitation 1 wedged in DISPATCHING while a healthy solicitation 2 sat in
+        // PENDINGDISPATCH behind it and was never touched.
+        //
+        // The recovery path must therefore be able to run twice. Skipping the duplicate lets
+        // the status and lease release commit, which is the part that actually frees the queue.
+        var alreadyRecorded = await db.ProcurementEvents
+            .AsNoTracking()
+            .AnyAsync(x => x.BusinessUnitId == message.BusinessUnitId
+                        && x.EventType == "SUPPLIER_SOLICITATION_DELIVERY_UNCERTAIN"
+                        && x.IdempotencyKey == EventKey(message, "SUPPLIER_SOLICITATION_DELIVERY_UNCERTAIN"), ct);
+        if (!alreadyRecorded)
+            AddEvent(db, message, solicitation, "SUPPLIER_SOLICITATION_DELIVERY_UNCERTAIN", now);
+
         await UpdateSourcingCaseLifecycleAsync(db, message, solicitation, sent: false, terminalFailure: true, now, ct);
         await db.SaveChangesAsync(ct);
     }
@@ -541,6 +568,14 @@ public sealed class ProcurementDispatchWorker : BackgroundService
         });
     }
 
+    /// <summary>
+    /// The event's identity: message, attempt and type. Deliberately carries nothing that
+    /// varies between two writes of the SAME fact, which is what makes it an idempotency key —
+    /// and is exactly why re-writing that fact has to be handled rather than attempted.
+    /// </summary>
+    private static string EventKey(ProcurementOutboxMessage message, string eventType)
+        => $"dispatch:{message.Id}:attempt:{message.AttemptCount}:{eventType}";
+
     private static void AddEvent(
         ErpRfqAutomationContext db,
         ProcurementOutboxMessage message,
@@ -557,7 +592,7 @@ public sealed class ProcurementDispatchWorker : BackgroundService
             EventType = eventType,
             Actor = "procurement-dispatch-worker",
             CorrelationId = message.OriginCorrelationId ?? $"dispatch:{message.Id}:attempt:{message.AttemptCount}",
-            IdempotencyKey = $"dispatch:{message.Id}:attempt:{message.AttemptCount}:{eventType}",
+            IdempotencyKey = EventKey(message, eventType),
             PayloadJson = JsonSerializer.Serialize(new { message.AttemptCount, message.Status, message.NextAttemptOn, message.LastErrorCode }),
             OccurredOn = occurredOn
         });
