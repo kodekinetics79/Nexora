@@ -401,6 +401,16 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
                     && x.CustomerAwardId.HasValue && awardIds.Contains(x.CustomerAwardId.Value))
                 .Select(x => new { x.Id, x.OrderNo, AwardId = x.CustomerAwardId!.Value })
                 .ToListAsync(cancellationToken);
+        // The quotations these purchase orders were uploaded AGAINST, which is knowable the moment
+        // the document arrives and does not wait for an allocation. Read here because
+        // CustomerPurchaseOrder.QuoteId is a bare column with no navigation property, and batched
+        // because the alternative is one query per row on a 200-row inbox.
+        var directQuoteNumbers = await DirectQuoteNumbersAsync(businessUnitId,
+            purchaseOrders
+                .Where(x => x.QuoteId.HasValue
+                    && !x.Awards.Any(award => award.Status != CustomerAwardStatuses.Cancelled))
+                .Select(x => x.QuoteId!.Value),
+            cancellationToken);
         return purchaseOrders.Select(purchaseOrder =>
         {
             var award = purchaseOrder.Awards.Where(x => x.Status != CustomerAwardStatuses.Cancelled)
@@ -415,12 +425,60 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
             var outcome = award is null ? "POSSIBLE_MATCH_REVIEW"
                 : purchaseOrder.Status == CustomerPurchaseOrderStatuses.PartiallyAwarded ? "PARTIAL_AWARD"
                 : discrepancyCount > 0 ? "ACCEPTED_WITH_DIFFERENCES" : "EXACT_ACCEPTANCE";
+            var (quoteId, quoteNumber) = ResolveQuote(purchaseOrder, award, directQuoteNumbers);
             return new ClientPurchaseOrderInboxRow(purchaseOrder.Id, purchaseOrder.InternalNumber,
                 purchaseOrder.ExternalPoNumber, purchaseOrder.Customer.Name,
                 purchaseOrder.CommercialCase.MasterReference, purchaseOrder.ReceivedOn, purchaseOrder.Status,
-                award?.QuoteId, award?.Quote.QuoteNo, outcome, discrepancyCount,
+                quoteId, quoteNumber, outcome, discrepancyCount,
                 order?.Id, order?.OrderNo);
         }).ToList();
+    }
+
+    /// <summary>
+    /// Which quotation a captured customer PO answers, for the two screens a reviewer actually
+    /// looks at.
+    ///
+    /// <para><b>The defect this closes.</b> Both projections used to read the quote solely off the
+    /// award — <c>award?.QuoteId, award?.Quote.QuoteNo</c> — while
+    /// <see cref="CreatePurchaseOrderAsync"/> has always written <c>CustomerPurchaseOrder.QuoteId</c>
+    /// for exactly the opposite reason: "so the matcher can reach the quotation without going
+    /// through an award that may not exist yet". So a purchase order that had been uploaded and
+    /// attached to a quotation, but not yet allocated, displayed <i>Quote match pending</i> on the
+    /// Client PO Inbox and hid the "Customer Quote" button on the review screen. The link was in
+    /// the database and the product denied it existed.</para>
+    ///
+    /// <para>That state is not hypothetical. The capture workspace issues four sequential requests
+    /// — create PO, create award, confirm, convert — so any refusal after the first (the R17 tax
+    /// gate, a stale quote revision, an over-allocation) strands a saved purchase order whose only
+    /// record of what the buyer was answering is this column.</para>
+    ///
+    /// <para>The award still WINS when there is one. It is the stronger statement: a purchase order
+    /// can be split across awards, and the header award is the one whose quotation the rest of this
+    /// projection — the line allocations, the discrepancies, the blocking keys — is computed
+    /// against. Naming a different quotation in the header than the lines were compared to would be
+    /// worse than naming none.</para>
+    /// </summary>
+    private static (long? QuoteId, string? QuoteNumber) ResolveQuote(CustomerPurchaseOrder purchaseOrder,
+        CustomerAward? award, IReadOnlyDictionary<long, string> directQuoteNumbers)
+    {
+        if (award is not null) return (award.QuoteId, award.Quote.QuoteNo);
+        if (purchaseOrder.QuoteId is not { } quoteId) return (null, null);
+        // A quote id with no number beside it reads as a broken link, so an id we could not resolve
+        // inside the tenant is reported as no link at all rather than as half of one.
+        return directQuoteNumbers.TryGetValue(quoteId, out var quoteNumber) ? (quoteId, quoteNumber) : (null, null);
+    }
+
+    private async Task<Dictionary<long, string>> DirectQuoteNumbersAsync(long businessUnitId,
+        IEnumerable<long> quoteIds, CancellationToken cancellationToken)
+    {
+        var ids = quoteIds.Distinct().ToArray();
+        if (ids.Length == 0) return [];
+        // Scoped to the tenant, so a QuoteId that somehow names another business unit's quotation
+        // resolves to nothing and the caller reports an unlinked purchase order.
+        return await _db.Quotes.AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId && ids.Contains(x.Id))
+            .Select(x => new { x.Id, x.QuoteNo })
+            .ToDictionaryAsync(x => x.Id, x => x.QuoteNo, cancellationToken);
     }
 
     public async Task<ClientPurchaseOrderMatchView> GetPurchaseOrderMatchAsync(long businessUnitId,
@@ -483,10 +541,17 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
         var outcome = award is null ? "POSSIBLE_MATCH_REVIEW"
             : purchaseOrder.Status == CustomerPurchaseOrderStatuses.PartiallyAwarded ? "PARTIAL_AWARD"
             : discrepancyCount > 0 ? "ACCEPTED_WITH_DIFFERENCES" : "EXACT_ACCEPTANCE";
+        // See ResolveQuote: before an award exists the purchase order's own QuoteId is the only
+        // record of which quotation the buyer was answering, and it is the link the reviewer needs
+        // most — this is the screen where they decide what the PO should be allocated against.
+        var (headerQuoteId, headerQuoteNumber) = ResolveQuote(purchaseOrder, award,
+            award is null && purchaseOrder.QuoteId.HasValue
+                ? await DirectQuoteNumbersAsync(businessUnitId, [purchaseOrder.QuoteId.Value], cancellationToken)
+                : []);
         var header = new ClientPurchaseOrderInboxRow(purchaseOrder.Id, purchaseOrder.InternalNumber,
             purchaseOrder.ExternalPoNumber, purchaseOrder.Customer.Name,
             purchaseOrder.CommercialCase.MasterReference, purchaseOrder.ReceivedOn, purchaseOrder.Status,
-            award?.QuoteId, award?.Quote.QuoteNo, outcome, discrepancyCount, order?.Id, order?.OrderNo);
+            headerQuoteId, headerQuoteNumber, outcome, discrepancyCount, order?.Id, order?.OrderNo);
         // FR-COM-04. The gate ConvertToOrderAsync applies, computed here so the reviewer sees the
         // same answer BEFORE pressing the button rather than as a 409 afterwards.
         var accepted = await AcceptedDifferencesAsync(businessUnitId, purchaseOrder.Id, cancellationToken);

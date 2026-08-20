@@ -1,18 +1,31 @@
 import { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import {
   Alert, Box, Button, Chip, CircularProgress, Paper, Stack, Table, TableBody,
   TableCell, TableContainer, TableHead, TableRow, TextField, Typography,
 } from '@mui/material';
-import { FindInPage, Refresh, Search } from '@mui/icons-material';
+import { CloudUpload, FindInPage, Refresh, Search } from '@mui/icons-material';
 import customerAwardService from '../../../api/services/customerAwardService';
+import { useAuth } from '../../../context/AuthContext';
+import { CustomerAwardDialog, type CustomerAwardQuote } from '../Quotes/customer-awards';
+import ChooseQuoteForClientPoDialog from './ChooseQuoteForClientPoDialog';
 
 const readable = (value: string) => value.replaceAll('_', ' ');
 
 export default function ClientPurchaseOrderInboxPage() {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const { hasPermission } = useAuth();
   const [search, setSearch] = useState('');
+  /**
+   * The upload journey, in the two states it can be in: choosing which quotation the buyer's
+   * document answers, then capturing it against that quotation. They are separate states rather
+   * than one wizard because the second is the existing `CustomerAwardDialog` — the same component
+   * the quote view page opens — and it must not be forked.
+   */
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [uploadAgainst, setUploadAgainst] = useState<CustomerAwardQuote | null>(null);
   const query = useQuery({
     queryKey: ['client-purchase-orders', search],
     queryFn: () => customerAwardService.searchPurchaseOrders(search),
@@ -22,9 +35,18 @@ export default function ClientPurchaseOrderInboxPage() {
     <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} sx={{ justifyContent: 'space-between', mb: 3 }}>
       <Box>
         <Typography variant="h4" component="h1" sx={{ fontWeight: 800 }}>Client PO Inbox</Typography>
-        <Typography color="text.secondary">Match End Customer purchase orders to the accepted Customer Quote.</Typography>
+        <Typography color="text.secondary">Upload an End Customer purchase order, file it against the Customer Quote it answers, and raise the sales order.</Typography>
       </Box>
-      <Button startIcon={<Refresh />} onClick={() => query.refetch()} disabled={query.isFetching}>Refresh</Button>
+      <Stack direction="row" spacing={1}>
+        <Button startIcon={<Refresh />} onClick={() => query.refetch()} disabled={query.isFetching}>Refresh</Button>
+        {hasPermission('Customer Awards', 'create') && <Button
+          variant="contained"
+          startIcon={<CloudUpload />}
+          onClick={() => setPickerOpen(true)}
+        >
+          Upload Client PO
+        </Button>}
+      </Stack>
     </Stack>
 
     <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
@@ -59,5 +81,25 @@ export default function ClientPurchaseOrderInboxPage() {
         </TableRow>)}</TableBody>
       </Table>
     </TableContainer>}
+
+    <ChooseQuoteForClientPoDialog
+      open={pickerOpen}
+      onClose={() => setPickerOpen(false)}
+      onChosen={(quote) => { setPickerOpen(false); setUploadAgainst(quote); }}
+    />
+
+    <CustomerAwardDialog
+      open={uploadAgainst !== null}
+      quote={uploadAgainst}
+      onClose={() => setUploadAgainst(null)}
+      onCompleted={(result) => {
+        setUploadAgainst(null);
+        // Back to the inbox the user started on, showing the purchase order they just uploaded,
+        // rather than to the sales order the quote view page navigates to — the sales order is
+        // reachable from the row, and this screen is where the next PO gets uploaded from.
+        queryClient.invalidateQueries({ queryKey: ['client-purchase-orders'] });
+        if (result.order) queryClient.invalidateQueries({ queryKey: ['orders'] });
+      }}
+    />
   </Box>;
 }
