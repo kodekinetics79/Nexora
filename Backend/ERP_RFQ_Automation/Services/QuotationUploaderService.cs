@@ -16,10 +16,16 @@ namespace ERP_RFQ_Automation.Services
         private readonly ErpRfqAutomationContext _context;
         private readonly ILogger<QuotationUploaderService> _logger;
 
-        public QuotationUploaderService(ErpRfqAutomationContext context, ILogger<QuotationUploaderService> logger)
+        private readonly QuoteBackfillSpine? _spine;
+
+        public QuotationUploaderService(
+            ErpRfqAutomationContext context,
+            ILogger<QuotationUploaderService> logger,
+            QuoteBackfillSpine? spine = null)
         {
             _context = context;
             _logger = logger;
+            _spine = spine;
         }
 
         public async Task<byte[]> GenerateTemplateAsync(long businessUnitId)
@@ -155,11 +161,22 @@ namespace ERP_RFQ_Automation.Services
         /// <see cref="ERP_RFQ_Automation.Infrastructure.RetriableUploadTransaction"/> for the
         /// defect this closes (every upload returned 500 against PostgreSQL).
         /// </summary>
-        public Task<ServiceResult<string>> UploadTemplateAsync(Stream fileStream, long businessUnitId, string createdBy) =>
+        /// <param name="backfill">
+        /// When true the sheet is a BACK-FILL of quotes issued before Nexora existed, and a row
+        /// naming no RFQ originates its own commercial spine instead of being refused.
+        ///
+        /// This is an explicit mode, never a fallback for a blank cell. A missing 'Customer RFQ No'
+        /// on an ordinary upload is overwhelmingly a mistake, and quietly inventing an inquiry to
+        /// paper over it is exactly the corruption the guard below exists to prevent. The operator
+        /// has to say which kind of file this is.
+        /// </param>
+        public Task<ServiceResult<string>> UploadTemplateAsync(
+            Stream fileStream, long businessUnitId, string createdBy, bool backfill = false) =>
             ERP_RFQ_Automation.Infrastructure.RetriableUploadTransaction.ExecuteAsync(
-                _context, fileStream, () => UploadTemplateCoreAsync(fileStream, businessUnitId, createdBy));
+                _context, fileStream, () => UploadTemplateCoreAsync(fileStream, businessUnitId, createdBy, backfill));
 
-        private async Task<ServiceResult<string>> UploadTemplateCoreAsync(Stream fileStream, long businessUnitId, string createdBy)
+        private async Task<ServiceResult<string>> UploadTemplateCoreAsync(
+            Stream fileStream, long businessUnitId, string createdBy, bool backfill)
         {
             ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
             using var package = new ExcelPackage(fileStream);
@@ -200,7 +217,7 @@ namespace ERP_RFQ_Automation.Services
                     // would manufacture a phantom inquiry and corrupt the spine to preserve a
                     // convenience.
                     var customerRfqNo = ws.Cells[row, 14].Text?.Trim();
-                    if (string.IsNullOrEmpty(customerRfqNo))
+                    if (!backfill && string.IsNullOrEmpty(customerRfqNo))
                         return ServiceResult<string>.CreateFailure(
                             $"Row {row}: 'Customer RFQ No' is required. A quotation takes its Nexora Serial " +
                             "from the RFQ it answers, and one uploaded against no RFQ could never be traced " +
@@ -234,23 +251,45 @@ namespace ERP_RFQ_Automation.Services
 
                         // Re-read inside the caller's tenant: a spreadsheet must not be able to
                         // name another business unit's RFQ and borrow its commercial case.
-                        var normalizedRfqNo = customerRfqNo.ToLower();
-                        var rfqMatches = await _context.Rfqs
-                            .Include(r => r.Lead)
-                            .Where(r => r.BusinessUnitId == businessUnitId && r.Rfqno.ToLower().Trim() == normalizedRfqNo)
-                            .OrderBy(r => r.Id)
-                            .ToListAsync();
-                        if (rfqMatches.Count == 0)
-                            return ServiceResult<string>.CreateFailure(
-                                $"Row {row}: RFQ '{customerRfqNo}' was not found in this business unit.");
-                        // Rfqno carries no uniqueness constraint, so an ambiguous reference is a
-                        // question for a human, not a coin toss between two commercial cases.
-                        if (rfqMatches.Count > 1)
-                            return ServiceResult<string>.CreateFailure(
-                                $"Row {row}: RFQ '{customerRfqNo}' matches {rfqMatches.Count} RFQs " +
-                                $"(IDs {string.Join(", ", rfqMatches.Select(r => r.Id))}). Resolve the duplicate " +
-                                "before importing, so the quotation cannot be attached to the wrong case.");
-                        var rfq = rfqMatches[0];
+                        Rfq rfq;
+                        if (backfill && string.IsNullOrEmpty(customerRfqNo))
+                        {
+                            // A quote issued before Nexora existed answers an inquiry that really happened, it
+                            // just happened elsewhere. The spine records that: a Lead marked BACKFILL carrying the
+                            // quote's ORIGINAL issue date, which mints the commercial case exactly as a live
+                            // inquiry would. That is why this is not the "allocate a case here" branch the guard
+                            // above rightly refuses — no case is minted without the Lead that owns it.
+                            if (_spine is null)
+                                return ServiceResult<string>.CreateFailure(
+                                    $"Row {row}: back-fill is unavailable because the commercial spine is not wired up.");
+                            if (string.IsNullOrWhiteSpace(quoteNo))
+                                return ServiceResult<string>.CreateFailure(
+                                    $"Row {row}: a back-filled quote needs the number its CUSTOMER knows it by. " +
+                                    "That number is how the quote is recognised and how a re-import is detected.");
+                            var issuedOn = ParseDate(ws.Cells[row, 3].Text?.Trim()) ?? DateTime.UtcNow;
+                            rfq = await _spine.OriginateAsync(
+                                businessUnitId, customer.Id, null, issuedOn, createdBy, quoteNo);
+                        }
+                        else
+                        {
+                            var normalizedRfqNo = customerRfqNo.ToLower();
+                            var rfqMatches = await _context.Rfqs
+                                .Include(r => r.Lead)
+                                .Where(r => r.BusinessUnitId == businessUnitId && r.Rfqno.ToLower().Trim() == normalizedRfqNo)
+                                .OrderBy(r => r.Id)
+                                .ToListAsync();
+                            if (rfqMatches.Count == 0)
+                                return ServiceResult<string>.CreateFailure(
+                                    $"Row {row}: RFQ '{customerRfqNo}' was not found in this business unit.");
+                            // Rfqno carries no uniqueness constraint, so an ambiguous reference is a
+                            // question for a human, not a coin toss between two commercial cases.
+                            if (rfqMatches.Count > 1)
+                                return ServiceResult<string>.CreateFailure(
+                                    $"Row {row}: RFQ '{customerRfqNo}' matches {rfqMatches.Count} RFQs " +
+                                    $"(IDs {string.Join(", ", rfqMatches.Select(r => r.Id))}). Resolve the duplicate " +
+                                    "before importing, so the quotation cannot be attached to the wrong case.");
+                            rfq = rfqMatches[0];
+                        }
                         if (!rfq.CommercialCaseId.HasValue)
                             return ServiceResult<string>.CreateFailure(
                                 $"Row {row}: RFQ '{rfq.Rfqno}' carries no commercial case, so a quotation " +
@@ -268,6 +307,8 @@ namespace ERP_RFQ_Automation.Services
                         var quote = new Quote
                         {
                             QuoteNo = quoteNo,
+                            ExternalQuoteReference = backfill ? quoteNo : null,
+                            Origin = backfill ? QuoteOrigin.Backfill : QuoteOrigin.Pipeline,
                             Rfqid = rfq.Id,
                             CustomerId = customer.Id,
                             BusinessUnitId = businessUnitId,
