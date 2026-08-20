@@ -59,6 +59,35 @@ public sealed record QueuePageResponse(
     int PageNumber,
     int PageSize);
 
+/// <summary>
+/// The exact wording the routing availability projection uses to explain why a user may or may
+/// not be handed governed work.
+///
+/// <para>These are constants rather than inline literals because a second surface has to quote
+/// them without being able to read them: <c>GetOwnerOptionsAsync</c> only considers users who
+/// already appear in a profile, a team, an ownership or an assignment, so a user with no
+/// governed profile at all is absent from its result entirely. The lead-assignment dropdown
+/// still has to tell a manager WHY that person cannot be picked, and it must say the same
+/// sentence the engine would have said. One copy of the sentence, two readers.</para>
+/// </summary>
+public static class RoutingEligibilityReasons
+{
+    public const string UserInactive = "User is inactive";
+    public const string ProfileRequired = "Governed Sales Rep profile is required";
+    public const string ProfileNotEligible = "Governed Sales Rep profile is not routing eligible";
+    public const string CapacityExhausted = "Configured or measured capacity is exhausted";
+    public const string Eligible = "Governed Sales Rep profile is active and eligible";
+
+    /// <summary>
+    /// A profile row exists but its effective window has not opened or has already closed.
+    /// The availability projection never says this — it filters non-effective rows out before it
+    /// computes a reason, so to it the user simply has no profile. Only a surface that reads the
+    /// stored row directly (the maintenance screen) can tell the two apart, and it must, because
+    /// "create a profile" and "extend the one you have" are different corrections.
+    /// </summary>
+    public const string ProfileNotEffective = "Governed Sales Rep profile is outside its effective dates";
+}
+
 public sealed record RoutingOwnerOptionResponse(
     long UserId,
     string Name,

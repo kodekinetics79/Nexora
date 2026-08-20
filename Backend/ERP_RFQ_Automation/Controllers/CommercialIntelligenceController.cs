@@ -97,6 +97,74 @@ public sealed class CommercialIntelligenceController(
     public async Task<ActionResult> Reps(CancellationToken ct) => Ok(await BuildRepSummaries(TenantId(), ct));
 
     /// <summary>
+    /// The read side of <c>POST reps/{userId}/routing-profile</c>.
+    ///
+    /// <para><b>Why this endpoint exists.</b> The write endpoint below demands an
+    /// <c>ExpectedVersion</c> for optimistic concurrency, and nothing in the product could tell a
+    /// caller what that version was: <c>reps</c> and <c>reps/{userId}</c> both return commercial
+    /// performance and say nothing about routing. So the profile that decides whether the routing
+    /// engine may assign anyone at all could be written but never read, which is why no
+    /// maintenance screen existed for it.</para>
+    ///
+    /// <para>Every active user is listed, including those with no profile row. That is the whole
+    /// point of the screen: <c>sales_rep_profiles</c> is fail-closed, so a tenant with an empty
+    /// table has nobody the engine will accept, and the only way out is to see the people who are
+    /// missing a profile and give them one.</para>
+    ///
+    /// <para>The stored row and the engine's live verdict are reported separately and both are
+    /// needed. The stored row is what the editor writes back (including <c>version</c>); the
+    /// verdict is what routing will actually do today, which can differ because a row outside its
+    /// effective dates is invisible to the engine.</para>
+    /// </summary>
+    [HttpGet("reps/routing-profiles")]
+    [RequireManagerRole]
+    [RequireModulePermission("Users", PermissionAction.View)]
+    public async Task<ActionResult> RepRoutingProfiles(CancellationToken ct)
+    {
+        var tenant = TenantId();
+        var now = DateTime.UtcNow;
+        var users = await db.Users.AsNoTracking().Include(x => x.Role)
+            .Where(x => x.Buid == tenant && x.IsActive != false)
+            .OrderBy(x => x.FirstName).ThenBy(x => x.LastName).ToListAsync(ct);
+        var profiles = await db.SalesRepProfiles.AsNoTracking()
+            .Where(x => x.BusinessUnitId == tenant).ToDictionaryAsync(x => x.UserId, ct);
+        var options = (await routing.GetOwnerOptionsAsync(tenant, ct)).ToDictionary(x => x.UserId);
+        return Ok(users.Select(user =>
+        {
+            profiles.TryGetValue(user.Id, out var profile);
+            options.TryGetValue(user.Id, out var option);
+            var effectiveNow = profile != null && profile.EffectiveFromUtc <= now &&
+                (!profile.EffectiveToUtc.HasValue || profile.EffectiveToUtc > now);
+            return new
+            {
+                userId = user.Id, name = Name(user), email = user.Email, roleName = user.Role?.SetupValue,
+                hasProfile = profile != null,
+                profileEffectiveNow = effectiveNow,
+                isRoutingEligible = profile?.IsRoutingEligible,
+                capacityPercent = profile?.CapacityPercent,
+                distributionWeight = profile?.DistributionWeight,
+                territoryKeys = profile?.TerritoryKeys ?? Array.Empty<string>(),
+                productCategoryKeys = profile?.ProductCategoryKeys ?? Array.Empty<string>(),
+                effectiveFromUtc = profile?.EffectiveFromUtc,
+                effectiveToUtc = profile?.EffectiveToUtc,
+                // 0 is the create sentinel the write endpoint expects, so a user with no row can
+                // be POSTed straight back without the client inventing a version.
+                version = profile?.Version ?? 0,
+                updatedAtUtc = profile?.UpdatedAtUtc, updatedBy = profile?.UpdatedBy,
+                isAvailable = option?.IsAvailable ?? false,
+                eligibilityReason = option?.EligibilityReason
+                    ?? (profile == null
+                        ? RoutingEligibilityReasons.ProfileRequired
+                        : RoutingEligibilityReasons.ProfileNotEffective),
+                measuredCapacityPercent = option?.CapacityPercent,
+                workloadPoints = option?.Workload.WorkloadPoints,
+                policyVersion = option?.PolicyVersion,
+                measuredAtUtc = option?.MeasuredAtUtc
+            };
+        }));
+    }
+
+    /// <summary>
     /// Creates or updates a sales rep's routing profile.
     ///
     /// <para><b>Why this endpoint exists.</b> <c>SalesApplicationService.UpsertProfileAsync</c>
@@ -375,7 +443,17 @@ public sealed class CommercialIntelligenceController(
                 reason = item.RequiredAction, recommendedOwnerUserId = item.SuggestedUserId,
                 recommendationReason = item.ReasonCode, matchConfidence = item.MatchConfidence,
                 policyVersion = decision.PolicyVersion, priority = item.Priority,
+                claimedByUserId = item.ClaimedByUserId, claimedUntil = item.ClaimedUntil,
                 status = item.Status.ToString(), version = item.Version }).Take(250).ToListAsync(ct);
+        var claimantIds = rows.Where(row => row.claimedByUserId.HasValue)
+            .Select(row => row.claimedByUserId!.Value).Distinct().ToArray();
+        // Materialised before Name() is applied: Name() is a C# string concat that EF cannot
+        // translate, so composing it inside the projection would fail at query time.
+        var claimants = (claimantIds.Length == 0
+                ? []
+                : await db.Users.AsNoTracking().Where(x => x.Buid == tenant && claimantIds.Contains(x.Id))
+                    .ToListAsync(ct))
+            .ToDictionary(x => x.Id, Name);
         return Ok(rows.Select(row =>
         {
             ownerLookup.TryGetValue(row.recommendedOwnerUserId ?? 0, out var owner);
@@ -388,6 +466,13 @@ public sealed class CommercialIntelligenceController(
                 recommendedOwnerAvailable = owner?.IsAvailable,
                 recommendedOwnerCapacityPercent = owner?.CapacityPercent,
                 recommendedOwnerWorkloadPoints = owner?.Workload.WorkloadPoints,
+                row.claimedByUserId, row.claimedUntil,
+                claimedByName = row.claimedByUserId.HasValue &&
+                    claimants.TryGetValue(row.claimedByUserId.Value, out var claimant) ? claimant : null,
+                // A lease that has run out is reported as expired rather than as still held.
+                // Nothing ever flips Status back to Open when ClaimedUntil passes, so a queue
+                // rendered from Status alone would show "Claimed by X" for ever.
+                claimExpired = row.claimedUntil.HasValue && row.claimedUntil < DateTime.UtcNow,
                 row.priority, row.status, row.version
             };
         }));

@@ -98,9 +98,27 @@ namespace ERP_RFQ_Automation.Controllers
             });
         }
 
+        /// <summary>
+        /// The assignee dropdown for the three lead/RFQ assignment dialogs.
+        ///
+        /// <para>Two things were wrong here. The action carried no module permission at all —
+        /// alone among its siblings on this controller — so any authenticated user in the tenant
+        /// could enumerate the tenant's staff. And the list was the raw set of active users,
+        /// while <c>POST assign</c> immediately below refuses anyone without an eligible governed
+        /// Sales Rep profile. Every name was offered and most of them answered 409.</para>
+        ///
+        /// <para>The list is still every active user, deliberately: narrowing it to the eligible
+        /// set would show an EMPTY dropdown on a tenant that has not set up any profiles yet,
+        /// which explains even less than a 409 does. Instead each name now carries the verdict
+        /// and the routing engine's own reason, so the dialog can grey out who cannot be picked
+        /// and say why. Users absent from the routing candidate set have no profile row by
+        /// definition, which is exactly the reason named for them.</para>
+        /// </summary>
         [HttpGet("users-for-assignment")]
+        [RequireModulePermission("Leads", PermissionAction.View)]
         public async Task<ActionResult<IEnumerable<UserDropdownDTO>>> GetAssignmentUsers(
-            [FromQuery] long? businessUnitId = null)
+            [FromQuery] long? businessUnitId = null,
+            CancellationToken ct = default)
         {
             var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
             var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
@@ -108,7 +126,25 @@ namespace ERP_RFQ_Automation.Controllers
             if (targetBUId <= 0)
                 return BadRequest("Business Unit ID is required");
 
-            var users = await _repository.GetUsersForAssignmentAsync(targetBUId);
+            var users = (await _repository.GetUsersForAssignmentAsync(targetBUId)).ToList();
+            var eligibility = (await _routing.GetOwnerOptionsAsync(targetBUId, ct))
+                .ToDictionary(option => option.UserId);
+            foreach (var user in users)
+            {
+                if (eligibility.TryGetValue(user.Id, out var option))
+                {
+                    user.IsEligibleForAssignment = option.IsAvailable;
+                    user.EligibilityReason = option.EligibilityReason;
+                    user.CapacityPercent = option.CapacityPercent;
+                    user.WorkloadPoints = option.Workload.WorkloadPoints;
+                }
+                else
+                {
+                    user.IsEligibleForAssignment = false;
+                    user.EligibilityReason = RoutingEligibilityReasons.ProfileRequired;
+                }
+            }
+
             return Ok(users);
         }
 

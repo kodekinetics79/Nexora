@@ -198,3 +198,116 @@ test('representative directory uses the registered profile route without horizon
   const dimensions = await page.evaluate(() => ({ width: document.documentElement.scrollWidth, viewport: window.innerWidth }));
   expect(dimensions.width).toBeLessThanOrEqual(dimensions.viewport);
 });
+
+/**
+ * A plain sales rep: Leads edit, but not a manager. This is the lane that had no UI at all —
+ * claim and release are the only routing verbs this role can reach, and nothing called them.
+ */
+async function authorizeRep(page: Page, userId = 102) {
+  await page.addInitScript((id) => {
+    const current = JSON.parse(localStorage.getItem('userData') ?? '{}');
+    localStorage.setItem('userData', JSON.stringify({
+      ...current, id, isManager: false, isSuperAdmin: false,
+      permissions: [{ id: 9400, moduleId: 9400, moduleName: 'Leads', roleId: current.roleId ?? 1, canCreate: true, canEdit: true, canDelete: false }],
+    }));
+  }, userId);
+}
+
+const queueRow = {
+  sourceId: 501,
+  leadId: 601,
+  nexoraSerial: 'NX-2026-000601',
+  customerName: 'Atlas Controls',
+  receivedAt: '2026-07-30T16:00:00Z',
+  dueAt: '2026-07-30T17:00:00Z',
+  reason: 'Confirm a sales owner',
+  recommendedOwnerUserId: null,
+  recommendedOwnerName: null,
+  recommendationReason: 'NO_MATCH_EVIDENCE',
+  matchConfidence: 0,
+  policyVersion: 'routing-v1',
+  recommendationMeasuredAt: measuredAt,
+  recommendedOwnerAvailable: null,
+  recommendedOwnerCapacityPercent: null,
+  recommendedOwnerWorkloadPoints: null,
+  claimedByUserId: null,
+  claimedByName: null,
+  claimedUntil: null,
+  claimExpired: false,
+  priority: 90,
+  status: 'Open',
+  overdue: true,
+  version: 4,
+};
+
+test('a sales rep can pull work from the shared pool and is told a claim is not ownership', async ({ page }) => {
+  await authorizeRep(page);
+  await page.route('**/api/commercial-intelligence/routing-queue*', route => route.fulfill({
+    status: 200, contentType: 'application/json', body: JSON.stringify([queueRow]),
+  }));
+  let claim: Record<string, unknown> | null = null;
+  await page.route('**/api/commercial-routing/queue/501/claim', async route => {
+    claim = route.request().postDataJSON();
+    await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
+  });
+
+  await page.goto('/sales/routing');
+  await expect(page.getByRole('region', { name: 'Lead routing queue' })).toContainText('Unclaimed');
+  // A rep may claim but may not assign: assignment is manager-gated on the server, so offering
+  // the button would only produce a 403.
+  await expect(page.getByRole('button', { name: 'Assign', exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Claim' }).click();
+
+  await expect.poll(() => claim).not.toBeNull();
+  // The row version travels with the claim so two reps racing produce a 409 for the loser
+  // rather than a silent steal.
+  expect(claim).toMatchObject({ expectedVersion: 4 });
+});
+
+test('an expired lease is shown as free rather than as still held', async ({ page }) => {
+  await authorizeRep(page);
+  await page.route('**/api/commercial-intelligence/routing-queue*', route => route.fulfill({
+    status: 200, contentType: 'application/json',
+    // Status still reads Claimed: nothing flips it back when the lease runs out. The row must be
+    // rendered from the lease, not from the status.
+    body: JSON.stringify([{ ...queueRow, status: 'Claimed', claimedByUserId: 101, claimedByName: 'Avery Recommended', claimedUntil: '2026-07-30T16:30:00Z', claimExpired: true }]),
+  }));
+
+  await page.goto('/sales/routing');
+  const queue = page.getByRole('region', { name: 'Lead routing queue' });
+  await expect(queue).toContainText('Claimed by Avery Recommended');
+  await expect(queue).toContainText('anyone may claim it');
+  await expect(page.getByRole('button', { name: 'Claim' })).toBeEnabled();
+});
+
+test('a manager can give a representative the governed profile routing requires', async ({ page }) => {
+  await authorizeManager(page);
+  await page.route('**/api/commercial-intelligence/reps', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([{
+    userId: 103, name: 'Casey Unprofiled', email: 'casey@nexora.invalid', roleName: 'Sales Representative', activeLeads: 0, overdueLeads: 0, openRfqs: 0, draftQuotes: 0, followUpsDue: 0, pipelineGroups: [],
+  }]) }));
+  await page.route('**/api/commercial-intelligence/reps/routing-profiles', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([{
+    userId: 103, name: 'Casey Unprofiled', email: 'casey@nexora.invalid', roleName: 'Sales Representative',
+    hasProfile: false, profileEffectiveNow: false, isRoutingEligible: null, capacityPercent: null,
+    distributionWeight: null, territoryKeys: [], productCategoryKeys: [], effectiveFromUtc: null,
+    effectiveToUtc: null, version: 0, updatedAtUtc: null, updatedBy: null, isAvailable: false,
+    eligibilityReason: 'Governed Sales Rep profile is required', measuredCapacityPercent: null,
+    workloadPoints: null, policyVersion: null, measuredAtUtc: null,
+  }]) }));
+  let saved: Record<string, unknown> | null = null;
+  await page.route('**/api/commercial-intelligence/reps/103/routing-profile', async route => {
+    saved = route.request().postDataJSON();
+    await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
+  });
+
+  await page.goto('/sales/reps');
+  // The empty-table state is the one that matters: with no profile rows the engine can assign
+  // nobody at all, and before this screen there was no way to see or fix that.
+  await expect(page.getByText('No representative in this business unit is currently eligible')).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Sales representatives' })).toContainText('No profile');
+  await page.getByRole('button', { name: 'Enable routing' }).click();
+  await page.getByRole('button', { name: 'Save profile' }).click();
+
+  await expect.poll(() => saved).not.toBeNull();
+  // 0 is the create sentinel; sending anything else would be refused as a version conflict.
+  expect(saved).toMatchObject({ isRoutingEligible: true, capacityPercent: 100, expectedVersion: 0 });
+});

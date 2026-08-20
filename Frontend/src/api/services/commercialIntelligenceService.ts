@@ -128,10 +128,70 @@ export interface RoutingQueueItemDTO {
   recommendedOwnerAvailable?: boolean | null;
   recommendedOwnerCapacityPercent?: number | null;
   recommendedOwnerWorkloadPoints?: number | null;
+  claimedByUserId?: number | null;
+  claimedByName?: string | null;
+  claimedUntil?: string | null;
+  /** True when `claimedUntil` has passed. Nothing ever flips `status` back to Open, so a row
+   *  rendered from `status` alone would read "Claimed" for ever. Render from this. */
+  claimExpired: boolean;
   priority: number;
   status: string;
   overdue: boolean;
   version: number;
+}
+
+/**
+ * A rep's governed routing profile, as returned by
+ * `GET /api/commercial-intelligence/reps/routing-profiles`.
+ *
+ * Every active user in the tenant appears, whether or not a profile row exists — a fail-closed
+ * table with no rows means routing can assign nobody, so the people who are MISSING a profile are
+ * the important ones on this screen.
+ *
+ * The stored row and the engine's live verdict are separate on purpose. `isRoutingEligible` and
+ * `capacityPercent` are what a manager configured; `isAvailable` and `eligibilityReason` are what
+ * routing will actually do today, which also accounts for measured workload and for a profile
+ * whose effective window has closed.
+ */
+export interface RepRoutingProfileDTO {
+  userId: number;
+  name: string;
+  email?: string | null;
+  roleName?: string | null;
+  hasProfile: boolean;
+  profileEffectiveNow: boolean;
+  isRoutingEligible?: boolean | null;
+  capacityPercent?: number | null;
+  distributionWeight?: number | null;
+  territoryKeys: string[];
+  productCategoryKeys: string[];
+  effectiveFromUtc?: string | null;
+  effectiveToUtc?: string | null;
+  /** 0 when no profile exists — the create sentinel the write endpoint expects. */
+  version: number;
+  updatedAtUtc?: string | null;
+  updatedBy?: string | null;
+  isAvailable: boolean;
+  eligibilityReason: string;
+  measuredCapacityPercent?: number | null;
+  workloadPoints?: number | null;
+  policyVersion?: string | null;
+  measuredAtUtc?: string | null;
+}
+
+/** Body of POST reps/{userId}/routing-profile — matches `UpsertRepRoutingProfileRequest`. */
+export interface UpsertRepRoutingProfileRequest {
+  isRoutingEligible: boolean;
+  capacityPercent: number;
+  distributionWeight: number;
+  territoryKeys: string[];
+  productCategoryKeys: string[];
+  /** Omit on create: the server floors its own default to midnight UTC so retries stay
+   *  idempotent. Round-trip the stored value on update so editing capacity does not silently
+   *  restart the effective period. */
+  effectiveFromUtc?: string | null;
+  effectiveToUtc?: string | null;
+  expectedVersion: number;
 }
 
 export interface FollowUpDTO {
@@ -664,6 +724,11 @@ const commercialIntelligenceService = {
     (await axiosInstance.post<AccountOwnershipDTO>(`${commercialRoot}/account-ownership/${customerId}/assign`, { ownerUserId, expectedVersion, reason }, { headers: { 'Idempotency-Key': idempotencyKey } })).data,
   getRoutingQueue: async (params: { sourceId?: number } = {}): Promise<RoutingQueueItemDTO[]> =>
     (await axiosInstance.get<RoutingQueueItemDTO[]>(`${commercialRoot}/routing-queue`, { params })).data,
+  getRepRoutingProfiles: async (): Promise<RepRoutingProfileDTO[]> =>
+    (await axiosInstance.get<RepRoutingProfileDTO[]>(`${commercialRoot}/reps/routing-profiles`)).data,
+  upsertRepRoutingProfile: async (userId: number, body: UpsertRepRoutingProfileRequest, idempotencyKey: string): Promise<void> => {
+    await axiosInstance.post(`${commercialRoot}/reps/${userId}/routing-profile`, body, { headers: { 'Idempotency-Key': idempotencyKey } });
+  },
   getRoutingOwnerOptions: async (): Promise<RoutingOwnerOptionDTO[]> =>
     (await axiosInstance.get<RoutingOwnerOptionDTO[]>(`${commercialRoot}/routing-owner-options`)).data,
   getAccountOwnerOptions: async (): Promise<RoutingOwnerOptionDTO[]> =>

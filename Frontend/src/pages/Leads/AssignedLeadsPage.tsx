@@ -19,7 +19,7 @@ import {
   ExpandMore as ChangeIcon,
 } from '@mui/icons-material';
 import { useSnackbar } from 'notistack';
-import leadService, { type AcceptedLeadResponseDTO } from '../../api/services/leadService';
+import leadService, { assignabilityNote, type AcceptedLeadResponseDTO } from '../../api/services/leadService';
 import SearchField from '../../components/common/SearchField';
 import { useAuth } from '../../context/AuthContext';
 import { presentableErrorMessage } from '../../utils/apiErrors';
@@ -355,10 +355,10 @@ const AssignedLeadsPage: React.FC = () => {
         {users.length === 0 && (
           <MenuItem disabled sx={{ fontSize: '0.8rem' }}>No team members found</MenuItem>
         )}
-        {users.map((u: any) => (
+        {users.map((u) => (
           <MenuItem
             key={u.id}
-            disabled={reassignMutation.isPending}
+            disabled={reassignMutation.isPending || !u.isEligibleForAssignment}
             onClick={() => {
               if (quickAssign) reassignMutation.mutate({
                 leadId: quickAssign.leadId,
@@ -366,9 +366,14 @@ const AssignedLeadsPage: React.FC = () => {
                 expectedAssigneeId: quickAssign.expectedAssigneeId,
               });
             }}
-            sx={{ fontSize: '0.8rem', fontWeight: 600, py: 1 }}
+            sx={{ fontSize: '0.8rem', fontWeight: 600, py: 1, display: 'block' }}
           >
-            <UserIcon sx={{ fontSize: 16, mr: 1, color: 'primary.main' }} /> {u.fullName || u.userName}
+            <Box sx={{ display: 'flex', alignItems: 'center' }}>
+              <UserIcon sx={{ fontSize: 16, mr: 1, color: 'primary.main' }} /> {u.fullName}
+            </Box>
+            <Typography variant="caption" sx={{ display: 'block', pl: 3, color: 'text.secondary', whiteSpace: 'normal' }}>
+              {assignabilityNote(u)}
+            </Typography>
           </MenuItem>
         ))}
       </Menu>
