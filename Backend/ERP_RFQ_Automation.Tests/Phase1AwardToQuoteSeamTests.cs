@@ -171,9 +171,17 @@ public sealed class Phase1AwardToQuoteSeamTests
         {
             var quote = await new QuoteService(draft, null!, null!).PrepareDraftFromRfqAsync(rfqId, UpstreamSpine.Tenant, "qa");
 
-            // SEAM: the quote inherits the RFQ's commercial identity. Read the ROW, not the DTO —
-            // a response contract that omits the serial and a quote that never received one look
-            // identical from outside, and only one of them is a defect.
+            // The RESPONSE must carry the identity too. It did not: this projection built its own
+            // DTO and set none of CommercialCaseId, NexoraSerial, ContactId or LeadId, and RfqNo
+            // had been null since the "// Add Include if needed" note was written beside it. A
+            // quote that carries a serial and a quote that never received one looked identical to
+            // every caller, including the screen.
+            Assert.Equal(lead.CommercialCaseReference, quote.NexoraSerial);
+            Assert.NotNull(quote.CommercialCaseId);
+            Assert.False(string.IsNullOrWhiteSpace(quote.RfqNo),
+                "the quote response carries no RFQ number");
+
+            // And the row agrees, so the projection is reporting truth rather than a constant.
             await using (var verify = spine.Context())
             {
                 var stored = await verify.Quotes.AsNoTracking().SingleAsync(x => x.Id == quote.Id);
