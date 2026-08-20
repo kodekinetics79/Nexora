@@ -54,6 +54,10 @@ namespace ERP_RFQ_Automation.Services
 
         private readonly ERP_RFQ_Automation.LeadIdentity.ILeadIdentityApplicationService _identity;
 
+        // Required for the reason stated below about _identity: the door that skips it is the door
+        // whose leads arrive unlinked, and a lead with no client can never be qualified or converted.
+        private readonly ERP_RFQ_Automation.CustomerResolution.ILeadCustomerResolutionService _customerResolution;
+
         public ManualUploadService(
             ErpRfqAutomationContext context,
             IWebHostEnvironment env,
@@ -62,8 +66,10 @@ namespace ERP_RFQ_Automation.Services
             IConfiguration configuration,
             IFileStorage storage,
             ERP_RFQ_Automation.LeadIdentity.ILeadIdentityApplicationService identity,
+            ERP_RFQ_Automation.CustomerResolution.ILeadCustomerResolutionService customerResolution,
             ERP_RFQ_Automation.Extraction.IDocumentIngestion? ingestion = null)
         {
+            _customerResolution = customerResolution;
             // Required, not optional-with-null: an optional collaborator is always supplied in
             // production and always absent in tests, which is exactly how a step that must always
             // run becomes a step nothing ever exercises.
@@ -343,7 +349,7 @@ namespace ERP_RFQ_Automation.Services
                 // The change tracker is deliberately NOT cleared on entry: the EmailIngest row for
                 // this upload is staged above and belongs to the same unit of work.
                 var strategy = _context.Database.CreateExecutionStrategy();
-                return await strategy.ExecuteAsync(async () =>
+                var uploaded = await strategy.ExecuteAsync(async () =>
                 {
                 await using var transaction = await _context.Database.BeginTransactionAsync();
                 try
@@ -433,6 +439,21 @@ namespace ERP_RFQ_Automation.Services
                     throw;
                 }
                 });
+
+                // Client resolution runs AFTER the strategy, outside the upload transaction. It
+                // writes its own rows, and failing to work out who the buyer is must never roll
+                // back a document the user has already uploaded — the lead is the work, the client
+                // link is a decision that can be re-run.
+                //
+                // Until now no upload door resolved at all; only the extraction worker did. A lead
+                // created here was born with a NULL CustomerMatchReasonCode — not "no match found"
+                // but never evaluated — and could then never be qualified or converted, because
+                // both require a client.
+                if (uploaded.Success && uploaded.Data > 0)
+                    await ERP_RFQ_Automation.CustomerResolution.UploadedLeadResolution.ResolveAsync(
+                        _customerResolution, businessUnitId, new[] { uploaded.Data }, _logger, "manual-upload");
+
+                return uploaded;
             }
             catch (Exception ex)
             {
