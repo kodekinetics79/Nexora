@@ -614,6 +614,31 @@ export interface LeadReconciliationResultDTO {
   shouldRoute: boolean;
 }
 
+/**
+ * A candidate assignee for a lead or an RFQ, as returned by
+ * `GET /api/UnAssignedLead/users-for-assignment`.
+ *
+ * The list is every active user in the tenant, but governed routing will only accept the ones
+ * carrying an effective, eligible Sales Rep profile with capacity left. `isEligibleForAssignment`
+ * is the server's own verdict and `eligibilityReason` is the sentence the routing engine uses,
+ * so a dialog can grey out a name and say why instead of letting the assignment fail with a 409.
+ */
+export interface AssignableUserDTO {
+  id: number;
+  fullName: string;
+  isEligibleForAssignment: boolean;
+  eligibilityReason: string;
+  /** Null when the user is not a routing candidate at all (no profile row). */
+  capacityPercent?: number | null;
+  workloadPoints?: number | null;
+}
+
+/** The one-line justification shown under an assignee's name in every assignment picker. */
+export const assignabilityNote = (user: AssignableUserDTO): string =>
+  user.isEligibleForAssignment
+    ? `${user.workloadPoints ?? 0} workload points, ${user.capacityPercent ?? 0}% capacity`
+    : user.eligibilityReason;
+
 const leadService = {
   getAll: async (filters: LeadFilters): Promise<PaginatedResponse<LeadResponseDTO>> => {
     const r = await axiosInstance.get('/api/Lead', { params: filters });
@@ -780,8 +805,8 @@ const leadService = {
     return r.data;
   },
 
-  getUsersForAssignment: async (buid: number) => {
-    const r = await axiosInstance.get('/api/UnAssignedLead/users-for-assignment', { params: { businessUnitId: buid } });
+  getUsersForAssignment: async (buid: number): Promise<AssignableUserDTO[]> => {
+    const r = await axiosInstance.get<AssignableUserDTO[]>('/api/UnAssignedLead/users-for-assignment', { params: { businessUnitId: buid } });
     return r.data;
   },
 

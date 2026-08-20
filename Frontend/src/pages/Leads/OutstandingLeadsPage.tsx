@@ -6,7 +6,7 @@ import {
   Box, Typography, Paper, Button, IconButton,
   Stack, Dialog, DialogTitle, DialogContent,
   DialogActions, TextField, MenuItem, Chip,
-  Menu, FormControlLabel, Switch,
+  Menu, FormControlLabel, Switch, Alert,
 } from '@mui/material';
 import {
   DataGrid, type GridColDef, type GridPaginationModel
@@ -20,7 +20,7 @@ import {
   Person as UserIcon,
   MoreHoriz as MenuIcon,
 } from '@mui/icons-material';
-import leadService, { type AcceptedLeadResponseDTO } from '../../api/services/leadService';
+import leadService, { assignabilityNote, type AcceptedLeadResponseDTO } from '../../api/services/leadService';
 import SearchField from '../../components/common/SearchField';
 import { useSnackbar } from 'notistack';
 import { useAuth } from '../../context/AuthContext';
@@ -381,10 +381,19 @@ const OutstandingLeadsPage: React.FC = () => {
               onChange={(e) => setAssignToUserId(e.target.value)}
               sx={{ '& .MuiOutlinedInput-root': { borderRadius: 2 } }}
             >
-              {users.map((u: any) => (
-                <MenuItem key={u.id} value={u.id}>{u.fullName || u.userName}</MenuItem>
+              {users.map((u) => (
+                <MenuItem key={u.id} value={u.id} disabled={!u.isEligibleForAssignment}>
+                  {u.fullName} &mdash; {assignabilityNote(u)}
+                </MenuItem>
               ))}
             </TextField>
+            {users.length > 0 && !users.some((u) => u.isEligibleForAssignment) && (
+              <Alert severity="warning" sx={{ borderRadius: 2 }}>
+                Nobody in this business unit can currently receive a lead. Governed routing only
+                accepts a user who has an effective Sales Rep profile with capacity left, and there
+                is no such user right now. Give someone a profile in Sales &gt; Rep directory.
+              </Alert>
+            )}
             <TextField
               fullWidth
               multiline
@@ -427,16 +436,21 @@ const OutstandingLeadsPage: React.FC = () => {
         {users.length === 0 && (
           <MenuItem disabled sx={{ fontSize: '0.8rem' }}>No team members found</MenuItem>
         )}
-        {users.map((u: any) => (
+        {users.map((u) => (
           <MenuItem
             key={u.id}
-            disabled={assignMutation.isPending}
+            disabled={assignMutation.isPending || !u.isEligibleForAssignment}
             onClick={() => {
               if (quickAssign) assignMutation.mutate({ leadId: quickAssign.leadId, assignedToUserId: Number(u.id) });
             }}
-            sx={{ fontSize: '0.8rem', fontWeight: 600, py: 1 }}
+            sx={{ fontSize: '0.8rem', fontWeight: 600, py: 1, display: 'block' }}
           >
-            <UserIcon sx={{ fontSize: 16, mr: 1, color: 'primary.main' }} /> {u.fullName || u.userName}
+            <Box sx={{ display: 'flex', alignItems: 'center' }}>
+              <UserIcon sx={{ fontSize: 16, mr: 1, color: 'primary.main' }} /> {u.fullName}
+            </Box>
+            <Typography variant="caption" sx={{ display: 'block', pl: 3, color: 'text.secondary', whiteSpace: 'normal' }}>
+              {assignabilityNote(u)}
+            </Typography>
           </MenuItem>
         ))}
       </Menu>
