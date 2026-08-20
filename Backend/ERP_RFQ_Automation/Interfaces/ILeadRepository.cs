@@ -50,5 +50,13 @@ namespace ERP_RFQ_Automation.Interfaces
         Task<(IEnumerable<LeadNeedsReviewItemDTO>, int TotalCount)> GetNeedsReviewLeadsAsync(int pageNumber, int pageSize, long businessUnitId, string? search = null);
         Task<LeadResponseDTO?> SubmitLeadReviewAsync(
             long id, long businessUnitId, LeadReviewSubmitDTO review, string reviewedBy = "system");
+
+        /// <summary>
+        /// Links a lead to the client organisation a human picked, at any point in the lead's
+        /// life. Independent of extraction review, which closes; the need to name the buyer
+        /// does not. Returns null when the lead is not in this tenant.
+        /// </summary>
+        Task<LeadResponseDTO?> LinkClientAsync(
+            long id, long businessUnitId, LeadClientLinkRequestDTO request, string linkedBy = "system");
     }
 }

@@ -11,14 +11,13 @@ import {
 } from '@mui/icons-material';
 import { toast } from 'react-hot-toast';
 import leadService, { type ClientCandidateDTO, type LeadResponseDTO } from '../../api/services/leadService';
-import extractionReviewService from '../../api/services/extractionReviewService';
 import { presentableErrorMessage } from '../../utils/apiErrors';
 import {
   clientCandidates, clientDisplayName, clientIdentityState, clientStatusLabel,
   confidencePercent, isHumanConfirmedStatus, matchExplanation, realSenderAddress,
 } from './ClientCell';
 import ResolveClientDialog, {
-  buildClientReviewPayload, CLIENT_LINK_FAILURE_MESSAGE, type ClientSelection,
+  CLIENT_LINK_FAILURE_MESSAGE, type ClientSelection,
 } from './ResolveClientDialog';
 
 /**
@@ -109,7 +108,7 @@ const ClientIdentityPanel: React.FC<ClientIdentityPanelProps> = ({
 
   const confirmMutation = useMutation({
     mutationFn: (selection: { customerId: number; contactId?: number | null }) =>
-      extractionReviewService.submitReview(lead.id, buildClientReviewPayload(lead, selection)),
+      leadService.linkClient(lead.id, selection),
     onSuccess: () => {
       toast.success('Client confirmed for this lead.');
       queryClient.invalidateQueries({ queryKey: ['lead-detail', lead.id] });

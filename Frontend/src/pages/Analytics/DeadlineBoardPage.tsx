@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import {
   Box, Typography, Paper, Stack, Chip, Button, Tooltip, Alert, Divider,
@@ -7,13 +7,17 @@ import {
 } from '@mui/material';
 import {
   Refresh as RefreshIcon,
+  AutoFixHigh as MatchIcon,
   EventBusy as OverdueIcon,
   Today as TodayIcon,
   Schedule as SoonIcon,
   DateRange as LaterIcon,
   HelpOutlined as NoDateIcon,
 } from '@mui/icons-material';
+import { toast } from 'react-hot-toast';
 import leadService, { type LeadResponseDTO } from '../../api/services/leadService';
+import ResolveClientDialog from '../Leads/ResolveClientDialog';
+import { useAuth } from '../../context/AuthContext';
 import { parseDateSafe } from '../../utils/dates';
 import { presentableErrorMessage } from '../../utils/apiErrors';
 import { LoadingState, ErrorState, EmptyState } from '../../platform/components/States';
@@ -22,8 +26,14 @@ import { LoadingState, ErrorState, EmptyState } from '../../platform/components/
 // Deadline board — what closes when, and how much work each one is.
 //
 // Forward-looking and built only on data the platform already holds today:
-// Lead.BidClosingDate and the line count. No customer identity, no catalog, no
-// FX, no lifecycle events — none of which are populated for the pilot tenant.
+// Lead.BidClosingDate, the line count, and the client the enquiry is linked to.
+//
+// The client column is not decoration. An enquiry with no client record cannot be
+// qualified, cannot become an RFQ and therefore cannot be quoted, so on this board an
+// unlinked row is not a cosmetic gap — it is the reason that deadline will be missed.
+// It used to render as the greyed-out sentence "Not linked to a client record", which
+// named the blocker and offered nothing to do about it. It is now the control that
+// clears it, because a board of work should be a board of work you can do.
 //
 // Every number states its denominator, and leads whose deadline was already
 // past when Nexora first saw the document are disclosed rather than quietly
@@ -94,7 +104,45 @@ type SortKey = 'deadline' | 'lines' | 'client';
 
 const DeadlineBoardPage: React.FC = () => {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const { hasPermission, userData } = useAuth();
+  const canLinkClients = hasPermission('Leads', 'edit');
+  // The tenant-wide re-run is manager-gated on the server (RequireManagerRole). Offering it
+  // to someone the server will refuse is a worse experience than not offering it at all.
+  const canRunMatcher = canLinkClients && userData?.isManager === true;
+  // One dialog for the whole table, not one per row: 500 mounted dialogs is 500 mounted
+  // candidate queries. The row being resolved is state, the dialog is a singleton.
+  const [resolveLead, setResolveLead] = useState<LeadResponseDTO | null>(null);
   const [activeBucket, setActiveBucket] = useState<BucketKey | 'all'>('all');
+
+  /**
+   * Re-runs deterministic client matching over the tenant's undecided leads.
+   *
+   * It is offered HERE, next to the unlinked rows, because this is the only screen that
+   * shows how many enquiries the missing client is actually blocking. It earns its place
+   * after a person links one client by hand: that link teaches the matcher the buyer's
+   * domain, and this applies the lesson to every other enquiry already in the pile. The
+   * real counts are reported back — including how many are still unresolved — because
+   * "matched 0 of 31" is the answer an operator needs in order to know the customer record
+   * simply does not exist yet.
+   */
+  const runMatcher = useMutation({
+    mutationFn: () => leadService.resolveClients({ includeSuggested: true }),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ['deadline-board'] });
+      queryClient.invalidateQueries({ queryKey: ['leads'] });
+      toast.success(
+        result.autoMatched > 0
+          ? `Linked ${result.autoMatched} of ${result.examined} unresolved enquir${result.examined === 1 ? 'y' : 'ies'}`
+            + `${result.suggested + result.ambiguous > 0 ? `, and proposed a client for ${result.suggested + result.ambiguous} more` : ''}.`
+          : `Checked ${result.examined} unresolved enquir${result.examined === 1 ? 'y' : 'ies'} and matched none. `
+            + 'Nexora can only match clients it already has a record of — link one by hand and it will recognise the rest.',
+        { duration: 8_000 },
+      );
+    },
+    onError: (error: unknown) => toast.error(presentableErrorMessage(
+      error, 'Client matching could not be run. Nothing was changed.')),
+  });
   const [sortKey, setSortKey] = useState<SortKey>('deadline');
   const [sortAsc, setSortAsc] = useState(true);
 
@@ -130,6 +178,12 @@ const DeadlineBoardPage: React.FC = () => {
       byBucket,
       totalLeadsReturned: all.length,
       totalOpen: open.length,
+      // Counted over ALL open enquiries, including the late-ingested ones excluded from the
+      // buckets: they are still enquiries the tenant cannot quote, and the matcher would
+      // still try them.
+      unlinkedCount: open.filter((lead) => !lead.customerId).length,
+      unlinkedLines: open.filter((lead) => !lead.customerId)
+        .reduce((sum, lead) => sum + (lead.itemCount ?? 0), 0),
       lateIngestedCount: lateIngested.length,
       lateIngestedLines: lateIngested.reduce((sum, lead) => sum + (lead.itemCount ?? 0), 0),
       truncated: (leads.data?.totalCount ?? 0) > all.length,
@@ -167,15 +221,33 @@ const DeadlineBoardPage: React.FC = () => {
             Open enquiries by how long is left to respond, with the amount of work each one carries.
           </Typography>
         </Box>
-        <Button
-          variant="outlined"
-          startIcon={<RefreshIcon />}
-          onClick={() => void leads.refetch()}
-          disabled={leads.isFetching}
-          sx={{ fontWeight: 800, borderRadius: 2 }}
-        >
-          Refresh
-        </Button>
+        <Stack direction="row" spacing={1}>
+          {canRunMatcher && model.unlinkedCount > 0 && (
+            <Tooltip title="Re-checks every enquiry nobody has decided against the clients this tenant already knows. It never changes a client a person chose.">
+              <span>
+                <Button
+                  variant="outlined"
+                  color="warning"
+                  startIcon={<MatchIcon />}
+                  onClick={() => runMatcher.mutate()}
+                  disabled={runMatcher.isPending}
+                  sx={{ fontWeight: 800, borderRadius: 2 }}
+                >
+                  {runMatcher.isPending ? 'Matching…' : 'Match clients automatically'}
+                </Button>
+              </span>
+            </Tooltip>
+          )}
+          <Button
+            variant="outlined"
+            startIcon={<RefreshIcon />}
+            onClick={() => void leads.refetch()}
+            disabled={leads.isFetching}
+            sx={{ fontWeight: 800, borderRadius: 2 }}
+          >
+            Refresh
+          </Button>
+        </Stack>
       </Stack>
 
       {leads.isLoading ? (
@@ -296,9 +368,19 @@ const DeadlineBoardPage: React.FC = () => {
                       <TableCell sx={{ fontFamily: 'monospace', fontWeight: 700 }}>{lead.rfqno || `#${lead.id}`}</TableCell>
                       <TableCell>
                         <Typography variant="body2" sx={{ fontWeight: 700 }}>{clientLabel(lead)}</Typography>
-                        {!lead.customerId && (
+                        {!lead.customerId && (canLinkClients ? (
+                          <Button
+                            size="small"
+                            variant="text"
+                            color="warning"
+                            onClick={() => setResolveLead(lead)}
+                            sx={{ p: 0, minWidth: 0, textTransform: 'none', fontWeight: 700, fontSize: '0.75rem' }}
+                          >
+                            Not linked to a client record — link it
+                          </Button>
+                        ) : (
                           <Typography variant="caption" color="text.disabled">Not linked to a client record</Typography>
-                        )}
+                        ))}
                       </TableCell>
                       <TableCell align="right" sx={{ fontWeight: 800 }}>{lines.toLocaleString()}</TableCell>
                       <TableCell align="right">
@@ -332,6 +414,15 @@ const DeadlineBoardPage: React.FC = () => {
                 </Typography>
               </Tooltip>
             )}
+            {model.unlinkedCount > 0 && (
+              <Tooltip title="A lead with no client record cannot be qualified, converted to an RFQ, or quoted. These are blocked, not merely incomplete.">
+                <Typography variant="caption" color="warning.main" sx={{ fontWeight: 700 }}>
+                  {model.unlinkedCount} of {model.totalOpen} open enquir{model.unlinkedCount === 1 ? 'y' : 'ies'}, carrying{' '}
+                  {model.unlinkedLines.toLocaleString()} line{model.unlinkedLines === 1 ? '' : 's'}, are not linked to a client
+                  record and cannot be quoted until they are.
+                </Typography>
+              </Tooltip>
+            )}
             <Typography variant="caption" color="text.secondary">
               Counted from {model.totalOpen} open of {model.totalLeadsReturned} enquir
               {model.totalLeadsReturned === 1 ? 'y' : 'ies'} loaded. Rejected enquiries are not shown.
@@ -345,6 +436,25 @@ const DeadlineBoardPage: React.FC = () => {
           </Stack>
         </>
       )}
+
+      <ResolveClientDialog
+        open={resolveLead != null}
+        leadId={resolveLead?.id ?? null}
+        lead={resolveLead}
+        prefill={resolveLead ? {
+          name: resolveLead.customerCompanyNameExtracted,
+          email: resolveLead.clientemail,
+          contactName: resolveLead.buyersName,
+          evidence: resolveLead.customerCompanyEvidence,
+        } : null}
+        onClose={() => setResolveLead(null)}
+        onResolved={() => {
+          // The board's own query, and the lead caches every other screen reads, so the
+          // row stops saying "not linked" the moment it is.
+          queryClient.invalidateQueries({ queryKey: ['deadline-board'] });
+          queryClient.invalidateQueries({ queryKey: ['leads'] });
+        }}
+      />
     </Box>
   );
 };
