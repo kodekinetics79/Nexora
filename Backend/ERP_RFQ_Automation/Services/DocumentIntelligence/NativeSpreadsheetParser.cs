@@ -414,7 +414,14 @@ public sealed class NativeSpreadsheetParser
         [RfqSpreadsheetFields.UnitPrice] = new[] { "unitprice", "price", "rate", "unitrate" },
         [RfqSpreadsheetFields.Currency] = new[] { "currency", "curr", "ccy" },
         [RfqSpreadsheetFields.ManufacturerName] = new[] { "manufacturername", "manufacturer", "make", "brand", "mfr", "mfg" },
-        [RfqSpreadsheetFields.ManufacturerPartNumber] = new[] { "manufacturerpartnumber", "mpn", "partnumber", "partno", "partcode", "modelno", "modelnumber", "materialcode", "itemcode" },
+        // "materialcode" was here while "materialno"/"materialnumber" were not, which is an
+        // omission rather than a decision: they are one column under three headings, and an SAP
+        // export writes the second two far more often than the first. A column this list does not
+        // recognise is DROPPED — not carried through as prose — so the number never reaches the
+        // lead line and cannot be matched against the catalogue afterwards.
+        // Bare "material" is deliberately still absent: on a fabrication enquiry that column holds
+        // the material of CONSTRUCTION ("SS316", "Carbon Steel"), not an identifier.
+        [RfqSpreadsheetFields.ManufacturerPartNumber] = new[] { "manufacturerpartnumber", "mpn", "partnumber", "partno", "partcode", "modelno", "modelnumber", "materialcode", "itemcode", "materialno", "materialnumber", "stockcode", "stockno", "stocknumber", "sapmaterial", "customerpartno", "customerpartnumber", "buyerpartno", "buyerpartnumber", "catalogno", "catalogueno", "catno" },
         // "delivery" is deliberately NOT here. A column headed exactly "Delivery" holds a date far
         // more often than a number of days; under LeadTimeDays it failed the integer parse and was
         // dropped, while RequiredDeliveryDate stayed null — the buyer's stated delivery date lost

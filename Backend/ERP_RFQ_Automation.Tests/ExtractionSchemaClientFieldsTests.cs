@@ -174,4 +174,32 @@ public sealed class ExtractionSchemaClientFieldsTests
         Assert.True(ExtractionOutputBudget.FitsBudget(23, 8192));
         Assert.False(ExtractionOutputBudget.FitsBudget(24, 8192));
     }
+
+    /// <summary>
+    /// GUARD-PIN on a prompt, and honestly labelled as one: it proves the instruction is present,
+    /// not that a model obeys it.
+    ///
+    /// <para>Why it is worth pinning. "ItemMaterialCode" was requested by the schema with ZERO
+    /// guidance anywhere in the numbered rules, while rule 7 explicitly tells the model to divert
+    /// any labelled per-item value it does not recognise into "ExtraFields" — which never reaches
+    /// LeadItem. A buyer's "Material" column therefore had every reason to land in ExtraFields and
+    /// no reason to land in the one field the conversion matcher scores at 1.00. A field the
+    /// schema declares and the instructions never explain is a field the pipeline never
+    /// populates.</para>
+    /// </summary>
+    [Fact]
+    public void The_prompt_tells_the_model_what_the_buyer_material_number_field_is_for()
+    {
+        var instructions = Instructions();
+
+        // it is explained at all, and named as the BUYER's own number
+        Assert.Contains("ItemMaterialCode", instructions, StringComparison.Ordinal);
+        Assert.Contains("BUYER'S OWN MATERIAL NUMBER", instructions, StringComparison.Ordinal);
+
+        // and it explicitly outranks the ExtraFields catch-all, which is what it has to compete with
+        Assert.Contains("ExtraFields", instructions, StringComparison.Ordinal);
+        var rule = instructions[instructions.IndexOf("BUYER'S OWN MATERIAL NUMBER", StringComparison.Ordinal)..];
+        Assert.Contains("PRECEDENCE over rule 7", rule, StringComparison.Ordinal);
+        Assert.Contains("ManufacturerPartNumber", rule, StringComparison.Ordinal);
+    }
 }
