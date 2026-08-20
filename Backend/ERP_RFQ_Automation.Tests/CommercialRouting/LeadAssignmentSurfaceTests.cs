@@ -204,6 +204,24 @@ public sealed class LeadAssignmentSurfaceTests
         Assert.Equal(RoutingEligibilityReasons.ProfileNotEffective, row.GetProperty("eligibilityReason").GetString());
     }
 
+    /// <summary>
+    /// The profile editor round-trips <c>effectiveFromUtc</c> so that adjusting a rep's capacity
+    /// does not silently restart the effective period. That round trip only works if the value
+    /// survives model binding as UTC: <c>UpsertProfileAsync</c> calls <c>RequireUtc</c> and throws
+    /// <c>SalesValidationException</c> for any other kind, which would turn every EDIT of an
+    /// existing profile — never a create, which omits the field — into a 400.
+    /// </summary>
+    [Fact]
+    public void Effective_dates_round_trip_through_model_binding_as_utc()
+    {
+        var body = JsonSerializer.Deserialize<UpsertRepRoutingProfileRequest>(
+            """{"effectiveFromUtc":"2026-08-19T00:00:00Z","effectiveToUtc":"2027-01-01T00:00:00Z"}""",
+            new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+
+        Assert.Equal(DateTimeKind.Utc, body.EffectiveFromUtc!.Value.Kind);
+        Assert.Equal(DateTimeKind.Utc, body.EffectiveToUtc!.Value.Kind);
+    }
+
     private static async Task<JsonElement[]> QueueRowsAsync(ErpRfqAutomationContext context, long tenant)
     {
         var response = Assert.IsType<OkObjectResult>(
