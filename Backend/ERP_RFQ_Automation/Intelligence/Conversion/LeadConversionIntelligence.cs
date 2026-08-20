@@ -3,6 +3,7 @@ using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using Microsoft.EntityFrameworkCore;
 using ERP_RFQ_Automation.Inventory.Commercial;
+using ERP_RFQ_Automation.ProductIntelligence;
 using ERP_RFQ_Automation.Services.Uom;
 
 namespace ERP_RFQ_Automation.Intelligence.Conversion;
@@ -10,12 +11,22 @@ namespace ERP_RFQ_Automation.Intelligence.Conversion;
 /// <summary>
 /// Deterministic (no-LLM) conversion intelligence.
 ///
-/// Product resolution per lead line, best rule wins:
-///   1.00  exact ItemMaterialCode == Product.PartNo
-///   0.95  exact ManufacturerPartNumber == Product.ModelNo (or PartNo)
+/// Product resolution per lead line, best rule wins. Each code rung compares the line's
+/// identifier against BOTH catalogue number columns (PartNo, ModelNo), and loses 0.02 when the
+/// two sides agree on the characters but not the punctuation:
+///   1.00  ItemMaterialCode        == a catalogue number
+///   0.95  ManufacturerPartNumber  == a catalogue number
+///   0.93  AlternatePartNumber     == a catalogue number
+///   0.92  a code-SHAPED ProductShortName / ProductShortDescription == a catalogue number
 ///   0.90  normalized-name equality vs Product.ProductName
 ///   0.40–0.85  contains / token-overlap vs Product name + description,
 ///              scaled by overlap ratio
+///
+/// Note the arithmetic: the similarity band tops out at 0.85 (0.40 + 0.45 * ratio, ratio &lt;= 1)
+/// and the floor is 0.90, so NOTHING below the name-equality rung can ever auto-assign. That is
+/// intentional — a line silently bound to the wrong product prices the wrong thing while looking
+/// right — and it is why a catalogue number the resolver fails to recognise as one produces
+/// zero auto-assignments rather than a few.
 ///
 /// Candidates are fetched with cheap set-based queries (IN on part/model numbers,
 /// ILIKE on the most significant name tokens) and scored in memory; catalogs are
@@ -630,19 +641,28 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
             .ToListAsync(ct);
         var uomVocabulary = SetUomVocabulary.From(uoms);
 
-        // ---- Candidate fetch 1: exact part/model numbers in one IN query.
-        var codes = items.Select(i => i.ItemMaterialCode?.Trim().ToLowerInvariant())
-                         .Where(s => !string.IsNullOrEmpty(s)).Select(s => s!).Distinct().ToList();
-        var mpns = items.Select(i => i.ManufacturerPartNumber?.Trim().ToLowerInvariant())
-                        .Where(s => !string.IsNullOrEmpty(s)).Select(s => s!).Distinct().ToList();
+        // ---- Candidate fetch 1: every catalogue number any line offers, in one IN query.
+        // Each identifier contributes BOTH its literal spelling and its punctuation-free fold, so
+        // a catalogue keyed on "A2A50006470" is still reached by a document that wrote
+        // "A2A-50006470". Folding the LINE side is free — a handful of extra strings in an IN
+        // list. Folding the CATALOGUE side would mean replace() over every product row, which is
+        // exactly the wholesale scan this resolver exists to avoid, so it is not done here; see
+        // BestCodeHit, which still recognises a catalogue-side spelling difference on any product
+        // the name query happens to have pulled in.
+        var spellings = items
+            .SelectMany(CodeIdentifiers)
+            .SelectMany(id => new[] { id.Value, ProductIdentityNormalizer.FoldIdentifier(id.Value) })
+            .Where(s => !string.IsNullOrEmpty(s))
+            .Select(s => s!.ToLowerInvariant())
+            .Distinct()
+            .ToList();
 
         var candidates = new Dictionary<long, Candidate>();
-        if (codes.Count > 0 || mpns.Count > 0)
+        if (spellings.Count > 0)
         {
             var exactRows = await ActiveProducts()
-                .Where(p => codes.Contains(p.PartNo.ToLower())
-                            || mpns.Contains(p.PartNo.ToLower())
-                            || (p.ModelNo != null && mpns.Contains(p.ModelNo.ToLower())))
+                .Where(p => spellings.Contains(p.PartNo.ToLower())
+                            || (p.ModelNo != null && spellings.Contains(p.ModelNo.ToLower())))
                 .Select(p => new Candidate(p.Id, p.ProductName, p.PartNo, p.ModelNo, p.Description))
                 .ToListAsync(ct);
             foreach (var c in exactRows) candidates[c.Id] = c;
@@ -728,8 +748,7 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
 
     private static IEnumerable<ProductMatch> ScoreItem(LeadItem item, IEnumerable<Candidate> candidates)
     {
-        var code = item.ItemMaterialCode?.Trim();
-        var mpn = item.ManufacturerPartNumber?.Trim();
+        var identifiers = CodeIdentifiers(item).ToList();
         var normName = NormalizeName(item.ProductShortName ?? item.ProductShortDescription);
         var nameTokens = normName is null ? new HashSet<string>() : Tokenize(normName);
 
@@ -738,13 +757,9 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
             decimal score;
             string reason;
 
-            if (!string.IsNullOrEmpty(code) && Eq(p.PartNo, code))
+            if (BestCodeHit(identifiers, p) is { } hit)
             {
-                (score, reason) = (1.00m, "Matched by material code");
-            }
-            else if (!string.IsNullOrEmpty(mpn) && (Eq(p.ModelNo, mpn) || Eq(p.PartNo, mpn)))
-            {
-                (score, reason) = (0.95m, "Matched by manufacturer part number");
+                (score, reason) = hit;
             }
             else
             {
@@ -789,6 +804,97 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
     }
 
     // ================================================== Normalization helpers
+
+    /// <summary>A catalogue number a lead line offers, and what an exact hit on it is worth.</summary>
+    private readonly record struct CodeIdentifier(string Value, decimal ExactScore, string Reason);
+
+    /// <summary>
+    /// Every field on a lead line that can carry a catalogue number, best evidence first.
+    ///
+    /// <para>Only <c>ItemMaterialCode</c> and <c>ManufacturerPartNumber</c> used to be read, and
+    /// that omission is the defect. A buyer's material number arrives in whichever field the door
+    /// that read the document happens to have: <c>NativeSpreadsheetParser</c> routes a
+    /// "Material Code" column into <c>ManufacturerPartNumber</c>, the structured extractor cannot
+    /// populate <c>ItemMaterialCode</c> at all (<c>ChunkedExtractionService.MapCanonicalItem</c>
+    /// hardcodes it null, because <c>CanonicalRfqLineItem</c> has no member for it), and a table
+    /// whose code column has an unrecognised heading leaves the number sitting in the description
+    /// cell. Measured against the live catalogue shape: a code in <c>AlternatePartNumber</c>
+    /// scored 0.85 and a code in <c>ProductShortDescription</c> scored 0.00 — not a near miss,
+    /// no candidate at all, because the ILIKE candidate query searches ProductName and
+    /// Description and never the catalogue's own number columns.</para>
+    ///
+    /// <para>The confidence floor is NOT relaxed anywhere below. Every rung here is exact equality
+    /// against a catalogue number; what changed is which of the line's fields are allowed to
+    /// supply that number.</para>
+    /// </summary>
+    private static IEnumerable<CodeIdentifier> CodeIdentifiers(LeadItem item)
+    {
+        if (Clean(item.ItemMaterialCode) is { } code)
+            yield return new CodeIdentifier(code, 1.00m, "Matched by material code");
+        if (Clean(item.ManufacturerPartNumber) is { } mpn)
+            yield return new CodeIdentifier(mpn, 0.95m, "Matched by manufacturer part number");
+        if (Clean(item.AlternatePartNumber) is { } alternate)
+            yield return new CodeIdentifier(alternate, 0.93m, "Matched by alternate part number");
+
+        // A code typed into a description cell, which is where it lands whenever the document had
+        // no column heading the parser recognised. Offered as an identifier only when it is SHAPED
+        // like one, and it still has to equal a catalogue number outright to score: prose never
+        // qualifies, because "GASKET:SPIRAL WOUND,2 IN,CL300" contains spaces and "VALVE" contains
+        // no digit.
+        foreach (var text in new[] { item.ProductShortName, item.ProductShortDescription })
+            if (Clean(text) is { } quoted && LooksLikeBareCode(quoted))
+                yield return new CodeIdentifier(quoted, 0.92m, "Matched by catalog number in the line text");
+    }
+
+    private static string? Clean(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    /// <summary>One unspaced token, at least five characters, carrying at least one digit.</summary>
+    private static bool LooksLikeBareCode(string value) =>
+        value.Length is >= 5 and <= 60
+        && !value.Any(char.IsWhiteSpace)
+        && value.Any(char.IsDigit);
+
+    /// <summary>
+    /// How much an identifier loses when the two sides agree on the characters but not the
+    /// punctuation. Deliberately small: "A2A-50006470" and "A2A50006470" are one number written
+    /// two ways, so a folded hit must still clear <see cref="ConfidenceFloor"/> — while ranking
+    /// below an outright hit whenever both are available on the same line.
+    /// </summary>
+    private const decimal FoldedHitPenalty = 0.02m;
+
+    /// <summary>
+    /// The best catalogue-number hit this candidate takes from the line, or null when it takes
+    /// none and must fall through to name similarity. Every identifier is compared against BOTH
+    /// catalogue number columns: <c>PartNo</c> and <c>ModelNo</c> are both codes, and which one a
+    /// tenant keyed its catalogue on is its own choice, not something a lead line can know.
+    /// </summary>
+    private static (decimal Score, string Reason)? BestCodeHit(
+        IReadOnlyList<CodeIdentifier> identifiers, Candidate p)
+    {
+        (decimal Score, string Reason)? best = null;
+        foreach (var identifier in identifiers)
+        {
+            decimal? score = null;
+            if (Eq(p.PartNo, identifier.Value) || Eq(p.ModelNo, identifier.Value))
+                score = identifier.ExactScore;
+            else if (FoldedEq(p.PartNo, identifier.Value) || FoldedEq(p.ModelNo, identifier.Value))
+                score = identifier.ExactScore - FoldedHitPenalty;
+
+            if (score is { } value && (best is null || value > best.Value.Score))
+                best = (value, identifier.Reason);
+        }
+        return best;
+    }
+
+    /// <summary>
+    /// Equality once punctuation is folded away, using the SAME normaliser
+    /// (<c>ProductIntelligence/ProductIdentityNormalizer</c>) the deterministic resolver already
+    /// trusts for this, rather than a second opinion about what a part number is.
+    /// </summary>
+    private static bool FoldedEq(string? a, string? b) =>
+        ProductIdentityNormalizer.FoldIdentifier(a) is { } x
+        && ProductIdentityNormalizer.FoldIdentifier(b) is { } y
+        && x == y;
 
     private static bool Eq(string? a, string? b) =>
         a is not null && b is not null &&
