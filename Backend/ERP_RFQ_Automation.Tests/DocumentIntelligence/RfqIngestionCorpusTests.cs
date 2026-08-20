@@ -420,6 +420,71 @@ public sealed class RfqIngestionCorpusTests
 
     // ===================================================================== helpers
 
+    /// <summary>
+    /// A currency stated once in a document belongs to every line of it.
+    ///
+    /// <para>Measured on a real Saudi Aramco bid: <c>Currency</c> was null on ALL 32 extracted
+    /// lines. An RFQ names its currency once — a header, a note, the first priced row — and the
+    /// extractor returns it only where it saw it. Every other line then reaches the buyer with no
+    /// currency at all, and a quote cannot state a price without one.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_currency_stated_on_one_line_is_inherited_by_the_lines_that_omit_it()
+    {
+        var service = new ChunkedExtractionService(
+            new StubLlm(), new CanonicalRfqNormalizer(), new NoopLogger<ChunkedExtractionService>());
+
+        var outcome = await service.ExtractStructuredAsync(
+            new[] { PricedRow("1", "USD"), PricedRow("2", null), PricedRow("3", "") },
+            7, "currency.xlsx");
+
+        var items = outcome.Result!.Items!;
+        Assert.Equal(3, items.Count);
+        Assert.All(items, i => Assert.Equal("USD", i.Currency));
+
+        // The line that SAID it keeps full confidence; the two that inherited carry less, so a
+        // reviewer can tell a stated value from a carried one.
+        Assert.True(items[1].CurrencyConfidence < items[0].CurrencyConfidence);
+    }
+
+    /// <summary>
+    /// The refusal that makes the inheritance safe: a document that genuinely names two currencies
+    /// is left exactly as it was.
+    ///
+    /// <para>Rewriting the minority to the majority would misprice a real multi-currency bid, and
+    /// it would do it invisibly — a blank currency is visibly missing, a wrong one looks complete.
+    /// Nothing is filled in here that the document did not say.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_document_naming_two_currencies_has_neither_spread_over_the_other()
+    {
+        var service = new ChunkedExtractionService(
+            new StubLlm(), new CanonicalRfqNormalizer(), new NoopLogger<ChunkedExtractionService>());
+
+        var outcome = await service.ExtractStructuredAsync(
+            new[] { PricedRow("1", "USD"), PricedRow("2", "SAR"), PricedRow("3", null) },
+            7, "mixed-currency.xlsx");
+
+        var items = outcome.Result!.Items!;
+        Assert.Equal("USD", items[0].Currency);
+        Assert.Equal("SAR", items[1].Currency);
+        Assert.True(string.IsNullOrWhiteSpace(items[2].Currency),
+            "a third line was given a currency the document never stated for it");
+    }
+
+    private static RfqSpreadsheetRow PricedRow(string lineNo, string? currency) => new()
+    {
+        RowNumber = int.Parse(lineNo) + 1,
+        SourceDocumentName = "currency.xlsx",
+        RfqNo = "RFQ-CUR-1",
+        BuyerName = "Aramco",
+        ReceivedDate = "2026-05-26",
+        ProductName = "Cable 3 core 95mm",
+        Quantity = "10",
+        UnitPrice = "214.50",
+        Currency = currency,
+    };
+
     private static RfqSpreadsheetRow QuantityRow(string quantity) => new()
     {
         RowNumber = 2,
