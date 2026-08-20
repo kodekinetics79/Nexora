@@ -898,6 +898,12 @@ namespace ERP_RFQ_Automation.Services
                .Include(q => q.Currency)
                .Include(q => q.Status)
                .Include(q => q.DiscountType)
+               // The RFQ was never included, so RfqNo answered null on every quote response for as
+               // long as the "// Add Include if needed" note beside it has been there. The note was
+               // right and nobody acted on it, which is how a TODO becomes a defect: the field is
+               // declared, the screen has somewhere to put it, and the API quietly says there is
+               // nothing to show. LeadId reads through the same navigation.
+               .Include(q => q.Rfq)
                .FirstOrDefaultAsync(q => q.Id == id);
 
             if (quote == null) return null;
@@ -938,6 +944,26 @@ namespace ERP_RFQ_Automation.Services
                 QuoteNo = quote.QuoteNo,
                 RfqId = quote.Rfqid,
                 RfqNo = quote.Rfq?.Rfqno, // Add Include if needed
+
+                // The commercial identity, which this projection used to drop on the floor.
+                //
+                // Quote.InheritCommercialIdentity stamps CommercialCaseId, NexoraSerial, CustomerId
+                // and ContactId, a PostgreSQL trigger refuses the row if they do not match the RFQ,
+                // and then EVERY caller of this method -- GET /api/Quote/{id} and the quote-draft
+                // response among them -- was handed NexoraSerial = null. A quote that carries the
+                // serial and a quote that never received one looked identical from outside, which
+                // is the worst way to lose a field: the screen shows nothing, the API says nothing
+                // is there, and the row has been correct the whole time.
+                //
+                // Found while asserting a seam: the test read this DTO, saw null, and would have
+                // reported a fabricated identity defect had it not been re-pointed at the row.
+                LeadId = quote.Rfq?.LeadId,
+                CommercialCaseId = quote.CommercialCaseId,
+                NexoraSerial = quote.NexoraSerial,
+                ContactId = quote.ContactId,
+                SourceLeadRevision = quote.SourceLeadRevision,
+                SourceRfqRevision = quote.SourceRfqRevision,
+
                 CustomerId = quote.CustomerId,
                 CustomerName = quote.Customer?.Name,
                 BusinessUnitId = quote.BusinessUnitId,

@@ -974,7 +974,7 @@ namespace ERP_RFQ_Automation.Services
                     ThreadContinuation: !string.IsNullOrWhiteSpace(message.InReplyTo)
                                         || message.References?.Count > 0)
                 : DeterministicEmailTriage.Evaluate(
-                    BuildTriageSignals(message, bodyParts, senderPartyType));
+                    BuildTriageSignals(message, bodyParts, senderPartyType, config.EmailAddress));
 
             // Persist the decision BEFORE branching on it: a message that is stopped must still
             // be recorded, with its reason, and be retrievable (raw .eml is already on disk).
@@ -1092,7 +1092,7 @@ namespace ERP_RFQ_Automation.Services
         /// evidence of automated/bulk mail.
         /// </summary>
         private static EmailTriageSignals BuildTriageSignals(
-            MimeMessage message, EmailBodyParts parts, string? senderPartyType)
+            MimeMessage message, EmailBodyParts parts, string? senderPartyType, string? polledMailbox)
         {
             var from = message.From.Mailboxes.FirstOrDefault()?.Address;
             return new EmailTriageSignals
@@ -1102,6 +1102,13 @@ namespace ERP_RFQ_Automation.Services
                 Signature = parts.Signature,
                 FromAddress = from,
                 FromDomain = SenderPartyResolver.ExtractDomain(from),
+                // Compared against the mailbox being polled, which is the address our own outbound
+                // mail lands back in. Deliberately narrow: it does not consult every mailbox in the
+                // tenant, because a message from one tenant mailbox to another is real internal
+                // mail a person may well have meant to send.
+                SenderIsOwnMailbox = !string.IsNullOrWhiteSpace(from)
+                    && !string.IsNullOrWhiteSpace(polledMailbox)
+                    && string.Equals(from.Trim(), polledMailbox.Trim(), StringComparison.OrdinalIgnoreCase),
                 SenderPartyType = senderPartyType,
                 HasInReplyTo = !string.IsNullOrWhiteSpace(message.InReplyTo),
                 HasReferences = message.References?.Count > 0,
