@@ -62,6 +62,7 @@ import opportunityPriorityService, {
   type OpportunityFeedbackCode,
 } from '../../api/services/opportunityPriorityService';
 import { useAuth } from '../../context/AuthContext';
+import { statusLabel } from '../../utils/statusLabels';
 
 const DOC_ORDER: CommercialCaseDocument['documentType'][] = [
   'Lead', 'RFQ', 'SourcingCase', 'SupplierRFQ', 'SupplierQuote',
@@ -454,7 +455,7 @@ const CommercialCaseWorkspacePage: React.FC = () => {
                     <Typography sx={{ fontWeight: 900 }}>
                       {component.value == null ? 'Not measured' : `${component.value.toLocaleString(undefined, { maximumFractionDigits: 2 })}${component.unit === 'percent' ? '%' : component.unit === 'ratio' ? '' : ` ${component.unit ?? ''}`}`}
                     </Typography>
-                    <Typography variant="caption" color="text.secondary">Sample {component.sampleSize} | Confidence {percent(component.confidence)} | {component.status.replaceAll('_', ' ')}</Typography>
+                    <Typography variant="caption" color="text.secondary">Sample {component.sampleSize} | Confidence {percent(component.confidence)} | {statusLabel(component.status)}</Typography>
                     <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>{component.sourceType} | {component.sourceReference} | {formatDateSafe(component.evidenceAsOfUtc)}</Typography>
                     <Typography variant="body2" sx={{ mt: 0.75 }}>{component.evidence}</Typography>
                   </Box>
@@ -502,7 +503,7 @@ const CommercialCaseWorkspacePage: React.FC = () => {
           <Paper sx={{ p: 3, borderRadius: 2, border: '1px solid', borderColor: 'divider', overflowX: 'auto' }}>
             <Typography sx={{ fontWeight: 900, mb: 2 }}>Requested lines, Product match and ATP</Typography>
             <Table size="small"><TableHead><TableRow><TableCell>Part / description</TableCell><TableCell>Requested</TableCell><TableCell>ATP</TableCell><TableCell>Shortfall</TableCell><TableCell>Resolution</TableCell><TableCell>Evidence checked</TableCell></TableRow></TableHead><TableBody>
-              {workbench.data.lines.map(line => <TableRow key={line.id}><TableCell><Typography sx={{ fontWeight: 800 }}>{line.partNumber ?? 'Part unresolved'}</Typography><Typography variant="caption" color="text.secondary">{line.description}</Typography></TableCell><TableCell>{line.requestedQuantity}</TableCell><TableCell>{line.availableQuantity}</TableCell><TableCell>{line.shortfallQuantity}</TableCell><TableCell><Chip size="small" label={line.resolution.replaceAll('_', ' ')} /></TableCell><TableCell>{line.resolutionCheckedOn ? formatDateSafe(line.resolutionCheckedOn) : 'Pending'}</TableCell></TableRow>)}
+              {workbench.data.lines.map(line => <TableRow key={line.id}><TableCell><Typography sx={{ fontWeight: 800 }}>{line.partNumber ?? 'Part unresolved'}</Typography><Typography variant="caption" color="text.secondary">{line.description}</Typography></TableCell><TableCell>{line.requestedQuantity}</TableCell><TableCell>{line.availableQuantity}</TableCell><TableCell>{line.shortfallQuantity}</TableCell><TableCell><Chip size="small" label={statusLabel(line.resolution)} /></TableCell><TableCell>{line.resolutionCheckedOn ? formatDateSafe(line.resolutionCheckedOn) : 'Pending'}</TableCell></TableRow>)}
             </TableBody></Table>
           </Paper>
           {memory.data && <Paper sx={{ p: 3, borderRadius: 2, border: '1px solid', borderColor: 'divider' }}>

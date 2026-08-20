@@ -9,8 +9,9 @@ import {
 import { Add, EditNote, OpenInNew, Refresh, Sync } from '@mui/icons-material';
 import procurementHandoffService, { type ProcurementHandoff } from '../../../api/services/procurementHandoffService';
 import { useAuth } from '../../../context/AuthContext';
+import { statusLabel } from '../../../utils/statusLabels';
+import { formatMoney } from '../../../utils/currency';
 
-const readable = (value: string) => value.replaceAll('_', ' ');
 const todayPlus = (days: number) => new Date(Date.now() + days * 86_400_000).toISOString().slice(0, 10);
 const statusOptions: Record<string, string[]> = {
   CREATED: ['EXTERNAL_PO_CREATED', 'CANCELLED'],
@@ -109,7 +110,7 @@ export default function ProcurementHandoffsPage() {
         <Box><Stack direction="row" spacing={1} sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
           <Typography variant="subtitle1" sx={{ fontWeight: 800 }}>Operational synchronization</Typography>
           <Chip size="small" color={integration.data.isConfigured ? 'info' : 'default'}
-            label={readable(integration.data.connectorStatus)} />
+            label={statusLabel(integration.data.connectorStatus)} />
         </Stack><Typography variant="body2" color="text.secondary">
           {integration.data.sourceSystem} · {integration.data.lastSuccessfulSync
             ? `Last verified ${new Date(integration.data.lastSuccessfulSync).toLocaleString()}`
@@ -133,11 +134,11 @@ export default function ProcurementHandoffsPage() {
     {query.data?.length === 0 && <Alert severity="info">{search.trim() ? 'No handoffs match this search.' : 'No sourced Customer Order lines have been handed off.'}</Alert>}
     {query.data && query.data.length > 0 && mobile && <Stack spacing={1.5}>{query.data.map((item) => <Paper key={item.id} variant="outlined" sx={{ p: 2 }}>
       <Stack spacing={1}><Stack direction="row" sx={{ justifyContent: 'space-between', gap: 1 }}><Button onClick={() => navigate(`/sales/orders/${item.customerOrderId}`)}>{item.customerOrderNumber}</Button>
-        <Chip size="small" label={readable(item.externalStatus || item.status)} color={statusColor(item.externalStatus || item.status)} /></Stack>
+        <Chip size="small" label={statusLabel(item.externalStatus || item.status)} color={statusColor(item.externalStatus || item.status)} /></Stack>
         <Typography sx={{ fontFamily: 'monospace', fontWeight: 700 }}>{item.nexoraSerial}</Typography>
-        <Typography variant="body2">{item.supplierName} · {item.requiredQuantity} · {new Intl.NumberFormat(undefined, { style: 'currency', currency: item.currencyCode }).format(item.selectedUnitCost)}</Typography>
+        <Typography variant="body2">{item.supplierName} · {item.requiredQuantity} · {formatMoney(item.selectedUnitCost, item.currencyCode)}</Typography>
         <Typography variant="caption">Demand {item.commercialDemandLineId} · Award {item.sourcingAwardId}</Typography>
-        <Typography variant="caption">{readable(item.destinationType)}{item.deliveryLocation ? ` · ${item.deliveryLocation}` : ''}</Typography>
+        <Typography variant="caption">{statusLabel(item.destinationType)}{item.deliveryLocation ? ` · ${item.deliveryLocation}` : ''}</Typography>
         <Typography variant="caption">{item.externalSupplierPoNumber
           ? `Supplier PO ${item.externalSupplierPoNumber} · line ${item.externalSupplierPoLineNumber}`
           : `Awaiting ${item.externalSystemTarget}`}</Typography>
@@ -159,9 +160,9 @@ export default function ProcurementHandoffsPage() {
         <TableCell><Typography sx={{ fontFamily: 'monospace', fontWeight: 700 }}>{item.nexoraSerial}</Typography>
           <Typography variant="caption">Demand {item.commercialDemandLineId} · Award {item.sourcingAwardId} · Quote line {item.supplierQuotedItemId}</Typography></TableCell>
         <TableCell>{item.supplierName}</TableCell>
-        <TableCell align="right">{item.requiredQuantity} / {new Intl.NumberFormat(undefined, { style: 'currency', currency: item.currencyCode }).format(item.selectedUnitCost)}</TableCell>
-        <TableCell>{readable(item.destinationType)}{item.deliveryLocation && <Typography variant="caption" sx={{ display: 'block' }}>{item.deliveryLocation}</Typography>}</TableCell>
-        <TableCell><Chip size="small" label={readable(item.externalStatus || item.status)} color={statusColor(item.externalStatus || item.status)} />
+        <TableCell align="right">{item.requiredQuantity} / {formatMoney(item.selectedUnitCost, item.currencyCode)}</TableCell>
+        <TableCell>{statusLabel(item.destinationType)}{item.deliveryLocation && <Typography variant="caption" sx={{ display: 'block' }}>{item.deliveryLocation}</Typography>}</TableCell>
+        <TableCell><Chip size="small" label={statusLabel(item.externalStatus || item.status)} color={statusColor(item.externalStatus || item.status)} />
           <Typography variant="caption" sx={{ display: 'block' }}>{item.externalSupplierPoNumber
             ? `Supplier PO ${item.externalSupplierPoNumber} · line ${item.externalSupplierPoLineNumber}`
             : `Awaiting ${item.externalSystemTarget}`}</Typography>
@@ -183,7 +184,7 @@ export default function ProcurementHandoffsPage() {
           <TextField required label="External Supplier PO line" value={poLine} onChange={(event) => setPoLine(event.target.value)} />
           <TextField required type="date" label="Expected date" value={expectedOn} onChange={(event) => setExpectedOn(event.target.value)} slotProps={{ inputLabel: { shrink: true } }} />
           <FormControl><InputLabel id="handoff-status">Status</InputLabel><Select labelId="handoff-status" label="Status" value={status} onChange={(event) => setStatus(event.target.value)}>
-            {(statusOptions[selected?.externalStatus || selected?.status || 'CREATED'] || []).map((value) => <MenuItem value={value} key={value}>{readable(value)}</MenuItem>)}
+            {(statusOptions[selected?.externalStatus || selected?.status || 'CREATED'] || []).map((value) => <MenuItem value={value} key={value}>{statusLabel(value)}</MenuItem>)}
           </Select></FormControl>
           {synchronize.isError && <Alert severity="error">The external reference could not be saved. Reload before retrying.</Alert>}
         </Stack>

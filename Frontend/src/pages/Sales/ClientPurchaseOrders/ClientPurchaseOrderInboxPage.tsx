@@ -10,8 +10,8 @@ import customerAwardService from '../../../api/services/customerAwardService';
 import { useAuth } from '../../../context/AuthContext';
 import { CustomerAwardDialog, type CustomerAwardQuote } from '../Quotes/customer-awards';
 import ChooseQuoteForClientPoDialog from './ChooseQuoteForClientPoDialog';
+import { statusLabel } from '../../../utils/statusLabels';
 
-const readable = (value: string) => value.replaceAll('_', ' ');
 
 export default function ClientPurchaseOrderInboxPage() {
   const navigate = useNavigate();
@@ -74,7 +74,7 @@ export default function ClientPurchaseOrderInboxPage() {
           <TableCell><Typography sx={{ fontWeight: 800 }}>{item.externalPoNumber}</Typography><Typography variant="caption">{item.internalNumber}</Typography></TableCell>
           <TableCell><Typography sx={{ fontFamily: 'monospace', fontWeight: 700 }}>{item.nexoraSerial}</Typography><Typography variant="caption">{item.quoteNumber || 'Quote match pending'}</Typography></TableCell>
           <TableCell>{item.customerName}</TableCell>
-          <TableCell><Chip size="small" color={item.discrepancyCount > 0 ? 'warning' : 'success'} label={readable(item.matchOutcome)} />{item.discrepancyCount > 0 && <Typography variant="caption" sx={{ display: 'block', mt: 0.5 }}>{item.discrepancyCount} line discrepancy</Typography>}</TableCell>
+          <TableCell><Chip size="small" color={item.discrepancyCount > 0 ? 'warning' : 'success'} label={statusLabel(item.matchOutcome)} />{item.discrepancyCount > 0 && <Typography variant="caption" sx={{ display: 'block', mt: 0.5 }}>{item.discrepancyCount} line discrepancy</Typography>}</TableCell>
           <TableCell>{item.customerOrderNumber ? <Button size="small" onClick={() => navigate(`/sales/orders/${item.customerOrderId}`)}>{item.customerOrderNumber}</Button> : <Chip size="small" variant="outlined" label="Not created" />}</TableCell>
           <TableCell>{new Date(item.receivedOn).toLocaleDateString()}</TableCell>
           <TableCell align="right"><Button startIcon={<FindInPage />} onClick={() => navigate(`/sales/client-pos/${item.id}`)}>Review match</Button></TableCell>

@@ -44,7 +44,7 @@ import {
 } from '../../../utils/supplierTierFilter';
 import { useAuth } from '../../../context/AuthContext';
 import { presentableErrorMessage, toPresentableError } from '../../../utils/apiErrors';
-import { parseMoneyInput } from '../../../utils/currency';
+import { formatMoney, parseMoneyInput } from '../../../utils/currency';
 import { toast } from 'react-hot-toast';
 import supplierQuotedItemService from '../../../api/services/supplierQuotedItemService';
 import { useTranslation } from 'react-i18next';
@@ -102,7 +102,10 @@ const ProductSelector: React.FC<ProductSelectorProps> = React.memo(({ value, onC
   const [search, setSearch] = useState('');
   const [inputValue, setInputValue] = useState('');
 
-  const { data: products = [], isLoading } = useQuery({
+  // `isError` was never read, so a failed product search rendered as MUI's default "No options"
+  // — the same thing the user sees when their search genuinely matches nothing. On the screen
+  // that assigns products to RFQ lines, those two readings lead to opposite actions.
+  const { data: products = [], isLoading, isError } = useQuery({
     queryKey: ['product-search', search, businessUnitId],
     queryFn: () =>
       productService
@@ -131,6 +134,7 @@ const ProductSelector: React.FC<ProductSelectorProps> = React.memo(({ value, onC
       size="small"
       options={products}
       loading={isLoading}
+      noOptionsText={isError ? 'Product search is unavailable right now — this is not an empty catalogue.' : 'No products match'}
       getOptionLabel={(o) => `${o.productName}${o.partNo ? ` (${o.partNo})` : ''}`}
       value={selectedOption}
       inputValue={inputValue}
@@ -171,7 +175,8 @@ interface QuoteSelectorProps {
 const QuoteSelector: React.FC<QuoteSelectorProps> = React.memo(({ value, onChange, businessUnitId }) => {
   const [inputValue, setInputValue] = useState('');
 
-  const { data: quotes = [], isLoading } = useQuery({
+  // See ProductSelector: an empty option list must not be how a failed request looks.
+  const { data: quotes = [], isLoading, isError } = useQuery({
     queryKey: ['quoted-items', businessUnitId],
     queryFn: () => supplierQuotedItemService.getAll(businessUnitId),
     enabled: businessUnitId > 0,
@@ -196,6 +201,7 @@ const QuoteSelector: React.FC<QuoteSelectorProps> = React.memo(({ value, onChang
       size="small"
       options={quotes}
       loading={isLoading}
+      noOptionsText={isError ? 'Supplier quote lookup is unavailable right now — this is not an empty list.' : 'No supplier quotes match'}
       getOptionLabel={(o) => `${o.itemName} - ${o.supplierName}`}
       value={selectedOption}
       inputValue={inputValue}
@@ -212,8 +218,11 @@ const QuoteSelector: React.FC<QuoteSelectorProps> = React.memo(({ value, onChang
               <Typography variant="body2" sx={{ fontWeight: 800 }}>{option.itemName}</Typography>
               <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
                 <Typography variant="caption" color="text.secondary">{option.supplierName}</Typography>
-                <Typography variant="caption" sx={{ fontWeight: 900, color: 'primary.main' }}>
-                  ${(option.unitPrice ?? 0).toFixed(2)}
+                {/* The offer carries its own currency. A hardcoded $ is the exact defect
+                    utils/currency.ts was written to stop; where the record states no code,
+                    formatMoney returns a bare grouped number rather than inventing a symbol. */}
+                <Typography variant="caption" sx={{ fontWeight: 900, color: 'primary.main', fontVariantNumeric: 'tabular-nums' }}>
+                  {formatMoney(option.unitPrice, option.currencyName)}
                 </Typography>
               </Box>
             </Box>

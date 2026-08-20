@@ -40,13 +40,12 @@ import opportunityPriorityService, {
 } from '../../api/services/opportunityPriorityService';
 import { useAuth } from '../../context/AuthContext';
 import { MetricGrid, PageShell, QueryState, ResponsiveTable, formatDateTime } from './CommercialPagePrimitives';
+import { statusLabel } from '../../utils/statusLabels';
 
 const percentage = (value: number) => `${value <= 1 ? Math.round(value * 100) : Math.round(value)}%`;
 const money = (value?: number | null, currency?: string | null) => value == null
   ? 'Not measured'
   : `${currency ?? ''} ${value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`.trim();
-const businessLabel = (value: string) => value.toLowerCase().replaceAll('_', ' ')
-  .replace(/\b\w/g, letter => letter.toUpperCase());
 const priorityPageSize = 10;
 
 const reportingWindow = () => {
@@ -74,7 +73,7 @@ function SourceEvidence({ evidence, identity }: { evidence: CommercialIntelligen
     <Collapse in={open}>
       <Stack id={evidenceId} component="ul" spacing={0.75} sx={{ pl: 2.5, my: 1 }}>
         {evidence.length ? evidence.map((item, index) => <Typography component="li" variant="body2" key={`${item.recordType}-${item.recordId}-${index}`}>
-          <strong>{item.role}:</strong> {item.reference} ({businessLabel(item.recordType)}){item.occurredOn ? `, ${formatDateTime(item.occurredOn)}` : ''}
+          <strong>{item.role}:</strong> {item.reference} ({statusLabel(item.recordType)}){item.occurredOn ? `, ${formatDateTime(item.occurredOn)}` : ''}
         </Typography>) : <Typography component="li" variant="body2" color="text.secondary">No source evidence was returned.</Typography>}
       </Stack>
     </Collapse>
@@ -94,14 +93,14 @@ function CoachingFindingRow({ item, canAcknowledge, onOpen, onAcknowledge }: {
           <Typography sx={{ fontWeight: 900, overflowWrap: 'anywhere' }}>{item.salesRepName}: {item.recommendation}</Typography>
           <Typography variant="body2" color="text.secondary" sx={{ overflowWrap: 'anywhere' }}>{item.customerName || item.reference}</Typography>
         </Box>
-        <Chip size="small" label={businessLabel(item.severity)} color={severityColor(item.severity)} />
+        <Chip size="small" label={statusLabel(item.severity)} color={severityColor(item.severity)} />
       </Stack>
       <Typography variant="body2">
         {item.observedValue == null ? 'Observed value not available' : `Observed ${item.observedValue}${item.observedUnit ? ` ${item.observedUnit}` : ''}`}
         {item.thresholdValue == null ? '' : `; policy threshold ${item.thresholdValue}`}. Sample {item.sampleSize}; confidence {percentage(item.confidence)}.
       </Typography>
       <Typography variant="caption" color="text.secondary">Policy {item.policyVersion} | Evidence through {formatDateTime(item.asOf)}</Typography>
-      {item.latestAcknowledgement && <Alert severity="success" sx={{ py: 0 }}>{businessLabel(item.latestAcknowledgement.disposition)}: {item.latestAcknowledgement.reason}</Alert>}
+      {item.latestAcknowledgement && <Alert severity="success" sx={{ py: 0 }}>{statusLabel(item.latestAcknowledgement.disposition)}: {item.latestAcknowledgement.reason}</Alert>}
       <SourceEvidence evidence={item.evidence} identity={`finding-${item.findingKey}`} />
       <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
         <Button variant="outlined" endIcon={<OpenInNew />} onClick={onOpen} disabled={!item.actionRoute.startsWith('/')}>Open source</Button>
@@ -119,7 +118,7 @@ function RecoveryOpportunityRow({ item, onOpen }: { item: RecoveryOpportunityDTO
           <Typography sx={{ fontWeight: 900, overflowWrap: 'anywhere' }}>{item.title}</Typography>
           <Typography variant="body2" color="text.secondary">{item.customerName || item.nexoraSerial || item.sourceType} | {item.ownerName || 'Unassigned'}</Typography>
         </Box>
-        <Chip size="small" label={businessLabel(item.severity)} color={severityColor(item.severity)} />
+        <Chip size="small" label={statusLabel(item.severity)} color={severityColor(item.severity)} />
       </Stack>
       <Typography variant="body2">{item.explanation}</Typography>
       <Typography variant="body2"><strong>Recommended action:</strong> {item.recommendedAction}</Typography>
@@ -284,7 +283,7 @@ export default function SalesTodayPage() {
       {priorities.data && (
         <Stack spacing={0.25}>
           <Typography variant="caption" color="text.secondary">
-            Scope: {businessLabel(priorities.data.accessScope)} | Generated {formatDateTime(priorities.data.generatedAtUtc)}
+            Scope: {statusLabel(priorities.data.accessScope)} | Generated {formatDateTime(priorities.data.generatedAtUtc)}
           </Typography>
           <Typography variant="caption" color="text.secondary">
             Cohort: {priorities.data.cohort.eligibleRecommendations} eligible | {priorities.data.cohort.insufficientEvidenceRecommendations} insufficient evidence | {priorities.data.cohort.recommendationsWithObservedOutcome} with observed outcomes. Accuracy: {priorities.data.cohort.accuracyStatus}
@@ -311,7 +310,7 @@ export default function SalesTodayPage() {
                     <TableCell><Typography sx={{ fontWeight: 900 }}>#{item.rank}</Typography><Chip size="small" label="Shadow" variant="outlined" /></TableCell>
                     <TableCell><Typography sx={{ fontWeight: 800 }}>{item.nexoraSerial}</Typography><Typography variant="caption" color="text.secondary">{item.ownerName || 'Unassigned'}</Typography></TableCell>
                     <TableCell><Typography sx={{ fontWeight: 800 }}>{item.recommendedActionLabel}</Typography><Typography variant="caption" color="text.secondary">Blocker: {item.currentBlocker}</Typography><br /><Typography variant="caption" color="text.secondary">Deadline: {item.responseDeadline ? formatDateTime(item.responseDeadline) : 'Not available'}</Typography><RecommendationEvidence item={item} idPrefix="desktop" /></TableCell>
-                    <TableCell><Typography variant="body2">{item.priorityBand} | Score {item.priorityScore}</Typography><Typography variant="caption" color="text.secondary">Advisory ECV {money(item.expectedCommercialValue, item.expectedCommercialValueCurrency)} | {businessLabel(item.expectedCommercialValueStatus)}</Typography><br /><Typography variant="caption" color="text.secondary">Not used in cross-currency rank | Completeness {percentage(item.completeness)} | Sample {item.sampleSize}</Typography></TableCell>
+                    <TableCell><Typography variant="body2">{item.priorityBand} | Score {item.priorityScore}</Typography><Typography variant="caption" color="text.secondary">Advisory ECV {money(item.expectedCommercialValue, item.expectedCommercialValueCurrency)} | {statusLabel(item.expectedCommercialValueStatus)}</Typography><br /><Typography variant="caption" color="text.secondary">Not used in cross-currency rank | Completeness {percentage(item.completeness)} | Sample {item.sampleSize}</Typography></TableCell>
                     <TableCell>{percentage(item.confidence)}</TableCell>
                     <TableCell><Typography variant="body2">Policy {item.policyVersion}</Typography><Typography variant="caption" color="text.secondary">Through {formatDateTime(item.evidenceCutoffAtUtc)}</Typography></TableCell>
                     <TableCell align="right"><Button size="small" endIcon={<OpenInNew />} onClick={() => navigate(`/commercial-cases/${item.commercialCaseId}`)} aria-label={`Open opportunity ${item.nexoraSerial}`}>Open opportunity</Button></TableCell>
@@ -345,7 +344,7 @@ export default function SalesTodayPage() {
       <Typography id="coaching-recovery-heading" variant="h6" sx={{ fontWeight: 900 }}>Coaching and recovery</Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>Evidence-backed coaching and recoverable commercial work for the selected 90-day cohort.</Typography>
       {coaching.data && <Typography variant="caption" color="text.secondary">
-        Scope: {businessLabel(coaching.data.scope)} | Policy {coaching.data.policyVersion} | Generated {formatDateTime(coaching.data.generatedAt)}
+        Scope: {statusLabel(coaching.data.scope)} | Policy {coaching.data.policyVersion} | Generated {formatDateTime(coaching.data.generatedAt)}
       </Typography>}
       {coaching.data?.dataCompleteness.status === 'partial' && <Alert severity="warning" sx={{ mt: 1 }}>
         This cohort is partial because the bounded source limit was reached for: {coaching.data.dataCompleteness.incompleteSources.join(', ')}.

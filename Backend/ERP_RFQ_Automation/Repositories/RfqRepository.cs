@@ -217,6 +217,12 @@ namespace ERP_RFQ_Automation.Repositories
                 LeadEmail = rfq.Lead != null ? rfq.Lead.Clientemail : null,
                 AccountOwnerName = accountOwnerName,
                 OpportunityOwnerName = opportunityOwnerName,
+                // The detail projection used to leave ItemCount at its default 0 while the list
+                // projection above populated it. RfqResponseDTO.Readiness is derived from
+                // ItemCount, so GET /api/Rfq/{id} answered "Review Required" for every RFQ that
+                // has ever existed, including ones the list endpoint had just reported as ready.
+                // The lines are already materialised by the Include above, so this costs nothing.
+                ItemCount = rfq.Rfqitems.Count,
                 Rfqitems = rfq.Rfqitems.Select(i => new RfqitemResponseDTO
                 {
                     Id = i.Id,

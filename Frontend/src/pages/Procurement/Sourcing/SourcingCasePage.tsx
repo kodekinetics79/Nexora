@@ -32,6 +32,7 @@ import procurementService, {
   type SourcingCaseCandidate,
 } from "../../../api/services/procurementService";
 import { useAuth } from "../../../context/AuthContext";
+import { statusLabel } from "../../../utils/statusLabels";
 
 type CandidateLimit = 10 | 20 | 50;
 
@@ -42,9 +43,6 @@ const errorMessage = (error: any, fallback: string) =>
   error?.message ||
   fallback;
 
-const readableStatus = (value?: string | null) =>
-  value?.trim() ? value.replaceAll("_", " ") : "Unknown";
-
 const evidenceDate = (value?: string | null) =>
   value ? new Date(value).toLocaleDateString() : "No recorded activity";
 
@@ -54,7 +52,7 @@ const isCandidateReady = (candidate: SourcingCaseCandidate) =>
 function CandidateEvidence({ candidate }: { candidate: SourcingCaseCandidate }) {
   return (
     <Stack spacing={0.5}>
-      <Chip size="small" variant="outlined" label={readableStatus(candidate.evidenceType)} sx={{ alignSelf: "flex-start" }} />
+      <Chip size="small" variant="outlined" label={statusLabel(candidate.evidenceType)} sx={{ alignSelf: "flex-start" }} />
       <Typography variant="caption" color="text.secondary">{candidate.recommendationReason}</Typography>
       <Typography variant="caption" color="text.secondary">
         Evidence refreshed: {evidenceDate(candidate.evidenceFreshOn)}
@@ -212,7 +210,7 @@ function SourcingCasePage() {
             <Stack direction="row" spacing={1} sx={{ mt: 0.5, alignItems: "center", flexWrap: "wrap" }}>
               <Typography variant="body2" sx={{ fontWeight: 700 }}>Customer RFQ #{sourcingCase.rfqId}</Typography>
               {sourcingCase.nexoraSerial && <Chip size="small" variant="outlined" label={sourcingCase.nexoraSerial} />}
-              <Chip size="small" label={readableStatus(sourcingCase.status)} />
+              <Chip size="small" label={statusLabel(sourcingCase.status)} />
             </Stack>
           </Box>
         </Stack>
@@ -309,8 +307,8 @@ function SourcingCasePage() {
                     <TableCell>
                       <Stack direction="row" spacing={0.5} sx={{ flexWrap: "wrap" }}>
                         <Chip size="small" variant="outlined" label={`Rank ${candidate.rank}`} />
-                        <Chip size="small" variant="outlined" label={readableStatus(candidate.governanceStatus || candidate.approvalStatus)} />
-                        <Chip size="small" variant="outlined" label={readableStatus(candidate.readinessStatus)} />
+                        <Chip size="small" variant="outlined" label={statusLabel(candidate.governanceStatus || candidate.approvalStatus)} />
+                        <Chip size="small" variant="outlined" label={statusLabel(candidate.readinessStatus)} />
                       </Stack>
                     </TableCell>
                     <TableCell>

@@ -31,6 +31,7 @@ import dayjs from 'dayjs';
 import { toast } from 'react-hot-toast';
 import CommercialLineIntelligence from '../../../components/common/CommercialLineIntelligence';
 import procurementService from '../../../api/services/procurementService';
+import { statusLabel } from '../../../utils/statusLabels';
 
 const QuoteViewPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -503,7 +504,7 @@ const QuoteViewPage: React.FC = () => {
                       {(() => {
                         const source = sourceFor(item);
                         return <Stack spacing={0.5} sx={{ alignItems: 'flex-start' }}>
-                          <Chip size="small" color={source.source === 'COST_SOURCE_PENDING' ? 'warning' : 'info'} label={source.source.replaceAll('_', ' ')} />
+                          <Chip size="small" color={source.source === 'COST_SOURCE_PENDING' ? 'warning' : 'info'} label={statusLabel(source.source)} />
                           {source.offer && <Typography variant="caption" color="text.secondary">{source.offer.supplierName} · {source.offer.quoteReference || 'No supplier reference'} · valid {source.offer.validUntil ? dayjs(source.offer.validUntil).format('DD MMM YYYY') : 'not stated'}</Typography>}
                           {quote.rfqId && source.rfqItemId > 0 && <Button size="small" sx={{ px: 0 }} onClick={() => navigate(`/procurement/rfqs/${quote.rfqId}/sourcing`)}>View cost evidence</Button>}
                         </Stack>;

@@ -24,6 +24,9 @@ import {
   PriceCheck as PricingIcon,
   WarningAmber as BlockerIcon,
   Description as EvidenceIcon,
+  ErrorOutlined as UnavailableIcon,
+  HelpOutlined as UndecidedIcon,
+  HourglassEmpty as WaitingIcon,
 } from '@mui/icons-material';
 import rfqService, { type RfqitemResponseDTO } from '../../../api/services/rfqService';
 import { useAuth } from '../../../context/AuthContext';
@@ -36,6 +39,9 @@ import procurementService from '../../../api/services/procurementService';
 import commercialLearningService from '../../../api/services/commercialLearningService';
 import CommercialProcessingEvidence from '../../../components/common/CommercialProcessingEvidence';
 import commercialIntelligenceService from '../../../api/services/commercialIntelligenceService';
+import { formatMoney } from '../../../utils/currency';
+import { formatDateSafe } from '../../../utils/dates';
+import { statusLabel } from '../../../utils/statusLabels';
 
 const DataField: React.FC<{ label: string; value: string | number | null; bold?: boolean; color?: string }> = ({ label, value, bold = true, color = 'text.primary' }) => (
   <Box sx={{ mb: 1.5 }}>
@@ -48,16 +54,18 @@ const DataField: React.FC<{ label: string; value: string | number | null; bold?:
   </Box>
 );
 
-const formatScenarioMoney = (value: number, currencyCode?: string | null, currencyId?: number | null) => {
-  if (currencyCode) {
-    try {
-      return new Intl.NumberFormat('en-US', { style: 'currency', currency: currencyCode }).format(value);
-    } catch {
-      return `${currencyCode} ${value.toLocaleString()}`;
-    }
-  }
-  return `${value.toLocaleString()} (currency ${currencyId ?? 'unverified'})`;
-};
+/**
+ * Scenario money.
+ *
+ * This used to be a third private copy of `formatMoney`, hardcoded to `en-US` — so the same SAR
+ * figure was grouped one way here and another way on the quote screen — and, when the record
+ * carried no currency code, it printed the database foreign key: "1,240 (currency 7)". A
+ * currency id tells the reader nothing; `formatMoney` already renders a bare grouped number for
+ * a record with no stated currency, which is the honest output, so the note beside it only has
+ * to say the currency is missing.
+ */
+const formatScenarioMoney = (value: number, currencyCode?: string | null) =>
+  currencyCode ? formatMoney(value, currencyCode) : `${formatMoney(value)} (currency not stated)`;
 
 const ViewRFQPage: React.FC = () => {
   const { t } = useTranslation();
@@ -150,12 +158,6 @@ const ViewRFQPage: React.FC = () => {
     ),
   });
 
-  const formatDate = (dateStr: string | null) => {
-    if (!dateStr) return '—';
-    const d = new Date(dateStr);
-    return isNaN(d.getTime()) ? '—' : d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
-  };
-
   if (isLoading) return <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '60vh' }}><CircularProgress /></Box>;
   if (isError) return <Box sx={{ p: 4 }}><Alert severity="error" action={<Button color="inherit" onClick={() => refetch()}>Retry</Button>}>We couldn't load this RFQ.</Alert></Box>;
   if (!rfq) return <Box sx={{ p: 4 }}><Typography>RFQ not found.</Typography></Box>;
@@ -190,6 +192,27 @@ const ViewRFQPage: React.FC = () => {
     return true;
   };
   const visibleItems = rfq.rfqitems.filter((item) => lineMatches(item.id, lineFilter));
+  // Two populations feed this screen and they are BOTH right.
+  //
+  // The sourcing tiles come from the procurement workbench, which selects every line on the RFQ.
+  // The pricing and readiness figures come from commercial intelligence, which judges only the
+  // lines marked for quote — a partial bid is the normal case on an industrial bid list, and
+  // demanding stock coverage for lines we have declined is asking for work already decided
+  // against. So an RFQ can legitimately show "Total lines 21" beside a readiness score computed
+  // over 7, and the screen used to say nothing at all about that, which read as a contradiction.
+  //
+  // Everything needed to say it is already on the payload; no API change was required.
+  const quotedCount = rfq.rfqitems.filter((item) => item.participationDecision === 'Quote').length;
+  // Before anyone triages, no line is marked and the backend falls back to every non-declined
+  // line. Saying "of 0 marked" on an untriaged RFQ would be false, so the disclosure only
+  // appears once a partial bid actually exists.
+  const judgedCount = quotedCount > 0
+    ? quotedCount
+    : rfq.rfqitems.filter((item) => item.participationDecision !== 'NoQuote').length;
+  const partialBid = quotedCount > 0 && quotedCount < rfq.rfqitems.length;
+  const judgedScope = partialBid
+    ? `of ${quotedCount} marked for quote`
+    : `of ${judgedCount} line${judgedCount === 1 ? '' : 's'}`;
   const summary = [
     { key: 'all', label: 'Total lines', value: rfq.rfqitems.length, icon: <EvidenceIcon fontSize="small" /> },
     { key: 'stock', label: 'Ready from stock', value: sourcingQuery.isError ? '—' : rfq.rfqitems.filter((x) => lineMatches(x.id, 'stock')).length, icon: <InventoryIcon fontSize="small" /> },
@@ -197,11 +220,22 @@ const ViewRFQPage: React.FC = () => {
     { key: 'sourcing', label: 'Sourcing required', value: sourcingQuery.isError ? '—' : rfq.rfqitems.filter((x) => lineMatches(x.id, 'sourcing')).length, icon: <SourcingIcon fontSize="small" /> },
     { key: 'quoted', label: 'Lines with supplier quotes', value: sourcingQuery.isError ? '—' : rfq.rfqitems.filter((x) => lineMatches(x.id, 'quoted')).length, icon: <QuoteDraftIcon fontSize="small" /> },
     { key: 'unresolved', label: 'Unresolved matches', value: sourcingQuery.isError ? '—' : rfq.rfqitems.filter((x) => lineMatches(x.id, 'unresolved')).length, icon: <BlockerIcon fontSize="small" /> },
-    { key: 'pricing', label: 'Pricing pending', value: intelligenceQuery.isError ? '—' : rfq.rfqitems.filter((x) => lineMatches(x.id, 'pricing')).length, icon: <PricingIcon fontSize="small" /> },
-    { key: 'ready', label: 'Ready for quote', value: intelligenceQuery.isError ? '—' : rfq.rfqitems.filter((x) => lineMatches(x.id, 'ready')).length, icon: <ApproveIcon fontSize="small" /> },
+    { key: 'pricing', label: `Pricing pending ${judgedScope}`, value: intelligenceQuery.isError ? '—' : rfq.rfqitems.filter((x) => lineMatches(x.id, 'pricing')).length, icon: <PricingIcon fontSize="small" /> },
+    { key: 'ready', label: `Ready for quote ${judgedScope}`, value: intelligenceQuery.isError ? '—' : rfq.rfqitems.filter((x) => lineMatches(x.id, 'ready')).length, icon: <ApproveIcon fontSize="small" /> },
   ];
-  const readinessPercent = intelligence?.readinessScore ?? 0;
+  // The score is a heuristic rounded to two decimals by the server. Rendering "62.75%" claims a
+  // precision the model does not have.
+  const readinessPercent = intelligence ? Math.round(intelligence.readinessScore) : 0;
   const primaryBlocker = intelligence?.nextBestAction.explanation ?? (intelligenceQuery.isLoading ? 'Calculating from current commercial evidence' : 'Commercial intelligence unavailable');
+  // Why the screen's primary action is unavailable. `disabled` with no reason is the state a
+  // single transient intelligence failure leaves the page in, and the panel-level alert further
+  // down explains the panel, not the button.
+  const prepareQuoteReason = quoteDraftMutation.isPending ? 'Preparing the quote draft…'
+    : intelligenceQuery.isLoading ? 'Commercial readiness is still being calculated.'
+    : intelligenceQuery.isError ? 'Commercial readiness could not be reconciled, so quoting is held. Retry the panel below.'
+    : !intelligence ? 'Commercial readiness has not been reported for this RFQ.'
+    : canPrepareQuote ? 'Every line being quoted has an evidence-backed fulfilment route.'
+    : intelligence.nextBestAction.explanation;
   const evidenceItem = rfq.rfqitems.find((item) => item.id === evidenceItemId);
 
   return (
@@ -289,11 +323,19 @@ const ViewRFQPage: React.FC = () => {
                 </Button>
               </>
             )}
-            {hasPermission('Quotations', 'create') && <Button variant="contained" color="success" startIcon={<QuoteDraftIcon />}
-              onClick={() => quoteDraftMutation.mutate()} disabled={!canPrepareQuote || quoteDraftMutation.isPending}
-              sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}>
-              Prepare Quote Draft
-            </Button>}
+            {hasPermission('Quotations', 'create') && (
+              // A disabled button wrapped in a Tooltip needs a focusable element between them,
+              // otherwise the reason is unreachable by pointer and by keyboard alike.
+              <Tooltip title={prepareQuoteReason}>
+                <span>
+                  <Button variant="contained" color="success" startIcon={<QuoteDraftIcon />}
+                    onClick={() => quoteDraftMutation.mutate()} disabled={!canPrepareQuote || quoteDraftMutation.isPending}
+                    sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}>
+                    Prepare Quote Draft
+                  </Button>
+                </span>
+              </Tooltip>
+            )}
             <Button
               variant="outlined"
               startIcon={<ExportIcon />}
@@ -308,11 +350,18 @@ const ViewRFQPage: React.FC = () => {
             <Grid size={{ xs: 12, md: 3 }}><DataField label="Customer / contact" value={`${rfq.customerName || rfq.buyersName || 'Unresolved'}${rfq.contactName ? ` · ${rfq.contactName}` : ''}`} /></Grid>
             <Grid size={{ xs: 6, md: 2 }}><DataField label="Account Owner" value={rfq.accountOwnerName || 'Unassigned'} /></Grid>
             <Grid size={{ xs: 6, md: 2 }}><DataField label="Opportunity Owner" value={rfq.opportunityOwnerName || 'Unassigned'} /></Grid>
-            <Grid size={{ xs: 6, md: 2 }}><DataField label="Customer deadline" value={formatDate(rfq.bidClosingDate || null)} color={rfq.bidClosingDate && new Date(rfq.bidClosingDate) < new Date() ? 'error.main' : 'text.primary'} /></Grid>
+            <Grid size={{ xs: 6, md: 2 }}><DataField label="Customer deadline" value={formatDateSafe(rfq.bidClosingDate || null)} color={rfq.bidClosingDate && new Date(rfq.bidClosingDate) < new Date() ? 'error.main' : 'text.primary'} /></Grid>
             <Grid size={{ xs: 6, md: 3 }}>
               <Typography variant="caption" color="text.secondary">Commercial readiness</Typography>
-              <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}><LinearProgress variant="determinate" value={readinessPercent} sx={{ flex: 1, height: 8, borderRadius: 1 }} /><Typography sx={{ fontWeight: 800 }}>{readinessPercent}%</Typography></Stack>
-              <Typography variant="caption" color={intelligence?.commercialDecision === 'VIABLE_READY' ? 'success.main' : 'warning.main'}>{primaryBlocker}</Typography>
+              {/* A determinate bar pinned at 0 while the request is in flight is an assertion,
+                  and it is indistinguishable from an RFQ that genuinely scores zero. */}
+              <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}><LinearProgress variant={intelligence ? 'determinate' : 'indeterminate'} value={readinessPercent} sx={{ flex: 1, height: 8, borderRadius: 1 }} /><Typography sx={{ fontWeight: 800, fontVariantNumeric: 'tabular-nums' }}>{intelligence ? `${readinessPercent}%` : '—'}</Typography></Stack>
+              <Typography variant="caption" color={intelligence?.commercialDecision === 'VIABLE_READY' ? 'success.main' : 'warning.main'} sx={{ display: 'block' }}>{primaryBlocker}</Typography>
+              {intelligence && partialBid && (
+                <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                  Judged over the {quotedCount} of {rfq.rfqitems.length} lines marked for quote. The line tiles below count all {rfq.rfqitems.length}.
+                </Typography>
+              )}
             </Grid>
           </Grid>
         </Paper>
@@ -320,12 +369,28 @@ const ViewRFQPage: React.FC = () => {
 
       <CommercialProcessingEvidence resource="rfqs" id={rfq.id} />
 
+      <Stack direction="row" spacing={1} sx={{ mb: 1, alignItems: 'center', flexWrap: 'wrap' }}>
+        {/* Clicking a tile silently swapped the table contents with no indication of which filter
+            was applied and no labelled way back. The live region announces the change for a
+            screen reader; the chip is the visible half of the same statement. */}
+        <Typography variant="caption" role="status" aria-live="polite" sx={{ fontWeight: 700, color: 'text.secondary' }}>
+          {lineFilter === 'all'
+            ? `Showing all ${rfq.rfqitems.length} line${rfq.rfqitems.length === 1 ? '' : 's'}`
+            : `Showing ${visibleItems.length} of ${rfq.rfqitems.length} lines · ${summary.find((tile) => tile.key === lineFilter)?.label ?? statusLabel(lineFilter)}`}
+        </Typography>
+        {lineFilter !== 'all' && (
+          <Button size="small" variant="text" onClick={() => setLineFilter('all')} sx={{ fontWeight: 700 }}>
+            Show all lines
+          </Button>
+        )}
+      </Stack>
+
       <Grid container spacing={1.5} sx={{ mb: 3 }}>
         {summary.map((item) => (
           <Grid key={item.key} size={{ xs: 6, sm: 4, md: 3, xl: 1.5 }}>
             <ButtonBase onClick={() => setLineFilter(item.key)} sx={{ width: '100%', textAlign: 'left', borderRadius: 1 }} aria-pressed={lineFilter === item.key}>
               <Paper sx={{ width: '100%', minHeight: 88, p: 1.5, borderRadius: 1, border: '1px solid', borderColor: lineFilter === item.key ? 'primary.main' : 'divider', bgcolor: lineFilter === item.key ? 'action.selected' : 'background.paper' }}>
-                <Stack direction="row" sx={{ justifyContent: 'space-between', color: 'text.secondary' }}>{item.icon}<Typography variant="h6" sx={{ fontWeight: 900 }}>{item.value}</Typography></Stack>
+                <Stack direction="row" sx={{ justifyContent: 'space-between', color: 'text.secondary' }}>{item.icon}<Typography variant="h6" sx={{ fontWeight: 900, fontVariantNumeric: 'tabular-nums' }}>{item.value}</Typography></Stack>
                 <Typography variant="caption" sx={{ fontWeight: 700 }}>{item.label}</Typography>
               </Paper>
             </ButtonBase>
@@ -347,19 +412,18 @@ const ViewRFQPage: React.FC = () => {
               <Grid container spacing={2}>
                 <Grid size={{ xs: 12, md: 4 }}><DataField label="RFQ #" value={rfq.rfqno} /></Grid>
                 <Grid size={{ xs: 12, md: 4 }}><DataField label="Active Lead Revision" value={`Revision ${rfq.activeLeadRevision || 1}`} /></Grid>
-                <Grid size={{ xs: 12, md: 4 }}><DataField label="Readiness" value={rfq.readiness} /></Grid>
                 <Grid size={{ xs: 12, md: 4 }}>
                   <Button size="small" variant="outlined" onClick={() => navigate(`/procurement/leads/view/${rfq.leadId}`)}>Open Canonical Lead</Button>
                 </Grid>
                 <Grid size={{ xs: 12, md: 4 }}><DataField label="Customer / Buyer" value={rfq.buyersName || rfq.customerName || 'N/A'} /></Grid>
                 <Grid size={{ xs: 12, md: 4 }}><DataField label="Customer Email" value={rfq.customerEmail || rfq.leadEmail || 'N/A'} /></Grid>
                 
-                <Grid size={{ xs: 12, md: 4 }}><DataField label="Received Date" value={formatDate(rfq.recDate)} /></Grid>
-                <Grid size={{ xs: 12, md: 4 }}><DataField label="Bid Closing Date" value={formatDate(rfq.bidClosingDate || null)} color="error.main" /></Grid>
+                <Grid size={{ xs: 12, md: 4 }}><DataField label="Received Date" value={formatDateSafe(rfq.recDate)} /></Grid>
+                <Grid size={{ xs: 12, md: 4 }}><DataField label="Bid Closing Date" value={formatDateSafe(rfq.bidClosingDate || null)} color="error.main" /></Grid>
                 <Grid size={{ xs: 12, md: 4 }}><DataField label="RFQ Type" value={rfq.rfqtype || 'Agreement'} /></Grid>
 
                 <Grid size={{ xs: 12, md: 4 }}><DataField label="Created By" value={rfq.createdBy} /></Grid>
-                <Grid size={{ xs: 12, md: 4 }}><DataField label="Created On" value={formatDate(rfq.createdDate)} /></Grid>
+                <Grid size={{ xs: 12, md: 4 }}><DataField label="Created On" value={formatDateSafe(rfq.createdDate)} /></Grid>
                 <Grid size={{ xs: 12, md: 4 }}><DataField label="Business Unit" value={rfq.businessUnitName || null} /></Grid>
               </Grid>
 
@@ -378,23 +442,23 @@ const ViewRFQPage: React.FC = () => {
               <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} sx={{ justifyContent: 'space-between', mb: 2 }}>
                 <Box>
                   <Typography sx={{ fontWeight: 900 }}>Opportunity Digital Twin</Typography>
-                  <Typography variant="body2" color="text.secondary">{intelligence.nextBestAction.label}: {intelligence.nextBestAction.explanation}</Typography>
+                  <Typography variant="body2" color="text.secondary">{intelligence.nextBestAction.label}</Typography>
                   <Typography variant="caption" color="text.secondary">Confidence {Math.round(intelligence.nextBestAction.confidence * 100)}% · {intelligence.digitalTwin.validity}</Typography>
                 </Box>
                 {canOpenRecommendedAction && <Button variant="outlined" onClick={() => navigate(intelligence.nextBestAction.overrideAction)}>Open recommended action</Button>}
               </Stack>
               <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, 1fr)', xl: 'repeat(4, 1fr)' }, gap: 1.5 }}>
                 {intelligence.digitalTwin.scenarios.map((scenario) => <Box key={scenario.code} sx={{ border: '1px solid', borderColor: 'divider', p: 1.5, minHeight: 132 }}>
-                  <Stack direction="row" spacing={1} sx={{ justifyContent: 'space-between', alignItems: 'center' }}><Typography variant="subtitle2" sx={{ fontWeight: 800 }}>{scenario.label}</Typography><Chip size="small" color={scenario.eligible ? 'success' : 'default'} label={scenario.eligible ? 'Eligible' : 'Evidence needed'} /></Stack>
+                  <Stack direction="row" spacing={1} sx={{ justifyContent: 'space-between', alignItems: 'center' }}><Typography variant="subtitle2" sx={{ fontWeight: 800 }}>{scenario.label}</Typography><Chip size="small" icon={scenario.eligible ? <ApproveIcon /> : <BlockerIcon />} color={scenario.eligible ? 'success' : 'default'} label={scenario.eligible ? 'Eligible' : 'Evidence needed'} /></Stack>
                   <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>{scenario.explanation}</Typography>
-                  {scenario.estimatedLandedCost != null && <Typography variant="body2" sx={{ mt: 1, fontWeight: 800 }}>Landed total {formatScenarioMoney(scenario.estimatedLandedCost, scenario.currencyCode, scenario.currencyId)} · {scenario.estimatedLeadTimeDays ?? '—'} days</Typography>}
-                  <Typography variant="caption" sx={{ display: 'block', mt: 0.75, fontWeight: 700 }}>Risk {scenario.riskBand.replaceAll('_', ' ')} · Confidence {Math.round(scenario.confidence * 100)}%</Typography>
-                  {scenario.validUntil && <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>Valid to {formatDate(scenario.validUntil)}</Typography>}
+                  {scenario.estimatedLandedCost != null && <Typography variant="body2" sx={{ mt: 1, fontWeight: 800 }}>Landed total {formatScenarioMoney(scenario.estimatedLandedCost, scenario.currencyCode)} · {scenario.estimatedLeadTimeDays ?? '—'} days</Typography>}
+                  <Typography variant="caption" sx={{ display: 'block', mt: 0.75, fontWeight: 700 }}>Risk {statusLabel(scenario.riskBand)} · Confidence {Math.round(scenario.confidence * 100)}%</Typography>
+                  {scenario.validUntil && <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>Valid to {formatDateSafe(scenario.validUntil)}</Typography>}
                   {scenario.quantities.length > 0 && <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>Stock {scenario.quantities.reduce((sum, line) => sum + line.immediateStockQuantity, 0)} · Supplier {scenario.quantities.reduce((sum, line) => sum + line.supplierQuantity, 0)}</Typography>}
                   <Box component="details" sx={{ mt: 1 }}>
                     <Typography component="summary" variant="caption" sx={{ fontWeight: 800, cursor: 'pointer' }}>Evidence and assumptions</Typography>
                     <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.75 }}>{scenario.riskExplanation}</Typography>
-                    {scenario.costSources.map((source, index) => <Typography key={`${source.sourceType}-${index}`} variant="caption" sx={{ display: 'block' }}>{source.label}: {source.amount != null ? formatScenarioMoney(source.amount, scenario.currencyCode, source.currencyId) : source.status.replaceAll('_', ' ')}</Typography>)}
+                    {scenario.costSources.map((source, index) => <Typography key={`${source.sourceType}-${index}`} variant="caption" sx={{ display: 'block' }}>{source.label}: {source.amount != null ? formatScenarioMoney(source.amount, scenario.currencyCode) : statusLabel(source.status)}</Typography>)}
                     {scenario.assumptions.map((assumption) => <Typography key={assumption} variant="caption" color="text.secondary" sx={{ display: 'block' }}>Assumption: {assumption}</Typography>)}
                     {scenario.approvalRequirements.map((approval) => <Typography key={approval} variant="caption" color="warning.main" sx={{ display: 'block' }}>Approval: {approval}</Typography>)}
                     {scenario.evidence.map((item) => <Typography key={`${item.recordType}-${item.recordId}-${item.role}`} variant="caption" color="text.secondary" sx={{ display: 'block' }}>Evidence: {item.reference}</Typography>)}
@@ -408,8 +472,8 @@ const ViewRFQPage: React.FC = () => {
                   <Typography variant="caption" color="text.secondary">{intelligence.digitalTwin.backtest.cohort}</Typography>
                   <Typography variant="body2" sx={{ mt: 0.5 }}>{intelligence.digitalTwin.predictivePricing.filter(line => line.status === 'READY_SHADOW').length} of {intelligence.digitalTwin.predictivePricing.length} lines have sufficient order-backed evidence.</Typography>
                   {intelligence.digitalTwin.predictivePricing.filter(line => line.status === 'READY_SHADOW').map((line) => <Box key={line.rfqItemId} sx={{ mt: 1 }}>
-                    <Typography variant="caption" sx={{ display: 'block', fontWeight: 800 }}>Line {line.rfqItemId}: {line.recommendedUnitPrice != null ? formatScenarioMoney(line.recommendedUnitPrice, line.currencyCode, line.currencyId) : 'withheld'} · {line.customerOrderSampleSize} order outcomes</Typography>
-                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>Winning range {line.winningRangeLow != null && line.winningRangeHigh != null ? `${formatScenarioMoney(line.winningRangeLow, line.currencyCode, line.currencyId)} to ${formatScenarioMoney(line.winningRangeHigh, line.currencyCode, line.currencyId)}` : 'insufficient'} · walk-forward MAPE {line.backtestMeanAbsolutePercentError != null ? `${line.backtestMeanAbsolutePercentError}% (${line.backtestHoldoutCount} holdouts)` : 'not measured'} · decided-cohort conversion baseline {line.cohortConversionBaseline != null ? `${Math.round(line.cohortConversionBaseline * 100)}%` : 'withheld'}</Typography>
+                    <Typography variant="caption" sx={{ display: 'block', fontWeight: 800 }}>Line {line.rfqItemId}: {line.recommendedUnitPrice != null ? formatScenarioMoney(line.recommendedUnitPrice, line.currencyCode) : 'withheld'} · {line.customerOrderSampleSize} order outcomes</Typography>
+                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>Winning range {line.winningRangeLow != null && line.winningRangeHigh != null ? `${formatScenarioMoney(line.winningRangeLow, line.currencyCode)} to ${formatScenarioMoney(line.winningRangeHigh, line.currencyCode)}` : 'insufficient'} · walk-forward MAPE {line.backtestMeanAbsolutePercentError != null ? `${line.backtestMeanAbsolutePercentError}% (${line.backtestHoldoutCount} holdouts)` : 'not measured'} · decided-cohort conversion baseline {line.cohortConversionBaseline != null ? `${Math.round(line.cohortConversionBaseline * 100)}%` : 'withheld'}</Typography>
                   </Box>)}
                 </Box>
                 <Box>
@@ -433,7 +497,7 @@ const ViewRFQPage: React.FC = () => {
                     <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }}>#</TableCell>
                     <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }}>Product / Description</TableCell>
                     <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }}>Manufacturer / Part #</TableCell>
-                    <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }} align="center">Qty</TableCell>
+                    <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }} align="right">Qty</TableCell>
                     <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }}>Resolution</TableCell>
                     <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }}>Inventory</TableCell>
                     <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }}>Supplier Quotes</TableCell>
@@ -444,7 +508,11 @@ const ViewRFQPage: React.FC = () => {
                 <TableBody>
                   {visibleItems.map((item, idx) => (
                     <TableRow key={item.id} hover sx={{ '&:last-child td': { border: 0 } }}>
-                      <TableCell sx={{ fontSize: '0.8rem', fontWeight: 700, color: 'text.secondary' }}>{idx + 1}</TableCell>
+                      {/* The buyer's line number is the identifier they will quote back at you, so
+                          a renumbering index is actively wrong — and it shifted every time a tile
+                          filter was applied. Falls back to the position only when the document
+                          carried no line number. */}
+                      <TableCell sx={{ fontSize: '0.8rem', fontWeight: 700, color: 'text.secondary', fontVariantNumeric: 'tabular-nums' }}>{item.lineItemNo || idx + 1}</TableCell>
                       <TableCell>
                         <Typography sx={{ fontSize: '0.8rem', fontWeight: 800, color: 'primary.main' }}>
                           {item.productName || item.productShortName || 'Unknown Product'}
@@ -461,22 +529,25 @@ const ViewRFQPage: React.FC = () => {
                           {item.manufacturerPartNumber || 'N/A'}
                         </Typography>
                       </TableCell>
-                      <TableCell align="center" sx={{ fontSize: '0.85rem', fontWeight: 900 }}>
-                        {item.quantity} {item.unitOfMeasure || 'EA'}
+                      <TableCell align="right" sx={{ fontSize: '0.85rem', fontWeight: 900, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
+                        {item.quantity?.toLocaleString()} {item.unitOfMeasure || 'EA'}
                       </TableCell>
                       <TableCell>{(() => {
                         const resolution = persistedResolutions.get(item.id);
-                        if (lineResolutionQuery.isLoading) return <Chip size="small" label="Resolution checking" variant="outlined" />;
-                        if (lineResolutionQuery.isError) return <Chip size="small" label="Resolution unavailable" color="error" variant="outlined" />;
-                        if (!resolution) return <Chip size="small" label="Resolution not recorded" color="warning" variant="outlined" />;
+                        // Colour alone does not carry a status: roughly one man in twelve cannot
+                        // separate the success green from the warning amber, and these chips
+                        // differed in nothing else. Each state now has a shape as well.
+                        if (lineResolutionQuery.isLoading) return <Chip size="small" icon={<WaitingIcon />} label="Resolution checking" variant="outlined" />;
+                        if (lineResolutionQuery.isError) return <Chip size="small" icon={<UnavailableIcon />} label="Resolution unavailable" color="error" variant="outlined" />;
+                        if (!resolution) return <Chip size="small" icon={<UndecidedIcon />} label="Resolution not recorded" color="warning" variant="outlined" />;
                         const reviewed = resolution.productResolution?.decisionState?.toLowerCase().includes('approved') || resolution.classification === 'KnownInStock' || resolution.classification === 'KnownIncoming' || resolution.classification === 'KnownShortage';
-                        return <Tooltip title={`Evidence: ${resolution.evidenceReference || 'not recorded'}`}><Chip size="small" label={reviewed ? 'Persisted resolution' : resolution.classification.replace(/([a-z])([A-Z])/g, '$1 $2')} color={reviewed ? 'success' : 'warning'} variant="outlined" /></Tooltip>;
+                        return <Tooltip title={`Evidence: ${resolution.evidenceReference || 'not recorded'}`}><Chip size="small" icon={reviewed ? <ApproveIcon /> : <BlockerIcon />} label={reviewed ? 'Persisted resolution' : statusLabel(resolution.classification)} color={reviewed ? 'success' : 'warning'} variant="outlined" /></Tooltip>;
                       })()}</TableCell>
                       <TableCell>
-                        <Typography variant="caption" sx={{ fontWeight: 700 }}>{sourcingLines.get(item.id)?.resolution.replaceAll('_', ' ') || 'Checking'}</Typography>
+                        <Typography variant="caption" sx={{ fontWeight: 700 }}>{sourcingLines.get(item.id) ? statusLabel(sourcingLines.get(item.id)!.resolution) : 'Checking'}</Typography>
                         <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>ATP {sourcingLines.get(item.id)?.availableQuantity ?? '—'} · Short {sourcingLines.get(item.id)?.shortfallQuantity ?? '—'}</Typography>
                       </TableCell>
-                      <TableCell><Stack spacing={0.5} sx={{ alignItems: 'flex-start' }}><Chip size="small" label={`${intelligenceLines.get(item.id)?.eligibleOfferCount ?? 0}/${offersByLine.get(item.id) ?? 0} eligible`} color={(intelligenceLines.get(item.id)?.eligibleOfferCount ?? 0) > 0 ? 'success' : 'default'} />{(intelligenceLines.get(item.id)?.bidQualityFlags.length ?? 0) > 0 && <Typography variant="caption" color="warning.main">{intelligenceLines.get(item.id)?.bidQualityFlags.length} quality finding(s)</Typography>}</Stack></TableCell>
+                      <TableCell><Stack spacing={0.5} sx={{ alignItems: 'flex-start' }}><Chip size="small" icon={(intelligenceLines.get(item.id)?.eligibleOfferCount ?? 0) > 0 ? <ApproveIcon /> : <UndecidedIcon />} label={`${intelligenceLines.get(item.id)?.eligibleOfferCount ?? 0}/${offersByLine.get(item.id) ?? 0} eligible`} color={(intelligenceLines.get(item.id)?.eligibleOfferCount ?? 0) > 0 ? 'success' : 'default'} />{(intelligenceLines.get(item.id)?.bidQualityFlags.length ?? 0) > 0 && <Typography variant="caption" color="warning.main">{intelligenceLines.get(item.id)?.bidQualityFlags.length} quality finding(s)</Typography>}</Stack></TableCell>
                       <TableCell>
                         {/* Which lines Nexora will actually bid. A partial bid is the normal
                             case on an industrial bid list, and only lines marked Quote reach a
@@ -501,12 +572,12 @@ const ViewRFQPage: React.FC = () => {
                             return <Typography variant="caption" color="error.main">Inventory check unavailable</Typography>;
                           }
                           if (sourcingLine.shortfallQuantity <= 0 || sourcingLine.resolution === 'IN_STOCK') {
-                            return <Chip size="small" color="success" variant="outlined" label="Use company inventory" />;
+                            return <Chip size="small" icon={<InventoryIcon />} color="success" variant="outlined" label="Use company inventory" />;
                           }
                           return (
                             <Stack spacing={0.75} sx={{ alignItems: 'flex-start' }}>
                               <Typography variant="caption" color="error.main" sx={{ fontWeight: 700 }}>
-                                {sourcingLine.shortfallQuantity} to source · {sourcingLine.resolution.replaceAll('_', ' ')}
+                                {sourcingLine.shortfallQuantity} to source · {statusLabel(sourcingLine.resolution)}
                               </Typography>
                               {hasPermission('RFQ Management', 'edit') && (
                                 <Button
@@ -526,10 +597,16 @@ const ViewRFQPage: React.FC = () => {
                       </TableCell>
                     </TableRow>
                   ))}
-                  {rfq.rfqitems.length === 0 && (
+                  {/* The body renders `visibleItems`, so this has to test `visibleItems`. Keyed on
+                      `rfq.rfqitems` it fired only for an RFQ with no lines at all — the one case
+                      where "match this filter" is meaningless — and a filter that genuinely
+                      matched nothing produced a table body with no rows and no explanation. */}
+                  {visibleItems.length === 0 && (
                     <TableRow>
                       <TableCell colSpan={9} sx={{ py: 4, textAlign: 'center', color: 'text.disabled' }}>
-                        No RFQ lines match this filter.
+                        {rfq.rfqitems.length === 0
+                          ? 'This RFQ has no lines yet.'
+                          : `No line matches "${summary.find((tile) => tile.key === lineFilter)?.label ?? statusLabel(lineFilter)}". ${rfq.rfqitems.length} line${rfq.rfqitems.length === 1 ? '' : 's'} on this RFQ.`}
                       </TableCell>
                     </TableRow>
                   )}
@@ -538,10 +615,17 @@ const ViewRFQPage: React.FC = () => {
               <Box sx={{ p: 2, display: 'flex', justifyContent: 'flex-end', bgcolor: '#fafafa' }}>
                 <Stack direction="row" spacing={4}>
                    <Box sx={{ textAlign: 'right' }}>
-                      <Typography variant="caption" sx={{ fontWeight: 800, color: 'text.disabled', textTransform: 'uppercase' }}>Total Items</Typography>
-                      <Typography sx={{ fontWeight: 900, fontSize: '1.1rem' }}>{rfq.rfqitems.length}</Typography>
+                      <Typography variant="caption" sx={{ fontWeight: 800, color: 'text.disabled', textTransform: 'uppercase' }}>Total lines</Typography>
+                      <Typography sx={{ fontWeight: 900, fontSize: '1.1rem', fontVariantNumeric: 'tabular-nums' }}>{rfq.rfqitems.length}</Typography>
                    </Box>
-                   <Chip label="Commercial Review Required" color="warning" variant="outlined" />
+                   <Box sx={{ textAlign: 'right' }}>
+                      <Typography variant="caption" sx={{ fontWeight: 800, color: 'text.disabled', textTransform: 'uppercase' }}>Marked for quote</Typography>
+                      <Typography sx={{ fontWeight: 900, fontSize: '1.1rem', fontVariantNumeric: 'tabular-nums' }}>{quotedCount}</Typography>
+                   </Box>
+                   <Box sx={{ textAlign: 'right' }}>
+                      <Typography variant="caption" sx={{ fontWeight: 800, color: 'text.disabled', textTransform: 'uppercase' }}>Total quantity</Typography>
+                      <Typography sx={{ fontWeight: 900, fontSize: '1.1rem', fontVariantNumeric: 'tabular-nums' }}>{rfq.rfqitems.reduce((sum, item) => sum + (item.quantity ?? 0), 0).toLocaleString()}</Typography>
+                   </Box>
                 </Stack>
               </Box>
             </Paper>
@@ -588,7 +672,7 @@ const ViewRFQPage: React.FC = () => {
                        <Box>
                           <Typography sx={{ fontSize: '0.75rem', fontWeight: 800 }}>{log.title}</Typography>
                           <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block' }}>by {log.user}</Typography>
-                          <Typography variant="caption" sx={{ color: 'text.disabled', fontSize: '0.65rem' }}>{formatDate(log.date)}</Typography>
+                          <Typography variant="caption" sx={{ color: 'text.disabled', fontSize: '0.65rem' }}>{formatDateSafe(log.date)}</Typography>
                        </Box>
                     </Box>
                   ))}

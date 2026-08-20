@@ -21,8 +21,8 @@ import SupplierFormDialog from './SupplierFormDialog';
 import ChangeHistoryPanel from '../../components/common/ChangeHistoryPanel';
 import { useAuth } from '../../context/AuthContext';
 import { useSnackbar } from 'notistack';
+import { statusLabel } from '../../utils/statusLabels';
 
-const readableStatus = (value?: string) => (value || 'UNKNOWN').replaceAll('_', ' ');
 
 const InfoRow: React.FC<{ label: string; value: React.ReactNode }> = ({ label, value }) => (
   <Box sx={{ display: 'flex', gap: 2, py: 0.9, borderBottom: '1px solid', borderColor: 'divider', alignItems: 'center', '&:last-child': { border: 'none' } }}>
@@ -123,7 +123,7 @@ const SupplierDetailPage: React.FC = () => {
         </Box>
         <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
           <Chip label={supplier.isActive ? 'Active' : 'Inactive'} color={supplier.isActive ? 'success' : 'default'} size="small" variant="outlined" />
-          <Chip label={readableStatus(supplier.governanceStatus)} size="small" variant="outlined" />
+          <Chip label={statusLabel(supplier.governanceStatus)} size="small" variant="outlined" />
           {canGovern && <Button variant="outlined" onClick={openGovernance} sx={{ textTransform: 'none', fontWeight: 700, borderRadius: 1.5 }}>
             Review Governance
           </Button>}
@@ -165,7 +165,7 @@ const SupplierDetailPage: React.FC = () => {
         <Box sx={{ display: 'flex', gap: 0 }}>
           {[
             { label: 'Payment Terms', value: supplier.paymentTerms },
-            { label: 'RFQ Readiness', value: readableStatus(supplier.readinessStatus) },
+            { label: 'RFQ Readiness', value: statusLabel(supplier.readinessStatus) },
             { label: 'Country', value: supplier.countryName },
             { label: 'Currency', value: supplier.currencyName },
           ].map(({ label, value }) => (
@@ -232,11 +232,11 @@ const SupplierDetailPage: React.FC = () => {
             </Section>
 
             <Section title="Governance" icon={<SupplierIcon sx={{ fontSize: 16 }} />}>
-              <InfoRow label="Approval" value={readableStatus(supplier.governanceStatus)} />
-              <InfoRow label="Verification" value={readableStatus(supplier.verificationStatus)} />
-              <InfoRow label="Compliance" value={readableStatus(supplier.complianceStatus)} />
-              <InfoRow label="Risk" value={readableStatus(supplier.riskStatus)} />
-              <InfoRow label="RFQ readiness" value={readableStatus(supplier.readinessStatus)} />
+              <InfoRow label="Approval" value={statusLabel(supplier.governanceStatus)} />
+              <InfoRow label="Verification" value={statusLabel(supplier.verificationStatus)} />
+              <InfoRow label="Compliance" value={statusLabel(supplier.complianceStatus)} />
+              <InfoRow label="Risk" value={statusLabel(supplier.riskStatus)} />
+              <InfoRow label="RFQ readiness" value={statusLabel(supplier.readinessStatus)} />
               <InfoRow label="Reviewed by" value={supplier.governanceReviewedBy} />
             </Section>
           </Box>
@@ -272,7 +272,7 @@ const SupplierDetailPage: React.FC = () => {
               <InputLabel>{label as string}</InputLabel>
               <Select label={label as string} value={governance[field as keyof typeof governance]}
                 onChange={(event) => setGovernance(current => ({ ...current, [field as string]: event.target.value }))}>
-                {(options as string[]).map(option => <MenuItem key={option} value={option}>{readableStatus(option)}</MenuItem>)}
+                {(options as string[]).map(option => <MenuItem key={option} value={option}>{statusLabel(option)}</MenuItem>)}
               </Select>
             </FormControl>
           ))}

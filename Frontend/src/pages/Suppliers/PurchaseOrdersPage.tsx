@@ -28,11 +28,12 @@ import {
 import { useNavigate } from "react-router-dom";
 import procurementService from "../../api/services/procurementService";
 import { useAuth } from "../../context/AuthContext";
+import { formatMoney } from "../../utils/currency";
 
-const money = (value: number, currency: string) =>
-  new Intl.NumberFormat(undefined, { style: "currency", currency }).format(
-    value,
-  );
+// One house implementation (utils/currency.ts). The private copy here called
+// Intl.NumberFormat with no try/catch, so a non-ISO currency code on a purchase order threw a
+// RangeError during render — a white screen, not a bad cell.
+const money = (value: number, currency: string) => formatMoney(value, currency);
 
 const readableDate = (value?: string | null) =>
   value ? new Date(value).toLocaleDateString() : "Not scheduled";

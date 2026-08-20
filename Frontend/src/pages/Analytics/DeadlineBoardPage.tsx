@@ -26,7 +26,11 @@ import { LoadingState, ErrorState, EmptyState } from '../../platform/components/
 // Deadline board — what closes when, and how much work each one is.
 //
 // Forward-looking and built only on data the platform already holds today:
-// Lead.BidClosingDate, the line count, and the client the enquiry is linked to.
+// Lead.BidClosingDate — or, where the enquiry never stated one, Lead.SubDate — plus the line
+// count and the client the enquiry is linked to. The fallback matches the one the server uses
+// for `lateIngested` (api/services/leadService.ts), but the two dates mean different things,
+// so the date cell names which field it read rather than presenting a submission date as a
+// bid-closing deadline.
 //
 // The client column is not decoration. An enquiry with no client record cannot be
 // qualified, cannot become an RFQ and therefore cannot be quoted, so on this board an
@@ -363,7 +367,16 @@ const DeadlineBoardPage: React.FC = () => {
                         />
                       </TableCell>
                       <TableCell sx={{ color: 'text.secondary', whiteSpace: 'nowrap' }}>
-                        {due ? due.toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: 'numeric' }) : 'Not recorded'}
+                        {due ? (
+                          <Tooltip title={parseDateSafe(lead.bidClosingDate)
+                            ? 'Bid closing date, as stated on the enquiry'
+                            : 'Submission date — the enquiry stated no bid closing date'}>
+                            <Box component="span" sx={{ borderBottom: '1px dotted', borderColor: 'divider', cursor: 'help' }}>
+                              {due.toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: 'numeric' })}
+                              {!parseDateSafe(lead.bidClosingDate) && <Box component="span" sx={{ ml: 0.5, fontStyle: 'italic', fontSize: '0.75rem' }}>(submitted)</Box>}
+                            </Box>
+                          </Tooltip>
+                        ) : 'Not recorded'}
                       </TableCell>
                       <TableCell sx={{ fontFamily: 'monospace', fontWeight: 700 }}>{lead.rfqno || `#${lead.id}`}</TableCell>
                       <TableCell>

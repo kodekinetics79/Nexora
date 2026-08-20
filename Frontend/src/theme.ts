@@ -21,6 +21,21 @@ const theme = createTheme({
     h3: { fontWeight: 600 },
   },
   components: {
+    // Figures in a column have to line up.
+    //
+    // Nothing in this product used tabular figures — every money column, quantity column and
+    // count rendered in proportional digits, so "1,240" and "998" did not align down a column
+    // and a reader could not compare magnitudes by eye. This is scoped to the places a number
+    // actually lives: right-aligned table cells and right-aligned grid cells, plus an explicit
+    // opt-in class. It is deliberately NOT on MuiTypography's root, which would apply it to
+    // prose and would be a design change rather than a fix.
+    MuiCssBaseline: {
+      styleOverrides: {
+        '.MuiTableCell-root.MuiTableCell-alignRight, .MuiDataGrid-cell--textRight, .tabular-nums': {
+          fontVariantNumeric: 'tabular-nums',
+        },
+      },
+    },
     MuiButton: {
       styleOverrides: {
         root: {
