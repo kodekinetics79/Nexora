@@ -142,7 +142,8 @@ const OutstandingRFQsPage: React.FC = () => {
       headerName: t('line_count'),
       width: 110,
       // A count is a number and belongs on the right, where digits line up against the column
-      // edge and magnitudes can be compared down the column. See theme.ts for the figures.
+      // edge and magnitudes can be compared down the column. The figures themselves come from
+      // the MuiCssBaseline block in context/ThemeContext.tsx, which is the theme that is mounted.
       align: 'right',
       headerAlign: 'right',
       renderCell: (p) => (
