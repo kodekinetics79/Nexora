@@ -21,6 +21,12 @@ public sealed record EmailTriageSignals
     public string? FromAddress { get; init; }
     public string? FromDomain { get; init; }
 
+    /// <summary>
+    /// True when the sender address is one this tenant SENDS from. Defaults false, so a caller
+    /// that does not supply it leaves the classifier's behaviour exactly as it was.
+    /// </summary>
+    public bool SenderIsOwnMailbox { get; init; }
+
     /// <summary>"customer" | "supplier" | null. Resolved by the caller against tenant master
     /// data. Null means unknown — which must never, on its own, stop a message.</summary>
     public string? SenderPartyType { get; init; }
@@ -158,6 +164,13 @@ public static class DeterministicEmailTriage
         // subject or body overrides it, which is exactly the principle this gate already claims
         // to follow: stop only on positive, machine-verifiable evidence that something is NOT
         // business mail. An unattended address was never that evidence.
+        // Our own outbound mail is not an inquiry, and unlike the unattended-sender rule this one
+        // is NOT overridden by commercial evidence. A supplier RFQ we sent is full of commercial
+        // evidence — that is what makes it convincing, and what makes the phantom lead it creates
+        // look real enough to work on. The address is machine-verifiable and ours; there is no
+        // reading of it under which we are a customer enquiring of ourselves.
+        if (s.SenderIsOwnMailbox)
+            noise.Add(EmailTriageReasonCodes.OwnOutboundMail);
         if (IsUnattendedSender(s.FromAddress) && !HasCommercialEvidence(s))
             noise.Add(EmailTriageReasonCodes.NoreplySender);
         // "The sender added no new words AND attached nothing" — there is provably nothing

@@ -26,6 +26,49 @@ public class EmailTriageTests
 
     // ------------------------------------------------------------ the owner's sentence
 
+    /// <summary>
+    /// Our own supplier RFQ, arriving back in the mailbox we sent it from, is not an enquiry.
+    ///
+    /// <para>Observed live: lead 487 on the Noor &amp; Sons tenant is Nexora's own solicitation,
+    /// "Request for Quotation SRFQ-0007-00000002 from Nexora", sent from the platform address to a
+    /// supplier whose address is the mailbox Nexora polls. It came back, triage read an RFQ
+    /// reference in the subject, and it became an inbound lead. Every supplier request the product
+    /// sends manufactures one, and the phantom carries OUR solicitation number where a customer's
+    /// reference belongs.</para>
+    ///
+    /// <para>The commercial evidence is deliberately present in this test. A supplier RFQ we wrote
+    /// is full of it — that is what makes the phantom convincing — so unlike the unattended-sender
+    /// rule, this one must NOT be overridden by it.</para>
+    /// </summary>
+    [Fact]
+    public void OurOwnOutboundSupplierRfqReturningToItsOwnMailboxIsNotAnInquiry()
+    {
+        var decision = DeterministicEmailTriage.Evaluate(Signals(
+            subject: "Request for Quotation SRFQ-0007-00000002 from Nexora",
+            body: "Please quote the following: 120 EA of A2A50006470. Kindly send your best price.",
+            from: "info@kodekinetics.com") with { SenderIsOwnMailbox = true });
+
+        Assert.Equal(EmailTriageOutcome.Noise, decision.Outcome);
+        Assert.Contains(EmailTriageReasonCodes.OwnOutboundMail, decision.ReasonCodes);
+    }
+
+    /// <summary>
+    /// The control, and the reason the rule above is narrow: the SAME message from anybody else is
+    /// a perfectly good enquiry. A rule that stopped it on subject or content would suppress real
+    /// customer RFQs, which is a far more expensive mistake than the phantom it prevents.
+    /// </summary>
+    [Fact]
+    public void TheSameMessageFromAnybodyElseIsStillAnInquiry()
+    {
+        var decision = DeterministicEmailTriage.Evaluate(Signals(
+            subject: "Request for Quotation SRFQ-0007-00000002 from Nexora",
+            body: "Please quote the following: 120 EA of A2A50006470. Kindly send your best price.",
+            from: "buyer@gulfmep.ae"));
+
+        Assert.Equal(EmailTriageOutcome.Inquiry, decision.Outcome);
+        Assert.DoesNotContain(EmailTriageReasonCodes.OwnOutboundMail, decision.ReasonCodes);
+    }
+
     [Fact]
     public void ProseEnquiryWithQuantitiesIsAnInquiry()
     {
