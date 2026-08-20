@@ -164,7 +164,19 @@ const ViewRFQPage: React.FC = () => {
 
   const isDraft = lifecycle?.currentStatusCode === 'DRAFT';
   const intelligence = intelligenceQuery.data;
-  const canPrepareQuote = intelligence?.commercialDecision === 'VIABLE_READY';
+  // Matches the server. QuoteService.PrepareQuoteDraftAsync blocks a draft ONLY on
+  // NO_QUOTE_REVIEW, and says why in a comment worth repeating: demanding VIABLE_READY
+  // "made the draft unreachable for any line needing sourcing — the normal case. Supply
+  // coverage is a condition of quote RELEASE, not of starting one."
+  //
+  // The explanation beside this button (prepareQuoteReason) was added upstream and is kept —
+  // but it explained a block that should not have been there. Confirmed on the live tenant:
+  // RFQs 58 and 62 both showed the button disabled with a reason the rep could not act on.
+  //
+  // Enabled unless we positively KNOW the decision is NO_QUOTE_REVIEW: the intelligence query
+  // is advisory, and blocking a rep because advice failed to load is the same defect in a
+  // different costume.
+  const canPrepareQuote = intelligence?.commercialDecision !== 'NO_QUOTE_REVIEW';
   const canOpenRecommendedAction = Boolean(intelligence?.nextBestAction.userOverrideAllowed &&
     intelligence.nextBestAction.overrideAction.startsWith('/') && hasPermission('RFQ Management'));
   const sourcingLines = new Map((sourcingQuery.data?.lines ?? []).map((line) => [line.id, line]));

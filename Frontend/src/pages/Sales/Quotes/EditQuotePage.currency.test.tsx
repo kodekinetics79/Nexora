@@ -1,0 +1,120 @@
+import { render, screen, waitFor } from '@testing-library/react';
+import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { describe, expect, it, vi, beforeEach } from 'vitest';
+
+/**
+ * The currency on the screen where the price is decided.
+ *
+ * This page carried fourteen hardcoded `$` literals — the per-line total, the tax preview, the
+ * subtotal, the header discount, and the GRAND TOTAL a rep reads back to a customer over the
+ * phone. On a Saudi riyal tender it printed US dollars. `utils/currency.ts` was written to stop
+ * exactly this and says so in its own header: "inventing a symbol is precisely how the
+ * hardcoded-`$` defect began." It is imported by ten files; the two quote-authoring screens were
+ * not among them.
+ *
+ * The exported PDF was never affected — QuoteService.GenerateQuotePdfAsync renders
+ * `quote.Currency?.Code` and refuses to export a draft with no CurrencyId — so this was a
+ * misread-on-screen defect rather than a wrong document reaching the buyer. Still the screen the
+ * price is agreed on.
+ */
+
+const { getById, getAll, productGetAll, customerGetAll, policyGet } = vi.hoisted(() => ({
+  getById: vi.fn(),
+  getAll: vi.fn(),
+  productGetAll: vi.fn(),
+  customerGetAll: vi.fn(),
+  policyGet: vi.fn(),
+}));
+
+vi.mock('../../../api/services/quoteService', () => ({
+  default: { getById, update: vi.fn() },
+}));
+vi.mock('../../../api/services/setupService', () => ({ default: { getAll } }));
+vi.mock('../../../api/services/productService', () => ({ default: { getAll: productGetAll } }));
+vi.mock('../../../api/services/customerService', () => ({ default: { getAll: customerGetAll } }));
+vi.mock('../../../api/services/commercialPolicyService', () => ({
+  default: { get: policyGet, getPolicy: policyGet },
+}));
+vi.mock('./CustomerContextPanel', () => ({ default: () => null }));
+vi.mock('../../../context/AuthContext', () => ({
+  useAuth: () => ({ userData: { businessUnitId: 1 }, hasPermission: () => true }),
+}));
+vi.mock('react-hot-toast', () => ({
+  toast: Object.assign(vi.fn(), { success: vi.fn(), error: vi.fn() }),
+  default: Object.assign(vi.fn(), { success: vi.fn(), error: vi.fn() }),
+}));
+
+import EditQuotePage from './EditQuotePage';
+
+const sarQuote = {
+  id: 9,
+  quoteNo: 'QT-2026-0009',
+  statusValue: 'Draft',
+  statusCode: 'DRAFT',
+  statusId: 1,
+  currencyCode: 'SAR',
+  customerId: 3,
+  quoteDate: '2026-08-01',
+  validUntil: '2026-09-01',
+  headerRemarks: '',
+  totalAmount: 1840000,
+  quoteItems: [
+    {
+      id: 1, productId: 11, productName: 'Cisco Catalyst 9200',
+      description: 'Switch', quantity: 2, unitPrice: 920000, discount: 0,
+      totalAmount: 1840000, taxAmount: 276000, taxRatePercentApplied: 15,
+      taxCategory: 'STANDARD',
+    },
+  ],
+};
+
+function renderEdit() {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  return render(
+    <QueryClientProvider client={client}>
+      <MemoryRouter initialEntries={['/sales/quotes/edit/9']}>
+        <Routes>
+          <Route path="/sales/quotes/edit/:id" element={<EditQuotePage />} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  getById.mockResolvedValue(sarQuote);
+  getAll.mockResolvedValue({ items: [] });
+  productGetAll.mockResolvedValue({ items: [] });
+  customerGetAll.mockResolvedValue({ items: [] });
+  policyGet.mockResolvedValue({ outputTaxRatePercent: 15 });
+});
+
+describe('a quote priced in Saudi riyals', () => {
+  it('never renders a dollar sign anywhere on the page', async () => {
+    const { container } = renderEdit();
+    await waitFor(() => expect(getById).toHaveBeenCalled());
+    await screen.findByText(/Revised Summary/i);
+
+    // The regression, stated the way a rep would notice it.
+    expect(container.textContent).not.toContain('$');
+  });
+
+  it('states the actual currency on the total the rep reads to the customer', async () => {
+    renderEdit();
+    await screen.findByText(/Revised Summary/i);
+
+    await waitFor(() => {
+      // Intl renders SAR as "SAR" or "﷼" depending on the ICU build; either states the unit.
+      expect(container_text()).toMatch(/SAR|﷼/);
+    });
+  });
+});
+
+/** The whole rendered document, so the assertion is about what a person sees. */
+function container_text(): string {
+  return document.body.textContent ?? '';
+}
