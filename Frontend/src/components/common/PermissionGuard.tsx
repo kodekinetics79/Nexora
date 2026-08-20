@@ -18,6 +18,22 @@ interface PermissionGuardProps {
   // guard exists to prevent. The explicit Access Denied panel below is the intended treatment.
 }
 
+/**
+ * The single definition of "what happens when nobody is signed in".
+ *
+ * Extracted so a layout route can carry the auth gate on its own — `/setup` shipped with the gate
+ * only on its CHILD routes, so the index route rendered the whole authenticated shell to anonymous
+ * visitors and told them their ROLE lacked access. A guard that has to be repeated per child is a
+ * guard the next child will be added without; attach it to the shell and every screen below it
+ * inherits it. `PermissionGuard` uses this too, so both paths redirect identically and any future
+ * change (e.g. preserving the intended destination across login) lands in one place.
+ */
+export const RequireAuth: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const { token } = useAuth();
+  if (!token) return <Navigate to="/login" replace />;
+  return <>{children}</>;
+};
+
 /** Wording that matches what an administrator actually ticks in Roles & Permissions. */
 const ACTION_LABEL: Record<NonNullable<PermissionGuardProps['action']>, string> = {
   view: 'Can View',
@@ -35,9 +51,11 @@ const PermissionGuard: React.FC<PermissionGuardProps> = ({
   const { token, hasPermission, permissionsError, permissionsLoading, refreshPermissions } = useAuth();
 
   // Auth gate: unauthenticated users are always sent to the login screen
-  // (prevents the /dashboard -> /dashboard redirect loop / blank screen).
+  // (prevents the /dashboard -> /dashboard redirect loop / blank screen). Delegated to RequireAuth
+  // so there is exactly one definition of the redirect; with no token it renders <Navigate> and the
+  // children below never mount.
   if (!token) {
-    return <Navigate to="/login" replace />;
+    return <RequireAuth>{children}</RequireAuth>;
   }
 
   const isAuthorized = hasPermission(moduleName, action);
