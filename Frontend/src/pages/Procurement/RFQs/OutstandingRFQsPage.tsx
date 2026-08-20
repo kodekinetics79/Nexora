@@ -93,6 +93,16 @@ const OutstandingRFQsPage: React.FC = () => {
     }
   };
 
+  // Memoised because DataGrid takes a component TYPE here: rebuilding the factory on every
+  // render would hand it a new type each time and remount the overlay for no reason.
+  const noRowsOverlay = React.useMemo(() => gridEmptyOverlay({
+    title: 'No outstanding RFQs',
+    message: 'An assigned lead appears here until it has been processed into an RFQ.',
+    icon: <ItemsIcon sx={{ fontSize: 48 }} />,
+    filtered: Boolean(search),
+    filteredMessage: 'No outstanding RFQ matches this search. Clear it to see the whole queue.',
+  }), [search]);
+
   const columns: GridColDef[] = [
     {
       field: 'rfqno',
@@ -223,13 +233,7 @@ const OutstandingRFQsPage: React.FC = () => {
           columns={columns}
           rowCount={data?.totalCount ?? 0}
           loading={isLoading}
-          slots={{ noRowsOverlay: gridEmptyOverlay({
-            title: 'No outstanding RFQs',
-            message: 'An assigned lead appears here until it has been processed into an RFQ.',
-            icon: <ItemsIcon sx={{ fontSize: 48 }} />,
-            filtered: Boolean(search),
-            filteredMessage: 'No outstanding RFQ matches this search. Clear it to see the whole queue.',
-          }) }}
+          slots={{ noRowsOverlay }}
           pageSizeOptions={[10, 25, 50]}
           paginationModel={paginationModel}
           paginationMode="server"

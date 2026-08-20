@@ -87,6 +87,16 @@ const AssignedLeadsPage: React.FC = () => {
     ),
   });
 
+  // Memoised because DataGrid takes a component TYPE here: rebuilding the factory on every
+  // render would hand it a new type each time and remount the overlay for no reason.
+  const noRowsOverlay = React.useMemo(() => gridEmptyOverlay({
+    title: myLeadsOnly ? 'No leads are assigned to you' : 'No leads are assigned yet',
+    message: 'A lead appears here once it has an owner, and leaves when it is converted to an RFQ.',
+    icon: <ItemsIcon sx={{ fontSize: 48 }} />,
+    filtered: Boolean(search),
+    filteredMessage: 'No assigned lead matches this search. Clear it to see the whole queue.',
+  }), [search, myLeadsOnly]);
+
   const columns: GridColDef[] = [
     {
       field: 'rfqno',
@@ -296,13 +306,7 @@ const AssignedLeadsPage: React.FC = () => {
           columns={columns}
           rowCount={data?.totalCount ?? 0}
           loading={isLoading}
-          slots={{ noRowsOverlay: gridEmptyOverlay({
-            title: myLeadsOnly ? 'No leads are assigned to you' : 'No leads are assigned yet',
-            message: 'A lead appears here once it has an owner, and leaves when it is converted to an RFQ.',
-            icon: <ItemsIcon sx={{ fontSize: 48 }} />,
-            filtered: Boolean(search),
-            filteredMessage: 'No assigned lead matches this search. Clear it to see the whole queue.',
-          }) }}
+          slots={{ noRowsOverlay }}
           pageSizeOptions={[10, 25, 50]}
           paginationModel={paginationModel}
           paginationMode="server"

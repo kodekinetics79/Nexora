@@ -40,7 +40,7 @@ import commercialLearningService from '../../../api/services/commercialLearningS
 import CommercialProcessingEvidence from '../../../components/common/CommercialProcessingEvidence';
 import commercialIntelligenceService from '../../../api/services/commercialIntelligenceService';
 import { formatMoney } from '../../../utils/currency';
-import { formatDateSafe } from '../../../utils/dates';
+import { formatDateSafe, parseDateSafe } from '../../../utils/dates';
 import { statusLabel } from '../../../utils/statusLabels';
 
 const DataField: React.FC<{ label: string; value: string | number | null; bold?: boolean; color?: string }> = ({ label, value, bold = true, color = 'text.primary' }) => (
@@ -236,6 +236,11 @@ const ViewRFQPage: React.FC = () => {
     : !intelligence ? 'Commercial readiness has not been reported for this RFQ.'
     : canPrepareQuote ? 'Every line being quoted has an evidence-backed fulfilment route.'
     : intelligence.nextBestAction.explanation;
+  // A deadline is overdue only if it is a real date. `new Date('0001-01-01') < new Date()` is
+  // perfectly true, which is how a sentinel used to be coloured and presented as a passed
+  // customer deadline — the leak utils/dates.ts exists to close.
+  const deadline = parseDateSafe(rfq.bidClosingDate);
+  const overdue = deadline !== null && deadline < new Date();
   const evidenceItem = rfq.rfqitems.find((item) => item.id === evidenceItemId);
 
   return (
@@ -350,7 +355,7 @@ const ViewRFQPage: React.FC = () => {
             <Grid size={{ xs: 12, md: 3 }}><DataField label="Customer / contact" value={`${rfq.customerName || rfq.buyersName || 'Unresolved'}${rfq.contactName ? ` · ${rfq.contactName}` : ''}`} /></Grid>
             <Grid size={{ xs: 6, md: 2 }}><DataField label="Account Owner" value={rfq.accountOwnerName || 'Unassigned'} /></Grid>
             <Grid size={{ xs: 6, md: 2 }}><DataField label="Opportunity Owner" value={rfq.opportunityOwnerName || 'Unassigned'} /></Grid>
-            <Grid size={{ xs: 6, md: 2 }}><DataField label="Customer deadline" value={formatDateSafe(rfq.bidClosingDate || null)} color={rfq.bidClosingDate && new Date(rfq.bidClosingDate) < new Date() ? 'error.main' : 'text.primary'} /></Grid>
+            <Grid size={{ xs: 6, md: 2 }}><DataField label="Customer deadline" value={formatDateSafe(rfq.bidClosingDate || null)} color={overdue ? 'error.main' : 'text.primary'} /></Grid>
             <Grid size={{ xs: 6, md: 3 }}>
               <Typography variant="caption" color="text.secondary">Commercial readiness</Typography>
               {/* A determinate bar pinned at 0 while the request is in flight is an assertion,
@@ -372,7 +377,8 @@ const ViewRFQPage: React.FC = () => {
       <Stack direction="row" spacing={1} sx={{ mb: 1, alignItems: 'center', flexWrap: 'wrap' }}>
         {/* Clicking a tile silently swapped the table contents with no indication of which filter
             was applied and no labelled way back. The live region announces the change for a
-            screen reader; the chip is the visible half of the same statement. */}
+            screen reader; the same sentence is the visible half, with a labelled reset beside
+            it — the Total tile was the only way back and is not labelled as one. */}
         <Typography variant="caption" role="status" aria-live="polite" sx={{ fontWeight: 700, color: 'text.secondary' }}>
           {lineFilter === 'all'
             ? `Showing all ${rfq.rfqitems.length} line${rfq.rfqitems.length === 1 ? '' : 's'}`
@@ -419,7 +425,7 @@ const ViewRFQPage: React.FC = () => {
                 <Grid size={{ xs: 12, md: 4 }}><DataField label="Customer Email" value={rfq.customerEmail || rfq.leadEmail || 'N/A'} /></Grid>
                 
                 <Grid size={{ xs: 12, md: 4 }}><DataField label="Received Date" value={formatDateSafe(rfq.recDate)} /></Grid>
-                <Grid size={{ xs: 12, md: 4 }}><DataField label="Bid Closing Date" value={formatDateSafe(rfq.bidClosingDate || null)} color="error.main" /></Grid>
+                <Grid size={{ xs: 12, md: 4 }}><DataField label="Bid Closing Date" value={formatDateSafe(rfq.bidClosingDate || null)} color={overdue ? 'error.main' : 'text.primary'} /></Grid>
                 <Grid size={{ xs: 12, md: 4 }}><DataField label="RFQ Type" value={rfq.rfqtype || 'Agreement'} /></Grid>
 
                 <Grid size={{ xs: 12, md: 4 }}><DataField label="Created By" value={rfq.createdBy} /></Grid>

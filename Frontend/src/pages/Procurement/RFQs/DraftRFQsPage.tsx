@@ -69,6 +69,16 @@ const DraftRFQsPage: React.FC = () => {
     onError: () => enqueueSnackbar('Failed to delete RFQ', { variant: 'error' }),
   });
 
+  // Memoised because DataGrid takes a component TYPE here: rebuilding the factory on every
+  // render would hand it a new type each time and remount the overlay for no reason.
+  const noRowsOverlay = React.useMemo(() => gridEmptyOverlay({
+    title: 'No draft RFQs',
+    message: 'A converted lead lands here as a draft until it is reviewed and approved.',
+    icon: <ItemsIcon sx={{ fontSize: 48 }} />,
+    filtered: Boolean(search),
+    filteredMessage: 'No draft RFQ matches this search. Clear it to see every draft.',
+  }), [search]);
+
   const columns: GridColDef[] = [
     {
       field: 'rfqno',
@@ -197,13 +207,7 @@ const DraftRFQsPage: React.FC = () => {
           columns={columns}
           rowCount={data?.totalItems ?? 0}
           loading={isLoading}
-          slots={{ noRowsOverlay: gridEmptyOverlay({
-            title: 'No draft RFQs',
-            message: 'A converted lead lands here as a draft until it is reviewed and approved.',
-            icon: <ItemsIcon sx={{ fontSize: 48 }} />,
-            filtered: Boolean(search),
-            filteredMessage: 'No draft RFQ matches this search. Clear it to see every draft.',
-          }) }}
+          slots={{ noRowsOverlay }}
           pageSizeOptions={[10, 25, 50]}
           paginationModel={paginationModel}
           paginationMode="server"
