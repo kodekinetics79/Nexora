@@ -7,15 +7,14 @@ import { CloudOutlined, ExpandLess, ExpandMore, MemoryOutlined } from '@mui/icon
 import extractionReviewService, {
   type ProcessingEvidenceResource,
 } from '../../api/services/extractionReviewService';
+import { statusLabel } from '../../utils/statusLabels';
+import { formatMoney } from '../../utils/currency';
 
-const readable = (value?: string | null) => value
-  ? value.replace(/([a-z])([A-Z])/g, '$1 $2').replaceAll('_', ' ')
-  : 'Not recorded';
-
+// `new Intl.NumberFormat(undefined, { currency })` throws a RangeError on a non-ISO code, and it
+// throws during render, which is a white screen rather than a bad cell. formatMoney has the
+// try/catch for exactly that, and states the code beside the number when it cannot format it.
 const cost = (amount?: number | null, currency?: string | null) =>
-  amount == null || !currency
-    ? 'Unpriced'
-    : new Intl.NumberFormat(undefined, { style: 'currency', currency }).format(amount);
+  amount == null ? 'Unpriced' : formatMoney(amount, currency);
 
 export default function CommercialProcessingEvidence({
   resource,
@@ -53,17 +52,17 @@ export default function CommercialProcessingEvidence({
         <Stack direction="row" spacing={1} useFlexGap sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
           <Typography sx={{ fontWeight: 800 }}>Processing evidence</Typography>
           <Chip size="small" icon={usedExternal ? <CloudOutlined /> : <MemoryOutlined />} color={usedExternal ? 'warning' : 'success'} label={usedExternal ? 'External provider used' : 'Local-first'} />
-          <Chip size="small" variant="outlined" label={readable(latestRun?.processingPath ?? latestJob?.status)} />
+          <Chip size="small" variant="outlined" label={statusLabel(latestRun?.processingPath ?? latestJob?.status)} />
         </Stack>
         <Typography variant="body2" color="text.secondary">Nexora Serial {evidence.nexoraSerial || 'not recorded'} · {evidence.occurrences.length} occurrence{evidence.occurrences.length === 1 ? '' : 's'} · {evidence.runs.length} run{evidence.runs.length === 1 ? '' : 's'}</Typography>
       </Box>
       <Button variant="outlined" startIcon={expanded ? <ExpandLess /> : <ExpandMore />} onClick={() => setExpanded((value) => !value)}>{expanded ? 'Hide evidence' : 'Show evidence'}</Button>
     </Stack>
     {expanded && <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr 1fr', md: 'repeat(4, minmax(0, 1fr))' }, gap: 2, mt: 2, pt: 2, borderTop: '1px solid', borderColor: 'divider' }}>
-      <Box><Typography variant="caption" color="text.secondary">Processing path</Typography><Typography sx={{ fontWeight: 700 }}>{readable(latestRun?.processingPath)}</Typography></Box>
-      <Box><Typography variant="caption" color="text.secondary">OCR outcome</Typography><Typography sx={{ fontWeight: 700 }}>{readable(latestRun?.ocrStatus)}</Typography></Box>
+      <Box><Typography variant="caption" color="text.secondary">Processing path</Typography><Typography sx={{ fontWeight: 700 }}>{statusLabel(latestRun?.processingPath)}</Typography></Box>
+      <Box><Typography variant="caption" color="text.secondary">OCR outcome</Typography><Typography sx={{ fontWeight: 700 }}>{statusLabel(latestRun?.ocrStatus)}</Typography></Box>
       <Box><Typography variant="caption" color="text.secondary">Provider use</Typography><Typography sx={{ fontWeight: 700 }}>{evidence.localRequestCount} local · {evidence.externalRequestCount} external</Typography></Box>
-      <Box><Typography variant="caption" color="text.secondary">External cost</Typography><Typography sx={{ fontWeight: 700 }}>{cost(evidence.externalCostAmount, evidence.externalCostCurrency)}</Typography><Typography variant="caption" color="text.secondary">{readable(evidence.externalCostStatus)}</Typography></Box>
+      <Box><Typography variant="caption" color="text.secondary">External cost</Typography><Typography sx={{ fontWeight: 700 }}>{cost(evidence.externalCostAmount, evidence.externalCostCurrency)}</Typography><Typography variant="caption" color="text.secondary">{statusLabel(evidence.externalCostStatus)}</Typography></Box>
     </Box>}
   </Paper>;
 }

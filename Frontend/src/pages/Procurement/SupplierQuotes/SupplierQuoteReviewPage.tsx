@@ -42,18 +42,8 @@ import supplierQuoteService, {
 import CommercialProcessingEvidence from "../../../components/common/CommercialProcessingEvidence";
 import { useAuth } from "../../../context/AuthContext";
 import { formatWarrantyMonths } from "../../../utils/warrantyMonths";
+import { formatMoney } from "../../../utils/currency";
 
-const formatMoney = (value: number, currencyCode?: string | null) => {
-  if (!currencyCode) return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
-  try {
-    return new Intl.NumberFormat(undefined, {
-      style: "currency",
-      currency: currencyCode,
-    }).format(value);
-  } catch {
-    return `${currencyCode} ${value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
-  }
-};
 
 const confidenceLabel = (confidence: number | null) =>
   confidence == null ? "Confidence unavailable" : `${Math.round(confidence * 100)}% confidence`;

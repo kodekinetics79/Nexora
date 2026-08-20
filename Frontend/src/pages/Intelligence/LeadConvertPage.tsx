@@ -23,6 +23,7 @@ import lifecycleService from '../../api/services/commercialLifecycleService';
 import type { LifecycleTransitionOption } from '../../api/services/commercialLifecycleService';
 import { useAuth } from '../../context/AuthContext';
 import { conversionBlockers, QUALIFIED_STATUS_CODE } from './leadConversionGate';
+import { formatDateSafe } from '../../utils/dates';
 
 /** Sentinel for "None of these — leave unmatched" in the product dropdown. */
 const NO_MATCH = 'none';
@@ -34,14 +35,6 @@ interface LineEdit {
   quantity: string;
   unitOfMeasure: string;
 }
-
-const formatDate = (dateStr: string | null): string => {
-  if (!dateStr) return '—';
-  const d = new Date(dateStr);
-  return isNaN(d.getTime())
-    ? '—'
-    : d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
-};
 
 const HeaderField: React.FC<{ label: string; value: string | null }> = ({ label, value }) => (
   <Box>
@@ -320,8 +313,8 @@ const LeadConvertPage: React.FC = () => {
           <HeaderField label="Customer" value={lead?.customerName ?? null} />
           <HeaderField label="Account Owner" value={lead?.accountOwnerName ?? null} />
           <HeaderField label="Opportunity Owner" value={lead?.assignedToFullName ?? null} />
-          <HeaderField label="Received" value={formatDate(preview.header.recDate)} />
-          <HeaderField label="Bid closing" value={formatDate(preview.header.bidClosingDate)} />
+          <HeaderField label="Received" value={formatDateSafe(preview.header.recDate)} />
+          <HeaderField label="Bid closing" value={formatDateSafe(preview.header.bidClosingDate)} />
           <HeaderField label="Lines" value={String(preview.items.length)} />
         </Stack>
       </Paper>

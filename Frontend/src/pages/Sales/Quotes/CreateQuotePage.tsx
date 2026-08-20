@@ -64,26 +64,36 @@ const CreateQuotePage: React.FC = () => {
   const [items, setItems] = useState<QuoteItem[]>([]);
 
   // Queries
-  const { data: rfqs = [] } = useQuery({
+  //
+  // Every one of these defaults to an empty array on failure, and this is the screen that produces
+  // the customer-facing document. A failed currency load left `currencyId` null and the rep built
+  // a quote with no currency at all; a failed discount-type load made `discountKindOf` return null
+  // so header discounts silently stopped applying. Neither said anything. The aggregate notice
+  // below is lifted from SourcingWorkbenchPage, which already handles this correctly.
+  const rfqsQuery = useQuery({
     queryKey: ['rfqs-list', businessUnitId],
     queryFn: () => rfqService.getAll({ pageNumber: 1, pageSize: 100, businessUnitId }).then(r => r.items),
   });
+  const rfqs = rfqsQuery.data ?? [];
   const selectedRfq = rfqs.find((rfq) => rfq.id === rfqId) || null;
 
-  const { data: products = [] } = useQuery({
+  const productsQuery = useQuery({
     queryKey: ['products-list', businessUnitId],
     queryFn: () => productService.getAll({ pageSize: 200, businessUnitId }).then(r => r.items),
   });
+  const products = productsQuery.data ?? [];
 
-  const { data: discountTypes = [] } = useQuery({
+  const discountTypesQuery = useQuery({
     queryKey: ['setup-discount-types'],
     queryFn: () => setupService.getAll({ setupType: 'DiscountType', pageSize: 50 }).then(r => r.items),
   });
+  const discountTypes = discountTypesQuery.data ?? [];
 
-  const { data: currencies = [] } = useQuery({
+  const currenciesQuery = useQuery({
     queryKey: ['currencies-list', businessUnitId],
     queryFn: () => currencyService.getAll({ pageSize: 100, businessUnitId }).then(r => r.items),
   });
+  const currencies = currenciesQuery.data ?? [];
   // Default to the tenant's base currency rather than leaving it unset: unset is the state that
   // produced the defect, and a trader's own currency is the only sane opening guess.
   React.useEffect(() => {
@@ -97,11 +107,20 @@ const CreateQuotePage: React.FC = () => {
   // The business unit's output tax rate, so this screen previews the tax the server will derive
   // instead of showing a flat zero. Null means the tenant has stated no rate — the quote will save
   // but cannot be sent until one is set in Commercial Policy settings.
-  const { data: commercialPolicy } = useQuery({
+  const commercialPolicyQuery = useQuery({
     queryKey: ['commercial-policy'],
     queryFn: () => commercialPolicyService.getPolicy(),
   });
-  const outputTaxRatePercent = commercialPolicy?.outputTaxRatePercent ?? null;
+  const outputTaxRatePercent = commercialPolicyQuery.data?.outputTaxRatePercent ?? null;
+
+  const referenceQueries = [rfqsQuery, productsQuery, discountTypesQuery, currenciesQuery, commercialPolicyQuery];
+  const failedReferenceData = [
+    currenciesQuery.isError && 'currencies',
+    discountTypesQuery.isError && 'discount types',
+    productsQuery.isError && 'products',
+    rfqsQuery.isError && 'RFQs',
+    commercialPolicyQuery.isError && 'the tax policy',
+  ].filter((label): label is string => Boolean(label));
 
   // Totals. One shared implementation with the server (see quoteTotals.ts): the header discount
   // comes off the tax-EXCLUSIVE net, is allocated across lines pro rata, and each line's tax is
@@ -245,6 +264,26 @@ const CreateQuotePage: React.FC = () => {
           </Button>
         </Stack>
       </Stack>
+
+      {failedReferenceData.length > 0 && (
+        <Alert
+          severity="error"
+          sx={{ mb: 2 }}
+          action={
+            <Button
+              color="inherit"
+              size="small"
+              onClick={() => referenceQueries.filter((query) => query.isError).forEach((query) => { void query.refetch(); })}
+            >
+              Retry
+            </Button>
+          }
+        >
+          {`We couldn't load ${failedReferenceData.join(', ')}. `}
+          Fields that depend on the missing reference data are empty and the quote total may be
+          wrong, so do not save this quote until it is restored.
+        </Alert>
+      )}
 
       <Grid container spacing={2}>
         <Grid size={{ xs: 12, lg: 9 }}>

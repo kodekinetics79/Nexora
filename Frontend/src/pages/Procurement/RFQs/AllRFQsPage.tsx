@@ -18,6 +18,7 @@ import {
 import rfqService from '../../../api/services/rfqService';
 import SearchField from '../../../components/common/SearchField';
 import { useAuth } from '../../../context/AuthContext';
+import { formatDateSafe } from '../../../utils/dates';
 
 const AllRFQsPage: React.FC = () => {
   const { t } = useTranslation();
@@ -38,12 +39,6 @@ const AllRFQsPage: React.FC = () => {
       readiness,
     }),
   });
-
-  const formatDate = (dateStr: string | null) => {
-    if (!dateStr) return '—';
-    const d = new Date(dateStr);
-    return isNaN(d.getTime()) ? '—' : d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
-  };
 
   const getUrgencyColor = (dateStr: string | null) => {
     if (!dateStr) return 'text.secondary';
@@ -74,7 +69,7 @@ const AllRFQsPage: React.FC = () => {
     },
     {
       field: 'rfqno',
-      headerName: t('rfq_management'),
+      headerName: t('rfq_number'),
       width: 180,
       renderCell: (p) => (
         <Box sx={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', height: '100%' }}>
@@ -128,13 +123,13 @@ const AllRFQsPage: React.FC = () => {
         <Box sx={{ display: 'flex', alignItems: 'center', height: '100%', gap: 2 }}>
           <Box>
             <Typography sx={{ fontSize: '0.65rem', fontWeight: 900, color: 'text.disabled', textTransform: 'uppercase' }}>Received</Typography>
-            <Typography sx={{ fontSize: '0.8rem', fontWeight: 700 }}>{formatDate(p.row.recDate)}</Typography>
+            <Typography sx={{ fontSize: '0.8rem', fontWeight: 700 }}>{formatDateSafe(p.row.recDate)}</Typography>
           </Box>
           <Box sx={{ borderLeft: '1px solid', borderColor: 'divider', height: 24 }} />
           <Box>
             <Typography sx={{ fontSize: '0.65rem', fontWeight: 900, color: 'text.disabled', textTransform: 'uppercase' }}>Deadline</Typography>
             <Typography sx={{ fontSize: '0.85rem', fontWeight: 900, color: getUrgencyColor(p.row.bidClosingDate) }}>
-              {formatDate(p.row.bidClosingDate)}
+              {formatDateSafe(p.row.bidClosingDate)}
             </Typography>
           </Box>
         </Box>

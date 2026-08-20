@@ -545,16 +545,24 @@ public sealed class CommercialLearningService(ErpRfqAutomationContext context)
                 ? "VIABLE_READY" : "ACTIONABLE_WITH_BLOCKERS";
         var evidence = lineResults.Select(x => new CommercialEvidenceLink("RfqItem", x.RfqItemId,
             x.PartNumber, rfq.RecDate, x.FulfilmentRoute)).Take(50).ToArray();
+        // The explanation is prose a salesperson reads and acts on, so it is built from the
+        // conditions that actually produced the decision rather than from the decision's own
+        // vocabulary. See CommercialLearningRules for why each sentence is shaped as it is; the
+        // codes themselves (decision, slaRisk) are unchanged because the UI gates on them.
+        var judgedOnlyMarkedLines = quoted.Length > 0;
         var next = decision == "VIABLE_READY"
             ? new ExplainableRecommendation("PREPARE_CUSTOMER_QUOTE", "Prepare Customer Quote",
-                "Every RFQ line has a current evidence-backed fulfilment route.", .95m, true,
+                CommercialLearningRules.ViableReadyExplanation(lines.Length, rfq.Rfqitems.Count,
+                    judgedOnlyMarkedLines), .95m, true,
                 $"/sales/quotes/create?rfqId={rfqId}", evidence)
             : decision == "NO_QUOTE_REVIEW"
                 ? new ExplainableRecommendation("REVIEW_NO_QUOTE", "Review no-quote decision",
-                    $"{allBlockers.Length} blockers remain and the customer deadline is {slaRisk.ToLowerInvariant().Replace('_', ' ')}.",
+                    CommercialLearningRules.NoQuoteReviewExplanation(lines.Length, rfq.Rfqitems.Count,
+                        allBlockers.Length, slaRisk),
                     .9m, true, $"/procurement/rfqs/view/{rfqId}", evidence)
                 : new ExplainableRecommendation("RECOVER_COVERAGE", "Recover line coverage",
-                    $"Resolve {lineResults.Count(x => x.Blockers.Count > 0)} blocked lines before quoting.", .9m,
+                    CommercialLearningRules.RecoverCoverageExplanation(
+                        lineResults.Count(x => x.Blockers.Count > 0), globalBlockers.Count, lines.Length), .9m,
                     true, $"/procurement/rfqs/{rfqId}/sourcing", evidence);
         var pricingDecisions = await context.CustomerQuoteSourcingDecisions.AsNoTracking()
             .Where(x => x.BusinessUnitId == businessUnitId && x.RfqId == rfqId && lineIds.Contains(x.RfqItemId))
@@ -1229,4 +1237,90 @@ public static class CommercialLearningRules
     public static string ClassifyLoss(string? reasonCode) => CommercialConstraints.Contains(reasonCode ?? "")
         ? "COMMERCIAL_CONSTRAINT" : CustomerDecisions.Contains(reasonCode ?? "")
             ? "CUSTOMER_DECISION" : "EXECUTION_REVIEW";
+
+    // ---- Recommendation prose ----
+    //
+    // These exist because a status code is not a sentence. The RFQ screen used to render
+    // "0 blockers remain and the customer deadline is deadline not recorded", produced by
+    // interpolating the SLA vocabulary into prose with `slaRisk.ToLowerInvariant().Replace('_',
+    // ' ')`. That is a category error rather than a typo: the code DEADLINE_NOT_RECORDED names a
+    // state, and "the customer deadline is <state name>" can never be grammatical. It also named
+    // the wrong cause — the decision had been reached because no line was left to quote, and the
+    // sentence reported a blocker count of zero.
+    //
+    // Every code that reaches a user now gets an explicit sentence, written once, here, where a
+    // test can read it without a database. Pluralisation is handled for the same reason: "Resolve
+    // 1 blocked lines" is the same defect at a smaller scale.
+
+    /// <summary>A count and its noun, agreeing in number: "1 line", "3 lines".</summary>
+    public static string CountPhrase(int count, string singular, string plural) =>
+        $"{count} {(count == 1 ? singular : plural)}";
+
+    /// <summary>
+    /// What the SLA vocabulary means in a sentence that can follow "and". An unrecognised code
+    /// names itself rather than inventing a claim about the deadline, so a future code added to
+    /// the vocabulary and forgotten here is visible instead of silently wrong.
+    /// </summary>
+    public static string SlaRiskSentence(string? slaRisk) => slaRisk switch
+    {
+        "OVERDUE" => "the customer deadline has already passed",
+        "AT_RISK" => "the customer deadline is less than 24 hours away",
+        "ON_TRACK" => "the customer deadline is still ahead",
+        "DEADLINE_NOT_RECORDED" => "the enquiry stated no customer deadline",
+        _ => $"the deadline state is not recognised ({slaRisk ?? "none"})",
+    };
+
+    /// <summary>
+    /// Why the RFQ is ready to quote. The judgement is made over the lines marked for quote, not
+    /// over every line, so on a partial bid the sentence has to say so — "Every RFQ line has a
+    /// current evidence-backed fulfilment route" claimed coverage of 21 lines while asserting it
+    /// over 7, which is what made the readiness figure look like it contradicted the line tiles.
+    /// </summary>
+    public static string ViableReadyExplanation(int judgedLineCount, int totalLineCount,
+        bool judgedOnlyMarkedLines)
+    {
+        var partialBid = judgedOnlyMarkedLines && judgedLineCount < totalLineCount;
+        var subject = partialBid
+            ? judgedLineCount == 1 ? "The 1 line marked for quote has"
+                : $"All {judgedLineCount} lines marked for quote have"
+            : judgedLineCount == 1 ? "The single RFQ line has" : $"All {judgedLineCount} RFQ lines have";
+        var remainder = partialBid
+            ? $" The remaining {CountPhrase(totalLineCount - judgedLineCount, "line is", "lines are")} not being quoted."
+            : string.Empty;
+        return $"{subject} a current evidence-backed fulfilment route.{remainder}";
+    }
+
+    /// <summary>
+    /// Why the RFQ was routed to a no-quote review. Two conditions produce that decision — nothing
+    /// left to quote, or a deadline already gone — and the copy names whichever one applied
+    /// instead of reporting a blocker count for both.
+    /// </summary>
+    public static string NoQuoteReviewExplanation(int judgedLineCount, int totalLineCount,
+        int blockerCount, string? slaRisk)
+    {
+        var deadline = SlaRiskSentence(slaRisk);
+        if (judgedLineCount == 0)
+            return totalLineCount == 0
+                ? $"This RFQ has no lines to price, and {deadline}."
+                : $"None of the {totalLineCount} RFQ lines is marked for quote, so there is nothing to price, and {deadline}.";
+        return blockerCount == 0
+            ? $"Nothing is blocking the {CountPhrase(judgedLineCount, "line", "lines")} being quoted, but {deadline}."
+            : $"{CountPhrase(blockerCount, "blocker remains", "blockers remain")} and {deadline}.";
+    }
+
+    /// <summary>
+    /// Why coverage has to be recovered before quoting. An RFQ can reach this decision on
+    /// header-level evidence alone (no customer identity, no lineage) with no blocked line at all,
+    /// which is how "Resolve 0 blocked lines before quoting" used to appear.
+    /// </summary>
+    public static string RecoverCoverageExplanation(int blockedLineCount, int headerBlockerCount,
+        int judgedLineCount)
+    {
+        if (blockedLineCount > 0)
+            return $"Resolve {CountPhrase(blockedLineCount, "blocked line", "blocked lines")} of the "
+                + $"{CountPhrase(judgedLineCount, "line", "lines")} being quoted before preparing the customer quote.";
+        return headerBlockerCount > 0
+            ? $"{CountPhrase(headerBlockerCount, "RFQ-level blocker needs", "RFQ-level blockers need")} attention before quoting."
+            : $"Fulfilment coverage is incomplete on the {CountPhrase(judgedLineCount, "line", "lines")} being quoted.";
+    }
 }
