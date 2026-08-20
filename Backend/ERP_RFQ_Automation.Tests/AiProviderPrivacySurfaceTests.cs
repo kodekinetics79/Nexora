@@ -162,6 +162,43 @@ public sealed class AiProviderPrivacySurfaceTests
         Assert.Contains("PART-1", body, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Redaction must not eat the payload it is protecting.
+    ///
+    /// <para>The phone pattern's lookbehind excluded only a preceding DIGIT, so in
+    /// "SRFQ-1234567890" the match began at the 1 — preceded by a hyphen, which passed — and the
+    /// customer's own RFQ reference reached the model as [REDACTED_PHONE]. Every identifier of
+    /// nine or more digits went the same way: PO numbers, material codes, long part numbers. The
+    /// extraction then answered plausibly with the reference missing, which is the worst shape a
+    /// failure can take.</para>
+    ///
+    /// <para>The pre-existing redaction test used "PART-1" — one digit — so it could never have
+    /// caught this. Length is the whole point of the case.</para>
+    /// </summary>
+    [Fact]
+    public async Task External_fallback_redacts_phone_numbers_without_destroying_document_references()
+    {
+        var handler = new RecordingHandler(_ => Success("{\"Items\":[]}"));
+        var service = CreateService(handler, new CapturingLogger<OllamaLlmService>(),
+            new PermissiveGovernance(), external: true);
+
+        await service.ExtractLeadDataAsync(
+            "Ref SRFQ-1234567890 against PO 4500123456 for material 100-4567890 qty 12. " +
+            "Queries to +966 50 123 4567 or 0501234567.", Context());
+
+        var body = Assert.Single(handler.RequestBodies);
+
+        // The references survive — they are what extraction exists to read.
+        Assert.Contains("SRFQ-1234567890", body, StringComparison.Ordinal);
+        Assert.Contains("4500123456", body, StringComparison.Ordinal);
+        Assert.Contains("100-4567890", body, StringComparison.Ordinal);
+
+        // Free-standing contact numbers are still removed.
+        Assert.DoesNotContain("966 50 123 4567", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("0501234567", body, StringComparison.Ordinal);
+        Assert.Contains("[REDACTED_PHONE]", body, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task HealthResponse_IsOpaqueAndNeverReturnsProviderBodiesOrKeyMetadata()
     {

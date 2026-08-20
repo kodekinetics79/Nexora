@@ -301,8 +301,31 @@ namespace ERP_RFQ_Automation.Services
             RegexOptions.CultureInvariant, matchTimeoutMilliseconds: 100)]
         private static partial Regex EmailAddressPattern();
 
-        [GeneratedRegex(@"(?<!\d)(?:\+?\d[\d .()/-]{7,}\d)(?!\d)",
-            RegexOptions.CultureInvariant, matchTimeoutMilliseconds: 100)]
+        // A digit run ATTACHED to an identifier is not a phone number.
+        //
+        // The lookbehind used to exclude only a preceding digit, so "SRFQ-1234567890" matched at
+        // the 1 — preceded by a hyphen, which passed — and the customer's own RFQ reference was
+        // replaced with [REDACTED_PHONE] before the model ever saw it. The same held for PO
+        // numbers, material codes and long part numbers: every identifier of 9+ digits was
+        // destroyed on its way to extraction, which is precisely the field extraction exists to
+        // read. Redaction that eats the payload is worse than no redaction, because the loss is
+        // silent and the answer still looks plausible.
+        //
+        // Two guards, because a digit run alone cannot tell a purchase order from a telephone.
+        //
+        // The first refuses to redact a run introduced by an IDENTIFIER keyword ("PO 4500123456",
+        // "Ref 1234567890"), which in a procurement document is overwhelmingly a reference. The
+        // second refuses to redact a run bonded to a token ("SRFQ-1234567890", "100-4567890").
+        // Everything else — "+966 50 123 4567", "call 0501234567" — is still removed.
+        //
+        // This trades a little privacy reach for correctness, deliberately: an unredacted contact
+        // number reaching the model is a bounded disclosure to an endpoint the tenant has already
+        // had to authorise, whereas a destroyed reference silently produces a confident,
+        // unusable extraction.
+        [GeneratedRegex(
+            @"(?<!(?:po|rfq|srfq|ref|reference|material|mat|part|item|invoice|inv|quote|order|no|number|#)[\s.:#-]{0,4})" +
+            @"(?<![\w#/-])(?:\+?\d[\d .()/-]{7,}\d)(?![\w#/-])",
+            RegexOptions.CultureInvariant | RegexOptions.IgnoreCase, matchTimeoutMilliseconds: 100)]
         private static partial Regex PhoneNumberPattern();
 
         private async Task<ProviderCallResult<LeadExtractionResult>> SendExtractionRequestAsync(
