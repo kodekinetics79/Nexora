@@ -943,7 +943,7 @@ namespace ERP_RFQ_Automation.Services
                 Id = quote.Id,
                 QuoteNo = quote.QuoteNo,
                 RfqId = quote.Rfqid,
-                RfqNo = quote.Rfq?.Rfqno, // Add Include if needed
+                RfqNo = quote.Rfq?.Rfqno,
 
                 // The commercial identity, which this projection used to drop on the floor.
                 //
@@ -963,6 +963,16 @@ namespace ERP_RFQ_Automation.Services
                 ContactId = quote.ContactId,
                 SourceLeadRevision = quote.SourceLeadRevision,
                 SourceRfqRevision = quote.SourceRfqRevision,
+
+                // The optimistic-concurrency token and the revision number the customer sees. This
+                // projection left both at their default 0 while the repository's projection of the
+                // same DTO set them, so which endpoint a caller reached decided whether the quote
+                // claimed to be version 0 or its real version. A client that echoes back a 0 as
+                // ExpectedVersion is refused by the lifecycle guard for a reason that is not its
+                // fault, so this is stated here rather than defaulted.
+                LifecycleVersion = quote.LifecycleVersion,
+                Version = quote.RevisionNo,
+                ItemCount = quote.QuoteItems.Count,
 
                 CustomerId = quote.CustomerId,
                 CustomerName = quote.Customer?.Name,
@@ -1016,6 +1026,11 @@ namespace ERP_RFQ_Automation.Services
                     TaxCategory = i.TaxCategory,
                     TaxCategoryReason = i.TaxCategoryReason,
                     TaxRatePercentApplied = i.TaxRatePercentApplied,
+                    // Both are stored, and both are unrecoverable from the rest of the payload —
+                    // see QuoteItemResponseDTO. The PDF builder below already reads them; the
+                    // screen could not, and invented its own arithmetic instead.
+                    HeaderDiscountAllocated = i.HeaderDiscountAllocated,
+                    TaxableBase = i.TaxableBase,
                     DeliveryLeadTime = i.DeliveryLeadTime,
                     // Read through the existing RfqitemId link — never copied onto QuoteItem.
                     // See QuoteItemResponseDTO for why these are projected rather than stored.

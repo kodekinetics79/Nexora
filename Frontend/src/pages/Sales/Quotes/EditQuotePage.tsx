@@ -26,6 +26,7 @@ import {
 } from '../../../constants/taxCategories';
 import { toast } from 'react-hot-toast';
 import { calculateQuoteTotals, type DiscountKind } from './quoteTotals';
+import { formatMoney } from '../../../utils/currency';
 
 interface QuoteItem {
   id?: number;
@@ -73,6 +74,16 @@ const EditQuotePage: React.FC = () => {
   // Header Discount
   const [discountTypeId, setDiscountTypeId] = useState<number | null>(null);
   const [discountValue, setDiscountValue] = useState<number>(0);
+  /**
+   * The currency the quote is denominated in, read from the record.
+   *
+   * This screen printed a literal "$" on the unit price, both discount adornments and every row of
+   * the summary, while the quote it was editing was stored with a CurrencyId — so a SAR quote was
+   * edited in dollars. There is no fallback here on purpose: `formatMoney` renders a bare number
+   * when the record carries no currency, which is the honest output. Inventing a symbol is the
+   * defect, not the absence of one.
+   */
+  const [currencyCode, setCurrencyCode] = useState<string | null>(null);
 
   const [items, setItems] = useState<QuoteItem[]>([]);
 
@@ -109,9 +120,12 @@ const EditQuotePage: React.FC = () => {
       setStatusValue(quote.statusValue || '');
       setDiscountTypeId(quote.discountTypeId || null);
       setDiscountValue(quote.discountValue || 0);
+      // The quote's OWN currency. Every amount on this screen is denominated in it; there is no
+      // house default, and a quote with none renders a bare number rather than an invented symbol.
+      setCurrencyCode(quote.currencyCode ?? null);
       setItems(quote.quoteItems.map(i => ({
         id: i.id,
-        productId: i.productId,
+        productId: i.productId ?? null,
         productName: i.productName || '',
         itemDescription: i.itemDescription || '',
         quantity: i.quantity,
@@ -379,7 +393,7 @@ const EditQuotePage: React.FC = () => {
               <Grid size={{ xs: 12, md: 2 }}>
                 <TextField 
                   fullWidth type="number" label="Disc. Val" size="small" value={discountValue} onChange={(e) => setDiscountValue(Number(e.target.value))}
-                  slotProps={{ input: { endAdornment: <InputAdornment position="end">{discountTypes.find(t => t.setupId === discountTypeId)?.setupCode === 'PERCENTAGE' ? '%' : '$'}</InputAdornment> } }}
+                  slotProps={{ input: { endAdornment: <InputAdornment position="end">{discountTypes.find(t => t.setupId === discountTypeId)?.setupCode === 'PERCENTAGE' ? '%' : (currencyCode ?? '')}</InputAdornment> } }}
                 />
               </Grid>
             </Grid>
@@ -435,7 +449,7 @@ const EditQuotePage: React.FC = () => {
                     <TableCell align="center">
                       <TextField 
                         type="number" size="small" variant="standard" sx={{ width: 90 }} 
-                        slotProps={{ input: { startAdornment: <Typography variant="caption" sx={{ mr: 0.5 }}>$</Typography> } }} 
+                        slotProps={{ input: { startAdornment: <Typography variant="caption" sx={{ mr: 0.5 }}>{currencyCode ?? ''}</Typography> } }} 
                         value={item.unitPrice} onChange={(e) => updateItem(index, { unitPrice: Number(e.target.value) })} 
                       />
                     </TableCell>
@@ -447,7 +461,7 @@ const EditQuotePage: React.FC = () => {
                                 onChange={(e) => updateItem(index, { discountTypeId: Number(e.target.value) || null })}
                             >
                                 <MenuItem value=""><Typography variant="caption">N/A</Typography></MenuItem>
-                                {discountTypes.map(t => <MenuItem key={t.setupId} value={t.setupId}><Typography variant="caption">{t.setupCode === 'PERCENTAGE' ? '%' : '$'}</Typography></MenuItem>)}
+                                {discountTypes.map(t => <MenuItem key={t.setupId} value={t.setupId}><Typography variant="caption">{t.setupCode === 'PERCENTAGE' ? '%' : (currencyCode ?? 'AMT')}</Typography></MenuItem>)}
                             </Select>
                             <TextField 
                                 type="number" size="small" variant="standard" sx={{ width: 40 }} 
@@ -506,23 +520,23 @@ const EditQuotePage: React.FC = () => {
               <Stack spacing={1.5}>
                 <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
                   <Typography variant="body2" color="text.secondary">Gross Total</Typography>
-                  <Typography variant="body2" sx={{ fontWeight: 700 }}>$ {subtotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}</Typography>
+                  <Typography variant="body2" sx={{ fontWeight: 700 }}>{formatMoney(subtotal, currencyCode)}</Typography>
                 </Box>
                 {calculatedHeaderDiscount > 0 && (
                   <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
                     <Typography variant="body2" color="error">Addit. Discount</Typography>
-                    <Typography variant="body2" color="error" sx={{ fontWeight: 700 }}>- $ {calculatedHeaderDiscount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</Typography>
+                    <Typography variant="body2" color="error" sx={{ fontWeight: 700 }}>- {formatMoney(calculatedHeaderDiscount, currencyCode)}</Typography>
                   </Box>
                 )}
                 <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
                   <Typography variant="body2" color="text.secondary">Tax Amount</Typography>
-                  <Typography variant="body2" sx={{ fontWeight: 700 }}>$ {totalTax.toLocaleString(undefined, { minimumFractionDigits: 2 })}</Typography>
+                  <Typography variant="body2" sx={{ fontWeight: 700 }}>{formatMoney(totalTax, currencyCode)}</Typography>
                 </Box>
                 <Divider />
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <Typography variant="h6" sx={{ fontWeight: 900 }}>Total</Typography>
                   <Typography variant="h5" sx={{ fontWeight: 900, color: 'primary.main' }}>
-                    $ {grandTotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                    {formatMoney(grandTotal, currencyCode)}
                   </Typography>
                 </Box>
               </Stack>

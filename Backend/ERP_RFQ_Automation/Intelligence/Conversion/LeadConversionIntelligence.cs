@@ -306,6 +306,22 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
                     LeadTime = li.LeadTime,
                     ReceivedDate = li.ReceivedDate,
                     BidClosingDateLine = li.BidClosingDateLine,
+                    // The buyer's required-by date, carried down from the lead header.
+                    //
+                    // The parsers read this per row and CanonicalRfqNormalizer collapses it to the
+                    // header, where ExtractionWorker writes it to Lead.RequiredDeliveryDate and the
+                    // reviewer can correct it. LeadItem has no delivery-date column, so this was
+                    // where the value stopped: every RFQ line born from ingestion had a null
+                    // RequiredDesiredDate. That made three readers inert rather than wrong — the
+                    // sourcing case asked suppliers to quote with no need-by date, the inbound
+                    // ship-date SLA sweep joined on a column that was never non-null, and
+                    // commercial learning recorded "requested lead time not recorded" every time.
+                    //
+                    // One header date on every line is what the source document says: the collapse
+                    // to the header already happened upstream, and this restores it rather than
+                    // inventing per-line dates that were never extracted. Phase1SpineSeamTests
+                    // pinned the gap and names this as the change that closes it.
+                    RequiredDesiredDate = lead.RequiredDeliveryDate,
                     Aiconfidence = confidence,
                     CreatedBy = createdBy,
                     CreatedDate = now

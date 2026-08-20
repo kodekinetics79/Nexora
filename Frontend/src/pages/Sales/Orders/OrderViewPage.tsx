@@ -15,6 +15,7 @@ import {
 import { useAuth } from '../../../context/AuthContext';
 import orderService from '../../../api/services/orderService';
 import dayjs from 'dayjs';
+import { formatMoney } from '../../../utils/currency';
 
 const OrderViewPage: React.FC = () => {
   const { id } = useParams();
@@ -125,9 +126,9 @@ const OrderViewPage: React.FC = () => {
                       <Typography variant="caption" color="text.secondary">{item.description}</Typography>
                     </TableCell>
                     <TableCell align="center">{item.quantity}</TableCell>
-                    <TableCell align="right">$ {item.unitPrice.toLocaleString()}</TableCell>
-                    <TableCell align="right">$ {item.discount.toLocaleString()}</TableCell>
-                    <TableCell align="right" sx={{ fontWeight: 700 }}>$ {item.totalAmount.toLocaleString()}</TableCell>
+                    <TableCell align="right">{formatMoney(item.unitPrice, order.currencyCode)}</TableCell>
+                    <TableCell align="right">{formatMoney(item.discount, order.currencyCode)}</TableCell>
+                    <TableCell align="right" sx={{ fontWeight: 700 }}>{formatMoney(item.totalAmount, order.currencyCode)}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -142,20 +143,20 @@ const OrderViewPage: React.FC = () => {
               <Stack spacing={1.5}>
                 <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
                   <Typography variant="body2" color="text.secondary">Subtotal</Typography>
-                  <Typography variant="body2" sx={{ fontWeight: 600 }}>$ {order.subTotal.toLocaleString()}</Typography>
+                  <Typography variant="body2" sx={{ fontWeight: 600 }}>{formatMoney(order.subTotal, order.currencyCode)}</Typography>
                 </Box>
                 <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
                   <Typography variant="body2" color="text.secondary">Total Discount</Typography>
-                  <Typography variant="body2" sx={{ fontWeight: 600, color: 'error.main' }}>- $ {order.discountAmount.toLocaleString()}</Typography>
+                  <Typography variant="body2" sx={{ fontWeight: 600, color: 'error.main' }}>- {formatMoney(order.discountAmount, order.currencyCode)}</Typography>
                 </Box>
                 <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
                   <Typography variant="body2" color="text.secondary">Tax Amount</Typography>
-                  <Typography variant="body2" sx={{ fontWeight: 600 }}>$ {order.taxAmount.toLocaleString()}</Typography>
+                  <Typography variant="body2" sx={{ fontWeight: 600 }}>{formatMoney(order.taxAmount, order.currencyCode)}</Typography>
                 </Box>
                 <Divider />
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <Typography variant="subtitle1" sx={{ fontWeight: 800 }}>Grand Total</Typography>
-                  <Typography variant="h6" sx={{ fontWeight: 900, color: 'primary.main' }}>$ {order.totalAmount.toLocaleString()}</Typography>
+                  <Typography variant="h6" sx={{ fontWeight: 900, color: 'primary.main' }}>{formatMoney(order.totalAmount, order.currencyCode)}</Typography>
                 </Box>
               </Stack>
             </CardContent>
@@ -167,11 +168,11 @@ const OrderViewPage: React.FC = () => {
               <Stack spacing={2}>
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <Typography variant="body2">Paid Amount</Typography>
-                  <Typography variant="body2" sx={{ fontWeight: 700, color: 'success.main' }}>$ {order.paidAmount.toLocaleString()}</Typography>
+                  <Typography variant="body2" sx={{ fontWeight: 700, color: 'success.main' }}>{formatMoney(order.paidAmount, order.currencyCode)}</Typography>
                 </Box>
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <Typography variant="body2">Balance</Typography>
-                  <Typography variant="body2" sx={{ fontWeight: 700, color: 'error.main' }}>$ {order.balanceAmount.toLocaleString()}</Typography>
+                  <Typography variant="body2" sx={{ fontWeight: 700, color: 'error.main' }}>{formatMoney(order.balanceAmount, order.currencyCode)}</Typography>
                 </Box>
                 <Chip 
                     label={order.paymentStatus?.toUpperCase() || 'UNPAID'} 

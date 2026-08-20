@@ -119,6 +119,10 @@ namespace ERP_RFQ_Automation.Repositories
                 .Include(q => q.DiscountType)
                 .Include(q => q.QuoteItems).ThenInclude(qi => qi.Product)
                 .Include(q => q.QuoteItems).ThenInclude(qi => qi.DiscountType)
+                // The buyer's own line details live on the RFQ line, never copied onto QuoteItem.
+                // Without this include the projection below cannot state what the customer asked
+                // for, and — worse — cannot state the line's tax category. See MapToDTO.
+                .Include(q => q.QuoteItems).ThenInclude(qi => qi.Rfqitem)
                 .FirstOrDefaultAsync(q => q.Id == id && q.BusinessUnitId == businessUnitId);
 
             if (quote == null)
@@ -213,10 +217,37 @@ namespace ERP_RFQ_Automation.Repositories
                     TotalAmount = i.TotalAmount,
                     Discount = i.Discount,
                     TaxAmount = i.TaxAmount,
+                    // R19. This projection used to stop at TaxAmount, and the omission was not
+                    // cosmetic: EditQuotePage reads the category back from THIS endpoint, defaults
+                    // a missing one to STANDARD, and posts it again. A zero-rated export therefore
+                    // round-tripped itself back to standard-rated on the next save — and the
+                    // preserve-when-null guard in QuoteService could not help, because the client
+                    // was never omitting the field, it was being told the wrong one.
+                    TaxCategory = i.TaxCategory,
+                    TaxCategoryReason = i.TaxCategoryReason,
+                    TaxRatePercentApplied = i.TaxRatePercentApplied,
+                    // Persisted by CalculateQuoteTotals and, until now, read only by the PDF
+                    // builder. The screen had no way to state the header discount or the taxable
+                    // base, so it reconstructed both by subtracting a tax-INCLUSIVE grand total
+                    // from a tax-EXCLUSIVE net — the same reconstruction QuoteItem.Allowances
+                    // documents as the thing that broke. Read, never recompute.
+                    HeaderDiscountAllocated = i.HeaderDiscountAllocated,
+                    TaxableBase = i.TaxableBase,
                     DeliveryLeadTime = i.DeliveryLeadTime,
                     DiscountTypeId = i.DiscountTypeId,
                     DiscountTypeName = i.DiscountType?.Description,
-                    DiscountValue = i.DiscountValue
+                    DiscountValue = i.DiscountValue,
+                    // Read through the RfqitemId link — never copied onto QuoteItem. Same
+                    // expressions as QuoteService's projection of this DTO; the two are two views
+                    // of one contract and a field present in one and absent in the other is a
+                    // defect whichever endpoint the caller happens to reach.
+                    RequestedManufacturerName = i.Rfqitem?.ManufacturerName,
+                    RequestedManufacturerPartNumber = i.Rfqitem?.ManufacturerPartNumber,
+                    RequestedItemMaterialCode = i.Rfqitem?.ItemMaterialCode,
+                    RequestedAlternatePartNumber = i.Rfqitem?.AlternatePartNumber,
+                    RequestedDeliveryDate = i.Rfqitem?.RequiredDesiredDate,
+                    RequestedLeadTimeDays = i.Rfqitem?.LeadTime,
+                    RequestedCurrency = i.Rfqitem?.Currency
                 }).ToList()
             };
         }

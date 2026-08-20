@@ -21,6 +21,7 @@ import dayjs from 'dayjs';
 
 import PermissionGuard from '../../../components/common/PermissionGuard';
 import InvoiceFromOrderDialog from './InvoiceFromOrderDialog';
+import { formatMoney } from '../../../utils/currency';
 
 const OrderListPage: React.FC = () => {
   const navigate = useNavigate();
@@ -132,7 +133,7 @@ const OrderListPage: React.FC = () => {
                   <TableCell>{dayjs(order.orderDate).format('DD MMM YYYY')}</TableCell>
                   <TableCell>{order.customerName}</TableCell>
                   <TableCell>{order.quoteNo || '-'}</TableCell>
-                  <TableCell align="right" sx={{ fontWeight: 700 }}>$ {order.totalAmount.toLocaleString()}</TableCell>
+                  <TableCell align="right" sx={{ fontWeight: 700 }}>{formatMoney(order.totalAmount, order.currencyCode)}</TableCell>
                   <TableCell align="center">
                     <Chip label={order.status} size="small" color={getStatusColor(order.status) as any} variant="filled" sx={{ fontWeight: 600, minWidth: 80 }} />
                   </TableCell>

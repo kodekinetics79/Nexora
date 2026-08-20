@@ -13,6 +13,57 @@ export interface QuoteRemovalResult {
   message: string;
 }
 
+/**
+ * One priced line of a quote, mirroring `DTOs/QuoteDTOs/QuoteResponseDTO.cs`.
+ *
+ * This was `any[]` until the tax fields went missing on one of the two server-side projections and
+ * nothing on this side could have noticed. `any` on a wire contract is how a field the server sends
+ * ends up read by no screen, and how a field no server sends ends up read by one.
+ *
+ * Optional means "the server may legitimately omit it", not "we did not check".
+ */
+export interface QuoteLineDTO {
+  id: number;
+  quoteId: number;
+  rfqItemId?: number | null;
+  productId?: number | null;
+  productName?: string | null;
+  itemDescription?: string | null;
+  quantity: number;
+  unitOfMeasure?: string | null;
+  customerLineRef?: string | null;
+  unitPrice: number;
+  /** Tax-INCLUSIVE line total (calculation version 2): `taxableBase + taxAmount`. */
+  totalAmount: number;
+  discount?: number | null;
+  discountTypeId?: number | null;
+  discountTypeName?: string | null;
+  discountValue?: number | null;
+  /** Server-derived. Null means the tax was never derived, which is what blocks the send. */
+  taxAmount?: number | null;
+  taxCategory?: string | null;
+  taxCategoryReason?: string | null;
+  taxRatePercentApplied?: number | null;
+  /**
+   * This line's share of the QUOTE-LEVEL discount, as the server allocated and stored it.
+   * It cannot be recovered from the other figures — every attempt subtracts a tax-inclusive total
+   * from a tax-exclusive net — so a screen showing the header discount has to be told it.
+   * Null on lines written before the column existed.
+   */
+  headerDiscountAllocated?: number | null;
+  /** What output tax was charged on: `totalAmount - taxAmount`. The printed line column's figure. */
+  taxableBase: number;
+  deliveryLeadTime?: number | null;
+  // What the customer asked for, read through the linked RFQ line. Null when the quote has no RFQ.
+  requestedManufacturerName?: string | null;
+  requestedManufacturerPartNumber?: string | null;
+  requestedItemMaterialCode?: string | null;
+  requestedAlternatePartNumber?: string | null;
+  requestedDeliveryDate?: string | null;
+  requestedLeadTimeDays?: number | null;
+  requestedCurrency?: string | null;
+}
+
 export interface QuoteDTO {
   id: number;
   quoteNo: string;
@@ -50,7 +101,7 @@ export interface QuoteDTO {
   discountTypeName?: string;
   discountValue?: number;
   itemCount: number;
-  quoteItems: any[];
+  quoteItems: QuoteLineDTO[];
   // Outcome capture + SLA staleness (WP-A4)
   statusCode?: string;
   sentOn?: string | null;

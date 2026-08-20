@@ -24,6 +24,7 @@ import setupService from '../../../api/services/setupService';
 import { useSnackbar } from 'notistack';
 import { handleApiError } from '../../../utils/errorHandler';
 import dayjs from 'dayjs';
+import { formatMoney } from '../../../utils/currency';
 
 interface OrderItemState {
   id?: number;
@@ -184,6 +185,17 @@ const CreateOrderPage: React.FC = () => {
   };
 
   const { subtotal, totalDiscount, totalTax, grandTotal } = calculateTotals();
+
+  /**
+   * The order's own currency, in edit mode. In CREATE mode there is none — and that is the honest
+   * state, not an oversight to paper over: `CreateOrderDto.CurrencyId` is on the wire and this
+   * screen, the only one that raises a manual order, has never sent it, so a manually created
+   * order carries no currency at all. `formatMoney` renders a bare number for that case rather
+   * than the literal "$" this screen used to print over records that may be denominated in SAR.
+   * Giving the screen a currency to state is a product decision (which currencies, and what the
+   * default is), not a formatting one.
+   */
+  const currencyCode = orderData?.currencyCode ?? null;
 
   const handleSave = () => {
     if (!customerId) {
@@ -411,7 +423,7 @@ const CreateOrderPage: React.FC = () => {
                           variant="standard"
                           value={item.unitPrice}
                           onChange={(e) => handleItemChange(item.tempId, 'unitPrice', e.target.value)}
-                          slotProps={{ input: { startAdornment: <Box sx={{ mr: 0.5 }}>$</Box>, sx: { textAlign: 'right' } } }}
+                          slotProps={{ input: { startAdornment: <Box sx={{ mr: 0.5 }}>{currencyCode ?? ''}</Box>, sx: { textAlign: 'right' } } }}
                         />
                       </TableCell>
                       <TableCell align="right">
@@ -421,7 +433,7 @@ const CreateOrderPage: React.FC = () => {
                           variant="standard"
                           value={item.discount}
                           onChange={(e) => handleItemChange(item.tempId, 'discount', e.target.value)}
-                          slotProps={{ input: { startAdornment: <Box sx={{ mr: 0.5 }}>$</Box>, sx: { textAlign: 'right' } } }}
+                          slotProps={{ input: { startAdornment: <Box sx={{ mr: 0.5 }}>{currencyCode ?? ''}</Box>, sx: { textAlign: 'right' } } }}
                         />
                       </TableCell>
                       <TableCell align="right">
@@ -431,11 +443,11 @@ const CreateOrderPage: React.FC = () => {
                           variant="standard"
                           value={item.taxAmount}
                           onChange={(e) => handleItemChange(item.tempId, 'taxAmount', e.target.value)}
-                          slotProps={{ input: { startAdornment: <Box sx={{ mr: 0.5 }}>$</Box>, sx: { textAlign: 'right' } } }}
+                          slotProps={{ input: { startAdornment: <Box sx={{ mr: 0.5 }}>{currencyCode ?? ''}</Box>, sx: { textAlign: 'right' } } }}
                         />
                       </TableCell>
                       <TableCell align="right" sx={{ fontWeight: 700 }}>
-                        $ {item.totalAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                        {formatMoney(item.totalAmount, currencyCode)}
                       </TableCell>
                       <TableCell align="center">
                         <IconButton size="small" color="error" onClick={() => handleRemoveItem(item.tempId)}>
@@ -459,20 +471,20 @@ const CreateOrderPage: React.FC = () => {
             <Stack spacing={2}>
               <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
                 <Typography variant="body2" color="text.secondary">Subtotal</Typography>
-                <Typography variant="body2" sx={{ fontWeight: 700 }}>$ {subtotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}</Typography>
+                <Typography variant="body2" sx={{ fontWeight: 700 }}>{formatMoney(subtotal, currencyCode)}</Typography>
               </Box>
               <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
                 <Typography variant="body2" color="text.secondary">Total Discount</Typography>
-                <Typography variant="body2" sx={{ fontWeight: 700, color: 'error.main' }}>- $ {totalDiscount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</Typography>
+                <Typography variant="body2" sx={{ fontWeight: 700, color: 'error.main' }}>- {formatMoney(totalDiscount, currencyCode)}</Typography>
               </Box>
               <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
                 <Typography variant="body2" color="text.secondary">Total Tax</Typography>
-                <Typography variant="body2" sx={{ fontWeight: 700 }}>+ $ {totalTax.toLocaleString(undefined, { minimumFractionDigits: 2 })}</Typography>
+                <Typography variant="body2" sx={{ fontWeight: 700 }}>+ {formatMoney(totalTax, currencyCode)}</Typography>
               </Box>
               <Divider />
               <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <Typography variant="h6" sx={{ fontWeight: 900 }}>Grand Total</Typography>
-                <Typography variant="h6" sx={{ fontWeight: 900, color: 'primary.main' }}>$ {grandTotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}</Typography>
+                <Typography variant="h6" sx={{ fontWeight: 900, color: 'primary.main' }}>{formatMoney(grandTotal, currencyCode)}</Typography>
               </Box>
             </Stack>
           </Paper>

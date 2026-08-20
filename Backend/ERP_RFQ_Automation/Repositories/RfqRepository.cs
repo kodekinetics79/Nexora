@@ -463,6 +463,39 @@ namespace ERP_RFQ_Automation.Repositories
             await _context.SaveChangesAsync();
         }
 
+        /// <summary>
+        /// The quote number this path has always issued — <c>QT-</c> plus the RFQ number — held
+        /// inside the column it is written to.
+        ///
+        /// <para>Rfq.Rfqno is varchar(200) and Quote.QuoteNo is varchar(50), and nothing sat
+        /// between them. That is not a theoretical overflow: the conversion paths copy the
+        /// BUYER'S OWN reference into Rfqno verbatim, and the manual-upload door builds
+        /// <c>RFQ_{filename}_{timestamp}</c>, so a 35-character filename or an industrial buyer's
+        /// long purchase reference produced a 50+ character quote number and Postgres refused the
+        /// INSERT with "value too long". The failure landed inside approve-RFQ, which creates the
+        /// quote and mails it in one request, so the whole approval died on a string length.</para>
+        ///
+        /// <para>The TAIL is kept rather than the head. Everything that discriminates one of these
+        /// numbers from another is at the end — the collision suffix the conversion paths append,
+        /// the upload timestamp, the sequence in NXR-RFQ-{buid}-{yyyy}-{seq}. Truncating from the
+        /// front would map every long reference sharing a prefix onto one number; truncating from
+        /// the back keeps them apart. Numbers that fit today are returned byte-for-byte unchanged,
+        /// so this alters no existing document's identity. It is a length guard, not a numbering
+        /// scheme — how documents are numbered is a product decision this method does not make.</para>
+        /// </summary>
+        internal static string QuoteNumberFromRfq(string? rfqno)
+        {
+            const int QuoteNoMaxLength = 50; // Quotes.QuoteNo, varchar(50)
+            const string Prefix = "QT-";
+
+            var reference = (rfqno ?? string.Empty).Trim();
+            var candidate = Prefix + reference;
+            if (candidate.Length <= QuoteNoMaxLength) return candidate;
+
+            var keep = QuoteNoMaxLength - Prefix.Length;
+            return Prefix + reference.Substring(reference.Length - keep);
+        }
+
         public async Task<long> ApproveAsync(long id, string approvedBy, long businessUnitId, long? customerId = null)
         {
             var rfq = await _context.Rfqs
@@ -536,7 +569,7 @@ namespace ERP_RFQ_Automation.Repositories
             // Create Quote
             var quote = new Quote
             {
-                QuoteNo = $"QT-{rfq.Rfqno}",
+                QuoteNo = QuoteNumberFromRfq(rfq.Rfqno),
                 Rfqid = rfq.Id,
                 CustomerId = rfq.CustomerId,
                 BusinessUnitId = rfq.BusinessUnitId,

@@ -27,6 +27,7 @@ import { CustomerAwardDialog, type CustomerAwardQuote } from './customer-awards'
 import { useAuth } from '../../../context/AuthContext';
 import { presentableErrorMessage } from '../../../utils/apiErrors';
 import { formatMoney } from '../../../utils/currency';
+import { summariseStoredQuote } from './quoteTotals';
 import dayjs from 'dayjs';
 import { toast } from 'react-hot-toast';
 import CommercialLineIntelligence from '../../../components/common/CommercialLineIntelligence';
@@ -180,13 +181,28 @@ const QuoteViewPage: React.FC = () => {
   if (isError) return <Box sx={{ p: 4 }}><Alert severity="error" action={<Button color="inherit" onClick={() => refetch()}>Retry</Button>}>We couldn't load this quote.</Alert></Box>;
   if (!quote) return <Box sx={{ p: 4 }}>Quote not found</Box>;
 
-  // Manual Calculation for header discount if not already in totalAmount
-  // Actually the backend stores TotalAmount as the final grand total.
-  // We need to show the breakdown.
-  const itemsSubtotal = quote.quoteItems.reduce((sum, i) => sum + (i.quantity * i.unitPrice), 0);
-  const itemsDiscounts = quote.quoteItems.reduce((sum, i) => sum + (i.discount || 0), 0);
-  const itemsNetTotal = itemsSubtotal - itemsDiscounts;
-  const headerDiscount = itemsNetTotal - (quote.totalAmount || 0); // This is an approximation if tax is involved
+  // The financial breakdown, READ from what the server stored — never reconstructed.
+  //
+  // This block used to compute `headerDiscount = (gross - lineDiscounts) - quote.totalAmount`,
+  // subtracting a tax-INCLUSIVE grand total from a tax-EXCLUSIVE net. On a 1,000.00 quote at 15%
+  // with no header discount that is -150.00, suppressed by the `> 0` guard, leaving a panel that
+  // read 1,000.00 / 0.00 / 1,150.00 and did not add up. With a 200.00 header discount it printed
+  // 80.00. The same reconstruction, in the PDF builder, is what QuoteItem.HeaderDiscountAllocated
+  // was added to stop; the column has always been on the row and simply never reached this screen.
+  //
+  // Every figure below is a stored per-line value or a sum of them, matching QuoteService's PDF
+  // builder line for line. The customer's copy and the rep's screen now state one arithmetic.
+  const totals = summariseStoredQuote(
+    quote.quoteItems,
+    quote.discountTypeId != null && quote.discountValue != null,
+    quote.totalAmount || 0,
+  );
+  const itemsSubtotal = totals.grossSubTotal;
+  const itemsDiscounts = totals.totalLineDiscounts;
+  const headerDiscount = totals.headerDiscount;
+  // Name the rate only when every taxed line shares one. A quote that mixes a zero-rated export
+  // with a standard line has no single rate true of its total, so the label stays bare.
+  const vatLabel = totals.singleTaxRatePercent === null ? 'VAT' : `VAT ${totals.singleTaxRatePercent}%`;
   const awardQuote: CustomerAwardQuote | null = quote.commercialCaseId && quote.customerId && quote.currencyId
     ? {
         id: quote.id,
@@ -511,7 +527,7 @@ const QuoteViewPage: React.FC = () => {
                     </TableCell>
                     <TableCell align="right">{Number(item.unitPrice || 0) === 0 ? <Chip size="small" label="Pricing Pending" color="warning" variant="outlined" /> : formatMoney(item.unitPrice, quote.currencyCode)}</TableCell>
                     <TableCell align="right">
-                      {item.discount > 0 ? (
+                      {(item.discount ?? 0) > 0 ? (
                         <Typography variant="caption" color="error.main" sx={{ fontWeight: 700 }}>
                           - {formatMoney(item.discount, quote.currencyCode)}
                           <br />
@@ -535,6 +551,17 @@ const QuoteViewPage: React.FC = () => {
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}><Typography color="text.secondary">Gross Subtotal</Typography><Typography sx={{ fontWeight: 700 }}>{isUnpricedDraft ? 'Pricing Pending' : formatMoney(itemsSubtotal, quote.currencyCode)}</Typography></Box>
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}><Typography color="text.secondary">Item Discounts</Typography><Typography sx={{ fontWeight: 700, color: 'error.main' }}>{isUnpricedDraft ? 'Pending' : `- ${formatMoney(itemsDiscounts, quote.currencyCode)}`}</Typography></Box>
                 {headerDiscount > 0 && <Box sx={{ display: 'flex', justifyContent: 'space-between' }}><Typography color="text.secondary">Header Discount</Typography><Typography sx={{ fontWeight: 700, color: 'error.main' }}>- {formatMoney(headerDiscount, quote.currencyCode)}</Typography></Box>}
+                {/* The two rows the panel had no way to show, and without which the numbers on it
+                    could not be added up: the base the tax is charged on, and the tax. Same three
+                    lines, same order, as the printed quote. */}
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}><Typography color="text.secondary">Total excluding VAT</Typography><Typography sx={{ fontWeight: 700 }}>{isUnpricedDraft ? 'Pending' : formatMoney(totals.netExcludingTax, quote.currencyCode)}</Typography></Box>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}>
+                  <Typography color={totals.hasUnderivedTax ? 'warning.main' : 'text.secondary'}>{vatLabel}</Typography>
+                  <Typography sx={{ fontWeight: 700 }} color={totals.hasUnderivedTax ? 'warning.main' : undefined}>
+                    {totals.hasUnderivedTax ? 'Not derived' : formatMoney(totals.totalTax, quote.currencyCode)}
+                  </Typography>
+                </Box>
+                {totals.hasUnderivedTax && <Alert severity="warning" sx={{ py: 0 }}>No output tax rate is configured, so this quote cannot be sent.</Alert>}
                 <Divider />
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}><Typography variant="h5" sx={{ fontWeight: 900 }}>Grand Total</Typography><Typography variant="h5" sx={{ fontWeight: 900, color: isUnpricedDraft ? 'warning.main' : 'primary.main' }}>{isUnpricedDraft ? 'Pricing Pending' : formatMoney(quote.totalAmount, quote.currencyCode)}</Typography></Box>
               </Stack>

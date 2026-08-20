@@ -21,6 +21,7 @@ import { DELIVERY_STATUS_LABEL } from '../../../api/services/deliveryService';
 import DeliveryConfirmationPanel from './DeliveryConfirmationPanel';
 import orderService from '../../../api/services/orderService';
 import dayjs from 'dayjs';
+import { formatMoney } from '../../../utils/currency';
 
 const ShipmentViewPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -216,7 +217,7 @@ const ShipmentViewPage: React.FC = () => {
                   </Box>
                   <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
                     <Typography variant="body2" color="text.secondary">Order Total</Typography>
-                    <Typography variant="body2" sx={{ fontWeight: 700 }}>$ {order.totalAmount.toLocaleString()}</Typography>
+                    <Typography variant="body2" sx={{ fontWeight: 700 }}>{formatMoney(order.totalAmount, order.currencyCode)}</Typography>
                   </Box>
                   <Divider />
                   <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 800, display: 'flex', alignItems: 'center', gap: 0.5 }}>
@@ -224,11 +225,11 @@ const ShipmentViewPage: React.FC = () => {
                   </Typography>
                   <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <Typography variant="body2">Paid Amount</Typography>
-                    <Typography variant="body2" sx={{ fontWeight: 700, color: 'success.main' }}>$ {order.paidAmount.toLocaleString()}</Typography>
+                    <Typography variant="body2" sx={{ fontWeight: 700, color: 'success.main' }}>{formatMoney(order.paidAmount, order.currencyCode)}</Typography>
                   </Box>
                   <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <Typography variant="body2">Balance</Typography>
-                    <Typography variant="body2" sx={{ fontWeight: 700, color: 'error.main' }}>$ {order.balanceAmount.toLocaleString()}</Typography>
+                    <Typography variant="body2" sx={{ fontWeight: 700, color: 'error.main' }}>{formatMoney(order.balanceAmount, order.currencyCode)}</Typography>
                   </Box>
                   <Chip 
                     label={order.paymentStatus?.toUpperCase() || 'UNPAID'} 
