@@ -166,6 +166,22 @@ export const ThemeContextProvider: React.FC<{ children: ReactNode }> = ({ childr
       },
       MuiCssBaseline: {
         styleOverrides: {
+          // Figures in a column have to line up.
+          //
+          // Nothing in this product used tabular figures — every money column, quantity column
+          // and count rendered in proportional digits, so "1,240" and "998" did not align down a
+          // column and a reader could not compare magnitudes by eye. Scoped to the places a
+          // number actually lives: right-aligned table cells and right-aligned grid cells, plus
+          // an explicit opt-in class. Deliberately NOT on MuiTypography's root, which would apply
+          // it to prose and would be a design change rather than a fix.
+          //
+          // It lives HERE, and not in `src/theme.ts`, because src/theme.ts is imported by
+          // nothing: main.tsx mounts ThemeContextProvider, and the theme it renders is the
+          // createTheme call in this file. An override written into theme.ts compiles, reads
+          // correctly, and never loads.
+          '.MuiTableCell-root.MuiTableCell-alignRight, .MuiDataGrid-cell--textRight, .tabular-nums': {
+            fontVariantNumeric: 'tabular-nums',
+          },
           body: {
             scrollbarColor: mode === 'dark' ? '#334155 #0f172a' : '#cbd5e1 #f8fafc',
             '&::-webkit-scrollbar, & *::-webkit-scrollbar': {

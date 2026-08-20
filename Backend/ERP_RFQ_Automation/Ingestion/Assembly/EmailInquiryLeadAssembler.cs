@@ -365,15 +365,25 @@ public sealed class EmailInquiryLeadAssembler : IEmailInquiryLeadAssembler
             return new AssembleOutcome(null, null);
         }
 
-        // THE MARKETING GATE. Read in full, asked for nothing: that is not a Lead.
+        // THE ZERO-LINE GATE. A message that names nothing quotable is not a Lead.
         //
         // Every part of this message reached a terminal state, at least one of them parsed into
         // a usable extraction, and between them they name ZERO requestable lines. Until now the
         // merge simply did not look: `merged` stayed empty, the outcome below was built with a
         // hard-coded Ok, and the persister minted a Lead with no lines and no client. That is
         // where cold outreach lands — "Contact Us: Digital Marketing", "Communication on the
-        // ... solicitation" — and it is why 19 of 22 leads on the live tenant have no customer.
-        // The lead list, which is the sales pipeline, was carrying agency mail as work.
+        // ... solicitation" — and the lead list, which is the sales pipeline, was carrying
+        // agency mail as work.
+        //
+        // WHAT THIS DEFECT IS NOT — AND AN EARLIER DRAFT OF THIS COMMENT SAID OTHERWISE.
+        // It claimed as fact that this is why 19 of 22 leads on the live tenant have no client.
+        // It is not. The client backfill over that tenant reported examined=22, autoMatched=3,
+        // unresolved=19, failed=0 — nothing errored; no customer record matched those senders.
+        // Nor could an empty item list have caused it: resolution builds its evidence from the
+        // sender address and the extraction header (LeadCustomerResolutionService
+        // .BuildEvidenceAsync), and the only item-derived signal it reads is a customer account
+        // reference printed on a line, which none of this mail carries either way. Empty leads
+        // are the defect being fixed here; unresolved clients are a separate, ordinary state.
         //
         // WHY THE JUDGEMENT BELONGS HERE AND NOWHERE EARLIER. A header rule cannot see this
         // class: a human wrote it to a human, so there is no List-Unsubscribe, no
@@ -398,16 +408,52 @@ public sealed class EmailInquiryLeadAssembler : IEmailInquiryLeadAssembler
         // message — body or attachment — makes merged non-empty and this branch dead. That is
         // the property that matters most in this change and it holds by construction, not by
         // keyword tuning.
+        //
+        // WHAT THE OPERATOR IS TOLD SPLITS ON `expected`, BECAUSE ZERO LINES HAS TWO CAUSES.
+        // `expected` is how many candidate lines the extractors SAW before anything was
+        // discarded: parsed text regions on the document path (ChunkedExtractionService), the
+        // model's own item count before prose-anchor verification on the body path
+        // (ConversationalExtractionService).
+        //
+        //   expected == 0 — every part was looked at and nothing in the message even resembled a
+        //     requestable line. That is the marketing case, and "read in full, asked for nothing"
+        //     is a true sentence to put in front of an operator.
+        //
+        //   expected  > 0 — there WAS content that could have carried the request and none of it
+        //     survived into an inquiry. A scanned RFQ PDF whose OCR came back partial is the case
+        //     that matters: ChunkedExtractionService emits NeedsReview with a non-null result,
+        //     zero items and a positive expected count ("OCR was incomplete; omitted content
+        //     requires review"), and the worker does not divert a NeedsReview outcome — it records
+        //     it and this method runs. Telling that operator the sender asked for nothing is
+        //     false, and false about a real customer RFQ: they would chase a buyer who did their
+        //     part instead of re-reading the document.
+        //
+        // The disposition is the same HOLD either way — zero lines still proves nothing about
+        // intent — and only the sentence differs, because the sentence is the whole of what
+        // decides which of those two things the operator does next. The extractors' own review
+        // reasons go to the LOG rather than into the sentence: they are unbounded, and the
+        // operator screen REJECTS a reason over 300 characters outright (EmailInquiryHoldReasons).
         if (merged.Count == 0)
         {
+            var sawCandidateLines = expected > 0;
             _log.LogInformation(
-                "Assembly {AssemblyId} for business unit {BusinessUnitId} was read in full "
-                + "({Results} component result(s)) and names no requestable line; it is held for "
-                + "review rather than becoming an empty lead.",
-                assemblyId, businessUnitId, ordered.Count);
+                "Assembly {AssemblyId} for business unit {BusinessUnitId} was read "
+                + "({Results} component result(s)), saw {Expected} candidate line(s) and names no "
+                + "requestable line; it is held for review as {Reason} rather than becoming an "
+                + "empty lead. Extractor review reason(s): {ReviewReasons}",
+                assemblyId, businessUnitId, ordered.Count, expected,
+                sawCandidateLines
+                    ? EmailInquiryHoldReasons.ContentNotRecovered
+                    : EmailInquiryHoldReasons.NoRequestableContent,
+                reviewReasons.Count > 0 ? string.Join("; ", reviewReasons) : "(none reported)");
             await _coordinator.HoldForReviewAsync(
-                businessUnitId, assemblyId, EmailInquiryHoldReasons.NoRequestableContent,
-                EmailInquiryHoldReasons.NoRequestableContentDetail, ct);
+                businessUnitId, assemblyId,
+                sawCandidateLines
+                    ? EmailInquiryHoldReasons.ContentNotRecovered
+                    : EmailInquiryHoldReasons.NoRequestableContent,
+                sawCandidateLines
+                    ? EmailInquiryHoldReasons.ContentNotRecoveredDetail
+                    : EmailInquiryHoldReasons.NoRequestableContentDetail, ct);
             return new AssembleOutcome(null, null);
         }
 
