@@ -1271,22 +1271,40 @@ public static class CommercialLearningRules
     };
 
     /// <summary>
-    /// Why the RFQ is ready to quote. The judgement is made over the lines marked for quote, not
-    /// over every line, so on a partial bid the sentence has to say so — "Every RFQ line has a
-    /// current evidence-backed fulfilment route" claimed coverage of 21 lines while asserting it
-    /// over 7, which is what made the readiness figure look like it contradicted the line tiles.
+    /// Why the RFQ is ready to quote. The judgement is made over a SUBSET of the RFQ's lines, so
+    /// the sentence has to name the subset — "Every RFQ line has a current evidence-backed
+    /// fulfilment route" claimed coverage of 21 lines while asserting it over 7, which is what
+    /// made the readiness figure look like it contradicted the line tiles.
+    ///
+    /// <para>There are two different subsets, and the caller distinguishes them with
+    /// <paramref name="judgedOnlyMarkedLines"/>. When at least one line is explicitly marked for
+    /// quote, the judged set is exactly those lines. When none is, the service falls back to every
+    /// NON-DECLINED line — so an RFQ of 21 lines with 14 explicitly No-Quoted and 7 still pending
+    /// is judged over 7. Keying the "is this a partial bid?" test off the marked-lines flag alone
+    /// made that second case print "All 7 RFQ lines have…" on an RFQ that has 21: a denominator
+    /// that is not the RFQ's. The comparison is now the one that decides the question — did the
+    /// judged set cover every line — and the flag only chooses which subset to name.</para>
     /// </summary>
     public static string ViableReadyExplanation(int judgedLineCount, int totalLineCount,
         bool judgedOnlyMarkedLines)
     {
-        var partialBid = judgedOnlyMarkedLines && judgedLineCount < totalLineCount;
-        var subject = partialBid
+        var partialBid = judgedLineCount < totalLineCount;
+        if (!partialBid)
+            return (judgedLineCount == 1 ? "The single RFQ line has" : $"All {judgedLineCount} RFQ lines have")
+                + " a current evidence-backed fulfilment route.";
+
+        // The excluded lines differ between the two subsets, so the remainder sentence does too.
+        // Lines outside the marked set may be declined OR still undecided, and only "not being
+        // quoted" covers both; lines outside the non-declined set are declined, exactly.
+        var subject = judgedOnlyMarkedLines
             ? judgedLineCount == 1 ? "The 1 line marked for quote has"
                 : $"All {judgedLineCount} lines marked for quote have"
-            : judgedLineCount == 1 ? "The single RFQ line has" : $"All {judgedLineCount} RFQ lines have";
-        var remainder = partialBid
-            ? $" The remaining {CountPhrase(totalLineCount - judgedLineCount, "line is", "lines are")} not being quoted."
-            : string.Empty;
+            : judgedLineCount == 1 ? "The 1 line still open on this RFQ has"
+                : $"All {judgedLineCount} lines still open on this RFQ have";
+        var excluded = totalLineCount - judgedLineCount;
+        var remainder = judgedOnlyMarkedLines
+            ? $" The remaining {CountPhrase(excluded, "line is", "lines are")} not being quoted."
+            : $" The other {CountPhrase(excluded, "line has", "lines have")} been declined.";
         return $"{subject} a current evidence-backed fulfilment route.{remainder}";
     }
 
