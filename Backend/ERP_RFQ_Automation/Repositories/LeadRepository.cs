@@ -1405,6 +1405,197 @@ namespace ERP_RFQ_Automation.Repositories
         }
 
         /// <summary>
+        /// Links a lead to the client organisation a HUMAN picked — the second governed door
+        /// onto <c>Lead.ResolveCommercialIdentity</c>, and the one that is open for a lead's
+        /// whole life.
+        ///
+        /// <para><b>The defect this exists to close.</b> Until now the ONLY human path that
+        /// could set a lead's customer was <c>SubmitLeadReviewAsync</c>, and that method opens
+        /// with a gate: the lead must still be awaiting extraction review
+        /// (<c>EmailIngests.ParseStatus == "NeedsReview"</c>, or for an upload-door lead
+        /// <c>!CommercialFactsVerified</c> plus source evidence). Extraction review ENDS. The
+        /// worker sets <c>ParseStatus = "Success"</c> the moment extraction succeeds
+        /// (<c>ExtractionWorker.cs:1452</c>), and an approve sets it too
+        /// (<c>SubmitLeadReviewCoreAsync</c>, above). So on the ordinary happy path — a
+        /// document that extracted cleanly and never needed a reviewer — the client-linking
+        /// door was shut before anyone ever saw the lead, and every attempt came back
+        /// <c>"This lead is no longer awaiting extraction review."</c></para>
+        ///
+        /// <para>That was terminal, not cosmetic. A lead cannot be QUALIFIED and cannot be
+        /// converted to an RFQ without a customer, so an enquiry the machine could not match
+        /// to an existing client record could never reach a quote by ANY route: the machine
+        /// had nothing to match against and the human was locked out. The live tenant shows
+        /// the shape of it — enquiries sitting on the deadline board reading "Not linked to a
+        /// client record" against names like "Fulton County Government" that have no customer
+        /// record at all.</para>
+        ///
+        /// <para>The gate itself is CORRECT and is left exactly as it is: it protects a
+        /// method that rewrites the entire line-item set from a client-held snapshot. The
+        /// error was bundling a commercial decision with a lifetime of its own into a
+        /// document-correction workflow that closes. This command is that decision on its
+        /// own, and it writes exactly two fields.</para>
+        ///
+        /// <para>Everything the review path guarantees about a client link is preserved here:
+        /// the tenant/active check on the customer, the ownership check on the contact, the
+        /// human-grade status (so <c>IsHumanDecided</c> is true and the machine resolver will
+        /// never overwrite it), the immutable audit row, and the alias-learning loop inside
+        /// the same transaction.</para>
+        /// </summary>
+        public Task<LeadResponseDTO?> LinkClientAsync(
+            long id, long businessUnitId, LeadClientLinkRequestDTO request, string linkedBy = "system")
+        {
+            // Same reasoning as SubmitLeadReviewAsync: a caller that already owns a
+            // transaction owns the retriable unit, and nesting a strategy inside it is wrong.
+            if (!_context.Database.IsRelational() || _context.Database.CurrentTransaction is not null)
+                return LinkClientCoreAsync(id, businessUnitId, request, linkedBy);
+
+            var strategy = _context.Database.CreateExecutionStrategy();
+            return strategy.ExecuteAsync(() =>
+            {
+                _context.ChangeTracker.Clear();
+                return LinkClientCoreAsync(id, businessUnitId, request, linkedBy);
+            });
+        }
+
+        private async Task<LeadResponseDTO?> LinkClientCoreAsync(
+            long id, long businessUnitId, LeadClientLinkRequestDTO request, string linkedBy)
+        {
+            ArgumentNullException.ThrowIfNull(request);
+            if (string.IsNullOrWhiteSpace(linkedBy))
+                throw new LeadReviewValidationException("Reviewer identity is required.");
+            if (!request.CustomerId.HasValue || request.CustomerId.Value <= 0)
+                throw new LeadReviewValidationException("A customer is required.");
+
+            var customerId = request.CustomerId.Value;
+
+            // LeadItems and EmailIngests are loaded because SerializeReviewSnapshot reads
+            // both; a snapshot missing them would record a false before/after image.
+            var lead = await _context.Leads
+                .Include(l => l.LeadItems)
+                .Include(l => l.EmailIngests)
+                .FirstOrDefaultAsync(l => l.Id == id && l.BusinessUnitId == businessUnitId);
+
+            if (lead == null) return null;
+
+            if (request.ExpectedVersion.HasValue && request.ExpectedVersion.Value != lead.ReviewVersion)
+                throw new LeadReviewConflictException(
+                    $"Review version {request.ExpectedVersion} is stale; current version is {lead.ReviewVersion}.");
+
+            var customerExists = await _context.Customers.AsNoTracking().AnyAsync(customer =>
+                customer.Id == customerId && customer.Buid == businessUnitId && customer.IsActive != false);
+            if (!customerExists)
+                throw new LeadReviewValidationException("The selected customer was not found in this tenant.");
+
+            if (request.ContactId.HasValue)
+            {
+                var contactExists = await _context.Contacts.AsNoTracking().AnyAsync(contact =>
+                    contact.Id == request.ContactId.Value && contact.CustomerId == customerId
+                    && contact.IsActive != false);
+                if (!contactExists)
+                    throw new LeadReviewValidationException("The selected contact does not belong to the selected customer.");
+            }
+
+            // RE-POINTING GUARD. Rfq.InheritCommercialIdentity refuses to accept a lead whose
+            // customer differs from the one the RFQ already carries, and it is the RFQ that
+            // every downstream document (quote, order, invoice) is addressed from. Moving the
+            // lead underneath a converted RFQ would leave the two disagreeing about who the
+            // client is, with the RFQ unable to ever re-inherit. Setting a customer where
+            // there was none is always safe — conversion already requires one, so a lead with
+            // no customer has no RFQ.
+            if (lead.CustomerId.HasValue && lead.CustomerId.Value != customerId)
+            {
+                var hasRfq = await _context.Rfqs.AsNoTracking().IgnoreQueryFilters()
+                    .AnyAsync(r => r.LeadId == lead.Id && r.BusinessUnitId == businessUnitId);
+                if (hasRfq)
+                    throw new LeadReviewConflictException(
+                        "This lead has already been converted to an RFQ, so its client cannot be changed. "
+                        + "Correct the client on the RFQ instead, or reject and re-raise the enquiry.");
+            }
+
+            var beforeJson = SerializeReviewSnapshot(lead);
+            var fromVersion = lead.ReviewVersion;
+            var previousCustomerId = lead.CustomerId;
+
+            // Human-grade statuses, identical to the review path's, so a link made here and a
+            // link made in review are indistinguishable downstream — and both are protected
+            // from the machine resolver by LeadCustomerMatchStatuses.IsHumanDecided.
+            lead.ResolveCommercialIdentity(
+                customerId,
+                request.ContactId,
+                request.ContactId.HasValue
+                    ? LeadCustomerMatchStatuses.Confirmed
+                    : LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
+
+            // Deliberately NOT touched: ParseStatus, CommercialFactsVerified,
+            // RequiresCommercialReview, ReviewApprovedBy/On. Naming the buyer is not a
+            // statement that the extracted figures are correct, and quietly marking them
+            // verified here would let a lead skip the approval that qualification demands.
+            var linkedOn = DateTime.UtcNow;
+            lead.ModifiedDate = linkedOn;
+
+            // The audit table is unique on (tenant, lead, ToVersion), so the version must
+            // advance for the row to exist at all. It is also the lead's concurrency token,
+            // which is the behaviour we want: a review workbench holding a stale version
+            // finds out that the client changed underneath it.
+            lead.ReviewVersion++;
+
+            var ownsTransaction = _context.Database.CurrentTransaction == null;
+            await using var transaction = ownsTransaction
+                ? await _context.Database.BeginTransactionAsync()
+                : null;
+            try
+            {
+                await _context.SaveChangesAsync();
+
+                var audit = new LeadReviewAudit
+                {
+                    BusinessUnitId = businessUnitId,
+                    LeadId = lead.Id,
+                    FromVersion = fromVersion,
+                    ToVersion = lead.ReviewVersion,
+                    // 11 characters; the column is varchar(20).
+                    Action = "link-client",
+                    ReviewedBy = linkedBy.Trim(),
+                    Reason = string.IsNullOrWhiteSpace(request.Reason) ? null : request.Reason.Trim(),
+                    BeforeJson = beforeJson,
+                    AfterJson = SerializeReviewSnapshot(lead),
+                    ReviewedOn = linkedOn
+                };
+                _context.Set<LeadReviewAudit>().Add(audit);
+                await _context.SaveChangesAsync();
+
+                // LEARNING LOOP. The P6 approval gate exists to keep a MACHINE match from
+                // bootstrapping itself into an authoritative alias; the customer here is
+                // always one a person typed or clicked, which is exactly the signal P6 wants
+                // to keep. Same savepoint discipline as the review path: a learning failure
+                // never fails the link.
+                if (_aliasLearner != null)
+                    await LearnClientIdentityAsync(businessUnitId, lead, customerId, previousCustomerId, audit.Id);
+
+                if (transaction != null)
+                    await transaction.CommitAsync();
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+                if (transaction != null)
+                    await transaction.RollbackAsync();
+                throw new LeadReviewConflictException("The lead changed while the client was being linked. Refresh and retry.");
+            }
+            catch (DbUpdateException)
+            {
+                if (transaction != null)
+                    await transaction.RollbackAsync();
+                throw new LeadReviewConflictException("The client link could not be saved. Refresh and retry.");
+            }
+
+            _logger?.LogInformation(
+                "Lead {LeadId} linked to customer {CustomerId} (contact {ContactId}) by {LinkedBy}.",
+                lead.Id, customerId, request.ContactId, linkedBy);
+
+            return await GetLeadByIdAsync(id, businessUnitId);
+        }
+
+        /// <summary>
         /// Turns the reviewer's client correction into durable identity knowledge, inside the
         /// review's own transaction.
         ///

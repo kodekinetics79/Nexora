@@ -7,14 +7,9 @@ import {
 } from '@mui/material';
 import { AddBusiness as AddBusinessIcon } from '@mui/icons-material';
 import { toast } from 'react-hot-toast';
-import leadService, {
-  type ClientCandidateDTO, type LeadItemResponseDTO, type LeadResponseDTO,
-} from '../../api/services/leadService';
+import leadService, { type ClientCandidateDTO } from '../../api/services/leadService';
 import customerService from '../../api/services/customerService';
 import contactService from '../../api/services/contactService';
-import extractionReviewService, {
-  type ReviewItemPayload, type SubmitReviewPayload,
-} from '../../api/services/extractionReviewService';
 import { presentableErrorMessage } from '../../utils/apiErrors';
 import { candidateExplanation, clientCandidates, confidencePercent, type ClientIdentityLike } from './ClientCell';
 
@@ -40,63 +35,17 @@ import { candidateExplanation, clientCandidates, confidencePercent, type ClientI
  */
 
 /**
- * Builds the review payload that sets (only) the client organisation.
+ * Fallback wording when the server does not supply its own sentence.
  *
- * Two backend behaviours drive the shape, both verified in
- * `Repositories/LeadRepository.SubmitLeadReviewAsync`:
- *
- *  1. HEADER — only non-null fields are applied. Omitting rfqno/buyersName/etc.
- *     is therefore a no-op, which is what we want: this is a pure "set the
- *     client" write and must not silently re-stamp other header fields.
- *  2. ITEMS — items that exist in the database but are absent from the payload
- *     are DELETED. Sending `items: []` would wipe every line on the lead, so the
- *     stored lines are echoed back in full. `ApplyItemFields` assigns every
- *     field unconditionally, so the echo has to be faithful.
- *
- * The single deliberate omission is a non-positive quantity: the backend
- * rejects `quantity <= 0` on save, and it only applies quantity when supplied
- * (`if (dto.Quantity.HasValue)`), so omitting it preserves the stored value
- * instead of failing the whole action over an unrelated extraction defect.
- */
-export const buildClientReviewPayload = (
-  lead: Pick<LeadResponseDTO, 'reviewVersion' | 'leadItems'>,
-  selection: { customerId: number; contactId?: number | null },
-): SubmitReviewPayload => ({
-  action: 'save',
-  // ReviewVersion is 1-based server-side and the DTO rejects 0.
-  expectedVersion: Math.max(1, lead.reviewVersion ?? 1),
-  header: {
-    customerId: selection.customerId,
-    ...(selection.contactId != null ? { contactId: selection.contactId } : {}),
-  },
-  items: (lead.leadItems ?? []).map<ReviewItemPayload>((it: LeadItemResponseDTO) => ({
-    id: it.id,
-    lineItemNo: it.lineItemNo || undefined,
-    productShortName: it.productShortName || undefined,
-    productShortDescription: it.productShortDescription || undefined,
-    commodityProduct: it.commodityProduct || undefined,
-    itemMaterialCode: it.itemMaterialCode || undefined,
-    currency: it.currency || undefined,
-    unitOfMeasure: it.unitOfMeasure || undefined,
-    unitPrice: it.unitPrice ?? undefined,
-    quantity: it.quantity != null && it.quantity > 0 ? it.quantity : undefined,
-    manufacturerName: it.manufacturerName || undefined,
-    manufacturerPartNumber: it.manufacturerPartNumber || undefined,
-    alternateProductName: it.alternateProductName || undefined,
-    alternatePartNumber: it.alternatePartNumber || undefined,
-    itemText: it.itemText || undefined,
-    leadTime: it.leadTime || undefined,
-  })),
-});
-
-/**
- * Fallback wording when the server does not supply its own sentence. The
- * pointer to Extraction Review is load-bearing: the client link is written
- * through the extraction-review endpoint, so a lead that is no longer awaiting
- * review, or whose lines fail review validation, is refused there.
+ * It used to end "open this lead in Extraction Review to complete it there", which was
+ * advice that could not be followed: the reason the link failed was that the lead was no
+ * longer IN extraction review, and there is no way back into it. Sending an operator to a
+ * screen that will refuse them is worse than saying nothing. The link now has its own
+ * endpoint with none of those preconditions, so the only honest fallback is that the write
+ * did not happen and nothing changed.
  */
 export const CLIENT_LINK_FAILURE_MESSAGE =
-  'The client could not be linked. Nothing was changed — open this lead in Extraction Review to complete it there.';
+  'The client could not be linked, and nothing was changed. Try again in a moment.';
 
 export interface ClientSelection {
   customerId: number;
@@ -221,15 +170,6 @@ const ResolveClientDialog: React.FC<ResolveClientDialogProps> = ({
     return () => clearTimeout(handle);
   }, [searchTerm]);
 
-  // The full lead is needed to build a lossless review payload (its line items
-  // must be echoed back or the backend deletes them). Deferred mode never
-  // submits, so it does not need — and must not wait on — this fetch.
-  const leadQuery = useQuery({
-    queryKey: ['lead-detail', Number(leadId)],
-    queryFn: () => leadService.getById(Number(leadId)),
-    enabled: isOpen && !deferred,
-  });
-
   const candidatesQuery = useQuery({
     queryKey: ['lead-client-candidates', Number(leadId)],
     queryFn: () => leadService.getClientCandidates(Number(leadId)),
@@ -258,10 +198,8 @@ const ResolveClientDialog: React.FC<ResolveClientDialogProps> = ({
   const candidates = React.useMemo<ClientCandidateDTO[]>(() => {
     const fromEndpoint = candidatesQuery.data ?? [];
     if (fromEndpoint.length > 0) return [...fromEndpoint].sort((a, b) => (a.rank ?? 0) - (b.rank ?? 0));
-    const fromDetail = leadQuery.data ? clientCandidates(leadQuery.data) : [];
-    if (fromDetail.length > 0) return fromDetail;
     return lead ? clientCandidates(lead) : [];
-  }, [candidatesQuery.data, leadQuery.data, lead]);
+  }, [candidatesQuery.data, lead]);
 
   const searchResults = React.useMemo(() => {
     const items = searchQuery.data?.items ?? [];
@@ -281,11 +219,8 @@ const ResolveClientDialog: React.FC<ResolveClientDialogProps> = ({
   }, [selectedCustomerId, candidates, searchQuery.data]);
 
   const mutation = useMutation({
-    mutationFn: async (selection: { customerId: number; contactId?: number | null }) => {
-      const full = leadQuery.data;
-      if (!full) throw new Error('lead-not-loaded');
-      return extractionReviewService.submitReview(full.id, buildClientReviewPayload(full, selection));
-    },
+    mutationFn: (selection: { customerId: number; contactId?: number | null }) =>
+      leadService.linkClient(Number(leadId), selection),
     onSuccess: (_data, selection) => {
       toast.success('Client linked to this lead.');
       queryClient.invalidateQueries({ queryKey: ['leads'] });
@@ -354,8 +289,7 @@ const ResolveClientDialog: React.FC<ResolveClientDialogProps> = ({
     mutation.mutate({ customerId: selectedCustomerId, contactId });
   };
 
-  const leadLoading = !deferred && leadQuery.isPending && isOpen;
-  const canConfirm = selectedCustomerId != null && !mutation.isPending && (deferred || !!leadQuery.data);
+  const canConfirm = selectedCustomerId != null && !mutation.isPending;
 
   return (
     <Dialog open={isOpen} onClose={() => !mutation.isPending && onClose()} fullWidth maxWidth="sm">
@@ -365,19 +299,6 @@ const ResolveClientDialog: React.FC<ResolveClientDialogProps> = ({
           Pick the organisation that sent this enquiry. Nexora only suggests — nothing is linked
           until you confirm it here.
         </Typography>
-
-        {leadQuery.isError && !deferred && (
-          <Alert severity="error" sx={{ mb: 2 }} action={<Button color="inherit" size="small" onClick={() => leadQuery.refetch()}>Retry</Button>}>
-            We couldn&apos;t load this lead, so the client cannot be linked right now.
-          </Alert>
-        )}
-
-        {leadLoading && (
-          <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center', py: 2 }} role="status" aria-live="polite">
-            <CircularProgress size={20} />
-            <Typography variant="body2" color="text.secondary">Loading this lead…</Typography>
-          </Stack>
-        )}
 
         <FormControl component="fieldset" sx={{ width: '100%' }}>
           <FormLabel component="legend" sx={{ fontWeight: 800, fontSize: '0.7rem', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
@@ -400,7 +321,7 @@ const ResolveClientDialog: React.FC<ResolveClientDialogProps> = ({
               />
             ))}
 
-            {candidates.length === 0 && !leadLoading && (
+            {candidates.length === 0 && !candidatesQuery.isPending && (
               <Typography variant="body2" color="text.secondary" sx={{ py: 1 }}>
                 Nexora has no suggestion for this lead. Search for the client below.
               </Typography>

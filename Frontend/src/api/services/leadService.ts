@@ -41,6 +41,20 @@ export interface ClientCandidateDTO {
   explanation?: string | null;
 }
 
+/**
+ * What a tenant-wide re-run of client matching actually did. Every number is a real count
+ * of rows the server touched — `CustomerResolutionBackfillResult` verbatim — so the result
+ * can be reported to the operator instead of a cheerful "done".
+ */
+export interface ClientResolutionRunDTO {
+  examined: number;
+  autoMatched: number;
+  suggested: number;
+  ambiguous: number;
+  unresolved: number;
+  failed: number;
+}
+
 export interface LeadResponseDTO {
   id: number;
   commercialCaseId?: number | null;
@@ -630,6 +644,52 @@ const leadService = {
       if (status === 404 || status === 403) return [];
       throw error;
     }
+  },
+
+  /**
+   * Links this lead to the client organisation a person picked.
+   * PUT /api/Lead/{id}/client (Leads:Edit).
+   *
+   * This used to go through `extractionReviewService.submitReview`, and that was a
+   * dead end for most leads: the review endpoint's first gate refuses any lead whose
+   * extraction already succeeded, which on the happy path is every lead. Since a lead
+   * cannot be qualified or converted without a client, the enquiry was stranded with
+   * no route forward. This endpoint carries the same decision with none of the
+   * extraction-review preconditions.
+   *
+   * `expectedVersion` is deliberately NOT sent from here. It exists for callers that
+   * are holding a review snapshot; a grid row or a deadline-board row is not, and
+   * inventing a version to satisfy the wire format would turn a stale render into a
+   * spurious conflict.
+   */
+  linkClient: async (
+    id: number,
+    body: { customerId: number; contactId?: number | null; reason?: string },
+  ): Promise<LeadResponseDTO> => {
+    const r = await axiosInstance.put<LeadResponseDTO>(`/api/Lead/${id}/client`, {
+      customerId: body.customerId,
+      ...(body.contactId != null ? { contactId: body.contactId } : {}),
+      ...(body.reason ? { reason: body.reason } : {}),
+    });
+    return r.data;
+  },
+
+  /**
+   * Re-runs deterministic client matching across every lead in the tenant that a person
+   * has not already decided. POST /api/Lead/resolve-clients (manager + Leads:Edit).
+   *
+   * This endpoint has existed, tested, since the client-identity release, and until now
+   * NOTHING in the product called it — so the one action that could clear an accumulated
+   * backlog of unlinked enquiries was unreachable. It matters most immediately after a
+   * person links a client by hand: that link teaches the matcher the buyer's domain, and
+   * this is what then applies the lesson to every other enquiry already sitting in the
+   * pile. It never touches a lead a person has decided.
+   */
+  resolveClients: async (
+    params: { maxLeads?: number; includeSuggested?: boolean } = {},
+  ): Promise<ClientResolutionRunDTO> => {
+    const r = await axiosInstance.post<ClientResolutionRunDTO>('/api/Lead/resolve-clients', null, { params });
+    return r.data;
   },
 
   getIngestionBatch: async (batchId: string): Promise<BatchReconciliationDTO> => {

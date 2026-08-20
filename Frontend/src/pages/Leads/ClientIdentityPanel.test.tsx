@@ -7,6 +7,7 @@ import ClientIdentityPanel from './ClientIdentityPanel';
 import type { LeadResponseDTO } from '../../api/services/leadService';
 
 const getClientCandidates = vi.fn();
+const linkClient = vi.fn();
 const submitReview = vi.fn();
 const getAll = vi.fn();
 const getByCustomer = vi.fn();
@@ -14,6 +15,7 @@ const getByCustomer = vi.fn();
 vi.mock('../../api/services/leadService', () => ({
   default: {
     getClientCandidates: (...args: unknown[]) => getClientCandidates(...args),
+    linkClient: (...args: unknown[]) => linkClient(...args),
     getById: vi.fn(),
   },
 }));
@@ -69,6 +71,7 @@ beforeEach(() => {
   getAll.mockResolvedValue({ items: [], totalCount: 0, pageNumber: 1, pageSize: 10 });
   getByCustomer.mockResolvedValue([]);
   submitReview.mockResolvedValue(lead({ customerId: 42 }));
+  linkClient.mockResolvedValue(lead({ customerId: 42 }));
 });
 
 describe('ClientIdentityPanel — unresolved', () => {
@@ -133,22 +136,27 @@ describe('ClientIdentityPanel — suggested', () => {
     expect(screen.getByText(/Matched because the sender's email domain belongs to this client\./)).toBeInTheDocument();
   });
 
-  it('confirms in ONE click — no dialog, no extra decision', async () => {
+  /**
+   * One click, and it goes to the dedicated client endpoint.
+   *
+   * This used to submit an extraction review, echoing every stored line item back so the
+   * server would not delete them. That path is refused outright for any lead whose
+   * extraction already succeeded — the ordinary case — so a one-click confirm on such a
+   * lead did nothing but raise a toast. The endpoint it calls now has no extraction-review
+   * preconditions and needs no line items echoed.
+   */
+  it('confirms in ONE click, through the client endpoint rather than extraction review', async () => {
     const onChanged = vi.fn();
     renderPanel(<ClientIdentityPanel lead={suggested} onChanged={onChanged} />);
 
     const confirm = await screen.findByRole('button', { name: /Confirm Saudi Electricity Company/i });
     confirm.click();
 
-    await waitFor(() => expect(submitReview).toHaveBeenCalledTimes(1));
-    const [leadId, payload] = submitReview.mock.calls[0];
+    await waitFor(() => expect(linkClient).toHaveBeenCalledTimes(1));
+    const [leadId, body] = linkClient.mock.calls[0];
     expect(leadId).toBe(501);
-    expect(payload.header.customerId).toBe(42);
-    expect(payload.action).toBe('save');
-    // The stored lines must be echoed back: the endpoint DELETES any line item
-    // absent from the payload.
-    expect(payload.items).toHaveLength(1);
-    expect(payload.items[0].id).toBe(900);
+    expect(body).toEqual({ customerId: 42, contactId: null });
+    expect(submitReview).not.toHaveBeenCalled();
     await waitFor(() => expect(onChanged).toHaveBeenCalled());
   });
 

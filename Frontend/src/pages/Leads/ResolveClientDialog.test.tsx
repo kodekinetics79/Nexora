@@ -1,27 +1,33 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
-import ResolveClientDialog, { buildClientReviewPayload } from './ResolveClientDialog';
+import ResolveClientDialog from './ResolveClientDialog';
 import type { LeadResponseDTO } from '../../api/services/leadService';
 
 const getById = vi.fn();
 const getClientCandidates = vi.fn();
+const linkClient = vi.fn();
 const submitReview = vi.fn();
 const getAll = vi.fn();
+const createCustomer = vi.fn();
 const getByCustomer = vi.fn();
 
 vi.mock('../../api/services/leadService', () => ({
   default: {
     getById: (...args: unknown[]) => getById(...args),
     getClientCandidates: (...args: unknown[]) => getClientCandidates(...args),
+    linkClient: (...args: unknown[]) => linkClient(...args),
   },
 }));
 vi.mock('../../api/services/extractionReviewService', () => ({
   default: { submitReview: (...args: unknown[]) => submitReview(...args) },
 }));
 vi.mock('../../api/services/customerService', () => ({
-  default: { getAll: (...args: unknown[]) => getAll(...args) },
+  default: {
+    getAll: (...args: unknown[]) => getAll(...args),
+    create: (...args: unknown[]) => createCustomer(...args),
+  },
 }));
 vi.mock('../../api/services/contactService', () => ({
   default: { getByCustomer: (...args: unknown[]) => getByCustomer(...args) },
@@ -50,8 +56,6 @@ const lead = (over: Partial<LeadResponseDTO> = {}): LeadResponseDTO => ({
   lifecycleVersion: 1,
   leadItems: [
     { id: 900, quantity: 4, aiconfidence: 0.9, productShortName: 'Valve', currency: 'SAR' },
-    // A non-positive quantity is an extraction defect, not a reason to block a
-    // client link — see the payload test below.
     { id: 901, quantity: 0, aiconfidence: 0.4, productShortName: 'Gasket' },
   ],
   ...over,
@@ -73,7 +77,8 @@ beforeEach(() => {
   getClientCandidates.mockResolvedValue(CANDIDATES);
   getAll.mockResolvedValue({ items: [], totalCount: 0, pageNumber: 1, pageSize: 10 });
   getByCustomer.mockResolvedValue([]);
-  submitReview.mockResolvedValue(lead({ customerId: 42 }));
+  linkClient.mockResolvedValue(lead({ customerId: 42 }));
+  createCustomer.mockResolvedValue({ id: 77, name: 'Fulton County Government' });
 });
 
 describe('ResolveClientDialog', () => {
@@ -106,16 +111,7 @@ describe('ResolveClientDialog', () => {
     escape.click();
 
     await waitFor(() => expect(onClose).toHaveBeenCalled());
-    expect(submitReview).not.toHaveBeenCalled();
-  });
-
-  it('offers no way to create a customer — a wrong client is worse than an unresolved one', async () => {
-    render(<ResolveClientDialog open leadId={501} lead={lead()} onClose={() => {}} />, { wrapper });
-
-    await screen.findByText('Saudi Electricity Company');
-    const dialog = screen.getByRole('dialog');
-    expect(within(dialog).queryByRole('button', { name: /create|add new|new client|new customer/i })).not.toBeInTheDocument();
-    expect(within(dialog).queryByText(/create a (new )?(client|customer)/i)).not.toBeInTheDocument();
+    expect(linkClient).not.toHaveBeenCalled();
   });
 
   it('cannot confirm until a client is actually chosen', async () => {
@@ -128,7 +124,15 @@ describe('ResolveClientDialog', () => {
     await waitFor(() => expect(confirm).toBeEnabled());
   });
 
-  it('writes the chosen client through the review endpoint', async () => {
+  /**
+   * The regression this whole change exists for.
+   *
+   * The client link used to be written through `extractionReviewService.submitReview`,
+   * and the backend refuses that endpoint for any lead whose extraction already
+   * succeeded — which, on the happy path, is every lead. Linking must go through the
+   * dedicated client endpoint, which has no extraction-review preconditions.
+   */
+  it('links the client through the dedicated client endpoint, never through extraction review', async () => {
     const onResolved = vi.fn();
     render(
       <ResolveClientDialog open leadId={501} lead={lead()} onClose={() => {}} onResolved={onResolved} />,
@@ -138,9 +142,30 @@ describe('ResolveClientDialog', () => {
     (await screen.findAllByRole('radio'))[0].click();
     (await screen.findByRole('button', { name: /Confirm client/i })).click();
 
-    await waitFor(() => expect(submitReview).toHaveBeenCalledTimes(1));
-    expect(submitReview.mock.calls[0][1].header.customerId).toBe(42);
+    await waitFor(() => expect(linkClient).toHaveBeenCalledTimes(1));
+    expect(linkClient.mock.calls[0][0]).toBe(501);
+    expect(linkClient.mock.calls[0][1]).toEqual({ customerId: 42, contactId: null });
+    expect(submitReview).not.toHaveBeenCalled();
     await waitFor(() => expect(onResolved).toHaveBeenCalledWith(42));
+  });
+
+  /**
+   * The dialog used to block Confirm on a full `getById` of the lead, because the review
+   * payload had to echo every stored line item back or the server would delete them. The
+   * dedicated endpoint writes two scalars, so the dialog neither needs the lead nor may
+   * be held hostage by a failure to load it.
+   */
+  it('does not need the whole lead in order to link a client', async () => {
+    getById.mockRejectedValue(new Error('lead detail is down'));
+    render(<ResolveClientDialog open leadId={501} lead={lead()} onClose={() => {}} />, { wrapper });
+
+    (await screen.findAllByRole('radio'))[0].click();
+    const confirm = await screen.findByRole('button', { name: /Confirm client/i });
+    await waitFor(() => expect(confirm).toBeEnabled());
+    confirm.click();
+
+    await waitFor(() => expect(linkClient).toHaveBeenCalledTimes(1));
+    expect(getById).not.toHaveBeenCalled();
   });
 
   it('reports the choice instead of writing it in deferred mode', async () => {
@@ -156,33 +181,64 @@ describe('ResolveClientDialog', () => {
     await waitFor(() => expect(onSelect).toHaveBeenCalledWith(
       expect.objectContaining({ customerId: 42, customerName: 'Saudi Electricity Company' }),
     ));
+    expect(linkClient).not.toHaveBeenCalled();
     expect(submitReview).not.toHaveBeenCalled();
-    // Deferred hosts already hold the lead; the dialog must not refetch it.
     expect(getById).not.toHaveBeenCalled();
   });
-});
 
-describe('buildClientReviewPayload', () => {
-  it('echoes every stored line item back, because the endpoint deletes anything absent', () => {
-    const payload = buildClientReviewPayload(lead(), { customerId: 42 });
-    expect(payload.items.map((i) => i.id)).toEqual([900, 901]);
-    expect(payload.action).toBe('save');
-    expect(payload.header).toEqual({ customerId: 42 });
-  });
+  /**
+   * A buyer with no customer record is the single most common reason an enquiry is
+   * stranded, so the create path is the exit from that state and has to be covered.
+   *
+   * The previous test in this slot asserted the OPPOSITE — "offers no way to create a
+   * customer" — and had been passing vacuously for some time: it rendered without a
+   * search term, and the create affordance only mounts once a search of two or more
+   * characters comes back empty, so it was asserting the absence of something that was
+   * never mounted. A test that cannot fail is not coverage.
+   */
+  describe('creating a client that does not exist yet', () => {
+    const searchForNothing = async () => {
+      render(
+        <ResolveClientDialog
+          open
+          leadId={501}
+          lead={lead()}
+          prefill={{ name: 'Fulton County Government', email: 'bids@fultoncountyga.gov' }}
+          onClose={() => {}}
+        />,
+        { wrapper },
+      );
+      await screen.findByText('Saudi Electricity Company');
+      fireEvent.change(screen.getByLabelText(/Search all clients by name/i), {
+        target: { value: 'Fulton County Government' },
+      });
+      return screen.findByRole('button', { name: /Create .*Fulton County Government.* as a new client/i });
+    };
 
-  it('omits a non-positive quantity, which the server preserves, instead of failing the link', () => {
-    const payload = buildClientReviewPayload(lead(), { customerId: 42 });
-    expect(payload.items[0].quantity).toBe(4);
-    expect(payload.items[1].quantity).toBeUndefined();
-  });
+    it('offers to create the buyer only once a search has proved no such client exists', async () => {
+      const create = await searchForNothing();
+      expect(create).toBeInTheDocument();
+      // It is offered because the search came back empty, not merely because text was typed.
+      await waitFor(() => expect(getAll).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'Fulton County Government' }),
+      ));
+    });
 
-  it('sends a contact only when one was chosen', () => {
-    expect(buildClientReviewPayload(lead(), { customerId: 42, contactId: null }).header.contactId).toBeUndefined();
-    expect(buildClientReviewPayload(lead(), { customerId: 42, contactId: 7 }).header.contactId).toBe(7);
-  });
+    it('selects the new client but does not link it — that stays a separate, explicit act', async () => {
+      const create = await searchForNothing();
+      create.click();
 
-  it('never sends the review version the DTO rejects', () => {
-    expect(buildClientReviewPayload(lead({ reviewVersion: 0 }), { customerId: 42 }).expectedVersion).toBe(1);
-    expect(buildClientReviewPayload(lead({ reviewVersion: 5 }), { customerId: 42 }).expectedVersion).toBe(5);
+      const submit = await screen.findByRole('button', { name: /^Create client$/i });
+      submit.click();
+
+      await waitFor(() => expect(createCustomer).toHaveBeenCalledTimes(1));
+      const form = createCustomer.mock.calls[0][0] as FormData;
+      expect(form.get('Name')).toBe('Fulton County Government');
+      expect(form.get('ContactEmail')).toBe('bids@fultoncountyga.gov');
+
+      // Creating a client must never link it in the same breath: a mis-typed name has to
+      // be correctable before anything is attached to the enquiry.
+      expect(linkClient).not.toHaveBeenCalled();
+    });
   });
 });
