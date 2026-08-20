@@ -89,6 +89,37 @@ public static class EmailInquiryHoldReasons
         + "link.";
 
     /// <summary>
+    /// The message carried content that could have held a request, and none of it survived
+    /// into an inquiry.
+    ///
+    /// <para>The same zero-line merge as <see cref="NoRequestableContent"/>, reached for the
+    /// opposite reason. Here the extractors DID see candidate lines — parsed text regions on a
+    /// document, model-named items before anchor verification on a body — and none of them
+    /// became a requestable line. A scanned RFQ whose OCR came back partial is the case that
+    /// matters: it is a real customer request, and telling the operator it asked for nothing
+    /// sends them to chase a sender who did their part.</para>
+    ///
+    /// <para>Held, not closed, exactly as the other case is: the content is still there to be
+    /// read, and reprocessing the message can still produce the inquiry.</para>
+    /// </summary>
+    public const string ContentNotRecovered = "assembly_content_not_recovered";
+
+    /// <summary>
+    /// What an operator is told when the message was not read well enough to quote from.
+    ///
+    /// <para>It says the one thing that changes what they do next: the failure is on Nexora's
+    /// side of the exchange, so the next step is to read or reprocess the message, not to reply
+    /// to the sender. Length obeys the same 300-character screen gate as every sentence here,
+    /// which is why the extractor's own review reasons are LOGGED rather than appended — they
+    /// are unbounded, and a reason one character too long renders as no reason at all.</para>
+    /// </summary>
+    public const string ContentNotRecoveredDetail =
+        "Nexora found content in this message but could not recover any product, quantity or "
+        + "specification from it, so no inquiry was created. Nothing is lost — the original "
+        + "email is retained. Read it before replying: this is not a message that asked for "
+        + "nothing.";
+
+    /// <summary>
     /// The message merged cleanly, but the persist path produced no Lead.
     ///
     /// <para>The persister returns a lead id, and a NON-POSITIVE one is not an id — it is
