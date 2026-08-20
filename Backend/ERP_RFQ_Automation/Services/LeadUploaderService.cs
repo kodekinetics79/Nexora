@@ -19,12 +19,21 @@ namespace ERP_RFQ_Automation.Services
 
         private readonly ERP_RFQ_Automation.LeadIdentity.ILeadIdentityApplicationService _identity;
 
+        // Required, not optional-with-null — the rule ManualUploadService states beside its own
+        // identity collaborator, and for the same reason: an optional dependency is always supplied
+        // in production and always absent in tests, so the step that must always run becomes the
+        // step nothing exercises. That is exactly how client resolution came to be missing from
+        // every upload door while the extraction door had it.
+        private readonly ERP_RFQ_Automation.CustomerResolution.ILeadCustomerResolutionService _customerResolution;
+
         public LeadUploaderService(ErpRfqAutomationContext context, ILogger<LeadUploaderService> logger,
-            ERP_RFQ_Automation.LeadIdentity.ILeadIdentityApplicationService identity)
+            ERP_RFQ_Automation.LeadIdentity.ILeadIdentityApplicationService identity,
+            ERP_RFQ_Automation.CustomerResolution.ILeadCustomerResolutionService customerResolution)
         {
             _context = context;
             _logger = logger;
             _identity = identity;
+            _customerResolution = customerResolution;
         }
 
         public async Task<byte[]> GenerateTemplateAsync(long businessUnitId)
@@ -247,6 +256,18 @@ namespace ERP_RFQ_Automation.Services
                             "User", "System", $"bulk-upload:{businessUnitId}:{importedLeadId}"));
 
                 await transaction.CommitAsync();
+
+                // Client resolution runs AFTER the commit, deliberately outside the upload
+                // transaction. It writes its own rows, and a failure to work out who the buyer is
+                // must never roll back an import the user has already done — the leads and their
+                // lines are the work; the client link is a decision that can be re-run.
+                //
+                // Until now no upload door resolved at all: only the extraction worker did, so a
+                // bulk-imported lead was born with a NULL CustomerMatchReasonCode — not "no match
+                // found" but never evaluated — and could never be qualified or converted, because
+                // both require a client. Exactly the shape of the identity gap fixed above it.
+                await ERP_RFQ_Automation.CustomerResolution.UploadedLeadResolution.ResolveAsync(
+                    _customerResolution, businessUnitId, importedLeadIds, _logger, "bulk-upload");
 
                 return ServiceResult<string>.CreateSuccess($"{leadCount} leads and {itemViewCount} items imported successfully.");
             }
