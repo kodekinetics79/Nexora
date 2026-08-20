@@ -163,6 +163,8 @@ public class EmailInquiryHoldLifecycleTests
         EmailInquiryHoldReasons.OwnershipUnresolvedDetail)]
     [InlineData(EmailInquiryHoldReasons.NoRequestableContent,
         EmailInquiryHoldReasons.NoRequestableContentDetail)]
+    [InlineData(EmailInquiryHoldReasons.ContentNotRecovered,
+        EmailInquiryHoldReasons.ContentNotRecoveredDetail)]
     public void A_hold_reason_fits_the_sentence_gate_the_operator_screen_applies(
         string code, string detail)
     {

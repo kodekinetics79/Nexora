@@ -4,11 +4,14 @@ using ERP_RFQ_Automation.Ingestion.Assembly;
 using ERP_RFQ_Automation.Ingestion.Triage;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.MultiTenancy;
+using ERP_RFQ_Automation.Services.DocumentIntelligence;
 using ERP_RFQ_Automation.Services.Interfaces;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using MimeKit;
+using QuestPDF.Fluent;
+using QuestPDF.Infrastructure;
 
 namespace ERP_RFQ_Automation.Tests;
 
@@ -259,6 +262,85 @@ public sealed class MarketingMailDoesNotBecomeLeadPostgreSqlTests(PostgreSqlTest
         Assert.Equal(EmailInquiryAssemblyStatus.Assembled, assembly.Status);
     }
 
+    // =====================================================================================
+    // 4. THE TWO REASONS A MESSAGE CAN NAME ZERO LINES ARE NOT THE SAME REASON, AND THE
+    //    OPERATOR IS THE ONE WHO HAS TO TELL THEM APART.
+    //
+    // Test 1 above is a message that WAS read and asked for nothing. This is a message we FAILED
+    // TO READ: a scanned RFQ whose OCR came back partial. ChunkedExtractionService reports that
+    // honestly — NeedsReview, a non-null result, zero items, and a POSITIVE expected count
+    // ("OCR was incomplete; omitted content requires review") — and ExtractionWorker diverts only
+    // on Failed or a null result, so the outcome is recorded and the assembler runs on it.
+    //
+    // Both messages are held, and both should be. What must differ is the sentence, because the
+    // sentence is the whole of what the operator acts on: "they asked for nothing" sends them to
+    // chase a buyer who did their part, when the document is sitting in the message waiting to be
+    // re-read. Before this branch existed, a real customer RFQ was held with the marketing
+    // sentence on it.
+    // =====================================================================================
+
+    [Fact]
+    public async Task A_document_we_could_not_read_is_not_held_with_the_sentence_for_a_message_that_asked_for_nothing()
+    {
+        var businessUnitId = UniqueBusinessUnitId();
+        var messageId = $"partial-ocr-{Guid.NewGuid():N}@newbuyer.example";
+        await using (var connection = await _database.OpenConnectionAsync())
+            await EmailToLeadHarness.SeedTenantAsync(connection, businessUnitId, messageId);
+
+        // The BODY is a covering note that genuinely asks for nothing — that is the real shape of
+        // "please see attached", and it is what makes the attachment the only thing that could
+        // have carried the request. The chunked extractor is the one substitution: OCR quality is
+        // not reproducible from a byte stream, so the outcome it produces on a bad scan is stated
+        // directly. Everything else — capture, the queue, the real PDF reader, the coordinator,
+        // the assembler — is real.
+        await using var services = EmailToLeadHarness.BuildGraph(
+            _database.ConnectionString, _storageRoot, new EmailToLeadHarness.RefusingLlm(),
+            registrations => registrations
+                .AddScoped<IConversationalExtractionService, NoRequestableItemsExtractor>()
+                .AddScoped<IChunkedExtractionService, PartiallyReadDocumentExtractor>());
+
+        const string note = "Hi,\n\nOur requirement is attached, scanned from the signed original."
+            + "\n\nRegards,\nProcurement";
+        var message = BuildProseMessage(
+            messageId, "hello@newbuyer.example", "Our requirement (scanned)", note);
+        message.Body = new Multipart("mixed")
+        {
+            message.Body,
+            EmailToLeadHarness.Attachment("scanned-requirement.pdf", "application/pdf", ScannedPdf())
+        };
+
+        var (_, assemblyId, schedule) = await EmailToLeadHarness.CaptureAndScheduleAsync(
+            services, businessUnitId, message, expectedComponentCount: 2,
+            triage: TriageOf(message, note), clientEmail: "hello@newbuyer.example");
+        Assert.Equal(2, schedule.Scheduled);
+
+        await EmailToLeadHarness.DrainQueueAsync(services, businessUnitId);
+
+        using var scope = services.CreateScope();
+        using var tenant = scope.ServiceProvider
+            .GetRequiredService<ITenantScopeAccessor>().Push(businessUnitId);
+        var context = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+
+        // STILL HELD, AND STILL NO LEAD. Nothing about this change lowers the bar for minting one.
+        Assert.Empty(await context.Leads.AsNoTracking()
+            .Where(l => l.BusinessUnitId == businessUnitId).ToListAsync());
+        var assembly = await context.EmailInquiryAssemblies.AsNoTracking()
+            .SingleAsync(a => a.Id == assemblyId);
+        Assert.Equal(EmailInquiryAssemblyStatus.NeedsReview, assembly.Status);
+        Assert.Null(assembly.AssembledLeadId);
+
+        // THE ASSERTION THIS TEST EXISTS FOR. A different typed reason and a different sentence —
+        // and, said explicitly because it is the defect, NOT the one that tells the operator this
+        // sender asked for nothing.
+        Assert.NotNull(assembly.StatusReason);
+        Assert.StartsWith(EmailInquiryHoldReasons.ContentNotRecovered, assembly.StatusReason!,
+            StringComparison.Ordinal);
+        Assert.Contains(EmailInquiryHoldReasons.ContentNotRecoveredDetail, assembly.StatusReason!,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(EmailInquiryHoldReasons.NoRequestableContentDetail,
+            assembly.StatusReason!, StringComparison.Ordinal);
+    }
+
     // ---- helpers ---------------------------------------------------------------------------
 
     /// <summary>
@@ -340,5 +422,53 @@ public sealed class MarketingMailDoesNotBecomeLeadPostgreSqlTests(PostgreSqlTest
                 ExtractedItemCount = 1,
                 ProcessingPath = ExtractionProcessingPath.NativeParser
             });
+    }
+
+    /// <summary>
+    /// A scanned page whose OCR came back partial, in the exact shape
+    /// <c>ChunkedExtractionService</c> emits for one: <see cref="ExtractionOutcomeStatus.NeedsReview"/>
+    /// with a NON-NULL result, an empty item list, and — the discriminator — an
+    /// <c>ExpectedItemCount</c> above zero, because text regions WERE parsed off the page and
+    /// simply produced no line.
+    /// </summary>
+    private sealed class PartiallyReadDocumentExtractor : IChunkedExtractionService
+    {
+        private static ChunkedExtractionOutcome PartialOcr() => new()
+        {
+            Status = ExtractionOutcomeStatus.NeedsReview,
+            Result = Ext.Result([], 0.4),
+            ExpectedItemCount = 14,
+            ExtractedItemCount = 0,
+            ReviewReason = "OCR was incomplete; omitted content requires review.",
+            ProcessingPath = ExtractionProcessingPath.LocalOcr
+        };
+
+        public Task<ChunkedExtractionOutcome> ExtractAsync(
+            DocumentExtractionInput input, CancellationToken ct = default)
+            => Task.FromResult(PartialOcr());
+
+        public Task<ChunkedExtractionOutcome> ExtractUnstructuredAsync(
+            DocumentExtractionInput input, CancellationToken ct = default)
+            => Task.FromResult(PartialOcr());
+
+        public Task<ChunkedExtractionOutcome> ExtractStructuredAsync(
+            IReadOnlyList<RfqSpreadsheetRow> rows, long businessUnitId, string sourceName,
+            CancellationToken ct = default, string? documentNarrative = null)
+            => Task.FromResult(PartialOcr());
+    }
+
+    /// <summary>A real PDF, so the reader, the storage path and the queue all do real work; its
+    /// text layer is irrelevant because the extractor above states the outcome directly.</summary>
+    private static byte[] ScannedPdf()
+    {
+        QuestPDF.Settings.License = LicenseType.Community;
+        return QuestPDF.Fluent.Document.Create(container => container.Page(page =>
+        {
+            page.Margin(30);
+            page.Content().Text(
+                "REQUEST FOR QUOTATION 44-1180. Scanned from the signed original. The schedule of "
+                + "requirements continues over the following pages and is reproduced here at a "
+                + "quality the page reader recovers only in part.").FontSize(14);
+        })).GeneratePdf();
     }
 }
