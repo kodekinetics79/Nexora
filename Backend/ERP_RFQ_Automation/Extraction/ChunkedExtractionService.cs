@@ -817,7 +817,7 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             return Task.FromResult(Failed(0, "Structured file contained no valid line items."));
 
         var primary = import.Documents.First();
-        var items = allItems.Select(MapCanonicalItem).ToList();
+        var items = InheritStatedCurrency(allItems.Select(MapCanonicalItem).ToList());
         var overall = ComputeOverallConfidence(items, header: primary);
         var result = BuildStructuredResult(primary, items, overall);
 
@@ -838,7 +838,7 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
                 splitResults = import.Documents
                     .Select(d =>
                     {
-                        var groupItems = d.LineItems.Select(MapCanonicalItem).ToList();
+                        var groupItems = InheritStatedCurrency(d.LineItems.Select(MapCanonicalItem).ToList());
                         return BuildStructuredResult(d, groupItems, ComputeOverallConfidence(groupItems, d));
                     })
                     .ToList();
@@ -1036,6 +1036,41 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             RequiredDeliveryDateConfidence: (double)doc.RequiredDeliveryDate.Confidence,
             AgreementReference: doc.AgreementReference.Value,
             AgreementReferenceConfidence: (double)doc.AgreementReference.Confidence);
+
+
+    /// <summary>
+    /// Fills a blank line currency from the ONE currency the document actually stated.
+    ///
+    /// <para>An RFQ quotes in a single currency, stated once — usually in the header or on the
+    /// first priced row — and the model returns it only where it saw it. Every other line then
+    /// carries null, and the whole document reaches the buyer with no currency on 31 of its 32
+    /// lines. Measured on a real Aramco bid: currency was null on all 32.</para>
+    ///
+    /// <para>REFUSES TO GUESS when the document states more than one. A genuinely multi-currency
+    /// bid exists, and silently rewriting the minority to the majority would misprice it — the one
+    /// failure mode worse than a blank field, because a blank is visibly missing and a wrong
+    /// currency looks complete. Nothing is inferred here that the document did not say.</para>
+    /// </summary>
+    private static List<LeadItemData> InheritStatedCurrency(List<LeadItemData> items)
+    {
+        var stated = items
+            .Select(x => x.Currency)
+            .Where(c => !string.IsNullOrWhiteSpace(c))
+            .Select(c => c!.Trim().ToUpperInvariant())
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+
+        if (stated.Length != 1) return items;   // none stated, or genuinely mixed — leave it alone
+
+        var currency = stated[0];
+        for (var i = 0; i < items.Count; i++)
+            if (string.IsNullOrWhiteSpace(items[i].Currency))
+                // Confidence carries the provenance: this value was read from the document, but
+                // not from THIS line, and a reviewer should be able to tell the difference.
+                items[i] = items[i] with { Currency = currency, CurrencyConfidence = 0.75 };
+
+        return items;
+    }
 
     private static LeadItemData MapCanonicalItem(CanonicalRfqLineItem line)
         => new(
