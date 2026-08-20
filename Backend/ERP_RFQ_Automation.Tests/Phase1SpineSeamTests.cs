@@ -92,14 +92,18 @@ public sealed class Phase1SpineSeamTests
             Assert.Equal("EA", line.UnitOfMeasure);
             Assert.Equal(UpstreamSpine.FirstLinePart, line.ManufacturerPartNumber);
 
-            // A NAMED GAP, pinned so it cannot be lost. The buyer's required-by date is parsed per
-            // row by the spreadsheet parsers, collapsed to the header by
-            // CanonicalRfqNormalizer, and then dropped: LeadItem has no delivery-date column, so
-            // CreateRfqFromLeadAsync cannot carry one. Rfqitem.RequiredDesiredDate — read by the
-            // sourcing case, the SLA sweep and commercial learning — is therefore null on every
-            // RFQ line born from ingestion, and its ONLY writer is a manual API payload.
-            // When that hole is closed, this assertion is the one that changes.
-            Assert.Null(line.RequiredDesiredDate);
+            // THE GAP THAT WAS PINNED HERE, NOW CLOSED. The buyer's required-by date is parsed
+            // per row by the spreadsheet parsers and collapsed to the header by
+            // CanonicalRfqNormalizer; LeadItem has no delivery-date column, so the value lives on
+            // Lead.RequiredDeliveryDate and conversion used to drop it. Rfqitem.RequiredDesiredDate
+            // — read by the sourcing case, the inbound SLA sweep and commercial learning — was
+            // therefore null on every RFQ line born from ingestion, and its only writer was a
+            // manual API payload. Both conversion paths now carry the header date down.
+            //
+            // Asserted on EVERY line, not just the first: a carriage that reaches one line and not
+            // the next is the same defect wearing a smaller hat.
+            Assert.All(rfq.Rfqitems, item =>
+                Assert.Equal(UpstreamSpine.RequiredDeliveryDate, item.RequiredDesiredDate));
         }
 
         var sourcingCase = await spine.OpenSourcingCaseAsync(rfqId);
@@ -115,10 +119,11 @@ public sealed class Phase1SpineSeamTests
             Assert.Equal(lead.CommercialCaseReference, opened.NexoraSerial);
             Assert.Equal(lead.CustomerId, opened.CustomerId);
 
-            // Consequence of the gap above, stated where it bites: the sourcing case's RequiredOn
-            // is copied from Rfqitem.RequiredDesiredDate, so a buyer who stated a delivery date in
-            // their enquiry gets a sourcing case with no required date.
-            Assert.Null(opened.RequiredOn);
+            // Where the carriage above actually bites: the sourcing case's RequiredOn is copied
+            // from Rfqitem.RequiredDesiredDate, which is the date the supplier is asked to quote
+            // against. This is the assertion that proves the buyer's date reached procurement
+            // rather than merely being stored one table earlier.
+            Assert.Equal(UpstreamSpine.RequiredDeliveryDate, opened.RequiredOn);
         }
     }
 
@@ -255,6 +260,9 @@ internal sealed class UpstreamSpine : IDisposable
     public const int FirstLineQuantity = 40;
     public const string FirstLinePart = "SPINE-VALVE-0001";
 
+    /// <summary>The date the buyer needs the goods by, as stated on the enquiry document.</summary>
+    public static readonly DateTime RequiredDeliveryDate = new(2026, 11, 30, 0, 0, 0, DateTimeKind.Utc);
+
     /// <summary>
     /// Anchored to the real clock, deliberately, where every other seeded date in this file is a
     /// literal.
@@ -317,6 +325,10 @@ internal sealed class UpstreamSpine : IDisposable
             BuyersName = "Spine Bid Desk",
             RecDate = Now,
             BidClosingDate = Now.Date.AddDays(21),
+            // The buyer's own need-by date, stated in the enquiry. Distinct from BidClosingDate:
+            // one is when the quote is due, the other is when the goods are. Seeded on the SOURCE
+            // side only — every assertion about it below reads the DESTINATION the product wrote.
+            RequiredDeliveryDate = RequiredDeliveryDate,
             LeadSource = "SpineSeamTests",
             CreatedBy = "qa",
             CreatedDate = Now,

@@ -285,6 +285,12 @@ namespace ERP_RFQ_Automation.Repositories
                     InquiryType = l.InquiryType, // WP-BOQ: service/mixed list badge
                     DuplicateStatus = l.DuplicateStatus,
                     DuplicateOfLeadId = l.DuplicateOfLeadId,
+                    DuplicateResolvedBy = l.DuplicateResolvedBy,
+                    // This list offers a "revisions" view that filters on CurrentRevisionNumber > 1
+                    // (see the query above), and then returned every matching row reporting
+                    // revision 0 because this projection never set the column. A view whose whole
+                    // purpose is revised leads could not say which revision any of them was.
+                    CurrentRevisionNumber = l.CurrentRevisionNumber,
                     ItemCount = itemCounts.TryGetValue(l.Id, out var count) ? count : 0,
                     LeadItems = new List<LeadItemResponseDTO>(), // Empty list for list view
                     Attachments = attachmentsGrouped.TryGetValue(l.Id, out var atts) ? atts : new List<AttachmentResponseDTO>()
@@ -460,6 +466,11 @@ namespace ERP_RFQ_Automation.Repositories
                     LeadTime = li.LeadTime,
                     ReceivedDate = li.ReceivedDate,
                     BidClosingDateLine = li.BidClosingDateLine,
+                    // Carried from the lead header for the same reason, and by the same rule, as
+                    // LeadConversionIntelligence — see the comment there. Both conversion paths
+                    // have to do this, or which one an operator happened to use decides whether
+                    // the sourcing case and the SLA sweep ever learn the customer's date.
+                    RequiredDesiredDate = lead.RequiredDeliveryDate,
                     Aiconfidence = li.Aiconfidence,
                     CreatedBy = createdBy.Trim(),
                     CreatedDate = now
@@ -568,7 +579,14 @@ namespace ERP_RFQ_Automation.Repositories
                     FileName = a.FileName,
                     FilePath = a.FilePath,
                     MimeType = a.MimeType,
-                    // ... other fields
+                    // Completed from the "// ... other fields" this projection used to stop at.
+                    // The detail projection of this same DTO has always set them; this one is what
+                    // the accepted-leads grid reads, and FileSize arriving undefined is what makes
+                    // a size renderer print NaN KB rather than nothing.
+                    FileSize = a.FileSize,
+                    ContentType = a.ContentType,
+                    CreatedOn = a.CreatedOn,
+                    UploadedDate = a.UploadedDate
                 }).ToList());
 
             // Batch load item counts for all leads in a single query
@@ -587,6 +605,12 @@ namespace ERP_RFQ_Automation.Repositories
             var dtos = leads.Select(l => new AcceptedLeadResponseDTO
             {
                 Id = l.Id,
+                // The commercial identity, on the LIST as well as the detail. The detail projection
+                // of this same DTO has always carried both; dropping them here meant which endpoint
+                // a screen happened to call decided whether the lead had a Nexora serial at all —
+                // and the serial is the reference a customer quotes back at us.
+                CommercialCaseId = l.CommercialCaseId,
+                CommercialCaseReference = l.CommercialCaseReference,
                 Rfqno = l.Rfqno,
                 BuyersName = l.BuyersName,
                 RecDate = l.RecDate,

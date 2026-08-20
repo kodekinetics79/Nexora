@@ -17,6 +17,29 @@ export interface OrderDTO {
   paymentStatusId?: number;
   paymentStatus: string;
   paymentMethodId?: number;
+
+  /**
+   * The currency every monetary figure on this DTO is denominated in.
+   *
+   * `Order.CurrencyId` has always been persisted, the repository has always Included the
+   * navigation, and `OrderDto` states both — this interface simply never declared them, so the
+   * value arrived on the wire and no screen could read it. Orders, the order view and the shipment
+   * order-summary panel all printed a literal "$" instead, on records that may be denominated in
+   * SAR. Null means the order carries no currency; render it as a bare number, never as a house
+   * default.
+   */
+  currencyId?: number | null;
+  currencyCode?: string | null;
+
+  /**
+   * The commercial identity the order inherited from its quote. Emitted by `OrderDto` since the
+   * case spine landed; undeclared here, so the Orders screens cannot show the serial a customer
+   * quotes back at us.
+   */
+  commercialCaseId?: number | null;
+  nexoraSerial?: string | null;
+  contactId?: number | null;
+
   totalAmount: number;
   subTotal: number;
   taxAmount: number;

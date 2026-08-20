@@ -110,6 +110,28 @@ namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
         /// </summary>
         public decimal? TaxRatePercentApplied { get; set; }
 
+        /// <summary>
+        /// This line's share of the QUOTE-LEVEL discount, as allocated and stored by
+        /// <c>QuoteService.CalculateQuoteTotals</c> (see <c>QuoteItem.HeaderDiscountAllocated</c>).
+        ///
+        /// <para>It is on the wire for one reason: the header discount CANNOT be recovered from the
+        /// other figures. Every attempt to do so subtracts a tax-inclusive total from a tax-
+        /// exclusive net and lands 15% out — which is precisely why the column was added to the
+        /// model. A screen that must show the discount has to be told it.</para>
+        ///
+        /// <para>Null means the line predates the column, so no allocation is known for it; zero
+        /// means there was no header discount. The two are not the same statement.</para>
+        /// </summary>
+        public decimal? HeaderDiscountAllocated { get; set; }
+
+        /// <summary>
+        /// What output tax was charged on for this line: <see cref="TotalAmount"/> minus
+        /// <see cref="TaxAmount"/>. This is the figure the printed quote puts in its line column
+        /// and sums into "Total excluding VAT", so a screen showing the same quote must sum the
+        /// same figure or the two documents disagree in front of the customer.
+        /// </summary>
+        public decimal TaxableBase { get; set; }
+
         public int? DeliveryLeadTime { get; set; }
         public long? DiscountTypeId { get; set; }
         public string? DiscountTypeName { get; set; }

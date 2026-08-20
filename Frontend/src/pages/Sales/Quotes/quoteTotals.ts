@@ -182,3 +182,83 @@ export const calculateQuoteTotals = (
     hasUnderivedTax,
   };
 };
+
+/**
+ * One line of a quote as the SERVER stored it, which is a different thing from a line being edited.
+ * Every figure here has already been through `QuoteService.CalculateQuoteTotals`.
+ */
+export interface StoredLine {
+  quantity: number;
+  unitPrice: number;
+  /** The line's own discount, in money. */
+  discount?: number | null;
+  /** Server-derived output tax. Null means it was never derived — not that it is zero. */
+  taxAmount?: number | null;
+  /** `totalAmount - taxAmount`: what the tax was charged on. */
+  taxableBase?: number | null;
+  /** This line's stored share of the header discount. Null on rows predating the column. */
+  headerDiscountAllocated?: number | null;
+  taxRatePercentApplied?: number | null;
+}
+
+export interface StoredQuoteSummary {
+  grossSubTotal: number;
+  totalLineDiscounts: number;
+  headerDiscount: number;
+  netExcludingTax: number;
+  totalTax: number;
+  /** The single rate every taxed line shares, or null when the quote mixes tax treatments. */
+  singleTaxRatePercent: number | null;
+  /** A standard-rated line the server could not tax: the tenant states no output tax rate. */
+  hasUnderivedTax: boolean;
+}
+
+/**
+ * The breakdown of a quote that has ALREADY been priced and saved — read off the stored line
+ * values, never recomputed from the header discount.
+ *
+ * `calculateQuoteTotals` above predicts what the server WILL store while a rep is typing.
+ * This answers the different question a view screen asks: what did the server actually store?
+ * Re-running the prediction there would need the tenant's tax rate and would silently disagree
+ * with the row the moment a quote was priced under an older rate.
+ *
+ * The header discount is READ from the per-line allocation for the reason
+ * `QuoteItem.HeaderDiscountAllocated` documents at length: reconstructing it as
+ * `net - grandTotal` subtracts a tax-INCLUSIVE figure from a tax-EXCLUSIVE one and lands a whole
+ * VAT out. On 1,000.00 at 15% with no header discount that reconstruction yields -150.00; with a
+ * 200.00 header discount it yields 80.00. Both were on screen.
+ *
+ * `storedGrandTotal` is used ONLY for lines that predate the allocation column, where the broken
+ * inference is the only answer that exists — scoped exactly as `QuoteService`'s PDF builder scopes
+ * it, and only when the quote actually carries a header discount.
+ */
+export const summariseStoredQuote = (
+  lines: StoredLine[],
+  hasHeaderDiscount: boolean,
+  storedGrandTotal: number,
+): StoredQuoteSummary => {
+  const grossSubTotal = roundCurrency(lines.reduce((sum, l) => sum + (l.quantity || 0) * (l.unitPrice || 0), 0));
+  const totalLineDiscounts = roundCurrency(lines.reduce((sum, l) => sum + (l.discount ?? 0), 0));
+  const totalTax = roundCurrency(lines.reduce((sum, l) => sum + (l.taxAmount ?? 0), 0));
+  const netExcludingTax = roundCurrency(lines.reduce((sum, l) => sum + (l.taxableBase ?? 0), 0));
+
+  const allocated = roundCurrency(lines.reduce((sum, l) => sum + (l.headerDiscountAllocated ?? 0), 0));
+  const isLegacyUnallocated =
+    allocated === 0 && lines.length > 0 && lines.every((l) => l.headerDiscountAllocated == null);
+  const headerDiscount = isLegacyUnallocated && hasHeaderDiscount
+    ? Math.max(0, roundCurrency(grossSubTotal - totalLineDiscounts + totalTax - storedGrandTotal))
+    : allocated;
+
+  const rates = Array.from(new Set(
+    lines.filter((l) => (l.taxRatePercentApplied ?? 0) > 0).map((l) => l.taxRatePercentApplied as number)));
+
+  return {
+    grossSubTotal,
+    totalLineDiscounts,
+    headerDiscount,
+    netExcludingTax,
+    totalTax,
+    singleTaxRatePercent: rates.length === 1 ? rates[0] : null,
+    hasUnderivedTax: lines.some((l) => l.taxAmount == null),
+  };
+};
