@@ -285,7 +285,9 @@ public static class EmailToLeadHarness
     public static async Task<(EmailInquiryCaptureResult Capture, long AssemblyId, EmailScheduleResult Schedule)>
         CaptureAndScheduleAsync(
             ServiceProvider services, long businessUnitId, MimeMessage message,
-            int expectedComponentCount = 3)
+            int expectedComponentCount = 3,
+            EmailTriageDecision? triage = null,
+            string? clientEmail = "buyer@customer.example")
     {
         using var scope = services.CreateScope();
         using var tenant = scope.ServiceProvider
@@ -315,9 +317,12 @@ public static class EmailToLeadHarness
         var plan = await EmailInquiryManifestPlanner.PlanAsync(message, assembly.MessageKey, bodyText);
 
         var schedule = await EmailIngestEnqueuer.ScheduleAsync(
-            assembly, components, plan, ingest, "buyer@customer.example",
+            assembly, components, plan, ingest, clientEmail,
             scope.ServiceProvider.GetRequiredService<IDocumentIngestion>(),
-            new EmailTriageDecision(EmailTriageOutcome.Inquiry, [], null, false),
+            // Defaulted rather than hardcoded: a caller whose subject IS the classifier's
+            // verdict (marketing versus a first-time buyer) must be able to schedule under the
+            // decision the real gate would have reached, not under a stand-in that flatters it.
+            triage ?? new EmailTriageDecision(EmailTriageOutcome.Inquiry, [], null, false),
             scope.ServiceProvider.GetRequiredService<IEmailInquiryAssemblyCoordinator>(),
             scope.ServiceProvider.GetRequiredService<Microsoft.Extensions.Logging.ILogger<ExtractionWorker>>());
 
