@@ -365,6 +365,52 @@ public sealed class EmailInquiryLeadAssembler : IEmailInquiryLeadAssembler
             return new AssembleOutcome(null, null);
         }
 
+        // THE MARKETING GATE. Read in full, asked for nothing: that is not a Lead.
+        //
+        // Every part of this message reached a terminal state, at least one of them parsed into
+        // a usable extraction, and between them they name ZERO requestable lines. Until now the
+        // merge simply did not look: `merged` stayed empty, the outcome below was built with a
+        // hard-coded Ok, and the persister minted a Lead with no lines and no client. That is
+        // where cold outreach lands — "Contact Us: Digital Marketing", "Communication on the
+        // ... solicitation" — and it is why 19 of 22 leads on the live tenant have no customer.
+        // The lead list, which is the sales pipeline, was carrying agency mail as work.
+        //
+        // WHY THE JUDGEMENT BELONGS HERE AND NOWHERE EARLIER. A header rule cannot see this
+        // class: a human wrote it to a human, so there is no List-Unsubscribe, no
+        // Auto-Submitted, no bulk Precedence. The obvious alternative — stop an Uncertain
+        // message that carries no commercial vocabulary — is the gate DeterministicEmailTriage
+        // was rewritten to remove, and for a reason that has not changed: "Do you carry
+        // Schneider NSX250N MCCBs? We are building a plant in Dammam" has no quantity, no
+        // request verb, no RFQ reference and no attachment, and it is a real deal. Absence of
+        // keywords is not evidence. The extractor's verdict IS evidence, and it is already
+        // computed — ConversationalExtractionService records "No requestable items found in
+        // message body" and sets NeedsReview, and this method was throwing that away.
+        //
+        // WHY HELD AND NOT CLOSED. Zero lines does not prove nothing was asked. A BidNet Direct
+        // or SAM.gov solicitation states the requirement in a portal behind a link and extracts
+        // to zero lines every time; it is a bid opportunity, and it triages identically to the
+        // marketing mail (Uncertain / no_signal), so no triage-side discriminator can separate
+        // the two. NoInquiry is terminal AND absorbing, so guessing wrong there is unrecoverable
+        // and would re-break the 2026-08-13 fix that stopped discarding public procurement.
+        // NeedsReview costs a human a glance and can still become either.
+        //
+        // A REAL FIRST-TIME BUYER IS UNREACHABLE FROM HERE. One extracted line anywhere in the
+        // message — body or attachment — makes merged non-empty and this branch dead. That is
+        // the property that matters most in this change and it holds by construction, not by
+        // keyword tuning.
+        if (merged.Count == 0)
+        {
+            _log.LogInformation(
+                "Assembly {AssemblyId} for business unit {BusinessUnitId} was read in full "
+                + "({Results} component result(s)) and names no requestable line; it is held for "
+                + "review rather than becoming an empty lead.",
+                assemblyId, businessUnitId, ordered.Count);
+            await _coordinator.HoldForReviewAsync(
+                businessUnitId, assemblyId, EmailInquiryHoldReasons.NoRequestableContent,
+                EmailInquiryHoldReasons.NoRequestableContentDetail, ct);
+            return new AssembleOutcome(null, null);
+        }
+
         // The representative job. The Lead needs a provenance anchor and every component of
         // this message shares one batch, so the lowest-ordinal component's job is a stable,
         // deterministic choice rather than "whichever finished last".

@@ -129,4 +129,41 @@ public class EmailTriageNoReplyProcurementTests
 
         Assert.NotEqual(EmailTriageOutcome.Noise, decision.Outcome);
     }
+
+    /// <summary>
+    /// WHY THE MARKETING GATE CANNOT LIVE AT TRIAGE, PINNED AS A FACT.
+    ///
+    /// <para>Three messages, three completely different commercial values: a marketing agency's
+    /// cold outreach (worthless), a first-time buyer's opening question (a deal), and a BidNet
+    /// solicitation whose requirement is behind a portal login (a bid). All three leave this
+    /// classifier as <c>Uncertain</c> carrying the single reason code <c>no_signal</c> — the
+    /// same outcome and the same reasons, byte for byte.</para>
+    ///
+    /// <para>That is not a defect in the classifier; it is the honest limit of what headers and
+    /// vocabulary can know before anybody has read the message. It is recorded here because it
+    /// forecloses two tempting fixes: stopping an Uncertain message that carries no commercial
+    /// vocabulary would kill the buyer, and branching on the persisted triage reason codes at
+    /// assembly time would close the solicitation. The one signal that separates them arrives
+    /// later, from the extractor: the buyer's message yields a line and the other two do not.
+    /// </para>
+    /// </summary>
+    [Theory]
+    [InlineData("agency@growthstudio.example", "Contact Us: Digital Marketing",
+        "Hi there, I came across your website and noticed a few opportunities to improve your "
+        + "search ranking. Would you be open to a short call this week?")]
+    [InlineData("hello@newbuyer.example", "Question about your switchgear",
+        "Do you carry Schneider NSX250N MCCBs? We are building a plant in Dammam and would like "
+        + "to know whether you can supply them.")]
+    [InlineData("noreply@bidnet.com",
+        "Communication on the \"Design Professional Services for the Fulton County Jail Special "
+        + "Purpose Facility\" solicitation from BidNet Direct",
+        "A communication has been posted. Log in to the BidNet Direct portal to view it.")]
+    public void Marketing_a_first_time_buyer_and_a_solicitation_are_indistinguishable_at_triage(
+        string sender, string subject, string body)
+    {
+        var decision = DeterministicEmailTriage.Evaluate(From(sender, subject, body));
+
+        Assert.Equal(EmailTriageOutcome.Uncertain, decision.Outcome);
+        Assert.Equal(new[] { EmailTriageReasonCodes.NoSignal }, decision.ReasonCodes);
+    }
 }
