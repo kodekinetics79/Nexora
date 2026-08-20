@@ -73,9 +73,25 @@ public sealed class RecommendationProseTests
             CommercialLearningRules.ViableReadyExplanation(7, 21, true));
 
         // Nothing triaged yet: the service falls back to every non-declined line, so the sentence
-        // must not claim a marked-for-quote scope that does not exist.
+        // must not claim a marked-for-quote scope that does not exist. Here the fallback happens
+        // to cover the whole RFQ, so "All 21 RFQ lines" is the RFQ's own denominator.
         Assert.Equal("All 21 RFQ lines have a current evidence-backed fulfilment route.",
             CommercialLearningRules.ViableReadyExplanation(21, 21, false));
+
+        // The same fallback on an RFQ that HAS been triaged, just never with a Quote decision:
+        // 14 lines explicitly No-Quoted, 7 still Pending and clean. The service judges the 7
+        // non-declined lines, and the flag is false because no line is marked for quote — so
+        // testing the flag rather than the counts produced "All 7 RFQ lines have a current
+        // evidence-backed fulfilment route." on an RFQ with 21 lines. 7 is a real number about a
+        // real subset; "7 RFQ lines" is not, and it is the same false-denominator defect the rest
+        // of this file exists to stop.
+        Assert.Equal("All 7 lines still open on this RFQ have a current evidence-backed "
+            + "fulfilment route. The other 14 lines have been declined.",
+            CommercialLearningRules.ViableReadyExplanation(7, 21, false));
+
+        Assert.Equal("The 1 line still open on this RFQ has a current evidence-backed "
+            + "fulfilment route. The other 1 line has been declined.",
+            CommercialLearningRules.ViableReadyExplanation(1, 2, false));
 
         Assert.Equal("The single RFQ line has a current evidence-backed fulfilment route.",
             CommercialLearningRules.ViableReadyExplanation(1, 1, false));
@@ -122,6 +138,100 @@ public sealed class RecommendationProseTests
         Assert.DoesNotContain("0 blockers", explanation);
         Assert.Contains("marked for quote", explanation);
         Assert.Contains("the enquiry stated no customer deadline", explanation);
+    }
+
+    /// <summary>
+    /// The false denominator, reached the way a tenant reaches it.
+    ///
+    /// <para>The rule-level assertions above prove the sentence is built correctly for the inputs
+    /// it is given. This proves the service GIVES it those inputs: an RFQ of 21 lines where 14
+    /// were explicitly No-Quoted and 7 were left Pending has no line marked for quote, so
+    /// <c>judgedOnlyMarkedLines</c> is false and the judged set is the 7 non-declined lines. The
+    /// old sentence took "not judged on marked lines" to mean "judged on everything" and printed
+    /// "All 7 RFQ lines have a current evidence-backed fulfilment route." on an RFQ with 21.</para>
+    /// </summary>
+    [Fact]
+    public async Task Ready_rfq_that_declined_most_of_its_lines_does_not_claim_the_rfq_has_seven()
+    {
+        const long tenant = 93;
+        using var db = new TestDb();
+        await using var context = db.ContextFor(null);
+
+        var lead = Seed.Lead(context, 931, tenant);
+        Seed.Customer(context, 9931, tenant, "Partial Bid Customer");
+        lead.ResolveCommercialIdentity(9931, null, "CONFIRMED");
+        await context.SaveChangesAsync();
+
+        var stamp = new DateTime(2026, 7, 14, 0, 0, 0, DateTimeKind.Utc);
+        context.Warehouses.Add(new Warehouse
+        {
+            Id = 9320, BusinessUnitId = tenant, WarehouseCode = "PB-WH", WarehouseName = "Partial Bid Warehouse",
+            IsActive = true, CreatedBy = "seed", CreatedOn = stamp
+        });
+        context.Products.Add(new Product
+        {
+            Id = 9330, Buid = tenant, PartNo = "PB-PART", ProductName = "Partial Bid Product",
+            WarehouseId = 9320, QtyOnHand = 500, ReorderPoint = 0, IsActive = true,
+            CreatedBy = "seed", CreatedOn = stamp
+        });
+        // Stock covers every line comfortably, so no line carries a fulfilment blocker and the
+        // decision can actually reach VIABLE_READY — which is the only decision that renders the
+        // sentence under test.
+        context.Set<Models.Inventory>().Add(new Models.Inventory
+        {
+            Id = 9340, Buid = tenant, ProductId = 9330, WarehouseId = 9320, PartNo = "PB-PART",
+            ProductName = "Partial Bid Product", QtyOnHand = 500, ReorderPoint = 0,
+            CreatedBy = "seed", CreatedOn = stamp
+        });
+
+        var rfq = new Rfq
+        {
+            Id = 9930,
+            Rfqno = "RFQ-9930",
+            BuyersName = "Partial Bid Buyer",
+            RecDate = stamp,
+            BusinessUnitId = tenant,
+            LeadId = lead.Id,
+            CreatedBy = "seed",
+            CreatedDate = stamp
+        };
+        rfq.InheritCommercialIdentity(lead);
+        context.Rfqs.Add(rfq);
+        // Header lineage has to be complete too, or the RFQ never reaches VIABLE_READY and the
+        // sentence under test is never built.
+        context.Entry(rfq).Property(x => x.NexoraSerial).CurrentValue = $"NXR-QA-{tenant}-9930";
+
+        for (var position = 1; position <= 21; position++)
+            context.Rfqitems.Add(new Rfqitem
+            {
+                Id = 99300 + position,
+                Rfqid = rfq.Id,
+                ProductId = 9330,
+                Quantity = 1,
+                UnitOfMeasure = "EA",
+                ManufacturerPartNumber = $"MPN-{position:00}",
+                CreatedBy = "seed",
+                CreatedDate = stamp
+            });
+        await context.SaveChangesAsync();
+
+        // 14 declined outright, 7 left Pending — nothing marked for quote anywhere on the RFQ.
+        var lines = await context.Rfqitems.Where(x => x.Rfqid == rfq.Id).OrderBy(x => x.Id).ToListAsync();
+        foreach (var declined in lines.Take(14))
+            declined.DecideParticipation(Rfqitem.ParticipationNoQuote, "Outside the bid scope", "qa", stamp);
+        await context.SaveChangesAsync();
+
+        await using var read = db.ContextFor(tenant);
+        var result = await new CommercialLearningService(read).GetRfqIntelligenceAsync(tenant, rfq.Id);
+
+        Assert.Equal("VIABLE_READY", result.CommercialDecision);
+        Assert.Equal(7, result.Lines.Count);
+
+        var explanation = result.NextBestAction.Explanation;
+        // The exact sentence the screen rendered: a count that is real about a subset, attached
+        // to a noun phrase that claims it is the RFQ's own line count.
+        Assert.DoesNotContain("All 7 RFQ lines", explanation);
+        Assert.Contains("The other 14 lines have been declined.", explanation);
     }
 
     [Fact]
