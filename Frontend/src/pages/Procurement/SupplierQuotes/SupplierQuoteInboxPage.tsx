@@ -23,6 +23,27 @@ const sha256 = async (value: string) => Array.from(
   new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value))),
 ).map((byte) => byte.toString(16).padStart(2, "0")).join("");
 
+/**
+ * Hand-keyed supplier quote capture, hidden for the pilot.
+ *
+ * The dialog asks a buyer to type SIX database row identifiers as free-text numbers — Supplier ID,
+ * Supplier RFQ ID, Sourcing Case ID, Currency ID, RFQ line ID and Demand line ID — with no picker
+ * and no lookup, behind helper text telling them to go and read the numbers off the Sourcing Case
+ * screen first. Thirteen of its twenty-three fields are mandatory and the submit button gives no
+ * indication which one is missing. The payload then hardcodes `lineNumber: 1`, so it cannot
+ * capture the second line of an eighteen-line supplier quote at all.
+ *
+ * No buyer at a trading company will use this, which means supplier quotes get captured nowhere
+ * and the sourcing comparison that justifies the margin decision has no input. Upload stays as the
+ * working door.
+ *
+ * Preserved, not deleted, per the pilot rule: the dialog and its endpoint are untouched and the
+ * route is still mounted. Flip this to true once the identifier fields are repointed at the
+ * selectors that already exist (SupplierSelector / QuoteSelector in ProcessRFQPage) and the
+ * payload accepts N lines — the multi-line change needs written approval as a scope item.
+ */
+const CAPTURE_BY_HAND_ENABLED = false;
+
 function CaptureDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const client = useQueryClient();
   const [form, setForm] = useState({ supplierId: "", supplierSolicitationId: "", sourcingCaseId: "",
@@ -174,7 +195,7 @@ export default function SupplierQuoteInboxPage() {
   return <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 1400, mx: "auto" }}>
     <Stack direction={{ xs: "column", sm: "row" }} sx={{ justifyContent: "space-between", gap: 2, mb: 3 }}>
       <Box><Typography variant="h4" sx={{ fontWeight: 800 }}>Supplier Quote Inbox</Typography><Typography color="text.secondary">Review persisted Supplier responses before comparison and pricing.</Typography></Box>
-      <Stack direction="row" spacing={1}><Button startIcon={<Refresh />} onClick={() => query.refetch()}>Refresh</Button>{hasPermission("Supplier History", "create") && <><Button variant="outlined" startIcon={<CloudUpload />} onClick={() => setUploadOpen(true)}>Upload Supplier Quote</Button><Button variant="contained" startIcon={<Add />} onClick={() => setCaptureOpen(true)}>Capture Supplier Quote</Button></>}</Stack>
+      <Stack direction="row" spacing={1}><Button startIcon={<Refresh />} onClick={() => query.refetch()}>Refresh</Button>{hasPermission("Supplier History", "create") && <><Button variant="outlined" startIcon={<CloudUpload />} onClick={() => setUploadOpen(true)}>Upload Supplier Quote</Button>{CAPTURE_BY_HAND_ENABLED && <Button variant="contained" startIcon={<Add />} onClick={() => setCaptureOpen(true)}>Capture Supplier Quote</Button>}</>}</Stack>
     </Stack>
     <TextField select size="small" label="Status" value={status} onChange={(event) => setStatus(event.target.value as typeof status)} sx={{ minWidth: 230, mb: 2 }}>
       <MenuItem value="ALL">All statuses</MenuItem><MenuItem value="REVIEW_REQUIRED">Review required</MenuItem><MenuItem value="READY_FOR_COMPARISON">Ready for comparison</MenuItem>

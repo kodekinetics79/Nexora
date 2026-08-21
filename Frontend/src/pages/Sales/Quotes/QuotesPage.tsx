@@ -415,6 +415,8 @@ const QuotesPage: React.FC = () => {
         loading={sendMutation.isPending}
         businessUnitId={userData?.businessUnitId || 0}
         customerId={emailTarget?.customerId ?? null}
+        composerFields="recipient-only"
+        confirmLabel="Send quote"
         onCancel={() => setEmailTarget(null)}
         onConfirm={(email) => {
           // R5: choosing the recipient does not send. The prices are confirmed first.

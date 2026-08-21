@@ -610,6 +610,8 @@ const QuoteViewPage: React.FC = () => {
         title={`Email quote ${quote.quoteNo}`}
         initialEmail={quote.customerEmail || ''}
         loading={sendMutation.isPending}
+        composerFields="recipient-only"
+        confirmLabel="Send quote"
         businessUnitId={businessUnitId}
         customerId={quote.customerId ?? null}
         onCancel={() => setEmailOpen(false)}

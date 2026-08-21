@@ -223,6 +223,69 @@ const INTAKE_ERRORS: Record<string, IntakeErrorEntry> = {
     // The server's companion string here is "Failed to enqueue file." — strictly less than this.
     serverReasonWins: false,
   },
+
+  /**
+   * Extraction phase. The nine entries above are all intake/security phase — a document that
+   * cleared the scanner and then failed while being READ fell through to UNKNOWN_INTAKE_ERROR
+   * ("This file needs attention"), with isRetryable false so no retry button was even offered.
+   *
+   * That is not an edge case in the current deployed configuration: external AI is unauthorized
+   * by default, so every PDF, scan and prose document takes this path while only spreadsheets and
+   * table-structured Word files read deterministically. The rep who uploaded a tender watched it
+   * stop with no reason and no next step. The one true, actionable sentence existed the whole
+   * time — ChunkedExtractionService.AiNotAuthorizedOperatorAction — on /admin/operations, behind
+   * a permission a sales rep does not hold.
+   *
+   * Codes come from the trigger in
+   * Migrations/20260725035352_Release01CTransactionalIntakeHardening.cs:129-138, which writes
+   * 'extraction_retryable' when a lease drops back to Pending and 'extraction_dead_letter' when
+   * the job is abandoned.
+   */
+  extraction_retryable: {
+    title: 'Still being read',
+    whatHappened:
+      'Reading this document stopped part-way and it has been put back in the queue. Nothing is wrong with your file, and the original is stored exactly as you sent it.',
+    nextAction:
+      'No action needed. This file is picked up again automatically — you can leave this page.',
+    category: 'infrastructure',
+    isRetryable: true,
+    // The code is the cause and the reassurance is the part that matters; the server's companion
+    // string is a lease diagnostic that means nothing to a rep.
+    serverReasonWins: false,
+  },
+  extraction_dead_letter: {
+    title: 'We could not read this document',
+    whatHappened:
+      'This file passed the security scan but reading it did not produce any lines. Your document is stored safely and unchanged — nothing was lost, and nothing was sent to any outside service.',
+    nextAction:
+      'Ask an administrator to open Tenant Admin Operations and look at this batch. The usual cause is a scanned or PDF document that needs AI reading, which is switched off for this tenant by default. Spreadsheets and Word files whose lines sit in a table are read without it.',
+    category: 'content',
+    // Retrying changes nothing until the underlying condition changes, and offering a button that
+    // cannot work is how the last version of this screen wasted a rep's afternoon.
+    isRetryable: false,
+    // A BUCKET code: the specific category (AI_NOT_AUTHORIZED, EVIDENCE_MISSING,
+    // EVIDENCE_BUCKET_MISMATCH...) lives on the dead-letter event, and
+    // ExtractionDeadLetterService.OperatorAction returns a fixed, tenant-safe prescription per
+    // category. When the server sends one, it is better than the guess above.
+    serverReasonWins: true,
+  },
+  /**
+   * ChunkedExtractionService.AiNotAuthorizedCode ("EXTRACTION_AI_NOT_AUTHORIZED"), lower-cased
+   * because normalizeCode folds case. This is the single most common reason a document dies in
+   * the current deployment, so it gets its own entry rather than the bucket's guess.
+   */
+  extraction_ai_not_authorized: {
+    title: 'This document needs AI reading, which is switched off',
+    whatHappened:
+      'Reading this file needs an AI service, and external AI processing is not authorized for this tenant. Nothing was sent to any provider, and your document is stored unchanged.',
+    nextAction:
+      'A platform owner must authorize an inference endpoint in the AI trust centre, or the deployment must point at a local model. Until then, upload the lines as a spreadsheet, or as a Word file with the items in a table — both are read without AI.',
+    category: 'infrastructure',
+    isRetryable: false,
+    // Our copy names what the rep can do instead TODAY; the server's operator-facing sentence is
+    // written for an administrator.
+    serverReasonWins: false,
+  },
 };
 
 const UNKNOWN_INTAKE_ERROR: IntakeErrorEntry = {

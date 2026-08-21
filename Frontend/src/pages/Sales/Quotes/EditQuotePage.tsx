@@ -15,6 +15,7 @@ import {
   Edit as EditIcon,
 } from '@mui/icons-material';
 import { useAuth } from '../../../context/AuthContext';
+import { useUnsavedWorkGuard } from '../../../hooks/useUnsavedWorkGuard';
 import customerService from '../../../api/services/customerService';
 import quoteService from '../../../api/services/quoteService';
 import setupService from '../../../api/services/setupService';
@@ -185,6 +186,21 @@ const EditQuotePage: React.FC = () => {
     outputTaxRatePercent,
   ), [liveItems, discountTypes, discountTypeId, discountValue, outputTaxRatePercent]);
 
+  /*
+   * Unsaved-work protection. This screen is where a rep spends 25 minutes pricing 40 lines, and
+   * it had none: the button below labelled "Discard" navigated away on click with no prompt, and
+   * every line lived in useState, so a mistaken sidebar click lost all of it silently. The one
+   * page in the product that did protect this (ExtractionReviewDetailPage) says why in its own
+   * comment: "A reviewer who loses twenty minutes of corrections once goes back to Excel
+   * permanently."
+   */
+  const guard = useUnsavedWorkGuard({
+    storageKey: id ? `nexora.quote.edit.${id}` : '',
+    value: { quoteNo, customerId, quoteDate, validUntil, headerRemarks, discountTypeId, discountValue, items },
+    enabled: Boolean(quote),
+  });
+
+
   // The render loop walks `items` (deleted rows included, hidden); `totals.lines` is indexed over
   // the live rows only. This maps one to the other so a line never reads another line's figures.
   const pricedByItemIndex = useMemo(() => {
@@ -205,11 +221,10 @@ const EditQuotePage: React.FC = () => {
     mutationFn: (data: any) => quoteService.update(Number(id), data),
     onSuccess: () => {
       toast.success('Quote updated successfully');
+      // Re-baseline before navigating, so the saved work is not still offered as a stray draft.
+      guard.markSaved({ quoteNo, customerId, quoteDate, validUntil, headerRemarks, discountTypeId, discountValue, items });
       navigate(`/sales/quotes/view/${id}`);
     },
-    onError: (error: any) => {
-      toast.error(error?.response?.data || 'Failed to update quote');
-    }
   });
 
   const handleAddItem = () => {
@@ -339,7 +354,14 @@ const EditQuotePage: React.FC = () => {
           </Stack>
         </Box>
         <Stack direction="row" spacing={1.5}>
-          <Button variant="outlined" startIcon={<BackIcon />} onClick={() => navigate(`/sales/quotes/view/${id}`)} size="small">Discard</Button>
+          <Button variant="outlined" startIcon={<BackIcon />} size="small"
+            onClick={() => {
+              // "Discard" sat next to Save and threw the work away on a single click. It now says
+              // what it does, and asks first when there is something to lose.
+              if (guard.isDirty
+                && !window.confirm('Leave without saving? The pricing you have entered on this quote will be lost.')) return;
+              navigate(`/sales/quotes/view/${id}`);
+            }}>Cancel</Button>
           <Button 
             variant="contained" 
             startIcon={updateMutation.isPending ? <CircularProgress size={20} color="inherit" /> : <SaveIcon />} 

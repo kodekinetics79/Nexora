@@ -371,6 +371,43 @@ interface LoginResponse {
   businessUnits?: LoginBusinessUnitOption[];
 }
 
+/**
+ * Where a user lands after signing in.
+ *
+ * This used to be an unconditional `navigate('/analytics/deadlines')`. The reasoning was sound and
+ * is kept below — a new tenant's KPIs all read "insufficient data" on day one, so a wall of empty
+ * tiles is a worse first screen than the work actually waiting. It was simply never checked
+ * against the roles the platform seeds: /analytics/deadlines is gated on Leads, and of the four
+ * starter roles only SALES_MANAGER and SALES_REP are granted it. PROCUREMENT_OFFICER and
+ * FINANCE_OFFICER signed in successfully and landed on "Access Denied" as their first screen —
+ * while both hold Read on Dashboard, so a working destination existed all along.
+ *
+ * Ordered by what is most useful to arrive at, not by module name. The last entry is reached only
+ * by a user with no view grant anywhere; landing them on the deadline board means PermissionGuard
+ * names the exact grant to ask an administrator for, which is the right answer to "I have no
+ * access at all".
+ */
+const LANDING_ROUTES: ReadonlyArray<{ path: string; moduleName: string }> = [
+  { path: '/analytics/deadlines', moduleName: 'Leads' },
+  { path: '/dashboard', moduleName: 'Dashboard' },
+  { path: '/procurement/rfqs/all', moduleName: 'RFQ Management' },
+  { path: '/sales/quotes', moduleName: 'Quotations' },
+  { path: '/sales/orders', moduleName: 'Orders' },
+  { path: '/suppliers', moduleName: 'Suppliers' },
+  { path: '/customers', moduleName: 'Customers' },
+];
+
+export const landingRouteFor = (
+  isSuperAdmin: boolean,
+  permissions: ReadonlyArray<{ moduleName: string; canView?: boolean }>,
+): string => {
+  if (isSuperAdmin) return LANDING_ROUTES[0].path;
+  const canView = (moduleName: string) => permissions.some(
+    (p) => p.moduleName?.trim().toLowerCase() === moduleName.toLowerCase() && p.canView === true,
+  );
+  return (LANDING_ROUTES.find((route) => canView(route.moduleName)) ?? LANDING_ROUTES[0]).path;
+};
+
 const LoginPage: React.FC = () => {
   const theme = useTheme();
   const { mode, setMode, primaryColor } = useAppTheme();
@@ -456,10 +493,7 @@ const LoginPage: React.FC = () => {
         businessUnitId: me.businessUnitId ?? data.businessUnitId ?? undefined,
         permissions: me.permissions ?? [],
       });
-      // Land on the deadline board, not /dashboard. A new tenant's KPIs are all
-      // "insufficient data" on day one; a wall of empty tiles is a worse first
-      // screen than the work that is actually waiting.
-      navigate('/analytics/deadlines');
+      navigate(landingRouteFor(me.isSuperAdmin === true, me.permissions ?? []));
     } catch (err: any) {
       setError(err.response?.data?.error || err.response?.data?.message || "Invalid credentials");
     } finally {
