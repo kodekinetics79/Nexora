@@ -192,3 +192,79 @@ describe('DeadlineBoardPage — the tenant-wide re-run', () => {
     expect(screen.queryByRole('button', { name: /Match clients automatically/i })).not.toBeInTheDocument();
   });
 });
+
+/**
+ * The board is the post-login landing screen of a deadline-driven product, and it dropped every
+ * enquiry the moment a rep started working it: it asked the leads API for its DEFAULT view,
+ * LeadRepository applies `LeadStatusId == null` to that view ("new lead to review"), and every
+ * lifecycle transition stamps a status. The tender advanced on Monday was simply gone on
+ * Tuesday — not moved to a working column, not greyed out — from the only screen in the product
+ * that counts down to a bid deadline.
+ *
+ * The footnote compounded it, naming REJECTION as the exclusion while concealing the real one,
+ * and reporting it with a predicate (`!lead.isRejected`, i.e. `LeadStatusId !== 25`) that could
+ * not return false on a view returning only rows where that column was null.
+ */
+describe('DeadlineBoardPage — enquiries a rep is working stay on the board', () => {
+  it('asks the server for open work, not for the untriaged inbox', async () => {
+    render(<DeadlineBoardPage />, { wrapper });
+    await screen.findByText('FC-2026-0088');
+
+    expect(getAllLeads).toHaveBeenCalledWith(expect.objectContaining({ view: 'open' }));
+  });
+
+  it('shows an enquiry that carries a lifecycle status, and says where it stands', async () => {
+    // Exactly what the server projects for a worked lead: the tenant-local id, the governed
+    // code and the tenant's own label (LeadRepository list projection → LeadResponseDTO).
+    getAllLeads.mockResolvedValue({
+      items: [unlinkedLead({
+        id: 490,
+        rfqno: 'FC-2026-0090',
+        customerId: 42,
+        customerName: 'Fulton County Government',
+        leadStatusCode: 'QUALIFIED',
+        leadStatusLabel: 'Qualified',
+      })],
+      totalCount: 1, pageNumber: 1, pageSize: 500,
+    });
+    render(<DeadlineBoardPage />, { wrapper });
+
+    // The row survives — this half is a CONTROL: the component never filtered on status itself,
+    // it simply never asked for a statused lead. The state caption is not: without it the board
+    // is one undifferentiated pile and the rep cannot see what she already started.
+    expect(await screen.findByText('FC-2026-0090')).toBeInTheDocument();
+    expect(screen.getByText('Qualified')).toBeInTheDocument();
+  });
+
+  it('states the real exclusion, and counts open work instead of restating the total', async () => {
+    getAllLeads.mockResolvedValue({
+      items: [
+        // Untriaged mail: open, not started.
+        unlinkedLead(),
+        // Already being worked: open, in progress.
+        unlinkedLead({
+          id: 489, rfqno: 'FC-2026-0089', customerId: 42, itemCount: 3, leadStatusCode: 'QUALIFIED', leadStatusLabel: 'Qualified',
+        }),
+        // Finished. LifecyclePolicy calls CANCELLED terminal, and it is NOT id 25, so the old
+        // `!isRejected` predicate counted it as open work with a live deadline.
+        unlinkedLead({
+          id: 490, rfqno: 'FC-2026-0090', customerId: 42, itemCount: 7, leadStatusCode: 'CANCELLED', leadStatusLabel: 'Cancelled',
+        }),
+      ],
+      totalCount: 3, pageNumber: 1, pageSize: 500,
+    });
+    render(<DeadlineBoardPage />, { wrapper });
+
+    // Two open of three loaded — a measurement, not the tautology "3 open of 3" that the old
+    // predicate could only ever produce — and one of them already in progress, which is the
+    // proof the board is no longer just the inbox.
+    expect(await screen.findByText(
+      /Counted from 2 open of 3 enquiries loaded, 1 of them already in progress/i,
+    )).toBeInTheDocument();
+    expect(screen.getByText(
+      /Excluded: enquiries disqualified, lost, cancelled, completed or merged as a duplicate/i,
+    )).toBeInTheDocument();
+    // The old sentence named rejection — the one exclusion that was never happening.
+    expect(screen.queryByText(/Rejected enquiries are not shown/i)).not.toBeInTheDocument();
+  });
+});

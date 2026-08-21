@@ -97,7 +97,27 @@ namespace ERP_RFQ_Automation.DTOs.Lead
         public string? EmailSource { get; set; }
         public string? Clientemail { get; set; }
         public long? LeadStatusId { get; set; }
+
+        /// <summary>
+        /// The lead's lifecycle state as a governed code — RECEIVED, QUALIFIED, CONVERTED_TO_RFQ,
+        /// CANCELLED … — resolved from the tenant's own status row through
+        /// <c>LifecyclePolicy.Canonicalize</c>, so a tenant that spells DISQUALIFIED "Rejected"
+        /// still reports the governed code. Null means the enquiry has never been triaged.
+        ///
+        /// <para><see cref="LeadStatusId"/> on its own is a tenant-local integer: no screen could
+        /// read it, so screens that needed to know whether work had started inferred it from the
+        /// column being null — which is why the deadline board dropped every enquiry a rep
+        /// advanced.</para>
+        /// </summary>
+        public string? LeadStatusCode { get; set; }
+
+        /// <summary>The tenant's own label for that state, for display beside the code.</summary>
+        public string? LeadStatusLabel { get; set; }
+
         public int LifecycleVersion { get; set; }
+        // Legacy hardcoded setup ids from the pre-lifecycle accept/reject path. They are true only
+        // for tenants whose rows carry those exact ids; <see cref="LeadStatusCode"/> is the reading
+        // that works on every tenant, and is what new callers should use.
         public bool IsAccepted => LeadStatusId == 24;
         public bool IsRejected => LeadStatusId == 25;
         public long ReviewVersion { get; set; }

@@ -43,6 +43,12 @@ import { LoadingState, ErrorState, EmptyState } from '../../platform/components/
 // past when Nexora first saw the document are disclosed rather than quietly
 // mixed in: they are not a response-time failure and counting them as urgent
 // work would misstate the queue.
+//
+// SCOPE: the whole live pipeline. This board asked the leads API for its DEFAULT
+// view, which is the untriaged inbox — so advancing a tender took it off the
+// board, and the board that counts down to bid deadlines was showing only mail
+// nobody had touched. It now asks for the `open` view and names, in the footnote,
+// the only work it leaves out: enquiries that are actually finished.
 // ---------------------------------------------------------------------------
 
 /** How many leads to pull. The pilot tenant holds 27; the cap is disclosed. */
@@ -88,8 +94,46 @@ const bucketFor = (days: number | null): BucketKey => {
   return 'later';
 };
 
-/** A lead still needing a decision. Rejected work is not a deadline. */
-const isOpen = (lead: LeadResponseDTO): boolean => !lead.isRejected;
+/**
+ * The server view that means "still live work": every enquiry the tenant holds that has not
+ * finished, INCLUDING the ones somebody has already started.
+ *
+ * The board used to send no view at all, which is the untriaged-inbox default — LeadRepository
+ * applies `LeadStatusId == null` to it, and any lifecycle transition stamps a status. So the rep
+ * who opened the top tender, pressed "Advance · RECEIVED" and worked it landed here the next
+ * morning to find it GONE from the only screen in the product that counts down to a deadline.
+ */
+const OPEN_WORK_VIEW = 'open';
+
+/**
+ * Lifecycle states that END an enquiry — LifecyclePolicy's LeadTerminal set verbatim
+ * (Backend/CommercialCases/Lifecycle/LifecyclePolicy.cs). Everything else is live work,
+ * qualified and converted included.
+ */
+const FINISHED_STATUSES: ReadonlySet<string> = new Set([
+  'DISQUALIFIED', 'LOST', 'CANCELLED', 'COMPLETED', 'DUPLICATED',
+]);
+
+/**
+ * A lead still needing a decision.
+ *
+ * This read `!lead.isRejected`, which could never return false: `isRejected` is
+ * `LeadStatusId == 25`, and the view the board asked for returned only rows where that column
+ * was null. So the footnote's "27 open of 27" was a tautology reporting a filter that had
+ * already removed everything it claimed to be counting, and it named REJECTION as the exclusion
+ * while the real one — having any status at all — went unmentioned.
+ *
+ * It now reads the lead's own governed status code. The `open` view already refuses finished
+ * work server-side, so this is the second line rather than the first: a tenant whose LeadStatus
+ * rows are incomplete — the case LifecycleStatusCatalog.EnsureAsync exists to repair — leaves the
+ * server unable to recognise its own terminal states, and a deadline board is the last screen
+ * where closed work should reappear as urgent.
+ */
+const isOpen = (lead: LeadResponseDTO): boolean =>
+  !lead.isRejected && !FINISHED_STATUSES.has((lead.leadStatusCode ?? '').trim().toUpperCase());
+
+/** Somebody has advanced this one at least once: it carries a lifecycle status. */
+const isInProgress = (lead: LeadResponseDTO): boolean => !!lead.leadStatusCode;
 
 const clientLabel = (lead: LeadResponseDTO): string =>
   lead.customerName?.trim()
@@ -151,8 +195,8 @@ const DeadlineBoardPage: React.FC = () => {
   const [sortAsc, setSortAsc] = useState(true);
 
   const leads = useQuery({
-    queryKey: ['deadline-board', FETCH_LIMIT],
-    queryFn: () => leadService.getAll({ pageNumber: 1, pageSize: FETCH_LIMIT }),
+    queryKey: ['deadline-board', OPEN_WORK_VIEW, FETCH_LIMIT],
+    queryFn: () => leadService.getAll({ pageNumber: 1, pageSize: FETCH_LIMIT, view: OPEN_WORK_VIEW }),
     staleTime: 60_000,
   });
 
@@ -182,6 +226,9 @@ const DeadlineBoardPage: React.FC = () => {
       byBucket,
       totalLeadsReturned: all.length,
       totalOpen: open.length,
+      // Not decoration: this is the number that proves the board is showing worked enquiries
+      // rather than untriaged mail, and it is the half the old footnote could never report.
+      inProgressCount: open.filter(isInProgress).length,
       // Counted over ALL open enquiries, including the late-ingested ones excluded from the
       // buckets: they are still enquiries the tenant cannot quote, and the matcher would
       // still try them.
@@ -222,7 +269,8 @@ const DeadlineBoardPage: React.FC = () => {
         <Box>
           <Typography variant="h4" sx={{ fontWeight: 900 }}>Deadline board</Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-            Open enquiries by how long is left to respond, with the amount of work each one carries.
+            Open enquiries — new and already in progress — by how long is left to respond, with the
+            amount of work each one carries.
           </Typography>
         </Box>
         <Stack direction="row" spacing={1}>
@@ -378,7 +426,20 @@ const DeadlineBoardPage: React.FC = () => {
                           </Tooltip>
                         ) : 'Not recorded'}
                       </TableCell>
-                      <TableCell sx={{ fontFamily: 'monospace', fontWeight: 700 }}>{lead.rfqno || `#${lead.id}`}</TableCell>
+                      <TableCell sx={{ fontWeight: 700 }}>
+                        {/* The reference keeps an element of its own: it is what a rep searches
+                            the screen for, and burying it in a cell alongside other text makes it
+                            unfindable to both a person scanning and a test asserting. */}
+                        <Box component="span" sx={{ display: 'block', fontFamily: 'monospace' }}>
+                          {lead.rfqno || `#${lead.id}`}
+                        </Box>
+                        {/* Where this one stands. Without it the board reads as one undifferentiated
+                            pile of new mail, and the rep cannot see which tenders she has already
+                            started — the exact question that sends her back into each row. */}
+                        <Typography variant="caption" component="div" color="text.secondary" sx={{ fontWeight: 600 }}>
+                          {lead.leadStatusLabel?.trim() || 'Not yet triaged'}
+                        </Typography>
+                      </TableCell>
                       <TableCell>
                         <Typography variant="body2" sx={{ fontWeight: 700 }}>{clientLabel(lead)}</Typography>
                         {!lead.customerId && (canLinkClients ? (
@@ -436,9 +497,19 @@ const DeadlineBoardPage: React.FC = () => {
                 </Typography>
               </Tooltip>
             )}
+            {/*
+              * The exclusion this sentence names is now the one the query actually applies. It
+              * used to say "Rejected enquiries are not shown", which was false twice over: nothing
+              * rejected could reach the board anyway, and the real exclusion — every enquiry
+              * carrying ANY lifecycle status, i.e. everything anyone had started working — went
+              * unnamed. The in-progress count is stated because it is the proof the board is no
+              * longer just the inbox.
+              */}
             <Typography variant="caption" color="text.secondary">
               Counted from {model.totalOpen} open of {model.totalLeadsReturned} enquir
-              {model.totalLeadsReturned === 1 ? 'y' : 'ies'} loaded. Rejected enquiries are not shown.
+              {model.totalLeadsReturned === 1 ? 'y' : 'ies'} loaded, {model.inProgressCount} of them
+              already in progress. Excluded: enquiries disqualified, lost, cancelled, completed or
+              merged as a duplicate.
             </Typography>
             {model.truncated && (
               <Alert severity="info" sx={{ mt: 1 }}>

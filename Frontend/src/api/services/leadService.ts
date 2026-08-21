@@ -112,6 +112,19 @@ export interface LeadResponseDTO {
   emailSource: string;
   clientemail: string;
   status: string;
+  /**
+   * The lead's lifecycle state as a governed code — 'RECEIVED' | 'PENDING_IDENTIFICATION' |
+   * 'ASSIGNED' | 'UNDER_REVIEW' | 'QUALIFIED' | 'CONVERTED_TO_RFQ' | 'QUOTED' | 'NEGOTIATION' |
+   * 'AWARDED' | 'PARTIALLY_AWARDED' | 'DISQUALIFIED' | 'LOST' | 'CANCELLED' | 'COMPLETED' |
+   * 'DUPLICATED'. Absent means the enquiry has never been triaged.
+   *
+   * Read this, not `leadStatusId` (a tenant-local integer) and not `isRejected` (the legacy
+   * id-25 hardcode): those are why screens used to infer "not started yet" from the id being
+   * null, and the deadline board dropped every enquiry the moment someone advanced it.
+   */
+  leadStatusCode?: string | null;
+  /** The tenant's own label for that state, e.g. "Qualified". */
+  leadStatusLabel?: string | null;
   isAccepted: boolean;
   isRejected: boolean;
   aiconfidence: number;
