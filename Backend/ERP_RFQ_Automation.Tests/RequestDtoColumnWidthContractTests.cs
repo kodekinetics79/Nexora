@@ -308,14 +308,6 @@ public sealed class RequestDtoColumnWidthContractTests
     /// <c>SupplierTierInput.MaximumCanonicalisableLength</c>, a deliberate bound on the stack buffer
     /// <c>Normalize</c> allocates during model binding — it is not a promise that 64 characters can
     /// be stored, and no value that long can reach the column. Excluded permanently.</item>
-    ///
-    /// <item><b>Mailbox EmailAddress and Username</b> — a GENUINE third instance of this defect,
-    /// surfaced only once the sweep was widened to resolve <c>Mailbox*RequestDTO</c> onto
-    /// <c>EmailConfiguration</c>. Both are <c>[StringLength(320)]</c> (the RFC 5321 address limit)
-    /// over <c>character varying(255)</c> columns, and <c>MailboxController</c> has no <c>22001</c>
-    /// handling — so a 300-character address is the same unhandled 500 products produced. NOT fixed
-    /// here because <c>Mailbox/MailboxDTOs.cs</c> and <c>Controllers/MailboxController.cs</c> are
-    /// outside this change's file scope. Reported, not forgotten.</item>
     /// </list>
     ///
     /// <para><c>ProductCategory.Description</c> WAS on this list and is now FIXED: both DTOs are
@@ -323,15 +315,21 @@ public sealed class RequestDtoColumnWidthContractTests
     /// <c>ProductCategoryController</c> Create and Update carry the same 22001 / ArgumentException
     /// handling <c>ProductController</c> does. The entries are gone rather than kept-and-passing,
     /// which is what the count assertion enforces.</para>
+    ///
+    /// <para><b>Mailbox EmailAddress and Username</b> were the last four entries, and they are now
+    /// FIXED too. Both were <c>[StringLength(320)]</c> — the RFC 5321 address limit, correct about
+    /// email and wrong about the table — over <c>character varying(255)</c> columns, with no
+    /// <c>22001</c> handling anywhere in <c>MailboxController</c>. All four attributes now read 255
+    /// and both write doors carry the same narrow catches. The judgement was to bring the ATTRIBUTE
+    /// down rather than widen the columns: a genuinely valid 260-character address is now refused
+    /// with a clean 400 it can act on, which is survivable, where an unexplained 500 on the mailbox
+    /// setup screen — the one screen that must work before this product ingests anything — is not.
+    /// Nothing was added to this list to make that pass.</para>
     /// </summary>
     private static readonly IReadOnlyList<(string Dto, string Property)> Exclusions =
     [
         ("SupplierCreateRequestDTO", "Tier"),
         ("SupplierUpdateRequestDTO", "Tier"),
-        ("MailboxCreateRequestDTO", "EmailAddress"),
-        ("MailboxCreateRequestDTO", "Username"),
-        ("MailboxUpdateRequestDTO", "EmailAddress"),
-        ("MailboxUpdateRequestDTO", "Username"),
     ];
 
     private static bool Excluded(string dto, string property) =>
