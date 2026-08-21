@@ -88,6 +88,37 @@ namespace ERP_RFQ_Automation.Repositories
                 }).ToListAsync();
         }
 
+        /// <summary>
+        /// The tenant's LeadStatus rows that mean the enquiry is over: DISQUALIFIED, LOST,
+        /// CANCELLED, COMPLETED, DUPLICATED — read through <see cref="LifecyclePolicy"/> rather
+        /// than restated as a SQL string list, because the alias table (REJECTED → DISQUALIFIED,
+        /// CLOSED → COMPLETED) cannot be expressed in a WHERE clause and a second, divergent
+        /// definition of "finished" is how a lead ends up open in one screen and closed in another.
+        ///
+        /// <para>The type is normalised the same way <c>LifecycleStatusCatalog.ResolveIdAsync</c>
+        /// normalises it, so a tenant carrying legacy "Lead Status" rows is read identically to a
+        /// seeded one. IsActive is deliberately NOT filtered: retiring the "Cancelled" row does not
+        /// un-cancel the leads still pointing at it.</para>
+        ///
+        /// <para>Unresolvable ids fail OPEN — the lead is shown. On a board that counts down to a
+        /// bid deadline, a stale row a person can dismiss costs less than a live tender nobody
+        /// ever sees again.</para>
+        /// </summary>
+        private async Task<List<long>> FinishedLeadStatusIdsAsync(long businessUnitId)
+        {
+            var statuses = await _context.SetupMasters.AsNoTracking()
+                .Where(s => s.BusinessUnitId == businessUnitId
+                    && s.SetupType.ToLower().Replace(" ", "") == "leadstatus")
+                .Select(s => new { s.SetupId, s.SetupCode, s.SetupValue })
+                .ToListAsync();
+
+            return statuses
+                .Where(s => LifecyclePolicy.IsTerminal(
+                    "Lead", LifecyclePolicy.Canonicalize("Lead", s.SetupCode, s.SetupValue)))
+                .Select(s => s.SetupId)
+                .ToList();
+        }
+
         public async Task<(IEnumerable<LeadResponseDTO>, int TotalCount)> GetLeadListAsync(int pageNumber, int pageSize, long? id, string? rfqno, string? buyersName, string? leadSource, long businessUnitId, DateTime? startDate = null, DateTime? endDate = null, string? emailSource = null, string? clientemail = null, string? view = null)
         {
             var query = _context.Leads
@@ -96,7 +127,13 @@ namespace ERP_RFQ_Automation.Repositories
                 .Include(l => l.EmailIngests)
                 .Where(l => l.BusinessUnitId == businessUnitId);
 
-            if (!string.Equals(view, "revisions", StringComparison.OrdinalIgnoreCase))
+            // The default list is the untriaged inbox — RfqRepository spells LeadStatusId == null
+            // out as "new lead to review". "open" and "revisions" deliberately escape it: ANY
+            // lifecycle transition stamps a status, so a queue that keeps this filter is a queue
+            // that empties itself the moment a rep starts working, which is precisely how the
+            // deadline board lost every tender the day after it was advanced.
+            var openWorkView = string.Equals(view, "open", StringComparison.OrdinalIgnoreCase);
+            if (!openWorkView && !string.Equals(view, "revisions", StringComparison.OrdinalIgnoreCase))
                 query = query.Where(l => l.LeadStatusId == null);
 
             // Apply filters
@@ -120,6 +157,15 @@ namespace ERP_RFQ_Automation.Repositories
                 query = query.Where(l => l.DuplicateStatus == "suspected" || l.DuplicateStatus == "confirmed");
             else if (string.Equals(view, "revisions", StringComparison.OrdinalIgnoreCase))
                 query = query.Where(l => l.CurrentRevisionNumber > 1);
+            else if (openWorkView)
+            {
+                // "Open" is the whole live pipeline, not the inbox: untriaged mail AND everything
+                // someone has already advanced. Only genuinely finished work is dropped, and which
+                // states those are comes from the governed lifecycle policy, never from a second
+                // list of strings restated here.
+                var finished = await FinishedLeadStatusIdsAsync(businessUnitId);
+                query = query.Where(l => l.LeadStatusId == null || !finished.Contains(l.LeadStatusId.Value));
+            }
             else if (string.Equals(view, "ready-for-rfq", StringComparison.OrdinalIgnoreCase))
                 // Mirrors LeadConversionIntelligence.FindConversionBlockers exactly. A closing
                 // date is deliberately NOT required in either place: an enquiry that states no
@@ -187,6 +233,23 @@ namespace ERP_RFQ_Automation.Repositories
                     .Select(c => new { c.Id, c.Name })
                     .ToDictionaryAsync(c => c.Id, c => c.Name);
 
+            // LIFECYCLE STATE: the projection has always carried LeadStatusId — a tenant-local
+            // integer no screen can read — and nothing else, so every consumer that needed to know
+            // whether work had started had to guess. The deadline board guessed by asking for the
+            // untriaged view and dropped the rest. Canonical code for logic, the tenant's own label
+            // for a human, one query for the whole page.
+            var pagedStatusIds = leads.Where(l => l.LeadStatusId.HasValue)
+                .Select(l => l.LeadStatusId!.Value).Distinct().ToList();
+            var statusRows = pagedStatusIds.Count == 0
+                ? new Dictionary<long, (string Code, string Label)>()
+                : (await _context.SetupMasters.AsNoTracking()
+                        .Where(s => s.BusinessUnitId == businessUnitId && pagedStatusIds.Contains(s.SetupId))
+                        .Select(s => new { s.SetupId, s.SetupCode, s.SetupValue })
+                        .ToListAsync())
+                    .ToDictionary(
+                        s => s.SetupId,
+                        s => (LifecyclePolicy.Canonicalize("Lead", s.SetupCode, s.SetupValue), s.SetupValue));
+
             var candidateRows = await (
                 from candidate in _context.Set<ERP_RFQ_Automation.CustomerResolution.LeadCustomerMatchCandidate>().AsNoTracking()
                 join customer in _context.Customers.AsNoTracking()
@@ -220,6 +283,12 @@ namespace ERP_RFQ_Automation.Repositories
                 var ingestedOn = LeadIdentity.LeadIngestionAudit.ResolveIngestionTimestamp(
                     earliestReceivedOn.TryGetValue(l.Id, out var receivedOn) ? receivedOn : null,
                     l.CreatedDate);
+                // No status row at all is a state too — the enquiry has never been triaged — and is
+                // reported as null rather than invented as "Received".
+                (string Code, string Label)? status = l.LeadStatusId.HasValue
+                    && statusRows.TryGetValue(l.LeadStatusId.Value, out var statusRow)
+                        ? statusRow
+                        : null;
                 return new LeadResponseDTO
                 {
                     Id = l.Id,
@@ -278,6 +347,8 @@ namespace ERP_RFQ_Automation.Repositories
                     EmailSource = l.EmailSource,
                     Clientemail = l.Clientemail,
                     LeadStatusId = l.LeadStatusId,
+                    LeadStatusCode = status?.Code,
+                    LeadStatusLabel = status?.Label,
                     LifecycleVersion = l.LifecycleVersion,
                     ReviewVersion = l.ReviewVersion,
                     RequiresCommercialReview = l.RequiresCommercialReview,
@@ -846,6 +917,16 @@ namespace ERP_RFQ_Automation.Repositories
             var ingestedOn = LeadIdentity.LeadIngestionAudit.ResolveIngestionTimestamp(
                 earliestReceivedOn.TryGetValue(lead.Id, out var receivedOn) ? receivedOn : null,
                 lead.CreatedDate);
+            // Same lifecycle-state read as the list projection. A field populated on the list and
+            // silently null on the detail would make which endpoint a screen happened to call
+            // decide whether the lead has a status — the exact class of split truth this
+            // projection has been corrected for before (see CommercialCaseReference above).
+            var detailStatusRow = lead.LeadStatusId.HasValue
+                ? await _context.SetupMasters.AsNoTracking()
+                    .Where(s => s.BusinessUnitId == businessUnitId && s.SetupId == lead.LeadStatusId.Value)
+                    .Select(s => new { s.SetupCode, s.SetupValue })
+                    .FirstOrDefaultAsync()
+                : null;
             var detailCandidates = await GetClientCandidatesAsync(id, businessUnitId);
             var emailProvenance = lead.EmailIngestsId.HasValue
                 ? await (from ingest in _context.EmailIngests.AsNoTracking()
@@ -915,6 +996,10 @@ namespace ERP_RFQ_Automation.Repositories
                 EmailSource = lead.EmailSource,
                 Clientemail = lead.Clientemail,
                 LeadStatusId = lead.LeadStatusId,
+                LeadStatusCode = detailStatusRow == null
+                    ? null
+                    : LifecyclePolicy.Canonicalize("Lead", detailStatusRow.SetupCode, detailStatusRow.SetupValue),
+                LeadStatusLabel = detailStatusRow?.SetupValue,
                 LifecycleVersion = lead.LifecycleVersion,
                 ReviewVersion = lead.ReviewVersion,
                 RequiresCommercialReview = lead.RequiresCommercialReview,
