@@ -19,7 +19,6 @@ import {
   CircularProgress,
 } from '@mui/material';
 import {
-  Add as AddIcon,
   Edit as EditIcon,
 } from '@mui/icons-material';
 import { DataGrid, type GridColDef, type GridPaginationModel } from '@mui/x-data-grid';
@@ -74,16 +73,6 @@ const BusinessUnitPage: React.FC = () => {
     }),
   });
 
-  const createMutation = useMutation({
-    mutationFn: (newRecord: any) => businessUnitService.create(newRecord),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['businessUnits'] });
-      enqueueSnackbar('Business Unit created successfully', { variant: 'success' });
-      setIsModalOpen(false);
-    },
-    onError: (error: any) => handleApiError(error),
-  });
-
   // The ONLY field of an existing business unit a tenant identity may change. Code, name,
   // description and activation state are control-plane facts and PUT /api/BusinessUnit/{id}
   // forbids tenant callers outright, so the edit dialog shows them read-only rather than
@@ -111,29 +100,18 @@ const BusinessUnitPage: React.FC = () => {
     setIsModalOpen(true);
   };
 
-  const handleAddNew = () => {
-    setSelectedRecord(null);
-    setFormData({
-      businessUnitCode: '',
-      businessUnitName: '',
-      description: '',
-      taxRegistrationNumber: '',
-      isActive: true,
-    });
-    setIsModalOpen(true);
-  };
-
   const handleSave = () => {
     if (taxRegistrationError) return;
 
-    if (selectedRecord) {
-      updateMutation.mutate({
-        id: selectedRecord.id,
-        taxRegistrationNumber: (formData.taxRegistrationNumber ?? '').trim() || null,
-      });
-    } else {
-      createMutation.mutate({ ...formData });
-    }
+    // Update only. There is no create path: POST /api/BusinessUnit is `return Forbid()`
+    // unconditionally, so the branch that used to live here could do nothing but produce a 403
+    // the user had not been warned about. Removed rather than left unreachable — an unreachable
+    // call to a refused endpoint is how a future entry point silently reintroduces the defect.
+    if (!selectedRecord) return;
+    updateMutation.mutate({
+      id: selectedRecord.id,
+      taxRegistrationNumber: (formData.taxRegistrationNumber ?? '').trim() || null,
+    });
   };
 
   const columns: GridColDef[] = [
@@ -181,11 +159,23 @@ const BusinessUnitPage: React.FC = () => {
       <Box sx={{ mb: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <Box>
           <Typography variant="h5" sx={{ fontWeight: 800, letterSpacing: '-0.02em', mb: 0.5 }}>{t('business_unit')}</Typography>
-          <Typography variant="body2" color="text.secondary">Configure and manage corporate business units</Typography>
+          {/*
+            Say what this screen can actually do. It cannot create anything: POST /api/BusinessUnit
+            is `return Forbid()` unconditionally, because the governed platform control plane owns
+            the tenant lifecycle. That refusal is CORRECT and stays — the defect was that the page
+            never mentioned it, so the first thing a founding administrator does in Setup (this is
+            the first card of the first group) was open a create dialog, fill five fields, and get
+            a 403 with no explanation.
+
+            The dialog's own copy already said the right sentence, but it was bound to
+            `selectedRecord` — the EDIT path — so the one path that always fails said nothing.
+          */}
+          <Typography variant="body2" color="text.secondary">
+            The trading entities that issue your quotes and invoices. New business units are
+            provisioned by the platform, not created here — you can update the VAT / tax
+            registration number on each one.
+          </Typography>
         </Box>
-        <Button variant="contained" startIcon={<AddIcon />} onClick={handleAddNew} sx={{ px: 3 }}>
-          {t('create_new')}
-        </Button>
       </Box>
 
       <Paper sx={{ p: 1, mb: 1.5, display: 'flex', gap: 2, alignItems: 'center', backgroundColor: 'background.paper', borderRadius: 2 }}>
@@ -207,7 +197,7 @@ const BusinessUnitPage: React.FC = () => {
       </Paper>
 
       <Dialog open={isModalOpen} onClose={() => setIsModalOpen(false)} fullWidth maxWidth="sm">
-        <DialogTitle sx={{ fontWeight: 800 }}>{selectedRecord ? 'Edit Business Unit' : 'Add New Business Unit'}</DialogTitle>
+        <DialogTitle sx={{ fontWeight: 800 }}>Business Unit</DialogTitle>
         <DialogContent dividers sx={{ p: 3 }}>
           <Grid container spacing={3}>
             <Grid size={{ xs: 12, sm: 4 }}>
@@ -269,10 +259,10 @@ const BusinessUnitPage: React.FC = () => {
           <Button 
             variant="contained" 
             onClick={handleSave} 
-            disabled={createMutation.isPending || updateMutation.isPending || !!taxRegistrationError}
+            disabled={updateMutation.isPending || !!taxRegistrationError}
             sx={{ px: 4 }}
           >
-            {(createMutation.isPending || updateMutation.isPending) ? <CircularProgress size={24} /> : 'Save'}
+            {updateMutation.isPending ? <CircularProgress size={24} /> : 'Save'}
           </Button>
         </DialogActions>
       </Dialog>

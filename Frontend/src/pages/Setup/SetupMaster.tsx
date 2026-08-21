@@ -72,7 +72,12 @@ const SetupMaster: React.FC = () => {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
-  const { data: allSetups, isLoading } = useQuery({
+  const {
+    data: allSetups, isLoading,
+    // A failed read used to be indistinguishable from an empty tenant here: `allSetups` stayed
+    // undefined, `groupedData` returned {}, and the page announced "Nothing on this list yet."
+    isError: listReadFailed, error: listReadError, refetch: refetchSetups,
+  } = useQuery({
     queryKey: ['setups-global-all'],
     queryFn: () => setupService.getAll({ pageSize: 5000 }),
   });
@@ -397,6 +402,26 @@ const SetupMaster: React.FC = () => {
         <Box sx={{ display: 'flex', justifyContent: 'center', p: 10 }}>
           <CircularProgress size={40} thickness={4} />
         </Box>
+      ) : listReadFailed ? (
+        /*
+          This screen is the ESCAPE HATCH. When Users or Roles & Permissions finds no roles, both
+          send the administrator here with a "Create roles" button pointing at
+          /setup/master?type=role. If the read that lands them here 500s, the remedy repeats the
+          exact failure it exists to cure: "Nothing on this list yet." on a tenant whose roles are
+          all present, and the admin starts recreating roles that already exist and are already
+          granting access.
+
+          So the list is never summarised from a read that did not happen. The counts, the type
+          rail and the "Nothing on this list yet." line all come from `allSetups`; none of them
+          may speak for it.
+        */
+        <ApiErrorNotice
+          error={listReadError}
+          fallbackMessage="Nexora could not read this list, so it cannot say what exists here. Nothing is missing from your configuration — this screen could not read it."
+          onRetry={() => void refetchSetups()}
+          retryLabel="Reload list"
+          sx={{ borderRadius: 2 }}
+        />
       ) : (
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
           {distinctTypes.map((type) => {

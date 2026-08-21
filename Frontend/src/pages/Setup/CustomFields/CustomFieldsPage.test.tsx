@@ -212,4 +212,41 @@ describe('CustomFieldsPage', () => {
     await waitFor(() =>
       expect(screen.getByText(/No empty result has been assumed/)).toBeInTheDocument());
   });
+
+  it('does not print the cheerful empty state UNDERNEATH the failure alert', async () => {
+    // The alert alone was not enough. The empty branch was gated on `!isPending` only, so a failed
+    // read — which leaves `definitions` at its `= []` default — rendered BOTH: "Custom fields could
+    // not be loaded. No empty result has been assumed." and, in the table below it, "No custom
+    // fields yet. Add one and it becomes available on every record of this type."
+    //
+    // Two contradictory diagnoses on one screen, and the one carrying an instruction is the false
+    // one. A tenant admin who acts on it re-creates a field whose stable key is permanent.
+    service.listDefinitions.mockRejectedValue(
+      // The AxiosError shape `src/api/axiosInstance.ts` re-rejects on a 500.
+      Object.assign(new Error('Request failed with status code 500'), {
+        isAxiosError: true,
+        code: 'ERR_BAD_RESPONSE',
+        config: { method: 'get', url: '/api/CustomFieldDefinition' },
+        request: {},
+        response: { status: 500, data: '', headers: {} },
+      }),
+    );
+
+    render(<CustomFieldsPage />, { wrapper });
+
+    await waitFor(() =>
+      expect(screen.getByText(/No empty result has been assumed/)).toBeInTheDocument());
+    expect(screen.queryByText(/No custom fields yet/)).not.toBeInTheDocument();
+  });
+
+  it('still shows the empty state when the read succeeds and there are genuinely none', async () => {
+    // CONTROL for the guard above: `!isError` must not suppress the copy a real first-run tenant
+    // needs. This passes against both the broken and the fixed page — that is the point of it.
+    service.listDefinitions.mockResolvedValue([]);
+
+    render(<CustomFieldsPage />, { wrapper });
+
+    await waitFor(() => expect(screen.getByText(/No custom fields yet/)).toBeInTheDocument());
+    expect(screen.queryByText(/No empty result has been assumed/)).not.toBeInTheDocument();
+  });
 });

@@ -20,11 +20,29 @@ import SearchField from '../../../components/common/SearchField';
 import { useAuth } from '../../../context/AuthContext';
 import { formatDateSafe } from '../../../utils/dates';
 
+/**
+ * Same defect as QuotesPage: two rail entries point here at a FILTERED address while the page
+ * heads itself "All RFQs / Manage and track all Request for Quotations" either way.
+ *
+ * RfqRepository.GetAllAsync narrows on 'ready-for-quote' and nothing else, so it is the only value
+ * that earns a filter chip. "Sourcing Cases" sends ?state=requires-sourcing, which the server drops
+ * on the floor — that rail entry lands the user on EVERY RFQ under a heading promising a sourcing
+ * subset, so it gets a stated warning rather than a silently complete list.
+ */
+const RFQ_FILTERS: Record<string, { label: string; description: string }> = {
+  'ready-for-quote': {
+    label: 'Ready for Quote',
+    description: 'Showing only RFQs with a customer, a lead and complete line items. This is not every RFQ.',
+  },
+};
+
 const AllRFQsPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const readiness = searchParams.get('state') || undefined;
+  const activeFilter = readiness ? RFQ_FILTERS[readiness] : undefined;
+  const unappliedFilter = readiness && !activeFilter ? readiness : undefined;
   const { userData, hasPermission } = useAuth();
   const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ pageSize: 10, page: 0 });
   const [search, setSearch] = useState('');
@@ -170,12 +188,33 @@ const AllRFQsPage: React.FC = () => {
       {/* Header Section */}
       <Stack direction="row" sx={{ justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
         <Box>
-          <Typography variant="h4" sx={{ fontWeight: 900, letterSpacing: '-0.02em', mb: 0.5 }}>
-            {t('all_rfqs')}
-          </Typography>
+          <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center', mb: 0.5 }}>
+            <Typography variant="h4" sx={{ fontWeight: 900, letterSpacing: '-0.02em' }}>
+              {t('all_rfqs')}
+            </Typography>
+            {activeFilter && (
+              <Chip
+                size="small"
+                color="warning"
+                variant="outlined"
+                label={`Filtered: ${activeFilter.label}`}
+                sx={{ fontWeight: 800 }}
+              />
+            )}
+          </Stack>
           <Typography variant="body2" color="text.secondary">
-            Manage and track all Request for Quotations
+            {activeFilter ? activeFilter.description : 'Manage and track all Request for Quotations'}
           </Typography>
+          {activeFilter && (
+            <Button size="small" onClick={() => navigate('/procurement/rfqs/all')} sx={{ px: 0, fontWeight: 700 }}>
+              Show all RFQs
+            </Button>
+          )}
+          {unappliedFilter && (
+            <Alert severity="warning" sx={{ mt: 1 }}>
+              This link asked for "{unappliedFilter}", which is not a filter this list applies. Every RFQ is shown.
+            </Alert>
+          )}
         </Box>
         <Stack direction="row" spacing={2}>
           {hasPermission('RFQ Management', 'create') && <Button

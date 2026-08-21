@@ -1648,20 +1648,74 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
                 x.Id, award.Id, x.CustomerPurchaseOrderLineId, x.QuoteItemId, x.AwardedQuantity,
                 x.UnitPriceSnapshot, x.DiscountSnapshot, x.TaxSnapshot, x.TotalSnapshot, x.Version)).ToList());
 
+    /// <summary>
+    /// What one awarded quantity is worth, frozen onto the award: unit price, the discount the
+    /// customer was granted, the output tax, and the total those three imply.
+    ///
+    /// <para>The discount is the line's OWN discount plus its share of the QUOTE-LEVEL header
+    /// discount, and that share is now READ from <see cref="QuoteItem.HeaderDiscountAllocated"/>.
+    /// It used to be reconstructed as <c>sum(line totals) - quote.TotalAmount</c>. Allocating the
+    /// header discount down to the lines changed the meaning of both operands — a line total is
+    /// already net of its own share, and the quote total is the sum of those same lines — so that
+    /// subtraction became EXACTLY ZERO on every quote and this site was never updated. A rep's 10%
+    /// goodwill discount disappeared from the sales order her Client PO produced, and that order's
+    /// Financial Summary then contradicted itself: 10,000.00 subtotal, -0.00 discount, 1,350.00
+    /// tax, 10,350.00 grand total. Subtotal - Discount + Tax must equal Grand Total, and it did
+    /// not.</para>
+    /// </summary>
     private static (decimal UnitPrice, decimal Discount, decimal Tax, decimal Total) CalculateSnapshots(
         Quote quote, QuoteItem item, decimal quantity)
     {
         if (item.Quantity <= 0m) throw new CustomerAwardConflictException("A quoted quantity must be positive before it can be awarded.");
         var ratio = quantity / item.Quantity;
-        var lineTotalSum = quote.QuoteItems.Sum(x => x.TotalAmount);
-        var headerDiscount = quote.TotalAmount.HasValue ? Math.Max(0m, lineTotalSum - quote.TotalAmount.Value) : 0m;
-        var allocatedHeaderDiscount = lineTotalSum > 0m
-            ? Money(headerDiscount * (item.TotalAmount / lineTotalSum) * ratio)
-            : 0m;
+        var storedAllocation = HeaderDiscountIsAllocatedToLines(quote);
+        var allocatedHeaderDiscount = Money(ratio * (storedAllocation
+            ? item.HeaderDiscountAllocated ?? 0m
+            : InferredHeaderDiscountShare(quote, item)));
+
         return (decimal.Round(item.UnitPrice, 4, MidpointRounding.AwayFromZero),
             Money((item.Discount ?? 0m) * ratio + allocatedHeaderDiscount),
             Money((item.TaxAmount ?? 0m) * ratio),
-            Money(item.TotalAmount * ratio - allocatedHeaderDiscount));
+            // An allocated line already had the header discount taken OUT of TotalAmount by the
+            // quote calculator, so taking it out again here would charge the customer's own
+            // discount to him twice. Only an inferred share still has to be removed.
+            storedAllocation
+                ? Money(item.TotalAmount * ratio)
+                : Money(item.TotalAmount * ratio - allocatedHeaderDiscount));
+    }
+
+    /// <summary>
+    /// Whether this quote's header discount is written down on its lines. Null on every line means
+    /// the quote predates the allocation column, which is the only case left that has to infer.
+    /// Same test the quote document builder makes, so the printed quotation and the sales order
+    /// raised from it cannot pick different answers about the same quote.
+    /// </summary>
+    private static bool HeaderDiscountIsAllocatedToLines(Quote quote)
+        => quote.QuoteItems.Any(x => x.HeaderDiscountAllocated is not null);
+
+    /// <summary>
+    /// A legacy quote's header discount, inferred the only way still available: the gap between
+    /// what its lines add up to and the total that was actually stored, shared out pro rata.
+    ///
+    /// <para>Deliberately the same shape as <c>OrderService.CreateOrderFromQuoteAsync</c>, down to
+    /// the <see cref="Quote.FinancialCalculationVersion"/> branch, rather than a second opinion.
+    /// The branch is not decoration: from version 2 a line total carries its own tax, so a subtotal
+    /// compared against the stored total has to carry tax too — compare a tax-exclusive subtotal
+    /// against a tax-inclusive total and the inference comes back short by the entire VAT.</para>
+    /// </summary>
+    private static decimal InferredHeaderDiscountShare(Quote quote, QuoteItem item)
+    {
+        var grossSubtotal = quote.QuoteItems.Sum(x => Money(x.Quantity * x.UnitPrice));
+        var itemDiscounts = quote.QuoteItems.Sum(x => Money(x.Discount ?? 0m));
+        var itemTax = quote.QuoteItems.Sum(x => Money(x.TaxAmount ?? 0m));
+        var preHeaderTotal = quote.FinancialCalculationVersion >= 2
+            ? Money(grossSubtotal - itemDiscounts + itemTax)
+            : Money(grossSubtotal - itemDiscounts);
+        var headerDiscount = Math.Max(0m, Money(preHeaderTotal - (quote.TotalAmount ?? preHeaderTotal)));
+        var lineTotalSum = quote.QuoteItems.Sum(x => x.TotalAmount);
+        return headerDiscount > 0m && lineTotalSum > 0m
+            ? headerDiscount * (item.TotalAmount / lineTotalSum)
+            : 0m;
     }
 
     private static decimal Money(decimal value) => decimal.Round(value, 2, MidpointRounding.AwayFromZero);

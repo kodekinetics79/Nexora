@@ -309,6 +309,11 @@ const EditQuotePage: React.FC = () => {
       // therefore permanently unsaveable from this screen.
       quoteDate: quoteDate || null,
       validUntil: validUntil || null,
+      // Round-trip the currency the record already has. The server now treats an absent
+      // CurrencyId as "not supplied" rather than "clear it", so this is belt AND braces: the
+      // payload states the truth, and the server no longer destroys it if some future caller
+      // forgets to. This screen deliberately offers no way to CHANGE the currency.
+      currencyId: quote?.currencyId ?? null,
       headerRemarks,
       discountTypeId, discountValue, statusId,
       modifiedBy: userData?.userName || 'System',
