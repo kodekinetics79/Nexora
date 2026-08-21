@@ -11,3 +11,4 @@ export { default as ReorderAlertsPage } from './ReorderAlertsPage';
 export { default as CountVariancePage } from './CountVariancePage';
 export { default as StockAgeingPage } from './StockAgeingPage';
 export { default as StockActionsDialog } from './StockActionsDialog';
+export { default as OpeningStockDialog } from './OpeningStockDialog';

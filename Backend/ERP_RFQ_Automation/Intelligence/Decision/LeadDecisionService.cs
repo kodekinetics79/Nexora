@@ -277,6 +277,7 @@ public sealed class LeadDecisionService : ILeadDecisionService
                 Items = l.LeadItems.Select(li => new
                 {
                     li.ItemMaterialCode,
+                    li.ManufacturerPartNumber,
                     li.UnitPrice,
                     li.Quantity,
                     li.Currency
@@ -285,22 +286,53 @@ public sealed class LeadDecisionService : ILeadDecisionService
             .ToListAsync(ct);
         if (leads.Count == 0) return result;
 
-        // Batched query 2 — every distinct material code across every lead in one
-        // IN query; summaries use exact-code coverage only (the cheap signal).
-        var codes = leads.SelectMany(l => l.Items)
+        // Batched query 2 — every distinct catalogue number across every lead in one IN query.
+        // The grid MUST read the same fields as the brief (MatchCatalogAsync): a buyer's material
+        // number arrives in whichever field the door that read the document happens to have, and
+        // the spreadsheet door routes every material-code heading into ManufacturerPartNumber by
+        // design (NativeSpreadsheetParser.FieldAliases). Reading ItemMaterialCode alone scored
+        // every spreadsheet-ingested lead 0% here — "We stock ~0%" and a Skip chip — while that
+        // lead's own brief reported full coverage.
+        var lines = leads.SelectMany(l => l.Items).ToList();
+        var codes = lines
             .Select(i => i.ItemMaterialCode?.Trim().ToLowerInvariant())
             .Where(c => !string.IsNullOrEmpty(c))
             .Select(c => c!)
             .Distinct()
             .ToList();
+        var mpns = lines
+            .Select(i => i.ManufacturerPartNumber?.Trim().ToLowerInvariant())
+            .Where(c => !string.IsNullOrEmpty(c))
+            .Select(c => c!)
+            .Distinct()
+            .ToList();
 
-        var knownCodes = codes.Count == 0
-            ? new HashSet<string>()
-            : (await ActiveProducts(businessUnitId)
-                   .Where(p => codes.Contains(p.PartNo.ToLower()))
-                   .Select(p => p.PartNo.ToLower())
-                   .ToListAsync(ct))
-              .ToHashSet(StringComparer.Ordinal);
+        // Identifier -> product id, populated ONLY where exactly one product owns that
+        // identifier. Same three fail-closed guards as MatchCatalogAsync (duplicate PartNo,
+        // duplicate ModelNo, and a line whose two identifiers point at two different products):
+        // without them the grid would count as covered what the brief refuses to match, which is
+        // the identical contradiction mirrored.
+        var byPartNo = new Dictionary<string, long>(StringComparer.Ordinal);
+        var byModelNo = new Dictionary<string, long>(StringComparer.Ordinal);
+
+        if (codes.Count > 0 || mpns.Count > 0)
+        {
+            var exactRows = await ActiveProducts(businessUnitId)
+                .Where(p => codes.Contains(p.PartNo.ToLower())
+                            || mpns.Contains(p.PartNo.ToLower())
+                            || (p.ModelNo != null && mpns.Contains(p.ModelNo.ToLower())))
+                .Select(p => new { p.Id, p.PartNo, p.ModelNo })
+                .ToListAsync(ct);
+
+            foreach (var group in exactRows.GroupBy(
+                         p => p.PartNo.Trim().ToLowerInvariant(), StringComparer.Ordinal))
+                if (group.Count() == 1) byPartNo[group.Key] = group.Single().Id;
+
+            foreach (var group in exactRows
+                         .Where(p => !string.IsNullOrWhiteSpace(p.ModelNo))
+                         .GroupBy(p => p.ModelNo!.Trim().ToLowerInvariant(), StringComparer.Ordinal))
+                if (group.Count() == 1) byModelNo[group.Key] = group.Single().Id;
+        }
 
         // Same guard as the full brief: with no catalog loaded, coverage is 0% on every
         // lead and the skip rule fires on 100% of inbound. One existence check, hoisted
@@ -314,7 +346,15 @@ public sealed class LeadDecisionService : ILeadDecisionService
             var covered = lead.Items.Count(i =>
             {
                 var code = i.ItemMaterialCode?.Trim().ToLowerInvariant();
-                return !string.IsNullOrEmpty(code) && knownCodes.Contains(code!);
+                var mpn = i.ManufacturerPartNumber?.Trim().ToLowerInvariant();
+                var matched = new List<long>(3);
+                if (!string.IsNullOrEmpty(code) && byPartNo.TryGetValue(code!, out var byCode))
+                    matched.Add(byCode);
+                if (!string.IsNullOrEmpty(mpn) && byModelNo.TryGetValue(mpn!, out var byModel))
+                    matched.Add(byModel);
+                if (!string.IsNullOrEmpty(mpn) && byPartNo.TryGetValue(mpn!, out var byPart))
+                    matched.Add(byPart);
+                return matched.Distinct().Count() == 1;
             });
             var coveragePct = Pct(covered, total);
 

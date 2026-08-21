@@ -828,16 +828,29 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
     /// Every field on a lead line that can carry a catalogue number, best evidence first.
     ///
     /// <para>Only <c>ItemMaterialCode</c> and <c>ManufacturerPartNumber</c> used to be read, and
-    /// that omission is the defect. A buyer's material number arrives in whichever field the door
-    /// that read the document happens to have: <c>NativeSpreadsheetParser</c> routes a
-    /// "Material Code" column into <c>ManufacturerPartNumber</c>, the structured extractor cannot
-    /// populate <c>ItemMaterialCode</c> at all (<c>ChunkedExtractionService.MapCanonicalItem</c>
-    /// hardcodes it null, because <c>CanonicalRfqLineItem</c> has no member for it), and a table
-    /// whose code column has an unrecognised heading leaves the number sitting in the description
-    /// cell. Measured against the live catalogue shape: a code in <c>AlternatePartNumber</c>
-    /// scored 0.85 and a code in <c>ProductShortDescription</c> scored 0.00 — not a near miss,
-    /// no candidate at all, because the ILIKE candidate query searches ProductName and
-    /// Description and never the catalogue's own number columns.</para>
+    /// that omission is the defect. A buyer's material number arrives in whichever FIELD the door
+    /// that read the document happens to populate: <c>NativeSpreadsheetParser</c> routes every
+    /// material-code heading ("materialcode", "stockcode", "sapmaterial", "buyerpartno", …) into
+    /// <c>ManufacturerPartNumber</c>, and a table whose code column has an unrecognised heading
+    /// leaves the number sitting in the description cell. Measured against the live catalogue
+    /// shape: a code in <c>AlternatePartNumber</c> scored 0.85 and a code in
+    /// <c>ProductShortDescription</c> scored 0.00 — not a near miss, no candidate at all, because
+    /// the ILIKE candidate query searches ProductName and Description and never the catalogue's
+    /// own number columns.</para>
+    ///
+    /// <para>CORRECTION (2026-08, after an adversarial re-read): an earlier revision of this
+    /// comment claimed the <c>ItemMaterialCode</c> rung was dead because
+    /// <c>ChunkedExtractionService.MapCanonicalItem</c> hardcodes that field null. That is FALSE
+    /// and it cost an investigation. <c>CanonicalRfqLineItem</c> genuinely has no member for a
+    /// material code, so the structured chunked path leaving it null is correct, not a bug — but
+    /// it is not the only door. <c>AramcoBidListExtraction</c> writes the Aramco material number
+    /// straight into <c>ItemMaterialCode</c> at <c>Certain</c> confidence, and the model door
+    /// populates it too. The 1.00 rung below is LIVE. Do not "fix" the hardcoded null, do not
+    /// touch <c>CanonicalRfqLineItem</c>, <c>MapCanonicalItem</c>, the extraction prompt, or
+    /// <c>NativeSpreadsheetParser.FieldAliases</c> (that routing is deliberate and
+    /// test-pinned by <c>ProductionDocumentReaderSpreadsheetFallbackTests</c>). Any consumer that
+    /// reads a lead line's catalogue number must read BOTH fields, exactly as the ladder below
+    /// and <c>LeadDecisionService</c> now do on both its brief and its grid paths.</para>
     ///
     /// <para>The confidence floor is NOT relaxed anywhere below. Every rung here is exact equality
     /// against a catalogue number; what changed is which of the line's fields are allowed to

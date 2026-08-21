@@ -36,6 +36,26 @@ namespace ERP_RFQ_Automation.Controllers
         private bool TryGetTenantId(out long businessUnitId) =>
             long.TryParse(User.FindFirst("businessUnitId")?.Value, out businessUnitId) && businessUnitId > 0;
 
+        /// <summary>
+        /// RFC 7807 body carrying the request's trace identifier, so a caller reporting a failure
+        /// gives support an id that ties straight back to the server log entry. Mirrors the helper
+        /// on the sibling master-data controller (SupplierController).
+        ///
+        /// <para>NOT named <c>Problem</c>. <see cref="ControllerBase"/> already declares
+        /// <c>Problem(...)</c>, which this class calls six times to RETURN a 500
+        /// (<c>ObjectResult</c>); this helper BUILDS a body (<c>ProblemDetails</c>) to be handed to
+        /// <c>BadRequest</c>/<c>Conflict</c>. Overloaded on argument shape, the two bound correctly
+        /// but read identically at every call site, and the compiler would have silently picked the
+        /// other one the day an argument list drifted. The distinct name makes which one is meant
+        /// visible in the call rather than inferable from the arguments.</para>
+        /// </summary>
+        private ProblemDetails TracedProblem(int status, string title, string detail)
+        {
+            var problem = new ProblemDetails { Status = status, Title = title, Detail = detail };
+            problem.Extensions["traceId"] = HttpContext.TraceIdentifier;
+            return problem;
+        }
+
         private string Actor() => User.FindFirstValue(ClaimTypes.Email)
             ?? User.FindFirstValue(ClaimTypes.NameIdentifier)
             ?? User.FindFirst("email")?.Value
@@ -239,7 +259,53 @@ namespace ERP_RFQ_Automation.Controllers
                 CreatedBy = Actor(),
                 CreatedOn = DateTime.UtcNow
             };
-            await _repository.AddAsync(product, request.Attachments);
+            try
+            {
+                await _repository.AddAsync(product, request.Attachments);
+            }
+            catch (DbUpdateException ex) when (ex.InnerException is Npgsql.PostgresException { SqlState: "22001" })
+            {
+                // 22001 ONLY — "value too long for type character varying(n)". Deliberately not a
+                // blanket catch: a bare catch(DbUpdateException) would also swallow foreign-key
+                // violations (23503), unique violations (23505), RLS denials (42501 — this codebase
+                // is deny-by-default under nexora_tenant_isolation) and serialization failures from
+                // the serializable transaction in AllocateProductDocIdAsync, and would report every
+                // one of them to the operator as "shorten the product name" while removing the log
+                // entry that says what actually happened. Everything else escapes to the global
+                // handler, on purpose.
+                //
+                // The DTO caps now mirror the columns, so this should be unreachable for the fields
+                // this screen writes. It stays as the backstop for the ones it does not.
+                return BadRequest(TracedProblem(StatusCodes.Status400BadRequest, "Product not created",
+                    "One of the values is too long for the field it is stored in. Shorten it and try again."));
+            }
+            catch (ArgumentException ex) when (ex is not (ArgumentNullException or ArgumentOutOfRangeException))
+            {
+                // The subclasses are EXCLUDED, and that exclusion is the point of the filter.
+                // ArgumentNullException and ArgumentOutOfRangeException both derive from
+                // ArgumentException, and neither is ever a message to the operator — each is a bug
+                // in this process. The traced path: PersistAttachmentAsync calls
+                // Path.Combine(_environment.WebRootPath, subFolder), and WebRootPath is null on any
+                // deployment without a wwwroot directory, so Path.Combine throws
+                // ArgumentNullException. Caught here, a product saved WITH an attachment on such a
+                // deployment would be reported to the user as a duplicate part number or a bad
+                // category id — a sentence about their data describing a fault in ours, sending
+                // them to correct a field that was never wrong. Excluded, it reaches the global
+                // handler and stays in the log where somebody can fix the deployment.
+                //
+                // The repository signals a taken part number and five "does not exist" reference
+                // failures through the SAME exception type, so the message text is the only thing
+                // that separates a conflict from a bad request.
+                //
+                // This IS message-sniffing and it is knowingly accepted for now: it works against
+                // today's strings and breaks silently the day somebody rewords one. The durable fix
+                // is a typed exception (or a result object) out of ProductRepository; until then a
+                // reworded message degrades to 400 rather than 409, which is wrong but not harmful.
+                var duplicate = ex.Message.Contains("already exists", StringComparison.OrdinalIgnoreCase);
+                return duplicate
+                    ? Conflict(TracedProblem(StatusCodes.Status409Conflict, "Product not created", ex.Message))
+                    : BadRequest(TracedProblem(StatusCodes.Status400BadRequest, "Product not created", ex.Message));
+            }
 
             // Reload the product to include attachments
             var savedProduct = await _repository.GetByIdAsync(product.Id, request.Buid);
@@ -358,7 +424,53 @@ namespace ERP_RFQ_Automation.Controllers
             product.ModifiedBy = Actor();
             product.ModifiedOn = DateTime.UtcNow;
 
-            await _repository.UpdateAsync(product, request.Buid, request.Attachments);
+            try
+            {
+                await _repository.UpdateAsync(product, request.Buid, request.Attachments);
+            }
+            catch (DbUpdateException ex) when (ex.InnerException is Npgsql.PostgresException { SqlState: "22001" })
+            {
+                // 22001 ONLY — "value too long for type character varying(n)". Deliberately not a
+                // blanket catch: a bare catch(DbUpdateException) would also swallow foreign-key
+                // violations (23503), unique violations (23505), RLS denials (42501 — this codebase
+                // is deny-by-default under nexora_tenant_isolation) and serialization failures from
+                // the serializable transaction in AllocateProductDocIdAsync, and would report every
+                // one of them to the operator as "shorten the product name" while removing the log
+                // entry that says what actually happened. Everything else escapes to the global
+                // handler, on purpose.
+                //
+                // The DTO caps now mirror the columns, so this should be unreachable for the fields
+                // this screen writes. It stays as the backstop for the ones it does not.
+                return BadRequest(TracedProblem(StatusCodes.Status400BadRequest, "Product not saved",
+                    "One of the values is too long for the field it is stored in. Shorten it and try again."));
+            }
+            catch (ArgumentException ex) when (ex is not (ArgumentNullException or ArgumentOutOfRangeException))
+            {
+                // The subclasses are EXCLUDED, and that exclusion is the point of the filter.
+                // ArgumentNullException and ArgumentOutOfRangeException both derive from
+                // ArgumentException, and neither is ever a message to the operator — each is a bug
+                // in this process. The traced path: PersistAttachmentAsync calls
+                // Path.Combine(_environment.WebRootPath, subFolder), and WebRootPath is null on any
+                // deployment without a wwwroot directory, so Path.Combine throws
+                // ArgumentNullException. Caught here, a product saved WITH an attachment on such a
+                // deployment would be reported to the user as a duplicate part number or a bad
+                // category id — a sentence about their data describing a fault in ours, sending
+                // them to correct a field that was never wrong. Excluded, it reaches the global
+                // handler and stays in the log where somebody can fix the deployment.
+                //
+                // The repository signals a taken part number and five "does not exist" reference
+                // failures through the SAME exception type, so the message text is the only thing
+                // that separates a conflict from a bad request.
+                //
+                // This IS message-sniffing and it is knowingly accepted for now: it works against
+                // today's strings and breaks silently the day somebody rewords one. The durable fix
+                // is a typed exception (or a result object) out of ProductRepository; until then a
+                // reworded message degrades to 400 rather than 409, which is wrong but not harmful.
+                var duplicate = ex.Message.Contains("already exists", StringComparison.OrdinalIgnoreCase);
+                return duplicate
+                    ? Conflict(TracedProblem(StatusCodes.Status409Conflict, "Product not saved", ex.Message))
+                    : BadRequest(TracedProblem(StatusCodes.Status400BadRequest, "Product not saved", ex.Message));
+            }
 
             // FR-INV-04. Push the reorder point down to the stock rows that actually drive the
             // alert.

@@ -28,6 +28,15 @@ namespace ERP_RFQ_Automation.Controllers;
 /// dials them, so <see cref="MailEndpointPolicy"/> gates every attempt: without it, the test
 /// endpoint is a tenant-operable SSRF probe into the private network with timings and error
 /// detail reported back in the response.</para>
+///
+/// <para><b>Write failures are named, on the two actions that can produce one.</b>
+/// <see cref="Create"/> and <see cref="Update"/> are the only actions that carry operator-typed
+/// TEXT into a bounded column, so they are the only ones wrapped. The other three writes cannot
+/// reach a <c>22001</c>: <see cref="Delete"/> and <see cref="PauseOutbound"/> assign booleans or
+/// remove a row, <see cref="Test"/> persists nothing but an audit event, and every audit field
+/// those three touch is either truncated by <c>IamAuditWriter</c> (<c>TargetLabel</c> at 256,
+/// <c>Reason</c> at 512) or is unbounded <c>jsonb</c>. Adding a catch there would be an unreachable
+/// claim on an exception type that only a genuine fault can raise.</para>
 /// </summary>
 [Route("api/[controller]")]
 [ApiController]
@@ -47,6 +56,21 @@ public sealed class MailboxController(
     /// <summary>Whole-request ceiling for a connection test. Six network stages against an
     /// unresponsive host must not hold a request thread indefinitely.</summary>
     private static readonly TimeSpan TestDeadline = TimeSpan.FromSeconds(45);
+
+    /// <summary>
+    /// RFC 7807 body carrying the request's trace identifier, so an operator reporting a failed
+    /// save gives support an id that ties straight back to the server log entry. Same helper, same
+    /// shape and same name as the ones on <c>ProductController</c> and
+    /// <c>ProductCategoryController</c>; deliberately NOT called <c>Problem</c>, because
+    /// <see cref="ControllerBase"/> already declares that and two same-named helpers with
+    /// different return types in one file is a trap.
+    /// </summary>
+    private ProblemDetails TracedProblem(int status, string title, string detail)
+    {
+        var problem = new ProblemDetails { Status = status, Title = title, Detail = detail };
+        problem.Extensions["traceId"] = HttpContext.TraceIdentifier;
+        return problem;
+    }
 
     // ---- read ---------------------------------------------------------------------------
 
@@ -189,34 +213,74 @@ public sealed class MailboxController(
         }
 
         EmailConfiguration? created = null;
-        await audit.ExecuteAtomicAsync(async () =>
+        try
         {
-            // Constructed inside the delegate: ExecuteAtomicAsync is retriable, and an entity
-            // built outside stays tracked as Added across a rolled-back attempt.
-            created = new EmailConfiguration
+            await audit.ExecuteAtomicAsync(async () =>
             {
-                BusinessUnitId = tenant,
-                ConfigurationName = request.ConfigurationName.Trim(),
-                EmailAddress = request.EmailAddress.Trim(),
-                Protocol = protocol,
-                Host = MailEndpointPolicy.Normalize(request.Host),
-                Port = request.Port,
-                Username = request.Username.Trim(),
-                Password = request.Password,
-                UseSsl = request.UseSsl,
-                PollingInterval = request.PollingInterval,
-                IsActive = request.IsActive,
-                CreatedOn = DateTime.UtcNow
-            };
+                // Constructed inside the delegate: ExecuteAtomicAsync is retriable, and an entity
+                // built outside stays tracked as Added across a rolled-back attempt.
+                created = new EmailConfiguration
+                {
+                    BusinessUnitId = tenant,
+                    ConfigurationName = request.ConfigurationName.Trim(),
+                    EmailAddress = request.EmailAddress.Trim(),
+                    Protocol = protocol,
+                    Host = MailEndpointPolicy.Normalize(request.Host),
+                    Port = request.Port,
+                    Username = request.Username.Trim(),
+                    Password = request.Password,
+                    UseSsl = request.UseSsl,
+                    PollingInterval = request.PollingInterval,
+                    IsActive = request.IsActive,
+                    CreatedOn = DateTime.UtcNow
+                };
 
-            context.EmailConfigurations.Add(created);
-            await context.SaveChangesAsync(HttpContext.RequestAborted);
+                context.EmailConfigurations.Add(created);
+                await context.SaveChangesAsync(HttpContext.RequestAborted);
 
-            await audit.WriteAsync(User, new IamAuditEntry(
-                IamAuditActions.MailboxCreated, IamAuditTargets.Mailbox, created.Id,
-                $"{created.Protocol} {created.EmailAddress}", After: Snapshot(created)));
-            await context.SaveChangesAsync(HttpContext.RequestAborted);
-        }, HttpContext.RequestAborted);
+                await audit.WriteAsync(User, new IamAuditEntry(
+                    IamAuditActions.MailboxCreated, IamAuditTargets.Mailbox, created.Id,
+                    $"{created.Protocol} {created.EmailAddress}", After: Snapshot(created)));
+                await context.SaveChangesAsync(HttpContext.RequestAborted);
+            }, HttpContext.RequestAborted);
+        }
+        catch (DbUpdateException ex) when (ex.InnerException is Npgsql.PostgresException { SqlState: "22001" })
+        {
+            // 22001 ONLY — "value too long for type character varying(n)". Deliberately not a
+            // blanket catch: a bare catch(DbUpdateException) would also swallow the foreign-key
+            // violation on BusinessUnitID (23503), unique violations (23505), RLS denials
+            // (42501 — this codebase is deny-by-default under nexora_tenant_isolation) and
+            // serialization failures from the retriable transaction ExecuteAtomicAsync opens,
+            // and would report every one of them to the operator as "shorten the address" while
+            // removing the log entry that says what actually happened. Everything else escapes
+            // to the global handler, on purpose.
+            //
+            // The DTO caps now mirror the columns, so this should be unreachable for the fields
+            // this screen writes. It stays as the backstop for the ones it does not.
+            return BadRequest(TracedProblem(StatusCodes.Status400BadRequest, "Mailbox not created",
+                "One of the values is too long for the field it is stored in. Shorten it and try again."));
+        }
+        catch (ArgumentException ex) when (ex is not (ArgumentNullException or ArgumentOutOfRangeException))
+        {
+            // The subclasses are EXCLUDED, and that exclusion is the point of the filter.
+            // ArgumentNullException and ArgumentOutOfRangeException both derive from
+            // ArgumentException, and neither is ever a message to the operator — each is a bug
+            // in this process. There is a real one on this exact call: IamAuditWriter opens
+            // ExecuteAtomicAsync with ArgumentNullException.ThrowIfNull(work). Caught here it
+            // would be reported to the operator as a mailbox that already exists: a sentence
+            // about their data describing a fault in ours, sending them to change an address
+            // that was never wrong. Excluded, it reaches the global handler and stays logged.
+            //
+            // The message text is the only thing that separates a conflict from a bad request.
+            // This IS message-sniffing and it is knowingly accepted for now; a reworded message
+            // degrades to 400 rather than 409, which is wrong but not harmful. Nothing is
+            // logged from here — the message could be echoed back, and this module's exception
+            // paths handle mailbox credentials.
+            var duplicate = ex.Message.Contains("already exists", StringComparison.OrdinalIgnoreCase);
+            return duplicate
+                ? Conflict(TracedProblem(StatusCodes.Status409Conflict, "Mailbox not created", ex.Message))
+                : BadRequest(TracedProblem(StatusCodes.Status400BadRequest, "Mailbox not created", ex.Message));
+        }
 
         var row = created ?? throw new InvalidOperationException("Mailbox creation produced no entity.");
         logger.LogInformation("Mailbox {MailboxId} ({Protocol}) created for tenant {Tenant}.",
@@ -251,33 +315,56 @@ public sealed class MailboxController(
 
         var before = Snapshot(row);
 
-        await audit.ExecuteAtomicAsync(async () =>
+        try
         {
-            row.ConfigurationName = request.ConfigurationName.Trim();
-            row.EmailAddress = request.EmailAddress.Trim();
-            row.Host = MailEndpointPolicy.Normalize(request.Host);
-            row.Port = request.Port;
-            row.Username = request.Username.Trim();
-            row.UseSsl = request.UseSsl;
-            row.PollingInterval = request.PollingInterval;
-            row.IsActive = request.IsActive;
-            if (rotating) row.Password = request.Password!;
+            await audit.ExecuteAtomicAsync(async () =>
+            {
+                row.ConfigurationName = request.ConfigurationName.Trim();
+                row.EmailAddress = request.EmailAddress.Trim();
+                row.Host = MailEndpointPolicy.Normalize(request.Host);
+                row.Port = request.Port;
+                row.Username = request.Username.Trim();
+                row.UseSsl = request.UseSsl;
+                row.PollingInterval = request.PollingInterval;
+                row.IsActive = request.IsActive;
+                if (rotating) row.Password = request.Password!;
 
-            await context.SaveChangesAsync(HttpContext.RequestAborted);
+                await context.SaveChangesAsync(HttpContext.RequestAborted);
 
-            await audit.WriteAsync(User, new IamAuditEntry(
-                IamAuditActions.MailboxUpdated, IamAuditTargets.Mailbox, row.Id,
-                $"{row.Protocol} {row.EmailAddress}", Before: before, After: Snapshot(row)));
-
-            // A credential rotation gets its own event so a reviewer can find it without
-            // reading the diff of every unrelated host and port edit.
-            if (rotating)
                 await audit.WriteAsync(User, new IamAuditEntry(
-                    IamAuditActions.MailboxCredentialChanged, IamAuditTargets.Mailbox, row.Id,
-                    $"{row.Protocol} {row.EmailAddress}"));
+                    IamAuditActions.MailboxUpdated, IamAuditTargets.Mailbox, row.Id,
+                    $"{row.Protocol} {row.EmailAddress}", Before: before, After: Snapshot(row)));
 
-            await context.SaveChangesAsync(HttpContext.RequestAborted);
-        }, HttpContext.RequestAborted);
+                // A credential rotation gets its own event so a reviewer can find it without
+                // reading the diff of every unrelated host and port edit.
+                if (rotating)
+                    await audit.WriteAsync(User, new IamAuditEntry(
+                        IamAuditActions.MailboxCredentialChanged, IamAuditTargets.Mailbox, row.Id,
+                        $"{row.Protocol} {row.EmailAddress}"));
+
+                await context.SaveChangesAsync(HttpContext.RequestAborted);
+            }, HttpContext.RequestAborted);
+        }
+        catch (DbUpdateException ex) when (ex.InnerException is Npgsql.PostgresException { SqlState: "22001" })
+        {
+            // 22001 ONLY — see the identical catch on Create for why this is not a blanket
+            // catch(DbUpdateException). Everything else escapes to the global handler, on purpose.
+            //
+            // The DTO caps now mirror the columns, so this should be unreachable for the fields
+            // this screen writes. It stays as the backstop for the ones it does not.
+            return BadRequest(TracedProblem(StatusCodes.Status400BadRequest, "Mailbox not saved",
+                "One of the values is too long for the field it is stored in. Shorten it and try again."));
+        }
+        catch (ArgumentException ex) when (ex is not (ArgumentNullException or ArgumentOutOfRangeException))
+        {
+            // The subclasses are EXCLUDED — see the identical catch on Create. Nothing is logged
+            // from here: the row being edited carries a live customer mailbox credential, and this
+            // catch sits directly on the call that assigns it.
+            var duplicate = ex.Message.Contains("already exists", StringComparison.OrdinalIgnoreCase);
+            return duplicate
+                ? Conflict(TracedProblem(StatusCodes.Status409Conflict, "Mailbox not saved", ex.Message))
+                : BadRequest(TracedProblem(StatusCodes.Status400BadRequest, "Mailbox not saved", ex.Message));
+        }
 
         return Ok(ToResponse(row));
     }
