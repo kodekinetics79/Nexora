@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Alert, Box, Button, Table, TableBody, TableCell, TableHead, TableRow, TextField, Typography } from '@mui/material';
 import commercialIntelligenceService, { type AvailabilityDTO } from '../../../api/services/commercialIntelligenceService';
 import { useAuth } from '../../../context/AuthContext';
@@ -26,6 +26,7 @@ export default function AvailabilityPage() {
   // The bootstrap door. Every per-row action needs a row, and a row only exists once the product
   // already has stock, so a never-stocked product has no way in without this.
   const [opening, setOpening] = useState(false);
+  const queryClient = useQueryClient();
   const query = useQuery({
     queryKey: ['inventory-intelligence', 'availability', search],
     queryFn: () => commercialIntelligenceService.getAvailability({ search: search || undefined }),
@@ -35,6 +36,25 @@ export default function AvailabilityPage() {
   // whole stock position — a silently truncated availability table is worse than no table.
   const truncated = rows.length >= ROW_CAP;
   const searching = search.trim() !== '';
+
+  /**
+   * Which emptiness this is — with the nothing-is-stocked case asked FIRST, ahead of the search
+   * filter, for the same reason the stock-levels ladder asks it first. "No availability records
+   * match this search" is a true sentence and a useless one on a tenant that has never stocked
+   * anything: the next step is not a different search term, it is the opening-stock door.
+   *
+   * <p>This endpoint returns a bare array with no unfiltered total to read, so the unfiltered
+   * result is taken from the query cache rather than from a second request — this component always
+   * mounts with an empty search, so that query has already run by the time a search can be typed.
+   * Undefined (never resolved, or evicted) falls back to the search wording rather than guessing.</p>
+   */
+  const unfiltered = queryClient.getQueryData<AvailabilityDTO[]>(['inventory-intelligence', 'availability', '']);
+  const nothingStocked = !searching || unfiltered?.length === 0;
+  const emptyText = nothingStocked
+    ? `No stock has been recorded yet. No product in this business unit has an opening balance in any warehouse.${canEdit
+      ? ' Use "Record opening stock" above to enter what is on the shelf.'
+      : ' Someone who can edit products needs to record the opening stock before this screen has anything to show.'}`
+    : 'No availability records match this search.';
 
   return (
     <PageShell
@@ -49,12 +69,7 @@ export default function AvailabilityPage() {
         </Box>
       }
     >
-      <QueryState loading={query.isLoading} error={query.isError} empty={!rows.length} onRetry={() => void query.refetch()} emptyText={searching
-        // "Nothing matched" and "nothing is stocked" are different answers, and only one of them
-        // is true on day one. A grid that says "no match" when no search was typed reads as
-        // "you have no stock", when in fact no product has ever been given an opening balance.
-        ? 'No availability records match this search.'
-        : 'No stock has been recorded yet. No product in this business unit has an opening balance in any warehouse — use "Record opening stock" above to enter what is on the shelf.'}>
+      <QueryState loading={query.isLoading} error={query.isError} empty={!rows.length} onRetry={() => void query.refetch()} emptyText={emptyText}>
         {truncated && <Alert severity="info" sx={{ mb: 2 }}>Showing the first {ROW_CAP} rows. Search by part or product to narrow this list.</Alert>}
         <ResponsiveTable label="Product availability">
           <Table size="small">

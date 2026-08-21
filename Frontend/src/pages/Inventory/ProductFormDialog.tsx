@@ -47,6 +47,31 @@ const serverMessage = (error: unknown, fallback: string): string => {
   return body?.title?.trim() ? body.title : fallback;
 };
 
+/**
+ * The server's caps, stated at the keyboard instead of at the Save button.
+ *
+ * ProductCreateRequestDTO and ProductUpdateRequestDTO cap ProductName at 100 and Description at
+ * 500, mirroring `Products."ProductName"` varchar(100) and `Products."Description"` varchar(500).
+ * Those attributes were tightened so an over-long value is refused by validation with a readable
+ * sentence rather than dying inside the INSERT as Postgres 22001 — but a refusal that only arrives
+ * after Save still costs the user everything they typed. Repeating the cap here means the 101st
+ * character is never typed in the first place.
+ *
+ * The counter is not decoration. `maxLength` swallows keystrokes silently, which reads as a broken
+ * keyboard unless something on screen says why — so the field states where it is, and says so
+ * plainly at the boundary. Same pairing the rest of the app already uses (AccountsReceivablePage,
+ * ExtendValidityDialog): `htmlInput.maxLength` plus an `n/max` helper.
+ *
+ * Defence in depth, not a replacement: `serverMessage` above still renders the server's own
+ * sentence, and the server remains the authority on what fits.
+ */
+const PRODUCT_NAME_MAX = 100;
+const DESCRIPTION_MAX = 500;
+
+/** `12/100` — and, at the boundary, why the keyboard appears to have stopped. */
+const counter = (value: string, max: number) =>
+  value.length >= max ? `${value.length}/${max} · limit reached` : `${value.length}/${max}`;
+
 interface Props {
   open: boolean;
   onClose: () => void;
@@ -174,7 +199,14 @@ const ProductFormDialog: React.FC<Props> = ({ open, onClose, productId }) => {
           {/* Basic Info */}
           <SectionTitle label="Basic Information" />
           <Grid size={{ xs: 12, sm: 6 }}>
-            <TextField fullWidth label="Product Name" value={form.productName} onChange={f('productName')} />
+            <TextField
+              fullWidth
+              label="Product Name"
+              value={form.productName}
+              onChange={f('productName')}
+              helperText={counter(form.productName, PRODUCT_NAME_MAX)}
+              slotProps={{ htmlInput: { maxLength: PRODUCT_NAME_MAX } }}
+            />
           </Grid>
           <Grid size={{ xs: 12, sm: 6 }}>
             <TextField fullWidth label="Part No" value={form.partNo} onChange={f('partNo')} required />
@@ -195,7 +227,16 @@ const ProductFormDialog: React.FC<Props> = ({ open, onClose, productId }) => {
             </TextField>
           </Grid>
           <Grid size={{ xs: 12 }}>
-            <TextField fullWidth multiline rows={2} label="Description" value={form.description} onChange={f('description')} />
+            <TextField
+              fullWidth
+              multiline
+              rows={2}
+              label="Description"
+              value={form.description}
+              onChange={f('description')}
+              helperText={counter(form.description, DESCRIPTION_MAX)}
+              slotProps={{ htmlInput: { maxLength: DESCRIPTION_MAX } }}
+            />
           </Grid>
 
           {isEditLoading && <Grid size={{ xs: 12 }}><CircularProgress size={22} aria-label="Loading product" /></Grid>}

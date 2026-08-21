@@ -40,8 +40,16 @@ namespace ERP_RFQ_Automation.Controllers
         /// RFC 7807 body carrying the request's trace identifier, so a caller reporting a failure
         /// gives support an id that ties straight back to the server log entry. Mirrors the helper
         /// on the sibling master-data controller (SupplierController).
+        ///
+        /// <para>NOT named <c>Problem</c>. <see cref="ControllerBase"/> already declares
+        /// <c>Problem(...)</c>, which this class calls six times to RETURN a 500
+        /// (<c>ObjectResult</c>); this helper BUILDS a body (<c>ProblemDetails</c>) to be handed to
+        /// <c>BadRequest</c>/<c>Conflict</c>. Overloaded on argument shape, the two bound correctly
+        /// but read identically at every call site, and the compiler would have silently picked the
+        /// other one the day an argument list drifted. The distinct name makes which one is meant
+        /// visible in the call rather than inferable from the arguments.</para>
         /// </summary>
-        private ProblemDetails Problem(int status, string title, string detail)
+        private ProblemDetails TracedProblem(int status, string title, string detail)
         {
             var problem = new ProblemDetails { Status = status, Title = title, Detail = detail };
             problem.Extensions["traceId"] = HttpContext.TraceIdentifier;
@@ -268,11 +276,23 @@ namespace ERP_RFQ_Automation.Controllers
                 //
                 // The DTO caps now mirror the columns, so this should be unreachable for the fields
                 // this screen writes. It stays as the backstop for the ones it does not.
-                return BadRequest(Problem(StatusCodes.Status400BadRequest, "Product not created",
+                return BadRequest(TracedProblem(StatusCodes.Status400BadRequest, "Product not created",
                     "One of the values is too long for the field it is stored in. Shorten it and try again."));
             }
-            catch (ArgumentException ex)
+            catch (ArgumentException ex) when (ex is not (ArgumentNullException or ArgumentOutOfRangeException))
             {
+                // The subclasses are EXCLUDED, and that exclusion is the point of the filter.
+                // ArgumentNullException and ArgumentOutOfRangeException both derive from
+                // ArgumentException, and neither is ever a message to the operator — each is a bug
+                // in this process. The traced path: PersistAttachmentAsync calls
+                // Path.Combine(_environment.WebRootPath, subFolder), and WebRootPath is null on any
+                // deployment without a wwwroot directory, so Path.Combine throws
+                // ArgumentNullException. Caught here, a product saved WITH an attachment on such a
+                // deployment would be reported to the user as a duplicate part number or a bad
+                // category id — a sentence about their data describing a fault in ours, sending
+                // them to correct a field that was never wrong. Excluded, it reaches the global
+                // handler and stays in the log where somebody can fix the deployment.
+                //
                 // The repository signals a taken part number and five "does not exist" reference
                 // failures through the SAME exception type, so the message text is the only thing
                 // that separates a conflict from a bad request.
@@ -283,8 +303,8 @@ namespace ERP_RFQ_Automation.Controllers
                 // reworded message degrades to 400 rather than 409, which is wrong but not harmful.
                 var duplicate = ex.Message.Contains("already exists", StringComparison.OrdinalIgnoreCase);
                 return duplicate
-                    ? Conflict(Problem(StatusCodes.Status409Conflict, "Product not created", ex.Message))
-                    : BadRequest(Problem(StatusCodes.Status400BadRequest, "Product not created", ex.Message));
+                    ? Conflict(TracedProblem(StatusCodes.Status409Conflict, "Product not created", ex.Message))
+                    : BadRequest(TracedProblem(StatusCodes.Status400BadRequest, "Product not created", ex.Message));
             }
 
             // Reload the product to include attachments
@@ -421,11 +441,23 @@ namespace ERP_RFQ_Automation.Controllers
                 //
                 // The DTO caps now mirror the columns, so this should be unreachable for the fields
                 // this screen writes. It stays as the backstop for the ones it does not.
-                return BadRequest(Problem(StatusCodes.Status400BadRequest, "Product not saved",
+                return BadRequest(TracedProblem(StatusCodes.Status400BadRequest, "Product not saved",
                     "One of the values is too long for the field it is stored in. Shorten it and try again."));
             }
-            catch (ArgumentException ex)
+            catch (ArgumentException ex) when (ex is not (ArgumentNullException or ArgumentOutOfRangeException))
             {
+                // The subclasses are EXCLUDED, and that exclusion is the point of the filter.
+                // ArgumentNullException and ArgumentOutOfRangeException both derive from
+                // ArgumentException, and neither is ever a message to the operator — each is a bug
+                // in this process. The traced path: PersistAttachmentAsync calls
+                // Path.Combine(_environment.WebRootPath, subFolder), and WebRootPath is null on any
+                // deployment without a wwwroot directory, so Path.Combine throws
+                // ArgumentNullException. Caught here, a product saved WITH an attachment on such a
+                // deployment would be reported to the user as a duplicate part number or a bad
+                // category id — a sentence about their data describing a fault in ours, sending
+                // them to correct a field that was never wrong. Excluded, it reaches the global
+                // handler and stays in the log where somebody can fix the deployment.
+                //
                 // The repository signals a taken part number and five "does not exist" reference
                 // failures through the SAME exception type, so the message text is the only thing
                 // that separates a conflict from a bad request.
@@ -436,8 +468,8 @@ namespace ERP_RFQ_Automation.Controllers
                 // reworded message degrades to 400 rather than 409, which is wrong but not harmful.
                 var duplicate = ex.Message.Contains("already exists", StringComparison.OrdinalIgnoreCase);
                 return duplicate
-                    ? Conflict(Problem(StatusCodes.Status409Conflict, "Product not saved", ex.Message))
-                    : BadRequest(Problem(StatusCodes.Status400BadRequest, "Product not saved", ex.Message));
+                    ? Conflict(TracedProblem(StatusCodes.Status409Conflict, "Product not saved", ex.Message))
+                    : BadRequest(TracedProblem(StatusCodes.Status400BadRequest, "Product not saved", ex.Message));
             }
 
             // FR-INV-04. Push the reorder point down to the stock rows that actually drive the

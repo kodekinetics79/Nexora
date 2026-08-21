@@ -1,9 +1,11 @@
 using System.ComponentModel.DataAnnotations;
 using System.Reflection;
+using ERP_RFQ_Automation.DTOs.ProductCategory;
 using ERP_RFQ_Automation.DTOs.ProductDTOs;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata;
 
 namespace ERP_RFQ_Automation.Tests;
 
@@ -34,6 +36,11 @@ public sealed class RequestDtoColumnWidthContractTests
     // The two Products columns at issue, as configured in ErpRfqAutomationContext.
     private const int ProductNameColumn = 100;
     private const int ProductDescriptionColumn = 500;
+
+    // ProductCategories."Description" is NARROWER than the Products one. Both DTOs carried the
+    // same [StringLength(500)], which is how the category door stayed broken after the product
+    // door was fixed: the number looked right against the wrong column.
+    private const int CategoryDescriptionColumn = 255;
 
     private static IReadOnlyList<ValidationResult> Validate(object dto)
     {
@@ -102,6 +109,47 @@ public sealed class RequestDtoColumnWidthContractTests
         Assert.True(Rejects(update, nameof(ProductUpdateRequestDTO.Description)));
     }
 
+    /// <summary>
+    /// THE SECOND INSTANCE, on categories. A 300-character description is the exact shape the
+    /// reviewer traced: <c>[StringLength(500)]</c> accepted it, <c>varchar(255)</c> refused it, and
+    /// <c>ProductCategoryController.Create</c> answered with a 500 that said nothing.
+    /// </summary>
+    [Fact]
+    public void A_category_description_the_column_cannot_hold_is_refused_on_both_doors()
+    {
+        var create = new ProductCategoryCreateRequestDTO
+        {
+            CategoryName = "Valves",
+            Description = new string('D', 300),
+            BusinessUnitId = 1
+        };
+        var update = new ProductCategoryUpdateRequestDTO
+        {
+            CategoryName = "Valves",
+            Description = new string('D', 300),
+            BusinessUnitId = 1
+        };
+
+        Assert.True(create.Description!.Length > CategoryDescriptionColumn, "fixture must exceed the column");
+        Assert.True(Rejects(create, nameof(ProductCategoryCreateRequestDTO.Description)),
+            "a description longer than the varchar(255) column must fail validation, not the INSERT");
+        Assert.True(Rejects(update, nameof(ProductCategoryUpdateRequestDTO.Description)));
+    }
+
+    /// <summary>Tightening must not have cost anything the column can actually hold.</summary>
+    [Fact]
+    public void A_category_description_that_fits_the_column_is_still_accepted()
+    {
+        var create = new ProductCategoryCreateRequestDTO
+        {
+            CategoryName = "Valves",
+            Description = new string('D', CategoryDescriptionColumn),
+            BusinessUnitId = 1
+        };
+
+        Assert.False(Rejects(create, nameof(ProductCategoryCreateRequestDTO.Description)));
+    }
+
     /// <summary>A name that fits must still be accepted — the cap mirrors the column exactly.</summary>
     [Fact]
     public void A_name_that_fits_the_column_is_still_accepted()
@@ -137,31 +185,50 @@ public sealed class RequestDtoColumnWidthContractTests
 
         var violations = new List<string>();
         var outstanding = new List<string>();
+        var unmapped = new List<string>();
         var assembly = typeof(ProductCreateRequestDTO).Assembly;
 
-        foreach (var dto in assembly.GetTypes().Where(t => t.IsClass && !t.IsAbstract && t.Name.EndsWith("RequestDTO", StringComparison.Ordinal)))
+        foreach (var dto in RequestDtos(assembly))
         {
-            var entityName = EntityNameFor(dto.Name);
-            var entity = model.GetEntityTypes().FirstOrDefault(e => e.ClrType.Name == entityName);
-            if (entity is null) continue;
+            // Only DTOs that actually promise a length are in scope; one with no cap at all cannot
+            // lie about one.
+            var capped = dto.GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                .Select(p => (Property: p, Declared: DeclaredCap(p)))
+                .Where(x => x.Declared is not null)
+                .ToList();
+            if (capped.Count == 0) continue;
 
-            foreach (var property in dto.GetProperties(BindingFlags.Public | BindingFlags.Instance))
+            var entity = EntityFor(model, dto.Name);
+            if (entity is null)
             {
-                var declared = property.GetCustomAttribute<StringLengthAttribute>()?.MaximumLength;
-                if (declared is null) continue;
+                // NOT silently skipped any more. Before this sweep was widened, eight capped request
+                // DTOs fell out here without a word — which is exactly where the next instance of
+                // this defect would have hidden.
+                if (!NotBackedByOneEntity.Any(x => x.Dto == dto.Name)) unmapped.Add(dto.Name);
+                continue;
+            }
 
+            foreach (var (property, declared) in capped)
+            {
                 var column = entity.FindProperty(property.Name)?.GetMaxLength();
                 if (column is null) continue;
-
                 if (declared <= column) continue;
 
-                var finding = $"{dto.Name}.{property.Name}: [StringLength({declared})] > {entity.ClrType.Name}.{property.Name} varchar({column})";
+                var finding = $"{dto.Name}.{property.Name}: [{CapAttributeName(property)}({declared})] > {entity.ClrType.Name}.{property.Name} varchar({column})";
                 (Excluded(dto.Name, property.Name) ? outstanding : violations).Add(finding);
             }
         }
 
         Assert.True(violations.Count == 0,
             "Request DTOs promise more text than the database column can hold:\n  " + string.Join("\n  ", violations));
+
+        // A capped DTO that resolves to no entity is a HOLE in this sweep, not a pass. Every one
+        // must be named in NotBackedByOneEntity with the reason it cannot be checked here, so the
+        // hole is a decision somebody wrote down rather than an accident of a naming convention.
+        Assert.True(unmapped.Count == 0,
+            "These request DTOs carry length caps but resolve to no entity, so nothing checks them. "
+            + "Add an alias to EntityAliases, or list them in NotBackedByOneEntity with the reason:\n  "
+            + string.Join("\n  ", unmapped));
 
         // The exclusions must still be REAL. If somebody fixes one, this fails and the entry comes
         // out of the list — an exclusion that has quietly stopped applying is how a suppression list
@@ -170,8 +237,69 @@ public sealed class RequestDtoColumnWidthContractTests
     }
 
     /// <summary>
-    /// Mismatches this sweep found that are NOT fixed here, each with the reason. Two entries, and
-    /// they are not the same kind of thing.
+    /// Every request DTO in the assembly. Matched case-insensitively on purpose — <c>RequestDto</c>
+    /// and <c>RequestDTO</c> are both spelled in this codebase, and an Ordinal match silently
+    /// dropped the first spelling.
+    /// </summary>
+    private static IEnumerable<Type> RequestDtos(Assembly assembly) =>
+        assembly.GetTypes().Where(t => t.IsClass && !t.IsAbstract
+            && t.Name.EndsWith("RequestDTO", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// The declared cap, from EITHER attribute. <c>[MaxLength]</c> lies exactly as loudly as
+    /// <c>[StringLength]</c> — <c>RolePermissionBulkApplyRequestDTO.Reason</c> uses it — and reading
+    /// only one of the two is how a whole family of DTOs escaped the first version of this sweep.
+    /// </summary>
+    private static int? DeclaredCap(PropertyInfo property)
+    {
+        if (property.PropertyType != typeof(string)) return null;
+        var stringLength = property.GetCustomAttribute<StringLengthAttribute>()?.MaximumLength;
+        if (stringLength is not null) return stringLength;
+        var maxLength = property.GetCustomAttribute<MaxLengthAttribute>()?.Length;
+        return maxLength > 0 ? maxLength : null;
+    }
+
+    private static string CapAttributeName(PropertyInfo property) =>
+        property.GetCustomAttribute<StringLengthAttribute>() is not null ? "StringLength" : "MaxLength";
+
+    private static IEntityType? EntityFor(IModel model, string dtoTypeName)
+    {
+        var entityName = EntityAliases.TryGetValue(dtoTypeName, out var alias) ? alias : EntityNameFor(dtoTypeName);
+        return model.GetEntityTypes().FirstOrDefault(e => e.ClrType.Name == entityName);
+    }
+
+    /// <summary>
+    /// DTOs whose entity does not follow the "strip the verb" convention. Each pairing was read off
+    /// the controller or repository that performs the write, not guessed from the name.
+    /// </summary>
+    private static readonly IReadOnlyDictionary<string, string> EntityAliases = new Dictionary<string, string>
+    {
+        // MailboxController.Create/Update map these onto EmailConfiguration.
+        ["MailboxCreateRequestDTO"] = "EmailConfiguration",
+        ["MailboxUpdateRequestDTO"] = "EmailConfiguration",
+        // LeadRepository.LinkClientAsync writes request.Reason onto a LeadReviewAudit row.
+        ["LeadClientLinkRequestDTO"] = "LeadReviewAudit",
+        // QuoteController.Transition hands the command to LifecycleApplicationService, which
+        // persists CorrelationId and IdempotencyKey on CommercialLifecycleEvent.
+        ["QuoteLifecycleTransitionRequestDTO"] = "CommercialLifecycleEvent",
+        // QuoteService.ExtendValidityAsync records the reason on a QuoteValidityExtension row.
+        ["QuoteExtendValidityRequestDTO"] = "QuoteValidityExtension",
+        // AuthController compares against User; only Email is a column, and it is unbounded.
+        ["LoginRequestDTO"] = "User",
+    };
+
+    /// <summary>
+    /// Capped DTOs this sweep genuinely cannot check, each with the reason. Listed rather than
+    /// skipped, so the gap is visible.
+    /// </summary>
+    private static readonly IReadOnlyList<(string Dto, string Reason)> NotBackedByOneEntity =
+    [
+        ("MailboxTestRequestDTO", "Writes nothing — it opens a connection with the supplied settings and discards them."),
+        ("RolePermissionBulkApplyRequestDTO", "Reason reaches the database only through IamAuditWriter, which calls Truncate(entry.Reason, 512) before assigning it, so the cap cannot overflow the column."),
+    ];
+
+    /// <summary>
+    /// Mismatches this sweep finds that are NOT fixed here, each with the reason.
     ///
     /// <list type="bullet">
     /// <item><b>Supplier.Tier</b> — a false positive of the rule, not a defect. The DTO also carries
@@ -181,20 +309,29 @@ public sealed class RequestDtoColumnWidthContractTests
     /// <c>Normalize</c> allocates during model binding — it is not a promise that 64 characters can
     /// be stored, and no value that long can reach the column. Excluded permanently.</item>
     ///
-    /// <item><b>ProductCategory.Description</b> — a GENUINE second instance of exactly this defect,
-    /// live on <c>ProductCategoryController.Create</c>: <c>[StringLength(500)]</c> over a
-    /// <c>varchar(255)</c> column, so a 300-character category description is the same unhandled
-    /// <c>22001</c> that products just produced. It is not fixed here only because it lives in
-    /// <c>DTOs/Product/ProductCategoryResponseDTO.cs</c>, outside this change's file scope. It needs
-    /// the identical two-line fix and it is reported, not forgotten.</item>
+    /// <item><b>Mailbox EmailAddress and Username</b> — a GENUINE third instance of this defect,
+    /// surfaced only once the sweep was widened to resolve <c>Mailbox*RequestDTO</c> onto
+    /// <c>EmailConfiguration</c>. Both are <c>[StringLength(320)]</c> (the RFC 5321 address limit)
+    /// over <c>character varying(255)</c> columns, and <c>MailboxController</c> has no <c>22001</c>
+    /// handling — so a 300-character address is the same unhandled 500 products produced. NOT fixed
+    /// here because <c>Mailbox/MailboxDTOs.cs</c> and <c>Controllers/MailboxController.cs</c> are
+    /// outside this change's file scope. Reported, not forgotten.</item>
     /// </list>
+    ///
+    /// <para><c>ProductCategory.Description</c> WAS on this list and is now FIXED: both DTOs are
+    /// <c>[StringLength(255)]</c> over the <c>varchar(255)</c> column, and
+    /// <c>ProductCategoryController</c> Create and Update carry the same 22001 / ArgumentException
+    /// handling <c>ProductController</c> does. The entries are gone rather than kept-and-passing,
+    /// which is what the count assertion enforces.</para>
     /// </summary>
     private static readonly IReadOnlyList<(string Dto, string Property)> Exclusions =
     [
         ("SupplierCreateRequestDTO", "Tier"),
         ("SupplierUpdateRequestDTO", "Tier"),
-        ("ProductCategoryCreateRequestDTO", "Description"),
-        ("ProductCategoryUpdateRequestDTO", "Description"),
+        ("MailboxCreateRequestDTO", "EmailAddress"),
+        ("MailboxCreateRequestDTO", "Username"),
+        ("MailboxUpdateRequestDTO", "EmailAddress"),
+        ("MailboxUpdateRequestDTO", "Username"),
     ];
 
     private static bool Excluded(string dto, string property) =>

@@ -4,7 +4,9 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { SnackbarProvider } from 'notistack';
 import AvailabilityPage from './AvailabilityPage';
 import StockLevelsPage from './StockLevelsPage';
-import type { StockLevelsDTO, WarehouseIntelligenceDTO } from '../../../api/services/commercialIntelligenceService';
+import type {
+  AvailabilityDTO, StockLevelsDTO, WarehouseIntelligenceDTO,
+} from '../../../api/services/commercialIntelligenceService';
 import type { PaginatedProductResponse } from '../../../api/services/productService';
 
 /**
@@ -70,6 +72,14 @@ const WAREHOUSES: WarehouseIntelligenceDTO[] = [
     skuCount: 0, onHandUnits: 0, reservedUnits: 0, availableUnits: 0, exceptionCount: 0,
   },
 ];
+
+/** One stocked row, for the cases where the tenant is past day one. */
+const STOCKED_ROW: AvailabilityDTO = {
+  inventoryId: 1, productId: 11, partNumber: 'VLV-100', productName: 'Gate valve',
+  warehouseId: 21, warehouseName: 'Dammam',
+  onHand: 12, reserved: 0, available: 12, incoming: 0,
+  reorderPoint: 0, minimumLevel: null, maximumLevel: null, safetyStock: 0, leadTimeDays: null,
+};
 
 /** Nothing has ever been stocked. Not "nothing matched" — nothing exists. */
 const NO_LEVELS: StockLevelsDTO = {
@@ -165,10 +175,17 @@ describe('Honest empty states', () => {
     expect(screen.queryByText(/match this search/i)).not.toBeInTheDocument();
   });
 
-  it('still says "no match" once a search has actually been typed', async () => {
+  /**
+   * The premise matters. "No match" is only the honest answer when there was something to match
+   * against, so this tenant has to hold stock — an unstocked tenant that typed a search is told
+   * nothing is stocked, which EmptyStateOrdering.test.tsx pins.
+   */
+  it('still says "no match" once a search has been typed against a tenant that holds stock', async () => {
+    getAvailability.mockImplementation((params: { search?: string } | undefined) =>
+      Promise.resolve(params?.search ? [] : [STOCKED_ROW]));
     renderPage(<AvailabilityPage />);
 
-    await screen.findByText(/no stock has been recorded yet/i);
+    await screen.findByText('VLV-100');
     fireEvent.change(screen.getByLabelText(/search part or product/i), { target: { value: 'zzz' } });
 
     await waitFor(() => expect(screen.getByText(/match this search/i)).toBeInTheDocument());

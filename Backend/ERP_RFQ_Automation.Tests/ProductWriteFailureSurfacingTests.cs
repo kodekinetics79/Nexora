@@ -186,6 +186,80 @@ public sealed class ProductWriteFailureSurfacingTests
         Assert.Equal("23503", Assert.IsType<PostgresException>(escaped.InnerException).SqlState);
     }
 
+    // ---- ArgumentException must not swallow its own subclasses --------------------------
+
+    /// <summary>
+    /// THE LIE THIS PREVENTS. <c>ArgumentNullException</c> derives from <c>ArgumentException</c>, so
+    /// an unfiltered <c>catch (ArgumentException)</c> claims it too — and there is a real path that
+    /// throws one: <c>ProductRepository.PersistAttachmentAsync</c> calls
+    /// <c>Path.Combine(_environment.WebRootPath, subFolder)</c>, and <c>WebRootPath</c> is null on
+    /// any deployment without a <c>wwwroot</c> directory. A product saved WITH an attachment on such
+    /// a deployment would then be reported to the user as a taken part number or a bad category id.
+    /// That is a sentence about their data describing a fault in ours: they go and change a part
+    /// number that was never wrong, the save fails again, and the log entry that would have named
+    /// the real cause was consumed by the catch.
+    ///
+    /// <para>Excluded, it escapes to the global handler in <c>Program.cs</c>, which logs it. The
+    /// caller still gets a 500 — correctly, because a missing wwwroot IS a server fault.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_null_argument_bug_in_our_own_code_is_not_reported_as_a_duplicate_or_a_bad_field()
+    {
+        using var database = new TestDb();
+        await using var context = database.ContextFor(Bu);
+        var controller = ControllerFor(context, new ThrowingProductRepository(
+            // What Path.Combine(null, "products") actually throws.
+            new ArgumentNullException("path1", "Value cannot be null.")));
+
+        var escaped = await Assert.ThrowsAsync<ArgumentNullException>(() => controller.Create(CreateRequest()));
+
+        Assert.Equal("path1", escaped.ParamName);
+    }
+
+    /// <summary><c>ArgumentOutOfRangeException</c> is the same story and the same base class.</summary>
+    [Fact]
+    public async Task An_out_of_range_argument_bug_is_not_reported_as_a_bad_field_either()
+    {
+        using var database = new TestDb();
+        await using var context = database.ContextFor(Bu);
+        var controller = ControllerFor(context, new ThrowingProductRepository(
+            new ArgumentOutOfRangeException("index", "Index was out of range.")));
+
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => controller.Create(CreateRequest()));
+    }
+
+    /// <summary>The edit door carries the identical filter, so it carries the identical proof.</summary>
+    [Fact]
+    public async Task A_null_argument_bug_on_the_edit_path_is_not_reported_as_a_duplicate_either()
+    {
+        using var database = new TestDb();
+        await using var context = database.ContextFor(Bu);
+        var controller = ControllerFor(context, new ThrowingProductRepository(
+            new ArgumentNullException("path1", "Value cannot be null."), existing: Existing()));
+
+        var escaped = await Assert.ThrowsAsync<ArgumentNullException>(() => controller.Update(1, UpdateRequest()));
+
+        Assert.Equal("path1", escaped.ParamName);
+    }
+
+    /// <summary>
+    /// And the genuine ArgumentException — the one the repository raises deliberately — must still
+    /// be claimed. Excluding the subclasses must not have excluded the base case with them.
+    /// </summary>
+    [Fact]
+    public async Task A_plain_ArgumentException_from_the_repository_is_still_turned_into_an_answer()
+    {
+        using var database = new TestDb();
+        await using var context = database.ContextFor(Bu);
+        var controller = ControllerFor(context, new ThrowingProductRepository(
+            new ArgumentException("Category ID 44 does not exist in this Business Unit.")));
+
+        var result = await controller.Create(CreateRequest());
+
+        Assert.Equal(StatusCodes.Status400BadRequest,
+            Assert.IsType<ProblemDetails>(Assert.IsType<BadRequestObjectResult>(result.Result).Value).Status);
+    }
+
     private static Product Existing() => new()
     {
         Id = 1, Buid = Bu, PartNo = "PN-OLD", ProductName = "Ball valve",

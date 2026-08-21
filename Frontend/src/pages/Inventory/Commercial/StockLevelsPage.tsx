@@ -85,19 +85,30 @@ export default function StockLevelsPage() {
   const summary = query.data;
 
   /**
-   * Which emptiness this is. The three are not the same answer and only one of them is good news:
-   * nothing breaching (healthy, and only as far as the monitored rows go), nothing matching a
+   * Which emptiness this is. The four answers are not interchangeable and only one of them is good
+   * news: nothing breaching (healthy, and only as far as the monitored rows go), nothing matching a
    * search the user typed, or nothing stocked at all — the day-one state, in which the module has
-   * never been initialised and the grid is empty because no product has an opening balance.
+   * never been initialised because no product holds an opening balance anywhere.
+   *
+   * <p>Nothing-stocked is asked FIRST, ahead of every filter. `rowCount` is the <b>unfiltered</b>
+   * total — InventoryIntelligenceController counts it off `rows` before `breachedOnly` narrows the
+   * payload — so a zero there means the module is empty no matter which switch is on. Asking
+   * "breaching only?" first answered the curious demo user sitting on that switch with "No stock row
+   * is currently breaching a configured level.": literally true, and it withholds the one fact that
+   * would have told them what to do next.</p>
    */
-  const emptyText = breachedOnly
-    ? summary && summary.unmonitoredCount > 0
-      ? `No stock row is currently breaching a configured level. ${summary.unmonitoredCount} row(s) are not monitored at all and could not breach anything, so this is not the same as "all healthy".`
-      : 'No stock row is currently breaching a configured level.'
-    : search.trim() !== ''
-      ? 'No stock row matches this search.'
-      : summary && summary.rowCount === 0
-        ? 'No stock has been recorded yet. No product in this business unit holds an opening balance in any warehouse, so there is nothing to set a level on — use "Record opening stock" above to enter what is on the shelf.'
+  const nothingStocked = summary != null && summary.rowCount === 0;
+
+  const emptyText = nothingStocked
+    ? `No stock has been recorded yet. No product in this business unit holds an opening balance in any warehouse, so there is nothing to breach a level or to set one on.${canEdit
+      ? ' Use "Record opening stock" above to enter what is on the shelf.'
+      : ' Someone who can edit products needs to record the opening stock before this screen has anything to show.'}`
+    : breachedOnly
+      ? summary && summary.unmonitoredCount > 0
+        ? `No stock row is currently breaching a configured level. ${summary.unmonitoredCount} row(s) are not monitored at all and could not breach anything, so this is not the same as "all healthy".`
+        : 'No stock row is currently breaching a configured level.'
+      : search.trim() !== ''
+        ? 'No stock row matches this search.'
         : 'No stock rows exist for this business unit.';
 
   return (
