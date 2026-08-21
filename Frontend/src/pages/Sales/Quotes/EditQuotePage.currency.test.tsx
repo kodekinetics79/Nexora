@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
@@ -19,8 +19,9 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
  * price is agreed on.
  */
 
-const { getById, getAll, productGetAll, customerGetAll, policyGet } = vi.hoisted(() => ({
+const { getById, update, getAll, productGetAll, customerGetAll, policyGet } = vi.hoisted(() => ({
   getById: vi.fn(),
+  update: vi.fn(),
   getAll: vi.fn(),
   productGetAll: vi.fn(),
   customerGetAll: vi.fn(),
@@ -28,7 +29,7 @@ const { getById, getAll, productGetAll, customerGetAll, policyGet } = vi.hoisted
 }));
 
 vi.mock('../../../api/services/quoteService', () => ({
-  default: { getById, update: vi.fn() },
+  default: { getById, update },
 }));
 vi.mock('../../../api/services/setupService', () => ({ default: { getAll } }));
 vi.mock('../../../api/services/productService', () => ({ default: { getAll: productGetAll } }));
@@ -91,6 +92,7 @@ beforeEach(() => {
   productGetAll.mockResolvedValue({ items: [] });
   customerGetAll.mockResolvedValue({ items: [] });
   policyGet.mockResolvedValue({ outputTaxRatePercent: 15 });
+  update.mockResolvedValue({});
 });
 
 describe('a quote priced in Saudi riyals', () => {
@@ -118,3 +120,24 @@ describe('a quote priced in Saudi riyals', () => {
 function container_text(): string {
   return document.body.textContent ?? '';
 }
+
+describe('a quote whose validity date is not set', () => {
+  /**
+   * Found on the live tenant, not in review. Quote QT-0826-0002 carries validUntil = null; the
+   * form loads that as '' and sent it straight back, and '' is not a DateTime?. ASP.NET failed to
+   * bind the entire request, so the 400 read "The request field is required" and the quote could
+   * not be saved AT ALL from this screen — permanently, by any user.
+   */
+  it('sends an unset date as null rather than an empty string', async () => {
+    getById.mockResolvedValue({ ...sarQuote, validUntil: null, quoteDate: null });
+    renderEdit();
+    await screen.findByText(/Revised Summary/i);
+
+    fireEvent.click(screen.getByRole('button', { name: /update quote/i }));
+
+    await waitFor(() => expect(update).toHaveBeenCalled());
+    const payload = update.mock.calls[0][1];
+    expect(payload.validUntil).toBeNull();
+    expect(payload.validUntil).not.toBe('');
+  });
+});

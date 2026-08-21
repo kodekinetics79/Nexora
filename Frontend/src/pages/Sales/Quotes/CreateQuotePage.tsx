@@ -224,7 +224,10 @@ const CreateQuotePage: React.FC = () => {
     }
 
     const payload = {
-      customerId, contactId: selectedRfq?.contactId ?? null, rfqId, businessUnitId, quoteDate, validUntil, headerRemarks,
+      customerId, contactId: selectedRfq?.contactId ?? null, rfqId, businessUnitId,
+      // See EditQuotePage: "" is not a DateTime? and fails model binding for the whole request.
+      // This screen defaults the field, but a user can clear it.
+      quoteDate: quoteDate || null, validUntil: validUntil || null, headerRemarks,
       discountTypeId, discountValue,
       currencyId,
       createdBy: userData?.userName || 'System',

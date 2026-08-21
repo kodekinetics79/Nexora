@@ -299,7 +299,17 @@ const EditQuotePage: React.FC = () => {
       return;
     }
     const payload = {
-      id: Number(id), quoteNo, customerId, quoteDate, validUntil, headerRemarks,
+      id: Number(id), quoteNo, customerId,
+      // Empty date inputs must go over the wire as null, not "".
+      //
+      // A quote whose validUntil is null on the server loads into this form as '' (line ~107),
+      // and '' round-tripped back is not a DateTime?: ASP.NET fails to bind the WHOLE request,
+      // so the 400 reads "The request field is required" and the record cannot be saved AT ALL.
+      // Found on the live tenant, where quote QT-0826-0002 carries validUntil = null and was
+      // therefore permanently unsaveable from this screen.
+      quoteDate: quoteDate || null,
+      validUntil: validUntil || null,
+      headerRemarks,
       discountTypeId, discountValue, statusId,
       modifiedBy: userData?.userName || 'System',
       totalAmount: grandTotal,
