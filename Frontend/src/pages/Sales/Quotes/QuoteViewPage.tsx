@@ -53,14 +53,6 @@ const QuoteViewPage: React.FC = () => {
     retry: 1,
   });
 
-  const statusMutation = useMutation({
-    mutationFn: (status: string) => quoteService.transitionStatus(Number(id), status, quote?.lifecycleVersion ?? 1),
-    onSuccess: () => {
-      toast.success('Status updated successfully');
-      queryClient.invalidateQueries({ queryKey: ['quote-detail', id] });
-    }
-  });
-
   const pdfMutation = useMutation({
     mutationFn: () => quoteService.downloadPdf(Number(id)),
     onSuccess: (blob) => {
@@ -239,6 +231,7 @@ const QuoteViewPage: React.FC = () => {
     !offer.validUntil || dayjs(offer.validUntil).isBefore(dayjs()) ||
     Boolean(quote.validUntil && dayjs(offer.validUntil).isBefore(dayjs(quote.validUntil)))
   ));
+  const isDraftQuote = (quote.statusCode || quote.statusValue || '').toUpperCase() === 'DRAFT';
   const isUnpricedDraft = (quote.statusCode || quote.statusValue || '').toUpperCase() === 'DRAFT'
     && !quote.currencyId
     && quote.quoteItems.every((item) => Number(item.unitPrice || 0) === 0);
@@ -330,14 +323,30 @@ const QuoteViewPage: React.FC = () => {
           >
             Export PDF
           </Button>
-          {hasPermission('Quotations', 'edit') && quote.statusValue === 'Sent' && <Button
-            variant="outlined"
-            startIcon={<EmailIcon />}
-            disabled={quote.statusValue?.toUpperCase() === 'ORDERED'}
+          {/*
+            The ONE control that puts this quote in front of the customer.
+
+            It used to render only once statusValue was already 'Sent', behind a contained
+            "Ready to Send" button that merely transitioned the lifecycle and emailed nobody. A rep
+            who clicked the prominent one got a success toast and a green Sent chip while the buyer
+            received nothing — and the quote's SentOn stayed null, so the status was a claim the
+            delivery record did not support.
+
+            The server owns the real transition: FinalizeQuoteDeliveryAsync stamps SentOn, moves the
+            lifecycle to SENT and creates the follow-up task when the mail is actually delivered. So
+            this button never touches status. It opens the recipient -> price-confirmation chain and
+            lets delivery report itself.
+          */}
+          {hasPermission('Quotations', 'edit')
+            && quote.statusValue?.toUpperCase() !== 'ORDERED'
+            && (isDraftQuote || quote.statusValue === 'Sent') && <Button
+            variant={isDraftQuote ? 'contained' : 'outlined'}
+            startIcon={isDraftQuote ? <SendIcon /> : <EmailIcon />}
+            disabled={isUnpricedDraft}
             onClick={() => setEmailOpen(true)}
             sx={{ borderRadius: 2 }}
           >
-            Email
+            {isDraftQuote ? 'Send to customer' : 'Send again'}
           </Button>}
 
           {/*
@@ -375,8 +384,6 @@ const QuoteViewPage: React.FC = () => {
               </Button>
             </Tooltip>
           )}
-
-          {hasPermission('Quotations', 'edit') && quote.statusValue === 'Draft' && <Button variant="contained" startIcon={<SendIcon />} onClick={() => statusMutation.mutate('Sent')} disabled={isUnpricedDraft} sx={{ borderRadius: 2 }}>Ready to Send</Button>}
 
           {quote.rfqId && <Button variant="outlined" startIcon={<OutcomeIcon />} onClick={() => navigate(`/procurement/rfqs/${quote.rfqId}/sourcing`)}>Sourcing & offers</Button>}
 
@@ -603,6 +610,8 @@ const QuoteViewPage: React.FC = () => {
         title={`Email quote ${quote.quoteNo}`}
         initialEmail={quote.customerEmail || ''}
         loading={sendMutation.isPending}
+        composerFields="recipient-only"
+        confirmLabel="Send quote"
         businessUnitId={businessUnitId}
         customerId={quote.customerId ?? null}
         onCancel={() => setEmailOpen(false)}

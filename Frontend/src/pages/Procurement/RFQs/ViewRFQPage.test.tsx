@@ -262,6 +262,13 @@ describe('ViewRFQPage — dates', () => {
  */
 describe('ViewRFQPage — the primary action states why it is unavailable', () => {
   it('gives the quote-draft button a reason drawn from the actual blocker', async () => {
+    // Fixture corrected: this case must be one the SERVER actually refuses. The default fixture
+    // is ACTIONABLE_WITH_BLOCKERS, and QuoteService.PrepareQuoteDraftAsync refuses only
+    // NO_QUOTE_REVIEW — it says so in a comment, because demanding VIABLE_READY "made the draft
+    // unreachable for any line needing sourcing — the normal case." The client had kept
+    // enforcing the abandoned rule, so this assertion was pinning the defect rather than the
+    // intent. The intent — a disabled action always states why — is preserved below and is right.
+    getRfqIntelligence.mockResolvedValue(intelligence({ commercialDecision: 'NO_QUOTE_REVIEW' }));
     render(<ViewRFQPage />, { wrapper });
 
     const button = await screen.findByRole('button', { name: /Prepare Quote Draft/i });
@@ -270,5 +277,19 @@ describe('ViewRFQPage — the primary action states why it is unavailable', () =
       'aria-label',
       'Resolve 1 blocked line of the 1 line being quoted before preparing the customer quote.',
     );
+  });
+
+  it('lets a rep start a quote whose lines still need sourcing, and says so honestly', async () => {
+    // The everyday case for a distributor: lines not in stock. The server allows the draft; the
+    // client used to grey the button out with an explanation the rep could not act on.
+    getRfqIntelligence.mockResolvedValue(intelligence({ commercialDecision: 'ACTIONABLE_WITH_BLOCKERS' }));
+    render(<ViewRFQPage />, { wrapper });
+
+    const button = await screen.findByRole('button', { name: /Prepare Quote Draft/i });
+    expect(button).toBeEnabled();
+    // And the reason must not claim every line is covered when it plainly is not.
+    const label = button.closest('span')?.getAttribute('aria-label') ?? '';
+    expect(label).toMatch(/You can start the quote now/i);
+    expect(label).not.toMatch(/evidence-backed fulfilment route/i);
   });
 });

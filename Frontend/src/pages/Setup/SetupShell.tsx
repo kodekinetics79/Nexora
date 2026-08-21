@@ -4,6 +4,7 @@ import { Autocomplete, Box, Breadcrumbs, Link, TextField, Typography } from '@mu
 import { NavigateNext as SeparatorIcon, TuneRounded as JumpIcon } from '@mui/icons-material';
 import { useTranslation } from 'react-i18next';
 import { useAuth } from '../../context/AuthContext';
+import { RequireAuth } from '../../components/common/PermissionGuard';
 import {
   SETUP_ENTRIES,
   SETUP_ROOT,
@@ -32,7 +33,7 @@ import {
  */
 export const SETUP_CHROME_HEIGHT = 57;
 
-const SetupShell: React.FC = () => {
+const SetupShellChrome: React.FC = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const { hasPermission } = useAuth();
@@ -157,5 +158,20 @@ const SetupShell: React.FC = () => {
     </Box>
   );
 };
+
+/**
+ * Auth gate for the whole Setup tree.
+ *
+ * `/setup` previously carried `PermissionGuard` on its CHILD routes only, so the index route — the
+ * hub — rendered the full authenticated shell to anyone with no token, over copy telling them their
+ * ROLE lacked access. That sent signed-out visitors to an administrator who would find nothing
+ * wrong. Gating the shell rather than each child means every screen below it, including any added
+ * later, inherits the redirect and none can be introduced without it.
+ */
+const SetupShell: React.FC = () => (
+  <RequireAuth>
+    <SetupShellChrome />
+  </RequireAuth>
+);
 
 export default SetupShell;

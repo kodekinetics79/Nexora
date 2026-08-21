@@ -15,6 +15,7 @@ import {
   Receipt as QuoteIcon
 } from '@mui/icons-material';
 import { useAuth } from '../../../context/AuthContext';
+import { useUnsavedWorkGuard } from '../../../hooks/useUnsavedWorkGuard';
 import rfqService from '../../../api/services/rfqService';
 import quoteService from '../../../api/services/quoteService';
 import commercialPolicyService from '../../../api/services/commercialPolicyService';
@@ -145,16 +146,25 @@ const CreateQuotePage: React.FC = () => {
     outputTaxRatePercent,
   ), [items, discountTypes, discountTypeId, discountValue, outputTaxRatePercent]);
 
+  /* See EditQuotePage: same 40-line grid, same total loss on a mistaken click, same fix. */
+  const guard = useUnsavedWorkGuard({
+    storageKey: 'nexora.quote.create',
+    value: { rfqId, customerId, quoteDate, validUntil, headerRemarks, discountTypeId, discountValue, items },
+    enabled: true,
+  });
+
+
   // Mutations
   const createMutation = useMutation({
     mutationFn: (data: any) => quoteService.create(data),
     onSuccess: () => {
       toast.success('Quote created successfully');
+      guard.markSaved({ rfqId, customerId, quoteDate, validUntil, headerRemarks, discountTypeId, discountValue, items });
       navigate('/sales/quotes');
     },
-    onError: (error: any) => {
-      toast.error(error?.response?.data || 'Failed to create quote');
-    }
+    // The raw `error?.response?.data` render that used to live here is gone: utils/apiErrors.ts
+    // forbids rendering a non-string body (an object prints as "[object Object]"), and the
+    // cache-level handler in api/queryClient.ts now presents this failure through that boundary.
   });
 
   const handleAddItem = () => {
@@ -214,7 +224,10 @@ const CreateQuotePage: React.FC = () => {
     }
 
     const payload = {
-      customerId, contactId: selectedRfq?.contactId ?? null, rfqId, businessUnitId, quoteDate, validUntil, headerRemarks,
+      customerId, contactId: selectedRfq?.contactId ?? null, rfqId, businessUnitId,
+      // See EditQuotePage: "" is not a DateTime? and fails model binding for the whole request.
+      // This screen defaults the field, but a user can clear it.
+      quoteDate: quoteDate || null, validUntil: validUntil || null, headerRemarks,
       discountTypeId, discountValue,
       currencyId,
       createdBy: userData?.userName || 'System',
@@ -251,7 +264,12 @@ const CreateQuotePage: React.FC = () => {
           </Stack>
         </Box>
         <Stack direction="row" spacing={1.5}>
-          <Button variant="outlined" startIcon={<BackIcon />} onClick={() => navigate('/sales/quotes')} size="small">Cancel</Button>
+          <Button variant="outlined" startIcon={<BackIcon />} size="small"
+            onClick={() => {
+              if (guard.isDirty
+                && !window.confirm('Leave without saving? The lines you have entered on this quote will be lost.')) return;
+              navigate('/sales/quotes');
+            }}>Cancel</Button>
           <Button 
             variant="contained" 
             startIcon={createMutation.isPending ? <CircularProgress size={20} color="inherit" /> : <SaveIcon />} 

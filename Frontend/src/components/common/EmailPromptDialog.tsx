@@ -31,6 +31,21 @@ interface EmailPromptDialogProps {
   loading?: boolean;
   businessUnitId: number;
   customerId?: number | null;
+  /**
+   * Which of the optional composer fields this caller can actually deliver.
+   *
+   * The dialog is shared by two flows. The RFQ-approval callers pass subject, body and the
+   * associated customer to an endpoint that uses all three. The quote-send caller passes only the
+   * recipient — POST /api/Quote/{id}/email takes `recipientEmail` and nothing else — so the
+   * Subject and Message boxes sat there collecting a rep's covering note and dropping it on the
+   * floor with no warning. Silent data loss on the one action that touches the customer.
+   *
+   * Rendering is now the caller's declaration of what it will send. Omitted for the RFQ callers,
+   * whose behaviour is unchanged.
+   */
+  composerFields?: 'full' | 'recipient-only';
+  /** Verb for the primary action. "Confirm & Approve" is an approval, not a send. */
+  confirmLabel?: string;
 }
 
 const EmailPromptDialog: React.FC<EmailPromptDialogProps> = ({
@@ -43,8 +58,11 @@ const EmailPromptDialog: React.FC<EmailPromptDialogProps> = ({
   title,
   loading = false,
   businessUnitId,
-  customerId: preselectedCustomerId
+  customerId: preselectedCustomerId,
+  composerFields = 'full',
+  confirmLabel = 'Confirm & Approve',
 }) => {
+  const showComposer = composerFields === 'full';
   const [email, setEmail] = useState('');
   const [subject, setSubject] = useState('');
   const [body, setBody] = useState('');
@@ -84,6 +102,8 @@ const EmailPromptDialog: React.FC<EmailPromptDialogProps> = ({
 
   const handleConfirm = () => {
     if (!email) return;
+    // Never hand back fields this caller declared it cannot deliver.
+    if (!showComposer) { onConfirm(email); return; }
     onConfirm(email, subject, body, selectedCustomerId || undefined);
   };
 
@@ -101,6 +121,7 @@ const EmailPromptDialog: React.FC<EmailPromptDialogProps> = ({
 
       <DialogContent dividers sx={{ p: 3 }}>
         <Stack spacing={3}>
+{showComposer && (
           <Box>
             <Typography variant="caption" sx={{ fontWeight: 800, color: 'text.disabled', textTransform: 'uppercase', mb: 1, display: 'block' }}>
               Associate Customer
@@ -129,6 +150,7 @@ const EmailPromptDialog: React.FC<EmailPromptDialogProps> = ({
               {selectedCustomerId ? 'This RFQ will be linked to the selected customer.' : 'Linking a customer is recommended for better reporting.'}
             </Typography>
           </Box>
+          )}
 
           <TextField
             fullWidth
@@ -139,6 +161,7 @@ const EmailPromptDialog: React.FC<EmailPromptDialogProps> = ({
             slotProps={{ input: { sx: { fontWeight: 800 } } }}
           />
 
+{showComposer && (<>
           <TextField
             fullWidth
             label="Email Subject"
@@ -155,6 +178,7 @@ const EmailPromptDialog: React.FC<EmailPromptDialogProps> = ({
             value={body}
             onChange={(e) => setBody(e.target.value)}
           />
+          </>)}
         </Stack>
       </DialogContent>
 
@@ -166,7 +190,7 @@ const EmailPromptDialog: React.FC<EmailPromptDialogProps> = ({
           disabled={!email || loading}
           sx={{ fontWeight: 900, borderRadius: 2, px: 3, bgcolor: 'success.main', '&:hover': { bgcolor: 'success.dark' } }}
         >
-          {loading ? <CircularProgress size={20} color="inherit" /> : 'Confirm & Approve'}
+          {loading ? <CircularProgress size={20} color="inherit" /> : confirmLabel}
         </Button>
       </DialogActions>
     </Dialog>

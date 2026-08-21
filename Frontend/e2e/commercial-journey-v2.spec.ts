@@ -868,8 +868,15 @@ test('35 RFQ intelligence reconciles current coverage and explainable Digital Tw
   await expect(page.getByRole('button', { name: 'Apply pricing' })).toHaveCount(0);
   await page.getByRole('button', { name: 'Return to RFQ' }).click();
   await expect(page).toHaveURL(new RegExp(`/procurement/rfqs/view/${rfqId()}$`));
-  if (intelligence.commercialDecision !== 'VIABLE_READY') {
+  // The client gate now matches the server: a draft is refused ONLY on NO_QUOTE_REVIEW.
+  // This assertion previously read `!== 'VIABLE_READY'`, which pinned a rule the server had
+  // already abandoned — it required every line covered by stock or an approved offer, so the
+  // button stayed disabled for any RFQ needing sourcing, i.e. the normal case for a
+  // distributor. The suite stayed green while enforcing it, which is why nobody noticed.
+  if (intelligence.commercialDecision === 'NO_QUOTE_REVIEW') {
     await expect(page.getByRole('button', { name: 'Prepare Quote Draft' })).toBeDisabled();
+  } else {
+    await expect(page.getByRole('button', { name: 'Prepare Quote Draft' })).toBeEnabled();
   }
   await fs.mkdir(v1EvidenceDir, { recursive: true });
   await page.screenshot({
