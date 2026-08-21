@@ -34,6 +34,7 @@ import stateService, { type StateDTO } from '../../../api/services/stateService'
 import cityService from '../../../api/services/cityService';
 import { useAuth } from '../../../context/AuthContext';
 import SearchField from '../../../components/common/SearchField';
+import ApiErrorNotice from '../../../components/common/ApiErrorNotice';
 // The grid is sized against the viewport, and the Setup breadcrumb bar is part of that viewport.
 import { SETUP_CHROME_HEIGHT } from '../SetupShell';
 import { handleApiError } from '../../../utils/errorHandler';
@@ -59,19 +60,35 @@ const LocationMaster: React.FC = () => {
   const [editingRecord, setEditingRecord] = useState<any>(null);
   const [formData, setFormData] = useState<any>({});
 
-  // Queries
-  const { data: countries, isLoading: loadingCountries } = useQuery({
+  // Queries.
+  //
+  // `isError` on all three is load-bearing, not defensive tidying. Each list below is derived with
+  // `(data || []).filter(...)`, so a failed read produces an empty array that is indistinguishable
+  // from a genuinely empty table — and the countries column had no length guard at all, so it
+  // painted a BLANK WHITE PANEL: no rows, no message, no error, nothing to act on. An operator
+  // reads that as "this tenant has no countries" and starts re-entering reference data that is
+  // already there.
+  const {
+    data: countries, isLoading: loadingCountries,
+    isError: countriesFailed, error: countriesError, refetch: refetchCountries,
+  } = useQuery({
     queryKey: ['countries', userData.businessUnitId],
     queryFn: () => countryService.getAll(userData.businessUnitId || 1),
   });
 
-  const { data: states, isLoading: loadingStates } = useQuery({
+  const {
+    data: states, isLoading: loadingStates,
+    isError: statesFailed, error: statesError, refetch: refetchStates,
+  } = useQuery({
     queryKey: ['states', userData.businessUnitId, selectedCountry?.countryId],
     queryFn: () => stateService.getAll(userData.businessUnitId || 1),
     enabled: !!selectedCountry,
   });
 
-  const { data: cities, isLoading: loadingCities } = useQuery({
+  const {
+    data: cities, isLoading: loadingCities,
+    isError: citiesFailed, error: citiesError, refetch: refetchCities,
+  } = useQuery({
     queryKey: ['cities', userData.businessUnitId, selectedState?.stateId],
     queryFn: () => cityService.getAll(userData.businessUnitId || 1),
     enabled: !!selectedState,
@@ -148,9 +165,18 @@ const LocationMaster: React.FC = () => {
               <SearchField width="100%" value={countrySearch} onChange={setCountrySearch} placeholder="Search..." />
             </Box>
             <Box sx={{ flexGrow: 1, overflowY: 'auto' }}>
-              <List disablePadding>
-                {loadingCountries ? <Box sx={{ p: 2, textAlign: 'center' }}><CircularProgress size={20} /></Box> :
-                  filteredCountries.map(c => (
+              {loadingCountries ? (
+                <Box sx={{ p: 2, textAlign: 'center' }}><CircularProgress size={20} /></Box>
+              ) : countriesFailed ? (
+                <ApiErrorNotice
+                  error={countriesError}
+                  fallbackMessage="Countries could not be loaded, so this column is not a picture of what exists. Nothing has been removed."
+                  onRetry={() => void refetchCountries()}
+                  sx={{ m: 1.5, borderRadius: 2 }}
+                />
+              ) : (
+                <List disablePadding>
+                  {filteredCountries.map(c => (
                     <ListItem
                       key={c.countryId}
                       onClick={() => { setSelectedCountry(c); setSelectedState(null); }}
@@ -169,9 +195,12 @@ const LocationMaster: React.FC = () => {
                         <ChevronRightIcon fontSize="small" sx={{ ml: 1, opacity: 0.3 }} />
                       </ListItemSecondaryAction>
                     </ListItem>
-                  ))
-                }
-              </List>
+                  ))}
+                  {/* The guard the other two columns always had. Without it an empty result — read
+                      or failed — was an unexplained expanse of white. */}
+                  {filteredCountries.length === 0 && <Box sx={{ p: 2, textAlign: 'center', color: 'text.secondary' }}>No countries found</Box>}
+                </List>
+              )}
             </Box>
           </Paper>
         </Grid>
@@ -193,6 +222,13 @@ const LocationMaster: React.FC = () => {
                 <Box sx={{ p: 4, textAlign: 'center', color: 'text.secondary' }}>Select a country to view states</Box>
               ) : loadingStates ? (
                 <Box sx={{ p: 2, textAlign: 'center' }}><CircularProgress size={20} /></Box>
+              ) : statesFailed ? (
+                <ApiErrorNotice
+                  error={statesError}
+                  fallbackMessage="States could not be loaded for this country. This column is not saying there are none."
+                  onRetry={() => void refetchStates()}
+                  sx={{ m: 1.5, borderRadius: 2 }}
+                />
               ) : (
                 <List disablePadding>
                   {filteredStates.map(s => (
@@ -239,6 +275,13 @@ const LocationMaster: React.FC = () => {
                 <Box sx={{ p: 4, textAlign: 'center', color: 'text.secondary' }}>Select a state to view cities</Box>
               ) : loadingCities ? (
                 <Box sx={{ p: 2, textAlign: 'center' }}><CircularProgress size={20} /></Box>
+              ) : citiesFailed ? (
+                <ApiErrorNotice
+                  error={citiesError}
+                  fallbackMessage="Cities could not be loaded for this state. This column is not saying there are none."
+                  onRetry={() => void refetchCities()}
+                  sx={{ m: 1.5, borderRadius: 2 }}
+                />
               ) : (
                 <List disablePadding>
                   {filteredCities.map(c => (

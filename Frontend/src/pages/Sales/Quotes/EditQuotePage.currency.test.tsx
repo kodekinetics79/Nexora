@@ -13,10 +13,14 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
  * hardcoded-`$` defect began." It is imported by ten files; the two quote-authoring screens were
  * not among them.
  *
- * The exported PDF was never affected — QuoteService.GenerateQuotePdfAsync renders
- * `quote.Currency?.Code` and refuses to export a draft with no CurrencyId — so this was a
- * misread-on-screen defect rather than a wrong document reaching the buyer. Still the screen the
- * price is agreed on.
+ * The exported PDF is not affected BY THAT DEFECT — GenerateQuotePdfAsync renders
+ * `quote.Currency?.Code` — so the hardcoded-`$` problem was misread-on-screen only.
+ *
+ * CORRECTION, found later by auditing the 94 commits that shipped unreviewed: the PDF *is*
+ * reachable by a DIFFERENT mechanism. This screen's payload never carried `currencyId`, and
+ * `QuoteService.UpdateQuoteAsync` assigned it unconditionally, so every save from here ERASED the
+ * quote's currency. A draft then fails PDF export on a field this screen does not show; a
+ * non-draft prints under the `?? "USD"` fallback. Both silent. Pinned below.
  */
 
 const { getById, update, getAll, productGetAll, customerGetAll, policyGet } = vi.hoisted(() => ({
@@ -139,5 +143,19 @@ describe('a quote whose validity date is not set', () => {
     const payload = update.mock.calls[0][1];
     expect(payload.validUntil).toBeNull();
     expect(payload.validUntil).not.toBe('');
+  });
+
+  it('round-trips the currency instead of silently dropping it', async () => {
+    // The omission that erased it: an absent key binds to null on the server, and the assignment
+    // there was unconditional. Saving a SAR quote made it currency-less, and the customer's PDF
+    // then printed USD.
+    getById.mockResolvedValue({ ...sarQuote, currencyId: 4, currencyCode: 'SAR' });
+    renderEdit();
+    await screen.findByText(/Revised Summary/i);
+
+    fireEvent.click(screen.getByRole('button', { name: /update quote/i }));
+
+    await waitFor(() => expect(update).toHaveBeenCalled());
+    expect(update.mock.calls[0][1].currencyId).toBe(4);
   });
 });

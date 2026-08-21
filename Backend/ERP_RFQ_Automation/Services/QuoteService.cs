@@ -473,7 +473,19 @@ namespace ERP_RFQ_Automation.Services
             quote.ValidUntil = request.ValidUntil;
             if (request.StatusId != quote.StatusId)
                 throw new InvalidOperationException("Quote status changes require the governed lifecycle endpoint.");
-            quote.CurrencyId = request.CurrencyId;
+            // A quote's currency is not editable from any screen in this product, so an absent
+            // CurrencyId means "not supplied", never "set it to nothing". Assigning it
+            // unconditionally silently ERASED the currency on every save from the Edit screen,
+            // whose payload has never carried the field. The consequences are both bad and both
+            // silent: a DRAFT then fails PDF export on a currency field the Edit screen does not
+            // show, and a non-draft prints on the customer's document under the `?? "USD"`
+            // fallback further down this file — a 3.75x misstatement of price on a SAR quote,
+            // on our letterhead, with our VAT number on it.
+            //
+            // Changing a quote's currency mid-quote is not a journey this product has. If one is
+            // ever added it must be an explicit, audited transition, not a side effect of Save.
+            if (request.CurrencyId.HasValue)
+                quote.CurrencyId = request.CurrencyId;
             quote.HeaderRemarks = request.HeaderRemarks;
             quote.ModifiedBy = request.ModifiedBy;
             quote.ModifiedDate = DateTime.UtcNow;

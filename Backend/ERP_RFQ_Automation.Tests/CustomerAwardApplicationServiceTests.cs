@@ -132,6 +132,13 @@ public sealed class CustomerAwardApplicationServiceTests
         Assert.Equal(1, await fixture.Context.Orders.CountAsync(x => x.CustomerAwardId == award.Id));
     }
 
+    /// <summary>
+    /// The LEGACY quote: one written before the header discount was allocated onto its lines, so
+    /// every line carries null in <c>HeaderDiscountAllocated</c> and the only evidence the discount
+    /// ever existed is that the stored quote total sits below what the lines add up to. Inferring
+    /// it from that gap is still the only answer available for those rows, so the inference stays —
+    /// scoped to exactly them.
+    /// </summary>
     [Fact]
     public async Task FullAward_PreservesAcceptedQuoteHeaderDiscountInOrderTotal()
     {
@@ -151,6 +158,70 @@ public sealed class CustomerAwardApplicationServiceTests
         var persisted = await fixture.Context.Orders.Include(x => x.OrderItems).SingleAsync(x => x.Id == order.Id);
         Assert.Equal(895.50m, persisted.TotalAmount);
         Assert.Equal(109.50m, persisted.DiscountAmount);
+    }
+
+    /// <summary>
+    /// P0. A rep granted a 10% goodwill discount on the quotation, captured the buyer's PO through
+    /// the Upload Client PO door, and the sales order it produced dropped the discount entirely:
+    /// Subtotal 1,000.00 / Total Discount -0.00 / Tax 135.00 / Grand Total 1,035.00 — four figures
+    /// that do not add up on a document she has to send to a customer.
+    ///
+    /// <para>The award service reconstructed the header discount as
+    /// <c>sum(line totals) - quote.TotalAmount</c>. Allocating the discount onto the lines made
+    /// those two operands the same number, so the reconstruction returned EXACTLY ZERO on every
+    /// quote. <c>QuoteItem.HeaderDiscountAllocated</c> was created for this and names this service
+    /// as a site that had to read it; this is that site finally reading it.</para>
+    ///
+    /// <para><b>The fixture is the shape the product actually emits.</b> For a version-2 quote
+    /// <c>QuoteService.CalculateQuoteTotals</c> writes the line total as taxable base plus tax,
+    /// already net of the allocated header discount, and the quote total as the sum of those lines.
+    /// A fixture that instead parks <c>quote.TotalAmount</c> below the line sum — the shape of the
+    /// legacy test above — leaves the old subtraction non-zero and cannot detect this defect at
+    /// all.</para>
+    /// </summary>
+    [Fact]
+    public async Task FullAward_ReadsTheAllocatedHeaderDiscountSoTheOrderSummaryBalances()
+    {
+        using var fixture = new CustomerAwardTestFixture();
+        // 10 x 100.00 = 1,000.00 gross. A 10% header discount is 100.00, VAT at 15% is charged on
+        // the 900.00 that survives it, and the line total is 900.00 + 135.00 = 1,035.00.
+        fixture.Context.SetupMasters.Add(new SetupMaster
+        {
+            SetupId = 880_030, BusinessUnitId = fixture.BusinessUnitId, SetupType = "DiscountType",
+            SetupCode = "PERCENTAGE", SetupValue = "PERCENTAGE", IsActive = true,
+            CreatedBy = "tests", CreatedOn = new DateTime(2026, 7, 23, 12, 0, 0, DateTimeKind.Utc)
+        });
+        var quote = await fixture.Context.Quotes.Include(x => x.QuoteItems).SingleAsync(x => x.Id == fixture.QuoteId);
+        var line = quote.QuoteItems.Single();
+        line.Discount = 0m;
+        line.HeaderDiscountAllocated = 100m;
+        line.TaxAmount = 135m;
+        line.TaxRatePercentApplied = 15m;
+        line.TotalAmount = 1_035m;
+        quote.DiscountTypeId = 880_030;
+        quote.DiscountValue = 10m;
+        quote.TotalAmount = 1_035m;
+        quote.FinancialCalculationVersion = 2;
+        await fixture.Context.SaveChangesAsync();
+
+        var purchaseOrder = await fixture.CreatePurchaseOrderAsync("po-allocated-discount", 10m);
+        var award = await fixture.CreateAwardAsync(purchaseOrder, "award-allocated-discount", 10m);
+        var confirmed = await fixture.Service.ConfirmAwardAsync(fixture.BusinessUnitId, award.Id,
+            "confirm-allocated-discount", "corr-allocated-discount", new(award.Version), "tests");
+        var order = await fixture.Service.ConvertToOrderAsync(fixture.BusinessUnitId, award.Id,
+            "convert-allocated-discount", "corr-convert-allocated-discount", new(confirmed.Version), "tests");
+
+        fixture.Context.ChangeTracker.Clear();
+        var persisted = await fixture.Context.Orders.Include(x => x.OrderItems).SingleAsync(x => x.Id == order.Id);
+        Assert.Equal(1_000m, persisted.SubTotal);
+        Assert.Equal(100m, persisted.DiscountAmount);
+        Assert.Equal(135m, persisted.TaxAmount);
+        Assert.Equal(1_035m, persisted.TotalAmount);
+        // The discount the rep granted, on the order line she will look at.
+        Assert.Equal(100m, Assert.Single(persisted.OrderItems).Discount);
+        // And the Financial Summary has to be one arithmetic statement, not four loose numbers.
+        Assert.Equal(persisted.TotalAmount,
+            persisted.SubTotal - persisted.DiscountAmount + persisted.TaxAmount);
     }
 
     [Fact]

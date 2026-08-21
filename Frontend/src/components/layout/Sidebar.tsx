@@ -283,12 +283,68 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
     });
   }, [t, hasPermission, isManager, setupIsReachable]);
 
+  /**
+   * Seven rail entries address a FILTERED view through a query string — the four quote states,
+   * "Ready for Quote", "Sourcing Cases" and lead "Revisions". `location.pathname` never carries a
+   * query, so the old path comparison could never match one of them: a rep who clicked
+   * "Sent Quotes" landed on three rows with nothing lit anywhere in the rail and no filter
+   * indicator on the page, and read that as an empty pipeline. Splitting the entry's own query off
+   * and comparing it against the address bar is what makes those seven entries reachable-looking.
+   */
+  const splitNavPath = (path: string): { pathname: string; params: [string, string][] } => {
+    const cut = path.indexOf('?');
+    if (cut < 0) return { pathname: path, params: [] };
+    return {
+      pathname: path.slice(0, cut),
+      params: Array.from(new URLSearchParams(path.slice(cut + 1)).entries()),
+    };
+  };
+
+  /**
+   * A bare entry and a filtered entry can share one pathname: "All RFQs" and "Ready for Quote" are
+   * both /procurement/rfqs/all. Lighting the bare entry on the filtered address is the same
+   * data-trust lie in the rail that the constant page heading was on the page — it tells the rep
+   * they are looking at everything while the grid shows a subset. So a bare entry stands down when
+   * the address carries one of the filter keys its own siblings claim. Only those keys count:
+   * an unrelated param (?page=2) must not blank the rail.
+   */
+  const filterKeysByPathname = useMemo(() => {
+    const keys = new Map<string, Set<string>>();
+    const record = (path?: string) => {
+      if (!path || !path.includes('?')) return;
+      const { pathname, params } = splitNavPath(path);
+      const set = keys.get(pathname) ?? new Set<string>();
+      params.forEach(([key]) => set.add(key));
+      keys.set(pathname, set);
+    };
+    menuItems.forEach((item) => {
+      record(item.path);
+      item.children?.forEach((child) => record(child.path));
+    });
+    return keys;
+  }, [menuItems]);
+
   const renderMenuItem = (item: MenuItem) => {
     const hasChildren = !!item.children;
     const isOpen = openGroups[item.key];
 
     const isPathMatched = (path: string, prefixes?: string[]) => {
-      if (location.pathname === path || (path.startsWith('/procurement') && location.pathname === path.replace('/procurement', ''))) return true;
+      const { pathname, params } = splitNavPath(path);
+      // The legacy alias strip has to happen on the pathname alone: `path.replace` used to run
+      // over the whole entry, so '/procurement/rfqs/all?state=ready-for-quote' became
+      // '/rfqs/all?state=ready-for-quote' and matched no address that exists.
+      const pathnameMatches = location.pathname === pathname
+        || (pathname.startsWith('/procurement') && location.pathname === pathname.replace('/procurement', ''));
+      if (pathnameMatches) {
+        const current = new URLSearchParams(location.search);
+        if (params.length > 0) {
+          if (params.every(([key, value]) => current.get(key) === value)) return true;
+        } else {
+          const claimed = filterKeysByPathname.get(pathname);
+          const showingASubset = claimed ? Array.from(claimed).some(key => !!current.get(key)) : false;
+          if (!showingASubset) return true;
+        }
+      }
       if (prefixes && prefixes.some(p => location.pathname.startsWith(p))) return true;
       return false;
     };

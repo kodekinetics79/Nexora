@@ -225,6 +225,91 @@ public sealed class QuoteReadProjectionFieldCarriageTests
         ]
     };
 
+    /// <summary>
+    /// The Edit screen's payload has never carried <c>CurrencyId</c>, and <c>UpdateQuoteAsync</c>
+    /// assigned it unconditionally — so an absent key bound to null and every save from that screen
+    /// ERASED the quote's currency.
+    ///
+    /// <para>Both outcomes are silent and both reach the customer. A DRAFT then fails PDF export on
+    /// <c>QuoteService</c>'s "pricing, currency, validity ... must be complete" gate, naming a field
+    /// the Edit screen does not show and offers no way to set. A non-draft prints, denominated by the
+    /// <c>quote.Currency?.Code ?? "USD"</c> fallback — a 3.75x misstatement of price on a riyal
+    /// quote, on our letterhead, carrying our VAT number.</para>
+    ///
+    /// <para>This test sends what the screen actually sends: every field it populates, and
+    /// <c>CurrencyId</c> left unset. No test-side knowledge of the stored currency is used, because
+    /// the screen has none either.</para>
+    /// </summary>
+    [Fact]
+    public async Task SavingFromTheEditScreen_DoesNotEraseTheCurrencyItNeverSent()
+    {
+        using var database = new TestDb();
+        await using var db = database.ContextFor(BusinessUnitId);
+        await SeedTenantAsync(db);
+
+        var service = new QuoteService(db, null!, null!);
+        var created = await service.CreateQuoteAsync(ExportQuoteRequest());
+
+        // The shared fixture creates quotes with no currency, so give this one the thing the
+        // defect destroys. A real tenant's quote always has one — CreateQuotePage requires it.
+        db.Currencies.Add(new Currency
+        {
+            Id = SarCurrencyId,
+            Code = "SAR",
+            CurrencyName = "Saudi Riyal",
+            BusinessUnitId = BusinessUnitId,
+            IsBaseCurrency = true,
+            IsActive = true,
+            CreatedBy = "test",
+        });
+        var beforeUpdate = await db.Quotes.SingleAsync(q => q.Id == created.Id);
+        beforeUpdate.CurrencyId = SarCurrencyId;
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+
+        var currencyBefore = (await db.Quotes.AsNoTracking().SingleAsync(q => q.Id == created.Id)).CurrencyId;
+        Assert.Equal(SarCurrencyId, currencyBefore);
+
+        var read = await new QuoteRepository(db).GetByIdAsync(created.Id, BusinessUnitId);
+
+        await service.UpdateQuoteAsync(created.Id, new QuoteUpdateRequestDTO
+        {
+            Id = created.Id,
+            QuoteNo = read.QuoteNo,
+            CustomerId = read.CustomerId,
+            QuoteDate = read.QuoteDate,
+            ValidUntil = read.ValidUntil,
+            StatusId = read.StatusId,
+            // CurrencyId deliberately NOT set — this is the defect, reproduced.
+            TotalAmount = read.TotalAmount,
+            HeaderRemarks = read.HeaderRemarks,
+            ModifiedBy = "test",
+            DiscountTypeId = read.DiscountTypeId,
+            DiscountValue = read.DiscountValue,
+            QuoteItems = read.QuoteItems.Select(i => new QuoteItemUpdateRequestDTO
+            {
+                Id = i.Id,
+                RfqItemId = i.RfqItemId,
+                ProductId = i.ProductId,
+                ItemDescription = i.ItemDescription,
+                UnitOfMeasure = i.UnitOfMeasure,
+                CustomerLineRef = i.CustomerLineRef,
+                Quantity = i.Quantity,
+                UnitPrice = i.UnitPrice,
+                TotalAmount = i.TotalAmount,
+                Discount = i.Discount,
+                DiscountTypeId = i.DiscountTypeId,
+                DiscountValue = i.DiscountValue,
+                TaxCategory = i.TaxCategory,
+                TaxCategoryReason = i.TaxCategoryReason,
+                DeliveryLeadTime = i.DeliveryLeadTime,
+            }).ToList(),
+        });
+
+        var currencyAfter = (await db.Quotes.AsNoTracking().SingleAsync(q => q.Id == created.Id)).CurrencyId;
+        Assert.Equal(currencyBefore, currencyAfter);
+    }
+
     private static QuoteCreateRequestDTO ExportQuoteRequest()
     {
         var request = StandardQuoteRequest();
@@ -300,4 +385,5 @@ public sealed class QuoteReadProjectionFieldCarriageTests
     private const long RfqId = 77_006;
     private const long PercentageDiscountId = 77_010;
     private const long QuoteDraftStatusId = 42;
+    private const long SarCurrencyId = 77_020;
 }
