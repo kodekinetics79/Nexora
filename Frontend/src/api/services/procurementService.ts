@@ -32,6 +32,64 @@ export interface SourcingLine {
   resolutionCheckedOn?: string | null;
 }
 
+/**
+ * How the buyer reached the supplier when Nexora did not send the request itself.
+ *
+ * The wire values are codes; {@link recordedDeliveryLabel} is the only thing a person ever sees.
+ * No screen shows the code, and no screen says "out of band" — a buyer says what actually
+ * happened.
+ */
+export type RecordedDeliveryChannel =
+  | "Phone"
+  | "InPerson"
+  | "SupplierPortal"
+  | "BuyerEmail";
+
+export const recordedDeliveryChannels: Array<{
+  value: RecordedDeliveryChannel;
+  label: string;
+  help: string;
+}> = [
+  {
+    value: "Phone",
+    label: "Recorded by phone",
+    help: "You called the supplier and took their answer verbally.",
+  },
+  {
+    value: "BuyerEmail",
+    label: "Sent from my own email",
+    help: "You emailed the supplier yourself instead of sending it from Nexora.",
+  },
+  {
+    value: "InPerson",
+    label: "Given in person",
+    help: "You handed the request over face to face.",
+  },
+  {
+    value: "SupplierPortal",
+    label: "Entered in the supplier's own portal",
+    help: "You logged into the supplier's system and raised it there.",
+  },
+];
+
+export const recordedDeliveryLabel = (channel: string): string =>
+  recordedDeliveryChannels.find((option) => option.value === channel)?.label ??
+  channel;
+
+/**
+ * A delivery the buyer made personally, not an email Nexora sent.
+ *
+ * Deliberately a field of its own rather than a value folded into `providerReference`: that field
+ * carries a mail provider's acceptance receipt, and putting "phoned Ahmed" in it would claim a
+ * confirmation nobody issued.
+ */
+export interface RecordedSolicitationDelivery {
+  channel: RecordedDeliveryChannel | string;
+  note: string;
+  recordedBy: string;
+  recordedOn: string;
+}
+
 export interface SupplierSolicitation {
   id: number;
   rfqId: number;
@@ -46,7 +104,9 @@ export interface SupplierSolicitation {
   sentOn?: string | null;
   respondedOn?: string | null;
   updatedOn: string;
+  version: number;
   requestedRfqItemIds: number[];
+  recordedDelivery?: RecordedSolicitationDelivery | null;
 }
 
 export interface SupplierOffer {
@@ -646,6 +706,28 @@ const procurementService = {
           },
     );
   },
+
+  /**
+   * Records that the buyer reached the supplier themselves, so a price taken by phone can be
+   * captured. The recorder and the timestamp are the server's — this sends only what the buyer
+   * chose and what they wrote.
+   */
+  recordSolicitationDelivery: async (
+    solicitationId: number,
+    request: {
+      deliveryChannel: RecordedDeliveryChannel;
+      note: string;
+      expectedVersion: number;
+    },
+    idempotencyKey: string,
+  ) =>
+    unwrap(
+      await axiosInstance.post(
+        `/api/procurement/solicitations/${solicitationId}/delivery-record`,
+        request,
+        { headers: commandHeaders(idempotencyKey) },
+      ),
+    ),
 
   retrySolicitation: async (solicitationId: number, idempotencyKey: string) =>
     unwrap(

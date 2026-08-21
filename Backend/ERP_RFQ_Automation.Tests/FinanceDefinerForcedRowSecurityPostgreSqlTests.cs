@@ -488,14 +488,18 @@ public sealed class FinanceDefinerForcedRowSecurityPostgreSqlTests(ForcedRowSecu
         // said so. It going up by exactly one is the evidence the policy reached real PostgreSQL,
         // which no portable test can establish.
         //
-        // 221 -> 223 with EmailInquiryAssemblies and EmailInquiryComponents. Exactly two, for the
+        // 221 -> 222 with supplier_solicitation_delivery_records. Exactly one, for the row that says
+        // a named person asserts they reached a supplier — writeable across a tenant boundary it
+        // would let a neighbour manufacture the evidence that unlocks quoting.
+        //
+        // 222 -> 224 with EmailInquiryAssemblies and EmailInquiryComponents. Exactly two, for the
         // two tenant-owned tables the email inquiry assembly adds — the census doing its job again.
         //
-        // 223 -> 224 with EmailInquiryComponentResults. Exactly one, and it is the row that holds
+        // 224 -> 225 with EmailInquiryComponentResults. Exactly one, and it is the row that holds
         // extracted customer content — the single worst table in the schema to leave readable
         // across tenants, and the one a migration is most likely to add without a policy because
         // the tables it hangs off already have theirs.
-        Assert.Equal(224L, await CountAsync("pg_policy", "polname = 'nexora_tenant_isolation'"));
+        Assert.Equal(225L, await CountAsync("pg_policy", "polname = 'nexora_tenant_isolation'"));
         Assert.Equal(300L, await CountAsync("pg_policy",
             "polname IN ('nexora_definer_tenant_read','nexora_definer_tenant_insert','nexora_definer_tenant_update')"));
 

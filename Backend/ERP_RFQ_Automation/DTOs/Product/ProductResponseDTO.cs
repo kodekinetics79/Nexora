@@ -139,19 +139,22 @@ namespace ERP_RFQ_Automation.DTOs.ProductDTOs
         [StringLength(100)]
         public string? CountryOfOrigin { get; set; }
 
-        [Required]
-        public long Buid { get; set; }
-
         public bool? IsActive { get; set; } = true;
 
         public bool? IsCatalogItem { get; set; }
 
         public int? SubCategoryId { get; set; }
 
-        [Required]
-        public string CreatedBy { get; set; } = null!;
-
         public List<IFormFile>? Attachments { get; set; }
+
+        // Sec-A1: the actor field (`CreatedBy`) and the tenant field (`Buid`) are GONE, not merely
+        // overwritten. `CreatedBy` was `[Required]`, so POST /api/Product answered "The CreatedBy
+        // field is required" before a product could be created at all — and a caller who satisfied
+        // it was writing a name of their choosing into the contract the audit trail is read from.
+        // `Buid` on the request is a cross-tenant write vector the moment any future writer of this
+        // endpoint reads it instead of the claim. Both are derived from the authenticated context
+        // in ProductController and cannot be influenced by a request body, exactly as
+        // SupplierCreateRequestDTO and CurrencyCreateRequestDTO already do.
     }
 
     public class ProductUpdateRequestDTO
@@ -231,19 +234,16 @@ namespace ERP_RFQ_Automation.DTOs.ProductDTOs
         [StringLength(100)]
         public string? CountryOfOrigin { get; set; }
 
-        [Required]
-        public long Buid { get; set; }
-
         public bool? IsActive { get; set; }
 
         public bool? IsCatalogItem { get; set; }
 
         public int? SubCategoryId { get; set; }
 
-        [Required]
-        public string ModifiedBy { get; set; } = null!;
-
         public List<IFormFile>? Attachments { get; set; }
+
+        // Sec-A1: same reasoning as the create request above. `ModifiedBy` and `Buid` are stamped
+        // from the authenticated context, never accepted from the caller.
     }
 
     public class PaginatedProductResponseDTO

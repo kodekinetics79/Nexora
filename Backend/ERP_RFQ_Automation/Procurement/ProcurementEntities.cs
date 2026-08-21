@@ -310,6 +310,95 @@ public static class GoodsReceiptStatuses
     public const string Posted = "POSTED";
 }
 
+/// <summary>
+/// How a Supplier RFQ actually reached the supplier.
+///
+/// <para><see cref="Email"/> is the only one Nexora itself performs: the dispatch worker sends the
+/// message and the provider's acceptance receipt on <c>procurement_outbox</c> is the evidence. The
+/// rest are routes a buyer took personally — a phone call, a counter, the supplier's own portal, or
+/// the buyer's own mailbox — and their evidence is a
+/// <see cref="SupplierSolicitationDeliveryRecord"/>, which is a different row in a different table
+/// carrying a different set of facts. The two are never merged: an email delivery names a provider
+/// and a provider reference, a recorded delivery names a person and what they said happened, and
+/// presenting one as the other would claim a machine-verifiable receipt that does not exist.</para>
+/// </summary>
+public static class SolicitationDeliveryChannels
+{
+    /// <summary>
+    /// System-delivered email. Spelled exactly as preparation has always written it, because
+    /// existing rows carry this literal and rewriting them to fit a new vocabulary is worse than
+    /// keeping the word.
+    /// </summary>
+    public const string Email = "Email";
+
+    /// <summary>The buyer telephoned the supplier and took the response verbally.</summary>
+    public const string Phone = "Phone";
+
+    /// <summary>The buyer handed the request over face to face.</summary>
+    public const string InPerson = "InPerson";
+
+    /// <summary>The buyer entered the request in the supplier's own procurement portal.</summary>
+    public const string SupplierPortal = "SupplierPortal";
+
+    /// <summary>The buyer sent it from their own mailbox rather than through Nexora.</summary>
+    public const string BuyerEmail = "BuyerEmail";
+
+    /// <summary>
+    /// The channels a buyer may record by hand. <see cref="Email"/> is deliberately absent: only a
+    /// real provider acceptance may claim a system email delivery, and letting a human assert one
+    /// would put an unverifiable receipt where a verified one is expected.
+    /// </summary>
+    public static readonly IReadOnlySet<string> RecordedByBuyer = new HashSet<string>(StringComparer.Ordinal)
+    {
+        Phone, InPerson, SupplierPortal, BuyerEmail
+    };
+
+    /// <summary>True when the solicitation's channel is one a buyer recorded rather than one Nexora sent.</summary>
+    public static bool IsRecordedByBuyer(string? channel)
+        => channel is not null && RecordedByBuyer.Contains(channel);
+}
+
+/// <summary>
+/// Evidence that a Supplier RFQ reached the supplier by a route Nexora did not drive.
+///
+/// <para>The delivery guard on supplier response capture is real: a response can only be recorded
+/// against a solicitation that actually reached the supplier. But the only thing that could satisfy
+/// it was <c>ProcurementDispatchWorker</c> delivering an email, so on any deployment without
+/// outbound mail — and for every supplier reached by phone, in person or through their own portal —
+/// a buyer holding a price could not record it. This row is the missing evidence: the buyer states
+/// the channel and what happened, and that statement, attributed and timestamped, is what advances
+/// the solicitation.</para>
+///
+/// <para>It is a separate table from <c>procurement_outbox</c> on purpose. An email delivery has a
+/// provider, an acceptance reference and an attempt count; this has a person and a note. Keeping
+/// them apart means nothing that reads delivery evidence can mistake one for the other, and the
+/// unique index on the solicitation means one solicitation never carries both stories.</para>
+/// </summary>
+public sealed class SupplierSolicitationDeliveryRecord
+{
+    public long Id { get; set; }
+    public long BusinessUnitId { get; set; }
+    public long SupplierSolicitationId { get; set; }
+
+    /// <summary>One of <see cref="SolicitationDeliveryChannels.RecordedByBuyer"/>.</summary>
+    public string Channel { get; set; } = null!;
+
+    /// <summary>
+    /// What the buyer says happened. Mandatory: a delivery nobody can describe is an assertion, not
+    /// evidence, and this note is the only account of a conversation Nexora never saw.
+    /// </summary>
+    public string Note { get; set; } = null!;
+
+    /// <summary>The authenticated actor who recorded it. Never taken from the request body.</summary>
+    public string RecordedBy { get; set; } = null!;
+
+    public DateTime RecordedOn { get; set; }
+    public string CorrelationId { get; set; } = null!;
+    public string IdempotencyKey { get; set; } = null!;
+    public string RequestHash { get; set; } = null!;
+    public DateTime CreatedOn { get; set; }
+}
+
 public static class ProcurementOutboxStatuses
 {
     public const string Pending = "PENDING";

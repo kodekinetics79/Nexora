@@ -49,7 +49,10 @@ import {
 import { toast } from "react-hot-toast";
 import procurementService, {
   INCOTERMS_2020,
+  recordedDeliveryChannels,
+  recordedDeliveryLabel,
   type Incoterm,
+  type RecordedDeliveryChannel,
   type PurchaseOrderLineTradeTerms,
   type QuoteComparisonLine,
   type QuoteComparisonResult,
@@ -371,6 +374,19 @@ function SupplierAnswer({ order }: { order: SupplierPurchaseOrder }) {
 const isRetryable = (status: string): boolean =>
   status.replaceAll("_", "").toUpperCase() === "DELIVERYFAILED";
 
+/**
+ * A Supplier RFQ that has not reached the supplier yet — either still waiting to be emailed, or
+ * emailed and failed.
+ *
+ * These are the only two states in which a buyer can truthfully say they reached the supplier
+ * themselves. Once the request is genuinely with the supplier there is nothing left to record, and
+ * the server refuses it, so the button is not offered.
+ */
+const isAwaitingDelivery = (status: string): boolean =>
+  ["PENDINGDISPATCH", "DELIVERYFAILED"].includes(
+    status.replaceAll("_", "").toUpperCase(),
+  );
+
 const ResolutionChip = ({ resolution }: { resolution: string }) => {
   const colors: Record<
     string,
@@ -400,6 +416,8 @@ function SourcingWorkbenchPage() {
   const { userData, hasPermission } = useAuth();
   const [tab, setTab] = useState(0);
   const [responseSolicitation, setResponseSolicitation] =
+    useState<SupplierSolicitation | null>(null);
+  const [deliverySolicitation, setDeliverySolicitation] =
     useState<SupplierSolicitation | null>(null);
   const [awardOffer, setAwardOffer] = useState<SupplierOffer | null>(null);
   const [pricingSelection, setPricingSelection] = useState<{ awardId: number; quoteItemId: number; landedUnitCost: number; currencyCode: string } | null>(null);
@@ -833,9 +851,31 @@ function SourcingWorkbenchPage() {
                   />
                 </TableCell>
                 <TableCell>
-                  <Typography variant="body2">
-                    {item.providerReference || "Awaiting provider confirmation"}
-                  </Typography>
+                  {/*
+                    A delivery the buyer made themselves is shown as what it was, never as a
+                    provider confirmation. The two never appear together: the server refuses to
+                    record one over the other.
+                  */}
+                  {item.recordedDelivery ? (
+                    <>
+                      <Typography variant="body2">
+                        {recordedDeliveryLabel(item.recordedDelivery.channel)}
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+                        {item.recordedDelivery.recordedBy} ·{" "}
+                        {new Date(
+                          item.recordedDelivery.recordedOn,
+                        ).toLocaleString()}
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        {item.recordedDelivery.note}
+                      </Typography>
+                    </>
+                  ) : (
+                    <Typography variant="body2">
+                      {item.providerReference || "Awaiting provider confirmation"}
+                    </Typography>
+                  )}
                   {item.lastErrorCode && (
                     <Typography variant="caption" color="error">
                       {item.lastErrorCode}
@@ -860,6 +900,20 @@ function SourcingWorkbenchPage() {
                         onClick={() => retryMutation.mutate(item.id)}
                       >
                         Retry
+                      </Button>
+                    )}
+                    {/*
+                      The supplier may already have this request without Nexora having emailed it —
+                      a phone call, a hand-over, their own portal. Saying so here is what lets the
+                      buyer record the price they were given.
+                    */}
+                    {canSolicit && isAwaitingDelivery(item.status) && (
+                      <Button
+                        size="small"
+                        startIcon={<HowToReg />}
+                        onClick={() => setDeliverySolicitation(item)}
+                      >
+                        I contacted them myself
                       </Button>
                     )}
                     <Button
@@ -1464,6 +1518,16 @@ function SourcingWorkbenchPage() {
         </Stack>
       )}
 
+      {deliverySolicitation && (
+        <RecordDeliveryDialog
+          solicitation={deliverySolicitation}
+          onClose={() => setDeliverySolicitation(null)}
+          onSaved={() => {
+            setDeliverySolicitation(null);
+            refresh();
+          }}
+        />
+      )}
       {responseSolicitation && (
         <ResponseDialog
           solicitation={responseSolicitation}
@@ -1632,6 +1696,115 @@ const responseLineDefaults = (): ResponseLineForm => ({
   warrantyMonths: warrantyMonthsFieldValue(null),
   minimumOrderQuantity: 0,
 });
+
+/**
+ * The buyer states how they reached the supplier and what was agreed.
+ *
+ * A supplier response can only be captured against a request that actually reached the supplier,
+ * and until this dialog existed the only way for that to be true was Nexora successfully emailing
+ * it. A buyer holding a price taken over the phone had nowhere to put it. This is that place: the
+ * buyer says which route they used and what happened, and both are kept as the evidence behind the
+ * capture that follows.
+ */
+function RecordDeliveryDialog({
+  solicitation,
+  onClose,
+  onSaved,
+}: {
+  solicitation: SupplierSolicitation;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [channel, setChannel] = useState<RecordedDeliveryChannel>(
+    recordedDeliveryChannels[0].value,
+  );
+  const [note, setNote] = useState("");
+  const [idempotencyKey] = useState(() =>
+    commandKey(`solicitation-delivery:${solicitation.id}`),
+  );
+  const trimmedNote = note.trim();
+  const mutation = useMutation({
+    mutationFn: () =>
+      procurementService.recordSolicitationDelivery(
+        solicitation.id,
+        {
+          deliveryChannel: channel,
+          note: trimmedNote,
+          expectedVersion: solicitation.version,
+        },
+        idempotencyKey,
+      ),
+    onSuccess: () => {
+      toast.success("Saved. You can now record their price.");
+      onSaved();
+    },
+    onError: (error) =>
+      toast.error(
+        errorMessage(error, "Could not save how you reached the supplier"),
+      ),
+  });
+
+  return (
+    <Dialog open onClose={onClose} fullWidth maxWidth="sm">
+      <DialogTitle>How did you reach {solicitation.supplierName}?</DialogTitle>
+      <DialogContent>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+          Nexora has not emailed this request. Tell us how the supplier got it
+          and what was agreed, and you can then record their price.
+        </Typography>
+        <Stack spacing={2} sx={{ mt: 1 }}>
+          <FormControl fullWidth>
+            <InputLabel id="recorded-delivery-channel-label">
+              How you reached them
+            </InputLabel>
+            <Select
+              labelId="recorded-delivery-channel-label"
+              label="How you reached them"
+              value={channel}
+              onChange={(event) =>
+                setChannel(event.target.value as RecordedDeliveryChannel)
+              }
+            >
+              {recordedDeliveryChannels.map((option) => (
+                <MenuItem key={option.value} value={option.value}>
+                  {option.label}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+          <Typography variant="caption" color="text.secondary">
+            {
+              recordedDeliveryChannels.find(
+                (option) => option.value === channel,
+              )?.help
+            }
+          </Typography>
+          <TextField
+            fullWidth
+            required
+            multiline
+            minRows={3}
+            label="What happened"
+            placeholder="Who you spoke to, when, and what they agreed."
+            value={note}
+            onChange={(event) => setNote(event.target.value)}
+            helperText="Required. This is the only record of a conversation Nexora did not see."
+          />
+        </Stack>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose}>Cancel</Button>
+        <Button
+          variant="contained"
+          disabled={trimmedNote.length === 0 || mutation.isPending}
+          onClick={() => mutation.mutate()}
+        >
+          Save and record their price
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
 
 function ResponseDialog({
   solicitation,
