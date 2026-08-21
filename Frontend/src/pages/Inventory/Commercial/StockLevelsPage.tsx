@@ -10,6 +10,7 @@ import commercialIntelligenceService, {
 import { useAuth } from '../../../context/AuthContext';
 import { PageShell, QueryState, ResponsiveTable } from '../../SalesManagement/CommercialPagePrimitives';
 import StockActionsDialog from './StockActionsDialog';
+import OpeningStockDialog from './OpeningStockDialog';
 
 const BREACH_LABEL: Record<string, string> = {
   OUT_OF_STOCK: 'Out of stock',
@@ -44,6 +45,9 @@ export default function StockLevelsPage() {
   const [breachedOnly, setBreachedOnly] = useState(false);
   const [search, setSearch] = useState('');
   const [editing, setEditing] = useState<AvailabilityDTO | null>(null);
+  // The bootstrap door. The per-row editor needs a row, and this grid INNER JOINs Inventory, so a
+  // product that has never been stocked cannot appear here to be clicked.
+  const [opening, setOpening] = useState(false);
 
   const query = useQuery({
     queryKey: ['inventory-intelligence', 'stock-levels', breachedOnly],
@@ -80,18 +84,37 @@ export default function StockLevelsPage() {
 
   const summary = query.data;
 
+  /**
+   * Which emptiness this is. The three are not the same answer and only one of them is good news:
+   * nothing breaching (healthy, and only as far as the monitored rows go), nothing matching a
+   * search the user typed, or nothing stocked at all — the day-one state, in which the module has
+   * never been initialised and the grid is empty because no product has an opening balance.
+   */
+  const emptyText = breachedOnly
+    ? summary && summary.unmonitoredCount > 0
+      ? `No stock row is currently breaching a configured level. ${summary.unmonitoredCount} row(s) are not monitored at all and could not breach anything, so this is not the same as "all healthy".`
+      : 'No stock row is currently breaching a configured level.'
+    : search.trim() !== ''
+      ? 'No stock row matches this search.'
+      : summary && summary.rowCount === 0
+        ? 'No stock has been recorded yet. No product in this business unit holds an opening balance in any warehouse, so there is nothing to set a level on — use "Record opening stock" above to enter what is on the shelf.'
+        : 'No stock rows exist for this business unit.';
+
   return (
     <PageShell
       title="Stock levels"
       subtitle="Minimum, maximum and reorder levels by item and warehouse — and which rows nobody is watching."
       actions={
-        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
           <TextField size="small" label="Search part or product" value={search}
             onChange={e => setSearch(e.target.value)} />
           <FormControlLabel
             control={<Switch checked={breachedOnly} onChange={e => setBreachedOnly(e.target.checked)} />}
             label="Breaching only"
           />
+          {canEdit && (
+            <Button variant="outlined" onClick={() => setOpening(true)}>Record opening stock</Button>
+          )}
         </Box>
       }
     >
@@ -117,9 +140,7 @@ export default function StockLevelsPage() {
         error={query.isError}
         empty={!rows.length}
         onRetry={() => void query.refetch()}
-        emptyText={breachedOnly
-          ? 'No stock row is currently breaching a configured level.'
-          : 'No stock rows exist for this business unit.'}
+        emptyText={emptyText}
       >
         <ResponsiveTable label="Stock levels by item and warehouse">
           <Table size="small">
@@ -179,6 +200,7 @@ export default function StockLevelsPage() {
       {editing && (
         <StockActionsDialog row={editing} open onClose={() => setEditing(null)} />
       )}
+      {opening && <OpeningStockDialog open onClose={() => setOpening(false)} />}
     </PageShell>
   );
 }

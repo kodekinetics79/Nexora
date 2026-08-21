@@ -36,6 +36,18 @@ namespace ERP_RFQ_Automation.Controllers
         private bool TryGetTenantId(out long businessUnitId) =>
             long.TryParse(User.FindFirst("businessUnitId")?.Value, out businessUnitId) && businessUnitId > 0;
 
+        /// <summary>
+        /// RFC 7807 body carrying the request's trace identifier, so a caller reporting a failure
+        /// gives support an id that ties straight back to the server log entry. Mirrors the helper
+        /// on the sibling master-data controller (SupplierController).
+        /// </summary>
+        private ProblemDetails Problem(int status, string title, string detail)
+        {
+            var problem = new ProblemDetails { Status = status, Title = title, Detail = detail };
+            problem.Extensions["traceId"] = HttpContext.TraceIdentifier;
+            return problem;
+        }
+
         private string Actor() => User.FindFirstValue(ClaimTypes.Email)
             ?? User.FindFirstValue(ClaimTypes.NameIdentifier)
             ?? User.FindFirst("email")?.Value
@@ -239,7 +251,41 @@ namespace ERP_RFQ_Automation.Controllers
                 CreatedBy = Actor(),
                 CreatedOn = DateTime.UtcNow
             };
-            await _repository.AddAsync(product, request.Attachments);
+            try
+            {
+                await _repository.AddAsync(product, request.Attachments);
+            }
+            catch (DbUpdateException ex) when (ex.InnerException is Npgsql.PostgresException { SqlState: "22001" })
+            {
+                // 22001 ONLY — "value too long for type character varying(n)". Deliberately not a
+                // blanket catch: a bare catch(DbUpdateException) would also swallow foreign-key
+                // violations (23503), unique violations (23505), RLS denials (42501 — this codebase
+                // is deny-by-default under nexora_tenant_isolation) and serialization failures from
+                // the serializable transaction in AllocateProductDocIdAsync, and would report every
+                // one of them to the operator as "shorten the product name" while removing the log
+                // entry that says what actually happened. Everything else escapes to the global
+                // handler, on purpose.
+                //
+                // The DTO caps now mirror the columns, so this should be unreachable for the fields
+                // this screen writes. It stays as the backstop for the ones it does not.
+                return BadRequest(Problem(StatusCodes.Status400BadRequest, "Product not created",
+                    "One of the values is too long for the field it is stored in. Shorten it and try again."));
+            }
+            catch (ArgumentException ex)
+            {
+                // The repository signals a taken part number and five "does not exist" reference
+                // failures through the SAME exception type, so the message text is the only thing
+                // that separates a conflict from a bad request.
+                //
+                // This IS message-sniffing and it is knowingly accepted for now: it works against
+                // today's strings and breaks silently the day somebody rewords one. The durable fix
+                // is a typed exception (or a result object) out of ProductRepository; until then a
+                // reworded message degrades to 400 rather than 409, which is wrong but not harmful.
+                var duplicate = ex.Message.Contains("already exists", StringComparison.OrdinalIgnoreCase);
+                return duplicate
+                    ? Conflict(Problem(StatusCodes.Status409Conflict, "Product not created", ex.Message))
+                    : BadRequest(Problem(StatusCodes.Status400BadRequest, "Product not created", ex.Message));
+            }
 
             // Reload the product to include attachments
             var savedProduct = await _repository.GetByIdAsync(product.Id, request.Buid);
@@ -358,7 +404,41 @@ namespace ERP_RFQ_Automation.Controllers
             product.ModifiedBy = Actor();
             product.ModifiedOn = DateTime.UtcNow;
 
-            await _repository.UpdateAsync(product, request.Buid, request.Attachments);
+            try
+            {
+                await _repository.UpdateAsync(product, request.Buid, request.Attachments);
+            }
+            catch (DbUpdateException ex) when (ex.InnerException is Npgsql.PostgresException { SqlState: "22001" })
+            {
+                // 22001 ONLY — "value too long for type character varying(n)". Deliberately not a
+                // blanket catch: a bare catch(DbUpdateException) would also swallow foreign-key
+                // violations (23503), unique violations (23505), RLS denials (42501 — this codebase
+                // is deny-by-default under nexora_tenant_isolation) and serialization failures from
+                // the serializable transaction in AllocateProductDocIdAsync, and would report every
+                // one of them to the operator as "shorten the product name" while removing the log
+                // entry that says what actually happened. Everything else escapes to the global
+                // handler, on purpose.
+                //
+                // The DTO caps now mirror the columns, so this should be unreachable for the fields
+                // this screen writes. It stays as the backstop for the ones it does not.
+                return BadRequest(Problem(StatusCodes.Status400BadRequest, "Product not saved",
+                    "One of the values is too long for the field it is stored in. Shorten it and try again."));
+            }
+            catch (ArgumentException ex)
+            {
+                // The repository signals a taken part number and five "does not exist" reference
+                // failures through the SAME exception type, so the message text is the only thing
+                // that separates a conflict from a bad request.
+                //
+                // This IS message-sniffing and it is knowingly accepted for now: it works against
+                // today's strings and breaks silently the day somebody rewords one. The durable fix
+                // is a typed exception (or a result object) out of ProductRepository; until then a
+                // reworded message degrades to 400 rather than 409, which is wrong but not harmful.
+                var duplicate = ex.Message.Contains("already exists", StringComparison.OrdinalIgnoreCase);
+                return duplicate
+                    ? Conflict(Problem(StatusCodes.Status409Conflict, "Product not saved", ex.Message))
+                    : BadRequest(Problem(StatusCodes.Status400BadRequest, "Product not saved", ex.Message));
+            }
 
             // FR-INV-04. Push the reorder point down to the stock rows that actually drive the
             // alert.

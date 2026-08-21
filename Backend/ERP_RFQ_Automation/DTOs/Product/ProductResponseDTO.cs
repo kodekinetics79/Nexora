@@ -64,7 +64,18 @@ namespace ERP_RFQ_Automation.DTOs.ProductDTOs
 
     public class ProductCreateRequestDTO
     {
-        [StringLength(200)]
+        /// <summary>
+        /// 100, because <c>Products."ProductName"</c> is <c>character varying(100)</c>. DO NOT
+        /// WIDEN THIS. The cap mirrors the column so an over-long name is refused as a 400 that
+        /// names the field; while this said 200 the value passed ModelState and died at the INSERT
+        /// as <c>22001</c>, which reached the caller as "An unexpected error occurred."
+        ///
+        /// <para>Widening the COLUMN to match instead is not available: <c>View_SupplierPriceList</c>
+        /// selects <c>ProductName</c>, PostgreSQL refuses "cannot alter type of a column used by a
+        /// view or rule", and <c>Program.cs</c> runs <c>MigrateAsync()</c> unguarded at startup — so
+        /// that migration fails the deploy itself.</para>
+        /// </summary>
+        [StringLength(100)]
         public string? ProductName { get; set; }
 
         [Required, StringLength(100)]
@@ -73,7 +84,12 @@ namespace ERP_RFQ_Automation.DTOs.ProductDTOs
         [StringLength(100)]
         public string? ModelNo { get; set; }
 
-        [StringLength(1000)]
+        /// <summary>
+        /// 500, mirroring <c>Products."Description"</c> — <c>character varying(500)</c>. Same
+        /// reason as <see cref="ProductName"/>: the cap exists so the refusal happens at validation
+        /// rather than at the INSERT. Do not widen it without widening the column first.
+        /// </summary>
+        [StringLength(500)]
         public string? Description { get; set; }
 
         public long? CategoryId { get; set; }
@@ -156,7 +172,18 @@ namespace ERP_RFQ_Automation.DTOs.ProductDTOs
 
     public class ProductUpdateRequestDTO
     {
-        [StringLength(200)]
+        /// <summary>
+        /// 100, because <c>Products."ProductName"</c> is <c>character varying(100)</c>. DO NOT
+        /// WIDEN THIS. The cap mirrors the column so an over-long name is refused as a 400 that
+        /// names the field; while this said 200 the value passed ModelState and died at the INSERT
+        /// as <c>22001</c>, which reached the caller as "An unexpected error occurred."
+        ///
+        /// <para>Widening the COLUMN to match instead is not available: <c>View_SupplierPriceList</c>
+        /// selects <c>ProductName</c>, PostgreSQL refuses "cannot alter type of a column used by a
+        /// view or rule", and <c>Program.cs</c> runs <c>MigrateAsync()</c> unguarded at startup — so
+        /// that migration fails the deploy itself.</para>
+        /// </summary>
+        [StringLength(100)]
         public string? ProductName { get; set; }
 
         [Required, StringLength(100)]
@@ -165,7 +192,12 @@ namespace ERP_RFQ_Automation.DTOs.ProductDTOs
         [StringLength(100)]
         public string? ModelNo { get; set; }
 
-        [StringLength(1000)]
+        /// <summary>
+        /// 500, mirroring <c>Products."Description"</c> — <c>character varying(500)</c>. Same
+        /// reason as <see cref="ProductName"/>: the cap exists so the refusal happens at validation
+        /// rather than at the INSERT. Do not widen it without widening the column first.
+        /// </summary>
+        [StringLength(500)]
         public string? Description { get; set; }
 
         public long? CategoryId { get; set; }

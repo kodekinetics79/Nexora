@@ -11,6 +11,42 @@ import productService from '../../api/services/productService';
 import { useAuth } from '../../context/AuthContext';
 import { useSnackbar } from 'notistack';
 
+/**
+ * The server's own sentence, verbatim.
+ *
+ * Every refusal this dialog can now provoke arrives already written for an operator — "PartNo
+ * VLV-8830 already exists in this Business Unit.", "Category ID 44 does not exist in this Business
+ * Unit.", "The field ProductName must be a string with a maximum length of 100." — and that
+ * sentence is the only thing that tells the user what to change. Replacing it with "Failed to save
+ * product." throws the answer away and leaves them clicking Save again.
+ *
+ * The 409 branch this replaces was WRONG on the only day it could ever have fired. It rendered
+ * "This product changed since you opened it. Reload and review the latest values." — a stale-record
+ * message — but the sole Conflict() in ProductController was inside Delete, which this dialog never
+ * calls, so the branch was unreachable and nobody noticed. Create and Update now return 409 for a
+ * duplicate part number, which would have shown a reload prompt for a problem no reload can fix.
+ *
+ * Reads all three shapes ASP.NET actually sends: the RFC 7807 body the controller builds
+ * (`detail`/`title`), the `{ error }` body the delete path uses, and the ModelState dictionary an
+ * automatic 400 produces. Mirrors the local helpers in CustomersPage and DeliveryConfirmationPanel
+ * rather than importing the Inventory/Commercial one, which does not unwrap the ModelState bag.
+ */
+const serverMessage = (error: unknown, fallback: string): string => {
+  const data = (error as { response?: { data?: unknown } })?.response?.data;
+  if (typeof data === 'string' && data.trim()) return data;
+
+  const body = data as { detail?: string; error?: string; title?: string; errors?: Record<string, string[]> } | undefined;
+  if (body?.detail?.trim()) return body.detail;
+  if (body?.error?.trim()) return body.error;
+
+  if (body?.errors) {
+    const first = Object.values(body.errors).flat().find(message => typeof message === 'string' && message.trim());
+    if (first) return first;
+  }
+
+  return body?.title?.trim() ? body.title : fallback;
+};
+
 interface Props {
   open: boolean;
   onClose: () => void;
@@ -94,7 +130,7 @@ const ProductFormDialog: React.FC<Props> = ({ open, onClose, productId }) => {
       enqueueSnackbar(isEdit ? 'Product updated!' : 'Product created!', { variant: 'success' });
       handleClose();
     },
-    onError: (error: any) => enqueueSnackbar(error?.response?.status === 409 ? 'This product changed since you opened it. Reload and review the latest values.' : 'Failed to save product.', { variant: 'error' }),
+    onError: (error) => enqueueSnackbar(serverMessage(error, 'Failed to save product.'), { variant: 'error' }),
   });
 
   const handleClose = () => {
