@@ -106,6 +106,16 @@ export const queryClient = new QueryClient({
       const meta = metaOf(mutation.options);
       if (isSilent(error, meta)) return;
 
+      // A backstop reports what NOTHING ELSE reports. A mutation that declares its own onError
+      // has said it handles failure, and 95 files do exactly that — 152 of those handlers raise
+      // a toast within a few lines. Firing here as well double-reports every one of them.
+      //
+      // The first version of this gated on an opt-out (meta.silenceGlobalError) instead, which
+      // was the wrong lever: it made correct behaviour require 95 edits, so in practice every
+      // one of those screens would have shipped showing two toasts. Reading the caller's own
+      // onError needs no edits and cannot drift.
+      if (typeof mutation.options.onError === 'function') return;
+
       // Writes get no dedup id: two different failed saves are two things the user must know
       // about, and a write that fails silently is the most expensive failure in the product.
       toast.error(

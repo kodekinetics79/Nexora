@@ -134,7 +134,14 @@ describe('global write failure reporting', () => {
     expect(message.length).toBeGreaterThan(0);
   });
 
-  it('still reports when the caller has its own onError, without suppressing either', async () => {
+  it('stays out of the way when the caller handles its own failure', async () => {
+    // This test originally asserted the OPPOSITE — that the backstop fires alongside a caller's
+    // own handler. That was wrong, and only measuring the real codebase showed it: 95 files
+    // declare a local onError and 152 of those handlers raise a toast within a few lines. Firing
+    // here too would have double-reported every one of them, and the opt-out this file first
+    // relied on (meta.silenceGlobalError) was declared by exactly zero files.
+    //
+    // A backstop reports what nothing else reports. A declared onError IS something else.
     const localHandler = vi.fn();
     await queryClient
       .getMutationCache()
@@ -146,6 +153,17 @@ describe('global write failure reporting', () => {
       .catch(() => {});
 
     expect(localHandler).toHaveBeenCalled();
+    expect(toastError).not.toHaveBeenCalled();
+  });
+
+  it('still reports a caller that declares no handler at all', async () => {
+    // The 35 mutations this whole change exists for.
+    await queryClient
+      .getMutationCache()
+      .build(queryClient, { mutationFn: () => Promise.reject(axiosError(500)) })
+      .execute(undefined)
+      .catch(() => {});
+
     expect(toastError).toHaveBeenCalledTimes(1);
   });
 

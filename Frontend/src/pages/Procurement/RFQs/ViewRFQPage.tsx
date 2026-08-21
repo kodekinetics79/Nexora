@@ -246,8 +246,15 @@ const ViewRFQPage: React.FC = () => {
     : intelligenceQuery.isLoading ? 'Commercial readiness is still being calculated.'
     : intelligenceQuery.isError ? 'Commercial readiness could not be reconciled, so quoting is held. Retry the panel below.'
     : !intelligence ? 'Commercial readiness has not been reported for this RFQ.'
-    : canPrepareQuote ? 'Every line being quoted has an evidence-backed fulfilment route.'
-    : intelligence.nextBestAction.explanation;
+    // Three states, not two. Matching the client gate to the server means a quote can now be
+    // STARTED while lines still lack a fulfilment route — that is the normal case for a
+    // distributor. Saying "every line has an evidence-backed fulfilment route" there would be
+    // false, so the enabled-with-blockers case gets its own sentence: supply coverage is a
+    // condition of quote RELEASE, not of starting one, and the reason now says exactly that.
+    : !canPrepareQuote ? intelligence.nextBestAction.explanation
+    : intelligence.commercialDecision === 'VIABLE_READY'
+      ? 'Every line being quoted has an evidence-backed fulfilment route.'
+      : `You can start the quote now. ${intelligence.nextBestAction.explanation}`;
   // A deadline is overdue only if it is a real date. `new Date('0001-01-01') < new Date()` is
   // perfectly true, which is how a sentinel used to be coloured and presented as a passed
   // customer deadline — the leak utils/dates.ts exists to close.
