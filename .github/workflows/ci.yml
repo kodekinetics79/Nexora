@@ -213,7 +213,19 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          # 24, not 20. The moment this job actually ran the unit suite it could not start a
+          # single worker: every one of the 94 files died on
+          #   TypeError: webidl.util.markAsUncloneable is not a function
+          # which is undici 8 calling a Node 22 API. The test stack has required 22 for some time —
+          # jsdom 30 declares `^22.22.2 || ^24.15.0 || >=26.0.0` and undici 8 declares `>=22.19.0` —
+          # and the pin sat at 20 without anyone noticing, because nothing here ever ran the tests.
+          # `npm run build` is happy on 20, so the mismatch was invisible until now.
+          #
+          # 24 rather than 22 because 24 is the version the suite is PROVEN green on (94 files,
+          # 925 tests, locally on v24.15.0). jsdom's floor inside the 22 line is ^22.22.2, which
+          # `node-version: '22'` is not guaranteed to resolve above — picking a version nobody has
+          # run the suite on would be trading one untested assumption for another.
+          node-version: '24'
           cache: npm
           cache-dependency-path: Frontend/package-lock.json
 
@@ -324,9 +336,59 @@ jobs:
   # `cancelled` matters as much as `failure`. A cancelled run has no conclusion, and a deploy
   # trigger that reads "not failed" as "passed" would ship a commit nothing ever tested.
   # ---------------------------------------------------------------------------------------------
+  frontend-unit:
+    name: Frontend unit suite
+    needs: changes
+    if: ${{ needs.changes.outputs.frontend == 'true' }}
+    runs-on: ubuntu-latest
+    # Its own job, not a step inside `frontend`. Two reasons, both learned the hard way here:
+    #
+    #  1. TIME. Added as a step, it pushed that job from ~14 minutes to over its 25-minute limit
+    #     and GitHub reported the result as "cancelled" — which reads like an infrastructure blip
+    #     rather than a budget overrun. Split, the unit suite and the browser suite run in
+    #     PARALLEL and neither is charged for the other.
+    #  2. LEGIBILITY. "Frontend unit suite failed" and "Frontend build/e2e failed" are different
+    #     problems with different owners. One red box that could mean either is worth less.
+    #
+    # 60 minutes, and no sharding or pool tuning. The suite is import-bound — ~925 tests across 94
+    # files, roughly 18 minutes on a developer machine and over 35 on a 2-core runner — and the
+    # obvious reflexes here are to shard it or switch vitest to the threads pool. Both were
+    # measured and both work. Neither is worth doing yet.
+    #
+    # Nothing is waiting on this number. There are no customers, nobody is queuing behind CI, and
+    # a slow-but-correct gate that nobody is blocked by is not a problem. Sharding adds moving
+    # parts to a pipeline whose whole failing was that nobody understood what it ran, and the
+    # threads pool changes test isolation semantics — a real risk taken for a speed benefit that
+    # currently buys nothing.
+    #
+    # Revisit when CI time actually costs something: when people are waiting on it, or when the
+    # suite grows enough that 60 minutes stops being generous.
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: Frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          # Must match the `frontend` job. jsdom 30 requires ^22.22.2 || ^24.15.0 and undici 8
+          # requires >=22.19.0; on Node 20 every worker dies with
+          # "webidl.util.markAsUncloneable is not a function" before a single assertion runs.
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: Frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Unit suite (vitest)
+        run: npm test
+
   ci-green:
     name: CI green
-    needs: [changes, backend, frontend]
+    needs: [changes, backend, frontend, frontend-unit]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -336,8 +398,9 @@ jobs:
           CHANGES: ${{ needs.changes.result }}
           BACKEND: ${{ needs.backend.result }}
           FRONTEND: ${{ needs.frontend.result }}
+          FRONTEND_UNIT: ${{ needs['frontend-unit'].result }}
         run: |
-          echo "changes=$CHANGES  backend=$BACKEND  frontend=$FRONTEND"
+          echo "changes=$CHANGES  backend=$BACKEND  frontend=$FRONTEND  frontend-unit=$FRONTEND_UNIT"
           # `changes` gates both suites, so anything other than success means the suites were
           # never even asked to run. Reporting green on that is the exact false negative that
           # made a PR look like it had chosen not to test itself.
@@ -346,7 +409,7 @@ jobs:
             exit 1
           fi
           status=0
-          for suite in BACKEND FRONTEND; do
+          for suite in BACKEND FRONTEND FRONTEND_UNIT; do
             case "${!suite}" in
               success) echo "  $suite passed." ;;
               skipped) echo "  $suite did not change — not run." ;;
