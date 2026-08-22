@@ -235,19 +235,6 @@ jobs:
       - name: Build (tsc + vite)
         run: npm run build
 
-      # The unit suite. This job did NOT run it until now: it built, listed the browser suite, and
-      # ran the browser suite — so ~925 vitest tests, including every regression test written
-      # against a specific defect, gated nothing at all.
-      #
-      # That gap was found the way you would expect: a change went green through CI and red on a
-      # developer machine, on the SAME commit. Four tests were failing on `main` while the merge
-      # button showed green, because the only job that could have caught them never invoked vitest.
-      #
-      # `CI green` is a REQUIRED status check on main. Adding this here is what makes that gate
-      # mean what everybody already believed it meant.
-      - name: Unit suite (vitest)
-        run: npm test
-
       - name: List browser acceptance suite
         run: npm run e2e:list
 
@@ -349,9 +336,49 @@ jobs:
   # `cancelled` matters as much as `failure`. A cancelled run has no conclusion, and a deploy
   # trigger that reads "not failed" as "passed" would ship a commit nothing ever tested.
   # ---------------------------------------------------------------------------------------------
+  frontend-unit:
+    name: Frontend unit suite
+    needs: changes
+    if: ${{ needs.changes.outputs.frontend == 'true' }}
+    runs-on: ubuntu-latest
+    # Its own job, not a step inside `frontend`. Two reasons, both learned the hard way here:
+    #
+    #  1. TIME. Added as a step, it pushed that job from ~14 minutes to over its 25-minute limit
+    #     and GitHub reported the result as "cancelled" — which reads like an infrastructure blip
+    #     rather than a budget overrun. Split, the unit suite and the browser suite run in
+    #     PARALLEL and neither is charged for the other.
+    #  2. LEGIBILITY. "Frontend unit suite failed" and "Frontend build/e2e failed" are different
+    #     problems with different owners. One red box that could mean either is worth less.
+    #
+    # 35 minutes because the suite is import-bound rather than compute-bound: ~925 tests across 94
+    # files, and the transform/import cost dominates. Measured at roughly 18 minutes locally, so
+    # this is headroom, not an estimate.
+    timeout-minutes: 35
+    defaults:
+      run:
+        working-directory: Frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          # Must match the `frontend` job. jsdom 30 requires ^22.22.2 || ^24.15.0 and undici 8
+          # requires >=22.19.0; on Node 20 every worker dies with
+          # "webidl.util.markAsUncloneable is not a function" before a single assertion runs.
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: Frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Unit suite (vitest)
+        run: npm test
+
   ci-green:
     name: CI green
-    needs: [changes, backend, frontend]
+    needs: [changes, backend, frontend, frontend-unit]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -361,8 +388,9 @@ jobs:
           CHANGES: ${{ needs.changes.result }}
           BACKEND: ${{ needs.backend.result }}
           FRONTEND: ${{ needs.frontend.result }}
+          FRONTEND_UNIT: ${{ needs['frontend-unit'].result }}
         run: |
-          echo "changes=$CHANGES  backend=$BACKEND  frontend=$FRONTEND"
+          echo "changes=$CHANGES  backend=$BACKEND  frontend=$FRONTEND  frontend-unit=$FRONTEND_UNIT"
           # `changes` gates both suites, so anything other than success means the suites were
           # never even asked to run. Reporting green on that is the exact false negative that
           # made a PR look like it had chosen not to test itself.
@@ -371,7 +399,7 @@ jobs:
             exit 1
           fi
           status=0
-          for suite in BACKEND FRONTEND; do
+          for suite in BACKEND FRONTEND FRONTEND_UNIT; do
             case "${!suite}" in
               success) echo "  $suite passed." ;;
               skipped) echo "  $suite did not change — not run." ;;
