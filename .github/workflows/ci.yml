@@ -213,7 +213,19 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          # 24, not 20. The moment this job actually ran the unit suite it could not start a
+          # single worker: every one of the 94 files died on
+          #   TypeError: webidl.util.markAsUncloneable is not a function
+          # which is undici 8 calling a Node 22 API. The test stack has required 22 for some time —
+          # jsdom 30 declares `^22.22.2 || ^24.15.0 || >=26.0.0` and undici 8 declares `>=22.19.0` —
+          # and the pin sat at 20 without anyone noticing, because nothing here ever ran the tests.
+          # `npm run build` is happy on 20, so the mismatch was invisible until now.
+          #
+          # 24 rather than 22 because 24 is the version the suite is PROVEN green on (94 files,
+          # 925 tests, locally on v24.15.0). jsdom's floor inside the 22 line is ^22.22.2, which
+          # `node-version: '22'` is not guaranteed to resolve above — picking a version nobody has
+          # run the suite on would be trading one untested assumption for another.
+          node-version: '24'
           cache: npm
           cache-dependency-path: Frontend/package-lock.json
 
