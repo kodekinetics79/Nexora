@@ -641,6 +641,16 @@ public sealed class ProcurementOutboxMessage
     public string Status { get; set; } = ProcurementOutboxStatuses.Pending;
     public string PayloadJson { get; set; } = "{}";
     public int AttemptCount { get; set; }
+
+    /// <summary>
+    /// Which delivery round this row is on. Zero for the original dispatch; incremented by
+    /// every surface that resets <see cref="AttemptCount"/> (the manual retry and platform
+    /// dead-letter recovery). Attempt numbers repeat across rounds, so the round — not the
+    /// attempt — is what makes a redelivery's ledger events distinct facts from the first
+    /// round's rather than duplicate keys.
+    /// </summary>
+    public int DispatchRound { get; set; }
+
     public DateTime NextAttemptOn { get; set; }
     public string? LeaseOwner { get; set; }
     public Guid? LeaseToken { get; set; }

@@ -137,6 +137,61 @@ public sealed class ProcurementDispatchWorkerTests
     }
 
     [Fact]
+    public async Task A_manual_retry_that_fails_the_same_way_does_not_wedge_the_queue()
+    {
+        // THE SAME POISON LOOP, one manual click away.
+        //
+        // RetrySolicitationAsync resets AttemptCount to ZERO, so the retry round re-uses
+        // attempt numbers the first round already spent. Events are keyed by round, attempt
+        // and type: without the round, a retry that failed the same way at the same attempt
+        // recomputed a key already on the ledger, and the solicitation event in FinishAsync —
+        // then outside the shared gate — took SaveChanges down WITH the lease release. The row
+        // stayed PROCESSING, was fenced ten minutes later back to DeliveryFailed, and the
+        // user's next retry re-armed the identical loop. Head-of-line: one wedged row stops
+        // every tenant's outbound mail.
+        //
+        // Two properties must hold at once, and each guards against the other's failure mode:
+        // the queue must not wedge, and the retry round must be RECORDED — it is a new
+        // episode (new timestamps, possibly a different failure reason), not a duplicate of
+        // round one. Deduplicating it away would silence the wedge by discarding audit
+        // history from the evidence ledger, including the only evidence that a supplier may
+        // have been emailed twice.
+        using var fixture = new DispatchFixture(new RecordingNotification { Result = false });
+        fixture.SeedPending(withSourcingCase: true);
+
+        // Round one, attempt 1: the provider accepts nothing => Uncertain => DeliveryFailed,
+        // recording DELIVERY_UNCERTAIN for the solicitation and review-required for the case.
+        Assert.True(await fixture.Worker.ProcessOneAsync(default));
+        var first = await fixture.StateAsync();
+        Assert.Equal(SolicitationStatus.DeliveryFailed, first.Solicitation.Status);
+        Assert.Contains(first.Events, e => e.EventType == "SUPPLIER_SOLICITATION_DELIVERY_UNCERTAIN");
+        Assert.Contains(first.Events, e => e.EventType == "SOURCING_CASE_DELIVERY_REVIEW_REQUIRED");
+        var firstCount = first.Events.Count;
+
+        // The REAL manual retry — the exact path the workbench Retry button takes. It resets
+        // the attempt counter and advances the round.
+        await fixture.RetryThroughServiceAsync();
+
+        // Round two, attempt 1 fails the same way at the same attempt number. It must not
+        // throw, must release the claim, and must record the round's own events under
+        // round-qualified keys — a possible second real email to the supplier is evidence.
+        var exception = await Record.ExceptionAsync(() => fixture.Worker.ProcessOneAsync(default));
+        Assert.Null(exception);
+
+        var after = await fixture.StateAsync();
+        Assert.Equal(ProcurementOutboxStatuses.Failed, after.Message.Status);
+        Assert.Null(after.Message.LeaseOwner);
+        Assert.Null(after.Message.LeaseToken);
+        Assert.Equal(SolicitationStatus.DeliveryFailed, after.Solicitation.Status);
+        // Round one's two events + the retry request + round two's two events.
+        Assert.Equal(firstCount + 3, after.Events.Count);
+        Assert.Equal(2, after.Events.Count(e => e.EventType == "SUPPLIER_SOLICITATION_DELIVERY_UNCERTAIN"));
+        Assert.Equal(2, after.Events.Count(e => e.EventType == "SOURCING_CASE_DELIVERY_REVIEW_REQUIRED"));
+        Assert.Single(after.Events, e => e.EventType == "SUPPLIER_SOLICITATION_RETRY_QUEUED");
+        Assert.Equal(2, after.Events.Count(e => e.IdempotencyKey.Contains(":round:1:")));
+    }
+
+    [Fact]
     public async Task Setup_failure_before_provider_invocation_is_retryable()
     {
         using var fixture = new DispatchFixture(registerNotification: false);
@@ -460,6 +515,18 @@ public sealed class ProcurementDispatchWorkerTests
             message.LeaseUntil = DateTime.UtcNow.AddMinutes(-5);
             message.NextAttemptOn = DateTime.UtcNow.AddMinutes(-1);
             await db.SaveChangesAsync();
+        }
+
+        /// <summary>
+        /// The real manual retry — RetrySolicitationAsync itself, so this fixture cannot
+        /// drift from what the workbench Retry button actually does to the row (attempt
+        /// counter reset to zero, round advanced, lease and error cleared).
+        /// </summary>
+        public async Task RetryThroughServiceAsync()
+        {
+            await using var db = _database.ContextFor(Tenant);
+            await new ProcurementApplicationService(db).RetrySolicitationAsync(
+                new RetrySolicitationCommand(Tenant, Solicitation, "manual-retry-1", "qa", "corr-manual-retry-1"));
         }
 
         public async Task<(ProcurementOutboxMessage Message, SupplierSolicitation Solicitation, List<ProcurementEvent> Events)> StateAsync()

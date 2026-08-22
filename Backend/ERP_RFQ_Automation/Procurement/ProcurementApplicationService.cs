@@ -995,6 +995,9 @@ public sealed class ProcurementApplicationService : IProcurementApplicationServi
             var now = DateTime.UtcNow;
             outbox.Status = ProcurementOutboxStatuses.Pending;
             outbox.AttemptCount = 0;
+            // Resetting the counter makes attempt numbers repeat, so the round is what keeps
+            // this redelivery's ledger events distinct facts from the first round's.
+            outbox.DispatchRound++;
             outbox.NextAttemptOn = now;
             outbox.LeaseOwner = null;
             outbox.LeaseToken = null;

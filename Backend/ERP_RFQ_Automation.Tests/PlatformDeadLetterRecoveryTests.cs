@@ -1,10 +1,12 @@
 using System.Security.Claims;
+using ERP_RFQ_Automation.Agent.Models;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Platform.Auth;
 using ERP_RFQ_Automation.Platform.Controllers;
 using ERP_RFQ_Automation.Platform.Models;
 using ERP_RFQ_Automation.Platform.Operations;
 using ERP_RFQ_Automation.Platform.Services;
+using ERP_RFQ_Automation.Procurement;
 using ERP_RFQ_Automation.QuoteDelivery;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.AspNetCore.Authorization;
@@ -62,6 +64,49 @@ public sealed class PlatformDeadLetterRecoveryTests
             x.Action == PlatformDeadLetterRecoveryService.AuditAction);
         Assert.Equal(91, occurrence.ActAsTenantId);
         Assert.Contains("quote-retry-912", occurrence.Metadata, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Supplier_rfq_recovery_advances_the_dispatch_round()
+    {
+        using var database = new TestDb();
+        await using var db = database.ContextFor(null);
+        Seed.EnsureBusinessUnit(db, 940);
+        db.Set<Tenant>().Add(new Tenant
+        {
+            Id = 94, Name = "Recovery tenant 94", Slug = "recovery-tenant-94",
+            Status = TenantStatus.Active, PrimaryBusinessUnitId = 940
+        });
+        AgentSeed.Solicitation(db, 941, 940, 942, 943, SolicitationStatus.DeliveryFailed);
+        db.ProcurementOutboxMessages.Add(new ProcurementOutboxMessage
+        {
+            Id = 944, BusinessUnitId = 940, SupplierSolicitationId = 941,
+            Status = ProcurementOutboxStatuses.DeadLettered, AttemptCount = 5,
+            NextAttemptOn = DateTime.UtcNow.AddHours(-1),
+            DeadLetteredOn = DateTime.UtcNow.AddMinutes(-10),
+            LastErrorCode = "DELIVERY_UNCERTAIN",
+            CreatedOn = DateTime.UtcNow.AddHours(-2), UpdatedOn = DateTime.UtcNow.AddMinutes(-10)
+        });
+        await db.SaveChangesAsync();
+        var service = Service(db);
+        var command = new RecoverPlatformDeadLetterCommand(
+            PlatformDeadLetterQueues.SupplierRfq, 944,
+            "Owner verified the provider configuration and approved redelivery.", "supplier-retry-944");
+
+        var first = await service.RecoverAsync(94, command, Actor(), null, default);
+        var replay = await service.RecoverAsync(94, command, Actor(), null, default);
+
+        Assert.Equal("RetryQueued", first.Status);
+        Assert.True(replay.IdempotentReplay);
+        var row = await db.ProcurementOutboxMessages.SingleAsync(x => x.Id == 944);
+        Assert.Equal(ProcurementOutboxStatuses.Pending, row.Status);
+        Assert.Equal(0, row.AttemptCount);
+        // The recovered delivery is a new round: attempt numbers repeat after the reset, so
+        // without the round the worker's ledger events for the recovery would recompute round
+        // one's idempotency keys — and either wedge the queue or be silently swallowed.
+        Assert.Equal(1, row.DispatchRound);
+        Assert.Null(row.DeadLetteredOn);
+        Assert.Null(row.LastErrorCode);
     }
 
     [Fact]
