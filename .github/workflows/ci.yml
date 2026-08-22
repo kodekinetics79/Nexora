@@ -223,6 +223,19 @@ jobs:
       - name: Build (tsc + vite)
         run: npm run build
 
+      # The unit suite. This job did NOT run it until now: it built, listed the browser suite, and
+      # ran the browser suite — so ~925 vitest tests, including every regression test written
+      # against a specific defect, gated nothing at all.
+      #
+      # That gap was found the way you would expect: a change went green through CI and red on a
+      # developer machine, on the SAME commit. Four tests were failing on `main` while the merge
+      # button showed green, because the only job that could have caught them never invoked vitest.
+      #
+      # `CI green` is a REQUIRED status check on main. Adding this here is what makes that gate
+      # mean what everybody already believed it meant.
+      - name: Unit suite (vitest)
+        run: npm test
+
       - name: List browser acceptance suite
         run: npm run e2e:list
 
