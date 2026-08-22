@@ -471,7 +471,11 @@ public sealed class ProcurementDispatchWorker : BackgroundService
                     : terminalFailure
                         ? "SUPPLIER_SOLICITATION_DELIVERY_FAILED"
                         : "SUPPLIER_SOLICITATION_RETRY_SCHEDULED";
-            AddEvent(db, message, solicitation, eventType, now);
+            // A manual retry resets the attempt counter (RetrySolicitationAsync), so a retry
+            // round recomputes keys the first round already wrote. Same gate as the fence and
+            // the sourcing-case event below: re-writing the same fact is skipped, because the
+            // failed insert would take the lease release down with it and wedge the queue.
+            await AddEventIfNewAsync(db, message, solicitation, eventType, now, ct);
             await UpdateSourcingCaseLifecycleAsync(db, message, solicitation,
                 outcome == DispatchOutcome.Sent, terminalFailure, now, ct);
             await db.SaveChangesAsync(ct);
@@ -545,7 +549,7 @@ public sealed class ProcurementDispatchWorker : BackgroundService
         var caseEventType = sent ? "SOURCING_CASE_OUTREACH_SENT"
             : terminalFailure ? "SOURCING_CASE_DELIVERY_REVIEW_REQUIRED"
             : "SOURCING_CASE_DELIVERY_RETRY_SCHEDULED";
-        var caseKey = $"dispatch:{message.Id}:attempt:{message.AttemptCount}:sourcing-case";
+        var caseKey = $"{DispatchIdentity(message)}:attempt:{message.AttemptCount}:sourcing-case";
         if (await EventAlreadyRecordedAsync(db, message.BusinessUnitId, caseEventType, caseKey, ct))
             return;
 
@@ -557,7 +561,7 @@ public sealed class ProcurementDispatchWorker : BackgroundService
             AggregateVersion = sourcingCase.Version,
             EventType = caseEventType,
             Actor = "procurement-dispatch-worker",
-            CorrelationId = message.OriginCorrelationId ?? $"dispatch:{message.Id}:attempt:{message.AttemptCount}",
+            CorrelationId = message.OriginCorrelationId ?? $"{DispatchIdentity(message)}:attempt:{message.AttemptCount}",
             IdempotencyKey = caseKey,
             PayloadJson = JsonSerializer.Serialize(new
             {
@@ -610,12 +614,24 @@ public sealed class ProcurementDispatchWorker : BackgroundService
     }
 
     /// <summary>
-    /// The event's identity: message, attempt and type. Deliberately carries nothing that
-    /// varies between two writes of the SAME fact, which is what makes it an idempotency key —
-    /// and is exactly why re-writing that fact has to be handled rather than attempted.
+    /// The event's identity: message, round, attempt and type. Deliberately carries nothing
+    /// that varies between two writes of the SAME fact, which is what makes it an idempotency
+    /// key — and is exactly why re-writing that fact has to be handled rather than attempted.
+    ///
+    /// <para>The round is load-bearing: both retry surfaces (RetrySolicitationAsync, platform
+    /// dead-letter recovery) reset the attempt counter, so attempt numbers repeat across
+    /// rounds and a redelivery's outcome is a DIFFERENT fact than the first round's — it gets
+    /// its own key rather than being swallowed by the duplicate gate. Round zero keeps the
+    /// historical key shape so events already on the ledger stay recognised.</para>
     /// </summary>
     private static string EventKey(ProcurementOutboxMessage message, string eventType)
-        => $"dispatch:{message.Id}:attempt:{message.AttemptCount}:{eventType}";
+        => $"{DispatchIdentity(message)}:attempt:{message.AttemptCount}:{eventType}";
+
+    /// <summary>"dispatch:{id}" on the original round, "dispatch:{id}:round:{r}" after.</summary>
+    private static string DispatchIdentity(ProcurementOutboxMessage message)
+        => message.DispatchRound == 0
+            ? $"dispatch:{message.Id}"
+            : $"dispatch:{message.Id}:round:{message.DispatchRound}";
 
     private static void AddEvent(
         ErpRfqAutomationContext db,
@@ -632,7 +648,7 @@ public sealed class ProcurementDispatchWorker : BackgroundService
             AggregateVersion = solicitation.Version,
             EventType = eventType,
             Actor = "procurement-dispatch-worker",
-            CorrelationId = message.OriginCorrelationId ?? $"dispatch:{message.Id}:attempt:{message.AttemptCount}",
+            CorrelationId = message.OriginCorrelationId ?? $"{DispatchIdentity(message)}:attempt:{message.AttemptCount}",
             IdempotencyKey = EventKey(message, eventType),
             PayloadJson = JsonSerializer.Serialize(new { message.AttemptCount, message.Status, message.NextAttemptOn, message.LastErrorCode }),
             OccurredOn = occurredOn
