@@ -33,6 +33,19 @@ namespace ERP_RFQ_Automation.DTOs.UserDTO
         public bool IsManager { get; set; }
 
         public List<MyModulePermissionDTO> Permissions { get; set; } = new();
+
+        /// <summary>
+        /// The runtime-available entitlement keys the caller's TENANT is granted (e.g.
+        /// <c>capability.full-navigation</c>), in catalogue order. Tenant scope, not user
+        /// privilege: it rides the same bootstrap as permissions but answers a different question
+        /// — what surface this customer bought, not what this user may do on it.
+        ///
+        /// <para>Empty means no optional surface, and clients must treat it that way: an
+        /// ungoverned business unit, an unreadable platform plane and an older server that never
+        /// wrote this field all look identical to the client, and all of them must land on the
+        /// minimal surface rather than an error.</para>
+        /// </summary>
+        public List<string> Entitlements { get; set; } = new();
     }
 
     public class MyModulePermissionDTO

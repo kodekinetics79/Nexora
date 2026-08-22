@@ -87,13 +87,16 @@ const PILOT_RAIL: Readonly<Record<string, true | readonly string[]>> = {
 };
 
 /**
- * Off by setting VITE_PILOT_RAIL=off, which restores all 17 rows without a code change.
+ * Off per tenant by granting this entitlement on the tenant's Modules screen in the platform
+ * console, which restores all 17 rows for that customer — audited, reason-required, no deploy.
  *
- * Deliberately an environment switch rather than a per-tenant setting: it decides what the PILOT
- * sees, and a pilot is a deployment-wide decision. If it ever needs to vary per tenant it should
- * become an entitlement, not a second flag.
+ * This REPLACED the VITE_PILOT_RAIL environment switch rather than joining it: two switches over
+ * the same rail can disagree, and the one an operator can see must be the one the product obeys.
+ * Absence — grant not made, bootstrap still loading, platform plane unreadable, or an older
+ * server that never reports entitlements — always lands on the trimmed rail: the floor, from
+ * which every screen stays reachable by URL, deep link and global search.
  */
-const PILOT_RAIL_ENABLED = import.meta.env.VITE_PILOT_RAIL !== 'off';
+export const FULL_NAVIGATION_ENTITLEMENT = 'capability.full-navigation';
 
 /** Applies the allow-list. Groups left with no surviving child disappear with them. */
 export const applyPilotRail = <T extends { key: string; children?: { key: string }[] }>(
@@ -112,7 +115,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
   const navigate = useNavigate();
   const location = useLocation();
   const { t } = useTranslation();
-  const { userData, hasPermission } = useAuth();
+  const { userData, hasPermission, hasEntitlement } = useAuth();
   const isManager = userData.isManager === true;
   // Two Sidebars are mounted at once (mobile drawer + permanent drawer), so
   // aria-controls targets must be unique per instance.
@@ -344,8 +347,8 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
 
     // Permissions decide what a user MAY open; the pilot rail decides what the pilot SHOWS. Order
     // matters: hiding first would let a row survive here that its owner has no permission for.
-    return PILOT_RAIL_ENABLED ? applyPilotRail(permitted) : permitted;
-  }, [t, hasPermission, isManager, setupIsReachable]);
+    return hasEntitlement(FULL_NAVIGATION_ENTITLEMENT) ? permitted : applyPilotRail(permitted);
+  }, [t, hasPermission, hasEntitlement, isManager, setupIsReachable]);
 
   /**
    * Seven rail entries address a FILTERED view through a query string — the four quote states,

@@ -185,6 +185,24 @@ public sealed class EntitlementService : IEntitlementService
                 + "per customer on the tenant's Modules screen in the platform console.");
     }
 
+    public async Task<IReadOnlyList<string>> GetEnabledFeaturesAsync(long businessUnitId, CancellationToken ct = default)
+    {
+        var access = await _tenantAccess.GetAccessAsync(businessUnitId, ct);
+
+        // IsAccessDenied folds unresolvable, provisioning, past-due, suspended and archived into
+        // one fail-closed answer. That is deliberately stricter than CheckFeatureAsync, which
+        // leaves status denial to the status-guard middleware: no middleware stands between this
+        // list and what a client renders. HasTenant excludes ungoverned legacy BUs, which hold no
+        // grant to report.
+        if (access.IsAccessDenied || !access.HasTenant)
+            return Array.Empty<string>();
+
+        return TypedEntitlementCatalog.OrderedKeys
+            .Where(key => TypedEntitlementCatalog.IsRuntimeAvailable(key)
+                && TypedEntitlementCatalog.IsEnabled(access.Entitlements, key))
+            .ToList();
+    }
+
     public async Task<double> GetQueueWeightAsync(long businessUnitId, double fallbackWeight, CancellationToken ct = default)
     {
         var access = await _tenantAccess.GetAccessAsync(businessUnitId, ct);
