@@ -29,6 +29,12 @@ public static class EntitlementEnforcementCoverage
                 "ProductCategoryUploaderController.ExportSubCategoryData",
                 "BoqController.ExportCsv"
             ],
+            // Presentation boundary, not a controller gate: the session bootstrap
+            // (UserController.GetMyPermissions) reports the grant and the client rail obeys it.
+            // Every screen the full rail reveals keeps its own permission and entitlement gates,
+            // so there is nothing server-side for this key to deny.
+            [TypedEntitlementCatalog.FullNavigation] =
+                ["UserController.GetMyPermissions", "Frontend Sidebar.applyPilotRail"],
             [TypedEntitlementCatalog.Api] = ["RuntimeUnavailableBoundary"],
             [TypedEntitlementCatalog.Automation] = ["RuntimeUnavailableBoundary"],
             [TypedEntitlementCatalog.Sso] = ["RuntimeUnavailableBoundary"],

@@ -14,25 +14,23 @@ import { describe, expect, it, vi } from 'vitest';
  * places that has to say which slice of the data is on screen.
  */
 
+// These tests pin how the rail MATCHES an address that carries a query string. That behaviour is
+// independent of which entries the pilot rail happens to show, and three of the entries it needs
+// ("Follow-up Due", "Ready for Quote", "Duplicates") are hidden from the pilot. Exercise the full
+// rail — the fixture is a tenant granted the full-navigation entitlement — so the matcher is
+// tested on every shape it must handle, not only the pilot subset. The rail decision itself is
+// covered by Sidebar.railEntitlement.test.tsx.
 vi.mock('../../context/AuthContext', () => ({
   useAuth: () => ({
     userData: { isManager: false, businessUnitId: 1 },
     hasPermission: () => true,
+    hasEntitlement: () => true,
   }),
 }));
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string, fallback?: string) => fallback ?? key }),
 }));
-
-// These tests pin how the rail MATCHES an address that carries a query string. That behaviour is
-// independent of which entries the pilot rail happens to show, and three of the entries it needs
-// ("Follow-up Due", "Ready for Quote", "Duplicates") are hidden from the pilot. Exercise the full
-// rail so the matcher is tested on every shape it must handle, not only the pilot subset.
-//
-// Hoisted because PILOT_RAIL_ENABLED is a module-level constant, read once when Sidebar is
-// imported — stubbing after the import would be too late.
-vi.hoisted(() => { vi.stubEnv('VITE_PILOT_RAIL', 'off'); });
 
 import Sidebar from './Sidebar';
 

@@ -150,6 +150,18 @@ namespace ERP_RFQ_Automation.Controllers
                     BusinessUnitId = actor.BusinessUnitId
                 };
 
+                // Tenant entitlements ride the same bootstrap read as permissions, and before the
+                // role-less early return: what surface the TENANT bought does not depend on the
+                // caller having a role. GetEnabledFeaturesAsync never throws for platform-plane
+                // trouble — it answers empty, and empty renders as the minimal surface.
+                // Tenant entitlements ride the same bootstrap read as permissions, and before the
+                // role-less early return: what surface the TENANT bought does not depend on the
+                // caller having a role. GetEnabledFeaturesAsync never throws for platform-plane
+                // trouble — it answers empty, and empty renders as the minimal surface.
+                if (_entitlements is not null)
+                    response.Entitlements =
+                        (await _entitlements.GetEnabledFeaturesAsync(actor.BusinessUnitId)).ToList();
+
                 if (actor.RoleId is not { } roleId)
                     return Ok(response);
 

@@ -257,6 +257,70 @@ public sealed class TypedEntitlementCatalogTests
         Assert.Equal(once, TypedEntitlementCatalog.Complete(once));
     }
 
+    /// <summary>
+    /// The full-navigation key follows every rule the rest of the catalogue lives by: absent
+    /// denies, granted permits, and the grant is the tenant's. Pinned because this key replaced a
+    /// deployment env var (VITE_PILOT_RAIL) — if it ever stops being default-off, every pilot
+    /// tenant's rail silently un-trims on the next deploy.
+    /// </summary>
+    [Fact]
+    public async Task Full_navigation_is_default_off_and_grantable_per_tenant()
+    {
+        const long businessUnitId = 45;
+        var trimmed = new EntitlementService(new FixedAccess(Tenant(businessUnitId, "{}")), null!);
+        Assert.False((await trimmed.CheckFeatureAsync(
+            businessUnitId, TypedEntitlementCatalog.FullNavigation)).Allowed);
+
+        var full = new EntitlementService(new FixedAccess(Tenant(businessUnitId,
+            $"{{\"{TypedEntitlementCatalog.FullNavigation}\":true}}")), null!);
+        Assert.True((await full.CheckFeatureAsync(
+            businessUnitId, TypedEntitlementCatalog.FullNavigation)).Allowed);
+    }
+
+    [Fact]
+    public async Task Enabled_features_report_granted_runtime_keys_in_catalogue_order()
+    {
+        const long businessUnitId = 46;
+        var service = new EntitlementService(new FixedAccess(Tenant(businessUnitId,
+            $"{{\"{TypedEntitlementCatalog.FullNavigation}\":true," +
+            $"\"{TypedEntitlementCatalog.Rfq}\":true," +
+            // Granted but runtime-unavailable: must not be reported — a client would render a
+            // switch over a surface the server denies.
+            $"\"{TypedEntitlementCatalog.Sso}\":true," +
+            $"\"{TypedEntitlementCatalog.Quotes}\":false}}")), null!);
+
+        var enabled = await service.GetEnabledFeaturesAsync(businessUnitId);
+
+        Assert.Equal(
+            new[] { TypedEntitlementCatalog.Rfq, TypedEntitlementCatalog.FullNavigation },
+            enabled);
+    }
+
+    /// <summary>
+    /// The list rides the session bootstrap, so platform-plane trouble must shrink it to empty
+    /// rather than throw: an outage that only affects surface presentation must not take login
+    /// down with it, and empty renders as the minimal surface — the floor, not a wrong answer.
+    /// </summary>
+    [Fact]
+    public async Task Enabled_features_are_empty_for_ungoverned_unresolvable_and_denied_tenants()
+    {
+        var ungoverned = new EntitlementService(new FixedAccess(
+            new TenantAccessSnapshot(47, null, null, null)), null!);
+        Assert.Empty(await ungoverned.GetEnabledFeaturesAsync(47));
+
+        var unresolvable = new EntitlementService(new FixedAccess(
+            TenantAccessSnapshot.Unresolved(48, "platform plane unreachable")), null!);
+        Assert.Empty(await unresolvable.GetEnabledFeaturesAsync(48));
+
+        var suspended = new EntitlementService(new FixedAccess(
+            new TenantAccessSnapshot(49, 9, TenantStatus.Suspended,
+                new PlanSnapshot(2, "paid", 1, 2, 100, 5, "{}"))
+            {
+                Entitlements = $"{{\"{TypedEntitlementCatalog.FullNavigation}\":true}}"
+            }), null!);
+        Assert.Empty(await suspended.GetEnabledFeaturesAsync(49));
+    }
+
     private sealed class FixedAccess(TenantAccessSnapshot snapshot) : ITenantAccessService
     {
         public Task<TenantAccessSnapshot> GetAccessAsync(

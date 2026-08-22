@@ -23,6 +23,7 @@ export const ENTITLEMENT_CATALOG = [
   { key: 'capability.supplier-search', label: 'Supplier search', group: 'Capabilities', available: true },
   { key: 'capability.integrations', label: 'Integrations', group: 'Capabilities', available: true },
   { key: 'capability.exports', label: 'Exports', group: 'Capabilities', available: true },
+  { key: 'capability.full-navigation', label: 'Full navigation', group: 'Capabilities', available: true },
   { key: 'capability.automation', label: 'Automation', group: 'Capabilities', available: false },
   { key: 'capability.sso', label: 'SSO', group: 'Capabilities', available: false },
   { key: 'capability.scim', label: 'SCIM', group: 'Capabilities', available: false },
