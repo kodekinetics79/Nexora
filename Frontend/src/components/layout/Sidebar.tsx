@@ -48,6 +48,66 @@ interface MenuItem {
   children?: { key: string; label: string; path: string; moduleName?: string; icon?: React.ReactNode; activePrefixes?: string[] }[];
 }
 
+/**
+ * The pilot rail.
+ *
+ * The full navigation is 17 top-level rows and 68 leaf destinations. On a 1440x900 laptop that is
+ * roughly 1,095px of rail against 836px of viewport, so Customers, Inventory and Setup sit below
+ * the fold — and the first three rows are Today, Dashboard and Copilot, with the word "RFQ" first
+ * appearing at row six. A rep opening this on their first Monday, in their second language, with a
+ * tender closing Thursday, is solving a scanning problem before they can start work.
+ *
+ * This is an ALLOW-LIST, not a deletion. Every hidden screen keeps its route, its permissions, its
+ * page title and its tests; it is reachable by URL, by deep link from another screen, and by
+ * global search — which matches RFQ, quote, order, shipment, CR and VAT numbers server-side. The
+ * rule the product operates under is preserve-but-hide: out-of-scope surface is concealed from the
+ * pilot, never removed.
+ *
+ * `true` keeps a single-destination row whole. An array keeps a group and names the children that
+ * survive. Anything absent is hidden.
+ *
+ * Kept because the BRD v3.0 spine runs through it:
+ *   RFQ -> Quote -> Customer PO -> Sales Order -> Supplier PO -> Shipment
+ * plus the two screens a rep starts the day on, the catalogue they quote against, the customer
+ * record, and Setup.
+ */
+const PILOT_RAIL: Readonly<Record<string, true | readonly string[]>> = {
+  'role-today': ['today-sales'],
+  dashboard: ['analytics-deadlines'],
+  lead_mgmt: ['leads-all', 'leads-review', 'leads-bulk', 'leads-inbound-mail'],
+  rfq_mgmt: ['rfqs-all', 'rfqs-draft'],
+  quote_mgmt: ['quotes-draft', 'quotes-sent'],
+  'client-po-inbox': true,
+  orders: true,
+  supplier_mgmt: ['suppliers', 'supplier-quote-inbox', 'purchase-orders'],
+  shipments: true,
+  inventory: ['products'],
+  customers: true,
+  setup: true,
+};
+
+/**
+ * Off by setting VITE_PILOT_RAIL=off, which restores all 17 rows without a code change.
+ *
+ * Deliberately an environment switch rather than a per-tenant setting: it decides what the PILOT
+ * sees, and a pilot is a deployment-wide decision. If it ever needs to vary per tenant it should
+ * become an entitlement, not a second flag.
+ */
+const PILOT_RAIL_ENABLED = import.meta.env.VITE_PILOT_RAIL !== 'off';
+
+/** Applies the allow-list. Groups left with no surviving child disappear with them. */
+export const applyPilotRail = <T extends { key: string; children?: { key: string }[] }>(
+  items: T[],
+): T[] =>
+  items
+    .filter((item) => PILOT_RAIL[item.key] !== undefined)
+    .map((item) => {
+      const allowed = PILOT_RAIL[item.key];
+      if (!item.children || allowed === true) return item;
+      return { ...item, children: item.children.filter((child) => allowed.includes(child.key)) };
+    })
+    .filter((item) => !item.children || item.children.length > 0);
+
 const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
   const navigate = useNavigate();
   const location = useLocation();
@@ -272,7 +332,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
     ];
 
     // Filter items based on permissions
-    return rawItems.filter(item => {
+    const permitted = rawItems.filter(item => {
       if (item.children) {
         // Filter children
         item.children = item.children.filter(child => !child.moduleName || hasPermission(child.moduleName));
@@ -281,6 +341,10 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
       }
       return !item.moduleName || hasPermission(item.moduleName);
     });
+
+    // Permissions decide what a user MAY open; the pilot rail decides what the pilot SHOWS. Order
+    // matters: hiding first would let a row survive here that its owner has no permission for.
+    return PILOT_RAIL_ENABLED ? applyPilotRail(permitted) : permitted;
   }, [t, hasPermission, isManager, setupIsReachable]);
 
   /**
