@@ -27,21 +27,37 @@ public static class TypedEntitlementCatalog
     public const string Scim = "capability.scim";
     public const string DedicatedResources = "capability.dedicated-resources";
 
+    /// <summary>
+    /// Grants the full 17-group navigation rail instead of the 12-row pilot rail. Absent or false
+    /// — every tenant the 20260822 completion touched — keeps the trimmed rail, which is the
+    /// behaviour the pilot launched with. This replaced the frontend's <c>VITE_PILOT_RAIL</c>
+    /// deployment flag so the decision lives with the other per-customer scope decisions, on the
+    /// tenant's Modules screen, audited, instead of in hosting configuration.
+    /// </summary>
+    public const string FullNavigation = "capability.full-navigation";
+
     public static readonly IReadOnlySet<string> Keys = new HashSet<string>(StringComparer.Ordinal)
     {
         Rfq, Quotes, Orders, Procurement, Inventory, Ai, Ocr, Api, EmailIntake,
-        SupplierSearch, Integrations, Exports, Automation, Sso, Scim, DedicatedResources
+        SupplierSearch, Integrations, Exports, Automation, Sso, Scim, DedicatedResources,
+        FullNavigation
     };
 
     /// <summary>
     /// Capabilities that have a production execution boundary today. A plan may retain a false
     /// packaging flag for a future capability, but setting that flag true cannot make an
     /// unimplemented product surface spring into existence: runtime authorization still denies.
+    ///
+    /// <para><see cref="FullNavigation"/> belongs here even though no controller carries it: the
+    /// screens it reveals all exist and keep their own permission and entitlement gates. Its
+    /// boundary is presentation — the session bootstrap reports the grant and the client rail
+    /// obeys it — so "available" is the truthful description, unlike the five keys below whose
+    /// product surface does not exist yet.</para>
     /// </summary>
     public static readonly IReadOnlySet<string> RuntimeAvailableKeys = new HashSet<string>(StringComparer.Ordinal)
     {
         Rfq, Quotes, Orders, Procurement, Inventory, Ai, Ocr, EmailIntake,
-        SupplierSearch, Integrations, Exports
+        SupplierSearch, Integrations, Exports, FullNavigation
     };
 
     public static bool IsRuntimeAvailable(string key) => RuntimeAvailableKeys.Contains(key);
@@ -58,7 +74,7 @@ public static class TypedEntitlementCatalog
     public static readonly IReadOnlyList<string> OrderedKeys =
     [
         Rfq, Quotes, Orders, Procurement, Inventory,
-        Ai, Ocr, EmailIntake, SupplierSearch, Integrations, Exports,
+        Ai, Ocr, EmailIntake, SupplierSearch, Integrations, Exports, FullNavigation,
         Api, Automation, Sso, Scim, DedicatedResources
     ];
 

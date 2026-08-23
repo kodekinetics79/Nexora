@@ -525,6 +525,56 @@ public sealed class PlatformEntitlementEnforcementTests
         Assert.True(repo.Added);
     }
 
+    // ---- 3c. Entitlements on the session bootstrap -----------------------
+
+    /// <summary>
+    /// Wiring, not unit: the entry point the client actually calls
+    /// (GET /api/User/me/permissions), through the real EntitlementService and
+    /// TenantAccessService, against a seeded tenant row. The caller deliberately has NO roleId
+    /// claim — the tenant's surface must not depend on the caller's RBAC bootstrap, so
+    /// entitlements have to ride ahead of the role-less early return.
+    /// </summary>
+    [Fact]
+    public async Task MePermissions_CarriesTenantEntitlements_EvenForARolelessCaller()
+    {
+        using var db = new TestDb();
+        using var seed = db.ContextFor(null);
+        var tenant = SeedTenant(seed, 1, Bu, TenantStatus.Active);
+        tenant.Entitlements =
+            $"{{\"{TypedEntitlementCatalog.FullNavigation}\":true," +
+            $"\"{TypedEntitlementCatalog.Rfq}\":true," +
+            $"\"{TypedEntitlementCatalog.Sso}\":true}}";
+        seed.SaveChanges();
+
+        using var ctx = db.ContextFor(null);
+        var controller = new UserController(
+            new StubUserRepository(), new StubWebHostEnvironment(), new StubRoleGate(),
+            Entitlements(ctx))
+        {
+            ControllerContext = new ControllerContext
+            {
+                HttpContext = new DefaultHttpContext
+                {
+                    User = new ClaimsPrincipal(new ClaimsIdentity(new[]
+                    {
+                        new Claim("businessUnitId", Bu.ToString()),
+                        new Claim(ClaimTypes.NameIdentifier, "999")
+                    }, "test"))
+                }
+            }
+        };
+
+        var result = await controller.GetMyPermissions();
+
+        var ok = Assert.IsType<OkObjectResult>(result.Result);
+        var me = Assert.IsType<MyPermissionsResponseDTO>(ok.Value);
+        // Granted, runtime-available keys in catalogue order. SSO is granted on the row but has
+        // no execution boundary; reporting it would hand the client a switch the server denies.
+        Assert.Equal(
+            new[] { TypedEntitlementCatalog.Rfq, TypedEntitlementCatalog.FullNavigation },
+            me.Entitlements);
+    }
+
     [Fact]
     public async Task UserReactivation_AtSeatCap_Returns403()
     {

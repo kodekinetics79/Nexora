@@ -38,6 +38,15 @@ public interface IEntitlementService
     Task<EntitlementDecision> CheckFeatureAsync(
         long businessUnitId, string entitlement, CancellationToken ct = default);
 
+    /// <summary>
+    /// The runtime-available catalogue keys this BU's tenant is granted, in catalogue order.
+    /// Empty — never a throw — when the platform plane is unresolvable, the BU is ungoverned, or
+    /// tenant access is denied: the session bootstrap carries this list, and an outage that only
+    /// affects surface presentation must not take login down with it. The client treats an empty
+    /// list as "no optional surface", which is the floor, not a wrong answer.
+    /// </summary>
+    Task<IReadOnlyList<string>> GetEnabledFeaturesAsync(long businessUnitId, CancellationToken ct = default);
+
     // NOTE (P2-A6): GetConcurrencyCapAsync was removed as dead code — the per-tenant
     // concurrency cap is enforced atomically inside ExtractionQueue.ClaimSql
     // (platform.Tenants → platform.Plans join), never through this service.
