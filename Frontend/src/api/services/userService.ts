@@ -60,6 +60,12 @@ export interface MePermissionsResponse {
   isSuperAdmin: boolean;
   isManager: boolean;
   permissions: MePermissionDTO[];
+  /**
+   * Runtime-available entitlement keys the caller's TENANT is granted (e.g.
+   * `capability.full-navigation`). Optional because a server that predates the field simply
+   * omits it — and omission must read as "no optional surface", never as an error.
+   */
+  entitlements?: string[];
 }
 
 export interface UserPaginatedResponse {

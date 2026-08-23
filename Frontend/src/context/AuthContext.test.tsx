@@ -40,9 +40,10 @@ const mePayload = (overrides: Record<string, unknown> = {}) => ({
 
 /** Surfaces the pieces of the context under assertion as plain text. */
 const Probe = () => {
-  const { hasPermission, permissionsError, userData } = useAuth();
+  const { hasPermission, hasEntitlement, permissionsError, userData } = useAuth();
   return (
     <div>
+      <span data-testid="full-nav">{String(hasEntitlement('capability.full-navigation'))}</span>
       <span data-testid="view">{String(hasPermission('Users', 'view'))}</span>
       <span data-testid="create">{String(hasPermission('Users', 'create'))}</span>
       <span data-testid="edit">{String(hasPermission('Users', 'edit'))}</span>
@@ -105,6 +106,42 @@ describe('AuthContext', () => {
 
     await waitFor(() => expect(screen.getByTestId('create')).toHaveTextContent('true'));
     expect(screen.getByTestId('view')).toHaveTextContent('false');
+  });
+
+  it('entitlement_isGrantedWhenTheBootstrapReportsIt', async () => {
+    localStorage.setItem('token', TOKEN);
+    getMyPermissions.mockResolvedValue(mePayload({
+      entitlements: ['capability.full-navigation'],
+    }));
+
+    renderAuth();
+
+    await waitFor(() => expect(screen.getByTestId('full-nav')).toHaveTextContent('true'));
+  });
+
+  it('entitlement_deniesWhenAnOlderServerOmitsTheField', async () => {
+    // A backend that predates entitlements omits the field entirely. Absence must read as "no
+    // optional surface" — the trimmed rail — never as an error and never as a grant.
+    localStorage.setItem('token', TOKEN);
+    getMyPermissions.mockResolvedValue(mePayload());
+
+    renderAuth();
+
+    await waitFor(() => expect(screen.getByTestId('role')).toHaveTextContent('Super Admin'));
+    expect(screen.getByTestId('full-nav')).toHaveTextContent('false');
+  });
+
+  it('entitlement_isTenantScope_superAdminGetsNoBypass', async () => {
+    // hasPermission short-circuits for super admins; hasEntitlement must NOT. The width of the
+    // product is the platform's decision about the CUSTOMER — a tenant super admin on a pilot
+    // tenant still gets the pilot surface.
+    localStorage.setItem('token', TOKEN);
+    getMyPermissions.mockResolvedValue(mePayload({ isSuperAdmin: true, entitlements: [] }));
+
+    renderAuth();
+
+    await waitFor(() => expect(screen.getByTestId('view')).toHaveTextContent('true'));
+    expect(screen.getByTestId('full-nav')).toHaveTextContent('false');
   });
 
   it('superAdmin_shortCircuitsAllChecks', async () => {

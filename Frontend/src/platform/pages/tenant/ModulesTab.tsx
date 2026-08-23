@@ -84,6 +84,14 @@ const MODULE_COPY: Record<string, { label: string; effect: string }> = {
     label: 'Exports',
     effect: 'Downloading customer, supplier, product and BOQ data as files.',
   },
+  'capability.full-navigation': {
+    label: 'Full navigation',
+    effect:
+      'Shows this customer the full 17-group navigation rail instead of the 12-row pilot rail. ' +
+      'Off keeps navigation trimmed to the commercial spine; every screen stays reachable by ' +
+      'search and direct link either way. Takes effect within about a minute of the user’s next ' +
+      'screen focus, not instantly.',
+  },
   'capability.api': { label: 'API access', effect: 'Programmatic access for the customer’s own systems.' },
   'capability.automation': { label: 'Automation', effect: 'Customer-defined automated workflows.' },
   'capability.sso': { label: 'SSO', effect: 'Single sign-on against the customer’s identity provider.' },

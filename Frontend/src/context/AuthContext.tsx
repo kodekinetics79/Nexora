@@ -77,6 +77,14 @@ export interface UserData {
   isManager?: boolean;
   businessUnitId?: number;
   permissions?: Permission[];
+  /**
+   * Runtime-available entitlement keys the TENANT is granted, from the same bootstrap read as
+   * `permissions`. Absence is fail-closed by design (`hasEntitlement` answers false), which is
+   * why adding this field did NOT bump `PERMISSION_SCHEMA_VERSION`: a pre-field snapshot simply
+   * grants no optional surface until the mount refresh replaces it, whereas discarding the
+   * snapshot would also throw away login-written identity fields the refresh does not restore.
+   */
+  entitlements?: string[];
   /** Written by `setUserData`; checked on load. See `PERMISSION_SCHEMA_VERSION`. */
   schemaVersion?: number;
 }
@@ -88,6 +96,14 @@ interface AuthContextType {
   setUserData: (data: UserData) => void;
   logout: () => void;
   hasPermission: (moduleName: string, action?: 'view' | 'create' | 'edit' | 'delete') => boolean;
+  /**
+   * Whether the TENANT is granted an entitlement key (e.g. `capability.full-navigation`).
+   * Tenant scope, not user privilege — deliberately no super-admin bypass: a tenant super admin
+   * of a customer on the trimmed pilot surface still sees the trimmed surface, because the width
+   * of the product is the platform's decision about the customer, not the user's rank inside it.
+   * Fails closed while loading and on any failure.
+   */
+  hasEntitlement: (key: string) => boolean;
   /**
    * Human-readable reason the permission set could not be loaded, or null.
    *
@@ -198,6 +214,9 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
             isSuperAdmin: me.isSuperAdmin === true,
             isManager: me.isManager === true,
             permissions: me.permissions ?? [],
+            // A server that predates the field omits it; that must read as "none", not "keep
+            // whatever the previous snapshot claimed".
+            entitlements: me.entitlements ?? [],
             schemaVersion: PERMISSION_SCHEMA_VERSION,
           };
           localStorage.setItem("userData", JSON.stringify(next));
@@ -250,6 +269,14 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       default: return false;
     }
   }, [userData.isSuperAdmin, userData.permissions]);
+
+  const hasEntitlement = useCallback((key: string) => {
+    // Impersonating platform operators mirror `hasPermission`: let them SEE the full surface —
+    // they are diagnosing the tenant, every mutation is rejected server-side, and the screens an
+    // entitlement reveals keep their own server-side gates regardless of what the client renders.
+    if (getImpersonation()) return true;
+    return userData.entitlements?.includes(key) === true;
+  }, [userData.entitlements]);
 
   // Keep the permission set fresh: once on mount (so a reload never runs on a stale snapshot) and
   // whenever the tab regains focus. Both honour the stale window, so switching tabs rapidly does
@@ -307,6 +334,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         setUserData,
         logout,
         hasPermission,
+        hasEntitlement,
         permissionsError,
         permissionsLoading,
         refreshPermissions,
