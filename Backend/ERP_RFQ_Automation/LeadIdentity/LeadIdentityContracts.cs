@@ -43,6 +43,17 @@ public sealed record LeadIntakeDescriptor(
 {
     public long? SourceDocumentOccurrenceId { get; init; }
     public string? LogicalGroupKey { get; init; }
+
+    /// <summary>
+    /// FR-RFQ-05/06: thread-ancestor keys of the message this document arrived in, in occurrence
+    /// <c>EmailThreadId</c> form ("email:{Message-Id}") — the union of its In-Reply-To and
+    /// References headers as persisted on the EmailIngest row. An occurrence already linked to a
+    /// lead whose EmailThreadId appears here is strong evidence the incoming document belongs to
+    /// that lead's thread. It is deliberately NEVER sufficient alone — subjects and threads get
+    /// reused for unrelated inquiries — so reconciliation pairs it with the same corroboration
+    /// the logical-group arm demands. Empty for doors with no mail message.
+    /// </summary>
+    public IReadOnlyList<string>? ThreadReferencedMessageIds { get; init; }
 }
 
 /// <summary>

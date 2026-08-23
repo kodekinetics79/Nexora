@@ -348,6 +348,13 @@ public sealed class ExtractionWorker : BackgroundService
                 {
                     await MarkIntakeFailureAsync(job, errorCode, workToken, permanent: permanent);
                     await CloseAssemblyComponentAsync(job, errorCode, permanent, workToken);
+                    // CancellationToken.None deliberately: the queue row is already durably
+                    // dead-lettered, so abandoning this small visibility write halfway through
+                    // (lease-expiry or shutdown cancellation) would leave the triage screen
+                    // claiming "Queued" over a dead letter — the exact lie being fixed. The
+                    // catch-block failure sites below already record under None for the same
+                    // reason.
+                    await MarkIngestDeadLetterVisibleAsync(job, permanent, CancellationToken.None);
                     RecordFailureMetrics(job, errorCode, failureReason, ElapsedMs(), permanent: permanent);
                 }
                 return true;
@@ -449,6 +456,7 @@ public sealed class ExtractionWorker : BackgroundService
                 {
                     await MarkIntakeFailureAsync(job, parseReason, CancellationToken.None, permanent: true);
                     await CloseAssemblyComponentAsync(job, parseReason, permanent: true, CancellationToken.None);
+                    await MarkIngestDeadLetterVisibleAsync(job, permanent: true, CancellationToken.None);
                     // FailPermanentlyAsync dead-letters immediately, regardless of attempts.
                     RecordFailureMetrics(job, parseReason, ex.Message, ElapsedMs(), permanent: true);
                 }
@@ -489,6 +497,7 @@ public sealed class ExtractionWorker : BackgroundService
                     // missing content which still exists and will be readable once fixed.
                     await CloseAssemblyComponentAsync(
                         job, EvidenceErrorCodeFor(ex), permanent: false, CancellationToken.None);
+                    await MarkIngestDeadLetterVisibleAsync(job, permanent: false, CancellationToken.None);
                     RecordFailureMetrics(job, "evidence_integrity_failure",
                         "Evidence integrity failure: " + ex.Message, ElapsedMs());
                 }
@@ -509,6 +518,7 @@ public sealed class ExtractionWorker : BackgroundService
                 else
                 {
                     await MarkIntakeFailureAsync(job, "unexpected_extraction_failure", CancellationToken.None);
+                    await MarkIngestDeadLetterVisibleAsync(job, permanent: false, CancellationToken.None);
                     RecordFailureMetrics(job, "unexpected_extraction_failure", ex.Message, ElapsedMs());
                 }
             }
@@ -911,6 +921,81 @@ public sealed class ExtractionWorker : BackgroundService
         }
     }
 
+    /// <summary>
+    /// EmailIngest.ParseStatus value for an email whose extraction reached the dead-letter
+    /// queue. &lt;= 50 chars (the column's limit), and in the existing "Failed - reason"
+    /// vocabulary ("Failed - nothing to extract", "Failed - N attachment(s) skipped") so the
+    /// triage screen and the LeadRepository/Dashboard readers — which key only on
+    /// "NeedsReview" — treat it exactly like every other failed state.
+    /// </summary>
+    internal const string DeadLetterParseStatus = "Failed - extraction dead-lettered";
+
+    /// <summary>
+    /// ING-09: makes a dead-lettered email job VISIBLE on its EmailIngest row.
+    ///
+    /// <para>
+    /// The only other writer that resolves ParseStatus downstream of "Queued" is
+    /// <c>LeadPersister.ResolveIngestAsync</c>, which runs on the persist/success path. When
+    /// every job of a message dead-letters, that path never runs, so the triage screen said
+    /// "Queued" forever while the DLQ held the truth. This is the failure-path counterpart.
+    /// </para>
+    /// <para>
+    /// DELIBERATELY in worker C#, on both database engines — unlike the occurrence intake
+    /// status, which <c>trg_release01c_sync_intake_from_job</c> owns on PostgreSQL and which
+    /// <see cref="MarkIntakeFailureAsync"/> therefore only writes when
+    /// <c>!db.Database.IsNpgsql()</c>. No trigger touches EmailIngests on either engine, so
+    /// there is nothing here to race or rewind; guarding this write the same way would
+    /// reintroduce on PostgreSQL exactly the invisibility being fixed.
+    /// </para>
+    /// <para>
+    /// Only "Queued"/"Pending" are overwritten: an email fans out to SEVERAL jobs (body +
+    /// attachments), and a sibling that already persisted a lead has set Success/NeedsReview
+    /// — a later dead-letter among the siblings must not un-say that. In the other order the
+    /// same rule self-heals: a successful sibling (or a dead-letter recovery replay) flips
+    /// this state back through ResolveIngestAsync, which writes unconditionally.
+    /// </para>
+    /// <para>
+    /// Best-effort like every intake annotation here: the queue row is already durably
+    /// dead-lettered, and a failure to annotate must not turn into a second failure recording.
+    /// Not covered: jobs dead-lettered by the claim statement itself (the exhausted-lease and
+    /// lineage-quarantine CTEs in ExtractionQueue, PostgreSQL-only) — no worker owns those
+    /// transitions; they remain visible through the operator dead-letter queue.
+    /// </para>
+    /// </summary>
+    private async Task MarkIngestDeadLetterVisibleAsync(
+        ExtractionJob job, bool permanent, CancellationToken ct)
+    {
+        if (job.SourceType != ExtractionSourceType.Email) return;
+        // Same terminality condition FailAsync/FailPermanentlyAsync apply: Attempts was
+        // incremented at claim, so this attempt was the last one iff it reached MaxAttempts.
+        if (!permanent && job.Attempts < job.MaxAttempts) return;
+        try
+        {
+            var metadata = await ReadJobMetadataAsync(job, ct);
+            if (metadata?.EmailIngestId is not > 0) return;
+            using var scope = _scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+            var ingest = await db.EmailIngests
+                .FirstOrDefaultAsync(e => e.Id == metadata.EmailIngestId.Value
+                    && e.EmailConfiguration.BusinessUnitId == job.BusinessUnitId, ct);
+            if (ingest is null || ingest.ParseStatus is not ("Queued" or "Pending")) return;
+            ingest.ParseStatus = DeadLetterParseStatus;
+            ingest.ParsedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync(ct);
+            _log.LogWarning(
+                "Job {JobId} dead-lettered; EmailIngest {IngestId} marked '{Status}' so the "
+                + "triage screen stops claiming the message is still queued.",
+                job.Id, ingest.Id, DeadLetterParseStatus);
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex,
+                "Job {JobId} was dead-lettered but its EmailIngest could not be marked failed. "
+                + "The queue row is authoritative; the triage screen overstates progress until "
+                + "a retry resolves it.", job.Id);
+        }
+    }
+
     private async Task MarkIntakeFinalizedAsync(ExtractionJob job, CancellationToken ct)
     {
         if (!job.SourceDocumentOccurrenceId.HasValue) return;
@@ -1142,7 +1227,6 @@ public sealed class LeadPersister : ILeadPersister
 {
     private readonly ErpRfqAutomationContext _context;
     private readonly ILogger<LeadPersister> _log;
-    private readonly ERP_RFQ_Automation.Deduplication.ILeadDuplicateDetector? _duplicateDetector;
     private readonly ERP_RFQ_Automation.CommercialRouting.ICommercialRoutingApplicationService? _routing;
     private readonly ERP_RFQ_Automation.LeadIdentity.ILeadIdentityApplicationService? _leadIdentity;
     /// <summary>Present once email assembly is wired; absent leaves non-email ingestion untouched.</summary>
@@ -1159,12 +1243,9 @@ public sealed class LeadPersister : ILeadPersister
     /// audit trail for one a named person looked at.</summary>
     internal const string AutoVerifyActor = "system:auto-verified-high-confidence";
 
-    // The detector is optional so persistence keeps working before (and without)
-    // the Deduplication DI registration (see Deduplication/DEDUP-WIRING.md).
     public LeadPersister(
         ErpRfqAutomationContext context,
         ILogger<LeadPersister> log,
-        ERP_RFQ_Automation.Deduplication.ILeadDuplicateDetector? duplicateDetector = null,
         ERP_RFQ_Automation.CommercialRouting.ICommercialRoutingApplicationService? routing = null,
         ERP_RFQ_Automation.LeadIdentity.ILeadIdentityApplicationService? leadIdentity = null,
         ERP_RFQ_Automation.Ingestion.Assembly.IEmailInquiryAssemblyCoordinator? emailAssemblies = null,
@@ -1184,7 +1265,6 @@ public sealed class LeadPersister : ILeadPersister
             : configuration.GetValue<decimal?>(AutoVerifyMinConfidenceKey) ?? 0.85m;
         _context = context;
         _log = log;
-        _duplicateDetector = duplicateDetector;
         _routing = routing;
         _leadIdentity = leadIdentity;
         _emailAssemblies = emailAssemblies;
@@ -1232,8 +1312,10 @@ public sealed class LeadPersister : ILeadPersister
         if (lead is null) return;
 
         Lead[] leads = [lead];
-        if (_leadIdentity is null)
-            await TryDetectDuplicatesAsync(job, leads, ct);
+        // No duplicate-detector call here: reconciliation (ILeadIdentityApplicationService) owns
+        // duplicate classification and is always registered, so the old `if (_leadIdentity is
+        // null)` gate never opened. LeadDuplicateDetector was deleted with its other two dead
+        // call sites rather than left as a path nothing takes.
         await TryResolveCustomersAsync(job, leads, ct);
         await TryRouteLeadsAsync(job, leads, ct);
     }
@@ -1479,9 +1561,12 @@ public sealed class LeadPersister : ILeadPersister
             // EmailIngest row it creates and as the job's logical group key ("email:{Message-Id}").
             // That id is a LOWER BOUND on thread identity: documents sharing it are provably from
             // one message and therefore one thread, so it can only ever miss a relationship, never
-            // invent one. A reply carries its own Message-Id and will NOT match — real
-            // In-Reply-To/References threading needs the mail door to persist the header chain.
-            // Manual upload and watched folders have no mail message at all, so this stays null
+            // invent one. A reply carries its own Message-Id and will NOT match on it — which is
+            // why the ANCESTOR chain below exists: the mail door persists the reply's In-Reply-To
+            // and References headers on the ingest row, and reconciliation treats "this message
+            // replies to a message an existing lead came from" as strong (but never solitary)
+            // evidence for that lead.
+            // Manual upload and watched folders have no mail message at all, so both stay null
             // rather than carrying a manufactured identity that the scorer would read as evidence.
             var emailThreadId = job.SourceType != ExtractionSourceType.Email
                 ? null
@@ -1489,6 +1574,10 @@ public sealed class LeadPersister : ILeadPersister
                     && messageGroupKey.StartsWith("email:", StringComparison.Ordinal)
                     ? messageGroupKey
                     : ingest?.MessageId is { Length: > 0 } messageId ? $"email:{messageId}" : null;
+            var threadAncestorKeys = job.SourceType == ExtractionSourceType.Email && ingest is not null
+                ? ERP_RFQ_Automation.Services.EmailService.ThreadAncestorKeys(
+                    ingest.InReplyToMessageId, ingest.ReferencesJson)
+                : Array.Empty<string>();
             var externalRequests = await _context.Set<ERP_RFQ_Automation.AI.AiRequest>()
                 .AsNoTracking()
                 .Where(x => x.BusinessUnitId == job.BusinessUnitId && x.ExtractionJobId == job.Id
@@ -1514,7 +1603,8 @@ public sealed class LeadPersister : ILeadPersister
                         attributedExternalCost, "Service", "extraction-worker", $"extraction:{job.Id}")
                     {
                         SourceDocumentOccurrenceId = job.SourceDocumentOccurrenceId,
-                        LogicalGroupKey = logicalGroupKey ?? metadata?.LogicalGroupKey
+                        LogicalGroupKey = logicalGroupKey ?? metadata?.LogicalGroupKey,
+                        ThreadReferencedMessageIds = threadAncestorKeys
                     }, ct));
             }
             if (job.SourceDocumentOccurrenceId.HasValue)
@@ -1571,11 +1661,6 @@ public sealed class LeadPersister : ILeadPersister
         // immutable source document (shared across split leads). Best-effort — an
         // attachment failure must never fail the persistence.
         await TryAttachSourceDocumentAsync(job, leads, now, ct);
-
-        // WP-A3: duplicate detection AFTER the save, PER produced lead. Best-effort by
-        // contract — a detection failure must never fail (or roll back) the persistence.
-        if (enrichAfterPersistence && _leadIdentity is null)
-            await TryDetectDuplicatesAsync(job, leads, ct);
 
         // Every extracted lead enters the governed routing flow. Matching may assign
         // an effective owner or create one durable unassigned work item. Routing is
@@ -1659,8 +1744,6 @@ public sealed class LeadPersister : ILeadPersister
         if (persisted is null)
             return null;
 
-        if (_leadIdentity is null)
-            await TryDetectDuplicatesAsync(job, persisted.Leads, ct);
         if (_leadIdentity is null)
         {
             await TryResolveCustomersAsync(job, persisted.Leads, ct);
@@ -1911,29 +1994,6 @@ public sealed class LeadPersister : ILeadPersister
     }
 
     private sealed record PersistedExtraction(long LeadId, Lead[] Leads);
-
-    private async Task TryDetectDuplicatesAsync(
-        ExtractionJob job, IEnumerable<Lead> leads, CancellationToken ct)
-    {
-        if (_duplicateDetector is null)
-            return;
-
-        foreach (var lead in leads)
-        {
-            try
-            {
-                var check = await _duplicateDetector.CheckAndFlagAsync(lead.Id, job.BusinessUnitId, ct);
-                if (check.Flagged)
-                    _log.LogInformation(
-                        "Lead {LeadId} flagged as suspected duplicate of lead {OriginalId} ({Reason}).",
-                        check.FlaggedLeadId, check.OriginalLeadId, check.Reason);
-            }
-            catch (Exception ex)
-            {
-                _log.LogError(ex, "Duplicate detection failed for lead {LeadId}; persistence succeeded.", lead.Id);
-            }
-        }
-    }
 
     /// <summary>
     /// Deterministic client-organisation resolution at INGESTION — the seam that turns

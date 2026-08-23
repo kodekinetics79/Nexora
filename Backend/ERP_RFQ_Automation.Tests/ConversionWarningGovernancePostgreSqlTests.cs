@@ -226,7 +226,10 @@ public sealed class ConversionWarningGovernancePostgreSqlTests
         await using var owner = _database.ContextFor(null);
         var converted = await owner.CommercialLifecycleEvents.AsNoTracking()
             .SingleAsync(e => e.AggregateType == "Lead" && e.AggregateId == leadId
-                              && e.NewStatusCode == "CONVERTED_TO_RFQ");
+                              && e.NewStatusCode == "CONVERTED_TO_RFQ"
+                              // The dedicated PromotedToRfq event also lands at this status;
+                              // the acknowledgement lives on the transition event.
+                              && e.EventType == "StatusTransitioned");
         Assert.Equal("CONVERTED_WITH_ACKNOWLEDGED_WARNINGS", converted.ReasonCode);
         Assert.Contains("00010", converted.ReasonNotes!);
         Assert.Contains("drawing pack", converted.ReasonNotes!);
@@ -495,7 +498,12 @@ public sealed class ConversionWarningGovernancePostgreSqlTests
         // The acknowledgement survives as evidence, within the column's limit. Nothing else
         // records it, so an empty or truncated-to-nothing note would lose the audit trail.
         var note = await owner.Set<CommercialLifecycleEvent>().AsNoTracking()
-            .Where(e => e.AggregateType == "Lead" && e.AggregateId == leadId)
+            .Where(e => e.AggregateType == "Lead" && e.AggregateId == leadId
+                        // Same disambiguation as the acknowledgement assertion above: the
+                        // dedicated PromotedToRfq event also lands on this lead and is NEWER,
+                        // so an unfiltered OrderByDescending(Id) reads the promotion — which
+                        // carries no acknowledgement — instead of the transition that does.
+                        && e.EventType == "StatusTransitioned")
             .OrderByDescending(e => e.Id)
             .Select(e => e.ReasonNotes)
             .FirstOrDefaultAsync();

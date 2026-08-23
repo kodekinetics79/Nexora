@@ -13333,6 +13333,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasMaxLength(255)
                         .HasColumnType("character varying(255)");
 
+                    b.Property<string>("InReplyToMessageId")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
                     b.Property<string>("MessageId")
                         .IsRequired()
                         .HasMaxLength(255)
@@ -13349,6 +13353,10 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<string>("RawEmailPath")
                         .HasMaxLength(500)
                         .HasColumnType("character varying(500)");
+
+                    b.Property<string>("ReferencesJson")
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
 
                     b.Property<string>("SkippedAttachmentsJson")
                         .HasMaxLength(2000)
@@ -15648,7 +15656,9 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.HasIndex("CustomerId");
 
-                    b.HasIndex("LeadId");
+                    b.HasIndex("LeadId")
+                        .IsUnique()
+                        .HasFilter("\"LeadID\" IS NOT NULL");
 
                     b.HasIndex("RfqstatusId");
 

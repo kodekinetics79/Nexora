@@ -33,6 +33,9 @@
     <Content Include="Fixtures\empty-workbook.xls" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="Fixtures\rfq-table.docx" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="Fixtures\rfq-table-2.docx" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The representative RFQ corpus: committed binaries + the manifest that defines every
+         expected classification and extracted value in advance. See Corpus\README.md. -->
+    <Content Include="Corpus\**" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

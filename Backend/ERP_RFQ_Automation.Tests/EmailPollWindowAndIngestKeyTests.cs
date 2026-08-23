@@ -3,6 +3,7 @@ using ERP_RFQ_Automation.Services;
 using ERP_RFQ_Automation.Tests.Support;
 using MailKit.Search;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.FileProviders;
@@ -198,6 +199,61 @@ public sealed class EmailPollWindowAndIngestKeyTests
         Assert.Null(EmailService.NormalizeMessageId(null));
     }
 
+    // ------------------------------------------------------------------- thread identity
+
+    [Fact]
+    public async Task ThreadIdentityHeadersRoundTripThroughTheRealIngestWrite()
+    {
+        // FR-RFQ-05/06: In-Reply-To and References are captured at the ONE moment the parsed
+        // MimeMessage is in hand, or they are lost — reconciliation later reads them from the
+        // ingest row to link a reply's amendment to the thread of the original inquiry. Driven
+        // through the real ProcessSingleEmailAsync, not by constructing the row by hand.
+        using var db = new TestDb();
+        await SeedAsync(db);
+        await using var ctx = db.ContextFor(null);
+        var config = await ctx.EmailConfigurations.SingleAsync(x => x.Id == 1);
+
+        var reply = Message("RE: RFQ 4711", "The closing date moves to 20 September.");
+        reply.InReplyTo = "origin@customer.example";
+        reply.References.Add("root@customer.example");
+        reply.References.Add("origin@customer.example");
+
+        var persisted = await Service(context: ctx).ProcessSingleEmailAsync(reply, config, ctx, new StubLlm());
+
+        Assert.True(persisted);
+        var ingest = await ctx.EmailIngests.AsNoTracking()
+            .SingleAsync(x => x.MessageId == EmailService.ResolveIngestKey(reply));
+        Assert.Equal("origin@customer.example", ingest.InReplyToMessageId);
+        Assert.Equal("[\"root@customer.example\",\"origin@customer.example\"]", ingest.ReferencesJson);
+
+        // And the descriptor-side reader reproduces the occurrence EmailThreadId form, so the
+        // capture and the reconciliation probe can never disagree about the key shape.
+        Assert.Equal(new[] { "email:origin@customer.example", "email:root@customer.example" },
+            EmailService.ThreadAncestorKeys(ingest.InReplyToMessageId, ingest.ReferencesJson)
+                .OrderBy(x => x, StringComparer.Ordinal).ToArray());
+    }
+
+    [Fact]
+    public void AMessageWithNoThreadHeadersPersistsNullNotEmptyEvidence()
+    {
+        // A first message in a thread must not manufacture thread identity: null columns mean
+        // "no ancestors", and the reader yields no keys rather than an empty-string key.
+        var original = Message("RFQ 4711", "Please quote the attached BOQ.");
+        Assert.Null(EmailService.ResolveInReplyTo(original));
+        Assert.Null(EmailService.SerializeReferences(original));
+        Assert.Empty(EmailService.ThreadAncestorKeys(null, null));
+    }
+
+    [Fact]
+    public void AnOverlongThreadAncestorIsDroppedNotTruncatedIntoAFalseJoin()
+    {
+        // Stored MessageIDs are all <= 255 chars (longer ones become sha256 content keys), so a
+        // truncated 300-char In-Reply-To could never match honestly — and could match falsely.
+        var reply = Message("RE: RFQ", "body");
+        reply.InReplyTo = new string('a', 300) + "@sender.example";
+        Assert.Null(EmailService.ResolveInReplyTo(reply));
+    }
+
     // ------------------------------------------------------------------------ test plumbing
 
     private static string Describe(SearchQuery query) => query.GetType().Name + ":" + query.Term;
@@ -256,12 +312,15 @@ public sealed class EmailPollWindowAndIngestKeyTests
         await ctx.SaveChangesAsync();
     }
 
-    private static EmailService Service(Dictionary<string, string?>? settings = null)
+    private static EmailService Service(
+        Dictionary<string, string?>? settings = null, ErpRfqAutomationContext? context = null)
     {
         var temp = Path.Combine(Path.GetTempPath(), "nexora-email-window-tests", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(temp);
         return new EmailService(
-            context: null!, // ResolveLookbackWindow / BuildRFQSearchQuery never touch the DbContext
+            // Null for the window/key tests, which never touch the DbContext; the thread
+            // round-trip test passes the real one because it drives the real ingest write.
+            context: context!,
             env: new StubEnvironment(temp),
             logger: new NoopLogger<EmailService>(),
             llmService: new StubLlm(),

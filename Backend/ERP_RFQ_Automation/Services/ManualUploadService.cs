@@ -12,6 +12,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -110,6 +111,10 @@ namespace ERP_RFQ_Automation.Services
             string combinedExtractedText = "";
             var fileTypes = new HashSet<string>();
             var attachmentStreams = new List<(string FileName, MemoryStream Stream, string Extension)>();
+            // Content identity for reconciliation: one SHA-256 over each accepted file's SHA-256,
+            // in upload order. This door merges every file into ONE lead, so the upload set —
+            // not any single file — is the document whose re-arrival must be recognisable.
+            var perFileHashes = new List<string>();
 
             foreach (var file in files)
             {
@@ -147,6 +152,7 @@ namespace ERP_RFQ_Automation.Services
                     var ms = new MemoryStream();
                     await file.CopyToAsync(ms);
                     ms.Position = 0;
+                    perFileHashes.Add(Convert.ToHexString(SHA256.HashData(ms.ToArray())).ToLowerInvariant());
                     attachmentStreams.Add((fileName, ms, ext));
                 }
                 catch (Exception ex)
@@ -154,6 +160,10 @@ namespace ERP_RFQ_Automation.Services
                     _logger.LogWarning(ex, "Failed to read uploaded file: {FileName}", fileName);
                 }
             }
+            var uploadContentHash = perFileHashes.Count == 0
+                ? null
+                : Convert.ToHexString(SHA256.HashData(
+                    Encoding.UTF8.GetBytes(string.Join("\n", perFileHashes)))).ToLowerInvariant();
 
             bool scannedPdfNeedsReview = false;
             foreach (var (fileName, ms, ext) in attachmentStreams)
@@ -267,6 +277,12 @@ namespace ERP_RFQ_Automation.Services
                     _logger.LogWarning(ex, "AI extraction failed – using regex fallback");
                 }
 
+                // Provenance for the reconciliation occurrence. This legacy seam has no
+                // provider-class attribution (the unified queue path reads it from the AI request
+                // ledger), so an LLM extraction is recorded as the deployment's local-first path
+                // and a regex fallback as deterministic; ExternalAiUsed stays false because
+                // nothing here can honestly claim otherwise.
+                bool aiExtracted = ai != null;
                 if (ai == null)
                 {
                     ai = BuildFallbackExtraction(combinedExtractedText);
@@ -287,56 +303,19 @@ namespace ERP_RFQ_Automation.Services
                     return ServiceResult<long>.CreateFailure($"AI analysis confidence low ({ai?.OverallConfidence:P0}). Please ensure the document is clear and readable.");
                 }
 
-                // --- DUPLICATE DETECTION ---
+                // --- DUPLICATE / AMENDMENT DETECTION: owned by reconciliation, not this door ---
                 //
-                // SEC-ING-01: the same missing tenant predicate as the email door, in the same
-                // shape, written by the same hand. It is LATENT here and not a live leak: this
-                // runs on an authenticated HTTP request, so the EF global query filter has a
-                // tenant and PostgreSQL executes it as nexora_tenant_app under RLS — both layers
-                // are on. The identical code on the mailbox poller ran with a null tenant under
-                // the BYPASSRLS pipeline role, where both layers were off, and there it read every
-                // tenant's leads. Identical code, two paths, one cross-tenant read: which is
-                // exactly why the predicate is stated here too rather than left to the ambient
-                // scope. Duplicate detection is a per-business-unit question.
-                bool isDuplicate = false;
-
-                if (!string.IsNullOrWhiteSpace(ai.Rfqno))
-                {
-                    // Strict check: Same RFQ No and Buyer, within this business unit
-                    isDuplicate = await _context.Leads
-                        .AsNoTracking()
-                        .AnyAsync(l =>
-                            l.BusinessUnitId == businessUnitId &&
-                            l.Rfqno == ai.Rfqno &&
-                            l.BuyersName == ai.BuyersName);
-                }
-                else if (!string.IsNullOrWhiteSpace(ai.BuyersName))
-                {
-                    // Fuzzy check: Same Buyer, same item count, and at least one matching item (Quantity + Product)
-                    var firstItem = ai.Items.FirstOrDefault();
-                    if (firstItem != null && firstItem.Quantity > 0)
-                    {
-                        isDuplicate = await _context.Leads
-                            .AsNoTracking()
-                            .AnyAsync(l =>
-                                l.BusinessUnitId == businessUnitId &&
-                                l.BuyersName == ai.BuyersName &&
-                                l.NoOfLineItems == ai.Items.Count &&
-                                l.LeadItems.Any(li =>
-                                    li.CommodityProduct == firstItem.CommodityProduct &&
-                                    li.Quantity == firstItem.Quantity));
-                    }
-                }
-
-                if (isDuplicate)
-                {
-                    _logger.LogWarning("Skipping duplicate lead from manual upload. RFQ: {Rfqno}, Buyer: {Buyer}", ai.Rfqno, ai.BuyersName);
-                    
-                    dummyIngest.ParseStatus = "Skipped - Duplicate";
-                    await _context.SaveChangesAsync();
-
-                    return ServiceResult<long>.CreateFailure($"Duplicate lead detected. RFQ '{ai.Rfqno}' from '{ai.BuyersName}' already exists.");
-                }
+                // This door used to run its own (Rfqno, BuyersName) equality pre-check here and
+                // refuse the upload as a duplicate. That check could not tell an AMENDMENT from a
+                // duplicate: a revised RFQ legitimately carries the same reference and buyer with
+                // CHANGED commercial content, so the buyer's "Rev B" was refused outright — and
+                // any wording drift in the extracted reference instead minted a second, unlinked
+                // lead. ReconcileAsync below makes that distinction with the full evidence model
+                // (logical-inquiry fingerprint, customer scope, content hash, reference-amendment
+                // rules, FR-RFQ-05/06 arms) and the (BusinessUnitId, IdempotencyKey) occurrence
+                // replay, so the naive pre-check is REMOVED rather than kept as a second,
+                // disagreeing arbiter in front of the real one. SEC-ING-01 still holds:
+                // reconciliation states the tenant predicate on every query it makes.
 
                 // Use transaction to ensure atomic Lead + Items + Attachments creation.
                 //
@@ -394,43 +373,95 @@ namespace ERP_RFQ_Automation.Services
                         EmailIngestsId = dummyIngest.Id
                     };
 
-                    _context.Leads.Add(lead);
-                    await _context.SaveChangesAsync();
-
                     // DRIFT GUARD: shared with the email, folder and async-worker doors — see
                     // LeadItemMapper. One mapper means the unit-of-measure canonicalisation
                     // applies to every ingested row, not to whichever door was edited last.
+                    // Lines are attached through the navigation, NOT persisted first:
+                    // reconciliation reads candidate.LeadItems for the fingerprint and
+                    // similarity, and it alone decides whether this candidate row is saved at
+                    // all (New) or its content becomes a revision of an existing lead.
                     foreach (var aiItem in items)
-                        _context.LeadItems.Add(LeadItemMapper.Map(aiItem, ParseDate, lead.Id));
+                        lead.LeadItems.Add(LeadItemMapper.Map(aiItem, ParseDate));
 
-                    if (items.Count > 0)
-                        await _context.SaveChangesAsync();
-
-                    // Canonical identity, in the SAME transaction as the lead and its lines.
+                    // FULL reconciliation, in the SAME transaction as the ingest row and the
+                    // attachments — not a bare identity baseline.
                     //
-                    // This door used to create a Lead with _context.Leads.Add and never touch the
-                    // identity service, so the lead was born with line items and NO revision.
-                    // Everything that needs the immutable revision then refused it — commercial
-                    // line resolution throws, which fails RFQ conversion outright. A lead uploaded
-                    // through this screen could never be converted. Called after the lines are
-                    // saved so revision 1 records them.
-                    await _identity.EstablishBaselineRevisionAsync(businessUnitId, lead.Id,
-                        new ERP_RFQ_Automation.LeadIdentity.LeadIdentityBaselineRequest(
-                            "ManualUpload",
-                            "Manual upload: commercial facts were extracted from the uploaded file. "
-                            + "Canonical identity established at creation.",
-                            "User", lead.CreatedBy ?? "System", $"manual-upload:{businessUnitId}:{lead.Id}"));
+                    // This door used to call EstablishBaselineRevisionAsync, which by design does
+                    // NO matching: it mints revision 1 and returns. A revised RFQ uploaded
+                    // through this screen therefore always became a second, unlinked lead — the
+                    // amendment fork FR-RFQ-05 exists to prevent. ReconcileAsync runs the same
+                    // four matching arms as the extraction-worker door, so a manual upload of an
+                    // amendment now versions its canonical lead, and a genuinely new inquiry
+                    // still creates a fresh lead with revision 1 exactly as before.
+                    var reconciliation = await _identity.ReconcileAsync(lead,
+                        new ERP_RFQ_Automation.LeadIdentity.LeadIntakeDescriptor(
+                            // Stable per ingest row, so an execution-strategy retry of this unit
+                            // of work replays into the same batch instead of minting another.
+                            BatchId: new Guid(MD5.HashData(Encoding.UTF8.GetBytes(
+                                $"manual-upload-batch:{businessUnitId}:{dummyIngest.Id}"))),
+                            SourceChannel: "ManualUpload",
+                            IdempotencyKey: $"manual-upload:{businessUnitId}:ingest:{dummyIngest.Id}",
+                            ExternalSourceId: null, EmailThreadId: null, SourceSystem: "ManualUpload",
+                            Sender: null, Subject: "Manual Upload",
+                            OriginalFileName: attachmentStreams.Count > 0 ? attachmentStreams[0].FileName : null,
+                            MimeType: null, FileSize: files.Sum(f => f.Length),
+                            ContentHash: uploadContentHash,
+                            SourceDocumentId: null, ExtractionJobId: null,
+                            SourceReceivedAtUtc: DateTimeOffset.UtcNow, IngestedAtUtc: DateTimeOffset.UtcNow,
+                            ProcessingPath: aiExtracted
+                                ? ERP_RFQ_Automation.LeadIdentity.LeadProcessingPath.LocalModel
+                                : ERP_RFQ_Automation.LeadIdentity.LeadProcessingPath.Deterministic,
+                            ExternalAiUsed: false, ExternalCost: null,
+                            ActorType: "User", ActorId: lead.CreatedBy ?? "System",
+                            CorrelationId: $"manual-upload:{businessUnitId}:ingest:{dummyIngest.Id}"));
 
-                    await SaveAttachmentsAsync(files, lead.Id);
+                    switch (reconciliation.Classification)
+                    {
+                        case ERP_RFQ_Automation.LeadIdentity.LeadOccurrenceClassification.New:
+                            await SaveAttachmentsAsync(files, reconciliation.LeadId);
+                            dummyIngest.ParseStatus = "NeedsReview";
+                            await _context.SaveChangesAsync();
+                            await transaction.CommitAsync();
+                            return ServiceResult<long>.CreateSuccess(reconciliation.LeadId,
+                                "File processed and lead created successfully.");
 
-                    // Update ingest status before commit
-                    dummyIngest.ParseStatus = "NeedsReview";
-                    await _context.SaveChangesAsync();
+                        case ERP_RFQ_Automation.LeadIdentity.LeadOccurrenceClassification.Revision:
+                            // FR-RFQ-05: the canonical lead was versioned; the uploaded file is
+                            // attached to it as the amendment's evidence.
+                            await SaveAttachmentsAsync(files, reconciliation.LeadId);
+                            dummyIngest.ParseStatus = "NeedsReview";
+                            await _context.SaveChangesAsync();
+                            await transaction.CommitAsync();
+                            return ServiceResult<long>.CreateSuccess(reconciliation.LeadId,
+                                $"Recognized as revision {reconciliation.RevisionNumber} of existing lead "
+                                + $"{reconciliation.NexoraSerial}; the canonical record was versioned instead of duplicated.");
 
-                    // Commit transaction - all or nothing
-                    await transaction.CommitAsync();
+                        case ERP_RFQ_Automation.LeadIdentity.LeadOccurrenceClassification.ExactDuplicate:
+                            // Committed, not rolled back: the duplicate occurrence and its audit
+                            // row are the evidence that this upload happened and was recognised.
+                            dummyIngest.ParseStatus = "Skipped - Duplicate";
+                            await _context.SaveChangesAsync();
+                            await transaction.CommitAsync();
+                            return ServiceResult<long>.CreateFailure(
+                                $"Duplicate lead detected. This upload matches existing lead {reconciliation.NexoraSerial}.");
 
-                    return ServiceResult<long>.CreateSuccess(lead.Id, "File processed and lead created successfully.");
+                        case ERP_RFQ_Automation.LeadIdentity.LeadOccurrenceClassification.PossibleMatchReviewRequired:
+                            // Held BEFORE any lead exists — a human decides whether this is an
+                            // amendment of the named candidate or a new inquiry.
+                            dummyIngest.ParseStatus = "NeedsReview";
+                            await _context.SaveChangesAsync();
+                            await transaction.CommitAsync();
+                            return ServiceResult<long>.CreateSuccess(0,
+                                "The upload closely matches an existing inquiry and was queued for "
+                                + "possible-match review; no lead was created yet.");
+
+                        default:
+                            dummyIngest.ParseStatus = "Failed - Unprocessable";
+                            await _context.SaveChangesAsync();
+                            await transaction.CommitAsync();
+                            return ServiceResult<long>.CreateFailure(
+                                "The upload could not be reconciled into a lead. Please review the document and try again.");
+                    }
                 }
                 catch (Exception txEx)
                 {

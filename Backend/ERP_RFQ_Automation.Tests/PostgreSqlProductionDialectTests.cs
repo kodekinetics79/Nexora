@@ -1661,5 +1661,8 @@ public sealed class PostgreSqlProductionDialectTests
         public Task<LifecycleTransitionResult> TransitionLeadInCurrentTransactionAsync(long businessUnitId,
             long leadId, LifecycleActor actor, LifecycleTransitionCommand command, bool reopen, CancellationToken ct) =>
             throw new NotSupportedException();
+        public Task RecordLeadPromotedToRfqInCurrentTransactionAsync(long businessUnitId,
+            long leadId, long rfqId, LifecycleActor actor, string correlationId, CancellationToken ct) =>
+            throw new NotSupportedException();
     }
 }
