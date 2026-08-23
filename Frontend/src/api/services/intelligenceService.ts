@@ -72,6 +72,8 @@ export interface ConvertLeadRequest {
    * to click through without reading. Every waived line is still audited by name.
    */
   acknowledgeAllWarnings?: boolean;
+  createNeedsClarification?: boolean;
+  expectedLifecycleVersion?: number;
 }
 
 export interface ConvertLeadResponse {

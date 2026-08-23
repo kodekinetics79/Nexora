@@ -133,6 +133,11 @@ export interface LeadResponseDTO {
   businessUnitName?: string;
   lifecycleVersion: number;
   assignedToFullName?: string;
+  assignedToId?: number | null;
+  assignmentMethod?: 'AUTOMATIC' | 'MANUAL';
+  manualAssignmentOverride?: boolean;
+  assignmentVersion?: number;
+  assignedByUserId?: number | null;
   assignComment?: string | null;
   assignmentReason?: string | null;
   // WP-A3 duplicate flag: null | 'suspected' | 'confirmed' | 'not_duplicate'.

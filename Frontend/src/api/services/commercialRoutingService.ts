@@ -113,6 +113,39 @@ export interface UpsertCustomerIdentifierRequest {
   source: string;
 }
 
+export interface RoutingOwnerOption {
+  userId: number;
+  name: string;
+  email: string;
+  roleName?: string | null;
+  isAvailable: boolean;
+  capacityPercent: number;
+  eligibilityReason: string;
+}
+
+export const LEAD_OWNERSHIP_ACTION = {
+  Assign: 0,
+  Unassign: 1,
+  ReturnToAutomatic: 2,
+} as const;
+
+export interface ChangeLeadOwnerRequest {
+  action: (typeof LEAD_OWNERSHIP_ACTION)[keyof typeof LEAD_OWNERSHIP_ACTION];
+  assignedToUserId?: number | null;
+  expectedAssignmentVersion: number;
+  idempotencyKey: string;
+  correlationId: string;
+  comment?: string | null;
+}
+
+export interface LeadOwnershipResponse {
+  leadId: number;
+  assignedToUserId?: number | null;
+  assignmentMethod: 'AUTOMATIC' | 'MANUAL';
+  manualAssignmentOverride: boolean;
+  assignmentVersion: number;
+}
+
 const root = '/api/commercial-routing';
 
 const commercialRoutingService = {
@@ -125,6 +158,12 @@ const commercialRoutingService = {
 
   upsertIdentifier: async (body: UpsertCustomerIdentifierRequest): Promise<CustomerIdentifierDTO> =>
     (await axiosInstance.post<CustomerIdentifierDTO>(`${root}/customer-identifiers`, body)).data,
+
+  getOwnerOptions: async (): Promise<RoutingOwnerOption[]> =>
+    (await axiosInstance.get<RoutingOwnerOption[]>(`${root}/owner-options`)).data,
+
+  changeLeadOwner: async (leadId: number, body: ChangeLeadOwnerRequest): Promise<LeadOwnershipResponse> =>
+    (await axiosInstance.put<LeadOwnershipResponse>(`${root}/leads/${leadId}/owner`, body)).data,
 };
 
 export default commercialRoutingService;
