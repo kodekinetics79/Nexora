@@ -26,6 +26,7 @@ import { downloadAuthenticatedFile } from '../../utils/authenticatedFile';
 import { useAuth } from '../../context/AuthContext';
 import LeadRevisionTimeline from './LeadRevisionTimeline';
 import LeadOwnerControl from './LeadOwnerControl';
+import LeadDecisionActions from './LeadDecisionActions';
 
 import { toast } from 'react-hot-toast';
 import { presentableErrorMessage } from '../../utils/apiErrors';
@@ -201,6 +202,11 @@ const LeadDetailPage: React.FC = () => {
           </Box>
         </Box>
         <Stack direction="row" spacing={1.5} sx={{ flexWrap: 'wrap', gap: 1, justifyContent: { xs: 'flex-start', md: 'flex-end' } }}>
+          <LeadDecisionActions
+            leadId={lead.id}
+            reviewVersion={lead.reviewVersion ?? 1}
+            canEdit={hasPermission('Leads', 'edit')}
+          />
           {lead.commercialCaseId && (
             <Button
               variant="outlined"

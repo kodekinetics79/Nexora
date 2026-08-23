@@ -1114,6 +1114,69 @@ namespace ERP_RFQ_Automation.Repositories
             });
         }
 
+        /// <summary>
+        /// Records that sales requested missing commercial information without moving the lead
+        /// through a technical lifecycle state. The lead and immutable review audit share one
+        /// atomic flush; ReviewVersion is the optimistic-concurrency fence.
+        /// </summary>
+        public async Task<LeadResponseDTO?> RequestClarificationAsync(
+            long id, long businessUnitId, LeadClarificationRequestDTO request, string requestedBy)
+        {
+            if (string.IsNullOrWhiteSpace(requestedBy))
+                throw new LeadReviewValidationException("Requester identity is required.");
+            var note = request.Note?.Trim();
+            if (string.IsNullOrWhiteSpace(note) || note.Length < 3)
+                throw new LeadReviewValidationException("A clarification note is required.");
+
+            var lead = await _context.Leads
+                .Include(item => item.LeadItems)
+                .Include(item => item.EmailIngests)
+                .SingleOrDefaultAsync(item => item.Id == id && item.BusinessUnitId == businessUnitId);
+            if (lead == null) return null;
+            if (request.ExpectedReviewVersion != lead.ReviewVersion)
+                throw new LeadReviewConflictException(
+                    $"Review version {request.ExpectedReviewVersion} is stale; current version is {lead.ReviewVersion}.");
+
+            var beforeJson = SerializeReviewSnapshot(lead);
+            var fromVersion = lead.ReviewVersion;
+            var requestedOn = DateTime.UtcNow;
+            lead.RequiresCommercialReview = true;
+            lead.CommercialFactsVerified = false;
+            lead.ReviewApprovedBy = null;
+            lead.ReviewApprovedOn = null;
+            lead.ModifiedDate = requestedOn;
+            lead.ReviewVersion++;
+
+            _context.Set<LeadReviewAudit>().Add(new LeadReviewAudit
+            {
+                BusinessUnitId = businessUnitId,
+                LeadId = lead.Id,
+                FromVersion = fromVersion,
+                ToVersion = lead.ReviewVersion,
+                Action = "clarification",
+                ReviewedBy = requestedBy.Trim(),
+                Reason = note,
+                BeforeJson = beforeJson,
+                AfterJson = SerializeReviewSnapshot(lead),
+                ReviewedOn = requestedOn
+            });
+
+            try
+            {
+                await _context.SaveChangesAsync();
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+                throw new LeadReviewConflictException("The lead changed while clarification was requested. Refresh and retry.");
+            }
+            catch (DbUpdateException)
+            {
+                throw new LeadReviewConflictException("The clarification request conflicted with another review. Refresh and retry.");
+            }
+
+            return await GetLeadByIdAsync(id, businessUnitId);
+        }
+
         private async Task<LeadResponseDTO?> SubmitLeadReviewCoreAsync(
             long id, long businessUnitId, LeadReviewSubmitDTO review, string reviewedBy = "system")
         {

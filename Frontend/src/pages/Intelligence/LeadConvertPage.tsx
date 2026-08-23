@@ -87,7 +87,9 @@ const LeadConvertPage: React.FC = () => {
         const qty = candidateQuantity != null && candidateQuantity > 0 ? candidateQuantity : null;
         next[item.leadItemId] = {
           include: true,
-          productId: item.needsAttention ? null : item.bestMatchProductId,
+          // The server's authoritative resolver is the only source of an automatic link. Keep
+          // preview candidates advisory in client state unless the operator explicitly selects one.
+          productId: null,
           quantity: qty != null ? String(qty) : '',
           unitOfMeasure: item.normalizedUom ?? item.unitOfMeasure ?? '',
         };
@@ -396,7 +398,7 @@ const LeadConvertPage: React.FC = () => {
         {sortedItems.map((item, idx) => {
           const edit = edits[item.leadItemId] ?? {
             include: true,
-            productId: item.bestMatchProductId,
+            productId: null,
             quantity: '',
             unitOfMeasure: '',
           };

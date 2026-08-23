@@ -36,12 +36,12 @@ public static partial class LifecyclePolicy
     };
 
     private static readonly IReadOnlyDictionary<string, IReadOnlySet<string>> LeadTransitions = Graph(
-        Edge("RECEIVED", "PENDING_IDENTIFICATION", "QUALIFIED", "CANCELLED"),
-        Edge("PENDING_IDENTIFICATION", "UNASSIGNED", "ASSIGNED", "QUALIFIED", "CANCELLED"),
-        Edge("UNASSIGNED", "ASSIGNED", "QUALIFIED", "CANCELLED"),
-        Edge("ASSIGNED", "UNDER_REVIEW", "UNASSIGNED", "QUALIFIED", "CANCELLED"),
+        Edge("RECEIVED", "PENDING_IDENTIFICATION", "QUALIFIED", "DISQUALIFIED", "CANCELLED"),
+        Edge("PENDING_IDENTIFICATION", "UNASSIGNED", "ASSIGNED", "QUALIFIED", "DISQUALIFIED", "CANCELLED"),
+        Edge("UNASSIGNED", "ASSIGNED", "QUALIFIED", "DISQUALIFIED", "CANCELLED"),
+        Edge("ASSIGNED", "UNDER_REVIEW", "UNASSIGNED", "QUALIFIED", "DISQUALIFIED", "CANCELLED"),
         Edge("UNDER_REVIEW", "QUALIFIED", "DISQUALIFIED", "CANCELLED", "DUPLICATED"),
-        Edge("QUALIFIED", "CONVERTED_TO_RFQ", "UNDER_REVIEW", "CANCELLED"),
+        Edge("QUALIFIED", "CONVERTED_TO_RFQ", "UNDER_REVIEW", "DISQUALIFIED", "CANCELLED"),
         Edge("CONVERTED_TO_RFQ", "QUOTED", "CANCELLED"),
         Edge("QUOTED", "NEGOTIATION", "AWARDED", "PARTIALLY_AWARDED", "LOST"),
         Edge("NEGOTIATION", "QUOTED", "AWARDED", "PARTIALLY_AWARDED", "LOST"),
@@ -83,7 +83,7 @@ public static partial class LifecyclePolicy
     private static readonly IReadOnlySet<string> RfqReopenable = Set("LOST", "EXPIRED", "CANCELLED");
     private static readonly IReadOnlySet<string> QuoteReopenable = Set();
     private static readonly IReadOnlySet<string> ElevatedTargets = Set(
-        "CONVERTED_TO_RFQ", "DISQUALIFIED", "CANCELLED", "AWARDED", "PARTIALLY_AWARDED", "LOST", "EXPIRED", "COMPLETED");
+        "CONVERTED_TO_RFQ", "CANCELLED", "AWARDED", "PARTIALLY_AWARDED", "LOST", "EXPIRED", "COMPLETED");
 
     public static string Canonicalize(string aggregateType, string? code, string? value = null)
     {

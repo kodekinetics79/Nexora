@@ -273,6 +273,37 @@ public class LeadController : ControllerBase
         }
     }
 
+    [HttpPost("{id}/request-clarification")]
+    [RequireModulePermission("Leads", PermissionAction.Edit)]
+    public async Task<ActionResult<LeadResponseDTO>> RequestClarification(
+        long id, [FromBody] LeadClarificationRequestDTO request)
+    {
+        try
+        {
+            if (!ModelState.IsValid) return BadRequest(ModelState);
+            var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+            if (businessUnitId == 0) return BadRequest("Business Unit ID is required.");
+            var requestedBy = User.FindFirstValue(ClaimTypes.NameIdentifier)
+                ?? User.FindFirstValue(ClaimTypes.Email)
+                ?? User.Identity?.Name
+                ?? string.Empty;
+            var lead = await _repository.RequestClarificationAsync(id, businessUnitId, request, requestedBy);
+            return lead == null ? NotFound($"Lead with ID {id} not found.") : Ok(lead);
+        }
+        catch (LeadReviewConflictException ex)
+        {
+            return Conflict(new { error = ex.Message });
+        }
+        catch (LeadReviewValidationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            return Unexpected(ex, "request-clarification");
+        }
+    }
+
     // WP-A3: resolve a duplicate flag. "not_duplicate" clears the conversion
     // block; "confirm" records a human-confirmed duplicate (stays blocked).
     [HttpPost("{id}/duplicate-resolution")]

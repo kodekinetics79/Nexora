@@ -90,6 +90,48 @@ public sealed class LifecycleApplicationServiceTests
     }
 
     [Fact]
+    public async Task ReceivedLead_CanBePassedDirectlyWithGovernedOutcome()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(742);
+        Seed.Lead(context, 1042, 742);
+        Status(context, 5053, 742, "LeadStatus", "DISQUALIFIED", "Passed");
+        OutcomeReason(context, 5054, 742, "NO_STOCK", "Item unavailable");
+        await context.SaveChangesAsync();
+
+        var result = await Service(context).TransitionLeadAsync(
+            742, 1042, Actor(), Command("DISQUALIFIED", 1, "lead-1042-passed", "NO_STOCK"), false, default);
+
+        Assert.Equal("DISQUALIFIED", result.NewStatusCode);
+        Assert.False(LifecyclePolicy.RequiresElevatedAuthorization("DISQUALIFIED"));
+        Assert.Single(context.CommercialLifecycleEvents);
+        Assert.Equal(5054, context.Leads.Single().OutcomeReasonId);
+    }
+
+    [Fact]
+    public async Task QualifiedLead_CanBePassedWithGovernedOutcome()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(743);
+        Seed.Lead(context, 1043, 743);
+        Status(context, 5055, 743, "LeadStatus", "QUALIFIED", "Qualified");
+        Status(context, 5056, 743, "LeadStatus", "DISQUALIFIED", "Passed");
+        OutcomeReason(context, 5057, 743, "NO_STOCK", "Item unavailable");
+        await context.SaveChangesAsync();
+        var service = Service(context);
+        await service.TransitionLeadAsync(
+            743, 1043, Actor(), Command("QUALIFIED", 1, "lead-1043-qualified"), false, default);
+
+        var result = await service.TransitionLeadAsync(
+            743, 1043, Actor(), Command("DISQUALIFIED", 2, "lead-1043-passed", "NO_STOCK"), false, default);
+
+        Assert.Equal("DISQUALIFIED", result.NewStatusCode);
+        Assert.Equal(3, result.Version);
+        Assert.Equal(2, context.CommercialLifecycleEvents.Count());
+        Assert.Equal(5057, context.Leads.Single().OutcomeReasonId);
+    }
+
+    [Fact]
     public async Task UnverifiedAiLead_CannotBeQualified()
     {
         using var db = new TestDb();

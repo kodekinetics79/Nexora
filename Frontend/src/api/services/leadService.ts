@@ -19,6 +19,11 @@ export interface LeadFilters {
   view?: string;
 }
 
+export interface LeadClarificationRequest {
+  expectedReviewVersion: number;
+  note: string;
+}
+
 /**
  * One machine-proposed client organisation for a lead, ranked best-first.
  *
@@ -744,6 +749,11 @@ const leadService = {
   // block; 'confirm' records a confirmed duplicate (conversion stays blocked).
   resolveDuplicate: async (id: number, action: 'not_duplicate' | 'confirm'): Promise<LeadResponseDTO> => {
     const r = await axiosInstance.post(`/api/Lead/${id}/duplicate-resolution`, { action });
+    return r.data;
+  },
+
+  requestClarification: async (id: number, request: LeadClarificationRequest): Promise<LeadResponseDTO> => {
+    const r = await axiosInstance.post(`/api/Lead/${id}/request-clarification`, request);
     return r.data;
   },
 

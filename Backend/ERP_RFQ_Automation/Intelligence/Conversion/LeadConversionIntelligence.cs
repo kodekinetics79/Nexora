@@ -4,6 +4,8 @@ using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using Microsoft.EntityFrameworkCore;
 using ERP_RFQ_Automation.Inventory.Commercial;
 using ERP_RFQ_Automation.Services.Uom;
+using ERP_RFQ_Automation.ProductIntelligence;
+using ERP_RFQ_Automation.LeadIdentity;
 
 namespace ERP_RFQ_Automation.Intelligence.Conversion;
 
@@ -32,12 +34,15 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
 
     private readonly ErpRfqAutomationContext _db;
     private readonly ICommercialLineResolutionApplicationService? _lineResolution;
+    private readonly IProductItemResolver? _productResolver;
 
     public LeadConversionIntelligence(ErpRfqAutomationContext db,
-        ICommercialLineResolutionApplicationService? lineResolution = null)
+        ICommercialLineResolutionApplicationService? lineResolution = null,
+        IProductItemResolver? productResolver = null)
     {
         _db = db;
         _lineResolution = lineResolution;
+        _productResolver = productResolver;
     }
 
     // ================================================================ Preview
@@ -266,12 +271,11 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
                 choices.TryGetValue(li.Id, out var choice);
                 var r = resolved[li.Id];
 
-                // Product: explicit choice wins; otherwise auto-assign the best
-                // match only when it clears the confidence floor.
+                // Product: explicit choice wins. Automatic linking is permitted only when the
+                // authoritative ProductItemResolver returned AutoLinked; advisory preview scores
+                // can never silently become a confirmed RFQ product.
                 var productId = choice?.ProductId
-                    ?? (r.Confidence >= ConfidenceFloor && r.Matches.Count > 0
-                        ? r.Matches[0].ProductId
-                        : (long?)null);
+                    ?? r.AutoLinkedProductId;
 
                 // Quantity comes only from the canonical field or an explicit correction. Text
                 // fragments are evidence, never permission to invent quote-critical demand.
@@ -445,6 +449,7 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
     internal sealed class ResolvedLine
     {
         public IReadOnlyList<ProductMatch> Matches { get; init; } = Array.Empty<ProductMatch>();
+        public long? AutoLinkedProductId { get; init; }
         public decimal Confidence { get; init; }
         public decimal? NormalizedQuantity { get; init; }
         public string? NormalizedUom { get; init; }
@@ -562,7 +567,9 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
     private async Task<Dictionary<long, ResolvedLine>> ResolveLinesAsync(
         IEnumerable<LeadItem> leadItems, long businessUnitId, CancellationToken ct)
     {
-        var items = leadItems.ToList();
+        // Navigation collections have no database ordering guarantee. Keep fallback revision-line
+        // alignment deterministic for historical lines that do not carry a parseable line number.
+        var items = leadItems.OrderBy(item => item.Id).ToList();
         var result = new Dictionary<long, ResolvedLine>();
         if (items.Count == 0) return result;
 
@@ -574,11 +581,16 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
             .Where(u => u.BusinessUnitId == businessUnitId && u.IsActive)
             .ToListAsync(ct);
         var uomVocabulary = SetUomVocabulary.From(uoms);
+        var authoritative = await AuthoritativeMatchesAsync(items, businessUnitId, ct);
+        // Legacy leads without immutable revision lines retain the bounded fallback matcher.
+        // Current leads never run two matchers: every mapped canonical line is resolved only by
+        // IProductItemResolver, which is also the commercial-intelligence authority.
+        var fallbackItems = items.Where(item => !authoritative.ContainsKey(item.Id)).ToList();
 
         // ---- Candidate fetch 1: exact part/model numbers in one IN query.
-        var codes = items.Select(i => i.ItemMaterialCode?.Trim().ToLowerInvariant())
+        var codes = fallbackItems.Select(i => i.ItemMaterialCode?.Trim().ToLowerInvariant())
                          .Where(s => !string.IsNullOrEmpty(s)).Select(s => s!).Distinct().ToList();
-        var mpns = items.Select(i => i.ManufacturerPartNumber?.Trim().ToLowerInvariant())
+        var mpns = fallbackItems.Select(i => i.ManufacturerPartNumber?.Trim().ToLowerInvariant())
                         .Where(s => !string.IsNullOrEmpty(s)).Select(s => s!).Distinct().ToList();
 
         var candidates = new Dictionary<long, Candidate>();
@@ -596,7 +608,7 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
         // ---- Candidate fetch 2: one bounded ILIKE query per distinct name, using
         // the two most significant tokens. Leads carry few lines, so this stays cheap.
         var nameQueriesDone = new HashSet<string>();
-        foreach (var item in items)
+        foreach (var item in fallbackItems)
         {
             var normName = NormalizeName(item.ProductShortName ?? item.ProductShortDescription);
             if (normName is null || !nameQueriesDone.Add(normName)) continue;
@@ -622,7 +634,8 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
         // ---- Score every line against the pooled candidate set, in memory.
         foreach (var item in items)
         {
-            var matches = ScoreItem(item, candidates.Values)
+            authoritative.TryGetValue(item.Id, out var authoritativeMatch);
+            var matches = authoritativeMatch?.Matches ?? ScoreItem(item, candidates.Values)
                 .OrderByDescending(m => m.Score)
                 .ThenBy(m => m.ProductId)
                 .Take(MaxMatchesPerLine)
@@ -654,6 +667,9 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
             result[item.Id] = new ResolvedLine
             {
                 Matches = matches,
+                AutoLinkedProductId = authoritativeMatch?.AutoLinkedProductId
+                    ?? (_productResolver is null && confidence >= ConfidenceFloor && matches.Count > 0
+                        ? matches[0].ProductId : null),
                 Confidence = confidence,
                 NormalizedQuantity = normalizedQty,
                 NormalizedUom = uom.Value,
@@ -667,6 +683,56 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
 
         return result;
     }
+
+    private async Task<Dictionary<long, AuthoritativeMatch>> AuthoritativeMatchesAsync(
+        IReadOnlyList<LeadItem> items, long businessUnitId, CancellationToken ct)
+    {
+        var result = new Dictionary<long, AuthoritativeMatch>();
+        if (_productResolver is null || items.Count == 0) return result;
+        var leadId = items[0].LeadId;
+        var revisionId = await _db.Leads.AsNoTracking()
+            .Where(lead => lead.BusinessUnitId == businessUnitId && lead.Id == leadId)
+            .Select(lead => lead.CurrentRevisionId)
+            .SingleOrDefaultAsync(ct);
+        if (!revisionId.HasValue) return result;
+        var revisionLines = await _db.Set<LeadItemRevision>().AsNoTracking()
+            .Where(line => line.BusinessUnitId == businessUnitId && line.LeadRevisionId == revisionId.Value)
+            .OrderBy(line => line.LineNumber)
+            .ToListAsync(ct);
+
+        for (var index = 0; index < items.Count; index++)
+        {
+            var item = items[index];
+            var revisionLine = int.TryParse(item.LineItemNo, out var lineNumber)
+                ? revisionLines.FirstOrDefault(line => line.LineNumber == lineNumber)
+                : null;
+            revisionLine ??= revisionLines.ElementAtOrDefault(index);
+            if (revisionLine is null) continue;
+            var part = FirstValue(item.ManufacturerPartNumber, item.ItemMaterialCode);
+            var description = FirstValue(item.ProductShortDescription, item.ProductShortName, item.ItemText);
+            var resolution = await _productResolver.ResolveAsync(new ProductResolutionRequest(
+                businessUnitId, revisionId.Value, revisionLine.Id, part, item.ManufacturerName, description,
+                [new ProductResolutionEvidence("canonical-lead-line", $"lead:{leadId}:item:{item.Id}", part)]), ct);
+            var matches = resolution.RankedCandidates.Take(MaxMatchesPerLine).Select(candidate => new ProductMatch
+            {
+                ProductId = candidate.ProductId,
+                ProductName = candidate.ProductName,
+                MaterialCode = candidate.PartNumber,
+                ManufacturerPartNumber = candidate.InternalCode,
+                Score = candidate.Confidence,
+                Reason = candidate.Reason
+            }).ToList();
+            result[item.Id] = new AuthoritativeMatch(matches,
+                resolution.DecisionState == ProductResolutionDecisionState.AutoLinked
+                    ? resolution.ResolvedProductId : null);
+        }
+        return result;
+    }
+
+    private sealed record AuthoritativeMatch(IReadOnlyList<ProductMatch> Matches, long? AutoLinkedProductId);
+
+    private static string? FirstValue(params string?[] values)
+        => values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))?.Trim();
 
     private IQueryable<Product> ActiveProducts() =>
         _db.Products.AsNoTracking().Where(p => p.IsActive == null || p.IsActive == true);
