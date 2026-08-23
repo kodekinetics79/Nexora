@@ -42,6 +42,13 @@ public sealed class QuoteDeliverySender(IQuoteService quotes, IEmailService emai
         {
             throw new QuoteDeliveryPreSendException(exception.GetType().Name, exception) { Permanent = true };
         }
+        catch (ERP_RFQ_Automation.Services.QuoteIssuerIdentityMissingException exception)
+        {
+            // Permanent for the same reason: nobody's setup screen fills itself in between
+            // attempt one and attempt eight. Retrying a configuration gap keeps a doomed send
+            // alive in the outbox and reports a fixable omission as flaky infrastructure.
+            throw new QuoteDeliveryPreSendException(exception.GetType().Name, exception) { Permanent = true };
+        }
         catch (Exception exception)
         {
             throw new QuoteDeliveryPreSendException(exception.GetType().Name, exception);
