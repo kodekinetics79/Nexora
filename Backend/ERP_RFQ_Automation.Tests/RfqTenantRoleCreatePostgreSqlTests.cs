@@ -212,10 +212,23 @@ public sealed class RfqTenantRoleCreatePostgreSqlTests
 
         var convertedId = await LifecycleStatusCatalog.ResolveIdAsync(assertOwner, Tenant, "Lead", "CONVERTED_TO_RFQ");
         Assert.Equal(convertedId, lead2.LeadStatusId);
-        Assert.Equal(2, lead2.LifecycleVersion);
+        // 1 (created) -> 2 (transition) -> 3 (PromotedToRfq event appended in the same
+        // transaction; every appended lifecycle event advances the aggregate version).
+        Assert.Equal(3, lead2.LifecycleVersion);
         Assert.Single(await assertOwner.CommercialLifecycleEvents.AsNoTracking()
-            .Where(e => e.AggregateType == "Lead" && e.AggregateId == leadId && e.NewStatusCode == "CONVERTED_TO_RFQ")
+            .Where(e => e.AggregateType == "Lead" && e.AggregateId == leadId
+                        && e.NewStatusCode == "CONVERTED_TO_RFQ" && e.EventType == "StatusTransitioned")
             .ToListAsync());
+        // The dedicated promotion event and its outbox message, written under the tenant role.
+        var promotion = await assertOwner.CommercialLifecycleEvents.AsNoTracking()
+            .SingleAsync(e => e.AggregateType == "Lead" && e.AggregateId == leadId && e.EventType == "PromotedToRfq");
+        var outbox = await assertOwner.LifecycleOutboxMessages.AsNoTracking()
+            .SingleAsync(m => m.LifecycleEventId == promotion.Id);
+        Assert.Equal("commercial-case.lead.promoted-to-rfq", outbox.EventType);
+        // Parsed, not substring-matched: the jsonb column re-serialises with its own spacing.
+        using var payload = System.Text.Json.JsonDocument.Parse(outbox.Payload);
+        Assert.Equal(rfqId, payload.RootElement.GetProperty("RfqId").GetInt64());
+        Assert.Equal(leadId, payload.RootElement.GetProperty("LeadId").GetInt64());
     }
 
     /// <summary>

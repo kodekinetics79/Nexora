@@ -129,9 +129,68 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
                 exact.CurrentRevisionNumber, occurrence.Classification, occurrence.Confidence, occurrence.DecisionReasons(), false);
         }
 
+        // ============================================================ Candidate assembly
+        //
+        // Matching used to score ONLY the tenant's 250 most recently created leads, so an
+        // amendment to any older inquiry silently fell out of the window and was minted as a
+        // brand-new, unlinked lead. The recency window is now a SUPPLEMENT, kept for the case
+        // where the incoming document carries no identity signal at all (and for legacy leads
+        // with no revision row to probe). Every identity-bearing signal gets its own targeted,
+        // index-friendly probe instead:
+        //   * REFERENCE — leads that ever carried this normalized customer RFQ reference, read
+        //     from LeadRevisions, which records it per revision precisely so it can be probed
+        //     without normalising every Lead row in .NET;
+        //   * CONTENT HASH — leads already linked to an occurrence with these exact bytes;
+        //   * CUSTOMER SCOPE — leads already linked to this customer/sender/buyer scope key
+        //     (what lets FR-RFQ-06 see an old inquiry from the same buyer);
+        //   * LOGICAL GROUP — documents from the same mail message or upload set;
+        //   * THREAD — leads whose occurrences sit in this message's In-Reply-To/References
+        //     ancestor chain (a lower bound on thread identity: it can only miss a
+        //     relationship, never invent one).
+        // Each probe is bounded — this runs once per ingested document — and ordered by id
+        // descending, so the assembled list is deterministic for a given database state.
+        var groupedLeadIds = string.IsNullOrWhiteSpace(intake.LogicalGroupKey)
+            ? Array.Empty<long>()
+            : await _db.Set<LeadIngestionOccurrence>().AsNoTracking()
+                .Where(x => x.BusinessUnitId == candidate.BusinessUnitId
+                    && x.LogicalGroupKey == intake.LogicalGroupKey && x.LeadId.HasValue)
+                .Select(x => x.LeadId!.Value).Distinct().ToArrayAsync(ct);
+        var threadLeadIds = intake.ThreadReferencedMessageIds is { Count: > 0 } threadKeys
+            ? await _db.Set<LeadIngestionOccurrence>().AsNoTracking()
+                .Where(x => x.BusinessUnitId == candidate.BusinessUnitId && x.LeadId.HasValue
+                    && x.EmailThreadId != null && threadKeys.Contains(x.EmailThreadId))
+                .Select(x => x.LeadId!.Value).Distinct().ToArrayAsync(ct)
+            : Array.Empty<long>();
+        var referenceLeadIds = normalizedRfq is null
+            ? Array.Empty<long>()
+            : await _db.Set<LeadRevision>().AsNoTracking()
+                .Where(r => r.BusinessUnitId == candidate.BusinessUnitId
+                    && r.NormalizedCustomerRfqReference == normalizedRfq)
+                .Select(r => r.LeadId).Distinct().OrderByDescending(id => id).Take(50).ToArrayAsync(ct);
+        var contentHashLeadIds = string.IsNullOrWhiteSpace(intake.ContentHash)
+            ? Array.Empty<long>()
+            : await _db.Set<LeadIngestionOccurrence>().AsNoTracking()
+                .Where(x => x.BusinessUnitId == candidate.BusinessUnitId && x.LeadId.HasValue
+                    && x.ContentHash == intake.ContentHash)
+                .Select(x => x.LeadId!.Value).Distinct().OrderByDescending(id => id).Take(50).ToArrayAsync(ct);
+        var scopeLeadIds = scope is null
+            ? Array.Empty<long>()
+            : await _db.Set<LeadIngestionOccurrence>().AsNoTracking()
+                .Where(x => x.BusinessUnitId == candidate.BusinessUnitId && x.LeadId.HasValue
+                    && x.CustomerScopeKey == scope)
+                .Select(x => x.LeadId!.Value).Distinct().OrderByDescending(id => id).Take(100).ToArrayAsync(ct);
+
         var candidates = await _db.Leads.Include(x => x.LeadItems)
             .Where(x => x.BusinessUnitId == candidate.BusinessUnitId)
-            .OrderByDescending(x => x.CreatedDate).Take(250).ToListAsync(ct);
+            .OrderByDescending(x => x.CreatedDate).ThenByDescending(x => x.Id).Take(250).ToListAsync(ct);
+        var targetedIds = referenceLeadIds.Concat(contentHashLeadIds).Concat(scopeLeadIds)
+            .Concat(groupedLeadIds).Concat(threadLeadIds)
+            .Distinct().Except(candidates.Select(x => x.Id)).ToArray();
+        if (targetedIds.Length > 0)
+            candidates.AddRange((await _db.Leads.Include(x => x.LeadItems)
+                .Where(x => x.BusinessUnitId == candidate.BusinessUnitId && targetedIds.Contains(x.Id))
+                .ToListAsync(ct))
+                .OrderByDescending(x => x.CreatedDate).ThenByDescending(x => x.Id));
 
         var strongLeadId = scope is not null && normalizedRfq is not null
             ? await _db.Set<LeadRevision>().AsNoTracking()
@@ -148,12 +207,6 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
             return await CreateRevisionAsync(strong, candidate, intake, fingerprint, scope,
                 ["Same tenant, customer scope and normalized customer RFQ reference with changed commercial content."], tx, ownsTransaction, ct);
 
-        var groupedLeadIds = string.IsNullOrWhiteSpace(intake.LogicalGroupKey)
-            ? Array.Empty<long>()
-            : await _db.Set<LeadIngestionOccurrence>().AsNoTracking()
-                .Where(x => x.BusinessUnitId == candidate.BusinessUnitId
-                    && x.LogicalGroupKey == intake.LogicalGroupKey && x.LeadId.HasValue)
-                .Select(x => x.LeadId!.Value).Distinct().ToArrayAsync(ct);
         // Every tenant-scoped candidate scored once, with its identity evidence resolved on both
         // axes. Ordering is by EVIDENCE first and similarity second: the lead whose customer and
         // reference corroborate is the one to offer a reviewer, even when a commodity line item
@@ -164,6 +217,7 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
                 ReferenceEvidence(normalizedRfq, CustomerReference(x)),
                 ReferenceAmends(normalizedRfq, CustomerReference(x)),
                 groupedLeadIds.Contains(x.Id),
+                threadLeadIds.Contains(x.Id),
                 DuplicateRules.DuplicateReason(candidate, x)))
             .ToList();
 
@@ -175,15 +229,22 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
             .OrderByDescending(x => x.EvidenceRank).ThenByDescending(x => x.Score)
             .ToList();
 
-        // Same logical document group (one mail message, one upload set) plus corroborating
-        // customer identity or reference. The group key is itself strong evidence, so this arm
-        // keeps its lower similarity bar — but it no longer fires when the buyer's own reference
-        // says the two documents are different inquiries.
-        var grouped = assessments.FirstOrDefault(x => x.Grouped && !x.Contradicted
+        // Same logical document group (one mail message, one upload set) OR the same email
+        // thread (this message's In-Reply-To/References chain names a message an existing lead
+        // was ingested from), plus corroborating customer identity or reference. Both keys are
+        // strong evidence of one conversation, so this arm keeps its lower similarity bar — but
+        // neither is EVER sufficient alone: subjects and threads get reused for unrelated
+        // inquiries, so a thread hit with no corroborating customer or reference still goes to
+        // review below, and it never fires when the buyer's own reference says the two
+        // documents are different inquiries.
+        var grouped = assessments.FirstOrDefault(x => (x.Grouped || x.ThreadLinked) && !x.Contradicted
             && (x.Scope == MatchEvidence.Corroborating || x.Reference == MatchEvidence.Corroborating));
         if (grouped is not null)
             return await CreateRevisionAsync(grouped.Lead, candidate, intake, fingerprint, scope,
-                ["Corroborated logical document group, customer identity, and commercial content."], tx, ownsTransaction, ct);
+                [grouped.Grouped
+                    ? "Corroborated logical document group, customer identity, and commercial content."
+                    : "Corroborated email thread (In-Reply-To/References), customer identity, and commercial content."],
+                tx, ownsTransaction, ct);
 
         var ranked = assessments.FirstOrDefault();
 
@@ -249,6 +310,8 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
                 [ranked.BrdDuplicateReason is { } duplicateReason ? duplicateReason
                     : ranked.Grouped
                     ? "Documents share a logical group and similar content, but canonical identity requires review."
+                    : ranked.ThreadLinked
+                    ? "Documents share an email thread and similar content, but canonical identity requires review."
                     : ranked.Reference == MatchEvidence.Corroborating
                         ? "The customer RFQ reference and commercial content match an existing inquiry, but customer identity is unresolved or differs."
                         : ranked.Scope == MatchEvidence.Corroborating
@@ -259,7 +322,8 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
             _db.Add(new LeadMatchCandidate { BusinessUnitId = candidate.BusinessUnitId, Occurrence = occurrence,
                 CandidateLeadId = ranked.Lead.Id, Confidence = ranked.Score, ReviewState = LeadMatchReviewState.Pending,
                 MatchEvidenceJson = JsonSerializer.Serialize(new { lineOverlap = ranked.Score, policy = PolicyVersion,
-                    customerIdentity = ranked.Scope.ToString(), customerReference = ranked.Reference.ToString(), logicalGroup = ranked.Grouped }),
+                    customerIdentity = ranked.Scope.ToString(), customerReference = ranked.Reference.ToString(),
+                    logicalGroup = ranked.Grouped, emailThread = ranked.ThreadLinked }),
                 DifferencesJson = Diff(Snapshot(ranked.Lead), Snapshot(candidate)),
                 // The buyer's real values, kept verbatim for the human decision. DifferencesJson
                 // above is normalised hash input and must never be projected onto a Lead.
@@ -1217,7 +1281,7 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
     private enum MatchEvidence { Contradicting, Absent, Corroborating }
 
     private sealed record MatchAssessment(Lead Lead, decimal Score, MatchEvidence Scope, MatchEvidence Reference,
-        bool ReferenceAmends, bool Grouped, string? BrdDuplicateReason = null)
+        bool ReferenceAmends, bool Grouped, bool ThreadLinked, string? BrdDuplicateReason = null)
     {
         /// <summary>
         /// The identity evidence positively says "different inquiry". The customer's own RFQ
@@ -1233,7 +1297,9 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
 
         public int EvidenceRank => Contradicted ? 0
             : Scope == MatchEvidence.Corroborating || Reference == MatchEvidence.Corroborating ? 3
-            : Grouped ? 2
+            // Thread linkage carries the same weight as the logical group: both say "one
+            // conversation", and neither says "one inquiry" without corroboration.
+            : Grouped || ThreadLinked ? 2
             : 1;
     }
 

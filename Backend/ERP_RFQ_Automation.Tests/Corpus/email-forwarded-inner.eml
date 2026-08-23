@@ -1,0 +1,29 @@
+From: Procurement <procurement@gulfprojects.example>
+Date: Mon, 10 Aug 2026 08:00:00 +0400
+Subject: FW: RFQ RFQ-CORPUS-007 - chemicals
+Message-Id: <corpus-forwarded@corpus.nexora.example>
+To: Intake <intake@tenant.example>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="=-6rbILiIi14K+tz1qkZ7yVQ=="
+
+--=-6rbILiIi14K+tz1qkZ7yVQ==
+Content-Type: text/plain; charset=utf-8
+
+Forwarding the site enquiry below - please quote 15 drums caustic soda flakes 25kg (part CHM-CS-25). Reference: RFQ-CORPUS-007
+
+--=-6rbILiIi14K+tz1qkZ7yVQ==
+Content-Type: message/rfc822
+Content-Disposition: attachment; filename=original-enquiry.eml
+
+From: Site Engineer <site@gulfprojects.example>
+Date: Sun, 09 Aug 2026 08:00:00 +0400
+Subject: RFQ RFQ-CORPUS-007 - chemicals
+Message-Id: <corpus-inner@corpus.nexora.example>
+To: Procurement <procurement@gulfprojects.example>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Please quote 15 drums caustic soda flakes 25kg (part CHM-CS-25).
+Reference: RFQ-CORPUS-007
+
+--=-6rbILiIi14K+tz1qkZ7yVQ==--

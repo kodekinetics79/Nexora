@@ -110,7 +110,21 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
     public async Task<long> ConvertAsync(long leadId, long businessUnitId, ConvertRequest request, CancellationToken ct)
     {
         var strategy = _db.Database.CreateExecutionStrategy();
-        return await strategy.ExecuteAsync(() => ConvertCoreAsync(leadId, businessUnitId, request, ct));
+        try
+        {
+            return await strategy.ExecuteAsync(() => ConvertCoreAsync(leadId, businessUnitId, request, ct));
+        }
+        catch (DbUpdateException ex) when (LeadConversionGate.IsDuplicateKey(ex))
+        {
+            // Lost the race against the RFQ."LeadID" partial unique index: another caller
+            // converted this lead between our existence check and our insert. The lead HAS
+            // its RFQ — resolve to it exactly as the read-then-return idempotent path would.
+            _db.ChangeTracker.Clear();
+            var winner = await _db.Rfqs.AsNoTracking()
+                .FirstOrDefaultAsync(r => r.LeadId == leadId && r.BusinessUnitId == businessUnitId, ct);
+            if (winner == null) throw; // Not our index after all — surface the truth.
+            return winner.Id;
+        }
     }
 
     private async Task<long> ConvertCoreAsync(long leadId, long businessUnitId, ConvertRequest request, CancellationToken ct)
@@ -140,19 +154,11 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
             return already.Id;
         }
 
-        // Legacy gates, replicated verbatim: only accepted leads convert, and a
-        // lead is only ever converted once.
-        if (LifecyclePolicy.Canonicalize("Lead", lead.LeadStatus?.SetupCode, lead.LeadStatus?.SetupValue) != "QUALIFIED")
-            throw new InvalidOperationException("Only a qualified lead can be converted to an RFQ.");
-
-        // WP-A3 hard block: an unresolved duplicate flag stops conversion here too.
-        if (lead.DuplicateStatus is "suspected" or "confirmed")
-            throw new InvalidOperationException(
-                $"This lead is flagged as a possible duplicate of lead #{lead.DuplicateOfLeadId} — resolve the duplicate flag first.");
-
-        if (lead.RequiresCommercialReview && !lead.CommercialFactsVerified)
-            throw new InvalidOperationException(
-                "AI-extracted commercial facts must be approved in extraction review before RFQ conversion.");
+        // The shared gate every RFQ-creating door runs (LeadRepository.ConvertLeadToRfqAsync,
+        // this path, and POST /api/Rfq with a LeadId). Before extraction these checks were a
+        // second, drifting copy of the legacy door's; a lead is only ever converted once and
+        // only through the same rules whichever door it enters by.
+        LeadConversionGate.EnsureEligible(lead);
 
         // Per-line choices. Reject ids that don't belong to this lead (never trust
         // caller-supplied identifiers across the tenant boundary).
@@ -365,11 +371,18 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
         if (LifecyclePolicy.Canonicalize("Lead", lead.LeadStatus?.SetupCode, lead.LeadStatus?.SetupValue) != "QUALIFIED") return;
         var actor = string.IsNullOrWhiteSpace(createdBy) ? "System" : createdBy.Trim();
         var reasonCode = acknowledgedWarnings is null ? null : "CONVERTED_WITH_ACKNOWLEDGED_WARNINGS";
-        await new LifecycleApplicationService(_db).TransitionLeadInCurrentTransactionAsync(
-            lead.BusinessUnitId, lead.Id, new LifecycleActor(actor, "LeadConversion"),
+        var lifecycle = new LifecycleApplicationService(_db);
+        var lifecycleActor = new LifecycleActor(actor, "LeadConversion");
+        await lifecycle.TransitionLeadInCurrentTransactionAsync(
+            lead.BusinessUnitId, lead.Id, lifecycleActor,
             new LifecycleTransitionCommand("CONVERTED_TO_RFQ", lead.LifecycleVersion, reasonCode, acknowledgedWarnings,
                 "Api", $"conversion-{lead.Id}", $"rfq-{rfqId}", $"lead-conversion:{lead.BusinessUnitId}:{lead.Id}"),
             false, ct);
+        // Dedicated promotion event ALONGSIDE the generic transition, same transaction:
+        // consumers get the lead/RFQ/revision facts by name instead of parsing a
+        // status-transition payload.
+        await lifecycle.RecordLeadPromotedToRfqInCurrentTransactionAsync(
+            lead.BusinessUnitId, lead.Id, rfqId, lifecycleActor, $"conversion-{lead.Id}", ct);
     }
 
     /// <summary>

@@ -121,8 +121,27 @@ public sealed class CommercialIntelligenceControllerFocusedTests
             ReasonCode = "TEST", EffectiveFrom = DateTime.UtcNow,
             CorrelationId = "focused", IdempotencyKey = "focused-assignment"
         });
+        // A second lead for the second RFQ (one lead, one RFQ — the partial unique index on
+        // RFQ."LeadID" forbids two RFQs on one lead), assigned to the same rep so the
+        // pipeline still aggregates both under them.
+        var draftLead = Seed.Lead(context, 87_011, tenant);
+        var draftDecision = new LeadRoutingDecision
+        {
+            Id = 87_052, BusinessUnitId = tenant, LeadId = draftLead.Id, SelectedUserId = user.Id,
+            MatchStatus = CustomerMatchStatus.NoEvidence, Outcome = RoutingOutcome.AssignedPrimary,
+            DecisionCode = "TEST", Explanation = "Focused test", PolicyVersion = "test/v1",
+            CorrelationId = "focused-2", IdempotencyKey = "focused-decision-2", CreatedOn = DateTime.UtcNow
+        };
+        context.Add(draftDecision);
+        context.Add(new LeadAssignment
+        {
+            Id = 87_053, BusinessUnitId = tenant, LeadId = draftLead.Id, ToUserId = user.Id,
+            AssignmentScope = AssignmentScope.LeadOnly, RoutingDecisionId = draftDecision.Id,
+            ReasonCode = "TEST", EffectiveFrom = DateTime.UtcNow,
+            CorrelationId = "focused-2", IdempotencyKey = "focused-assignment-2"
+        });
         var sentRfq = Rfq(87_061, tenant, lead.Id, quoteSentRfqStatus.SetupId);
-        var draftRfq = Rfq(87_062, tenant, lead.Id, draftRfqStatus.SetupId);
+        var draftRfq = Rfq(87_062, tenant, draftLead.Id, draftRfqStatus.SetupId);
         context.Rfqs.AddRange(sentRfq, draftRfq);
         context.Quotes.AddRange(
             Quote(87_071, tenant, sentRfq.Id, sentQuoteStatus.SetupId, usd.Id, 100m, DateTime.UtcNow.AddDays(-1)),

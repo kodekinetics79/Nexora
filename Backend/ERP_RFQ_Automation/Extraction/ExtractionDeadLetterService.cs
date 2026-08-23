@@ -75,11 +75,20 @@ public sealed class ExtractionDeadLetterService(
             })
             .ToListAsync(ct);
 
+        // Every dead-letter row is listed, INCLUDING those whose latest disposition is
+        // SourceObjectUnavailable. They used to be filtered out here, which made them the
+        // only dead letters with no operator surface at all: the job stayed DeadLetter, the
+        // customer's document stayed unprocessed, and the one screen built to show lost work
+        // hid exactly the rows that are lost for good. "Cannot be retried" is a fact to
+        // DISPLAY (Resolution + OperatorAction below), never a reason to hide the loss.
+        // BlocksReadiness stays false for them — the disposition is terminal and readiness
+        // must not stay red over work no retry can ever clear.
         return rows
-            .Where(x => x.SecurityBlocker || x.Resolution != ExtractionDeadLetterAction.SourceObjectUnavailable)
             .Select(x =>
             {
                 var category = FailureCategory(x.Job.LastError);
+                var sourceLost = !x.SecurityBlocker
+                    && x.Resolution == ExtractionDeadLetterAction.SourceObjectUnavailable;
                 return new ExtractionDeadLetterItem(
                     x.Job.Id,
                     x.Job.BatchId,
@@ -92,11 +101,22 @@ public sealed class ExtractionDeadLetterService(
                     AsUtc(x.Job.CreatedOn),
                     AsUtc(x.Job.UpdatedOn),
                     x.Resolution?.ToString() ?? "Open",
-                    x.SecurityBlocker || x.Resolution != ExtractionDeadLetterAction.SourceObjectUnavailable,
-                    OperatorAction(category));
+                    !sourceLost,
+                    sourceLost ? SourceLostOperatorAction : OperatorAction(category));
             })
             .ToArray();
     }
+
+    /// <summary>
+    /// Operator sentence for a dead letter whose stored source object is gone. Keyed on the
+    /// recorded DISPOSITION rather than the failure category, because the category describes
+    /// why extraction failed while this describes why recovery cannot run. Fixed string from
+    /// a closed set, like every other operator action here — never the stored error text.
+    /// </summary>
+    internal const string SourceLostOperatorAction =
+        "The stored source object no longer exists, so this job can never be retried. "
+        + "Ask the sender to resend the document (or re-upload it), which ingests it as new "
+        + "work; this row remains as the durable record of the loss.";
 
     public async Task<RecoverExtractionDeadLetterResult> RecoverAsync(
         long tenantId,
