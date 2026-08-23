@@ -277,6 +277,77 @@ public class NonCommercialAttachmentTests
     }
 
     // =====================================================================================
+    // Cryptographic transport artifacts
+    // =====================================================================================
+
+    [Theory]
+    // A signing mail server attaches this to EVERY message it sends. It is a hash over the
+    // other parts; there is no document inside it.
+    [InlineData("smime.p7s", "application/pkcs7-signature")]
+    [InlineData("smime.p7s", "application/x-pkcs7-signature")]
+    [InlineData("SMIME.P7S", "application/pkcs7-signature")]
+    // The extension alone decides it, even when the client declares nothing useful.
+    [InlineData("smime.p7s", "application/octet-stream")]
+    [InlineData("certificate-chain.p7c", "application/octet-stream")]
+    // ...and the media type alone decides it, even when the name is unhelpful.
+    [InlineData("signature", "application/pgp-signature")]
+    public void A_detached_signature_may_go_unread(string fileName, string mimeType)
+    {
+        Assert.True(
+            NonCommercialAttachmentClassifier.IsNonCommercialBoilerplate(
+                fileName, mimeType, out var pattern),
+            $"'{fileName}' ({mimeType}) still holds its message for review.");
+        Assert.False(string.IsNullOrWhiteSpace(pattern),
+            "The verdict must name what produced it, or it is not auditable.");
+    }
+
+    [Theory]
+    // THE LINE THAT MATTERS. Each of these CAN contain the enquiry itself, so none may be
+    // ignored — getting this wrong prices a Lead against content nobody saw.
+    //
+    // An enveloped S/MIME part can BE the message, attachments and all.
+    [InlineData("smime.p7m", "application/pkcs7-mime")]
+    // Outlook's TNEF envelope encapsulates the real attachments — a BOQ can be inside one.
+    [InlineData("winmail.dat", "application/ms-tnef")]
+    [InlineData("winmail.dat", "application/octet-stream")]
+    // An armoured PGP blob is not necessarily a signature; it can be the encrypted message.
+    [InlineData("message.asc", "application/octet-stream")]
+    // And the commercial-vocabulary exclusion still outranks the extension rule.
+    [InlineData("RFQ.p7s", "application/pkcs7-signature")]
+    public void An_envelope_that_could_carry_the_enquiry_is_never_ignored(
+        string fileName, string mimeType)
+    {
+        Assert.False(
+            NonCommercialAttachmentClassifier.IsNonCommercialBoilerplate(
+                fileName, mimeType, out _),
+            $"'{fileName}' ({mimeType}) was ignored, but it can carry the enquiry itself.");
+    }
+
+    [Fact]
+    public async Task A_signed_RFQ_produces_its_lead_instead_of_being_held_over_the_signature()
+    {
+        // THE DEFECT, END TO END. Before this rule the .p7s was refused by the allow-list,
+        // refusal marked it Skipped, and one Skipped part held the whole message — so every RFQ
+        // from a customer whose server signs its mail was held forever, over a file with nothing
+        // in it and no screen to release it from.
+        var manifest = await Plan(Message(
+            File("valves.csv", mime: "text/csv"),
+            File("smime.p7s", mime: "application/pkcs7-signature")));
+
+        var signature = Assert.Single(manifest.Components, c => c.FileName == "smime.p7s");
+        Assert.Equal(EmailInquiryComponentDisposition.IgnoreNonCommercial, signature.Disposition);
+        Assert.Equal(EmailInquirySkipReasons.NonCommercialBoilerplate, signature.ReasonCode);
+
+        // Ignored, not vanished: the row still records that the part arrived.
+        Assert.Equal(3, manifest.ExpectedComponentCount);
+        Assert.Equal(0, signature.ByteSize);
+        Assert.DoesNotContain(manifest.Processable, c => c.FileName == "smime.p7s");
+
+        // And the actual enquiry is still processed.
+        Assert.Contains(manifest.Processable, c => c.FileName == "valves.csv");
+    }
+
+    // =====================================================================================
 
     private static MimeMessage Message(params MimeEntity[] attachments)
     {
