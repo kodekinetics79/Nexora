@@ -36,10 +36,10 @@ public static partial class LifecyclePolicy
     };
 
     private static readonly IReadOnlyDictionary<string, IReadOnlySet<string>> LeadTransitions = Graph(
-        Edge("RECEIVED", "PENDING_IDENTIFICATION", "CANCELLED"),
-        Edge("PENDING_IDENTIFICATION", "UNASSIGNED", "ASSIGNED", "CANCELLED"),
-        Edge("UNASSIGNED", "ASSIGNED", "CANCELLED"),
-        Edge("ASSIGNED", "UNDER_REVIEW", "UNASSIGNED", "CANCELLED"),
+        Edge("RECEIVED", "PENDING_IDENTIFICATION", "QUALIFIED", "CANCELLED"),
+        Edge("PENDING_IDENTIFICATION", "UNASSIGNED", "ASSIGNED", "QUALIFIED", "CANCELLED"),
+        Edge("UNASSIGNED", "ASSIGNED", "QUALIFIED", "CANCELLED"),
+        Edge("ASSIGNED", "UNDER_REVIEW", "UNASSIGNED", "QUALIFIED", "CANCELLED"),
         Edge("UNDER_REVIEW", "QUALIFIED", "DISQUALIFIED", "CANCELLED", "DUPLICATED"),
         Edge("QUALIFIED", "CONVERTED_TO_RFQ", "UNDER_REVIEW", "CANCELLED"),
         Edge("CONVERTED_TO_RFQ", "QUOTED", "CANCELLED"),

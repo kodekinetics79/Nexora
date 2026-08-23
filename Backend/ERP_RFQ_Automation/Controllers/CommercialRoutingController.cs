@@ -33,6 +33,19 @@ public sealed class CommercialRoutingController : ControllerBase
             request.CorrelationId, request.AssignmentScope, request.Comment,
             true, request.ExpectedAssigneeId), ct));
 
+    [HttpGet("owner-options")]
+    [RequireModulePermission("Leads", PermissionAction.View)]
+    public async Task<ActionResult<IReadOnlyList<RoutingOwnerOptionResponse>>> OwnerOptions(CancellationToken ct) =>
+        Ok(await _routing.GetOwnerOptionsAsync(TenantId(), ct));
+
+    [HttpPut("leads/{leadId:long}/owner")]
+    [RequireModulePermission("Leads", PermissionAction.Edit)]
+    public Task<ActionResult<LeadOwnershipResponse>> ChangeOwner(
+        long leadId, [FromBody] ChangeLeadOwnerRequest request, CancellationToken ct) =>
+        Execute(async () => await _routing.ChangeLeadOwnershipAsync(TenantId(), new ChangeLeadOwnershipCommand(
+            leadId, request.Action, request.AssignedToUserId, UserId(), request.ExpectedAssignmentVersion,
+            request.IdempotencyKey, request.CorrelationId, request.Comment), ct));
+
     [HttpGet("queue")]
     [RequireModulePermission("Leads", PermissionAction.View)]
     public async Task<ActionResult<QueuePageResponse>> Queue(
@@ -132,6 +145,14 @@ public sealed record AssignLeadRoutingRequest(
     string IdempotencyKey,
     string CorrelationId,
     AssignmentScope AssignmentScope = AssignmentScope.LeadOnly,
+    string? Comment = null);
+
+public sealed record ChangeLeadOwnerRequest(
+    LeadOwnershipAction Action,
+    long? AssignedToUserId,
+    long ExpectedAssignmentVersion,
+    string IdempotencyKey,
+    string CorrelationId,
     string? Comment = null);
 
 public sealed record QueueLeaseRequest(long ExpectedVersion, int LeaseMinutes = 15);

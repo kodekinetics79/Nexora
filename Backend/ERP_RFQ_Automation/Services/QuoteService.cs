@@ -346,7 +346,7 @@ namespace ERP_RFQ_Automation.Services
                         RfqitemId = item.Id,
                         ProductId = item.ProductId,
                         ItemDescription = item.ProductShortDescription ?? item.ProductShortName ?? item.ItemText ?? item.ItemMaterialCode,
-                        Quantity = item.Quantity,
+                        Quantity = item.Quantity!.Value,
                         // The draft gate above refuses a blank UnitOfMeasure — keep what it
                         // validated instead of throwing it away, and carry the buyer's own
                         // line number so the printed quote can echo their reference back.

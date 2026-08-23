@@ -308,6 +308,7 @@ public sealed class GoldenJourneySeederConfigurationTests : IDisposable
         // ICommercialRoutingApplicationService
         public Task<RoutingDecisionResponse> RouteLeadAsync(long businessUnitId, RouteLeadCommand command, CancellationToken ct) => throw Stop();
         public Task<RoutingDecisionResponse> AssignLeadAsync(long businessUnitId, ManualAssignLeadCommand command, CancellationToken ct) => throw Stop();
+        public Task<LeadOwnershipResponse> ChangeLeadOwnershipAsync(long businessUnitId, ChangeLeadOwnershipCommand command, CancellationToken ct) => throw Stop();
         public Task<IReadOnlyList<RoutingOwnerOptionResponse>> GetOwnerOptionsAsync(long businessUnitId, CancellationToken ct) => throw Stop();
         public Task<QueuePageResponse> GetQueueAsync(long businessUnitId, WorkItemStatus? status, string? search, bool overdueOnly, int pageNumber, int pageSize, CancellationToken ct) => throw Stop();
         public Task<UnassignedQueueItemResponse> ClaimAsync(long businessUnitId, long workItemId, QueueLeaseCommand command, CancellationToken ct) => throw Stop();

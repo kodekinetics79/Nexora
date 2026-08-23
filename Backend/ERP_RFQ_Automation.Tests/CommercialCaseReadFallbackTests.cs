@@ -100,9 +100,9 @@ public sealed class CommercialCaseReadFallbackTests
         long LinkedRfqId, long UnlinkedRfqId, long LinkedQuoteId, long UnlinkedQuoteId);
 
     /// <summary>
-    /// One lead with a case, and beneath it both shapes of every document: one that inherited the
-    /// case and one that never did. The unlinked pair is attached to the SAME parents as the linked
-    /// pair, so the only thing that can distinguish them in a DTO is the document's own column.
+    /// Two leads carrying the same case identity, and beneath them both shapes of every document:
+    /// one that inherited the case and one that never did. Separate leads preserve the production
+    /// invariant that a lead can create at most one RFQ.
     /// </summary>
     private static async Task<Graph> SeedAsync(TestDb db)
     {
@@ -113,15 +113,17 @@ public sealed class CommercialCaseReadFallbackTests
         Seed.EnsureBusinessUnit(seed, Tenant);
         var customer = Seed.Customer(seed, Tenant, Tenant, "Fallback customer");
         var lead = Seed.Lead(seed, 97_611, Tenant, buyersName: "Fallback buyer");
+        var unlinkedLead = Seed.Lead(seed, 97_612, Tenant, buyersName: "Fallback buyer (unlinked RFQ)");
         await seed.SaveChangesAsync();
 
         lead.ResolveCommercialIdentity(customer.Id, null, "CONFIRMED");
+        unlinkedLead.ResolveCommercialIdentity(customer.Id, null, "CONFIRMED");
         caseId = lead.CommercialCaseId;
         serial = lead.CommercialCaseReference;
 
         var linkedRfq = NewRfq(97_621, "RFQ-FALLBACK-LINKED", lead.Id);
         linkedRfq.InheritCommercialIdentity(lead);
-        var unlinkedRfq = NewRfq(97_622, "RFQ-FALLBACK-UNLINKED", lead.Id);
+        var unlinkedRfq = NewRfq(97_622, "RFQ-FALLBACK-UNLINKED", unlinkedLead.Id);
         seed.Rfqs.AddRange(linkedRfq, unlinkedRfq);
 
         var linkedQuote = NewQuote(97_631, "QT-FALLBACK-LINKED", linkedRfq.Id, customer.Id);
@@ -130,7 +132,7 @@ public sealed class CommercialCaseReadFallbackTests
         seed.Quotes.AddRange(linkedQuote, unlinkedQuote);
         await seed.SaveChangesAsync();
 
-        return new Graph(caseId, serial, lead.Id, linkedRfq.Id, unlinkedRfq.Id, linkedQuote.Id, unlinkedQuote.Id);
+        return new Graph(caseId, serial, unlinkedLead.Id, linkedRfq.Id, unlinkedRfq.Id, linkedQuote.Id, unlinkedQuote.Id);
     }
 
     private static Rfq NewRfq(long id, string number, long leadId) => new()

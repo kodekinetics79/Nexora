@@ -63,7 +63,7 @@ public sealed class CommercialLineResolutionApplicationService(
         long businessUnitId, long leadId, int resourceLimit, bool forceRefresh, CancellationToken ct)
     {
 
-        var lead = await db.Leads.AsNoTracking()
+        var lead = await db.Leads.AsNoTracking().Include(candidate => candidate.LeadItems)
             .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.Id == leadId, ct)
             ?? throw new KeyNotFoundException("Lead was not found in this tenant.");
         if (!lead.CurrentRevisionId.HasValue)
@@ -80,13 +80,29 @@ public sealed class CommercialLineResolutionApplicationService(
 
         var batchId = Guid.NewGuid();
 
+        var canonicalLines = lead.LeadItems.OrderBy(item => item.Id).ToArray();
         foreach (var line in revision.Items.OrderBy(x => x.LineNumber))
         {
             var prior = latest.FirstOrDefault(x => x.LeadLineId == line.Id);
             if (!forceRefresh && prior is not null && prior.ResourceLimit >= resourceLimit) continue;
-            var snapshot = ParseSnapshot(line.SnapshotJson);
+            var storedSnapshot = ParseSnapshot(line.SnapshotJson);
+            var canonical = canonicalLines.FirstOrDefault(item =>
+                    int.TryParse(item.LineItemNo, out var number) && number == line.LineNumber)
+                ?? canonicalLines.ElementAtOrDefault(Math.Max(0, line.LineNumber - 1));
+            var snapshot = canonical is null
+                ? storedSnapshot
+                : new LineSnapshot(
+                    canonical.ManufacturerPartNumber,
+                    canonical.ItemMaterialCode,
+                    canonical.ManufacturerName,
+                    First(canonical.ProductShortDescription, canonical.ProductShortName, canonical.ItemText,
+                        $"LINE-{line.LineNumber}"),
+                    canonical.Quantity is > 0 ? canonical.Quantity.Value : 0m);
             var requestedPart = First(snapshot.Part, snapshot.MaterialCode, snapshot.Description, $"LINE-{line.LineNumber}");
-            var quantity = snapshot.Quantity > 0m ? snapshot.Quantity : 1m;
+            // Unknown demand is a clarification state, not a quantity. Do not run fulfilment,
+            // shortage, or availability calculations until a canonical positive value exists.
+            if (snapshot.Quantity <= 0m) continue;
+            var quantity = snapshot.Quantity;
             if (IsServiceLine(snapshot))
             {
                 var serviceResolution = new LeadLineCommercialResolution

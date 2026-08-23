@@ -615,6 +615,9 @@ namespace ERP_RFQ_Automation.Repositories
                     : "Unassigned",
                 AssignedOn = l.AssignOn,
                 AssignComment = l.AssignComment,
+                AssignmentMethod = l.AssignmentMethod,
+                ManualAssignmentOverride = l.ManualAssignmentOverride,
+                AssignmentVersion = l.AssignmentVersion,
 
                 // WP-A1 unassigned-aging (rule: accepted + unassigned + sitting
                 // longer than the tenant's unassigned-hours threshold).
@@ -742,6 +745,9 @@ namespace ERP_RFQ_Automation.Repositories
                     : "Unassigned",
                 AssignedOn = lead.AssignOn,
                 AssignComment = lead.AssignComment,
+                AssignmentMethod = lead.AssignmentMethod,
+                ManualAssignmentOverride = lead.ManualAssignmentOverride,
+                AssignmentVersion = lead.AssignmentVersion,
                 LeadItems = lead.LeadItems.Select(li => new AcceptedLeadItemDTO
                 {
                     Id = li.Id,
@@ -918,6 +924,10 @@ namespace ERP_RFQ_Automation.Repositories
                     : null,
                 AssignedOn = lead.AssignOn,
                 AssignComment = lead.AssignComment,
+                AssignmentMethod = lead.AssignmentMethod,
+                ManualAssignmentOverride = lead.ManualAssignmentOverride,
+                AssignmentVersion = lead.AssignmentVersion,
+                AssignedByUserId = lead.AssignedByUserId,
 
                 ItemCount = lead.LeadItems.Count,
                 LeadItems = lead.LeadItems.Select(li => new LeadItemResponseDTO

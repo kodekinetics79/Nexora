@@ -129,11 +129,6 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
             return already.Id;
         }
 
-        // Legacy gates, replicated verbatim: only accepted leads convert, and a
-        // lead is only ever converted once.
-        if (LifecyclePolicy.Canonicalize("Lead", lead.LeadStatus?.SetupCode, lead.LeadStatus?.SetupValue) != "QUALIFIED")
-            throw new InvalidOperationException("Only a qualified lead can be converted to an RFQ.");
-
         // WP-A3 hard block: an unresolved duplicate flag stops conversion here too.
         if (lead.DuplicateStatus is "suspected" or "confirmed")
             throw new InvalidOperationException(
@@ -181,7 +176,7 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
         // Header + per-line requirements, evaluated over the lines actually being converted with
         // the caller's corrections applied. Runs AFTER `included`/`choices` exist, because
         // checking the lead's raw stored lines ignored both exclusions and corrections (A-9).
-        var blockers = FindConversionBlockers(lead, included, choices);
+        var blockers = FindConversionBlockers(lead, included, choices, request.CreateNeedsClarification);
         if (blockers.Count > 0)
             throw new InvalidOperationException($"Review these required inquiry fields before creating the RFQ: {string.Join("; ", blockers)}.");
 
@@ -194,6 +189,40 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
         // it had failed to read. Everything below runs BEFORE the first write, so a refusal
         // leaves no partial RFQ.
         var acknowledgedLines = EnforceLineWarningGovernance(included, resolved, choices, request);
+
+        // Persist the operator's explicit corrections on the canonical lead lines. Downstream
+        // RFQ creation then copies those same values; preview and conversion cannot disagree.
+        foreach (var li in included)
+        {
+            if (!choices.TryGetValue(li.Id, out var choice)) continue;
+            if (choice.Quantity.HasValue)
+            {
+                if (choice.Quantity <= 0)
+                    throw new ArgumentException($"Quantity for line {li.Id} must be greater than zero.");
+                li.Quantity = choice.Quantity;
+            }
+            if (!string.IsNullOrWhiteSpace(choice.UnitOfMeasure))
+                li.UnitOfMeasure = choice.UnitOfMeasure.Trim();
+        }
+
+        // Qualification and RFQ creation are one serializable command. If any later write fails,
+        // the lifecycle transition rolls back with it; there is no stranded "qualified" lead.
+        var currentLeadStatus = LifecyclePolicy.Canonicalize("Lead", lead.LeadStatus?.SetupCode, lead.LeadStatus?.SetupValue);
+        if (currentLeadStatus != "QUALIFIED")
+        {
+            if (request.ExpectedLifecycleVersion.HasValue
+                && request.ExpectedLifecycleVersion.Value != lead.LifecycleVersion)
+                throw new DbUpdateConcurrencyException(
+                    $"Lead {lead.Id} changed while qualification was being submitted. Refresh and try again.");
+
+            var actor = string.IsNullOrWhiteSpace(request.ActingUser) ? "System" : request.ActingUser!.Trim();
+            await new LifecycleApplicationService(_db).TransitionLeadInCurrentTransactionAsync(
+                businessUnitId, lead.Id, new LifecycleActor(actor, "LeadConversion"),
+                new LifecycleTransitionCommand("QUALIFIED", lead.LifecycleVersion, "QUALIFIED_FOR_RFQ", request.Notes,
+                    "Api", $"qualification-{lead.Id}", $"lead-{lead.Id}",
+                    $"lead-qualification:{businessUnitId}:{lead.Id}:{lead.LifecycleVersion}"),
+                false, ct);
+        }
 
         var createdBy = string.IsNullOrWhiteSpace(request.ActingUser) ? "System" : request.ActingUser!;
         var now = DateTime.UtcNow;
@@ -228,7 +257,8 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
             DurationAgreement = lead.DurationAgreement,
             LeadId = lead.Id,
             BusinessUnitId = businessUnitId,
-            RfqstatusId = await LifecycleStatusCatalog.ResolveIdAsync(_db, businessUnitId, "Rfq", "DRAFT", ct),
+            RfqstatusId = await LifecycleStatusCatalog.ResolveIdAsync(_db, businessUnitId, "Rfq",
+                request.CreateNeedsClarification ? "NEEDS_REVIEW" : "DRAFT", ct),
             CreatedBy = createdBy,
             CreatedDate = now,
             Rfqitems = included.Select(li =>
@@ -243,12 +273,9 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
                         ? r.Matches[0].ProductId
                         : (long?)null);
 
-                // Quantity: corrected value wins; else the raw lead quantity WHEN THE DOCUMENT
-                // STATED ONE; else the normalized (parsed-from-text) quantity. A lead line whose
-                // quantity is null states none, so it falls through to recovery exactly as a
-                // dirty 0 did — and if recovery finds nothing the conversion is refused rather
-                // than writing a demand for zero units into an RFQ.
-                int quantity;
+                // Quantity comes only from the canonical field or an explicit correction. Text
+                // fragments are evidence, never permission to invent quote-critical demand.
+                int? quantity;
                 if (choice?.Quantity is int cq)
                 {
                     if (cq <= 0) throw new ArgumentException($"Quantity for line {li.Id} must be greater than zero.");
@@ -256,10 +283,8 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
                 }
                 else
                 {
-                    quantity = li.Quantity is > 0
-                        ? li.Quantity.Value
-                        : (int)Math.Ceiling(r.NormalizedQuantity ?? 0m);
-                    if (quantity <= 0)
+                    quantity = li.Quantity is > 0 ? li.Quantity.Value : null;
+                    if (!request.CreateNeedsClarification && quantity is null)
                         throw new ArgumentException(
                             $"Quantity for line {li.Id} is not stated in the source document. Enter it before converting.");
                 }
@@ -335,7 +360,16 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
     private async Task CompleteConversionLifecycleInCurrentTransactionAsync(
         Lead lead, long rfqId, string? createdBy, string? acknowledgedWarnings, CancellationToken ct)
     {
-        if (LifecyclePolicy.Canonicalize("Lead", lead.LeadStatus?.SetupCode, lead.LeadStatus?.SetupValue) != "QUALIFIED") return;
+        var statusCode = LifecyclePolicy.Canonicalize("Lead", lead.LeadStatus?.SetupCode, lead.LeadStatus?.SetupValue);
+        if (statusCode != "QUALIFIED" && lead.LeadStatusId.HasValue)
+        {
+            var persistedStatus = await _db.SetupMasters.AsNoTracking()
+                .Where(status => status.SetupId == lead.LeadStatusId.Value)
+                .Select(status => new { status.SetupCode, status.SetupValue })
+                .SingleOrDefaultAsync(ct);
+            statusCode = LifecyclePolicy.Canonicalize("Lead", persistedStatus?.SetupCode, persistedStatus?.SetupValue);
+        }
+        if (statusCode != "QUALIFIED") return;
         var actor = string.IsNullOrWhiteSpace(createdBy) ? "System" : createdBy.Trim();
         var reasonCode = acknowledgedWarnings is null ? null : "CONVERTED_WITH_ACKNOWLEDGED_WARNINGS";
         await new LifecycleApplicationService(_db).TransitionLeadInCurrentTransactionAsync(
@@ -363,7 +397,8 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
     private static List<string> FindConversionBlockers(
         Lead lead,
         IReadOnlyList<LeadItem> includedLines,
-        IReadOnlyDictionary<long, ConvertRequestItem> choices)
+        IReadOnlyDictionary<long, ConvertRequestItem> choices,
+        bool createNeedsClarification)
     {
         var blockers = new List<string>();
         if (!lead.CustomerId.HasValue) blockers.Add("customer");
@@ -387,14 +422,18 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
             var label = string.IsNullOrWhiteSpace(line.LineItemNo) ? $"line {line.Id}" : $"line {line.LineItemNo}";
             if (string.IsNullOrWhiteSpace(line.ItemMaterialCode)
                 && string.IsNullOrWhiteSpace(line.ManufacturerPartNumber)
+                && string.IsNullOrWhiteSpace(line.ProductShortName)
                 && string.IsNullOrWhiteSpace(line.ProductShortDescription))
                 blockers.Add($"{label} part number or description");
             // `is null or <= 0`, not `<= 0`. With a nullable quantity the bare comparison is
             // FALSE for null, so an unstated quantity would have stopped being a blocker and the
             // line would have converted with nothing in it.
-            if (quantity is null or <= 0) blockers.Add($"{label} quantity");
-            if (string.IsNullOrWhiteSpace(unitOfMeasure)) blockers.Add($"{label} unit");
-            if (string.IsNullOrWhiteSpace(line.Currency)) blockers.Add($"{label} currency");
+            if (!createNeedsClarification)
+            {
+                if (quantity is null or <= 0) blockers.Add($"{label} quantity");
+                if (string.IsNullOrWhiteSpace(unitOfMeasure)) blockers.Add($"{label} unit");
+                if (string.IsNullOrWhiteSpace(line.Currency)) blockers.Add($"{label} currency");
+            }
         }
 
         return blockers;
@@ -478,7 +517,7 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
             // that silently answers false.
             var stillBlocked = r.IsBlocked
                 && (effectiveQuantity is null or <= 0 || string.IsNullOrWhiteSpace(effectiveUom));
-            if (stillBlocked)
+            if (stillBlocked && !request.CreateNeedsClarification)
             {
                 blocked.Add($"{Label(li)}: {r.BlockingReason}");
                 continue;
@@ -565,14 +604,14 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
             var tokens = Tokenize(normName).OrderByDescending(t => t.Length).Take(2).ToList();
             if (tokens.Count == 0) continue;
 
-            var pat1 = $"%{EscapeLike(tokens[0])}%";
-            var pat2 = tokens.Count > 1 ? $"%{EscapeLike(tokens[1])}%" : pat1;
+            var token1 = tokens[0];
+            var token2 = tokens.Count > 1 ? tokens[1] : token1;
 
             var nameRows = await ActiveProducts()
-                .Where(p => (p.ProductName != null && (EF.Functions.ILike(p.ProductName, pat1, "\\")
-                                                       || EF.Functions.ILike(p.ProductName, pat2, "\\")))
-                            || (p.Description != null && (EF.Functions.ILike(p.Description, pat1, "\\")
-                                                          || EF.Functions.ILike(p.Description, pat2, "\\"))))
+                .Where(p => (p.ProductName != null && (p.ProductName.ToLower().Contains(token1)
+                                                       || p.ProductName.ToLower().Contains(token2)))
+                            || (p.Description != null && (p.Description.ToLower().Contains(token1)
+                                                          || p.Description.ToLower().Contains(token2))))
                 .OrderBy(p => p.Id)
                 .Take(MaxNameCandidatesPerLine)
                 .Select(p => new Candidate(p.Id, p.ProductName, p.PartNo, p.ModelNo, p.Description))
@@ -726,28 +765,13 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
             .Where(t => t.Length >= 3 && !StopWords.Contains(t))
             .ToHashSet(StringComparer.Ordinal);
 
-    private static string EscapeLike(string s) =>
-        s.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
-
     /// <summary>
-    /// The line's usable quantity. NULL on LeadItem means the document stated none we could
-    /// read; 0 or a dirty value means the same thing in practice. In either case try to recover
-    /// a number from the raw UoM ("10 EA") or the item text fields, and return null — never a
-    /// substituted zero — when there is nothing to recover.
+    /// The line's canonical quantity. Raw description/UoM text is not a quantity field and is
+    /// never parsed into one; an absent value remains absent until a human corrects it.
     /// </summary>
     private static decimal? NormalizeQuantity(LeadItem item)
     {
-        if (item.Quantity is > 0) return item.Quantity.Value;
-        foreach (var source in new[] { item.UnitOfMeasure, item.ItemText, item.MaterialPotext })
-        {
-            if (string.IsNullOrWhiteSpace(source)) continue;
-            var m = FirstNumber.Match(source);
-            if (m.Success && decimal.TryParse(m.Value.Replace(',', '.'),
-                    System.Globalization.NumberStyles.Number,
-                    System.Globalization.CultureInfo.InvariantCulture, out var q) && q > 0)
-                return q;
-        }
-        return null;
+        return item.Quantity is > 0 ? item.Quantity.Value : null;
     }
 
     /// <summary>

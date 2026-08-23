@@ -262,6 +262,9 @@ namespace ERP_RFQ_Automation.Services
                 .FirstOrDefaultAsync(r => r.Id == rfqId && r.BusinessUnitId == businessUnitId);
 
             if (rfq == null) throw new Exception("RFQ not found");
+            if (rfq.Rfqitems.Any(item => item.Quantity is null or <= 0))
+                throw new InvalidOperationException(
+                    "This RFQ still needs quantity clarification and cannot create an order.");
             if (!rfq.CommercialCaseId.HasValue)
                 throw new InvalidOperationException(
                     $"RFQ {rfq.Rfqno} carries no commercial case, so an order cannot inherit one from it.");
@@ -312,9 +315,9 @@ namespace ERP_RFQ_Automation.Services
                 {
                     ProductId = rfqItem.ProductId ?? 0,
                     Description = rfqItem.ItemText,
-                    Quantity = rfqItem.Quantity, // Quantity is int, not nullable
+                    Quantity = rfqItem.Quantity!.Value,
                     UnitPrice = rfqItem.UnitPrice ?? 0,
-                    TotalAmount = rfqItem.Quantity * (rfqItem.UnitPrice ?? 0),
+                    TotalAmount = rfqItem.Quantity!.Value * (rfqItem.UnitPrice ?? 0),
                     WarehouseId = rfqItem.WarehouseId,
                     CreatedBy = "System",
                     CreatedDate = DateTime.Now,

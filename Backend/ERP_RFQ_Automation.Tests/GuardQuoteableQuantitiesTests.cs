@@ -76,11 +76,11 @@ public sealed class GuardQuoteableQuantitiesTests
     // ───────────────────────────────────────────── the constraints, asserted via the model
 
     [Theory]
-    [InlineData(typeof(Rfqitem), "CK_RFQItems_Quantity_Positive")]
-    [InlineData(typeof(QuoteItem), "CK_QuoteItems_Quantity_Positive")]
-    [InlineData(typeof(OrderItem), "CK_OrderItems_Quantity_Positive")]
+    [InlineData(typeof(Rfqitem), "CK_RFQItems_Quantity_Positive", "\"Quantity\" IS NULL OR \"Quantity\" > 0")]
+    [InlineData(typeof(QuoteItem), "CK_QuoteItems_Quantity_Positive", "\"Quantity\" > 0")]
+    [InlineData(typeof(OrderItem), "CK_OrderItems_Quantity_Positive", "\"Quantity\" > 0")]
     public void Quoteable_line_tables_carry_the_positive_quantity_check_in_the_model(
-        Type entityType, string constraintName)
+        Type entityType, string constraintName, string expectedSql)
     {
         using var database = new TestDb();
         using var context = database.ContextFor(null);
@@ -91,7 +91,7 @@ public sealed class GuardQuoteableQuantitiesTests
         var entity = model.FindEntityType(entityType)!;
         var constraint = entity.GetCheckConstraints().Single(x => x.Name == constraintName);
 
-        Assert.Equal("\"Quantity\" > 0", constraint.Sql);
+        Assert.Equal(expectedSql, constraint.Sql);
     }
 
     [Fact]

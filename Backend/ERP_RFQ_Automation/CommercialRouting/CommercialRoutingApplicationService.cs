@@ -12,6 +12,7 @@ public interface ICommercialRoutingApplicationService
 {
     Task<RoutingDecisionResponse> RouteLeadAsync(long businessUnitId, RouteLeadCommand command, CancellationToken ct);
     Task<RoutingDecisionResponse> AssignLeadAsync(long businessUnitId, ManualAssignLeadCommand command, CancellationToken ct);
+    Task<LeadOwnershipResponse> ChangeLeadOwnershipAsync(long businessUnitId, ChangeLeadOwnershipCommand command, CancellationToken ct);
     Task<IReadOnlyList<RoutingOwnerOptionResponse>> GetOwnerOptionsAsync(long businessUnitId, CancellationToken ct);
     Task<QueuePageResponse> GetQueueAsync(long businessUnitId, WorkItemStatus? status, string? search,
         bool overdueOnly, int pageNumber, int pageSize, CancellationToken ct);
@@ -65,6 +66,8 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
                     .SingleOrDefaultAsync(l => l.BusinessUnitId == businessUnitId && l.Id == command.LeadId, ct)
                     ?? throw new RoutingNotFoundException($"Lead {command.LeadId} was not found.");
 
+                if (lead.ManualAssignmentOverride)
+                    throw new RoutingConflictException("Automatic routing is paused by a manual ownership override. Return the lead to automatic routing first.");
                 if (lead.AssignTo.HasValue)
                     throw new RoutingConflictException("Lead already has an owner. Use an explicit reassignment command.");
 
@@ -181,6 +184,85 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
         }
         await TryNotifyAssignmentAsync(businessUnitId, assigned, ct);
         return assigned;
+    }
+
+    public async Task<LeadOwnershipResponse> ChangeLeadOwnershipAsync(
+        long businessUnitId, ChangeLeadOwnershipCommand command, CancellationToken ct)
+    {
+        ValidateKey(command.IdempotencyKey, nameof(command.IdempotencyKey));
+        ValidateKey(command.CorrelationId, nameof(command.CorrelationId));
+        if (command.ExpectedAssignmentVersion <= 0)
+            throw new ArgumentOutOfRangeException(nameof(command.ExpectedAssignmentVersion));
+
+        if (command.Action == LeadOwnershipAction.Assign)
+        {
+            if (!command.AssignedToUserId.HasValue)
+                throw new ArgumentException("An owner is required for assignment.");
+            var assigned = await AssignLeadAsync(businessUnitId, new ManualAssignLeadCommand(
+                command.LeadId, command.AssignedToUserId.Value, command.AssignedByUserId,
+                command.IdempotencyKey, command.CorrelationId, AssignmentScope.LeadOnly,
+                command.Comment, false, null, command.ExpectedAssignmentVersion), ct);
+            var current = await _db.Leads.AsNoTracking().SingleAsync(
+                x => x.BusinessUnitId == businessUnitId && x.Id == command.LeadId, ct);
+            return Ownership(current, assigned);
+        }
+
+        var decision = await InTransactionAsync(async () =>
+        {
+            var lead = await _db.Leads.SingleOrDefaultAsync(
+                x => x.BusinessUnitId == businessUnitId && x.Id == command.LeadId, ct)
+                ?? throw new RoutingNotFoundException($"Lead {command.LeadId} was not found.");
+            if (lead.AssignmentVersion != command.ExpectedAssignmentVersion)
+                throw new RoutingConflictException("Lead assignment changed since it was loaded. Refresh and retry.");
+
+            var now = DateTime.UtcNow;
+            var active = await _db.Set<LeadAssignment>().SingleOrDefaultAsync(x =>
+                x.BusinessUnitId == businessUnitId && x.LeadId == lead.Id && x.EffectiveTo == null, ct);
+            if (active != null) active.EffectiveTo = now;
+            var code = command.Action == LeadOwnershipAction.ReturnToAutomatic
+                ? "RETURNED_TO_AUTOMATIC_ROUTING" : "MANUALLY_UNASSIGNED";
+            var routingDecision = new LeadRoutingDecision
+            {
+                BusinessUnitId = businessUnitId,
+                LeadId = lead.Id,
+                MatchStatus = CustomerMatchStatus.NoEvidence,
+                Outcome = RoutingOutcome.Unassigned,
+                MatchConfidence = 0,
+                DecisionCode = code,
+                Explanation = JsonSerializer.Serialize(new
+                {
+                    source = command.Action == LeadOwnershipAction.ReturnToAutomatic ? "automatic" : "manual",
+                    action = command.Action.ToString(),
+                    requestHash = $"ownership:{businessUnitId}:{command.LeadId}:{command.Action}:{command.ExpectedAssignmentVersion}"
+                }),
+                PolicyVersion = _policy.Version,
+                CorrelationId = command.CorrelationId.Trim(),
+                IdempotencyKey = command.IdempotencyKey.Trim(),
+                CreatedOn = now
+            };
+            lead.AssignTo = null;
+            lead.AssignOn = now;
+            lead.AssignComment = command.Comment?.Trim();
+            lead.AssignedByUserId = command.AssignedByUserId;
+            lead.AssignmentMethod = command.Action == LeadOwnershipAction.ReturnToAutomatic
+                ? LeadAssignmentMethods.Automatic : LeadAssignmentMethods.Manual;
+            lead.ManualAssignmentOverride = command.Action != LeadOwnershipAction.ReturnToAutomatic;
+            lead.AssignmentVersion++;
+            lead.ModifiedDate = now;
+            _db.Add(routingDecision);
+            await _db.SaveChangesAsync(ct);
+            return ToResponse(routingDecision, null, null);
+        }, ct);
+
+        if (command.Action == LeadOwnershipAction.ReturnToAutomatic)
+        {
+            var routeKey = $"{command.IdempotencyKey.Trim()}:route";
+            decision = await RouteLeadAsync(businessUnitId, new RouteLeadCommand(
+                command.LeadId, routeKey, command.CorrelationId), ct);
+        }
+        var refreshed = await _db.Leads.AsNoTracking().SingleAsync(
+            x => x.BusinessUnitId == businessUnitId && x.Id == command.LeadId, ct);
+        return Ownership(refreshed, decision);
     }
 
     public async Task<QueuePageResponse> GetQueueAsync(
@@ -496,6 +578,9 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
     {
         if (command.EnforceExpectedAssignee && lead.AssignTo != command.ExpectedAssigneeId)
             throw new RoutingConflictException("Lead assignment changed since it was loaded. Refresh and retry.");
+        if (command.ExpectedAssignmentVersion.HasValue
+            && lead.AssignmentVersion != command.ExpectedAssignmentVersion.Value)
+            throw new RoutingConflictException("Lead assignment changed since it was loaded. Refresh and retry.");
         var assigneeExists = await _db.Users.AnyAsync(u =>
             u.Id == command.AssignedToUserId && u.Buid == businessUnitId && u.IsActive == true, ct);
         if (!assigneeExists) throw new RoutingConflictException("Assignee must be an active user in the same tenant.");
@@ -505,6 +590,8 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
             throw new RoutingConflictException("Assignee is not currently eligible for governed routing.");
 
         var now = DateTime.UtcNow;
+        // The header command fences on AssignmentVersion.  Legacy queue callers still fence on
+        // ExpectedAssigneeId, so both paths remain backward compatible.
         var previous = await _db.Set<LeadAssignment>().SingleOrDefaultAsync(a =>
             a.BusinessUnitId == businessUnitId && a.LeadId == lead.Id && a.EffectiveTo == null, ct);
         if (previous != null) previous.EffectiveTo = now;
@@ -542,12 +629,18 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
             Comment = command.Comment?.Trim(),
             EffectiveFrom = now,
             AssignedByUserId = command.AssignedByUserId,
+            AssignmentMethod = LeadAssignmentMethods.Manual,
+            IsManualOverride = true,
             CorrelationId = command.CorrelationId.Trim(),
             IdempotencyKey = command.IdempotencyKey.Trim()
         };
         lead.AssignTo = command.AssignedToUserId;
         lead.AssignOn = now;
         lead.AssignComment = command.Comment?.Trim();
+        lead.AssignedByUserId = command.AssignedByUserId;
+        lead.AssignmentMethod = LeadAssignmentMethods.Manual;
+        lead.ManualAssignmentOverride = true;
+        lead.AssignmentVersion++;
         lead.ModifiedDate = now;
         await ResolveActiveQueueItemsAsync(businessUnitId, lead.Id, now, "MANUALLY_ASSIGNED", queueItem, ct);
         _db.Add(decision);
@@ -635,6 +728,12 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
             lead.AssignTo = result.Assignment.ToUserId;
             lead.AssignOn = result.Assignment.EffectiveFrom;
             lead.AssignComment = result.Assignment.ReasonCode;
+            lead.AssignedByUserId = null;
+            lead.AssignmentMethod = LeadAssignmentMethods.Automatic;
+            lead.ManualAssignmentOverride = false;
+            lead.AssignmentVersion++;
+            result.Assignment.AssignmentMethod = LeadAssignmentMethods.Automatic;
+            result.Assignment.IsManualOverride = false;
             lead.ModifiedDate = result.Assignment.EffectiveFrom;
             await ResolveActiveQueueItemsAsync(
                 lead.BusinessUnitId, lead.Id, result.Assignment.EffectiveFrom, "AUTO_ASSIGNED", null, ct);
@@ -1025,6 +1124,10 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
                 response.LeadId);
         }
     }
+
+    private static LeadOwnershipResponse Ownership(Lead lead, RoutingDecisionResponse decision) => new(
+        lead.Id, lead.AssignTo, lead.AssignmentMethod, lead.ManualAssignmentOverride,
+        lead.AssignmentVersion, lead.AssignOn, decision);
 
     private async Task<T> InTransactionAsync<T>(Func<Task<T>> operation, CancellationToken ct,
         IsolationLevel isolationLevel = IsolationLevel.Serializable)

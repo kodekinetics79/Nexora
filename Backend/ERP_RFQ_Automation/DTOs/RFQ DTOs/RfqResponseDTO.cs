@@ -68,7 +68,7 @@ namespace ERP_RFQ_Automation.DTOs.RfqDTOs
         public string? UnitOfMeasure { get; set; }
         public int? UomId { get; set; }
         public decimal? UnitPrice { get; set; }
-        public int Quantity { get; set; }
+        public int? Quantity { get; set; }
         public string? StorageLocation { get; set; }
         public long? WarehouseId { get; set; }
         public string? WarehouseName { get; set; }  // for UI

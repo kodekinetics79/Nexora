@@ -10,6 +10,15 @@ public static class CommercialRoutingModelBuilderExtensions
         ArgumentNullException.ThrowIfNull(modelBuilder);
 
         modelBuilder.Entity<Lead>().HasAlternateKey(x => new { x.BusinessUnitId, x.Id });
+        modelBuilder.Entity<Lead>(entity =>
+        {
+            entity.Property(x => x.AssignmentMethod).HasMaxLength(16).HasDefaultValue(LeadAssignmentMethods.Automatic);
+            entity.Property(x => x.ManualAssignmentOverride).HasDefaultValue(false);
+            entity.Property(x => x.AssignmentVersion).HasDefaultValue(1L).IsConcurrencyToken();
+            entity.HasIndex(x => new { x.BusinessUnitId, x.AssignTo, x.AssignmentMethod })
+                .HasDatabaseName("IX_Leads_BusinessUnitID_AssignTo_AssignmentMethod");
+            entity.HasCheckConstraint("CK_Leads_AssignmentMethod", "\"AssignmentMethod\" IN ('AUTOMATIC','MANUAL')");
+        });
 
         modelBuilder.Entity<CustomerIdentifier>(entity =>
         {
@@ -98,6 +107,8 @@ public static class CommercialRoutingModelBuilderExtensions
             entity.ToTable("lead_assignments");
             entity.HasKey(x => x.Id);
             entity.Property(x => x.AssignmentScope).HasConversion<string>().HasMaxLength(32);
+            entity.Property(x => x.AssignmentMethod).HasMaxLength(16).HasDefaultValue(LeadAssignmentMethods.Automatic);
+            entity.Property(x => x.IsManualOverride).HasDefaultValue(false);
             entity.Property(x => x.ReasonCode).HasMaxLength(80).IsRequired();
             entity.Property(x => x.Comment).HasMaxLength(1000);
             entity.Property(x => x.CorrelationId).HasMaxLength(100).IsRequired();

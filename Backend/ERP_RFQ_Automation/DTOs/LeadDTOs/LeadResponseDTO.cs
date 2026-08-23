@@ -137,6 +137,10 @@ namespace ERP_RFQ_Automation.DTOs.Lead
         public DateTime? AssignedOn { get; set; }
         public string? AssignComment { get; set; }
         public string? AssignmentReason => AssignComment;
+        public string AssignmentMethod { get; set; } = "AUTOMATIC";
+        public bool ManualAssignmentOverride { get; set; }
+        public long AssignmentVersion { get; set; }
+        public long? AssignedByUserId { get; set; }
 
         public int ItemCount { get; set; } // Optimized: Item count instead of loading all items
         public List<LeadItemResponseDTO> LeadItems { get; set; } = new List<LeadItemResponseDTO>();

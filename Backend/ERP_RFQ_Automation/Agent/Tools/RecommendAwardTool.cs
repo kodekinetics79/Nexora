@@ -94,6 +94,12 @@ public sealed class RecommendAwardTool : IAgentTool
         if (items.Count == 0)
             return AgentToolResult.Fail($"No priced supplier bids found for RFQ {rfqId}. Dispatch the RFQ to suppliers first.");
 
+        var missingQuantityLines = items.Count(i => i.Quantity is null or <= 0);
+        if (missingQuantityLines > 0)
+            return AgentToolResult.Fail(
+                $"{missingQuantityLines} priced bid line(s) on RFQ {rfqId} have no confirmed quantity. " +
+                "Clarify the requested quantity before an award can be recommended.");
+
         // Fail closed on a bid line with no currency: a price that does not know its own
         // denomination cannot take 50% of the weight in a ranking.
         var unpricedCurrencyLines = items.Count(i => i.CurrencyId is null);
@@ -141,7 +147,7 @@ public sealed class RecommendAwardTool : IAgentTool
             // rate per currency, rounds once after the rate, and fails closed as a whole rather
             // than quietly dropping the legs it could not convert.
             var total = await fx.TotalAsync(businessUnitId,
-                group.Select(x => new FxAmount((x.UnitPrice ?? 0m) * x.Quantity, x.CurrencyId)).ToArray(),
+                group.Select(x => new FxAmount((x.UnitPrice ?? 0m) * x.Quantity!.Value, x.CurrencyId)).ToArray(),
                 asOf, scoringCurrencyId, ct);
 
             if (!total.Converted || total.Total is null)

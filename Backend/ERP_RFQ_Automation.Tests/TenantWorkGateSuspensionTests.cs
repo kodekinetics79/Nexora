@@ -559,6 +559,7 @@ public sealed class TenantWorkGateSuspensionTests
         }
 
         public Task<RoutingDecisionResponse> AssignLeadAsync(long businessUnitId, ManualAssignLeadCommand command, CancellationToken ct) => throw new NotSupportedException();
+        public Task<LeadOwnershipResponse> ChangeLeadOwnershipAsync(long businessUnitId, ChangeLeadOwnershipCommand command, CancellationToken ct) => throw new NotSupportedException();
         public Task<IReadOnlyList<RoutingOwnerOptionResponse>> GetOwnerOptionsAsync(long businessUnitId, CancellationToken ct) => throw new NotSupportedException();
         public Task<QueuePageResponse> GetQueueAsync(long businessUnitId, WorkItemStatus? status, string? search, bool overdueOnly, int pageNumber, int pageSize, CancellationToken ct) => throw new NotSupportedException();
         public Task<UnassignedQueueItemResponse> ClaimAsync(long businessUnitId, long workItemId, QueueLeaseCommand command, CancellationToken ct) => throw new NotSupportedException();

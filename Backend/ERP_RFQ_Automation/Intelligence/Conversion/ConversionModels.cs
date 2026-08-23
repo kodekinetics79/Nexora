@@ -78,6 +78,15 @@ public sealed class ConvertRequest
     public string? Notes { get; set; }
 
     /// <summary>
+    /// Creates a governed NEEDS_REVIEW RFQ when quote-critical values are genuinely absent.
+    /// Missing values remain null; this never authorizes inferred or default quantities.
+    /// </summary>
+    public bool CreateNeedsClarification { get; set; }
+
+    /// <summary>Optional lifecycle concurrency check supplied by the lead detail client.</summary>
+    public long? ExpectedLifecycleVersion { get; set; }
+
+    /// <summary>
     /// One reason covering every line acknowledged in <see cref="ConvertRequestItem.AcknowledgeWarning"/>
     /// that does not carry its own. Operators acknowledge a batch of lines with a single
     /// explanation ("supplier confirmed pack sizes by phone"), so a per-line reason is optional

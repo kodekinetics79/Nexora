@@ -1118,6 +1118,10 @@ public partial class ErpRfqAutomationContext : DbContext
 
             entity.HasIndex(e => new { e.BusinessUnitId, e.NexoraSerial }, "IX_RFQ_BusinessUnitID_NexoraSerial");
 
+            entity.HasIndex(e => new { e.BusinessUnitId, e.LeadId }, "UX_RFQ_BusinessUnitID_LeadID")
+                .IsUnique()
+                .HasFilter("\"LeadID\" IS NOT NULL");
+
             entity.Property(e => e.Id).HasColumnName("ID");
             entity.Property(e => e.BiddingDecision).HasMaxLength(200);
             entity.Property(e => e.BusinessUnitId).HasColumnName("BusinessUnitID");
@@ -1176,7 +1180,7 @@ public partial class ErpRfqAutomationContext : DbContext
             // downstream of extraction review, so a non-positive quantity is always wrong.
             // LeadItems, the extraction landing zone, deliberately carries NO such
             // constraint — there 0 = "never established" plus a review flag.
-            entity.HasCheckConstraint("CK_RFQItems_Quantity_Positive", "\"Quantity\" > 0");
+            entity.HasCheckConstraint("CK_RFQItems_Quantity_Positive", "\"Quantity\" IS NULL OR \"Quantity\" > 0");
 
             // Line participation (see Rfqitem.Participation.cs). The reason rule is enforced in
             // the domain AND here, because a decline without a reason is an audit hole that a

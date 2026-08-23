@@ -43,6 +43,9 @@ public class AcceptedLeadResponseDTO
     public string? AssignedToFullName { get; set; }
     public DateTime? AssignedOn { get; set; }
     public string? AssignComment { get; set; }
+    public string AssignmentMethod { get; set; } = "AUTOMATIC";
+    public bool ManualAssignmentOverride { get; set; }
+    public long AssignmentVersion { get; set; }
 
     // WP-A1 unassigned-aging: whole hours the lead has sat unassigned (null when
     // assigned) and whether that exceeds the tenant's SLA threshold.
