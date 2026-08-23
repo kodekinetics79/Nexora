@@ -92,6 +92,39 @@ public static class NonCommercialAttachmentClassifier
         "المواصفات"      // specifications
     ];
 
+    /// <summary>
+    /// Cryptographic transport artifacts: parts a MAIL CLIENT generates, never a person, and
+    /// which by construction carry no commercial content.
+    ///
+    /// <para><b>Why these are keyed on type rather than name</b>, against the rest of this file's
+    /// grain. A filename is weak evidence — that is exactly why images are refused above. An
+    /// extension of <c>.p7s</c>, or a media type of <c>application/pkcs7-signature</c>, is not a
+    /// name a sender chose; it is emitted by the signing client and means one specific thing. A
+    /// DETACHED signature is a hash over the other parts. There is no document inside it to
+    /// lose.</para>
+    ///
+    /// <para><b>What is deliberately absent matters more than what is here.</b> <c>.p7m</c>
+    /// (enveloped S/MIME) is NOT listed: an enveloped part can BE the message, attachments and
+    /// all. <c>winmail.dat</c> (Outlook TNEF) is NOT listed for the same reason — it encapsulates
+    /// the real attachments, so a bill of quantities can be sitting inside one. Ignoring either
+    /// would produce a Lead priced against content nobody saw, which is the one error this module
+    /// exists to prevent. Both still go to a human, correctly.</para>
+    ///
+    /// <para>The defect this closes: a customer whose mail server signs outbound mail attaches
+    /// <c>smime.p7s</c> to EVERY message. The allow-list refuses it, the refusal marks the part
+    /// Skipped, and one Skipped part holds the whole message — so every RFQ that customer ever
+    /// sends is held for review over a file with nothing in it.</para>
+    /// </summary>
+    private static readonly HashSet<string> CryptographicArtifactExtensions =
+        new(StringComparer.OrdinalIgnoreCase) { ".p7s", ".p7c" };
+
+    /// <summary>The same rule on the declared media type, which is the stronger signal.</summary>
+    private static readonly string[] CryptographicArtifactMimeTypes =
+    [
+        "application/pkcs7-signature", "application/x-pkcs7-signature",
+        "application/pgp-signature"
+    ];
+
     /// <summary>Short commercial signals, matched as WHOLE WORDS only.</summary>
     private static readonly HashSet<string> CommercialTokens =
         new(StringComparer.Ordinal)
@@ -216,6 +249,26 @@ public static class NonCommercialAttachmentClassifier
             if (CommercialTokens.Contains(word)) return false;
 
         // POSITIVE EVIDENCE — and only then.
+
+        // A client-generated signature part, judged by TYPE rather than by name. It sits behind
+        // the commercial-vocabulary exclusion above deliberately: a part somebody troubled to
+        // name "RFQ" goes to a human even if its extension says otherwise, which is the safe
+        // direction and costs a signature part nothing.
+        if (extension.Length > 0 && CryptographicArtifactExtensions.Contains(extension))
+        {
+            matchedPattern = extension.TrimStart('.') + " signature";
+            return true;
+        }
+        if (!string.IsNullOrWhiteSpace(mimeType))
+        {
+            foreach (var type in CryptographicArtifactMimeTypes)
+            {
+                if (!mimeType.Contains(type, StringComparison.OrdinalIgnoreCase)) continue;
+                matchedPattern = type;
+                return true;
+            }
+        }
+
         foreach (var phrase in BoilerplatePhrases)
         {
             if (!normalized.Contains(phrase, StringComparison.Ordinal)) continue;
