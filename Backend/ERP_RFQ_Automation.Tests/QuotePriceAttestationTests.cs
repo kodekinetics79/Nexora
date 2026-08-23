@@ -490,8 +490,19 @@ public sealed class QuotePriceAttestationTests
     /// <summary>No configuration row: the PDF path exercises every built-in default.</summary>
     private sealed class StubQuoteConfigurationRepository : ERP_RFQ_Automation.Interfaces.IQuoteConfigurationRepository
     {
+        // Configured, because the PDF now refuses a business unit that cannot say who is sending
+        // the quotation. These tests are about the price-attestation gate; the identity gate is
+        // pinned by QuoteIssuerIdentityTests. Note the ORDER this relies on: attestation is
+        // checked before identity, so `The_pdf_refuses_an_unattested_quote` still gets the
+        // attestation exception rather than this one.
         public Task<QuoteConfiguration?> GetByBusinessUnitIdAsync(long businessUnitId) =>
-            Task.FromResult<QuoteConfiguration?>(null);
+            Task.FromResult<QuoteConfiguration?>(new QuoteConfiguration
+            {
+                BusinessUnitId = businessUnitId,
+                CompanyAddress = "King Fahd Road, Al Khobar 34423",
+                CompanyPhone = "+966 13 800 0000",
+                CompanyEmail = "sales@noorandsons.example"
+            });
         public Task AddAsync(QuoteConfiguration config) => Task.CompletedTask;
         public Task UpdateAsync(QuoteConfiguration config) => Task.CompletedTask;
     }

@@ -1152,10 +1152,58 @@ namespace ERP_RFQ_Automation.Services
                                 "6. Warranty and liability are as per the manufacturer's standard terms.\n" +
                                 "7. This quote is confidential and intended solely for the recipient.";
 
-            string companyAddress = config?.CompanyAddress ?? "123 Business Rd, Tech City, 54321";
-            string companyPhone = config?.CompanyPhone ?? "+1 800 555 0199";
-            string companyEmail = config?.CompanyEmail ?? quote.Rfq?.Lead?.Clientemail ?? "sales@company.com";
-            string footerText = config?.FooterText ?? "Professional Business Solutions";
+            // THE ISSUER, read from the tenant's own records and nowhere else — the same rule the
+            // delivery note already operates under (DeliveryNoteReadService.IssuerIdentity): every
+            // field may be null, and a null is reported as a gap rather than filled with something
+            // plausible, because the plausible one gets used.
+            //
+            // What this replaced was not a fallback but a wrong answer: `?? Lead.Clientemail` is
+            // the address the ENQUIRY ARRIVED FROM, so a tenant with no seller email on file sent
+            // the customer a quotation naming the customer as its sender, next to a placeholder
+            // street address and a +1 800 number. TenantBaselineSeeder deliberately leaves
+            // CompanyEmail null "so a blank sender line is a visible omission somebody will fix" —
+            // it was never blank, so nobody ever fixed it.
+            string companyAddress = config?.CompanyAddress;
+            string companyPhone = config?.CompanyPhone;
+            string companyEmail = config?.CompanyEmail;
+
+            // The legal entity, not the workspace label. Guaranteed present for an activated
+            // tenant: the identity.legal-customer activation control requires LegalName and
+            // RegistrationNumber before a tenant may be activated at all.
+            var issuer = await _context.Set<ERP_RFQ_Automation.Platform.Models.Tenant>()
+                .AsNoTracking()
+                .Where(t => t.PrimaryBusinessUnitId == quote.BusinessUnitId)
+                .OrderBy(t => t.Id)
+                .Select(t => new { t.LegalName, t.RegistrationNumber })
+                .FirstOrDefaultAsync(ct);
+
+            string sellerLegalName = string.IsNullOrWhiteSpace(issuer?.LegalName)
+                ? quote.BusinessUnit?.BusinessUnitName
+                : issuer.LegalName;
+            string sellerCommercialRegistration = issuer?.RegistrationNumber;
+            string sellerTaxRegistration = quote.BusinessUnit?.TaxRegistrationNumber;
+
+            // A document that cannot name its sender is not a document. Refuse, and name the
+            // screen — the rep who meets this did nothing wrong.
+            if (string.IsNullOrWhiteSpace(sellerLegalName))
+                throw new QuoteIssuerIdentityMissingException(
+                    "This quotation cannot be produced because the business unit sending it has no "
+                    + "name on file. Add the legal entity name under Setup → Business Units, then "
+                    + "download the quote again.");
+            if (string.IsNullOrWhiteSpace(companyAddress)
+                && string.IsNullOrWhiteSpace(companyPhone)
+                && string.IsNullOrWhiteSpace(companyEmail))
+                throw new QuoteIssuerIdentityMissingException(
+                    "This quotation cannot be produced because it would not tell the customer how "
+                    + "to reach you: no company address, telephone or email is configured. Fill in "
+                    + "Setup → Quote Format, then download the quote again.");
+
+            // Deliberately NOT a refusal. A VAT number is nullable by design, nothing has ever
+            // populated it automatically, and a tenant that is not yet VAT-registered still sends
+            // valid quotations. The delivery note prints the same gap on the face of the artefact
+            // rather than blocking; two customer-facing documents disagreeing about whether a
+            // missing registration is fatal would be worse than either rule alone.
+            string footerText = config?.FooterText;
 
             byte[] logoBytes = null;
             if (!string.IsNullOrEmpty(logoBase64))
@@ -1244,19 +1292,42 @@ namespace ERP_RFQ_Automation.Services
                                 }
                                 else
                                 {
-                                    c.Item().Text(quote.BusinessUnit?.BusinessUnitName ?? "Company Name")
+                                    c.Item().Text(sellerLegalName)
                                         .FontSize(22).Bold().FontColor(primaryColor);
                                 }
 
-                                c.Item().PaddingTop(8).Text(footerText)
-                                    .FontSize(9).Italic().FontColor(Colors.Grey.Darken1);
+                                if (!string.IsNullOrWhiteSpace(footerText))
+                                    c.Item().PaddingTop(8).Text(footerText)
+                                        .FontSize(9).Italic().FontColor(Colors.Grey.Darken1);
 
                                 c.Item().PaddingTop(10).Column(details =>
                                 {
                                     details.Spacing(1);
-                                    details.Item().Text(companyAddress).FontSize(8).FontColor(Colors.Grey.Medium);
-                                    details.Item().Text($"P: {companyPhone}").FontSize(8).FontColor(Colors.Grey.Medium);
-                                    details.Item().Text($"E: {companyEmail}").FontSize(8).FontColor(Colors.Grey.Medium);
+                                    // Each line appears only when it has something to say. A
+                                    // stray "P: " with nothing after it reads as a rendering
+                                    // fault; the refusal above already guarantees at least one
+                                    // of these three is present.
+                                    if (!string.IsNullOrWhiteSpace(companyAddress))
+                                        details.Item().Text(companyAddress).FontSize(8).FontColor(Colors.Grey.Medium);
+                                    if (!string.IsNullOrWhiteSpace(companyPhone))
+                                        details.Item().Text($"P: {companyPhone}").FontSize(8).FontColor(Colors.Grey.Medium);
+                                    if (!string.IsNullOrWhiteSpace(companyEmail))
+                                        details.Item().Text($"E: {companyEmail}").FontSize(8).FontColor(Colors.Grey.Medium);
+
+                                    // Registrations are printed as a NAMED GAP when absent rather
+                                    // than omitted. A Saudi buyer's finance team looks for the
+                                    // seller VAT number before it looks at the price; a line that
+                                    // is simply missing reads as an oversight by the reader,
+                                    // while "not on file" is unmistakably the sender's to fix —
+                                    // and the sender sees it on their own copy.
+                                    details.Item().PaddingTop(4).Text(
+                                        "CR: " + (string.IsNullOrWhiteSpace(sellerCommercialRegistration)
+                                            ? "not on file" : sellerCommercialRegistration))
+                                        .FontSize(8).FontColor(Colors.Grey.Medium);
+                                    details.Item().Text(
+                                        "VAT: " + (string.IsNullOrWhiteSpace(sellerTaxRegistration)
+                                            ? "not on file" : sellerTaxRegistration))
+                                        .FontSize(8).FontColor(Colors.Grey.Medium);
                                 });
                             });
 
@@ -1511,9 +1582,14 @@ namespace ERP_RFQ_Automation.Services
                 }
             }
 
+            // "Our Company" and "Sales Team" below were the same defect as the PDF's placeholder
+            // identity, one layer out: a customer receiving mail from "Our Company" learns
+            // nothing and trusts less. BusinessUnitName is non-null in the schema, so naming it
+            // directly is not a narrowing — it removes a fallback that could only ever have
+            // fired on a broken row, and would have hidden that breakage behind a bland phrase.
             var subject = !string.IsNullOrEmpty(customSubject)
                 ? customSubject
-                : $"Quote #{quote.QuoteNo} from {quote.BusinessUnit?.BusinessUnitName ?? "Our Company"}";
+                : $"Quote #{quote.QuoteNo} from {quote.BusinessUnit?.BusinessUnitName}";
 
             var body = !string.IsNullOrEmpty(customBody)
                 ? customBody.Replace("\n", "<br/>")
@@ -1523,7 +1599,7 @@ namespace ERP_RFQ_Automation.Services
                 <p>Thank you for your business.</p>
                 <br/>
                 <p>Best Regards,</p>
-                <p>{quote.BusinessUnit?.BusinessUnitName ?? "Sales Team"}</p>
+                <p>{quote.BusinessUnit?.BusinessUnitName}</p>
             ";
 
             var deliveryKey = $"quote:{quote.Id}:delivery:v1";
