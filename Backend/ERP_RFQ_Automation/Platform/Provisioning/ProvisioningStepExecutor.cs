@@ -159,10 +159,14 @@ public sealed class ProvisioningStepExecutor : IProvisioningStepExecutor
         // Re-verified here rather than trusted from submit. Minutes can pass between an operator
         // pressing submit and a runner picking the work up, and a plan deactivated in that window
         // would otherwise produce a tenant billed against a plan the business has withdrawn.
+        // Features ride along with the activeness check because the plan is also the source of the
+        // tenant's STARTING module grant — read here, at the same instant the plan is verified, so
+        // the copy can never be taken from a plan that turned out to be withdrawn.
+        string? planFeatures = null;
         if (request.PlanId is long planId)
         {
             var plan = await db.Set<Plan>().AsNoTracking()
-                .Select(p => new { p.Id, p.Code, p.IsActive })
+                .Select(p => new { p.Id, p.Code, p.IsActive, p.Features })
                 .FirstOrDefaultAsync(p => p.Id == planId, ct);
             if (plan is null)
                 throw new ProvisioningStepException(
@@ -171,6 +175,7 @@ public sealed class ProvisioningStepExecutor : IProvisioningStepExecutor
                 throw new ProvisioningStepException(
                     $"Plan '{plan.Code}' has been deactivated since this request was submitted and " +
                     "cannot be assigned.", isTerminal: true, failureCode: "plan-inactive");
+            planFeatures = plan.Features;
         }
 
         var billingMode = TenantBillingMode.Billable;
@@ -188,6 +193,13 @@ public sealed class ProvisioningStepExecutor : IProvisioningStepExecutor
             Slug = slug,
             Status = TenantStatus.Provisioning,
             PlanId = request.PlanId,
+            // The plan's features COPIED once as a starting template — not inherited. Since
+            // 20260818013530 this column is what [RequiresEntitlement] reads, so a tenant left on
+            // the closed default would provision cleanly and be able to open nothing; and a tenant
+            // that INHERITED would have its operator's later revoke undone by the next plan edit.
+            // Completed to the whole catalogue so the tenant is born DECIDED, which is what the
+            // entitlements.typed-hard-limits activation control requires.
+            Entitlements = Entitlements.TypedEntitlementCatalog.Complete(planFeatures),
             CreatedBy = actor,
             CreatedOn = now,
 

@@ -36,6 +36,18 @@ public static class EmailTriageReasonCodes
     public const string BulkListHeader = "bulk_list_header";
     /// <summary>The sender's local part is a no-reply / daemon / postmaster address.</summary>
     public const string NoreplySender = "noreply_sender";
+
+    /// <summary>
+    /// The message was sent BY this tenant, from one of its own mailboxes.
+    ///
+    /// Nexora emails a supplier RFQ from the platform sender; if that sender is also a mailbox
+    /// Nexora polls — which it is whenever a tenant tests with its own address, and whenever the
+    /// supplier's address happens to be the tenant's — the outbound message arrives back in the
+    /// inbox, carries an RFQ reference in its subject, and is classified as an inbound inquiry.
+    /// Every supplier request then manufactures a phantom lead, and the lead's own reference is
+    /// our solicitation number rather than a customer's.
+    /// </summary>
+    public const string OwnOutboundMail = "own_outbound_mail";
     /// <summary>Nothing but a quoted thread and/or a signature survived the strip, and there
     /// are no attachments — the sender added no new words.</summary>
     public const string EmptyAfterQuoteStrip = "empty_after_quote_strip";

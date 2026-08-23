@@ -259,7 +259,14 @@ const CustomFieldsPage: React.FC = () => {
               </TableRow>
             )}
 
-            {!isPending && ordered.length === 0 && (
+            {/*
+              `&& !isError` is the whole fix. The alert above already said the list could not be
+              loaded and that no empty result had been assumed — and then this branch, reached
+              because the failed read left `definitions` at its `= []` default, assumed exactly
+              that and printed "No custom fields yet" underneath it. Two contradictory diagnoses
+              on one screen, and the cheerful one is the one with the instruction in it.
+            */}
+            {!isPending && !isError && ordered.length === 0 && (
               <TableRow>
                 <TableCell colSpan={6} sx={{ py: 5 }}>
                   <Typography variant="body2" color="text.secondary" align="center">

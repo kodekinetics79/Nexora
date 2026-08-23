@@ -565,11 +565,13 @@ public sealed class AiExternalProviderAllowListTests
         await fixture.AuthorizeAsync(unstructuredAllowed: true);
         fixture.MutatePolicy(policy => policy.MonthlyHardTokenLimit = 43);
 
-        // 32 input bytes + 10 output tokens over one attempt reserves 42 of the 43.
+        // 128 input bytes estimate to 32 tokens; + 10 output tokens over one attempt reserves
+        // 42 of the 43. (These were 32 bytes when the reservation added a BYTE count to a
+        // token count — the numbers move with the unit fix, the intent does not.)
         await fixture.Governance.ReserveAsync(
             new AiCallContext(fixture.TenantId, AiPurposes.RfqExtraction, "spends-the-month", "test-v1",
                 ProviderClass: AiProviderClass.External),
-            fixture.Descriptor.Provider, fixture.Descriptor.Model, "external", 32, 10, 1, default);
+            fixture.Descriptor.Provider, fixture.Descriptor.Model, "external", 128, 10, 1, default);
 
         var report = await fixture.Readiness().EvaluateAsync(fixture.TenantId, default);
         var budget = report.Checks.Single(check => check.Code == AiReadinessCodes.MonthlyHardBudget);

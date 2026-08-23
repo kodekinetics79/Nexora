@@ -12,10 +12,12 @@ import customerAwardService, {
   type ClientPurchaseOrderMatchLine,
 } from '../../../api/services/customerAwardService';
 import CommercialProcessingEvidence from '../../../components/common/CommercialProcessingEvidence';
+import { statusLabel } from '../../../utils/statusLabels';
+import { formatMoney } from '../../../utils/currency';
 
-const readable = (value: string) => value.replaceAll('_', ' ');
+// See utils/currency.ts: one implementation, and one that cannot throw on a bad code.
 const money = (value: number | null | undefined, currency: string) =>
-  value == null ? 'Not provided' : new Intl.NumberFormat(undefined, { style: 'currency', currency }).format(value);
+  value == null ? 'Not provided' : formatMoney(value, currency);
 
 /**
  * FR-COM-04, wiring contract: "the unit is stated wherever a number could be money, weight, time or
@@ -130,14 +132,14 @@ export default function ClientPurchaseOrderReviewPage() {
     const blockedHere = differencesForLine(blocking, line.customerPurchaseOrderLineId);
     const acceptedHere = differencesForLine(accepted, line.customerPurchaseOrderLineId);
     return <TableCell>
-      <Chip size="small" color={line.differences.length ? 'warning' : 'success'} label={readable(line.matchStatus)} />
+      <Chip size="small" color={line.differences.length ? 'warning' : 'success'} label={statusLabel(line.matchStatus)} />
       {line.differences.map((difference) => <Typography
         key={difference}
         variant="caption"
         sx={{ display: 'block', mt: 0.5, fontWeight: blockedHere.includes(difference) ? 800 : 400 }}
         color={blockedHere.includes(difference) ? 'error.main' : acceptedHere.includes(difference) ? 'success.main' : undefined}
       >
-        {readable(difference)}
+        {statusLabel(difference)}
         {blockedHere.includes(difference) ? ' — blocks the order' : acceptedHere.includes(difference) ? ' — accepted' : ''}
       </Typography>)}
     </TableCell>;
@@ -151,7 +153,7 @@ export default function ClientPurchaseOrderReviewPage() {
         <Typography color="text.secondary">{match.header.customerName} · {match.header.nexoraSerial} · {match.currencyCode}</Typography>
       </Box>
       <Stack direction="row" spacing={1} sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
-        <Chip color={match.header.discrepancyCount > 0 ? 'warning' : 'success'} label={readable(match.header.matchOutcome)} />
+        <Chip color={match.header.discrepancyCount > 0 ? 'warning' : 'success'} label={statusLabel(match.header.matchOutcome)} />
         {match.header.quoteId && <Button startIcon={<Description />} onClick={() => navigate(`/sales/quotes/view/${match.header.quoteId}`)}>Customer Quote</Button>}
         {match.header.customerOrderId && <Button variant="contained" startIcon={<ShoppingCartCheckout />} onClick={() => navigate(`/sales/orders/${match.header.customerOrderId}`)}>Customer Order</Button>}
       </Stack>
@@ -186,9 +188,9 @@ export default function ClientPurchaseOrderReviewPage() {
       <Stack direction={{ xs: 'column', sm: 'row' }} spacing={3}>
         <Box><Typography variant="caption" color="text.secondary">CLIENT PO</Typography><Typography sx={{ fontWeight: 800 }}>{match.header.internalNumber}</Typography></Box>
         <Box><Typography variant="caption" color="text.secondary">CUSTOMER QUOTE</Typography><Typography sx={{ fontWeight: 800 }}>{match.header.quoteNumber || 'Review required'}</Typography></Box>
-        <Box><Typography variant="caption" color="text.secondary">AWARD</Typography><Typography sx={{ fontWeight: 800 }}>{match.awardNumber || 'Not accepted'} · {readable(match.awardStatus || 'REVIEW')}</Typography></Box>
+        <Box><Typography variant="caption" color="text.secondary">AWARD</Typography><Typography sx={{ fontWeight: 800 }}>{match.awardNumber || 'Not accepted'} · {statusLabel(match.awardStatus || 'REVIEW')}</Typography></Box>
         <Box><Typography variant="caption" color="text.secondary">PO DATE</Typography><Typography sx={{ fontWeight: 800 }}>{new Date(match.poDate).toLocaleDateString()}</Typography></Box>
-        <Box><Typography variant="caption" color="text.secondary">STATUS</Typography><Typography sx={{ fontWeight: 800 }}>{readable(match.header.status)}</Typography></Box>
+        <Box><Typography variant="caption" color="text.secondary">STATUS</Typography><Typography sx={{ fontWeight: 800 }}>{statusLabel(match.header.status)}</Typography></Box>
       </Stack>
     </Paper>
 
@@ -242,7 +244,7 @@ export default function ClientPurchaseOrderReviewPage() {
       </Button>}
     </Stack>
     {!cancelled && liveAward && <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
-      This Client PO cannot be withdrawn while award {match.awardNumber} is {readable(match.awardStatus || '')}.
+      This Client PO cannot be withdrawn while award {match.awardNumber} is {statusLabel(match.awardStatus || '')}.
       Cancel the award first; if it has already become a sales order, that order has to be reversed.
     </Typography>}
 

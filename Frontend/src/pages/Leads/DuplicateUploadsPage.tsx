@@ -22,9 +22,8 @@ import { OpenInNew, Refresh } from '@mui/icons-material';
 import leadService from '../../api/services/leadService';
 import ApiErrorNotice from '../../components/common/ApiErrorNotice';
 import { useAuth } from '../../context/AuthContext';
+import { statusLabel } from '../../utils/statusLabels';
 
-const readable = (value: string): string => value.replaceAll('_', ' ').toLowerCase()
-  .replace(/(^|\s)\S/g, (letter) => letter.toUpperCase());
 
 const bytes = (value: number): string => value >= 1024 * 1024
   ? `${(value / (1024 * 1024)).toFixed(2)} MB`
@@ -138,7 +137,7 @@ export default function DuplicateUploadsPage() {
                     <Typography variant="caption" color="text.secondary">Batch {row.uploadBatch}</Typography>
                   </TableCell>
                   <TableCell>{new Date(row.ingestedAt).toLocaleString()}</TableCell>
-                  <TableCell><Chip size="small" label={readable(row.duplicateType)} color="info" variant="outlined" /></TableCell>
+                  <TableCell><Chip size="small" label={statusLabel(row.duplicateType)} color="info" variant="outlined" /></TableCell>
                   <TableCell>
                     <Typography variant="body2">Original #{row.originalOccurrenceId ?? 'Pending'}</Typography>
                     <Typography variant="caption" sx={{ display: 'block' }}>
@@ -146,7 +145,7 @@ export default function DuplicateUploadsPage() {
                     </Typography>
                   </TableCell>
                   <TableCell>
-                    <Chip size="small" label={readable(row.securityStatus)}
+                    <Chip size="small" label={statusLabel(row.securityStatus)}
                       color={row.securityStatus === 'Cleared' ? 'success' : 'warning'} />
                     <Typography variant="caption" sx={{ display: 'block', mt: 0.5 }}>
                       Scan {row.resources.malwareScanReused ? 'reused' : row.resources.malwareScanRerun ? 'rerun' : 'pending'}
@@ -170,7 +169,7 @@ export default function DuplicateUploadsPage() {
                     <Typography variant="caption" sx={{ display: 'block' }}>
                       Actual {row.resources.totalActualCost.toFixed(6)} | External {row.resources.externalCost.toFixed(6)}
                     </Typography>
-                    <Typography variant="caption" color="text.secondary">{readable(row.resources.costStatus)}</Typography>
+                    <Typography variant="caption" color="text.secondary">{statusLabel(row.resources.costStatus)}</Typography>
                   </TableCell>
                   <TableCell>
                     <Typography variant="body2">

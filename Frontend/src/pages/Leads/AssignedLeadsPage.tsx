@@ -19,10 +19,13 @@ import {
   ExpandMore as ChangeIcon,
 } from '@mui/icons-material';
 import { useSnackbar } from 'notistack';
-import leadService, { type AcceptedLeadResponseDTO } from '../../api/services/leadService';
+import leadService, { assignabilityNote, type AcceptedLeadResponseDTO } from '../../api/services/leadService';
 import SearchField from '../../components/common/SearchField';
 import { useAuth } from '../../context/AuthContext';
 import { presentableErrorMessage } from '../../utils/apiErrors';
+import ApiErrorNotice from '../../components/common/ApiErrorNotice';
+import { gridEmptyOverlay } from '../../components/common/gridOverlays';
+import { formatDateSafe } from '../../utils/dates';
 import ClientCell from './ClientCell';
 import ResolveClientDialog from './ResolveClientDialog';
 
@@ -44,12 +47,6 @@ const AssignedLeadsPage: React.FC = () => {
 
   const isAdminOrManager = userData?.roleName?.toLowerCase().includes('admin') || userData?.roleName?.toLowerCase().includes('manager');
 
-  const formatDate = (dateStr: string | null) => {
-    if (!dateStr) return '—';
-    const d = new Date(dateStr);
-    return isNaN(d.getTime()) ? '—' : d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
-  };
-
   const getUrgencyColor = (dateStr: string | null) => {
     if (!dateStr) return 'text.secondary';
     const deadline = new Date(dateStr);
@@ -60,7 +57,7 @@ const AssignedLeadsPage: React.FC = () => {
     return 'success.main';
   };
 
-  const { data, isLoading, refetch } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['leads-assigned', paginationModel, search, myLeadsOnly],
     queryFn: () => leadService.getAssignedLeads({
       pageNumber: paginationModel.page + 1,
@@ -90,10 +87,20 @@ const AssignedLeadsPage: React.FC = () => {
     ),
   });
 
+  // Memoised because DataGrid takes a component TYPE here: rebuilding the factory on every
+  // render would hand it a new type each time and remount the overlay for no reason.
+  const noRowsOverlay = React.useMemo(() => gridEmptyOverlay({
+    title: myLeadsOnly ? 'No leads are assigned to you' : 'No leads are assigned yet',
+    message: 'A lead appears here once it has an owner, and leaves when it is converted to an RFQ.',
+    icon: <ItemsIcon sx={{ fontSize: 48 }} />,
+    filtered: Boolean(search),
+    filteredMessage: 'No assigned lead matches this search. Clear it to see the whole queue.',
+  }), [search, myLeadsOnly]);
+
   const columns: GridColDef[] = [
     {
       field: 'rfqno',
-      headerName: t('rfq_management'),
+      headerName: t('rfq_number'),
       width: 200,
       renderCell: (p) => (
         <Box sx={{ py: 1.5 }}>
@@ -187,7 +194,7 @@ const AssignedLeadsPage: React.FC = () => {
             </Stack>
           )}
           <Typography variant="caption" sx={{ fontSize: '0.65rem', fontWeight: 700, color: 'text.disabled', textTransform: 'uppercase' }}>
-            Since: {formatDate(p.row.assignedOn)}
+            Since: {formatDateSafe(p.row.assignedOn)}
           </Typography>
         </Box>
       )
@@ -198,8 +205,8 @@ const AssignedLeadsPage: React.FC = () => {
       width: 120,
       renderCell: (p) => (
         <Box sx={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', height: '100%' }}>
-          <Typography sx={{ fontSize: '0.8rem', fontWeight: 700 }}>{formatDate(p.row.recDate)}</Typography>
-          <Typography variant="caption" sx={{ fontSize: '0.65rem', fontWeight: 800, color: 'text.disabled', textTransform: 'uppercase' }}>Accepted: {formatDate(p.row.acceptedDate)}</Typography>
+          <Typography sx={{ fontSize: '0.8rem', fontWeight: 700 }}>{formatDateSafe(p.row.recDate)}</Typography>
+          <Typography variant="caption" sx={{ fontSize: '0.65rem', fontWeight: 800, color: 'text.disabled', textTransform: 'uppercase' }}>Accepted: {formatDateSafe(p.row.acceptedDate)}</Typography>
         </Box>
       )
     },
@@ -214,11 +221,11 @@ const AssignedLeadsPage: React.FC = () => {
       renderCell: (p) => (
         <Box sx={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', height: '100%' }}>
           <Typography sx={{ fontSize: '0.85rem', fontWeight: 900, color: getUrgencyColor(p.row.bidClosingDate) }}>
-            {formatDate(p.row.bidClosingDate)}
+            {formatDateSafe(p.row.bidClosingDate)}
           </Typography>
           <Typography variant="caption" sx={{ fontSize: '0.65rem', fontWeight: 800, color: 'text.disabled', textTransform: 'uppercase' }}>Submission</Typography>
           <Typography sx={{ fontSize: '0.8rem', fontWeight: 700, color: p.row.requiredDeliveryDate ? 'text.primary' : 'text.disabled' }}>
-            {p.row.requiredDeliveryDate ? formatDate(p.row.requiredDeliveryDate) : 'Not stated'}
+            {p.row.requiredDeliveryDate ? formatDateSafe(p.row.requiredDeliveryDate) : 'Not stated'}
           </Typography>
           <Typography variant="caption" sx={{ fontSize: '0.65rem', fontWeight: 800, color: 'text.disabled', textTransform: 'uppercase' }}>Buyer delivery</Typography>
         </Box>
@@ -229,12 +236,14 @@ const AssignedLeadsPage: React.FC = () => {
     // corpus — so no accuracy figure is shown anywhere in the product.
     {
       field: 'itemCount',
-      headerName: t('invoice_items'),
-      width: 80,
+      headerName: t('line_count'),
+      width: 90,
+      align: 'right',
+      headerAlign: 'right',
       renderCell: (p) => (
-        <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', height: '100%' }}>
+        <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', justifyContent: 'flex-end', height: '100%', width: '100%' }}>
           <ItemsIcon sx={{ fontSize: 14, color: 'text.secondary' }} />
-          <Typography sx={{ fontSize: '0.85rem', fontWeight: 800 }}>{p.row.itemCount || 0}</Typography>
+          <Typography sx={{ fontSize: '0.85rem', fontWeight: 800, fontVariantNumeric: 'tabular-nums' }}>{p.row.itemCount || 0}</Typography>
         </Stack>
       )
     },
@@ -281,11 +290,23 @@ const AssignedLeadsPage: React.FC = () => {
 
       {/* Grid */}
       <Paper sx={{ height: 'calc(100vh - 280px)', width: '100%', borderRadius: 3, overflow: 'hidden', border: '1px solid', borderColor: 'divider', boxShadow: '0 4px 20px rgba(0,0,0,0.03)' }}>
-        <DataGrid
+        {/* See OutstandingLeadsPage: a failed request must not render as an empty pipeline. */}
+        {isError ? (
+          <Box sx={{ height: '100%', display: 'grid', placeItems: 'center', p: 3 }}>
+            <Box sx={{ maxWidth: 520 }}>
+              <ApiErrorNotice
+                error={error}
+                fallbackMessage="We couldn't load assigned leads. No empty result has been assumed."
+                onRetry={() => refetch()}
+              />
+            </Box>
+          </Box>
+        ) : <DataGrid
           rows={data?.items ?? []}
           columns={columns}
           rowCount={data?.totalCount ?? 0}
           loading={isLoading}
+          slots={{ noRowsOverlay }}
           pageSizeOptions={[10, 25, 50]}
           paginationModel={paginationModel}
           paginationMode="server"
@@ -305,7 +326,7 @@ const AssignedLeadsPage: React.FC = () => {
               borderColor: 'action.hover',
             }
           }}
-        />
+        />}
       </Paper>
 
       {/* Client resolution — one dialog for the grid, driven by the client cell */}
@@ -334,10 +355,10 @@ const AssignedLeadsPage: React.FC = () => {
         {users.length === 0 && (
           <MenuItem disabled sx={{ fontSize: '0.8rem' }}>No team members found</MenuItem>
         )}
-        {users.map((u: any) => (
+        {users.map((u) => (
           <MenuItem
             key={u.id}
-            disabled={reassignMutation.isPending}
+            disabled={reassignMutation.isPending || !u.isEligibleForAssignment}
             onClick={() => {
               if (quickAssign) reassignMutation.mutate({
                 leadId: quickAssign.leadId,
@@ -345,9 +366,14 @@ const AssignedLeadsPage: React.FC = () => {
                 expectedAssigneeId: quickAssign.expectedAssigneeId,
               });
             }}
-            sx={{ fontSize: '0.8rem', fontWeight: 600, py: 1 }}
+            sx={{ fontSize: '0.8rem', fontWeight: 600, py: 1, display: 'block' }}
           >
-            <UserIcon sx={{ fontSize: 16, mr: 1, color: 'primary.main' }} /> {u.fullName || u.userName}
+            <Box sx={{ display: 'flex', alignItems: 'center' }}>
+              <UserIcon sx={{ fontSize: 16, mr: 1, color: 'primary.main' }} /> {u.fullName}
+            </Box>
+            <Typography variant="caption" sx={{ display: 'block', pl: 3, color: 'text.secondary', whiteSpace: 'normal' }}>
+              {assignabilityNote(u)}
+            </Typography>
           </MenuItem>
         ))}
       </Menu>

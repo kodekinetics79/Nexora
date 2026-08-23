@@ -20,6 +20,7 @@ import relativeTime from 'dayjs/plugin/relativeTime';
 import extractionReviewService from '../../api/services/extractionReviewService';
 import type { NeedsReviewItem } from '../../api/services/extractionReviewService';
 import SearchField from '../../components/common/SearchField';
+import { formatDateSafe } from '../../utils/dates';
 
 dayjs.extend(relativeTime);
 
@@ -55,12 +56,6 @@ const ExtractionReviewPage: React.FC = () => {
   });
 
   const totalCount = data?.totalCount ?? 0;
-
-  const formatDate = (dateStr: string | null) => {
-    if (!dateStr) return '—';
-    const d = dayjs(dateStr);
-    return d.isValid() ? d.format('DD MMM YYYY') : '—';
-  };
 
   const formatRelative = (dateStr: string | null) => {
     if (!dateStr) return '—';
@@ -132,7 +127,7 @@ const ExtractionReviewPage: React.FC = () => {
       renderCell: (p) => {
         const raw = p.row.receivedOn ?? p.row.recDate;
         return (
-          <Tooltip title={formatDate(raw)}>
+          <Tooltip title={formatDateSafe(raw)}>
             <Typography sx={{ fontSize: '0.8rem', fontWeight: 600, color: 'text.secondary' }}>
               {formatRelative(raw)}
             </Typography>

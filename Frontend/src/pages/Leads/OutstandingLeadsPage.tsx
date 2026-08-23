@@ -6,11 +6,14 @@ import {
   Box, Typography, Paper, Button, IconButton,
   Stack, Dialog, DialogTitle, DialogContent,
   DialogActions, TextField, MenuItem, Chip,
-  Menu, FormControlLabel, Switch,
+  Menu, FormControlLabel, Switch, Alert,
 } from '@mui/material';
 import {
   DataGrid, type GridColDef, type GridPaginationModel
 } from '@mui/x-data-grid';
+import ApiErrorNotice from '../../components/common/ApiErrorNotice';
+import { gridEmptyOverlay } from '../../components/common/gridOverlays';
+import { formatDateSafe } from '../../utils/dates';
 import {
   AssignmentInd as AssignIcon,
   Visibility as ViewIcon,
@@ -20,7 +23,7 @@ import {
   Person as UserIcon,
   MoreHoriz as MenuIcon,
 } from '@mui/icons-material';
-import leadService, { type AcceptedLeadResponseDTO } from '../../api/services/leadService';
+import leadService, { assignabilityNote, type AcceptedLeadResponseDTO } from '../../api/services/leadService';
 import SearchField from '../../components/common/SearchField';
 import { useSnackbar } from 'notistack';
 import { useAuth } from '../../context/AuthContext';
@@ -46,12 +49,6 @@ const OutstandingLeadsPage: React.FC = () => {
   // Inline 2-click assign: click "Assign to..." on a row, then pick a name.
   const [quickAssign, setQuickAssign] = useState<{ el: HTMLElement, leadId: number } | null>(null);
 
-  const formatDate = (dateStr: string | null) => {
-    if (!dateStr) return '—';
-    const d = new Date(dateStr);
-    return isNaN(d.getTime()) ? '—' : d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
-  };
-
   const getUrgencyColor = (dateStr: string | null) => {
     if (!dateStr) return 'text.secondary';
     const deadline = new Date(dateStr);
@@ -70,7 +67,7 @@ const OutstandingLeadsPage: React.FC = () => {
 
   const isAdminOrManager = userData?.roleName?.toLowerCase().includes('admin') || userData?.roleName?.toLowerCase().includes('manager');
 
-  const { data, isLoading, refetch } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['leads-outstanding', paginationModel, search, unassignedOnly],
     queryFn: () => leadService.getOutstandingLeads({
       pageNumber: paginationModel.page + 1,
@@ -120,10 +117,20 @@ const OutstandingLeadsPage: React.FC = () => {
     }
   };
 
+  // Memoised because DataGrid takes a component TYPE here: rebuilding the factory on every
+  // render would hand it a new type each time and remount the overlay for no reason.
+  const noRowsOverlay = React.useMemo(() => gridEmptyOverlay({
+    title: unassignedOnly ? 'Every accepted lead has an owner' : 'No outstanding leads',
+    message: 'Accepted leads appear here until they are assigned and converted to an RFQ.',
+    icon: <ItemsIcon sx={{ fontSize: 48 }} />,
+    filtered: Boolean(search),
+    filteredMessage: 'No outstanding lead matches this search. Clear it to see the whole queue.',
+  }), [search, unassignedOnly]);
+
   const columns: GridColDef[] = [
     {
       field: 'rfqno',
-      headerName: t('rfq_management'),
+      headerName: t('rfq_number'),
       width: 200,
       renderCell: (p) => (
         <Box sx={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', height: '100%' }}>
@@ -213,7 +220,7 @@ const OutstandingLeadsPage: React.FC = () => {
                 </Stack>
                 {!isUnassigned && (
                   <Typography variant="caption" sx={{ fontSize: '0.65rem', fontWeight: 700, color: 'text.disabled', textTransform: 'uppercase' }}>
-                    Since: {formatDate(p.row.assignedOn)}
+                    Since: {formatDateSafe(p.row.assignedOn)}
                   </Typography>
                 )}
               </>
@@ -228,8 +235,8 @@ const OutstandingLeadsPage: React.FC = () => {
       width: 120,
       renderCell: (p) => (
         <Box sx={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', height: '100%' }}>
-          <Typography sx={{ fontSize: '0.8rem', fontWeight: 700 }}>{formatDate(p.row.recDate)}</Typography>
-          <Typography variant="caption" sx={{ fontSize: '0.65rem', fontWeight: 800, color: 'text.disabled', textTransform: 'uppercase' }}>Accepted: {formatDate(p.row.acceptedDate)}</Typography>
+          <Typography sx={{ fontSize: '0.8rem', fontWeight: 700 }}>{formatDateSafe(p.row.recDate)}</Typography>
+          <Typography variant="caption" sx={{ fontSize: '0.65rem', fontWeight: 800, color: 'text.disabled', textTransform: 'uppercase' }}>Accepted: {formatDateSafe(p.row.acceptedDate)}</Typography>
         </Box>
       )
     },
@@ -244,11 +251,11 @@ const OutstandingLeadsPage: React.FC = () => {
       renderCell: (p) => (
         <Box sx={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', height: '100%' }}>
           <Typography sx={{ fontSize: '0.85rem', fontWeight: 900, color: getUrgencyColor(p.row.bidClosingDate) }}>
-            {formatDate(p.row.bidClosingDate)}
+            {formatDateSafe(p.row.bidClosingDate)}
           </Typography>
           <Typography variant="caption" sx={{ fontSize: '0.65rem', fontWeight: 800, color: 'text.disabled', textTransform: 'uppercase' }}>Submission</Typography>
           <Typography sx={{ fontSize: '0.8rem', fontWeight: 700, color: p.row.requiredDeliveryDate ? 'text.primary' : 'text.disabled' }}>
-            {p.row.requiredDeliveryDate ? formatDate(p.row.requiredDeliveryDate) : 'Not stated'}
+            {p.row.requiredDeliveryDate ? formatDateSafe(p.row.requiredDeliveryDate) : 'Not stated'}
           </Typography>
           <Typography variant="caption" sx={{ fontSize: '0.65rem', fontWeight: 800, color: 'text.disabled', textTransform: 'uppercase' }}>Buyer delivery</Typography>
         </Box>
@@ -256,12 +263,14 @@ const OutstandingLeadsPage: React.FC = () => {
     },
     {
       field: 'itemCount',
-      headerName: t('invoice_items'),
-      width: 80,
+      headerName: t('line_count'),
+      width: 90,
+      align: 'right',
+      headerAlign: 'right',
       renderCell: (p) => (
-        <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', height: '100%' }}>
+        <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', justifyContent: 'flex-end', height: '100%', width: '100%' }}>
           <ItemsIcon sx={{ fontSize: 14, color: 'text.secondary' }} />
-          <Typography sx={{ fontSize: '0.85rem', fontWeight: 800 }}>{p.value || 0}</Typography>
+          <Typography sx={{ fontSize: '0.85rem', fontWeight: 800, fontVariantNumeric: 'tabular-nums' }}>{p.value || 0}</Typography>
         </Stack>
       )
     },
@@ -332,11 +341,25 @@ const OutstandingLeadsPage: React.FC = () => {
 
       {/* Grid */}
       <Paper sx={{ height: 'calc(100vh - 280px)', width: '100%', borderRadius: 3, overflow: 'hidden', border: '1px solid', borderColor: 'divider', boxShadow: '0 4px 20px rgba(0,0,0,0.03)' }}>
-        <DataGrid
+        {/* A failed request used to fall through `data?.items ?? []` into MUI's bare "No rows",
+            which a salesperson reads as "no outstanding leads" — a statement about the pipeline,
+            not about the network. An empty result is never assumed from a failure. */}
+        {isError ? (
+          <Box sx={{ height: '100%', display: 'grid', placeItems: 'center', p: 3 }}>
+            <Box sx={{ maxWidth: 520 }}>
+              <ApiErrorNotice
+                error={error}
+                fallbackMessage="We couldn't load outstanding leads. No empty result has been assumed."
+                onRetry={() => refetch()}
+              />
+            </Box>
+          </Box>
+        ) : <DataGrid
           rows={data?.items ?? []}
           columns={columns}
           rowCount={data?.totalCount ?? 0}
           loading={isLoading}
+          slots={{ noRowsOverlay }}
           pageSizeOptions={[10, 25, 50]}
           paginationModel={paginationModel}
           paginationMode="server"
@@ -356,7 +379,7 @@ const OutstandingLeadsPage: React.FC = () => {
               borderColor: 'action.hover',
             }
           }}
-        />
+        />}
       </Paper>
 
       {/* Client resolution — one dialog for the grid, driven by the client cell */}
@@ -381,10 +404,19 @@ const OutstandingLeadsPage: React.FC = () => {
               onChange={(e) => setAssignToUserId(e.target.value)}
               sx={{ '& .MuiOutlinedInput-root': { borderRadius: 2 } }}
             >
-              {users.map((u: any) => (
-                <MenuItem key={u.id} value={u.id}>{u.fullName || u.userName}</MenuItem>
+              {users.map((u) => (
+                <MenuItem key={u.id} value={u.id} disabled={!u.isEligibleForAssignment}>
+                  {u.fullName} &mdash; {assignabilityNote(u)}
+                </MenuItem>
               ))}
             </TextField>
+            {users.length > 0 && !users.some((u) => u.isEligibleForAssignment) && (
+              <Alert severity="warning" sx={{ borderRadius: 2 }}>
+                Nobody in this business unit can currently receive a lead. Governed routing only
+                accepts a user who has an effective Sales Rep profile with capacity left, and there
+                is no such user right now. Give someone a profile in Sales &gt; Rep directory.
+              </Alert>
+            )}
             <TextField
               fullWidth
               multiline
@@ -427,16 +459,21 @@ const OutstandingLeadsPage: React.FC = () => {
         {users.length === 0 && (
           <MenuItem disabled sx={{ fontSize: '0.8rem' }}>No team members found</MenuItem>
         )}
-        {users.map((u: any) => (
+        {users.map((u) => (
           <MenuItem
             key={u.id}
-            disabled={assignMutation.isPending}
+            disabled={assignMutation.isPending || !u.isEligibleForAssignment}
             onClick={() => {
               if (quickAssign) assignMutation.mutate({ leadId: quickAssign.leadId, assignedToUserId: Number(u.id) });
             }}
-            sx={{ fontSize: '0.8rem', fontWeight: 600, py: 1 }}
+            sx={{ fontSize: '0.8rem', fontWeight: 600, py: 1, display: 'block' }}
           >
-            <UserIcon sx={{ fontSize: 16, mr: 1, color: 'primary.main' }} /> {u.fullName || u.userName}
+            <Box sx={{ display: 'flex', alignItems: 'center' }}>
+              <UserIcon sx={{ fontSize: 16, mr: 1, color: 'primary.main' }} /> {u.fullName}
+            </Box>
+            <Typography variant="caption" sx={{ display: 'block', pl: 3, color: 'text.secondary', whiteSpace: 'normal' }}>
+              {assignabilityNote(u)}
+            </Typography>
           </MenuItem>
         ))}
       </Menu>

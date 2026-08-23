@@ -34,8 +34,9 @@ vi.mock('../../auth/usePlatformPermissions', () => ({
   }),
 }));
 
-// `status` matters: the server refuses a profile change once a tenant has left Provisioning, and
-// the panel disables the control on the same rule.
+// `status` matters, but not as a freeze. The server refuses to LOOSEN a live tenant's profile and
+// says "Tightening back to PRODUCTION is always available"; the panel now follows that rule rather
+// than its old approximation of it.
 const tenant = {
   id: '9', name: 'Acme', dataRegion: 'us-east-1', status: 'provisioning', baseCurrencyCode: 'USD',
 } as Tenant;
@@ -75,10 +76,10 @@ const activationBlocked: TenantActivationDecision = {
   },
 };
 
-const renderPanel = () => render(
+const renderPanel = (subject: Tenant = tenant) => render(
   <MemoryRouter>
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-      <SnackbarProvider><ActivationPolicyPanel tenant={tenant} /></SnackbarProvider>
+      <SnackbarProvider><ActivationPolicyPanel tenant={subject} /></SnackbarProvider>
     </QueryClientProvider>
   </MemoryRouter>,
 );
@@ -178,6 +179,49 @@ describe('ActivationPolicyPanel', () => {
     permission.isOwner = false;
     renderPanel();
     expect(await screen.findByRole('button', { name: 'Change profile' })).toBeDisabled();
+  });
+
+  /**
+   * The live-tenant recovery path.
+   *
+   * The button was `disabled={tenant.status !== 'provisioning'}`, which reads the server's rule as
+   * "a live tenant's profile is frozen". It is not: SetDeploymentProfile refuses only to LOOSEN a
+   * live tenant, and says "Tightening back to PRODUCTION is always available". The cost was real —
+   * a tenant activated under LOCAL_TEST is permanently uncertifiable while it stays there, and the
+   * one action that fixes it was the action the console greyed out, with nothing on screen saying
+   * the server would have allowed it.
+   */
+  it('lets a live tenant tighten back to PRODUCTION', async () => {
+    const setProfile = vi.spyOn(platformApi, 'setTenantDeploymentProfile')
+      .mockResolvedValue({ ...tenant, deploymentProfile: 'PRODUCTION' } as Tenant);
+    vi.spyOn(platformApi, 'getTenantActivationDecision').mockResolvedValue({
+      ...activationBlocked, deploymentProfile: 'LOCAL_TEST',
+    });
+
+    renderPanel({ ...tenant, status: 'active' } as Tenant);
+
+    // Labelled for the only move available, not for the general one.
+    const button = await screen.findByRole('button', { name: 'Tighten to PRODUCTION' });
+    expect(button).toBeEnabled();
+    fireEvent.click(button);
+
+    // No reason field: the server requires one only to move OFF production, and demanding one to
+    // tighten would be a hurdle in front of the safe direction.
+    expect(screen.queryByLabelText(/Reason/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Record profile' }));
+
+    // null, not '': tightening a gate needs no justification and the server enforces that
+    // asymmetry, so the console sends nothing rather than an empty string it would have to parse.
+    await waitFor(() => expect(setProfile).toHaveBeenCalledWith('9', {
+      profile: 'PRODUCTION', reason: null,
+    }));
+  });
+
+  it('offers no profile change to a live tenant already on PRODUCTION', async () => {
+    // The strictest profile with nothing to tighten to. Disabled rather than hidden, and the
+    // tooltip says a live tenant cannot be relabelled onto a looser one.
+    renderPanel({ ...tenant, status: 'active' } as Tenant);
+    expect(await screen.findByRole('button', { name: 'Tighten to PRODUCTION' })).toBeDisabled();
   });
 
   /**

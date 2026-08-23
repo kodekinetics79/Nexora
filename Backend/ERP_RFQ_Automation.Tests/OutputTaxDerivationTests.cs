@@ -172,6 +172,47 @@ public sealed class OutputTaxDerivationTests
     // ───────────────────────────────────────────── the production path
 
     [Fact]
+    public async Task A_quote_is_created_without_the_caller_supplying_an_actor()
+    {
+        // POST /api/Quote answered "The CreatedBy field is required" while the very next line of
+        // the controller overwrote whatever was sent with the token's actor. [ApiController]
+        // validation runs BEFORE the action body, so the endpoint rejected requests it would
+        // then have ignored — a caller could only get through by inventing a value that was
+        // immediately discarded.
+        //
+        // Attribution is the server's to decide. A request that omits it must succeed, and must
+        // never persist a blank actor: Quote.CreatedBy is non-nullable, and an empty audit
+        // record is worse than a named default.
+        using var database = new TestDb();
+        await using var context = database.ContextFor(null);
+        const long tenant = 97_401;
+        Seed.EnsureBusinessUnit(context, tenant);
+        context.SetupMasters.Add(DraftStatus(97_499, tenant));
+        await context.SaveChangesAsync();
+
+        var service = new QuoteService(context, null!, null!);
+        var created = await service.CreateQuoteAsync(new QuoteCreateRequestDTO
+        {
+            QuoteNo = "QT-NO-ACTOR",
+            BusinessUnitId = tenant,
+            QuoteDate = DateTime.UtcNow,
+            // CreatedBy deliberately omitted — exactly what the controller sends before it stamps.
+            QuoteItems =
+            [
+                new QuoteItemCreateRequestDTO
+                {
+                    ItemDescription = "Line with no supplied actor",
+                    Quantity = 1m,
+                    UnitPrice = 100m,
+                },
+            ],
+        });
+
+        var stored = await context.Quotes.AsNoTracking().SingleAsync(x => x.Id == created.Id);
+        Assert.False(string.IsNullOrWhiteSpace(stored.CreatedBy));
+    }
+
+    [Fact]
     public async Task A_priced_quote_line_carries_a_server_derived_tax_the_client_never_supplied()
     {
         using var database = new TestDb();

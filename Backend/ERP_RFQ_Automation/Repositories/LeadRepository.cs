@@ -1,4 +1,3 @@
-using ERP_RFQ_Automation.Deduplication;
 using ERP_RFQ_Automation.DTOs.AcceptedLeadDTOs;
 using ERP_RFQ_Automation.DTOs.Lead;
 using ERP_RFQ_Automation.DTOs.LeadDTOs;
@@ -35,19 +34,17 @@ namespace ERP_RFQ_Automation.Repositories
 
         private readonly ErpRfqAutomationContext _context;
         private readonly ISlaPolicyReader _slaPolicy;
-        private readonly ILeadDuplicateDetector? _duplicateDetector;
         private readonly ILogger<LeadRepository>? _logger;
         private readonly ERP_RFQ_Automation.Metrics.IMetricRecorder? _metrics;
         private readonly ICommercialLineResolutionApplicationService? _lineResolution;
         private readonly ERP_RFQ_Automation.CustomerResolution.ICustomerAliasLearner? _aliasLearner;
 
         // Optional dependencies keep existing constructions (tests, pre-wiring DI)
-        // compiling and running: duplicate detection / metrics / alias learning
-        // degrade to no-ops, the SLA reader falls back to the flat default threshold.
+        // compiling and running: metrics / alias learning degrade to no-ops, the SLA
+        // reader falls back to the flat default threshold.
         public LeadRepository(
             ErpRfqAutomationContext context,
             ISlaPolicyReader? slaPolicy = null,
-            ILeadDuplicateDetector? duplicateDetector = null,
             ILogger<LeadRepository>? logger = null,
             ERP_RFQ_Automation.Metrics.IMetricRecorder? metrics = null,
             ICommercialLineResolutionApplicationService? lineResolution = null,
@@ -55,7 +52,6 @@ namespace ERP_RFQ_Automation.Repositories
         {
             _context = context;
             _slaPolicy = slaPolicy ?? new DefaultSlaPolicyReader();
-            _duplicateDetector = duplicateDetector;
             _logger = logger;
             _metrics = metrics;
             _lineResolution = lineResolution;
@@ -88,6 +84,37 @@ namespace ERP_RFQ_Automation.Repositories
                 }).ToListAsync();
         }
 
+        /// <summary>
+        /// The tenant's LeadStatus rows that mean the enquiry is over: DISQUALIFIED, LOST,
+        /// CANCELLED, COMPLETED, DUPLICATED — read through <see cref="LifecyclePolicy"/> rather
+        /// than restated as a SQL string list, because the alias table (REJECTED → DISQUALIFIED,
+        /// CLOSED → COMPLETED) cannot be expressed in a WHERE clause and a second, divergent
+        /// definition of "finished" is how a lead ends up open in one screen and closed in another.
+        ///
+        /// <para>The type is normalised the same way <c>LifecycleStatusCatalog.ResolveIdAsync</c>
+        /// normalises it, so a tenant carrying legacy "Lead Status" rows is read identically to a
+        /// seeded one. IsActive is deliberately NOT filtered: retiring the "Cancelled" row does not
+        /// un-cancel the leads still pointing at it.</para>
+        ///
+        /// <para>Unresolvable ids fail OPEN — the lead is shown. On a board that counts down to a
+        /// bid deadline, a stale row a person can dismiss costs less than a live tender nobody
+        /// ever sees again.</para>
+        /// </summary>
+        private async Task<List<long>> FinishedLeadStatusIdsAsync(long businessUnitId)
+        {
+            var statuses = await _context.SetupMasters.AsNoTracking()
+                .Where(s => s.BusinessUnitId == businessUnitId
+                    && s.SetupType.ToLower().Replace(" ", "") == "leadstatus")
+                .Select(s => new { s.SetupId, s.SetupCode, s.SetupValue })
+                .ToListAsync();
+
+            return statuses
+                .Where(s => LifecyclePolicy.IsTerminal(
+                    "Lead", LifecyclePolicy.Canonicalize("Lead", s.SetupCode, s.SetupValue)))
+                .Select(s => s.SetupId)
+                .ToList();
+        }
+
         public async Task<(IEnumerable<LeadResponseDTO>, int TotalCount)> GetLeadListAsync(int pageNumber, int pageSize, long? id, string? rfqno, string? buyersName, string? leadSource, long businessUnitId, DateTime? startDate = null, DateTime? endDate = null, string? emailSource = null, string? clientemail = null, string? view = null)
         {
             var query = _context.Leads
@@ -96,7 +123,13 @@ namespace ERP_RFQ_Automation.Repositories
                 .Include(l => l.EmailIngests)
                 .Where(l => l.BusinessUnitId == businessUnitId);
 
-            if (!string.Equals(view, "revisions", StringComparison.OrdinalIgnoreCase))
+            // The default list is the untriaged inbox — RfqRepository spells LeadStatusId == null
+            // out as "new lead to review". "open" and "revisions" deliberately escape it: ANY
+            // lifecycle transition stamps a status, so a queue that keeps this filter is a queue
+            // that empties itself the moment a rep starts working, which is precisely how the
+            // deadline board lost every tender the day after it was advanced.
+            var openWorkView = string.Equals(view, "open", StringComparison.OrdinalIgnoreCase);
+            if (!openWorkView && !string.Equals(view, "revisions", StringComparison.OrdinalIgnoreCase))
                 query = query.Where(l => l.LeadStatusId == null);
 
             // Apply filters
@@ -120,6 +153,15 @@ namespace ERP_RFQ_Automation.Repositories
                 query = query.Where(l => l.DuplicateStatus == "suspected" || l.DuplicateStatus == "confirmed");
             else if (string.Equals(view, "revisions", StringComparison.OrdinalIgnoreCase))
                 query = query.Where(l => l.CurrentRevisionNumber > 1);
+            else if (openWorkView)
+            {
+                // "Open" is the whole live pipeline, not the inbox: untriaged mail AND everything
+                // someone has already advanced. Only genuinely finished work is dropped, and which
+                // states those are comes from the governed lifecycle policy, never from a second
+                // list of strings restated here.
+                var finished = await FinishedLeadStatusIdsAsync(businessUnitId);
+                query = query.Where(l => l.LeadStatusId == null || !finished.Contains(l.LeadStatusId.Value));
+            }
             else if (string.Equals(view, "ready-for-rfq", StringComparison.OrdinalIgnoreCase))
                 // Mirrors LeadConversionIntelligence.FindConversionBlockers exactly. A closing
                 // date is deliberately NOT required in either place: an enquiry that states no
@@ -187,6 +229,23 @@ namespace ERP_RFQ_Automation.Repositories
                     .Select(c => new { c.Id, c.Name })
                     .ToDictionaryAsync(c => c.Id, c => c.Name);
 
+            // LIFECYCLE STATE: the projection has always carried LeadStatusId — a tenant-local
+            // integer no screen can read — and nothing else, so every consumer that needed to know
+            // whether work had started had to guess. The deadline board guessed by asking for the
+            // untriaged view and dropped the rest. Canonical code for logic, the tenant's own label
+            // for a human, one query for the whole page.
+            var pagedStatusIds = leads.Where(l => l.LeadStatusId.HasValue)
+                .Select(l => l.LeadStatusId!.Value).Distinct().ToList();
+            var statusRows = pagedStatusIds.Count == 0
+                ? new Dictionary<long, (string Code, string Label)>()
+                : (await _context.SetupMasters.AsNoTracking()
+                        .Where(s => s.BusinessUnitId == businessUnitId && pagedStatusIds.Contains(s.SetupId))
+                        .Select(s => new { s.SetupId, s.SetupCode, s.SetupValue })
+                        .ToListAsync())
+                    .ToDictionary(
+                        s => s.SetupId,
+                        s => (LifecyclePolicy.Canonicalize("Lead", s.SetupCode, s.SetupValue), s.SetupValue));
+
             var candidateRows = await (
                 from candidate in _context.Set<ERP_RFQ_Automation.CustomerResolution.LeadCustomerMatchCandidate>().AsNoTracking()
                 join customer in _context.Customers.AsNoTracking()
@@ -220,6 +279,12 @@ namespace ERP_RFQ_Automation.Repositories
                 var ingestedOn = LeadIdentity.LeadIngestionAudit.ResolveIngestionTimestamp(
                     earliestReceivedOn.TryGetValue(l.Id, out var receivedOn) ? receivedOn : null,
                     l.CreatedDate);
+                // No status row at all is a state too — the enquiry has never been triaged — and is
+                // reported as null rather than invented as "Received".
+                (string Code, string Label)? status = l.LeadStatusId.HasValue
+                    && statusRows.TryGetValue(l.LeadStatusId.Value, out var statusRow)
+                        ? statusRow
+                        : null;
                 return new LeadResponseDTO
                 {
                     Id = l.Id,
@@ -278,6 +343,8 @@ namespace ERP_RFQ_Automation.Repositories
                     EmailSource = l.EmailSource,
                     Clientemail = l.Clientemail,
                     LeadStatusId = l.LeadStatusId,
+                    LeadStatusCode = status?.Code,
+                    LeadStatusLabel = status?.Label,
                     LifecycleVersion = l.LifecycleVersion,
                     ReviewVersion = l.ReviewVersion,
                     RequiresCommercialReview = l.RequiresCommercialReview,
@@ -285,6 +352,12 @@ namespace ERP_RFQ_Automation.Repositories
                     InquiryType = l.InquiryType, // WP-BOQ: service/mixed list badge
                     DuplicateStatus = l.DuplicateStatus,
                     DuplicateOfLeadId = l.DuplicateOfLeadId,
+                    DuplicateResolvedBy = l.DuplicateResolvedBy,
+                    // This list offers a "revisions" view that filters on CurrentRevisionNumber > 1
+                    // (see the query above), and then returned every matching row reporting
+                    // revision 0 because this projection never set the column. A view whose whole
+                    // purpose is revised leads could not say which revision any of them was.
+                    CurrentRevisionNumber = l.CurrentRevisionNumber,
                     ItemCount = itemCounts.TryGetValue(l.Id, out var count) ? count : 0,
                     LeadItems = new List<LeadItemResponseDTO>(), // Empty list for list view
                     Attachments = attachmentsGrouped.TryGetValue(l.Id, out var atts) ? atts : new List<AttachmentResponseDTO>()
@@ -327,6 +400,8 @@ namespace ERP_RFQ_Automation.Repositories
             if (string.IsNullOrWhiteSpace(createdBy)) throw new ArgumentException("Authenticated actor is required.", nameof(createdBy));
 
             var strategy = _context.Database.CreateExecutionStrategy();
+            try
+            {
             return await strategy.ExecuteAsync(async () =>
             {
                 _context.ChangeTracker.Clear();
@@ -352,16 +427,9 @@ namespace ERP_RFQ_Automation.Repositories
                     await transaction.CommitAsync();
                     return (already.Id, already.Rfqno);
                 }
-                if (lifecycleCode != "QUALIFIED")
-                    throw new InvalidOperationException("Only a qualified lead can be converted to an RFQ.");
-                if (lead.DuplicateStatus is "suspected" or "confirmed")
-                    throw new InvalidOperationException(
-                        $"This lead is flagged as a possible duplicate of lead #{lead.DuplicateOfLeadId}; resolve the duplicate flag first.");
-                if (lead.RequiresCommercialReview && !lead.CommercialFactsVerified)
-                    throw new InvalidOperationException(
-                        "AI-extracted commercial facts must be approved in extraction review before RFQ conversion.");
-                if (!lead.CustomerId.HasValue)
-                    throw new InvalidOperationException("Resolve the lead customer before creating an RFQ.");
+                // The shared gate every RFQ-creating door runs (this door, the intelligence
+                // conversion, and POST /api/Rfq with a LeadId) — one set of checks, one wording.
+                LeadConversionGate.EnsureEligible(lead);
 
                 if (_lineResolution is not null)
                     await _lineResolution.ResolveLeadAsync(businessUnitId, lead.Id, 10);
@@ -381,14 +449,33 @@ namespace ERP_RFQ_Automation.Repositories
                 if (_lineResolution is not null)
                     await _lineResolution.LinkRfqAsync(businessUnitId, lead.Id, rfq.Id);
 
-                await new LifecycleApplicationService(_context).TransitionLeadInCurrentTransactionAsync(
-                    lead.BusinessUnitId, lead.Id, new LifecycleActor(createdBy.Trim(), "AuthenticatedUser"),
+                var lifecycle = new LifecycleApplicationService(_context);
+                var actor = new LifecycleActor(createdBy.Trim(), "AuthenticatedUser");
+                await lifecycle.TransitionLeadInCurrentTransactionAsync(
+                    lead.BusinessUnitId, lead.Id, actor,
                     new LifecycleTransitionCommand("CONVERTED_TO_RFQ", lead.LifecycleVersion, null, null,
                         "Api", $"conversion-{lead.Id}", $"rfq-{rfq.Id}",
                         $"lead-conversion:{lead.BusinessUnitId}:{lead.Id}"), false, default);
+                // Dedicated promotion event ALONGSIDE the generic transition, same transaction:
+                // consumers get the lead/RFQ/revision facts by name instead of parsing a
+                // status-transition payload.
+                await lifecycle.RecordLeadPromotedToRfqInCurrentTransactionAsync(
+                    lead.BusinessUnitId, lead.Id, rfq.Id, actor, $"conversion-{lead.Id}", default);
                 await transaction.CommitAsync();
                 return (rfq.Id, rfq.Rfqno);
             });
+            }
+            catch (DbUpdateException ex) when (LeadConversionGate.IsDuplicateKey(ex))
+            {
+                // Lost the race against the RFQ."LeadID" partial unique index: another caller
+                // converted this lead between our existence check and our insert. The lead HAS
+                // its RFQ — resolve to it exactly as the read-then-return idempotent path would.
+                _context.ChangeTracker.Clear();
+                var winner = await _context.Rfqs.AsNoTracking()
+                    .FirstOrDefaultAsync(r => r.LeadId == id && r.BusinessUnitId == businessUnitId);
+                if (winner == null) throw; // Not our index after all — surface the truth.
+                return (winner.Id, winner.Rfqno);
+            }
         }
 
         private async Task<Rfq> CreateRfqFromLeadAsync(Lead lead, long businessUnitId, string createdBy)
@@ -460,6 +547,11 @@ namespace ERP_RFQ_Automation.Repositories
                     LeadTime = li.LeadTime,
                     ReceivedDate = li.ReceivedDate,
                     BidClosingDateLine = li.BidClosingDateLine,
+                    // Carried from the lead header for the same reason, and by the same rule, as
+                    // LeadConversionIntelligence — see the comment there. Both conversion paths
+                    // have to do this, or which one an operator happened to use decides whether
+                    // the sourcing case and the SLA sweep ever learn the customer's date.
+                    RequiredDesiredDate = lead.RequiredDeliveryDate,
                     Aiconfidence = li.Aiconfidence,
                     CreatedBy = createdBy.Trim(),
                     CreatedDate = now
@@ -568,7 +660,14 @@ namespace ERP_RFQ_Automation.Repositories
                     FileName = a.FileName,
                     FilePath = a.FilePath,
                     MimeType = a.MimeType,
-                    // ... other fields
+                    // Completed from the "// ... other fields" this projection used to stop at.
+                    // The detail projection of this same DTO has always set them; this one is what
+                    // the accepted-leads grid reads, and FileSize arriving undefined is what makes
+                    // a size renderer print NaN KB rather than nothing.
+                    FileSize = a.FileSize,
+                    ContentType = a.ContentType,
+                    CreatedOn = a.CreatedOn,
+                    UploadedDate = a.UploadedDate
                 }).ToList());
 
             // Batch load item counts for all leads in a single query
@@ -587,6 +686,12 @@ namespace ERP_RFQ_Automation.Repositories
             var dtos = leads.Select(l => new AcceptedLeadResponseDTO
             {
                 Id = l.Id,
+                // The commercial identity, on the LIST as well as the detail. The detail projection
+                // of this same DTO has always carried both; dropping them here meant which endpoint
+                // a screen happened to call decided whether the lead had a Nexora serial at all —
+                // and the serial is the reference a customer quotes back at us.
+                CommercialCaseId = l.CommercialCaseId,
+                CommercialCaseReference = l.CommercialCaseReference,
                 Rfqno = l.Rfqno,
                 BuyersName = l.BuyersName,
                 RecDate = l.RecDate,
@@ -828,6 +933,16 @@ namespace ERP_RFQ_Automation.Repositories
             var ingestedOn = LeadIdentity.LeadIngestionAudit.ResolveIngestionTimestamp(
                 earliestReceivedOn.TryGetValue(lead.Id, out var receivedOn) ? receivedOn : null,
                 lead.CreatedDate);
+            // Same lifecycle-state read as the list projection. A field populated on the list and
+            // silently null on the detail would make which endpoint a screen happened to call
+            // decide whether the lead has a status — the exact class of split truth this
+            // projection has been corrected for before (see CommercialCaseReference above).
+            var detailStatusRow = lead.LeadStatusId.HasValue
+                ? await _context.SetupMasters.AsNoTracking()
+                    .Where(s => s.BusinessUnitId == businessUnitId && s.SetupId == lead.LeadStatusId.Value)
+                    .Select(s => new { s.SetupCode, s.SetupValue })
+                    .FirstOrDefaultAsync()
+                : null;
             var detailCandidates = await GetClientCandidatesAsync(id, businessUnitId);
             var emailProvenance = lead.EmailIngestsId.HasValue
                 ? await (from ingest in _context.EmailIngests.AsNoTracking()
@@ -897,6 +1012,10 @@ namespace ERP_RFQ_Automation.Repositories
                 EmailSource = lead.EmailSource,
                 Clientemail = lead.Clientemail,
                 LeadStatusId = lead.LeadStatusId,
+                LeadStatusCode = detailStatusRow == null
+                    ? null
+                    : LifecyclePolicy.Canonicalize("Lead", detailStatusRow.SetupCode, detailStatusRow.SetupValue),
+                LeadStatusLabel = detailStatusRow?.SetupValue,
                 LifecycleVersion = lead.LifecycleVersion,
                 ReviewVersion = lead.ReviewVersion,
                 RequiresCommercialReview = lead.RequiresCommercialReview,
@@ -1203,12 +1322,34 @@ namespace ERP_RFQ_Automation.Repositories
             // offered for review and then refused at submit: the approval path was closed
             // for them, and with it the ONLY source of measured correction evidence the
             // product has. An upload-door lead has no ParseStatus to read, so its review
-            // state is the lead's own — untriaged, unverified — plus the same authoritative
+            // state is the lead's own — unverified, plus the same authoritative
             // source-document evidence approval already demands.
+            //
+            // LIFECYCLE POSITION IS NOT REVIEW STATE, and treating it as one was a ONE-WAY TRAP.
+            //
+            // This condition also required LeadStatusId == null, as a proxy for "untriaged".
+            // But advancing the governed lifecycle SETS LeadStatusId, and the very first hop a
+            // user can make from the lead screen — RECEIVED -> PENDING_IDENTIFICATION — does
+            // exactly that. From that moment the approval path was shut. QUALIFIED, however,
+            // REQUIRES the approval (LifecycleApplicationService: "AI-extracted commercial facts
+            // must be approved before the lead can be qualified"), and the lifecycle offers no
+            // edge back to PENDING_IDENTIFICATION. So an upload-door lead advanced before its
+            // figures were approved could never be qualified, never become an RFQ, and never be
+            // recovered — with no message saying why.
+            //
+            // Reproduced on the live tenant: lead 467 was approvable while LeadStatusId was
+            // null, and returned 409 "This lead is no longer awaiting extraction review" once
+            // it was UNDER_REVIEW. Leads 466 and 467 both reached that dead end.
+            //
+            // The question this gate exists to ask is whether the extracted facts have been
+            // verified yet, and whether there is authoritative evidence to verify them against.
+            // Both remaining clauses ask exactly that. The lifecycle clause asked something else
+            // entirely and is simply dropped: approving is now idempotent with respect to where
+            // the lead sits, so it can be done before advancing, after advancing, or from the
+            // dead end a lead is already in.
             var awaitingReview = lead.EmailIngests != null
                 ? string.Equals(lead.EmailIngests.ParseStatus, "NeedsReview", StringComparison.OrdinalIgnoreCase)
-                : lead.LeadStatusId == null
-                  && !lead.CommercialFactsVerified
+                : !lead.CommercialFactsVerified
                   && (await SourceOccurrenceIdsAsync(lead.Id, businessUnitId)).Count > 0;
             if (!awaitingReview)
                 throw new LeadReviewConflictException("This lead is no longer awaiting extraction review.");
@@ -1452,6 +1593,197 @@ namespace ERP_RFQ_Automation.Repositories
             }
 
             // Reuse the canonical mapping for the response.
+            return await GetLeadByIdAsync(id, businessUnitId);
+        }
+
+        /// <summary>
+        /// Links a lead to the client organisation a HUMAN picked — the second governed door
+        /// onto <c>Lead.ResolveCommercialIdentity</c>, and the one that is open for a lead's
+        /// whole life.
+        ///
+        /// <para><b>The defect this exists to close.</b> Until now the ONLY human path that
+        /// could set a lead's customer was <c>SubmitLeadReviewAsync</c>, and that method opens
+        /// with a gate: the lead must still be awaiting extraction review
+        /// (<c>EmailIngests.ParseStatus == "NeedsReview"</c>, or for an upload-door lead
+        /// <c>!CommercialFactsVerified</c> plus source evidence). Extraction review ENDS. The
+        /// worker sets <c>ParseStatus = "Success"</c> the moment extraction succeeds
+        /// (<c>ExtractionWorker.cs:1452</c>), and an approve sets it too
+        /// (<c>SubmitLeadReviewCoreAsync</c>, above). So on the ordinary happy path — a
+        /// document that extracted cleanly and never needed a reviewer — the client-linking
+        /// door was shut before anyone ever saw the lead, and every attempt came back
+        /// <c>"This lead is no longer awaiting extraction review."</c></para>
+        ///
+        /// <para>That was terminal, not cosmetic. A lead cannot be QUALIFIED and cannot be
+        /// converted to an RFQ without a customer, so an enquiry the machine could not match
+        /// to an existing client record could never reach a quote by ANY route: the machine
+        /// had nothing to match against and the human was locked out. The live tenant shows
+        /// the shape of it — enquiries sitting on the deadline board reading "Not linked to a
+        /// client record" against names like "Fulton County Government" that have no customer
+        /// record at all.</para>
+        ///
+        /// <para>The gate itself is CORRECT and is left exactly as it is: it protects a
+        /// method that rewrites the entire line-item set from a client-held snapshot. The
+        /// error was bundling a commercial decision with a lifetime of its own into a
+        /// document-correction workflow that closes. This command is that decision on its
+        /// own, and it writes exactly two fields.</para>
+        ///
+        /// <para>Everything the review path guarantees about a client link is preserved here:
+        /// the tenant/active check on the customer, the ownership check on the contact, the
+        /// human-grade status (so <c>IsHumanDecided</c> is true and the machine resolver will
+        /// never overwrite it), the immutable audit row, and the alias-learning loop inside
+        /// the same transaction.</para>
+        /// </summary>
+        public Task<LeadResponseDTO?> LinkClientAsync(
+            long id, long businessUnitId, LeadClientLinkRequestDTO request, string linkedBy = "system")
+        {
+            // Same reasoning as SubmitLeadReviewAsync: a caller that already owns a
+            // transaction owns the retriable unit, and nesting a strategy inside it is wrong.
+            if (!_context.Database.IsRelational() || _context.Database.CurrentTransaction is not null)
+                return LinkClientCoreAsync(id, businessUnitId, request, linkedBy);
+
+            var strategy = _context.Database.CreateExecutionStrategy();
+            return strategy.ExecuteAsync(() =>
+            {
+                _context.ChangeTracker.Clear();
+                return LinkClientCoreAsync(id, businessUnitId, request, linkedBy);
+            });
+        }
+
+        private async Task<LeadResponseDTO?> LinkClientCoreAsync(
+            long id, long businessUnitId, LeadClientLinkRequestDTO request, string linkedBy)
+        {
+            ArgumentNullException.ThrowIfNull(request);
+            if (string.IsNullOrWhiteSpace(linkedBy))
+                throw new LeadReviewValidationException("Reviewer identity is required.");
+            if (!request.CustomerId.HasValue || request.CustomerId.Value <= 0)
+                throw new LeadReviewValidationException("A customer is required.");
+
+            var customerId = request.CustomerId.Value;
+
+            // LeadItems and EmailIngests are loaded because SerializeReviewSnapshot reads
+            // both; a snapshot missing them would record a false before/after image.
+            var lead = await _context.Leads
+                .Include(l => l.LeadItems)
+                .Include(l => l.EmailIngests)
+                .FirstOrDefaultAsync(l => l.Id == id && l.BusinessUnitId == businessUnitId);
+
+            if (lead == null) return null;
+
+            if (request.ExpectedVersion.HasValue && request.ExpectedVersion.Value != lead.ReviewVersion)
+                throw new LeadReviewConflictException(
+                    $"Review version {request.ExpectedVersion} is stale; current version is {lead.ReviewVersion}.");
+
+            var customerExists = await _context.Customers.AsNoTracking().AnyAsync(customer =>
+                customer.Id == customerId && customer.Buid == businessUnitId && customer.IsActive != false);
+            if (!customerExists)
+                throw new LeadReviewValidationException("The selected customer was not found in this tenant.");
+
+            if (request.ContactId.HasValue)
+            {
+                var contactExists = await _context.Contacts.AsNoTracking().AnyAsync(contact =>
+                    contact.Id == request.ContactId.Value && contact.CustomerId == customerId
+                    && contact.IsActive != false);
+                if (!contactExists)
+                    throw new LeadReviewValidationException("The selected contact does not belong to the selected customer.");
+            }
+
+            // RE-POINTING GUARD. Rfq.InheritCommercialIdentity refuses to accept a lead whose
+            // customer differs from the one the RFQ already carries, and it is the RFQ that
+            // every downstream document (quote, order, invoice) is addressed from. Moving the
+            // lead underneath a converted RFQ would leave the two disagreeing about who the
+            // client is, with the RFQ unable to ever re-inherit. Setting a customer where
+            // there was none is always safe — conversion already requires one, so a lead with
+            // no customer has no RFQ.
+            if (lead.CustomerId.HasValue && lead.CustomerId.Value != customerId)
+            {
+                var hasRfq = await _context.Rfqs.AsNoTracking().IgnoreQueryFilters()
+                    .AnyAsync(r => r.LeadId == lead.Id && r.BusinessUnitId == businessUnitId);
+                if (hasRfq)
+                    throw new LeadReviewConflictException(
+                        "This lead has already been converted to an RFQ, so its client cannot be changed. "
+                        + "Correct the client on the RFQ instead, or reject and re-raise the enquiry.");
+            }
+
+            var beforeJson = SerializeReviewSnapshot(lead);
+            var fromVersion = lead.ReviewVersion;
+            var previousCustomerId = lead.CustomerId;
+
+            // Human-grade statuses, identical to the review path's, so a link made here and a
+            // link made in review are indistinguishable downstream — and both are protected
+            // from the machine resolver by LeadCustomerMatchStatuses.IsHumanDecided.
+            lead.ResolveCommercialIdentity(
+                customerId,
+                request.ContactId,
+                request.ContactId.HasValue
+                    ? LeadCustomerMatchStatuses.Confirmed
+                    : LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
+
+            // Deliberately NOT touched: ParseStatus, CommercialFactsVerified,
+            // RequiresCommercialReview, ReviewApprovedBy/On. Naming the buyer is not a
+            // statement that the extracted figures are correct, and quietly marking them
+            // verified here would let a lead skip the approval that qualification demands.
+            var linkedOn = DateTime.UtcNow;
+            lead.ModifiedDate = linkedOn;
+
+            // The audit table is unique on (tenant, lead, ToVersion), so the version must
+            // advance for the row to exist at all. It is also the lead's concurrency token,
+            // which is the behaviour we want: a review workbench holding a stale version
+            // finds out that the client changed underneath it.
+            lead.ReviewVersion++;
+
+            var ownsTransaction = _context.Database.CurrentTransaction == null;
+            await using var transaction = ownsTransaction
+                ? await _context.Database.BeginTransactionAsync()
+                : null;
+            try
+            {
+                await _context.SaveChangesAsync();
+
+                var audit = new LeadReviewAudit
+                {
+                    BusinessUnitId = businessUnitId,
+                    LeadId = lead.Id,
+                    FromVersion = fromVersion,
+                    ToVersion = lead.ReviewVersion,
+                    // 11 characters; the column is varchar(20).
+                    Action = "link-client",
+                    ReviewedBy = linkedBy.Trim(),
+                    Reason = string.IsNullOrWhiteSpace(request.Reason) ? null : request.Reason.Trim(),
+                    BeforeJson = beforeJson,
+                    AfterJson = SerializeReviewSnapshot(lead),
+                    ReviewedOn = linkedOn
+                };
+                _context.Set<LeadReviewAudit>().Add(audit);
+                await _context.SaveChangesAsync();
+
+                // LEARNING LOOP. The P6 approval gate exists to keep a MACHINE match from
+                // bootstrapping itself into an authoritative alias; the customer here is
+                // always one a person typed or clicked, which is exactly the signal P6 wants
+                // to keep. Same savepoint discipline as the review path: a learning failure
+                // never fails the link.
+                if (_aliasLearner != null)
+                    await LearnClientIdentityAsync(businessUnitId, lead, customerId, previousCustomerId, audit.Id);
+
+                if (transaction != null)
+                    await transaction.CommitAsync();
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+                if (transaction != null)
+                    await transaction.RollbackAsync();
+                throw new LeadReviewConflictException("The lead changed while the client was being linked. Refresh and retry.");
+            }
+            catch (DbUpdateException)
+            {
+                if (transaction != null)
+                    await transaction.RollbackAsync();
+                throw new LeadReviewConflictException("The client link could not be saved. Refresh and retry.");
+            }
+
+            _logger?.LogInformation(
+                "Lead {LeadId} linked to customer {CustomerId} (contact {ContactId}) by {LinkedBy}.",
+                lead.Id, customerId, request.ContactId, linkedBy);
+
             return await GetLeadByIdAsync(id, businessUnitId);
         }
 

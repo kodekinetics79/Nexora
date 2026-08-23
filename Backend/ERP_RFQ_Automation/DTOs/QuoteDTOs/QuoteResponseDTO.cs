@@ -110,6 +110,28 @@ namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
         /// </summary>
         public decimal? TaxRatePercentApplied { get; set; }
 
+        /// <summary>
+        /// This line's share of the QUOTE-LEVEL discount, as allocated and stored by
+        /// <c>QuoteService.CalculateQuoteTotals</c> (see <c>QuoteItem.HeaderDiscountAllocated</c>).
+        ///
+        /// <para>It is on the wire for one reason: the header discount CANNOT be recovered from the
+        /// other figures. Every attempt to do so subtracts a tax-inclusive total from a tax-
+        /// exclusive net and lands 15% out — which is precisely why the column was added to the
+        /// model. A screen that must show the discount has to be told it.</para>
+        ///
+        /// <para>Null means the line predates the column, so no allocation is known for it; zero
+        /// means there was no header discount. The two are not the same statement.</para>
+        /// </summary>
+        public decimal? HeaderDiscountAllocated { get; set; }
+
+        /// <summary>
+        /// What output tax was charged on for this line: <see cref="TotalAmount"/> minus
+        /// <see cref="TaxAmount"/>. This is the figure the printed quote puts in its line column
+        /// and sums into "Total excluding VAT", so a screen showing the same quote must sum the
+        /// same figure or the two documents disagree in front of the customer.
+        /// </summary>
+        public decimal TaxableBase { get; set; }
+
         public int? DeliveryLeadTime { get; set; }
         public long? DiscountTypeId { get; set; }
         public string? DiscountTypeName { get; set; }
@@ -166,8 +188,32 @@ namespace ERP_RFQ_Automation.DTOs.QuoteDTOs
         public long? CurrencyId { get; set; }
         public decimal? TotalAmount { get; set; }
         public string? HeaderRemarks { get; set; }
-        [Required]
-        public string CreatedBy { get; set; } = null!;
+
+        /// <summary>The number the customer already knows a back-filled quote by. Null for pipeline quotes.</summary>
+        public string? ExternalQuoteReference { get; set; }
+
+        /// <summary>PIPELINE (default) or BACKFILL. See <see cref="Models.QuoteOrigin"/>.</summary>
+        public string? Origin { get; set; }
+
+        /// <summary>
+        /// Set by the server from the validated token; a value sent here is discarded.
+        ///
+        /// <para>It was <c>[Required]</c>, which made this endpoint reject requests it would
+        /// then have ignored: <c>[ApiController]</c> validation runs BEFORE the action body, so
+        /// <c>POST /api/Quote</c> answered "The CreatedBy field is required" while the very next
+        /// line of the controller overwrote whatever was supplied with
+        /// <c>ActorEmail()</c>. A caller could only get through by inventing a value that was
+        /// then thrown away.</para>
+        ///
+        /// <para>Sec-A1 removed this field outright from the product-category contracts, with
+        /// the reasoning that leaving an actor field on a request "invites the next writer of
+        /// this endpoint to read it, which is how the forgery got here". That is the right end
+        /// state here too, and it is not done in this change: <c>IQuoteService.CreateQuoteAsync</c>
+        /// takes the DTO alone, so removing the property means changing that signature, and
+        /// this fix landed the night before a customer demo. Dropping the attribute stops the
+        /// endpoint refusing valid requests without touching a service contract.</para>
+        /// </summary>
+        public string? CreatedBy { get; set; }
         public long? DiscountTypeId { get; set; }
         public decimal? DiscountValue { get; set; }
 

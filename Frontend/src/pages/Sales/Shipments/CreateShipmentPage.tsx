@@ -17,6 +17,7 @@ import orderService from '../../../api/services/orderService';
 import setupService from '../../../api/services/setupService';
 
 import dayjs from 'dayjs';
+import { formatMoney } from '../../../utils/currency';
 
 interface FormState {
   orderId: string;
@@ -521,7 +522,7 @@ const CreateShipmentPage: React.FC = () => {
                     </Box>
                     <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
                       <Typography variant="body2" color="text.secondary">Order Total</Typography>
-                      <Typography variant="body2" sx={{ fontWeight: 700 }}>$ {selectedOrder.totalAmount.toLocaleString()}</Typography>
+                      <Typography variant="body2" sx={{ fontWeight: 700 }}>{formatMoney(selectedOrder.totalAmount, selectedOrder.currencyCode)}</Typography>
                     </Box>
                     <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
                       <Typography variant="body2" color="text.secondary">Items to Ship</Typography>

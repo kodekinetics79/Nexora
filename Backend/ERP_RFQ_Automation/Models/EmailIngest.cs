@@ -48,6 +48,26 @@ public partial class EmailIngest
     /// </summary>
     public string? SkippedAttachmentsJson { get; set; }
 
+    /// <summary>
+    /// FR-RFQ-05/06: the RFC 5322 In-Reply-To header — the Message-Id of the message this one
+    /// directly replies to — normalized by <c>EmailService.NormalizeMessageId</c> (angle
+    /// brackets stripped) so it joins against <see cref="MessageId"/> on equal terms. Null when
+    /// the message is not a reply, was ingested before this column existed, or carries a
+    /// pathological id longer than the 255-char key space (such an id can never match a stored
+    /// MessageID anyway, so storing a truncation would only manufacture false joins).
+    /// </summary>
+    public string? InReplyToMessageId { get; set; }
+
+    /// <summary>
+    /// FR-RFQ-05/06: the RFC 5322 References header — the ordered ancestor Message-Id chain,
+    /// oldest first — stored as a JSON array of normalized ids, the same shape as
+    /// <see cref="SkippedAttachmentsJson"/>. This is what lets reconciliation see that a reply
+    /// belongs to the thread of an earlier ingested message even when In-Reply-To is absent.
+    /// When the chain does not fit the column, the NEWEST ids are kept: the nearest ancestors
+    /// are the ones most likely to be in our ingest ledger.
+    /// </summary>
+    public string? ReferencesJson { get; set; }
+
     public virtual EmailConfiguration EmailConfiguration { get; set; } = null!;
 
     public virtual ICollection<Lead> Leads { get; set; } = new List<Lead>();

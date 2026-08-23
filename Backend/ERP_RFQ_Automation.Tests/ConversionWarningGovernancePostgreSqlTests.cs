@@ -82,6 +82,18 @@ public sealed class ConversionWarningGovernancePostgreSqlTests
         Currency = "SAR"
     };
 
+    /// <summary>A line as an Aramco materials list leaves it: coded, counted, measured, and
+    /// silent about money. Conversion demands a currency the document never stated.</summary>
+    private static LeadItem LineWithoutCurrency(string lineNo, int qty, string partNo) => new()
+    {
+        LineItemNo = lineNo,
+        ItemMaterialCode = partNo,
+        ProductShortDescription = "KEY:SHAFT,SQUARE,10 MM X 10 MM LG",
+        Quantity = qty,
+        UnitOfMeasure = "EA",
+        Currency = null,
+    };
+
     private async Task<long> ConvertAsync(long leadId, ConvertRequest request)
     {
         await using var tenantContext = _database.TenantContextWithRls(Tenant);
@@ -214,7 +226,10 @@ public sealed class ConversionWarningGovernancePostgreSqlTests
         await using var owner = _database.ContextFor(null);
         var converted = await owner.CommercialLifecycleEvents.AsNoTracking()
             .SingleAsync(e => e.AggregateType == "Lead" && e.AggregateId == leadId
-                              && e.NewStatusCode == "CONVERTED_TO_RFQ");
+                              && e.NewStatusCode == "CONVERTED_TO_RFQ"
+                              // The dedicated PromotedToRfq event also lands at this status;
+                              // the acknowledgement lives on the transition event.
+                              && e.EventType == "StatusTransitioned");
         Assert.Equal("CONVERTED_WITH_ACKNOWLEDGED_WARNINGS", converted.ReasonCode);
         Assert.Contains("00010", converted.ReasonNotes!);
         Assert.Contains("drawing pack", converted.ReasonNotes!);
@@ -356,5 +371,145 @@ public sealed class ConversionWarningGovernancePostgreSqlTests
         await using var owner = _database.ContextFor(null);
         return await owner.LeadItems.AsNoTracking()
             .Where(i => i.LeadId == leadId).OrderBy(i => i.Id).Select(i => i.Id).ToListAsync();
+    }
+
+    // ------------------------------------------------------------------ currency
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task A_bid_that_states_no_currency_can_be_converted_by_stating_one()
+    {
+        // THE SECOND DEAD END, found on lead 466 in production.
+        //
+        // Conversion demands a currency on every line. An Aramco materials list states
+        // quantities and units and says nothing about money, so the lines carry none. The only
+        // writer of a line's currency was the extraction-review path — which closes the moment
+        // the figures are approved. Approving is also what makes a lead QUALIFIED, and only a
+        // QUALIFIED lead may convert.
+        //
+        // Approve (mandatory) -> currency unreachable -> conversion refuses for ever. Lead 466
+        // sat approved, qualified, and permanently unconvertible with 21 such lines.
+        //
+        // Quantity and unit always honoured a convert-time correction; currency read the stored
+        // line only. Closing that asymmetry is the fix.
+        var leadId = await QualifiedLeadAsync(LineWithoutCurrency("10", 176, "902017274"));
+
+        long itemId;
+        await using (var read = _database.ContextFor(null))
+            itemId = await read.LeadItems.AsNoTracking()
+                .Where(x => x.LeadId == leadId).Select(x => x.Id).SingleAsync();
+
+        // The currency refusal comes FIRST, before the soft warning gate, so the operator is
+        // told the one thing that actually stops the conversion.
+        var refused = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => ConvertAsync(leadId, new ConvertRequest { ActingUser = "sara@nexora.sa" }));
+        Assert.Contains("currency", refused.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, await RfqCountForAsync(leadId));
+
+        // Stating it on the conversion is enough: no second approval, no reopened review.
+        // The line still carries a soft "no catalog match" warning, acknowledged as any
+        // operator would have to — this fix does not weaken that gate.
+        var rfqId = await ConvertAsync(leadId, new ConvertRequest
+        {
+            ActingUser = "sara@nexora.sa",
+            Currency = "usd",
+            WarningAcknowledgementReason = "Checked against the source bid list.",
+            Items = new() { new ConvertRequestItem { LeadItemId = itemId, AcknowledgeWarning = true } },
+        });
+
+        await using var owner = _database.ContextFor(null);
+        var line = await owner.Rfqitems.AsNoTracking().SingleAsync(x => x.Rfqid == rfqId);
+        // Stored in the three-letter form the review path validates, not as it was typed.
+        Assert.Equal("USD", line.Currency);
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task A_per_line_currency_beats_the_conversion_wide_one()
+    {
+        // Mixed-currency inquiries are real, so the per-line value has to win — the same
+        // precedence quantity and unit of measure already follow.
+        var leadId = await QualifiedLeadAsync(LineWithoutCurrency("10", 5, "902017276"));
+
+        await using (var read = _database.ContextFor(null))
+        {
+            var itemId = await read.LeadItems.AsNoTracking()
+                .Where(x => x.LeadId == leadId).Select(x => x.Id).SingleAsync();
+
+            var rfqId = await ConvertAsync(leadId, new ConvertRequest
+            {
+                ActingUser = "sara@nexora.sa",
+                Currency = "USD",
+                WarningAcknowledgementReason = "Checked against the source bid list.",
+                Items = new()
+                {
+                    new ConvertRequestItem
+                    {
+                        LeadItemId = itemId, Currency = "SAR", AcknowledgeWarning = true,
+                    },
+                },
+            });
+
+            await using var owner = _database.ContextFor(null);
+            var line = await owner.Rfqitems.AsNoTracking().SingleAsync(x => x.Rfqid == rfqId);
+            Assert.Equal("SAR", line.Currency);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task A_bid_with_many_acknowledged_lines_still_converts()
+    {
+        // LEAD 466, 21 LINES, HTTP 500 "The lead could not be converted to an RFQ."
+        //
+        // The lifecycle event's ReasonNotes column holds 1000 characters, and the conversion
+        // summary listed every acknowledged line verbatim. At roughly ninety characters a line
+        // that passes 1000 at about a dozen lines; LifecycleApplicationService threw
+        // LifecycleValidationException, the conversion did not map it, and it escaped as a 500.
+        //
+        // The bigger the bid, the more certain the failure — the same shape as the varchar(200)
+        // overflow on RequestedPartNumber, and just as backwards.
+        var lines = Enumerable.Range(1, 20)
+            .Select(i => LineWithoutCurrency(i.ToString(), 10 + i, $"9020172{i:D2}"))
+            .ToArray();
+        var leadId = await QualifiedLeadAsync(lines);
+
+        long[] itemIds;
+        await using (var read = _database.ContextFor(null))
+            itemIds = await read.LeadItems.AsNoTracking()
+                .Where(x => x.LeadId == leadId).Select(x => x.Id).ToArrayAsync();
+
+        var rfqId = await ConvertAsync(leadId, new ConvertRequest
+        {
+            ActingUser = "sara@nexora.sa",
+            Currency = "USD",
+            // A realistic reason, not a token one: brevity here would hide the overflow.
+            WarningAcknowledgementReason =
+                "Reviewed against the source Aramco bid list and confirmed with the buyer.",
+            Items = itemIds.Select(id => new ConvertRequestItem
+            {
+                LeadItemId = id, AcknowledgeWarning = true,
+            }).ToList(),
+        });
+
+        await using var owner = _database.ContextFor(null);
+        Assert.Equal(20, await owner.Rfqitems.AsNoTracking().CountAsync(x => x.Rfqid == rfqId));
+
+        // The acknowledgement survives as evidence, within the column's limit. Nothing else
+        // records it, so an empty or truncated-to-nothing note would lose the audit trail.
+        var note = await owner.Set<CommercialLifecycleEvent>().AsNoTracking()
+            .Where(e => e.AggregateType == "Lead" && e.AggregateId == leadId
+                        // Same disambiguation as the acknowledgement assertion above: the
+                        // dedicated PromotedToRfq event also lands on this lead and is NEWER,
+                        // so an unfiltered OrderByDescending(Id) reads the promotion — which
+                        // carries no acknowledgement — instead of the transition that does.
+                        && e.EventType == "StatusTransitioned")
+            .OrderByDescending(e => e.Id)
+            .Select(e => e.ReasonNotes)
+            .FirstOrDefaultAsync();
+        Assert.False(string.IsNullOrWhiteSpace(note));
+        Assert.True(note!.Length <= 1000, $"reason notes were {note.Length} characters");
+        Assert.Contains("20 line(s)", note);
+        Assert.Contains("Reviewed against the source Aramco bid list", note);
     }
 }

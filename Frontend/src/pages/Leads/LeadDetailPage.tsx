@@ -30,6 +30,7 @@ import LeadDecisionActions from './LeadDecisionActions';
 
 import { toast } from 'react-hot-toast';
 import { presentableErrorMessage } from '../../utils/apiErrors';
+import { routingDecisionSentence } from '../../utils/routingDecisionReasons';
 
 /**
  * SLA deadline chip (WP-A2): urgency at a glance for the bid closing date.
@@ -384,7 +385,7 @@ const LeadDetailPage: React.FC = () => {
               </Grid>
               <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Account Owner" value={lead.accountOwnerName || 'Unassigned'} /></Grid>
               <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Opportunity Owner" value={lead.assignedToFullName || 'Unassigned'} /></Grid>
-              {lead.assignmentReason && <Grid size={{ xs: 12, md: 8 }} component="div"><DataField label="Assignment reason" value={lead.assignmentReason} /></Grid>}
+              {lead.assignmentReason && <Grid size={{ xs: 12, md: 8 }} component="div"><DataField label="Assignment reason" value={routingDecisionSentence(lead.assignmentReason)} /></Grid>}
 
               <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="RFQ Type" value={lead.rfqtype ?? 'N/A'} /></Grid>
               <Grid size={{ xs: 12, md: 4 }} component="div"><DataField label="Opportunity No" value={lead.opportunityNo ?? 'N/A'} /></Grid>
@@ -561,6 +562,16 @@ const LeadDetailPage: React.FC = () => {
         open={resolveClientOpen}
         leadId={lead.id}
         lead={lead}
+        // What the message actually said about the buying organisation, so creating a client
+        // starts from the enquiry rather than from whatever the operator retyped into search.
+        // Only these two become field values; the evidence snippet and buyer name are shown as
+        // context so the operator can judge whether the extracted name is the right one.
+        prefill={{
+          name: lead.customerCompanyNameExtracted,
+          email: lead.clientemail,
+          contactName: lead.buyersName,
+          evidence: lead.customerCompanyEvidence,
+        }}
         onClose={() => setResolveClientOpen(false)}
         onResolved={() => queryClient.invalidateQueries({ queryKey: ['lead-detail', Number(id)] })}
       />

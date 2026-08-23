@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading.Tasks;
 using ERP_RFQ_Automation.Extraction.Quantities;
 using ERP_RFQ_Automation.Models;
@@ -19,12 +21,21 @@ namespace ERP_RFQ_Automation.Services
 
         private readonly ERP_RFQ_Automation.LeadIdentity.ILeadIdentityApplicationService _identity;
 
+        // Required, not optional-with-null — the rule ManualUploadService states beside its own
+        // identity collaborator, and for the same reason: an optional dependency is always supplied
+        // in production and always absent in tests, so the step that must always run becomes the
+        // step nothing exercises. That is exactly how client resolution came to be missing from
+        // every upload door while the extraction door had it.
+        private readonly ERP_RFQ_Automation.CustomerResolution.ILeadCustomerResolutionService _customerResolution;
+
         public LeadUploaderService(ErpRfqAutomationContext context, ILogger<LeadUploaderService> logger,
-            ERP_RFQ_Automation.LeadIdentity.ILeadIdentityApplicationService identity)
+            ERP_RFQ_Automation.LeadIdentity.ILeadIdentityApplicationService identity,
+            ERP_RFQ_Automation.CustomerResolution.ILeadCustomerResolutionService customerResolution)
         {
             _context = context;
             _logger = logger;
             _identity = identity;
+            _customerResolution = customerResolution;
         }
 
         public async Task<byte[]> GenerateTemplateAsync(long businessUnitId)
@@ -134,7 +145,14 @@ namespace ERP_RFQ_Automation.Services
                             BidClosingDate = ParseDate(bidClosingStr),
                             LeadSource = "Excel Upload",
                             EmailSource = "Excel",
-                            Clientemail = "excel@upload.com",
+                            // No fabricated client email. "excel@upload.com" used to be written
+                            // here, and reconciliation derives the customer scope from
+                            // CustomerId ?? Clientemail ?? BuyersName — a shared fake address
+                            // would put every bulk-imported lead in ONE customer scope, letting
+                            // two different buyers who reuse a reference string merge as one
+                            // inquiry. Null means the buyer name (a real, typed fact) is the
+                            // scope, which is the truth this template actually captured.
+                            Clientemail = null,
                             // Aiconfidence is deliberately NOT set. Nothing was extracted
                             // here — a human typed these cells into Nexora's own template,
                             // so there is no prediction to be confident about. Writing 1.0
@@ -191,7 +209,10 @@ namespace ERP_RFQ_Automation.Services
                     groupedLeads[leadKey].Items.Add(item);
                 }
 
-                int leadCount = 0;
+                int leadCount = 0, revisionCount = 0, duplicateCount = 0, reviewCount = 0;
+                // Leads this upload created or amended, for the client resolution that runs
+                // after the commit. Reconciliation now owns lead creation, so the id comes
+                // from its outcome rather than from lead.Id.
                 var importedLeadIds = new List<long>();
                 int itemViewCount = 0;
 
@@ -206,6 +227,18 @@ namespace ERP_RFQ_Automation.Services
                 if (quantityNeedsReview.Count > 0)
                     dummyIngest.ParseStatus = "NeedsReview";
 
+                // FULL reconciliation per imported inquiry, in the SAME transaction — not a bare
+                // identity baseline. This door used to add Leads directly and then call
+                // EstablishBaselineRevisionAsync, which by design does NO matching: a revised RFQ
+                // re-imported through this template always became a second, unlinked lead. This
+                // door is NOT production-fenced (it is deterministic and never touches the
+                // unified extraction queue), so it was the one live amendment fork left after the
+                // extraction-worker door started reconciling. ReconcileAsync now decides: a
+                // genuinely new row creates a lead with revision 1 exactly as before, an amended
+                // row versions its canonical lead, a byte-identical row is recorded as a
+                // duplicate occurrence, and an ambiguous row is held for possible-match review.
+                var reconciliationBatchId = new Guid(MD5.HashData(Encoding.UTF8.GetBytes(
+                    $"bulk-upload-batch:{businessUnitId}:{dummyIngest.Id}")));
                 foreach (var (leadKey, entry) in groupedLeads)
                 {
                     var lead = entry.Lead;
@@ -217,38 +250,95 @@ namespace ERP_RFQ_Automation.Services
                     // so this is what stops a held line from being quoted.
                     if (quantityNeedsReview.Contains(leadKey))
                         lead.RequiresCommercialReview = true;
-                    _context.Leads.Add(lead);
-                    await _context.SaveChangesAsync(); // Save to get Lead.Id
-                    importedLeadIds.Add(lead.Id);
 
+                    // Items travel on the navigation: reconciliation reads candidate.LeadItems
+                    // for the fingerprint and similarity, and it alone decides whether this
+                    // candidate row is persisted (New) or projected onto an existing lead.
                     foreach (var item in entry.Items)
+                        lead.LeadItems.Add(item);
+
+                    var reconciliation = await _identity.ReconcileAsync(lead,
+                        new ERP_RFQ_Automation.LeadIdentity.LeadIntakeDescriptor(
+                            BatchId: reconciliationBatchId,
+                            SourceChannel: "BulkUpload",
+                            // Stable per (ingest row, workbook inquiry): a retry of this unit of
+                            // work replays instead of double-writing. The key is hashed because
+                            // leadKey is free text from workbook cells.
+                            IdempotencyKey: $"bulk-upload:{businessUnitId}:ingest:{dummyIngest.Id}:"
+                                + RowKeyHash(leadKey),
+                            ExternalSourceId: null, EmailThreadId: null, SourceSystem: "BulkUpload",
+                            Sender: null, Subject: "Excel Lead Upload", OriginalFileName: null,
+                            MimeType: null, FileSize: null,
+                            // The typed row content, hashed deterministically: what lets an
+                            // identical re-import be recognised as the same document even when
+                            // the recency window has long since moved past the original.
+                            ContentHash: RowContentHash(lead),
+                            SourceDocumentId: null, ExtractionJobId: null,
+                            SourceReceivedAtUtc: DateTimeOffset.UtcNow, IngestedAtUtc: DateTimeOffset.UtcNow,
+                            // A human typed these cells; nothing was extracted or predicted.
+                            ProcessingPath: ERP_RFQ_Automation.LeadIdentity.LeadProcessingPath.Deterministic,
+                            ExternalAiUsed: false, ExternalCost: null,
+                            ActorType: "User", ActorId: createdBy,
+                            CorrelationId: $"bulk-upload:{businessUnitId}:ingest:{dummyIngest.Id}"));
+
+                    switch (reconciliation.Classification)
                     {
-                        item.LeadId = lead.Id;
-                        _context.LeadItems.Add(item);
-                        itemViewCount++;
+                        case ERP_RFQ_Automation.LeadIdentity.LeadOccurrenceClassification.New:
+                            leadCount++;
+                            itemViewCount += entry.Items.Count;
+                            importedLeadIds.Add(reconciliation.LeadId);
+                            break;
+                        case ERP_RFQ_Automation.LeadIdentity.LeadOccurrenceClassification.Revision:
+                            revisionCount++;
+                            itemViewCount += entry.Items.Count;
+                            importedLeadIds.Add(reconciliation.LeadId);
+                            // The projection copies the lines (including any NULL quantity) onto
+                            // the canonical lead but not the review flag; raise it there or the
+                            // unreadable quantity sails past the conversion gate on the lead the
+                            // buyer will actually be quoted from.
+                            if (lead.RequiresCommercialReview)
+                            {
+                                var canonical = await _context.Leads.SingleAsync(x =>
+                                    x.BusinessUnitId == businessUnitId && x.Id == reconciliation.LeadId);
+                                canonical.RequiresCommercialReview = true;
+                                canonical.CommercialFactsVerified = false;
+                                await _context.SaveChangesAsync();
+                            }
+                            break;
+                        case ERP_RFQ_Automation.LeadIdentity.LeadOccurrenceClassification.ExactDuplicate:
+                            duplicateCount++;
+                            break;
+                        default:
+                            reviewCount++;
+                            dummyIngest.ParseStatus = "NeedsReview";
+                            break;
                     }
-                    leadCount++;
                 }
 
                 await _context.SaveChangesAsync();
-
-                // Canonical identity for every imported lead, in the SAME transaction.
-                //
-                // This door used to add Leads directly and never call the identity service, so
-                // every bulk-imported lead was born with line items and NO revision — and was
-                // therefore permanently unconvertible to an RFQ. Run after the final
-                // SaveChangesAsync so revision 1 records the lines.
-                foreach (var importedLeadId in importedLeadIds)
-                    await _identity.EstablishBaselineRevisionAsync(businessUnitId, importedLeadId,
-                        new ERP_RFQ_Automation.LeadIdentity.LeadIdentityBaselineRequest(
-                            "BulkUpload",
-                            "Bulk lead import: commercial facts were supplied in the uploaded workbook. "
-                            + "Canonical identity established at creation.",
-                            "User", "System", $"bulk-upload:{businessUnitId}:{importedLeadId}"));
-
                 await transaction.CommitAsync();
 
-                return ServiceResult<string>.CreateSuccess($"{leadCount} leads and {itemViewCount} items imported successfully.");
+                // Client resolution runs AFTER the commit, deliberately outside the upload
+                // transaction. It writes its own rows, and a failure to work out who the buyer is
+                // must never roll back an import the user has already done — the leads and their
+                // lines are the work; the client link is a decision that can be re-run.
+                //
+                // Until now no upload door resolved at all: only the extraction worker did, so a
+                // bulk-imported lead was born with a NULL CustomerMatchReasonCode — not "no match
+                // found" but never evaluated — and could never be qualified or converted, because
+                // both require a client. Exactly the shape of the identity gap fixed above it.
+                await ERP_RFQ_Automation.CustomerResolution.UploadedLeadResolution.ResolveAsync(
+                    _customerResolution, businessUnitId, importedLeadIds, _logger, "bulk-upload");
+
+                var summary = new StringBuilder(
+                    $"{leadCount} leads and {itemViewCount} items imported successfully.");
+                if (revisionCount > 0) summary.Append(
+                    $" {revisionCount} row group(s) matched existing leads and were applied as new revisions.");
+                if (duplicateCount > 0) summary.Append(
+                    $" {duplicateCount} row group(s) were exact duplicates of existing leads and were recorded, not re-imported.");
+                if (reviewCount > 0) summary.Append(
+                    $" {reviewCount} row group(s) closely match existing inquiries and were held for possible-match review.");
+                return ServiceResult<string>.CreateSuccess(summary.ToString());
             }
             catch (Exception ex)
             {
@@ -260,5 +350,32 @@ namespace ERP_RFQ_Automation.Services
 
         // Shared with every other ingestion door — see RfqDateParser.
         private DateTime? ParseDate(string s) => Extraction.RfqDateParser.Parse(s);
+
+        /// <summary>Stable, column-safe token for a workbook row group's free-text key.</summary>
+        private static string RowKeyHash(string leadKey) =>
+            Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(leadKey)))[..32].ToLowerInvariant();
+
+        /// <summary>
+        /// Deterministic content hash for one imported inquiry: every typed fact of the header
+        /// and its lines, in row order, separated by an unambiguous delimiter. This template has
+        /// no source document bytes to hash, but the typed cells ARE the document — hashing them
+        /// gives an identical re-import the same content identity on every run.
+        /// </summary>
+        private static string RowContentHash(Lead lead)
+        {
+            var sb = new StringBuilder()
+                .Append(lead.Rfqno).Append('\u001f')
+                .Append(lead.BuyersName).Append('\u001f')
+                .Append(lead.BidClosingDate?.ToString("O")).Append('\u001f');
+            foreach (var item in lead.LeadItems)
+                sb.Append(item.ProductShortName).Append('\u001f')
+                  .Append(item.Quantity?.ToString() ?? "null").Append('\u001f')
+                  .Append(item.UnitPrice?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "null").Append('\u001f')
+                  .Append(item.Currency).Append('\u001f')
+                  .Append(item.ManufacturerName).Append('\u001f')
+                  .Append(item.ManufacturerPartNumber).Append('\u001f')
+                  .Append(item.LeadTime?.ToString() ?? "null").Append('');
+            return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString()))).ToLowerInvariant();
+        }
     }
 }

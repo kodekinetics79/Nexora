@@ -163,4 +163,47 @@ public sealed class NativeSpreadsheetParserTests
 
         Assert.Null(Assert.Single(rows).UnitPrice);
     }
+
+    // ------------------------------------------------------------------ buyer catalogue number
+    // A code column whose heading this parser does not recognise is DROPPED — the structured path
+    // keeps no unmapped columns — so the number never reaches the lead line and can never be
+    // matched against the catalogue afterwards. "Material Code" was recognised while
+    // "Material Number" and "Stock Code", the same column under an SAP export's own headings,
+    // were not.
+
+    [Theory]
+    [InlineData("Material Code")]
+    [InlineData("Item Code")]
+    [InlineData("Part No")]
+    [InlineData("Material No")]
+    [InlineData("Material Number")]
+    [InlineData("Stock Code")]
+    [InlineData("Stock Number")]
+    [InlineData("SAP Material")]
+    [InlineData("Customer Part No")]
+    [InlineData("Buyer Part Number")]
+    [InlineData("Catalogue No")]
+    public void A_buyer_catalog_number_column_survives_under_any_of_its_headings(string header)
+    {
+        var rows = Parser.ParseCsv(Csv(
+            $"{header},Description,Quantity,UOM",
+            "A2A50006470,Gasket spiral wound,4,EA"), "test.csv");
+
+        Assert.Equal("A2A50006470", Assert.Single(rows).ManufacturerPartNumber);
+    }
+
+    /// <summary>
+    /// The line the alias list deliberately stops at. On a fabrication enquiry a bare "Material"
+    /// column holds the material of CONSTRUCTION, not an identifier, and reading it as a part
+    /// number would put "Stainless Steel 316" where a catalogue code belongs.
+    /// </summary>
+    [Fact]
+    public void A_bare_material_column_is_not_read_as_a_part_number()
+    {
+        var rows = Parser.ParseCsv(Csv(
+            "Description,Material,Quantity,UOM",
+            "Flange 2IN,Stainless Steel 316,4,EA"), "test.csv");
+
+        Assert.Null(Assert.Single(rows).ManufacturerPartNumber);
+    }
 }

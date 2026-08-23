@@ -301,8 +301,31 @@ namespace ERP_RFQ_Automation.Services
             RegexOptions.CultureInvariant, matchTimeoutMilliseconds: 100)]
         private static partial Regex EmailAddressPattern();
 
-        [GeneratedRegex(@"(?<!\d)(?:\+?\d[\d .()/-]{7,}\d)(?!\d)",
-            RegexOptions.CultureInvariant, matchTimeoutMilliseconds: 100)]
+        // A digit run ATTACHED to an identifier is not a phone number.
+        //
+        // The lookbehind used to exclude only a preceding digit, so "SRFQ-1234567890" matched at
+        // the 1 — preceded by a hyphen, which passed — and the customer's own RFQ reference was
+        // replaced with [REDACTED_PHONE] before the model ever saw it. The same held for PO
+        // numbers, material codes and long part numbers: every identifier of 9+ digits was
+        // destroyed on its way to extraction, which is precisely the field extraction exists to
+        // read. Redaction that eats the payload is worse than no redaction, because the loss is
+        // silent and the answer still looks plausible.
+        //
+        // Two guards, because a digit run alone cannot tell a purchase order from a telephone.
+        //
+        // The first refuses to redact a run introduced by an IDENTIFIER keyword ("PO 4500123456",
+        // "Ref 1234567890"), which in a procurement document is overwhelmingly a reference. The
+        // second refuses to redact a run bonded to a token ("SRFQ-1234567890", "100-4567890").
+        // Everything else — "+966 50 123 4567", "call 0501234567" — is still removed.
+        //
+        // This trades a little privacy reach for correctness, deliberately: an unredacted contact
+        // number reaching the model is a bounded disclosure to an endpoint the tenant has already
+        // had to authorise, whereas a destroyed reference silently produces a confident,
+        // unusable extraction.
+        [GeneratedRegex(
+            @"(?<!(?:po|rfq|srfq|ref|reference|material|mat|part|item|invoice|inv|quote|order|no|number|#)[\s.:#-]{0,4})" +
+            @"(?<![\w#/-])(?:\+?\d[\d .()/-]{7,}\d)(?![\w#/-])",
+            RegexOptions.CultureInvariant | RegexOptions.IgnoreCase, matchTimeoutMilliseconds: 100)]
         private static partial Regex PhoneNumberPattern();
 
         private async Task<ProviderCallResult<LeadExtractionResult>> SendExtractionRequestAsync(
@@ -629,6 +652,7 @@ namespace ERP_RFQ_Automation.Services
 11. CUSTOMER EVIDENCE. ""CustomerCompanyName"" must be copied verbatim from the document. Supply, in ""CustomerCompanyEvidence"", the 120-character-or-shorter verbatim snippet that names it (e.g. the sentence containing it, or the e-mail domain line). If you cannot supply that snippet, return null for both.
 12. ONE CONFIDENCE PER LINE ITEM. Each line-item object must contain EXACTLY the keys listed in the item schema below and NO OTHERS. In particular do NOT add a ""<FieldName>Confidence"" key for any item field — per-field confidences are requested at the document-header level only. A line item carries a single ""ItemConfidence"" summarising how certain you are about that whole line. Emitting extra confidence keys wastes the response budget and causes long documents to be cut off mid-answer.
 13. UNITS OF MEASURE. ""UnitOfMeasure"" is the unit the line's quantity is counted in, and NOTHING else — never a quantity, a size, a description or a price. TRANSCRIBE IT VERBATIM: return the document's own wording character-for-character (""each"", ""EA"", ""pcs"", ""NOS"", ""Activ.unit"" — whichever the document wrote), and do NOT translate, expand, abbreviate or standardise it. The platform maps spellings onto its own vocabulary — EA, SET, PR, DZ, LOT, M, MM, CM, M2, M3, FT, KG, MT, L, HR, DAY — after extraction; doing it here rewrites the customer's own words and destroys the evidence a reviewer checks against. If the document states no unit for a line, return null — NEVER default to ""EA"", ""each"" or ""1"". If the unit names a PACKAGE or a FORM rather than a count (""Pack"", ""Package"", ""Box"", ""Carton"", ""Pallet"", ""Drum"", ""Bundle"", ""Roll"", ""Coil"", ""Length"", ""Pipe""), copy that wording verbatim and NEVER convert it to a piece count: a pallet is not a piece, and the document does not say how many are on one.
+14. THE BUYER'S OWN MATERIAL NUMBER. ""ItemMaterialCode"" is the code THE BUYER uses for the line in ITS OWN system — the number printed under a heading such as ""Material"", ""Material Number"", ""Material Code"", ""Stock Code"", ""SAP Material"", ""Item Code"", ""Cat. No."" or ""Customer Part No."". Copy it VERBATIM. This field takes PRECEDENCE over rule 7: a buyer's material number is a schema field, NOT an unmapped custom column, and must NEVER be diverted into ""ExtraFields"". Keep it distinct from ""ManufacturerPartNumber"", which is the number the MAKER of the goods uses (the two are different numbers for the same part, and a document may print both). If the document states no such number for a line, return null — never copy the description into it and never invent one.
 
 **CONFIDENCE GUIDELINES (OPTIMIZED FOR HIGHER PRECISION):**
 - 0.95-1.0: Explicitly stated in text with exact match and clear labeling

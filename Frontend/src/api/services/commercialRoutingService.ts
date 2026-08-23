@@ -7,6 +7,19 @@ import axiosInstance from '../axiosInstance';
  *   GET  /api/commercial-routing/customers/{customerId}   → Customers: View
  *   POST /api/commercial-routing/customer-ownerships      → Customers: Edit + manager role
  *   POST /api/commercial-routing/customer-identifiers     → Customers: Edit + manager role
+ *   POST /api/commercial-routing/queue/{id}/claim         → Leads: Edit
+ *   POST /api/commercial-routing/queue/{id}/release       → Leads: Edit
+ *   POST /api/commercial-routing/leads/{id}/route         → Leads: Edit + manager role
+ *
+ * Note the permission split on the queue verbs, because it is the whole design of the pull lane:
+ * claim and release are the only routing verbs a plain sales rep can reach. Assignment — on both
+ * this controller and `CommercialIntelligenceController` — is manager-only. A claim is therefore
+ * a reservation, not ownership; a manager still confirms it. Do not paper over that in the UI.
+ *
+ * The queue LIST is deliberately not bound here. `GET /api/commercial-intelligence/routing-queue`
+ * already reads the same `UnassignedWorkItem` rows for the same `Leads: View` permission and adds
+ * the recommendation, the owner workload and the policy version on top, so a second list caller
+ * would be a second projection of one table rather than a missing capability.
  *
  * There is no list-all, update or delete endpoint for ownerships, so the screen reads one
  * customer's rules at a time and creates only. Do not invent the missing verbs client-side.
@@ -146,6 +159,17 @@ export interface LeadOwnershipResponse {
   assignmentVersion: number;
 }
 
+/** Mirrors `CommercialRouting.UnassignedWorkItem` as returned by the lease verbs. */
+export interface QueueLeaseResultDTO {
+  id: number;
+  leadId: number;
+  commercialCaseReference: string;
+  status: number;
+  claimedByUserId?: number | null;
+  claimedUntil?: string | null;
+  version: number;
+}
+
 const root = '/api/commercial-routing';
 
 const commercialRoutingService = {
@@ -164,6 +188,35 @@ const commercialRoutingService = {
 
   changeLeadOwner: async (leadId: number, body: ChangeLeadOwnerRequest): Promise<LeadOwnershipResponse> =>
     (await axiosInstance.put<LeadOwnershipResponse>(`${root}/leads/${leadId}/owner`, body)).data,
+
+  /**
+   * Takes a lease on a queue item so two reps cannot work the same inquiry.
+   * The claimant is taken from the bearer token server-side — there is no user id to send.
+   */
+  claimQueueItem: async (workItemId: number, expectedVersion: number, leaseMinutes = 15): Promise<QueueLeaseResultDTO> =>
+    (await axiosInstance.post<QueueLeaseResultDTO>(
+      `${root}/queue/${workItemId}/claim`, { expectedVersion, leaseMinutes })).data,
+
+  releaseQueueItem: async (workItemId: number, expectedVersion: number): Promise<QueueLeaseResultDTO> =>
+    (await axiosInstance.post<QueueLeaseResultDTO>(
+      `${root}/queue/${workItemId}/release`, { expectedVersion })).data,
+
+  /**
+   * Re-runs the routing engine over a lead.
+   *
+   * The reconciliation worker only picks up leads that have NO routing decision at all, so a lead
+   * that was already decided as Unassigned — because nobody had a governed profile at the time —
+   * will never be reconsidered on its own. This is the trigger that reopens those. The
+   * idempotency key must be fresh for the re-run to be a new decision rather than a replay of the
+   * old one, so it is minted per click.
+   */
+  routeLead: async (leadId: number): Promise<{ decisionId: number; selectedUserId?: number | null; decisionCode: string }> => {
+    const operationId = crypto.randomUUID();
+    return (await axiosInstance.post(`${root}/leads/${leadId}/route`, {
+      idempotencyKey: `manual-reroute:${operationId}`,
+      correlationId: operationId,
+    })).data;
+  },
 };
 
 export default commercialRoutingService;

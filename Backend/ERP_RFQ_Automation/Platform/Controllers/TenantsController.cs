@@ -601,6 +601,14 @@ public class TenantsController : ControllerBase
                     Slug = slug,
                     Status = TenantStatus.Provisioning,
                     PlanId = request.PlanId,
+                    // The plan's features COPIED once, as a starting template — not inherited.
+                    // A new customer therefore opens with what its tier sells, and nobody has to
+                    // tick sixteen boxes to provision one; but editing the plan afterwards cannot
+                    // reach back and re-open a module somebody deliberately revoked from this
+                    // customer. Completed to the full catalogue so the tenant is born DECIDED and
+                    // the activation control has nothing to block on. No plan → nothing granted,
+                    // which is what a tenant with no plan already effectively had.
+                    Entitlements = Entitlements.TypedEntitlementCatalog.Complete(plan?.Features),
                     CreatedBy = actor,
                     CreatedOn = DateTime.UtcNow,
 
@@ -1403,6 +1411,172 @@ public class TenantsController : ControllerBase
         if (withPlan.PrimaryBusinessUnitId is long planChangedBu)
             _tenantAccess?.Evict(planChangedBu);
         return Ok(ToDto(withPlan));
+    }
+
+    // GET /api/platform/tenants/{id}/modules
+    //
+    // Readable by every platform role. Which modules a customer has is the first question support
+    // asks when a screen is missing for them, and making them guess it from the plan is how the
+    // read-only Entitlements tab came to answer the wrong question for a year.
+    [HttpGet("{id:long}/modules")]
+    public async Task<ActionResult<TenantModulesDto>> GetModules(long id, CancellationToken ct)
+    {
+        var tenant = await _context.Set<Tenant>().IgnoreQueryFilters().AsNoTracking()
+            .Include(t => t.Plan)
+            .FirstOrDefaultAsync(t => t.Id == id, ct);
+        if (tenant is null)
+            return NotFound();
+
+        return Ok(ToModulesDto(tenant));
+    }
+
+    // PUT /api/platform/tenants/{id}/modules
+    //
+    // Platform.Billing (Owner | BillingAdmin), the same authority that assigns a plan. Deciding
+    // what a customer may open is a commercial decision about scope of supply, and it is
+    // deliberately NOT given to SupportAdmin: the separation of duties that keeps support out of
+    // pricing has to keep it out of granting the thing being priced, or it means nothing.
+    [HttpPut("{id:long}/modules")]
+    [Authorize(Policy = PlatformPolicies.Billing)]
+    public async Task<ActionResult<TenantModulesDto>> UpdateModules(
+        long id, [FromBody] UpdateTenantModulesRequest request, CancellationToken ct)
+    {
+        if (!ModelState.IsValid)
+            return BadRequest(ModelState);
+
+        var reason = request.Reason?.Trim() ?? string.Empty;
+        if (reason.Length < TenantModuleGrantRules.MinimumReasonLength)
+            return BadRequest(new
+            {
+                error = $"A reason of at least {TenantModuleGrantRules.MinimumReasonLength} characters is "
+                        + "required. Revoking a module takes work away from a live customer, and the audit "
+                        + "row is what explains that decision later."
+            });
+
+        // Refuse unknown keys HERE, naming the offender, rather than letting Complete() quietly
+        // drop them: a console sending module.reporting because somebody renamed a key would
+        // otherwise get a 200 and a silently unchanged grant.
+        var unknown = request.Modules.Keys
+            .Where(key => !Entitlements.TypedEntitlementCatalog.Keys.Contains(key))
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        if (unknown.Length > 0)
+            return BadRequest(new
+            {
+                error = $"Unknown module key(s): {string.Join(", ", unknown)}. Allowed keys: "
+                        + string.Join(", ", Entitlements.TypedEntitlementCatalog.OrderedKeys) + "."
+            });
+
+        // Completed to the whole catalogue on the way in, so a key the console did not send is
+        // stored as an explicit false rather than left absent. Absent and false read the same to
+        // IsEnabled but NOT to the activation control, which requires every key to be present —
+        // that asymmetry is what left tenants permanently unactivatable behind a plan carrying {}.
+        var completed = Entitlements.TypedEntitlementCatalog.Complete(
+            System.Text.Json.JsonSerializer.Serialize(request.Modules));
+
+        string[] granted;
+        string[] revoked;
+        try
+        {
+            var strategy = _context.Database.CreateExecutionStrategy();
+            (granted, revoked) = await strategy.ExecuteAsync(async () =>
+            {
+                _context.ChangeTracker.Clear();
+                await using var tx = await _context.Database.BeginTransactionAsync(ct);
+
+                var tenant = await _context.Set<Tenant>().IgnoreQueryFilters()
+                    .FirstOrDefaultAsync(t => t.Id == id, ct)
+                    ?? throw new TenantNotFoundException();
+
+                Entitlements.TypedEntitlementCatalog.TryParse(tenant.Entitlements, out var before, out _);
+                Entitlements.TypedEntitlementCatalog.TryParse(completed, out var after, out _);
+
+                var grantedKeys = Entitlements.TypedEntitlementCatalog.OrderedKeys
+                    .Where(key => After(after, key) && !After(before, key)).ToArray();
+                var revokedKeys = Entitlements.TypedEntitlementCatalog.OrderedKeys
+                    .Where(key => !After(after, key) && After(before, key)).ToArray();
+
+                tenant.Entitlements = completed;
+                tenant.ModifiedBy = User.FindFirst("email")?.Value ?? "platform";
+                tenant.ModifiedOn = DateTime.UtcNow;
+                await _context.SaveChangesAsync(ct);
+
+                // The whole before/after set, not just the delta: a dispute about what a customer
+                // was entitled to on a given day is answered by the state, and reconstructing it
+                // from a chain of deltas is exactly the reconstruction nobody manages under
+                // pressure. The delta is recorded alongside because it is what a reader scans for.
+                await _audit.WriteAsync(User, "tenant.modules.update", nameof(Tenant), tenant.Id.ToString(),
+                    new
+                    {
+                        reason,
+                        granted = grantedKeys,
+                        revoked = revokedKeys,
+                        before,
+                        after
+                    },
+                    actAsTenantId: tenant.Id, httpContext: HttpContext, ct: ct);
+
+                await tx.CommitAsync(ct);
+                return (grantedKeys, revokedKeys);
+            });
+        }
+        catch (TenantNotFoundException)
+        {
+            return NotFound();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to update tenant {TenantId} module grants", id);
+            return StatusCode(500, new { error = "Tenant module grants could not be saved." });
+        }
+
+        var updated = await _context.Set<Tenant>().IgnoreQueryFilters().AsNoTracking()
+            .Include(t => t.Plan).FirstAsync(t => t.Id == id, ct);
+
+        // Same reason the plan change evicts: the tenant-access snapshot is cached for ~60s and it
+        // now carries the grant itself, so without this a revoke keeps letting requests through for
+        // up to a minute on this node — which is the window in which the operator checks whether
+        // the revoke worked, sees that it did not, and presses it again.
+        if (updated.PrimaryBusinessUnitId is long moduleChangedBu)
+            _tenantAccess?.Evict(moduleChangedBu);
+
+        _logger.LogInformation(
+            "Tenant {TenantId} module grants updated by {Actor}: granted [{Granted}], revoked [{Revoked}].",
+            id, User.FindFirst("email")?.Value ?? "platform",
+            string.Join(", ", granted), string.Join(", ", revoked));
+
+        return Ok(ToModulesDto(updated));
+
+        static bool After(IReadOnlyDictionary<string, bool> values, string key)
+            => values.TryGetValue(key, out var enabled) && enabled;
+    }
+
+    /// <summary>
+    /// Projects a tenant's stored grant into the console's row-per-key shape, in catalogue order.
+    /// The plan's declaration rides along as <c>fromPlanTemplate</c> — advisory, so an operator can
+    /// see at a glance which of a customer's grants are deliberate exceptions to what they bought.
+    /// </summary>
+    private static TenantModulesDto ToModulesDto(Tenant tenant)
+    {
+        Entitlements.TypedEntitlementCatalog.TryParse(tenant.Entitlements, out var granted, out _);
+        var planTemplate = tenant.Plan is null
+            ? null
+            : Entitlements.TypedEntitlementCatalog.TryParse(tenant.Plan.Features, out var planValues, out _)
+                ? planValues
+                : null;
+
+        var rows = Entitlements.TypedEntitlementCatalog.OrderedKeys
+            .Select(key => new TenantModuleGrantDto(
+                key,
+                granted.TryGetValue(key, out var enabled) && enabled,
+                Entitlements.TypedEntitlementCatalog.IsRuntimeAvailable(key),
+                planTemplate is null
+                    ? null
+                    : planTemplate.TryGetValue(key, out var fromPlan) && fromPlan))
+            .ToArray();
+
+        return new TenantModulesDto(
+            tenant.Id, tenant.Name, tenant.PlanId, tenant.Plan?.Code, rows);
     }
 
     private async Task<ActionResult<TenantSummaryDto>> ChangeStatus(

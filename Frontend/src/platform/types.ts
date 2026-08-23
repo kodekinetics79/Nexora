@@ -405,6 +405,7 @@ export type ActivationRemediationSurface =
   | 'tenant.profile-access'
   | 'tenant.commercial'
   | 'tenant.data-storage'
+  | 'tenant.modules'
   | 'platform.plans';
 
 /** The existing edit to take. Mirrors `ActivationRemediationActions`. */
@@ -416,6 +417,7 @@ export type ActivationRemediationAction =
   | 'tenant.commercial-terms'
   | 'tenant.data-asset-boundary'
   | 'tenant.activation-evidence'
+  | 'tenant.module-grants'
   | 'platform.plan-entitlements';
 
 /**
@@ -2310,4 +2312,29 @@ export interface PlatformBrowserTrust {
   createdAtUtc: string;
   expiresAtUtc: string;
   lastUsedAtUtc: string | null;
+}
+
+/**
+ * One row of a tenant's Modules screen. Mirrors `TenantModuleGrantDto`.
+ *
+ * `available` is the honest half: five catalogue keys have no production execution boundary, and
+ * the server denies them however the grant reads. The console shows those as "not built" rather
+ * than as a switch, because a toggle that grants nothing is worse than no toggle — somebody
+ * eventually sells against it.
+ */
+export interface TenantModuleGrant {
+  key: string;
+  enabled: boolean;
+  available: boolean;
+  /** What the tenant's plan declares. Advisory: the plan is a provisioning template, not authority. */
+  fromPlanTemplate: boolean | null;
+}
+
+/** A tenant's whole module grant, as one read. Mirrors `TenantModulesDto`. */
+export interface TenantModules {
+  tenantId: number;
+  tenantName: string;
+  planId: number | null;
+  planCode: string | null;
+  modules: TenantModuleGrant[];
 }

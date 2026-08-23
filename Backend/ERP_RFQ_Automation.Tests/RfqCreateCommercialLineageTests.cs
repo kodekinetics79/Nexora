@@ -34,6 +34,7 @@ public sealed class RfqCreateCommercialLineageTests
     private const long CustomerId = 9_610;
     private const long LeadStatusConvertedId = 9_620;
     private const long RfqStatusDraftId = 9_621;
+    private const long LeadStatusQualifiedId = 9_622;
 
     // ── repository: shell-lead generation ────────────────────────────────────────────
 
@@ -148,15 +149,21 @@ public sealed class RfqCreateCommercialLineageTests
         Assert.Empty(await assertContext.Rfqs.AsNoTracking().ToListAsync());
     }
 
+    /// <summary>
+    /// POST /api/Rfq with a LeadId is now a CONVERSION, not a parallel creation: it runs the
+    /// same LeadConversionGate as the two conversion endpoints, records the governed
+    /// CONVERTED_TO_RFQ transition and the dedicated promotion event, and keeps the lineage
+    /// behaviour this test always pinned.
+    /// </summary>
     [Fact]
-    public async Task Create_with_a_tenant_lead_keeps_the_existing_lineage_behaviour()
+    public async Task Create_with_a_qualified_tenant_lead_converts_it_and_keeps_the_lineage_behaviour()
     {
         using var db = new TestDb();
         long leadId;
         await using (var seed = db.ContextFor(null))
         {
             SeedTenant(seed);
-            var lead = Seed.Lead(seed, 9_730, Bu);
+            var lead = Seed.Lead(seed, 9_730, Bu, LeadStatusQualifiedId);
             await seed.SaveChangesAsync();
             lead.ResolveCommercialIdentity(CustomerId, null, "CONFIRMED");
             await seed.SaveChangesAsync();
@@ -176,6 +183,76 @@ public sealed class RfqCreateCommercialLineageTests
         Assert.Matches($@"^NXR-RFQ-{Bu}-\d{{4}}-\d{{8}}$", persistedRfq.Rfqno);
         // No second lead was invented for a request that already had one.
         Assert.Single(await assertContext.Leads.AsNoTracking().ToListAsync());
+
+        // The lead was CONVERTED, exactly as through the conversion endpoints: governed
+        // transition to CONVERTED_TO_RFQ plus the dedicated promotion event, atomically
+        // with the RFQ insert.
+        Assert.Equal(LeadStatusConvertedId, lead2.LeadStatusId);
+        var promotion = await assertContext.CommercialLifecycleEvents.AsNoTracking()
+            .SingleAsync(e => e.AggregateId == leadId && e.EventType == "PromotedToRfq");
+        Assert.Equal($"rfq-{rfq.Id}", promotion.RequestReference);
+        var outbox = await assertContext.LifecycleOutboxMessages.AsNoTracking()
+            .SingleAsync(m => m.EventType == "commercial-case.lead.promoted-to-rfq");
+        // Parsed, not substring-matched: the jsonb column re-serialises with its own spacing.
+        using var payload = System.Text.Json.JsonDocument.Parse(outbox.Payload);
+        Assert.Equal(rfq.Id, payload.RootElement.GetProperty("RfqId").GetInt64());
+        Assert.Equal(leadId, payload.RootElement.GetProperty("LeadId").GetInt64());
+    }
+
+    [Fact]
+    public async Task Create_with_an_unqualified_lead_is_refused_with_the_gate_reason()
+    {
+        using var db = new TestDb();
+        long leadId;
+        await using (var seed = db.ContextFor(null))
+        {
+            SeedTenant(seed);
+            // No status at all: a lead still in triage. The raw door used to convert it anyway.
+            var lead = Seed.Lead(seed, 9_750, Bu);
+            await seed.SaveChangesAsync();
+            lead.ResolveCommercialIdentity(CustomerId, null, "CONFIRMED");
+            await seed.SaveChangesAsync();
+            leadId = lead.Id;
+        }
+
+        await using var context = db.ContextFor(Bu);
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            new RfqRepository(context).AddAsync(NewRfq(customerId: CustomerId, leadId: leadId)));
+
+        Assert.Contains("Only a qualified lead", error.Message);
+        await using var assertContext = db.ContextFor(null);
+        Assert.Empty(await assertContext.Rfqs.AsNoTracking().ToListAsync());
+    }
+
+    [Fact]
+    public async Task Create_for_a_lead_that_already_has_an_rfq_is_refused_naming_it()
+    {
+        using var db = new TestDb();
+        long leadId;
+        long existingRfqId;
+        await using (var seed = db.ContextFor(null))
+        {
+            SeedTenant(seed);
+            var lead = Seed.Lead(seed, 9_760, Bu, LeadStatusQualifiedId);
+            await seed.SaveChangesAsync();
+            lead.ResolveCommercialIdentity(CustomerId, null, "CONFIRMED");
+            await seed.SaveChangesAsync();
+            leadId = lead.Id;
+        }
+
+        await using var context = db.ContextFor(Bu);
+        var repository = new RfqRepository(context);
+        var first = NewRfq(customerId: CustomerId, leadId: leadId);
+        await repository.AddAsync(first);
+        existingRfqId = first.Id;
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            repository.AddAsync(NewRfq(customerId: CustomerId, leadId: leadId)));
+
+        // Actionable: the refusal names the RFQ the caller should open instead.
+        Assert.Contains($"RFQ #{existingRfqId}", error.Message);
+        await using var assertContext = db.ContextFor(null);
+        Assert.Single(await assertContext.Rfqs.AsNoTracking().Where(r => r.LeadId == leadId).ToListAsync());
     }
 
     [Fact]
@@ -301,6 +378,132 @@ public sealed class RfqCreateCommercialLineageTests
         AssertProblem((await controller.GetAll(pageSize: 0)).Result, StatusCodes.Status400BadRequest);
     }
 
+    // ── leadless import doors ────────────────────────────────────────────────────────
+    // The spreadsheet-import doors are the only legitimate producers of RFQs without a
+    // lead. The RFQ."LeadID" partial unique index deliberately leaves NULL unconstrained,
+    // and these tests pin the other half of that contract: the import doors really do
+    // create their RFQs leadless (if one ever started setting LeadId it would silently
+    // fall under one-RFQ-per-lead and conversions would begin colliding with imports).
+
+    [Fact]
+    public async Task Template_bulk_import_creates_rfqs_without_a_lead()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(Bu);
+        SeedTenant(context);
+        await context.SaveChangesAsync();
+
+        var uploader = new ERP_RFQ_Automation.Services.RfqUploaderService(
+            context,
+            new NoopLogger<ERP_RFQ_Automation.Services.RfqUploaderService>(),
+            new ERP_RFQ_Automation.Services.DocumentIntelligence.CanonicalRfqNormalizer());
+        var result = await uploader.UploadTemplateAsync(
+            TemplateWorkbook(("RFQ-IMP-1", "Import Buyer", "Widget", 5)), Bu, "importer@nexora.test");
+
+        Assert.True(result.Success, result.Message);
+        var rfq = Assert.Single(await context.Rfqs.AsNoTracking().ToListAsync());
+        Assert.Null(rfq.LeadId);
+    }
+
+    [Fact]
+    public async Task Customer_excel_import_creates_its_rfq_without_a_lead()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(Bu);
+        SeedTenant(context);
+        await context.SaveChangesAsync();
+
+        var result = await ManualDoor(context).ProcessCustomerRfqExcelAsync(
+            CustomerExcelFile(), Bu, "importer@nexora.test");
+
+        Assert.True(result.Success, result.Message);
+        var rfq = await context.Rfqs.AsNoTracking().SingleAsync(r => r.Id == result.Data);
+        Assert.Null(rfq.LeadId);
+    }
+
+    /// <summary>Nexora's own RFQ bulk template (RfqUploaderService.GenerateTemplateAsync
+    /// column order; row 1 is the header).</summary>
+    private static MemoryStream TemplateWorkbook(params (string Rfq, string Buyer, string Product, int Quantity)[] rows)
+    {
+        OfficeOpenXml.ExcelPackage.LicenseContext = OfficeOpenXml.LicenseContext.NonCommercial;
+        using var package = new OfficeOpenXml.ExcelPackage();
+        var ws = package.Workbook.Worksheets.Add("RFQTemplate");
+        ws.Cells[1, 1].Value = "RFQ No*";
+        for (var i = 0; i < rows.Length; i++)
+        {
+            ws.Cells[i + 2, 1].Value = rows[i].Rfq;
+            ws.Cells[i + 2, 2].Value = rows[i].Buyer;
+            ws.Cells[i + 2, 3].Value = "2026-08-01";
+            ws.Cells[i + 2, 4].Value = "2026-08-20";
+            ws.Cells[i + 2, 5].Value = rows[i].Product;
+            ws.Cells[i + 2, 6].Value = rows[i].Quantity;
+            ws.Cells[i + 2, 8].Value = "USD";
+        }
+        var stream = new MemoryStream(package.GetAsByteArray());
+        stream.Position = 0;
+        return stream;
+    }
+
+    /// <summary>The customer-specific Excel shape ProcessCustomerRfqExcelAsync reads by
+    /// column letter (B = product name, N = quantity; row 1 is the header).</summary>
+    private static IFormFile CustomerExcelFile()
+    {
+        OfficeOpenXml.ExcelPackage.LicenseContext = OfficeOpenXml.LicenseContext.NonCommercial;
+        using var package = new OfficeOpenXml.ExcelPackage();
+        var ws = package.Workbook.Worksheets.Add("CustomerRfq");
+        ws.Cells["B1"].Value = "Name";
+        ws.Cells["N1"].Value = "Quantity";
+        ws.Cells["B2"].Value = "Widget";
+        ws.Cells["N2"].Value = 5;
+        var ms = new MemoryStream(package.GetAsByteArray());
+        ms.Position = 0;
+        return new FormFile(ms, 0, ms.Length, "file", "customer-rfq.xlsx")
+        {
+            Headers = new HeaderDictionary(),
+            ContentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        };
+    }
+
+    private static ERP_RFQ_Automation.Services.ManualUploadService ManualDoor(ErpRfqAutomationContext context)
+    {
+        var temp = Path.Combine(Path.GetTempPath(), "nexora-rfq-door-tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(temp);
+        return new ERP_RFQ_Automation.Services.ManualUploadService(
+            context,
+            new DoorEnvironment(temp),
+            new NoopLogger<ERP_RFQ_Automation.Services.ManualUploadService>(),
+            new StubLlm(),
+            new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(),
+            new DoorStorage(temp),
+            new ERP_RFQ_Automation.LeadIdentity.LeadIdentityApplicationService(context),
+            new Support.StubLeadCustomerResolution());
+    }
+
+    private sealed class DoorEnvironment(string root) : Microsoft.AspNetCore.Hosting.IWebHostEnvironment
+    {
+        public string WebRootPath { get; set; } = root;
+        public Microsoft.Extensions.FileProviders.IFileProvider WebRootFileProvider { get; set; }
+            = new Microsoft.Extensions.FileProviders.NullFileProvider();
+        public string ApplicationName { get; set; } = "tests";
+        public Microsoft.Extensions.FileProviders.IFileProvider ContentRootFileProvider { get; set; }
+            = new Microsoft.Extensions.FileProviders.NullFileProvider();
+        public string ContentRootPath { get; set; } = root;
+        public string EnvironmentName { get; set; } = "Test";
+    }
+
+    private sealed class DoorStorage(string root) : ERP_RFQ_Automation.Infrastructure.Storage.IFileStorage
+    {
+        public string RootPath => root;
+        public string ResolvePath(string storagePath) => Path.Combine(root, storagePath);
+        public string GetPath(params string[] segments) => Path.Combine([root, .. segments]);
+        public Task<string> WriteImmutableAsync(string relativePath, ReadOnlyMemory<byte> content, CancellationToken ct = default)
+            => throw new InvalidOperationException("The import-door tests never write immutable objects.");
+        public Task<Stream> OpenReadAsync(string storagePath, CancellationToken ct = default)
+            => throw new InvalidOperationException("The import-door tests never read storage.");
+        public Task<bool> TryDeleteAsync(string storagePath, CancellationToken ct = default)
+            => throw new InvalidOperationException("The import-door tests never delete storage.");
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────────────
 
     /// <summary>BU + customer + the two lifecycle statuses the create path resolves.</summary>
@@ -311,6 +514,8 @@ public sealed class RfqCreateCommercialLineageTests
         Seed.Customer(seed, CustomerId, Bu, "Lineage Customer");
         var converted = Seed.LeadStatus(seed, LeadStatusConvertedId, Bu, "Converted to RFQ");
         converted.SetupCode = "CONVERTED_TO_RFQ";
+        var qualified = Seed.LeadStatus(seed, LeadStatusQualifiedId, Bu, "Qualified");
+        qualified.SetupCode = "QUALIFIED";
         seed.SetupMasters.Add(new SetupMaster
         {
             SetupId = RfqStatusDraftId,

@@ -11,7 +11,14 @@ namespace ERP_RFQ_Automation.Tests;
 /// kind of flag that reaches production set the wrong way. The allowance answers that
 /// STRUCTURALLY — the environment is a parameter to the enabling call, so no configuration can
 /// grant it on a non-Development host. These tests are what make that claim checkable.</para>
+///
+/// <para>The allowance is PROCESS-GLOBAL static state, and <c>AcceptanceJourneyTests</c> turns
+/// it on while it drives the mailbox journey through a loopback IMAP sink. This class asserts
+/// the default-off state, so the two must never run in parallel: both live in the serialized
+/// PostgreSQL integration collection for exactly that reason (this class does not use the
+/// database fixture — only the collection's no-parallelism guarantee).</para>
 /// </summary>
+[Collection(Support.PostgreSqlIntegrationCollection.Name)]
 public sealed class MailEndpointPolicyLoopbackAllowanceTests : IDisposable
 {
     public void Dispose() => MailEndpointPolicy.ResetLoopbackAllowance();

@@ -85,13 +85,15 @@ import {
 import { useAuth } from "../../../context/AuthContext";
 import commercialLearningService from "../../../api/services/commercialLearningService";
 import InboundShipmentsPanel from "./InboundShipmentsPanel";
+import { formatMoney } from "../../../utils/currency";
 
 const commandKey = (prefix: string) => `${prefix}:${crypto.randomUUID()}`;
 const number = (value: unknown) => Number(value || 0);
-const money = (value: number, currency = "USD") =>
-  new Intl.NumberFormat(undefined, { style: "currency", currency }).format(
-    value,
-  );
+// The default was `currency = "USD"`, on a KSA-first product: a landed cost whose record
+// carried no currency was rendered with a dollar sign it had never claimed. utils/currency.ts
+// exists to make that impossible — where the record states no currency, a bare grouped number
+// is the honest output.
+const money = (value: number, currency?: string | null) => formatMoney(value, currency);
 /**
  * The refusal the server actually gave, in its own words.
  *

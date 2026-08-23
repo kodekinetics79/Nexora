@@ -361,6 +361,72 @@ public sealed class LeadDecisionServiceTests
         Assert.False(summary.IsActionable);
     }
 
+    /// <summary>
+    /// The leads grid and the Decision Brief must agree about catalogue coverage. Every
+    /// spreadsheet-ingested lead arrives with ItemMaterialCode null and the buyer's material
+    /// number in ManufacturerPartNumber — NativeSpreadsheetParser.FieldAliases routes every
+    /// material-code heading there by design. The brief reads both fields; the grid used to read
+    /// only ItemMaterialCode, so it printed "We stock ~0%" and a Skip chip beside a lead whose own
+    /// brief reported full coverage. Both surfaces are asserted here so the divergence itself,
+    /// not one half of it, is the subject.
+    /// </summary>
+    [Fact]
+    public async Task Spreadsheet_ingested_part_number_covers_the_grid_exactly_as_it_covers_the_brief()
+    {
+        using var database = new TestDb();
+        await using (var seed = database.ContextFor(null))
+        {
+            var lead = Seed.Lead(seed, 1, TenantId, buyersName: null);
+            // Exactly what the spreadsheet door produces: no material code, number in the mpn.
+            lead.LeadItems.Add(Item(1001, null, "MAT-88001", "Spreadsheet line", 2, 25m, "USD"));
+            seed.Products.Add(Product(501, "MAT-88001", "Stocked part", 10m, 10m, 25m));
+            await seed.SaveChangesAsync();
+        }
+
+        await using var context = database.ContextFor(TenantId);
+        var service = new LeadDecisionService(context, new GrossMarginService(context));
+
+        var brief = await service.GetBriefAsync(1, TenantId, default);
+        Assert.Equal(1, brief.Coverage.CoveredItems);
+        Assert.Equal(100m, brief.Coverage.CoveragePct);
+
+        var summary = Assert.Single(await service.GetSummariesAsync([1], TenantId, default)).Value;
+        Assert.Equal(100m, summary.CoveragePct);
+        Assert.NotEqual(LeadDecisionRecommendations.Skip, summary.Recommendation);
+    }
+
+    /// <summary>
+    /// The grid must fail closed on ambiguity exactly where the brief does. Two products sharing
+    /// a ModelNo the lead's part number hits identify nothing, so both surfaces report zero —
+    /// otherwise the same contradiction reappears mirrored, with the grid claiming coverage the
+    /// brief denies.
+    /// </summary>
+    [Fact]
+    public async Task Ambiguous_part_number_covers_neither_the_grid_nor_the_brief()
+    {
+        using var database = new TestDb();
+        await using (var seed = database.ContextFor(null))
+        {
+            var lead = Seed.Lead(seed, 1, TenantId, buyersName: null);
+            lead.LeadItems.Add(Item(1001, null, "DUPLICATE", "Ambiguous product", 1, 100m, "USD"));
+            var first = Product(501, "FIRST", "First", 1m, 50m, 100m);
+            var second = Product(502, "SECOND", "Second", 1m, 55m, 100m);
+            first.ModelNo = "DUPLICATE";
+            second.ModelNo = "DUPLICATE";
+            seed.Products.AddRange(first, second);
+            await seed.SaveChangesAsync();
+        }
+
+        await using var context = database.ContextFor(TenantId);
+        var service = new LeadDecisionService(context, new GrossMarginService(context));
+
+        var brief = await service.GetBriefAsync(1, TenantId, default);
+        Assert.Equal(0, brief.Coverage.CoveredItems);
+
+        var summary = Assert.Single(await service.GetSummariesAsync([1], TenantId, default)).Value;
+        Assert.Equal(0m, summary.CoveragePct);
+    }
+
     private static LeadItem Item(
         long id,
         string? code,

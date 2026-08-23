@@ -393,3 +393,72 @@ describe('explainStoragePause', () => {
     }
   });
 });
+
+describe('extraction-phase failures', () => {
+  /**
+   * The nine original entries were all intake/security phase. A document that cleared the scanner
+   * and then failed while being READ fell through to UNKNOWN_INTAKE_ERROR — "This file needs
+   * attention / Processing stopped for this file before it produced a result" — with isRetryable
+   * false, so no retry button appeared either.
+   *
+   * In the current deployed configuration that is the MAJORITY path, not an edge case: external AI
+   * is unauthorized by default, so every PDF, scan and prose document dies here while only
+   * spreadsheets and table-structured Word files read deterministically. The rep who uploaded a
+   * tender saw it stop with no reason and no next step, and concluded the product had eaten it.
+   */
+  it('no longer falls through to the generic explanation on a dead letter', () => {
+    const explained = explainIntakeError('extraction_dead_letter');
+
+    expect(explained.title).not.toBe('This file needs attention');
+    expect(explained.whatHappened).not.toContain('Processing stopped for this file');
+  });
+
+  it('tells the rep where the answer is and what usually causes it', () => {
+    const explained = explainIntakeError('extraction_dead_letter');
+
+    expect(explained.nextAction).toMatch(/administrator/i);
+    // The workaround that works TODAY, without any configuration change.
+    expect(explained.nextAction).toMatch(/spreadsheet/i);
+  });
+
+  it('does not offer a retry that provably cannot succeed', () => {
+    // Retrying a dead letter changes nothing until the underlying condition changes. Offering the
+    // button anyway is how the previous screen wasted an afternoon.
+    expect(explainIntakeError('extraction_dead_letter').isRetryable).toBe(false);
+  });
+
+  it('prefers the server’s own prescription for a dead letter, because it names the category', () => {
+    // ExtractionDeadLetterService.OperatorAction returns a fixed, tenant-safe string per category
+    // (AI_NOT_AUTHORIZED, EVIDENCE_MISSING, EVIDENCE_BUCKET_MISMATCH...). When one arrives it is
+    // more specific than our guess, so it must win.
+    const serverSentence = 'NOTHING IS LOST. This document’s bytes are intact in the storage bucket.';
+    expect(explainIntakeError('extraction_dead_letter', serverSentence).whatHappened)
+      .toContain('NOTHING IS LOST');
+  });
+
+  it('reassures rather than alarms while a document is merely being retried', () => {
+    const explained = explainIntakeError('extraction_retryable');
+
+    expect(explained.isRetryable).toBe(true);
+    expect(explained.category).toBe('infrastructure');
+    expect(explained.nextAction).toMatch(/no action needed/i);
+  });
+
+  it('explains the AI refusal in the rep’s own terms, folding case from the backend constant', () => {
+    // ChunkedExtractionService.AiNotAuthorizedCode is "EXTRACTION_AI_NOT_AUTHORIZED" — upper case
+    // on the wire, and normalizeCode folds it.
+    const explained = explainIntakeError('EXTRACTION_AI_NOT_AUTHORIZED');
+
+    expect(explained.title).not.toBe('This file needs attention');
+    expect(explained.whatHappened).toMatch(/not authorized/i);
+    // The reassurance that matters commercially: no document left the building.
+    expect(explained.whatHappened).toMatch(/nothing was sent/i);
+    expect(explained.nextAction).toMatch(/spreadsheet|table/i);
+  });
+
+  it('reports all three extraction codes as explained', () => {
+    for (const code of ['extraction_dead_letter', 'extraction_retryable', 'EXTRACTION_AI_NOT_AUTHORIZED']) {
+      expect(hasIntakeErrorExplanation(code)).toBe(true);
+    }
+  });
+});

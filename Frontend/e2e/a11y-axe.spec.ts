@@ -96,6 +96,29 @@ test.describe('WCAG 2.1 AA — axe scan', () => {
       await expect(page.getByRole('menuitem', { name: 'Log Out Session' })).toBeVisible();
     });
 
+    /**
+     * The core journey — lead to RFQ to quote — was outside this gate entirely. It covered
+     * /dashboard, the two "all" lists and /security/users, so every screen a salesperson
+     * actually spends the day on could regress without the gate noticing. These are the
+     * list surfaces changed by the enterprise-polish pass; they share the DataGrid shell
+     * with /procurement/rfqs/all, which this spec already covers.
+     */
+    for (const [route, title] of [
+      ['/procurement/rfqs/draft', 'Draft RFQs | NEXORA'],
+      ['/procurement/rfqs/outstanding', 'Outstanding RFQs | NEXORA'],
+      ['/sales/quotes', 'Quotes | NEXORA'],
+      ['/analytics/deadlines', 'Deadline Board | NEXORA'],
+    ] as const) {
+      test(`${route} has no critical accessibility violations`, async ({ page }) => {
+        await page.goto(route);
+        await expect(page).toHaveTitle(title);
+        await expect(page.getByRole('main')).toBeVisible();
+
+        const results = await scan(page);
+        expect(criticalOnly(results.violations), describeViolations(results.violations)).toEqual([]);
+      });
+    }
+
     test('each route gets a distinct, meaningful document title', async ({ page }) => {
       await page.goto('/dashboard');
       await expect(page).toHaveTitle('Dashboard | NEXORA');

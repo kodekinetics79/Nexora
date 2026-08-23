@@ -1,0 +1,551 @@
+{
+  "$comment": "Ground truth for the representative RFQ corpus. Every expectation here was written BEFORE the acceptance tests ran; the tests assert against this file, never against values computed at runtime. Regeneration: see Corpus/README.md. Reason-code strings are the DeterministicEmailTriage constants; reader outcomes are asserted by CorpusAcceptanceTests; llm entries are what the stubbed ILLMService returns for a document whose text contains every marker (most specific match wins).",
+  "emails": [
+    {
+      "file": "email-simple-english.eml",
+      "messageId": "corpus-simple-en@corpus.nexora.example",
+      "description": "Simple English body-only RFQ",
+      "expectedTriageOutcome": "Inquiry",
+      "expectedTriageReasons": [
+        "rfq_reference",
+        "request_verb",
+        "qty_uom_pattern"
+      ],
+      "expectedParseStatus": "Queued",
+      "expectedJobCount": 1,
+      "expectedSkippedAttachments": [],
+      "expectedDisposition": "NeedsReview"
+    },
+    {
+      "file": "email-simple-arabic.eml",
+      "messageId": "corpus-simple-ar@corpus.nexora.example",
+      "description": "Mixed Arabic/English body-only RFQ",
+      "expectedTriageOutcome": "Inquiry",
+      "expectedTriageReasons": [
+        "rfq_reference",
+        "request_verb",
+        "qty_uom_pattern"
+      ],
+      "expectedParseStatus": "Queued",
+      "expectedJobCount": 1,
+      "expectedSkippedAttachments": [],
+      "expectedDisposition": "NeedsReview"
+    },
+    {
+      "file": "email-with-pdf.eml",
+      "messageId": "corpus-with-pdf@corpus.nexora.example",
+      "description": "Attachment-only RFQ carrying a native-text PDF; empty body must NOT read as noise because an attachment is present",
+      "expectedTriageOutcome": "Inquiry",
+      "expectedTriageReasons": [
+        "rfq_reference"
+      ],
+      "expectedParseStatus": "Queued",
+      "expectedJobCount": 1,
+      "expectedSkippedAttachments": [],
+      "expectedDisposition": "NeedsReview"
+    },
+    {
+      "file": "email-duplicate.eml",
+      "messageId": "corpus-duplicate@corpus.nexora.example",
+      "description": "Byte-identical duplicate pair: this ONE file is delivered twice; the second delivery must produce no second EmailIngest and no second lead",
+      "expectedTriageOutcome": "Inquiry",
+      "expectedTriageReasons": [
+        "rfq_reference",
+        "request_verb",
+        "qty_uom_pattern"
+      ],
+      "expectedParseStatus": "Queued",
+      "expectedJobCount": 1,
+      "expectedSkippedAttachments": [],
+      "expectedDisposition": "NeedsReview"
+    },
+    {
+      "file": "email-revised-rfq.eml",
+      "messageId": "corpus-revised@corpus.nexora.example",
+      "description": "Revision of RFQ-CORPUS-001 (quantity 40 -> 60), In-Reply-To the original; must become revision 2 of the canonical lead, not a new lead",
+      "expectedTriageOutcome": "Inquiry",
+      "expectedTriageReasons": [
+        "rfq_reference",
+        "request_verb",
+        "qty_uom_pattern"
+      ],
+      "expectedParseStatus": "Queued",
+      "expectedJobCount": 1,
+      "expectedSkippedAttachments": [],
+      "expectedDisposition": "NeedsReview",
+      "expectedThreadContinuation": true
+    },
+    {
+      "file": "email-conflicting-quantities.eml",
+      "messageId": "corpus-conflicting@corpus.nexora.example",
+      "description": "Body says 40 nos, attached PDF says 45 for the same part; both must be captured as evidence (one canonical lead, two revisions), never silently merged",
+      "expectedTriageOutcome": "Inquiry",
+      "expectedTriageReasons": [
+        "rfq_reference",
+        "request_verb",
+        "qty_uom_pattern"
+      ],
+      "expectedParseStatus": "Queued",
+      "expectedJobCount": 2,
+      "expectedSkippedAttachments": [],
+      "expectedDisposition": "NeedsReview"
+    },
+    {
+      "file": "email-missing-part-numbers.eml",
+      "messageId": "corpus-missing-parts@corpus.nexora.example",
+      "description": "RFQ lines with no part numbers; missing means null, never a guess",
+      "expectedTriageOutcome": "Inquiry",
+      "expectedTriageReasons": [
+        "rfq_reference",
+        "request_verb",
+        "qty_uom_pattern"
+      ],
+      "expectedParseStatus": "Queued",
+      "expectedJobCount": 1,
+      "expectedSkippedAttachments": [],
+      "expectedDisposition": "NeedsReview"
+    },
+    {
+      "file": "email-forwarded-inner.eml",
+      "messageId": "corpus-forwarded@corpus.nexora.example",
+      "description": "Forward carrying an inner message/rfc822. The embedded message is ingested as a component in its own right AND walked, so the forwarded RFQ's real content is extracted rather than only the forwarder's cover note; both components assemble into ONE lead via the message barrier.",
+      "expectedTriageOutcome": "Inquiry",
+      "expectedTriageReasons": [
+        "rfq_reference",
+        "request_verb",
+        "qty_uom_pattern"
+      ],
+      "expectedParseStatus": "Queued",
+      "expectedJobCount": 2,
+      "expectedSkippedAttachments": [],
+      "expectedDisposition": "NeedsReview"
+    },
+    {
+      "file": "email-multi-attachment.eml",
+      "messageId": "corpus-multi-attachment@corpus.nexora.example",
+      "description": "One message, three supported attachments (.xlsx multi-sheet, .docx table, legacy .xls): one job per attachment, one shared batch",
+      "expectedTriageOutcome": "Inquiry",
+      "expectedTriageReasons": [
+        "rfq_reference"
+      ],
+      "expectedParseStatus": "Queued",
+      "expectedJobCount": 3,
+      "expectedSkippedAttachments": [],
+      "expectedDisposition": "NeedsReview"
+    },
+    {
+      "file": "email-mixed-protected.eml",
+      "messageId": "corpus-mixed-protected@corpus.nexora.example",
+      "description": "Password-protected PDF plus a good PDF on the same message: the protected one dead-letters with a truthful reason, the good one still produces its lead",
+      "expectedTriageOutcome": "Inquiry",
+      "expectedTriageReasons": [
+        "rfq_reference"
+      ],
+      "expectedParseStatus": "Queued",
+      "expectedJobCount": 2,
+      "expectedSkippedAttachments": [],
+      "expectedDisposition": "NeedsReview"
+    },
+    {
+      "file": "email-noise-newsletter.eml",
+      "messageId": "corpus-noise-newsletter@corpus.nexora.example",
+      "description": "Bulk newsletter (List-Id, List-Unsubscribe, Precedence: bulk); its 'please quote us your feedback' must not defeat the positive bulk evidence",
+      "expectedTriageOutcome": "Noise",
+      "expectedTriageReasons": [
+        "bulk_list_header"
+      ],
+      "expectedParseStatus": "Rejected",
+      "expectedJobCount": 0,
+      "expectedSkippedAttachments": [],
+      "expectedDisposition": "Rejected"
+    },
+    {
+      "file": "email-noise-auto-reply.eml",
+      "messageId": "corpus-noise-autoreply@corpus.nexora.example",
+      "description": "Out-of-office auto reply (Auto-Submitted: auto-replied)",
+      "expectedTriageOutcome": "Noise",
+      "expectedTriageReasons": [
+        "auto_submitted_header"
+      ],
+      "expectedParseStatus": "Rejected",
+      "expectedJobCount": 0,
+      "expectedSkippedAttachments": [],
+      "expectedDisposition": "Rejected"
+    },
+    {
+      "file": "email-noise-no-reply.eml",
+      "messageId": "corpus-noise-noreply@corpus.nexora.example",
+      "description": "Unattended sender (no-reply@); order-confirmation noise",
+      "expectedTriageOutcome": "Noise",
+      "expectedTriageReasons": [
+        "noreply_sender"
+      ],
+      "expectedParseStatus": "Rejected",
+      "expectedJobCount": 0,
+      "expectedSkippedAttachments": [],
+      "expectedDisposition": "Rejected"
+    }
+  ],
+  "documents": [
+    {
+      "file": "doc-native-rfq.pdf",
+      "description": "Native-text PDF RFQ, two line items",
+      "expectedInspection": "Cleared",
+      "expectedReaderOutcome": "Prose",
+      "expectedTextMarkers": [
+        "RFQ-CORPUS-003",
+        "PMP-15KW",
+        "VLV-DN50"
+      ]
+    },
+    {
+      "file": "doc-good-simple.pdf",
+      "description": "Native-text PDF RFQ, one line item (the good half of email-mixed-protected)",
+      "expectedInspection": "Cleared",
+      "expectedReaderOutcome": "Prose",
+      "expectedTextMarkers": [
+        "RFQ-CORPUS-009",
+        "INS-PT-1000"
+      ]
+    },
+    {
+      "file": "doc-conflicting-qty.pdf",
+      "description": "PDF stating Qty 45 for the part the covering email says 40 of",
+      "expectedInspection": "Cleared",
+      "expectedReaderOutcome": "Prose",
+      "expectedTextMarkers": [
+        "RFQ-CORPUS-005",
+        "GV-DN100",
+        "45"
+      ]
+    },
+    {
+      "file": "doc-scanned-rfq.pdf",
+      "description": "Image-only (scanned) PDF; OCR is the only way to the text",
+      "expectedInspection": "Cleared",
+      "expectedReaderOutcome": "Ocr",
+      "expectedTextMarkers": [
+        "OCR-100"
+      ]
+    },
+    {
+      "file": "doc-multisheet-rfq.xlsx",
+      "description": "Two-sheet workbook, both sheets in a recognized layout",
+      "expectedInspection": "Cleared",
+      "expectedReaderOutcome": "Structured",
+      "expectedStructuredRows": 2,
+      "expectedTextMarkers": [
+        "SHT-100",
+        "SHT-200"
+      ]
+    },
+    {
+      "file": "doc-large-rfq.xlsx",
+      "description": "Large RFQ: 300 lines in a recognized layout",
+      "expectedInspection": "Cleared",
+      "expectedReaderOutcome": "Structured",
+      "expectedStructuredRows": 300,
+      "expectedTextMarkers": [
+        "LG-0001",
+        "LG-0300"
+      ]
+    },
+    {
+      "file": "doc-legacy-rfq.xls",
+      "description": "Legacy BIFF .xls in a recognized layout (same bytes as Fixtures/recognized-layout-rfq.xls)",
+      "expectedInspection": "Cleared",
+      "expectedReaderOutcome": "Structured",
+      "expectedStructuredRows": 1,
+      "expectedTextMarkers": [
+        "RFQ-1046",
+        "Centrifugal pump 15kW"
+      ]
+    },
+    {
+      "file": "doc-rfq-table.docx",
+      "description": "Word table RFQ, two line items; the docx table parser reads a recognized table STRUCTURALLY (deterministic, no LLM)",
+      "expectedInspection": "Cleared",
+      "expectedReaderOutcome": "Structured",
+      "expectedStructuredRows": 2,
+      "expectedTextMarkers": [
+        "RFQ-CORPUS-011",
+        "TBL-100",
+        "TBL-200"
+      ]
+    },
+    {
+      "file": "doc-outlook-rfq.msg",
+      "description": "Outlook .msg (real CFB with MAPI property streams)",
+      "expectedInspection": "Cleared",
+      "expectedReaderOutcome": "Prose",
+      "expectedTextMarkers": [
+        "RFQ-CORPUS-012",
+        "INS-PT-1000"
+      ]
+    },
+    {
+      "file": "doc-password-protected.pdf",
+      "description": "RC4-40 encrypted PDF (password 'nexora'); the reader must stop with a truthful password disposition, never an empty success",
+      "expectedInspection": "Cleared",
+      "expectedReaderOutcome": "ParseFailure",
+      "expectedFailureContains": "password-protected"
+    },
+    {
+      "file": "doc-corrupted.docx",
+      "description": "Valid docx truncated to its first 512 bytes (zip magic intact, central directory gone)",
+      "expectedInspection": "Rejected",
+      "expectedReaderOutcome": "InspectionRejected"
+    },
+    {
+      "file": "doc-unsupported.pptx",
+      "description": "Bytes under an extension the intake allow-list refuses; rejected for the extension, before content sniffing",
+      "expectedInspection": "Rejected",
+      "expectedReaderOutcome": "InspectionRejected",
+      "expectedFailureContains": "not a type Nexora accepts"
+    }
+  ],
+  "llm": [
+    {
+      "markers": [
+        "RFQ-CORPUS-001",
+        "Revision B"
+      ],
+      "rfqNumber": "RFQ-CORPUS-001",
+      "buyerName": "Al Noor Trading LLC",
+      "lines": [
+        {
+          "partNumber": "CT-300-HDG",
+          "description": "Cable tray 300mm hot dip galvanized",
+          "quantity": 60,
+          "uom": "Nos",
+          "sourceSpan": "60 nos cable tray 300mm hot dip galvanized",
+          "quantityToken": "60 nos"
+        }
+      ],
+      "buyerEmail": "ahmed@alnoortrading.ae"
+    },
+    {
+      "markers": [
+        "RFQ-CORPUS-001"
+      ],
+      "rfqNumber": "RFQ-CORPUS-001",
+      "buyerName": "Al Noor Trading LLC",
+      "lines": [
+        {
+          "partNumber": "CT-300-HDG",
+          "description": "Cable tray 300mm hot dip galvanized",
+          "quantity": 40,
+          "uom": "Nos",
+          "sourceSpan": "40 nos cable tray 300mm hot dip galvanized",
+          "quantityToken": "40 nos"
+        }
+      ],
+      "buyerEmail": "ahmed@alnoortrading.ae"
+    },
+    {
+      "markers": [
+        "RFQ-CORPUS-002"
+      ],
+      "rfqNumber": "RFQ-CORPUS-002",
+      "buyerName": "Al Noor Trading LLC",
+      "lines": [
+        {
+          "partNumber": "CBL-3C-25",
+          "description": "Power cable 3x2.5mm",
+          "quantity": 250,
+          "uom": "Mtrs",
+          "sourceSpan": "250 mtrs power cable 3x2.5mm",
+          "quantityToken": "250 mtrs"
+        }
+      ],
+      "buyerEmail": "ahmed@alnoortrading.ae"
+    },
+    {
+      "markers": [
+        "RFQ-CORPUS-003"
+      ],
+      "rfqNumber": "RFQ-CORPUS-003",
+      "buyerName": "Gulf Projects Co",
+      "lines": [
+        {
+          "partNumber": "PMP-15KW",
+          "description": "Centrifugal pump 15kW",
+          "quantity": 3,
+          "uom": "EA",
+          "sourceSpan": "Qty 3 EA",
+          "quantityToken": "3"
+        },
+        {
+          "partNumber": "VLV-DN50",
+          "description": "Ball valve DN50 PN16",
+          "quantity": 12,
+          "uom": "EA",
+          "sourceSpan": "Qty 12 EA",
+          "quantityToken": "12"
+        }
+      ],
+      "buyerEmail": "ahmed@alnoortrading.ae"
+    },
+    {
+      "markers": [
+        "RFQ-CORPUS-004"
+      ],
+      "rfqNumber": "RFQ-CORPUS-004",
+      "buyerName": "Al Noor Trading LLC",
+      "lines": [
+        {
+          "partNumber": "GSK-DN80",
+          "description": "Spiral wound gasket DN80 PN16",
+          "quantity": 100,
+          "uom": "Pcs",
+          "sourceSpan": "100 pcs spiral wound gasket DN80 PN16",
+          "quantityToken": "100 pcs"
+        }
+      ],
+      "buyerEmail": "ahmed@alnoortrading.ae"
+    },
+    {
+      "markers": [
+        "RFQ-CORPUS-005",
+        "supersedes"
+      ],
+      "rfqNumber": "RFQ-CORPUS-005",
+      "buyerName": "Al Noor Trading LLC",
+      "lines": [
+        {
+          "partNumber": "GV-DN100",
+          "description": "Gate valve DN100 PN16",
+          "quantity": 45,
+          "uom": "EA",
+          "sourceSpan": "Qty 45",
+          "quantityToken": "45"
+        }
+      ],
+      "buyerEmail": "ahmed@alnoortrading.ae"
+    },
+    {
+      "markers": [
+        "RFQ-CORPUS-005"
+      ],
+      "rfqNumber": "RFQ-CORPUS-005",
+      "buyerName": "Al Noor Trading LLC",
+      "lines": [
+        {
+          "partNumber": "GV-DN100",
+          "description": "Gate valve DN100 PN16",
+          "quantity": 40,
+          "uom": "EA",
+          "sourceSpan": "40 nos gate valve DN100",
+          "quantityToken": "40 nos"
+        }
+      ],
+      "buyerEmail": "ahmed@alnoortrading.ae"
+    },
+    {
+      "markers": [
+        "RFQ-CORPUS-006"
+      ],
+      "rfqNumber": "RFQ-CORPUS-006",
+      "buyerName": "Al Noor Trading LLC",
+      "lines": [
+        {
+          "partNumber": null,
+          "description": "Weld neck flange DN80 PN16 carbon steel",
+          "quantity": 10,
+          "uom": "Pcs",
+          "sourceSpan": "10 pcs weld neck flange DN80 PN16 carbon steel",
+          "quantityToken": "10 pcs"
+        },
+        {
+          "partNumber": null,
+          "description": "Elbow 90 degree DN80 seamless",
+          "quantity": 5,
+          "uom": "Pcs",
+          "sourceSpan": "5 pcs elbow 90 degree DN80 seamless",
+          "quantityToken": "5 pcs"
+        }
+      ],
+      "buyerEmail": "ahmed@alnoortrading.ae"
+    },
+    {
+      "markers": [
+        "RFQ-CORPUS-007"
+      ],
+      "rfqNumber": "RFQ-CORPUS-007",
+      "buyerName": "Gulf Projects Co",
+      "lines": [
+        {
+          "partNumber": "CHM-CS-25",
+          "description": "Caustic soda flakes 25kg",
+          "quantity": 15,
+          "uom": "Drums",
+          "sourceSpan": "15 drums caustic soda flakes 25kg",
+          "quantityToken": "15 drums"
+        }
+      ],
+      "buyerEmail": "ahmed@alnoortrading.ae"
+    },
+    {
+      "markers": [
+        "RFQ-CORPUS-009"
+      ],
+      "rfqNumber": "RFQ-CORPUS-009",
+      "buyerName": "Al Noor Trading LLC",
+      "lines": [
+        {
+          "partNumber": "INS-PT-1000",
+          "description": "Pressure transmitter 0-10 bar",
+          "quantity": 2,
+          "uom": "EA",
+          "sourceSpan": "Qty 2 EA",
+          "quantityToken": "2"
+        }
+      ],
+      "buyerEmail": "ahmed@alnoortrading.ae"
+    },
+    {
+      "markers": [
+        "RFQ-CORPUS-011"
+      ],
+      "rfqNumber": "RFQ-CORPUS-011",
+      "buyerName": "Al Noor Trading LLC",
+      "lines": [
+        {
+          "partNumber": "TBL-100",
+          "description": "Gate valve DN80 PN16",
+          "quantity": 6,
+          "uom": "EA",
+          "sourceSpan": "6",
+          "quantityToken": "6"
+        },
+        {
+          "partNumber": "TBL-200",
+          "description": "Check valve DN80 PN16",
+          "quantity": 4,
+          "uom": "EA",
+          "sourceSpan": "4",
+          "quantityToken": "4"
+        }
+      ],
+      "buyerEmail": "ahmed@alnoortrading.ae"
+    },
+    {
+      "markers": [
+        "RFQ-CORPUS-012"
+      ],
+      "rfqNumber": "RFQ-CORPUS-012",
+      "buyerName": "Al Noor Trading LLC",
+      "lines": [
+        {
+          "partNumber": "INS-PT-1000",
+          "description": "Pressure transmitter 0-10 bar",
+          "quantity": 2,
+          "uom": "EA",
+          "sourceSpan": "2 pcs pressure transmitter 0-10 bar",
+          "quantityToken": "2 pcs"
+        }
+      ],
+      "buyerEmail": "ahmed@alnoortrading.ae"
+    }
+  ]
+}

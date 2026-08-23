@@ -44,12 +44,23 @@ describe('typed plan entitlements', () => {
     });
   });
 
-  it('warns explicitly when an editable plan enables no product features', async () => {
+  it('warns that new customers on a featureless plan start with no modules', async () => {
     vi.spyOn(platformApi, 'listPlans').mockResolvedValue([plan()]);
     renderPage();
     fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
-    expect(screen.getByText('No product features enabled')).toBeVisible();
+    // The warning is about PROVISIONING now, not about the plan's own authority: since
+    // 20260818013530 a plan's features are copied into a tenant once and never read again.
+    expect(screen.getByText('New customers on this plan start with nothing')).toBeVisible();
     expect(screen.queryByLabelText(/Features \(JSON object\)/i)).not.toBeInTheDocument();
+  });
+
+  it('marks catalogue keys that have no product behind them', async () => {
+    vi.spyOn(platformApi, 'listPlans').mockResolvedValue([plan()]);
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    // Five keys are RuntimeUnavailableBoundary on the server and are denied however the flag
+    // reads. Ticking one must not look like selling something.
+    expect(screen.getAllByText('NOT BUILT YET')).toHaveLength(5);
   });
 
   it('renders an actionable empty catalogue without inferred defaults', async () => {

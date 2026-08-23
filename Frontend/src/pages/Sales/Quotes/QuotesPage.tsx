@@ -79,11 +79,44 @@ const QuoteStatusCell: React.FC<{ quote: QuoteDTO }> = ({ quote }) => {
   return chip(quote.statusValue || '—', { bg: 'action.hover', fg: 'text.secondary', border: 'divider' });
 };
 
+/**
+ * The rail's four quote entries are FILTERED addresses (?state=draft|sent|follow-up|outcomes), but
+ * this page headed itself "Quote Management / Manage sales quotations and customer offers" however
+ * the rep arrived. A rep who clicked "Sent Quotes" at 4pm to chase offers saw three rows under a
+ * heading that claims to show everything, with nothing lit in the rail, and told their manager the
+ * pipeline was nearly empty. A filtered list has to say which slice it is, and offer the way back.
+ *
+ * Only the states QuoteRepository.GetAllAsync actually narrows on are named here. The server
+ * IGNORES any other value, so the grid really is showing everything — announcing a filter that was
+ * never applied would be the same lie pointing the other way, which is why an unrecognised state
+ * gets the "not applied" warning below instead of a filter chip.
+ */
+const QUOTE_FILTERS: Record<string, { label: string; description: string }> = {
+  draft: {
+    label: 'Draft quotes',
+    description: 'Showing drafts only — quotes not yet with a customer. This is not the whole pipeline.',
+  },
+  sent: {
+    label: 'Sent quotes',
+    description: 'Showing sent quotes only — quotes already with a customer. This is not the whole pipeline.',
+  },
+  'follow-up': {
+    label: 'Follow-up due',
+    description: 'Showing sent quotes past the follow-up threshold with no reply and no outcome yet. This is not the whole pipeline.',
+  },
+  outcomes: {
+    label: 'Won / Lost / Expired',
+    description: 'Showing closed quotes only — won, lost or expired. This is not the whole pipeline.',
+  },
+};
+
 const QuotesPage: React.FC = () => {
   const { t: _t } = useTranslation();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const state = searchParams.get('state') || undefined;
+  const activeFilter = state ? QUOTE_FILTERS[state] : undefined;
+  const unappliedFilter = state && !activeFilter ? state : undefined;
   const { userData, hasPermission } = useAuth();
   const queryClient = useQueryClient();
   const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ pageSize: 10, page: 0 });
@@ -357,12 +390,33 @@ const QuotesPage: React.FC = () => {
     <Box sx={{ p: 3, bgcolor: 'background.default', minHeight: '100vh' }}>
       <Stack direction="row" sx={{ justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
         <Box>
-          <Typography variant="h4" sx={{ fontWeight: 900, letterSpacing: '-0.02em', mb: 0.5 }}>
-            Quote Management
-          </Typography>
+          <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center', mb: 0.5 }}>
+            <Typography variant="h4" sx={{ fontWeight: 900, letterSpacing: '-0.02em' }}>
+              Quote Management
+            </Typography>
+            {activeFilter && (
+              <Chip
+                size="small"
+                color="warning"
+                variant="outlined"
+                label={`Filtered: ${activeFilter.label}`}
+                sx={{ fontWeight: 800 }}
+              />
+            )}
+          </Stack>
           <Typography variant="body2" color="text.secondary">
-            Manage sales quotations and customer offers
+            {activeFilter ? activeFilter.description : 'Manage sales quotations and customer offers'}
           </Typography>
+          {activeFilter && (
+            <Button size="small" onClick={() => navigate('/sales/quotes')} sx={{ px: 0, fontWeight: 700 }}>
+              Show all quotes
+            </Button>
+          )}
+          {unappliedFilter && (
+            <Alert severity="warning" sx={{ mt: 1 }}>
+              This link asked for "{unappliedFilter}", which is not a filter this list applies. Every quote is shown.
+            </Alert>
+          )}
         </Box>
         <Stack direction="row" spacing={2}>
           {hasPermission('Quotations', 'create') && <Button
@@ -415,6 +469,8 @@ const QuotesPage: React.FC = () => {
         loading={sendMutation.isPending}
         businessUnitId={userData?.businessUnitId || 0}
         customerId={emailTarget?.customerId ?? null}
+        composerFields="recipient-only"
+        confirmLabel="Send quote"
         onCancel={() => setEmailTarget(null)}
         onConfirm={(email) => {
           // R5: choosing the recipient does not send. The prices are confirmed first.

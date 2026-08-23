@@ -350,6 +350,8 @@ public partial class ErpRfqAutomationContext
         // Reasoned, audited quote removal + the tombstone that outlives a discarded draft.
         // See Models/ErpRfqAutomationContext.QuoteRemoval.cs.
         ConfigureQuoteRemovalModel(modelBuilder);
+        ConfigureQuoteBackfillModel(modelBuilder);
+        ConfigureRfqLineProductResolutionModel(modelBuilder);
         modelBuilder.Entity<ERP_RFQ_Automation.Inventory.StockReservation>()
             .HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<CustomerIdentifier>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
@@ -789,6 +791,12 @@ public partial class ErpRfqAutomationContext
                 .HasDefaultValue(ERP_RFQ_Automation.Platform.Models.TenantDeploymentProfile.Production);
             e.Property(x => x.DeploymentProfileReason).HasMaxLength(1000);
             e.Property(x => x.DeploymentProfileApprovedBy).HasMaxLength(320);
+
+            // Per-tenant module/capability grants. jsonb with a store default of {} and NOT NULL,
+            // for the same reason DeploymentProfile defaults to Production: a row written by
+            // something that does not know about this column must land on the CLOSED value. An
+            // empty object denies every key, which is the safe direction for an access grant.
+            e.Property(x => x.Entitlements).HasColumnType("jsonb").HasDefaultValue("{}").IsRequired();
 
             // No navigation to RateCard: the billing aggregate sits above the platform model in
             // the dependency order, so the pin is carried as a plain id and resolved by

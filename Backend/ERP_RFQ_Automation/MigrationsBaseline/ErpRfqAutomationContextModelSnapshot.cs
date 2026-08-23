@@ -13345,6 +13345,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasMaxLength(255)
                         .HasColumnType("character varying(255)");
 
+                    b.Property<string>("InReplyToMessageId")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
                     b.Property<string>("MessageId")
                         .IsRequired()
                         .HasMaxLength(255)
@@ -13361,6 +13365,10 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<string>("RawEmailPath")
                         .HasMaxLength(500)
                         .HasColumnType("character varying(500)");
+
+                    b.Property<string>("ReferencesJson")
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
 
                     b.Property<string>("SkippedAttachmentsJson")
                         .HasMaxLength(2000)
@@ -13516,13 +13524,13 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasIndex("BusinessUnitId", "OccurredOn")
                         .HasDatabaseName("IX_IamAuditEvents_BU_OccurredOn");
 
-                    b.HasIndex("BusinessUnitId", "TargetType", "TargetId")
-                        .HasDatabaseName("IX_IamAuditEvents_BU_Target");
-
                     b.HasIndex("BusinessUnitId", "Action", "CorrelationId")
                         .IsUnique()
                         .HasDatabaseName("UX_IamAuditEvents_EmailTriageReprocess_Idempotency")
                         .HasFilter("\"Action\" = 'EmailTriageReprocessed' AND \"CorrelationId\" IS NOT NULL");
+
+                    b.HasIndex("BusinessUnitId", "TargetType", "TargetId")
+                        .HasDatabaseName("IX_IamAuditEvents_BU_Target");
 
                     b.ToTable("IamAuditEvents", (string)null);
                 });
@@ -15112,6 +15120,10 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<decimal?>("DiscountValue")
                         .HasColumnType("decimal(18, 2)");
 
+                    b.Property<string>("ExternalQuoteReference")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
                     b.Property<int>("FinancialCalculationVersion")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("integer")
@@ -15136,6 +15148,13 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<string>("NexoraSerial")
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
+
+                    b.Property<string>("Origin")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)")
+                        .HasDefaultValue("PIPELINE");
 
                     b.Property<string>("OutcomeNote")
                         .HasMaxLength(500)
@@ -15216,6 +15235,11 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.HasIndex("StatusId");
 
+                    b.HasIndex("BusinessUnitId", "ExternalQuoteReference")
+                        .IsUnique()
+                        .HasDatabaseName("UX_Quotes_BU_ExternalQuoteReference")
+                        .HasFilter("\"ExternalQuoteReference\" IS NOT NULL");
+
                     b.HasIndex("BusinessUnitId", "RemovedOn")
                         .HasDatabaseName("IX_Quotes_BU_RemovedOn");
 
@@ -15227,6 +15251,9 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasIndex("BusinessUnitId", "ValidityExtendedOn")
                         .HasDatabaseName("IX_Quotes_BU_ValidityExtendedOn")
                         .HasFilter("\"ValidityExtendedOn\" IS NOT NULL");
+
+                    b.HasIndex("BusinessUnitId", "Origin", "QuoteDate")
+                        .HasDatabaseName("IX_Quotes_BU_Origin_QuoteDate");
 
                     b.HasIndex(new[] { "BusinessUnitId", "CommercialCaseId" }, "IX_Quotes_BusinessUnitID_CommercialCaseID");
 
@@ -15241,6 +15268,8 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.ToTable("Quotes", t =>
                         {
+                            t.HasCheckConstraint("CK_Quotes_Origin", "\"Origin\" IN ('PIPELINE', 'BACKFILL')");
+
                             t.HasCheckConstraint("CK_Quotes_Removal", "(\"RemovedOn\" IS NULL AND \"RemovedBy\" IS NULL AND \"RemovalReason\" IS NULL) OR (\"RemovedOn\" IS NOT NULL AND \"RemovedBy\" IS NOT NULL AND trim(\"RemovedBy\") <> '' AND \"RemovalReason\" IS NOT NULL AND trim(\"RemovalReason\") <> '')");
                         });
                 });
@@ -15335,6 +15364,9 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<decimal?>("DiscountValue")
                         .HasColumnType("decimal(18, 2)");
+
+                    b.Property<decimal?>("HeaderDiscountAllocated")
+                        .HasColumnType("decimal(18, 6)");
 
                     b.Property<string>("ItemDescription")
                         .HasColumnType("text");
@@ -15662,8 +15694,6 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.HasIndex("CustomerId");
 
-                    b.HasIndex("LeadId");
-
                     b.HasIndex("RfqstatusId");
 
                     b.HasIndex("RfqtypeId");
@@ -15672,7 +15702,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.HasIndex(new[] { "BusinessUnitId", "NexoraSerial" }, "IX_RFQ_BusinessUnitID_NexoraSerial");
 
-                    b.HasIndex(new[] { "BusinessUnitId", "LeadId" }, "UX_RFQ_BusinessUnitID_LeadID")
+                    b.HasIndex("LeadId")
                         .IsUnique()
                         .HasFilter("\"LeadID\" IS NOT NULL");
 
@@ -15804,6 +15834,17 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint")
                         .HasColumnName("ProductID");
 
+                    b.Property<string>("ProductResolutionReason")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<string>("ProductResolvedBy")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<DateTime?>("ProductResolvedOn")
+                        .HasColumnType("timestamp without time zone");
+
                     b.Property<string>("ProductShortDescription")
                         .HasColumnType("text");
 
@@ -15872,6 +15913,8 @@ namespace ERP_RFQ_Automation.Migrations
                             t.HasCheckConstraint("CK_RFQItems_Participation_Decision", "\"ParticipationDecision\" IN ('Pending','Quote','NoQuote')");
 
                             t.HasCheckConstraint("CK_RFQItems_Quantity_Positive", "\"Quantity\" IS NULL OR \"Quantity\" > 0");
+
+                            t.HasCheckConstraint("CK_Rfqitems_ProductResolution", "(\"ProductResolvedBy\" IS NULL AND \"ProductResolvedOn\" IS NULL) OR (\"ProductResolvedBy\" IS NOT NULL AND trim(\"ProductResolvedBy\") <> '' AND \"ProductResolvedOn\" IS NOT NULL)");
                         });
                 });
 
@@ -19062,6 +19105,12 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasMaxLength(1000)
                         .HasColumnType("character varying(1000)");
 
+                    b.Property<string>("Entitlements")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("jsonb")
+                        .HasDefaultValue("{}");
+
                     b.Property<string>("Industry")
                         .HasMaxLength(128)
                         .HasColumnType("character varying(128)");
@@ -20757,6 +20806,9 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime?>("DeadLetteredOn")
                         .HasColumnType("timestamp without time zone");
+
+                    b.Property<int>("DispatchRound")
+                        .HasColumnType("integer");
 
                     b.Property<string>("LastErrorCode")
                         .HasMaxLength(120)

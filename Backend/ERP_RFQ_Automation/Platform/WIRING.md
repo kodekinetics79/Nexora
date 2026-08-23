@@ -336,3 +336,76 @@ to whichever role serves impersonated (tenant-token) requests.
 - `Platform:BootstrapOwnerEmail` + `Platform:BootstrapOwnerPassword` seed ONE Owner at
   startup, only when the PlatformUsers table is completely empty (fail-closed, never
   overwrites, no hardcoded credentials, secrets never logged).
+
+---
+
+## Per-tenant module entitlements (20260818013530)
+
+Module and capability access moved off the **plan** and onto the **tenant**.
+
+Before this, `EntitlementService.CheckFeatureAsync` resolved every typed key from
+`Plan.Features`, so what a customer could reach was a property of its price tier. Granting
+one tenant Procurement, or revoking Inventory from one tenant, could only be expressed by
+moving them to a different plan — which also moved their seat cap, their monthly document
+quota and their price. Operators therefore cloned a plan per customer and the plan catalogue
+stopped describing the commercial offer. The tenant Entitlements tab reflected this honestly:
+it was 74 lines of read-only chips.
+
+### Where authority now sits
+
+| Question | Answered by |
+|---|---|
+| Which modules/capabilities may this customer open? | `Tenants."Entitlements"` (jsonb, NOT NULL, default `{}`) |
+| How many seats / documents / concurrent extractions? | `Plans` |
+| What is this customer charged? | `Plans` + rate card |
+
+`Plan.Features` still exists and is still editable. It is now a **provisioning template**:
+copied into `Tenant.Entitlements` once, when the tenant row is created, and never read again
+at runtime. Editing a plan therefore cannot re-open a module an operator deliberately revoked
+from a live customer.
+
+### What the migration does
+
+1. `AddColumn Tenants."Entitlements"` — jsonb, NOT NULL, store default `{}` (an unknown write
+   path grants nothing rather than everything).
+2. Backfills every tenant from its current plan's features, so **nobody's access changed on
+   the day it shipped**. Tenants with no plan land on `{}` — which is what they effectively
+   had, since `CheckFeatureAsync` denied every key for a plan-less tenant.
+3. `GRANT SELECT ("Entitlements") ON platform."Tenants" TO nexora_tenant_app,
+   nexora_identity_app`, guarded on the role existing. The column is projected by
+   `TenantAccessService.CoreQuery`, so it is also declared in
+   `TenantAccessGrantContract.RequiredColumns` — a deployment missing the grant refuses to
+   boot rather than answering 42501 on every tenant request. `nexora_pipeline_app` needs
+   nothing; it holds table-level SELECT.
+
+### Endpoints
+
+| Method & route | Policy | Notes |
+|---|---|---|
+| `GET /api/platform/tenants/{id}/modules` | PlatformScope | catalogue order, with `available` and `fromPlanTemplate` per key |
+| `PUT /api/platform/tenants/{id}/modules` | Billing | wholesale replace; reason ≥ 15 chars; audited `tenant.modules.update`; evicts the tenant-access cache |
+
+`Platform.Billing` (Owner | BillingAdmin), the same authority that assigns a plan: deciding
+what a customer may open is a decision about scope of supply, and giving it to SupportAdmin
+would hollow out the separation that keeps support out of pricing.
+
+The write is **wholesale, not a patch**. A partial write cannot distinguish "off" from
+"undecided", and the `entitlements.typed-hard-limits` activation control requires every key
+to be present — so a patch API would let an operator leave a customer permanently
+unactivatable through a screen that looked like it had saved. The server runs the request
+through `TypedEntitlementCatalog.Complete` on the way in.
+
+### Seeding paths that must set it
+
+Three places create a `Tenant` row, and all three copy the plan's features:
+`ProvisioningStepExecutor.CreateTenantAsync` (the governed path),
+`TenantsController.Provision` (the synchronous one) and `GovernedPlatformTenantSeeder`
+(local/CI, which also fills an existing tenant whose grant is still empty).
+
+### Still unbuilt
+
+Five catalogue keys — `capability.api`, `capability.automation`, `capability.sso`,
+`capability.scim`, `capability.dedicated-resources` — are `RuntimeUnavailableBoundary`:
+runtime authorization denies them however the grant reads. The console marks them
+"Not built yet" on both the tenant Modules tab and the plan editor rather than offering a
+switch that grants nothing.

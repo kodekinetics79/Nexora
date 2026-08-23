@@ -130,14 +130,16 @@ public sealed class DocumentIntakeAllowListTests
     }
 
     [Fact]
-    public void FolderDoors_AreSubsetsOfTheInspectionAllowList()
+    public void FolderDoors_ReadFromTheInspectionAllowListItself()
     {
-        // The watched-folder doors are deliberately NARROW (SEC accepts only legacy .doc,
-        // Aramco only .docx, Shared a fixed document set) — that scoping is intentional and
-        // preserved. But nothing a folder door accepts may ever be rejected by inspection.
-        Assert.True(FolderService.SharedFolderExtensions.IsSubsetOf(DocumentIntakeAllowList.Extensions));
-        Assert.Contains(".doc", DocumentIntakeAllowList.Extensions);  // SEC door
-        Assert.Contains(".docx", DocumentIntakeAllowList.Extensions); // Aramco door
+        // The per-folder lists are gone. They were narrow on purpose — SEC accepted only legacy
+        // .doc, Aramco only .docx — and the narrowness cost real work: the entire Aramco corpus
+        // is .doc, so the folder named after that customer discarded that customer's documents
+        // without a word. See FolderService.WatchedFolderExtensions.
+        //
+        // This asserts SAME OBJECT, not merely equal contents. A door that copies the list can
+        // drift from it; a door that IS the list cannot.
+        Assert.Same(DocumentIntakeAllowList.Extensions, FolderService.WatchedFolderExtensions);
     }
 
     // ------------------------------------- newly accepted formats clear real inspection

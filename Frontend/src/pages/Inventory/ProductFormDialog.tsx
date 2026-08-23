@@ -11,6 +11,67 @@ import productService from '../../api/services/productService';
 import { useAuth } from '../../context/AuthContext';
 import { useSnackbar } from 'notistack';
 
+/**
+ * The server's own sentence, verbatim.
+ *
+ * Every refusal this dialog can now provoke arrives already written for an operator — "PartNo
+ * VLV-8830 already exists in this Business Unit.", "Category ID 44 does not exist in this Business
+ * Unit.", "The field ProductName must be a string with a maximum length of 100." — and that
+ * sentence is the only thing that tells the user what to change. Replacing it with "Failed to save
+ * product." throws the answer away and leaves them clicking Save again.
+ *
+ * The 409 branch this replaces was WRONG on the only day it could ever have fired. It rendered
+ * "This product changed since you opened it. Reload and review the latest values." — a stale-record
+ * message — but the sole Conflict() in ProductController was inside Delete, which this dialog never
+ * calls, so the branch was unreachable and nobody noticed. Create and Update now return 409 for a
+ * duplicate part number, which would have shown a reload prompt for a problem no reload can fix.
+ *
+ * Reads all three shapes ASP.NET actually sends: the RFC 7807 body the controller builds
+ * (`detail`/`title`), the `{ error }` body the delete path uses, and the ModelState dictionary an
+ * automatic 400 produces. Mirrors the local helpers in CustomersPage and DeliveryConfirmationPanel
+ * rather than importing the Inventory/Commercial one, which does not unwrap the ModelState bag.
+ */
+const serverMessage = (error: unknown, fallback: string): string => {
+  const data = (error as { response?: { data?: unknown } })?.response?.data;
+  if (typeof data === 'string' && data.trim()) return data;
+
+  const body = data as { detail?: string; error?: string; title?: string; errors?: Record<string, string[]> } | undefined;
+  if (body?.detail?.trim()) return body.detail;
+  if (body?.error?.trim()) return body.error;
+
+  if (body?.errors) {
+    const first = Object.values(body.errors).flat().find(message => typeof message === 'string' && message.trim());
+    if (first) return first;
+  }
+
+  return body?.title?.trim() ? body.title : fallback;
+};
+
+/**
+ * The server's caps, stated at the keyboard instead of at the Save button.
+ *
+ * ProductCreateRequestDTO and ProductUpdateRequestDTO cap ProductName at 100 and Description at
+ * 500, mirroring `Products."ProductName"` varchar(100) and `Products."Description"` varchar(500).
+ * Those attributes were tightened so an over-long value is refused by validation with a readable
+ * sentence rather than dying inside the INSERT as Postgres 22001 — but a refusal that only arrives
+ * after Save still costs the user everything they typed. Repeating the cap here means the 101st
+ * character is never typed in the first place.
+ *
+ * The counter is not decoration. `maxLength` swallows keystrokes silently, which reads as a broken
+ * keyboard unless something on screen says why — so the field states where it is, and says so
+ * plainly at the boundary. Same pairing the rest of the app already uses (AccountsReceivablePage,
+ * ExtendValidityDialog): `htmlInput.maxLength` plus an `n/max` helper.
+ *
+ * Defence in depth, not a replacement: `serverMessage` above still renders the server's own
+ * sentence, and the server remains the authority on what fits.
+ */
+const PRODUCT_NAME_MAX = 100;
+const DESCRIPTION_MAX = 500;
+
+/** `12/100` — and, at the boundary, why the keyboard appears to have stopped. */
+const counter = (value: string, max: number) =>
+  value.length >= max ? `${value.length}/${max} · limit reached` : `${value.length}/${max}`;
+
 interface Props {
   open: boolean;
   onClose: () => void;
@@ -94,7 +155,7 @@ const ProductFormDialog: React.FC<Props> = ({ open, onClose, productId }) => {
       enqueueSnackbar(isEdit ? 'Product updated!' : 'Product created!', { variant: 'success' });
       handleClose();
     },
-    onError: (error: any) => enqueueSnackbar(error?.response?.status === 409 ? 'This product changed since you opened it. Reload and review the latest values.' : 'Failed to save product.', { variant: 'error' }),
+    onError: (error) => enqueueSnackbar(serverMessage(error, 'Failed to save product.'), { variant: 'error' }),
   });
 
   const handleClose = () => {
@@ -138,7 +199,14 @@ const ProductFormDialog: React.FC<Props> = ({ open, onClose, productId }) => {
           {/* Basic Info */}
           <SectionTitle label="Basic Information" />
           <Grid size={{ xs: 12, sm: 6 }}>
-            <TextField fullWidth label="Product Name" value={form.productName} onChange={f('productName')} />
+            <TextField
+              fullWidth
+              label="Product Name"
+              value={form.productName}
+              onChange={f('productName')}
+              helperText={counter(form.productName, PRODUCT_NAME_MAX)}
+              slotProps={{ htmlInput: { maxLength: PRODUCT_NAME_MAX } }}
+            />
           </Grid>
           <Grid size={{ xs: 12, sm: 6 }}>
             <TextField fullWidth label="Part No" value={form.partNo} onChange={f('partNo')} required />
@@ -159,7 +227,16 @@ const ProductFormDialog: React.FC<Props> = ({ open, onClose, productId }) => {
             </TextField>
           </Grid>
           <Grid size={{ xs: 12 }}>
-            <TextField fullWidth multiline rows={2} label="Description" value={form.description} onChange={f('description')} />
+            <TextField
+              fullWidth
+              multiline
+              rows={2}
+              label="Description"
+              value={form.description}
+              onChange={f('description')}
+              helperText={counter(form.description, DESCRIPTION_MAX)}
+              slotProps={{ htmlInput: { maxLength: DESCRIPTION_MAX } }}
+            />
           </Grid>
 
           {isEditLoading && <Grid size={{ xs: 12 }}><CircularProgress size={22} aria-label="Loading product" /></Grid>}

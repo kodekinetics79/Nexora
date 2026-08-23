@@ -5,6 +5,7 @@ using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using System;
 using System.Linq;
 using System.Threading.Tasks;
@@ -22,6 +23,20 @@ namespace ERP_RFQ_Automation.Controllers
         public ProductCategoryController(IProductCategoryRepository repository)
         {
             _repository = repository;
+        }
+
+        /// <summary>
+        /// RFC 7807 body carrying the request's trace identifier, so a caller reporting a failure
+        /// gives support an id that ties straight back to the server log entry. Same helper, same
+        /// shape and same name as the one on <c>ProductController</c>; deliberately NOT called
+        /// <c>Problem</c>, because <see cref="ControllerBase"/> already declares that and two
+        /// same-named helpers with different return types in one file is a trap.
+        /// </summary>
+        private ProblemDetails TracedProblem(int status, string title, string detail)
+        {
+            var problem = new ProblemDetails { Status = status, Title = title, Detail = detail };
+            problem.Extensions["traceId"] = HttpContext.TraceIdentifier;
+            return problem;
         }
 
         // GET: api/ProductCategory?pageNumber=1&pageSize=20&search=electronics&isActive=true&businessUnitId=1
@@ -165,7 +180,49 @@ namespace ERP_RFQ_Automation.Controllers
                     CreatedOn = DateTime.UtcNow
                 };
 
-                await _repository.AddAsync(category);
+                try
+                {
+                    await _repository.AddAsync(category);
+                }
+                catch (DbUpdateException ex) when (ex.InnerException is Npgsql.PostgresException { SqlState: "22001" })
+                {
+                    // 22001 ONLY — "value too long for type character varying(n)". Deliberately not a
+                    // blanket catch: a bare catch(DbUpdateException) would also swallow foreign-key
+                    // violations (23503), unique violations (23505) and RLS denials (42501 — this
+                    // codebase is deny-by-default under nexora_tenant_isolation), and would report every
+                    // one of them to the operator as "shorten the description" while removing the log
+                    // entry that says what actually happened. Everything else falls through to the
+                    // catch-all below, which still LOGS it and answers a 500.
+                    //
+                    // The DTO caps now mirror the columns, so this should be unreachable for the fields
+                    // this screen writes. It stays as the backstop for the ones it does not.
+                    return BadRequest(TracedProblem(StatusCodes.Status400BadRequest, "Category not created",
+                        "One of the values is too long for the field it is stored in. Shorten it and try again."));
+                }
+                catch (ArgumentException ex) when (ex is not (ArgumentNullException or ArgumentOutOfRangeException))
+                {
+                    // The subclasses are EXCLUDED, and that exclusion is the point of the filter.
+                    // ArgumentNullException and ArgumentOutOfRangeException both derive from
+                    // ArgumentException, and neither is ever a message to the operator — each is a bug
+                    // in this process. Caught here, one would be reported to the user as a duplicate
+                    // category name or a bad parent id: a sentence about their data describing a fault
+                    // in ours, sending them to correct a field that was never wrong. Excluded, it falls
+                    // through to the catch-all, which logs it with the path and the tenant.
+                    //
+                    // ProductCategoryRepository signals a taken category name, a self-parent, a
+                    // cross-BU move and a missing parent through the SAME exception type, so the message
+                    // text is the only thing that separates a conflict from a bad request.
+                    //
+                    // This IS message-sniffing and it is knowingly accepted for now: it works against
+                    // today's strings and breaks silently the day somebody rewords one. The durable fix
+                    // is a typed exception (or a result object) out of ProductCategoryRepository; until
+                    // then a reworded message degrades to 400 rather than 409, which is wrong but not
+                    // harmful.
+                    var duplicate = ex.Message.Contains("already exists", StringComparison.OrdinalIgnoreCase);
+                    return duplicate
+                        ? Conflict(TracedProblem(StatusCodes.Status409Conflict, "Category not created", ex.Message))
+                        : BadRequest(TracedProblem(StatusCodes.Status400BadRequest, "Category not created", ex.Message));
+                }
 
             var response = new ProductCategoryResponseDTO
             {
@@ -210,7 +267,49 @@ namespace ERP_RFQ_Automation.Controllers
                 category.ModifiedBy = ActorContext.From(User).Stamp;
                 category.ModifiedOn = DateTime.UtcNow;
 
-                await _repository.UpdateAsync(category);
+                try
+                {
+                    await _repository.UpdateAsync(category);
+                }
+                catch (DbUpdateException ex) when (ex.InnerException is Npgsql.PostgresException { SqlState: "22001" })
+                {
+                    // 22001 ONLY — "value too long for type character varying(n)". Deliberately not a
+                    // blanket catch: a bare catch(DbUpdateException) would also swallow foreign-key
+                    // violations (23503), unique violations (23505) and RLS denials (42501 — this
+                    // codebase is deny-by-default under nexora_tenant_isolation), and would report every
+                    // one of them to the operator as "shorten the description" while removing the log
+                    // entry that says what actually happened. Everything else falls through to the
+                    // catch-all below, which still LOGS it and answers a 500.
+                    //
+                    // The DTO caps now mirror the columns, so this should be unreachable for the fields
+                    // this screen writes. It stays as the backstop for the ones it does not.
+                    return BadRequest(TracedProblem(StatusCodes.Status400BadRequest, "Category not saved",
+                        "One of the values is too long for the field it is stored in. Shorten it and try again."));
+                }
+                catch (ArgumentException ex) when (ex is not (ArgumentNullException or ArgumentOutOfRangeException))
+                {
+                    // The subclasses are EXCLUDED, and that exclusion is the point of the filter.
+                    // ArgumentNullException and ArgumentOutOfRangeException both derive from
+                    // ArgumentException, and neither is ever a message to the operator — each is a bug
+                    // in this process. Caught here, one would be reported to the user as a duplicate
+                    // category name or a bad parent id: a sentence about their data describing a fault
+                    // in ours, sending them to correct a field that was never wrong. Excluded, it falls
+                    // through to the catch-all, which logs it with the path and the tenant.
+                    //
+                    // ProductCategoryRepository signals a taken category name, a self-parent, a
+                    // cross-BU move and a missing parent through the SAME exception type, so the message
+                    // text is the only thing that separates a conflict from a bad request.
+                    //
+                    // This IS message-sniffing and it is knowingly accepted for now: it works against
+                    // today's strings and breaks silently the day somebody rewords one. The durable fix
+                    // is a typed exception (or a result object) out of ProductCategoryRepository; until
+                    // then a reworded message degrades to 400 rather than 409, which is wrong but not
+                    // harmful.
+                    var duplicate = ex.Message.Contains("already exists", StringComparison.OrdinalIgnoreCase);
+                    return duplicate
+                        ? Conflict(TracedProblem(StatusCodes.Status409Conflict, "Category not saved", ex.Message))
+                        : BadRequest(TracedProblem(StatusCodes.Status400BadRequest, "Category not saved", ex.Message));
+                }
 
                 return NoContent();
             }

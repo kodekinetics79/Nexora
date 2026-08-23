@@ -3,8 +3,8 @@ using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using Microsoft.EntityFrameworkCore;
 using ERP_RFQ_Automation.Inventory.Commercial;
-using ERP_RFQ_Automation.Services.Uom;
 using ERP_RFQ_Automation.ProductIntelligence;
+using ERP_RFQ_Automation.Services.Uom;
 using ERP_RFQ_Automation.LeadIdentity;
 
 namespace ERP_RFQ_Automation.Intelligence.Conversion;
@@ -12,12 +12,22 @@ namespace ERP_RFQ_Automation.Intelligence.Conversion;
 /// <summary>
 /// Deterministic (no-LLM) conversion intelligence.
 ///
-/// Product resolution per lead line, best rule wins:
-///   1.00  exact ItemMaterialCode == Product.PartNo
-///   0.95  exact ManufacturerPartNumber == Product.ModelNo (or PartNo)
+/// Product resolution per lead line, best rule wins. Each code rung compares the line's
+/// identifier against BOTH catalogue number columns (PartNo, ModelNo), and loses 0.02 when the
+/// two sides agree on the characters but not the punctuation:
+///   1.00  ItemMaterialCode        == a catalogue number
+///   0.95  ManufacturerPartNumber  == a catalogue number
+///   0.93  AlternatePartNumber     == a catalogue number
+///   0.92  a code-SHAPED ProductShortName / ProductShortDescription == a catalogue number
 ///   0.90  normalized-name equality vs Product.ProductName
 ///   0.40–0.85  contains / token-overlap vs Product name + description,
 ///              scaled by overlap ratio
+///
+/// Note the arithmetic: the similarity band tops out at 0.85 (0.40 + 0.45 * ratio, ratio &lt;= 1)
+/// and the floor is 0.90, so NOTHING below the name-equality rung can ever auto-assign. That is
+/// intentional — a line silently bound to the wrong product prices the wrong thing while looking
+/// right — and it is why a catalogue number the resolver fails to recognise as one produces
+/// zero auto-assignments rather than a few.
 ///
 /// Candidates are fetched with cheap set-based queries (IN on part/model numbers,
 /// ILIKE on the most significant name tokens) and scored in memory; catalogs are
@@ -104,7 +114,21 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
     public async Task<long> ConvertAsync(long leadId, long businessUnitId, ConvertRequest request, CancellationToken ct)
     {
         var strategy = _db.Database.CreateExecutionStrategy();
-        return await strategy.ExecuteAsync(() => ConvertCoreAsync(leadId, businessUnitId, request, ct));
+        try
+        {
+            return await strategy.ExecuteAsync(() => ConvertCoreAsync(leadId, businessUnitId, request, ct));
+        }
+        catch (DbUpdateException ex) when (LeadConversionGate.IsDuplicateKey(ex))
+        {
+            // Lost the race against the RFQ."LeadID" partial unique index: another caller
+            // converted this lead between our existence check and our insert. The lead HAS
+            // its RFQ — resolve to it exactly as the read-then-return idempotent path would.
+            _db.ChangeTracker.Clear();
+            var winner = await _db.Rfqs.AsNoTracking()
+                .FirstOrDefaultAsync(r => r.LeadId == leadId && r.BusinessUnitId == businessUnitId, ct);
+            if (winner == null) throw; // Not our index after all — surface the truth.
+            return winner.Id;
+        }
     }
 
     private async Task<long> ConvertCoreAsync(long leadId, long businessUnitId, ConvertRequest request, CancellationToken ct)
@@ -134,14 +158,11 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
             return already.Id;
         }
 
-        // WP-A3 hard block: an unresolved duplicate flag stops conversion here too.
-        if (lead.DuplicateStatus is "suspected" or "confirmed")
-            throw new InvalidOperationException(
-                $"This lead is flagged as a possible duplicate of lead #{lead.DuplicateOfLeadId} — resolve the duplicate flag first.");
-
-        if (lead.RequiresCommercialReview && !lead.CommercialFactsVerified)
-            throw new InvalidOperationException(
-                "AI-extracted commercial facts must be approved in extraction review before RFQ conversion.");
+        // The shared gate every RFQ-creating door runs (LeadRepository.ConvertLeadToRfqAsync,
+        // this path, and POST /api/Rfq with a LeadId). Before extraction these checks were a
+        // second, drifting copy of the legacy door's; a lead is only ever converted once and
+        // only through the same rules whichever door it enters by.
+        LeadConversionGate.EnsureEligible(lead);
 
         // Per-line choices. Reject ids that don't belong to this lead (never trust
         // caller-supplied identifiers across the tenant boundary).
@@ -181,7 +202,7 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
         // Header + per-line requirements, evaluated over the lines actually being converted with
         // the caller's corrections applied. Runs AFTER `included`/`choices` exist, because
         // checking the lead's raw stored lines ignored both exclusions and corrections (A-9).
-        var blockers = FindConversionBlockers(lead, included, choices, request.CreateNeedsClarification);
+        var blockers = FindConversionBlockers(lead, included, choices, request);
         if (blockers.Count > 0)
             throw new InvalidOperationException($"Review these required inquiry fields before creating the RFQ: {string.Join("; ", blockers)}.");
 
@@ -320,7 +341,7 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
                     ProductShortDescription = li.ProductShortDescription,
                     Alternative = li.Alternative,
                     BuyerName = li.BuyerName,
-                    Currency = li.Currency,
+                    Currency = EffectiveCurrency(li, choice, request),
                     UnitOfMeasure = uomText,
                     UomId = uomId,
                     UnitPrice = li.UnitPrice,
@@ -335,6 +356,22 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
                     LeadTime = li.LeadTime,
                     ReceivedDate = li.ReceivedDate,
                     BidClosingDateLine = li.BidClosingDateLine,
+                    // The buyer's required-by date, carried down from the lead header.
+                    //
+                    // The parsers read this per row and CanonicalRfqNormalizer collapses it to the
+                    // header, where ExtractionWorker writes it to Lead.RequiredDeliveryDate and the
+                    // reviewer can correct it. LeadItem has no delivery-date column, so this was
+                    // where the value stopped: every RFQ line born from ingestion had a null
+                    // RequiredDesiredDate. That made three readers inert rather than wrong — the
+                    // sourcing case asked suppliers to quote with no need-by date, the inbound
+                    // ship-date SLA sweep joined on a column that was never non-null, and
+                    // commercial learning recorded "requested lead time not recorded" every time.
+                    //
+                    // One header date on every line is what the source document says: the collapse
+                    // to the header already happened upstream, and this restores it rather than
+                    // inventing per-line dates that were never extracted. Phase1SpineSeamTests
+                    // pinned the gap and names this as the change that closes it.
+                    RequiredDesiredDate = lead.RequiredDeliveryDate,
                     Aiconfidence = confidence,
                     CreatedBy = createdBy,
                     CreatedDate = now
@@ -376,11 +413,18 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
         if (statusCode != "QUALIFIED") return;
         var actor = string.IsNullOrWhiteSpace(createdBy) ? "System" : createdBy.Trim();
         var reasonCode = acknowledgedWarnings is null ? null : "CONVERTED_WITH_ACKNOWLEDGED_WARNINGS";
-        await new LifecycleApplicationService(_db).TransitionLeadInCurrentTransactionAsync(
-            lead.BusinessUnitId, lead.Id, new LifecycleActor(actor, "LeadConversion"),
+        var lifecycle = new LifecycleApplicationService(_db);
+        var lifecycleActor = new LifecycleActor(actor, "LeadConversion");
+        await lifecycle.TransitionLeadInCurrentTransactionAsync(
+            lead.BusinessUnitId, lead.Id, lifecycleActor,
             new LifecycleTransitionCommand("CONVERTED_TO_RFQ", lead.LifecycleVersion, reasonCode, acknowledgedWarnings,
                 "Api", $"conversion-{lead.Id}", $"rfq-{rfqId}", $"lead-conversion:{lead.BusinessUnitId}:{lead.Id}"),
             false, ct);
+        // Dedicated promotion event ALONGSIDE the generic transition, same transaction:
+        // consumers get the lead/RFQ/revision facts by name instead of parsing a
+        // status-transition payload.
+        await lifecycle.RecordLeadPromotedToRfqInCurrentTransactionAsync(
+            lead.BusinessUnitId, lead.Id, rfqId, lifecycleActor, $"conversion-{lead.Id}", ct);
     }
 
     /// <summary>
@@ -398,11 +442,30 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
     /// <para>Nothing is relaxed. An included line must still carry a description, a positive
     /// quantity, a unit and a currency — the values are simply the ones being converted.</para>
     /// </summary>
+    /// <summary>
+    /// The currency this line will actually be written with: the caller's per-line correction,
+    /// then the conversion's header currency, then whatever the document stated.
+    ///
+    /// <para>Resolved in ONE place and used by both the blocker check and the RFQ line, so the
+    /// conversion cannot refuse a value it would then have written, or write one it never
+    /// checked. Trimmed and upper-cased to match the three-letter form the review path already
+    /// validates, so the same line does not end up as "usd" here and "USD" there.</para>
+    /// </summary>
+    private static string? EffectiveCurrency(
+        LeadItem line, ConvertRequestItem? choice, ConvertRequest request)
+    {
+        var value = Pick(choice?.Currency) ?? Pick(request?.Currency) ?? Pick(line.Currency);
+        return value?.ToUpperInvariant();
+
+        static string? Pick(string? candidate) =>
+            string.IsNullOrWhiteSpace(candidate) ? null : candidate.Trim();
+    }
+
     private static List<string> FindConversionBlockers(
         Lead lead,
         IReadOnlyList<LeadItem> includedLines,
         IReadOnlyDictionary<long, ConvertRequestItem> choices,
-        bool createNeedsClarification)
+        ConvertRequest request)
     {
         var blockers = new List<string>();
         if (!lead.CustomerId.HasValue) blockers.Add("customer");
@@ -432,11 +495,15 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
             // `is null or <= 0`, not `<= 0`. With a nullable quantity the bare comparison is
             // FALSE for null, so an unstated quantity would have stopped being a blocker and the
             // line would have converted with nothing in it.
-            if (!createNeedsClarification)
+            if (!request.CreateNeedsClarification)
             {
                 if (quantity is null or <= 0) blockers.Add($"{label} quantity");
                 if (string.IsNullOrWhiteSpace(unitOfMeasure)) blockers.Add($"{label} unit");
-                if (string.IsNullOrWhiteSpace(line.Currency)) blockers.Add($"{label} currency");
+                // Currency honours the same request correction as quantity and unit. This keeps
+                // ordinary conversion strict while the explicit clarification path may preserve
+                // unknown quote-critical facts as unknown.
+                if (string.IsNullOrWhiteSpace(EffectiveCurrency(line, choice, request)))
+                    blockers.Add($"{label} currency");
             }
         }
 
@@ -499,7 +566,7 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
 
         var blocked = new List<string>();
         var unacknowledged = new List<string>();
-        var acknowledged = new List<string>();
+        var acknowledged = new List<(string Line, string Attention, string Reason)>();
         var batchReason = request.WarningAcknowledgementReason?.Trim();
 
         foreach (var li in included)
@@ -546,7 +613,7 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
                     $"Acknowledging the warning on {Label(li)} requires a reason of at least " +
                     $"{MinimumAcknowledgementReasonLength} characters. An acknowledgement without an explanation is not an audit trail.");
 
-            acknowledged.Add($"{Label(li)} ({r.AttentionReason}) — {reason}");
+            acknowledged.Add((Label(li), r.AttentionReason ?? "warning", reason!));
         }
 
         if (blocked.Count > 0)
@@ -559,7 +626,74 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
                 "These lines carry extraction warnings that must be corrected or explicitly acknowledged with a reason before " +
                 $"the RFQ is created: {string.Join("; ", unacknowledged)}.");
 
-        return acknowledged.Count > 0 ? string.Join(" | ", acknowledged) : null;
+        return SummariseAcknowledgements(acknowledged);
+    }
+
+    /// <summary>
+    /// The lifecycle event's ReasonNotes column holds 1000 characters, and it is the ONLY place
+    /// a converted-over-warning acknowledgement is recorded — nothing is written to the RFQ
+    /// line — so this must stay inside the limit without losing what a reader needs.
+    ///
+    /// <para><b>Why it overflowed.</b> The summary listed every acknowledged line verbatim and
+    /// joined them. At roughly ninety characters a line that passes 1000 at about a dozen lines,
+    /// and LifecycleApplicationService then threw LifecycleValidationException, which the
+    /// conversion did not map — so it escaped as a 500 reading "The lead could not be converted
+    /// to an RFQ." Observed on lead 466: 21 acknowledged lines, conversion impossible. The
+    /// bigger the bid, the more certain the failure, which is exactly backwards.</para>
+    ///
+    /// <para><b>Why grouping rather than truncating.</b> Acknowledgements repeat: one batch
+    /// reason usually covers every line, so the old note said the same sentence twenty-one
+    /// times. Collapsing identical (attention, reason) pairs keeps every fact a reader
+    /// needs — how many lines, which lines, why they were flagged, what the operator said —
+    /// and costs a fraction of the space. Truncation would have dropped audit evidence
+    /// silently; this drops only repetition.</para>
+    ///
+    /// <para>If even the grouped form is too long, the remainder is stated as a count rather
+    /// than cut mid-sentence, so the note is never a fragment.</para>
+    /// </summary>
+    private const int MaximumAcknowledgementNoteLength = 1000;
+
+    private static string? SummariseAcknowledgements(
+        IReadOnlyList<(string Line, string Attention, string Reason)> acknowledged)
+    {
+        if (acknowledged.Count == 0) return null;
+
+        var groups = acknowledged
+            .GroupBy(a => (a.Attention, a.Reason))
+            .Select(g => new
+            {
+                g.Key.Attention,
+                g.Key.Reason,
+                Lines = g.Select(x => x.Line).ToList(),
+            })
+            .OrderByDescending(g => g.Lines.Count)
+            .ToList();
+
+        var parts = new List<string>();
+        var omitted = 0;
+        foreach (var group in groups)
+        {
+            // Name the lines while they fit; past a handful the count is the useful fact and
+            // the identifiers are noise.
+            var named = group.Lines.Count <= 6
+                ? string.Join(", ", group.Lines)
+                : $"{string.Join(", ", group.Lines.Take(6))} +{group.Lines.Count - 6} more";
+            var part = $"{group.Lines.Count} line(s) [{named}] ({group.Attention}) — {group.Reason}";
+
+            var projected = parts.Count == 0 ? part.Length : parts.Sum(x => x.Length + 3) + part.Length;
+            if (projected > MaximumAcknowledgementNoteLength - 40) { omitted += group.Lines.Count; continue; }
+            parts.Add(part);
+        }
+
+        if (parts.Count == 0)
+            parts.Add($"{acknowledged.Count} line(s) converted over acknowledged warnings.");
+        else if (omitted > 0)
+            parts.Add($"+{omitted} further line(s) acknowledged");
+
+        var note = string.Join(" | ", parts);
+        return note.Length <= MaximumAcknowledgementNoteLength
+            ? note
+            : note[..MaximumAcknowledgementNoteLength];
     }
 
     private sealed record Candidate(long Id, string? ProductName, string PartNo, string? ModelNo, string? Description);
@@ -587,19 +721,28 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
         // IProductItemResolver, which is also the commercial-intelligence authority.
         var fallbackItems = items.Where(item => !authoritative.ContainsKey(item.Id)).ToList();
 
-        // ---- Candidate fetch 1: exact part/model numbers in one IN query.
-        var codes = fallbackItems.Select(i => i.ItemMaterialCode?.Trim().ToLowerInvariant())
-                         .Where(s => !string.IsNullOrEmpty(s)).Select(s => s!).Distinct().ToList();
-        var mpns = fallbackItems.Select(i => i.ManufacturerPartNumber?.Trim().ToLowerInvariant())
-                        .Where(s => !string.IsNullOrEmpty(s)).Select(s => s!).Distinct().ToList();
+        // ---- Candidate fetch 1: every catalogue number any line offers, in one IN query.
+        // Each identifier contributes BOTH its literal spelling and its punctuation-free fold, so
+        // a catalogue keyed on "A2A50006470" is still reached by a document that wrote
+        // "A2A-50006470". Folding the LINE side is free — a handful of extra strings in an IN
+        // list. Folding the CATALOGUE side would mean replace() over every product row, which is
+        // exactly the wholesale scan this resolver exists to avoid, so it is not done here; see
+        // BestCodeHit, which still recognises a catalogue-side spelling difference on any product
+        // the name query happens to have pulled in.
+        var spellings = fallbackItems
+            .SelectMany(CodeIdentifiers)
+            .SelectMany(id => new[] { id.Value, ProductIdentityNormalizer.FoldIdentifier(id.Value) })
+            .Where(s => !string.IsNullOrEmpty(s))
+            .Select(s => s!.ToLowerInvariant())
+            .Distinct()
+            .ToList();
 
         var candidates = new Dictionary<long, Candidate>();
-        if (codes.Count > 0 || mpns.Count > 0)
+        if (spellings.Count > 0)
         {
             var exactRows = await ActiveProducts()
-                .Where(p => codes.Contains(p.PartNo.ToLower())
-                            || mpns.Contains(p.PartNo.ToLower())
-                            || (p.ModelNo != null && mpns.Contains(p.ModelNo.ToLower())))
+                .Where(p => spellings.Contains(p.PartNo.ToLower())
+                            || (p.ModelNo != null && spellings.Contains(p.ModelNo.ToLower())))
                 .Select(p => new Candidate(p.Id, p.ProductName, p.PartNo, p.ModelNo, p.Description))
                 .ToListAsync(ct);
             foreach (var c in exactRows) candidates[c.Id] = c;
@@ -739,8 +882,7 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
 
     private static IEnumerable<ProductMatch> ScoreItem(LeadItem item, IEnumerable<Candidate> candidates)
     {
-        var code = item.ItemMaterialCode?.Trim();
-        var mpn = item.ManufacturerPartNumber?.Trim();
+        var identifiers = CodeIdentifiers(item).ToList();
         var normName = NormalizeName(item.ProductShortName ?? item.ProductShortDescription);
         var nameTokens = normName is null ? new HashSet<string>() : Tokenize(normName);
 
@@ -749,13 +891,9 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
             decimal score;
             string reason;
 
-            if (!string.IsNullOrEmpty(code) && Eq(p.PartNo, code))
+            if (BestCodeHit(identifiers, p) is { } hit)
             {
-                (score, reason) = (1.00m, "Matched by material code");
-            }
-            else if (!string.IsNullOrEmpty(mpn) && (Eq(p.ModelNo, mpn) || Eq(p.PartNo, mpn)))
-            {
-                (score, reason) = (0.95m, "Matched by manufacturer part number");
+                (score, reason) = hit;
             }
             else
             {
@@ -800,6 +938,110 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
     }
 
     // ================================================== Normalization helpers
+
+    /// <summary>A catalogue number a lead line offers, and what an exact hit on it is worth.</summary>
+    private readonly record struct CodeIdentifier(string Value, decimal ExactScore, string Reason);
+
+    /// <summary>
+    /// Every field on a lead line that can carry a catalogue number, best evidence first.
+    ///
+    /// <para>Only <c>ItemMaterialCode</c> and <c>ManufacturerPartNumber</c> used to be read, and
+    /// that omission is the defect. A buyer's material number arrives in whichever FIELD the door
+    /// that read the document happens to populate: <c>NativeSpreadsheetParser</c> routes every
+    /// material-code heading ("materialcode", "stockcode", "sapmaterial", "buyerpartno", …) into
+    /// <c>ManufacturerPartNumber</c>, and a table whose code column has an unrecognised heading
+    /// leaves the number sitting in the description cell. Measured against the live catalogue
+    /// shape: a code in <c>AlternatePartNumber</c> scored 0.85 and a code in
+    /// <c>ProductShortDescription</c> scored 0.00 — not a near miss, no candidate at all, because
+    /// the ILIKE candidate query searches ProductName and Description and never the catalogue's
+    /// own number columns.</para>
+    ///
+    /// <para>CORRECTION (2026-08, after an adversarial re-read): an earlier revision of this
+    /// comment claimed the <c>ItemMaterialCode</c> rung was dead because
+    /// <c>ChunkedExtractionService.MapCanonicalItem</c> hardcodes that field null. That is FALSE
+    /// and it cost an investigation. <c>CanonicalRfqLineItem</c> genuinely has no member for a
+    /// material code, so the structured chunked path leaving it null is correct, not a bug — but
+    /// it is not the only door. <c>AramcoBidListExtraction</c> writes the Aramco material number
+    /// straight into <c>ItemMaterialCode</c> at <c>Certain</c> confidence, and the model door
+    /// populates it too. The 1.00 rung below is LIVE. Do not "fix" the hardcoded null, do not
+    /// touch <c>CanonicalRfqLineItem</c>, <c>MapCanonicalItem</c>, the extraction prompt, or
+    /// <c>NativeSpreadsheetParser.FieldAliases</c> (that routing is deliberate and
+    /// test-pinned by <c>ProductionDocumentReaderSpreadsheetFallbackTests</c>). Any consumer that
+    /// reads a lead line's catalogue number must read BOTH fields, exactly as the ladder below
+    /// and <c>LeadDecisionService</c> now do on both its brief and its grid paths.</para>
+    ///
+    /// <para>The confidence floor is NOT relaxed anywhere below. Every rung here is exact equality
+    /// against a catalogue number; what changed is which of the line's fields are allowed to
+    /// supply that number.</para>
+    /// </summary>
+    private static IEnumerable<CodeIdentifier> CodeIdentifiers(LeadItem item)
+    {
+        if (Clean(item.ItemMaterialCode) is { } code)
+            yield return new CodeIdentifier(code, 1.00m, "Matched by material code");
+        if (Clean(item.ManufacturerPartNumber) is { } mpn)
+            yield return new CodeIdentifier(mpn, 0.95m, "Matched by manufacturer part number");
+        if (Clean(item.AlternatePartNumber) is { } alternate)
+            yield return new CodeIdentifier(alternate, 0.93m, "Matched by alternate part number");
+
+        // A code typed into a description cell, which is where it lands whenever the document had
+        // no column heading the parser recognised. Offered as an identifier only when it is SHAPED
+        // like one, and it still has to equal a catalogue number outright to score: prose never
+        // qualifies, because "GASKET:SPIRAL WOUND,2 IN,CL300" contains spaces and "VALVE" contains
+        // no digit.
+        foreach (var text in new[] { item.ProductShortName, item.ProductShortDescription })
+            if (Clean(text) is { } quoted && LooksLikeBareCode(quoted))
+                yield return new CodeIdentifier(quoted, 0.92m, "Matched by catalog number in the line text");
+    }
+
+    private static string? Clean(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    /// <summary>One unspaced token, at least five characters, carrying at least one digit.</summary>
+    private static bool LooksLikeBareCode(string value) =>
+        value.Length is >= 5 and <= 60
+        && !value.Any(char.IsWhiteSpace)
+        && value.Any(char.IsDigit);
+
+    /// <summary>
+    /// How much an identifier loses when the two sides agree on the characters but not the
+    /// punctuation. Deliberately small: "A2A-50006470" and "A2A50006470" are one number written
+    /// two ways, so a folded hit must still clear <see cref="ConfidenceFloor"/> — while ranking
+    /// below an outright hit whenever both are available on the same line.
+    /// </summary>
+    private const decimal FoldedHitPenalty = 0.02m;
+
+    /// <summary>
+    /// The best catalogue-number hit this candidate takes from the line, or null when it takes
+    /// none and must fall through to name similarity. Every identifier is compared against BOTH
+    /// catalogue number columns: <c>PartNo</c> and <c>ModelNo</c> are both codes, and which one a
+    /// tenant keyed its catalogue on is its own choice, not something a lead line can know.
+    /// </summary>
+    private static (decimal Score, string Reason)? BestCodeHit(
+        IReadOnlyList<CodeIdentifier> identifiers, Candidate p)
+    {
+        (decimal Score, string Reason)? best = null;
+        foreach (var identifier in identifiers)
+        {
+            decimal? score = null;
+            if (Eq(p.PartNo, identifier.Value) || Eq(p.ModelNo, identifier.Value))
+                score = identifier.ExactScore;
+            else if (FoldedEq(p.PartNo, identifier.Value) || FoldedEq(p.ModelNo, identifier.Value))
+                score = identifier.ExactScore - FoldedHitPenalty;
+
+            if (score is { } value && (best is null || value > best.Value.Score))
+                best = (value, identifier.Reason);
+        }
+        return best;
+    }
+
+    /// <summary>
+    /// Equality once punctuation is folded away, using the SAME normaliser
+    /// (<c>ProductIntelligence/ProductIdentityNormalizer</c>) the deterministic resolver already
+    /// trusts for this, rather than a second opinion about what a part number is.
+    /// </summary>
+    private static bool FoldedEq(string? a, string? b) =>
+        ProductIdentityNormalizer.FoldIdentifier(a) is { } x
+        && ProductIdentityNormalizer.FoldIdentifier(b) is { } y
+        && x == y;
 
     private static bool Eq(string? a, string? b) =>
         a is not null && b is not null &&

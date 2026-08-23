@@ -92,6 +92,106 @@ public sealed class ProcurementDispatchWorkerTests
     }
 
     [Fact]
+    public async Task A_claim_fenced_twice_does_not_wedge_the_queue()
+    {
+        // THE POISON LOOP, observed in production on 2026-08-19.
+        //
+        // Fencing a stale claim writes SUPPLIER_SOLICITATION_DELIVERY_UNCERTAIN, whose
+        // idempotency key is message + attempt + type. Fencing does not increment the attempt —
+        // a fence is not a delivery attempt — so fencing the same claim twice produced an
+        // identical key, violated the unique index, and failed the whole SaveChanges. The
+        // message then stayed PROCESSING with an expired lease, the next cycle found the same
+        // stale claim, and ProcessOneAsync threw roughly every twelve seconds for ever.
+        //
+        // The worker handles one message per cycle, so that single row stopped EVERY supplier
+        // RFQ and customer quote in the deployment, silently. A healthy solicitation sat behind
+        // it in PENDINGDISPATCH and was never touched.
+        using var fixture = new DispatchFixture(new RecordingNotification
+        {
+            Exception = new InvalidOperationException("Ambiguous provider outcome")
+        });
+        fixture.SeedPending(withSourcingCase: true);
+
+        // First pass fences it and records the events.
+        Assert.True(await fixture.Worker.ProcessOneAsync(default));
+        var first = await fixture.StateAsync();
+        Assert.Equal("DELIVERY_UNCERTAIN", first.Message.LastErrorCode);
+        Assert.Contains(first.Events, e => e.EventType == "SUPPLIER_SOLICITATION_DELIVERY_UNCERTAIN");
+        // The sourcing-case event too — the one #56 missed, and the reason the loop survived it.
+        Assert.Contains(first.Events, e => e.EventType == "SOURCING_CASE_DELIVERY_REVIEW_REQUIRED");
+        var firstCount = first.Events.Count;
+
+        // Put it back exactly as the crash left it: PROCESSING, lease expired, attempt
+        // unchanged — so fencing computes the SAME idempotency key it already wrote.
+        await fixture.ReopenStaleClaimAsync();
+
+        // This must not throw, and must not leave the row PROCESSING for the next cycle.
+        var exception = await Record.ExceptionAsync(() => fixture.Worker.ProcessOneAsync(default));
+        Assert.Null(exception);
+
+        var after = await fixture.StateAsync();
+        Assert.Equal(ProcurementOutboxStatuses.Failed, after.Message.Status);
+        Assert.Null(after.Message.LeaseOwner);
+        // No event written twice: a second fence is the same fact, for BOTH aggregates.
+        Assert.Equal(firstCount, after.Events.Count);
+    }
+
+    [Fact]
+    public async Task A_manual_retry_that_fails_the_same_way_does_not_wedge_the_queue()
+    {
+        // THE SAME POISON LOOP, one manual click away.
+        //
+        // RetrySolicitationAsync resets AttemptCount to ZERO, so the retry round re-uses
+        // attempt numbers the first round already spent. Events are keyed by round, attempt
+        // and type: without the round, a retry that failed the same way at the same attempt
+        // recomputed a key already on the ledger, and the solicitation event in FinishAsync —
+        // then outside the shared gate — took SaveChanges down WITH the lease release. The row
+        // stayed PROCESSING, was fenced ten minutes later back to DeliveryFailed, and the
+        // user's next retry re-armed the identical loop. Head-of-line: one wedged row stops
+        // every tenant's outbound mail.
+        //
+        // Two properties must hold at once, and each guards against the other's failure mode:
+        // the queue must not wedge, and the retry round must be RECORDED — it is a new
+        // episode (new timestamps, possibly a different failure reason), not a duplicate of
+        // round one. Deduplicating it away would silence the wedge by discarding audit
+        // history from the evidence ledger, including the only evidence that a supplier may
+        // have been emailed twice.
+        using var fixture = new DispatchFixture(new RecordingNotification { Result = false });
+        fixture.SeedPending(withSourcingCase: true);
+
+        // Round one, attempt 1: the provider accepts nothing => Uncertain => DeliveryFailed,
+        // recording DELIVERY_UNCERTAIN for the solicitation and review-required for the case.
+        Assert.True(await fixture.Worker.ProcessOneAsync(default));
+        var first = await fixture.StateAsync();
+        Assert.Equal(SolicitationStatus.DeliveryFailed, first.Solicitation.Status);
+        Assert.Contains(first.Events, e => e.EventType == "SUPPLIER_SOLICITATION_DELIVERY_UNCERTAIN");
+        Assert.Contains(first.Events, e => e.EventType == "SOURCING_CASE_DELIVERY_REVIEW_REQUIRED");
+        var firstCount = first.Events.Count;
+
+        // The REAL manual retry — the exact path the workbench Retry button takes. It resets
+        // the attempt counter and advances the round.
+        await fixture.RetryThroughServiceAsync();
+
+        // Round two, attempt 1 fails the same way at the same attempt number. It must not
+        // throw, must release the claim, and must record the round's own events under
+        // round-qualified keys — a possible second real email to the supplier is evidence.
+        var exception = await Record.ExceptionAsync(() => fixture.Worker.ProcessOneAsync(default));
+        Assert.Null(exception);
+
+        var after = await fixture.StateAsync();
+        Assert.Equal(ProcurementOutboxStatuses.Failed, after.Message.Status);
+        Assert.Null(after.Message.LeaseOwner);
+        Assert.Null(after.Message.LeaseToken);
+        Assert.Equal(SolicitationStatus.DeliveryFailed, after.Solicitation.Status);
+        // Round one's two events + the retry request + round two's two events.
+        Assert.Equal(firstCount + 3, after.Events.Count);
+        Assert.Equal(2, after.Events.Count(e => e.EventType == "SUPPLIER_SOLICITATION_DELIVERY_UNCERTAIN"));
+        Assert.Equal(2, after.Events.Count(e => e.EventType == "SOURCING_CASE_DELIVERY_REVIEW_REQUIRED"));
+        Assert.Single(after.Events, e => e.EventType == "SUPPLIER_SOLICITATION_RETRY_QUEUED");
+        Assert.Equal(2, after.Events.Count(e => e.IdempotencyKey.Contains(":round:1:")));
+    }
+
+    [Fact]
     public async Task Setup_failure_before_provider_invocation_is_retryable()
     {
         using var fixture = new DispatchFixture(registerNotification: false);
@@ -278,6 +378,9 @@ public sealed class ProcurementDispatchWorkerTests
     {
         private const long Tenant = 72_001;
         public const long Rfq = 72_010;
+        public const long SourcingCase = 72_040;
+        public const long DemandLine = 72_050;
+        public const long RfqItem = 72_060;
         private const long Supplier = 72_020;
         private const long Solicitation = 72_030;
         private const long Message = 72_040;
@@ -320,7 +423,8 @@ public sealed class ProcurementDispatchWorkerTests
             string? payloadJson = null,
             string status = ProcurementOutboxStatuses.Pending,
             int attemptCount = 0,
-            DateTime? updatedOn = null)
+            DateTime? updatedOn = null,
+            bool withSourcingCase = false)
         {
             using var db = _database.ContextFor(null);
             db.Set<Tenant>().Add(new Tenant
@@ -340,8 +444,37 @@ public sealed class ProcurementDispatchWorkerTests
             governedSupplier.ComplianceStatus = SupplierComplianceStatuses.Cleared;
             governedSupplier.RiskStatus = SupplierRiskStatuses.Low;
             governedSupplier.ReadinessStatus = SupplierReadinessStatuses.Ready;
-            AgentSeed.Solicitation(db, Solicitation, Tenant, Rfq, Supplier, SolicitationStatus.PendingDispatch);
             var now = updatedOn ?? DateTime.UtcNow;
+            var seededSolicitation = AgentSeed.Solicitation(
+                db, Solicitation, Tenant, Rfq, Supplier, SolicitationStatus.PendingDispatch);
+
+            // A REAL solicitation belongs to a sourcing case, and the default fixture's does not.
+            // UpdateSourcingCaseLifecycleAsync returns immediately when SourcingCaseId is null,
+            // so half the fencing path — including the sourcing-case event that kept production
+            // crash-looping after #56 — is never exercised without this. Opt-in so the tests
+            // written against the simpler shape keep working unchanged.
+            if (withSourcingCase)
+            {
+                AgentSeed.RfqItem(db, RfqItem, Rfq, "Dispatch fixture item", 10);
+                db.Set<CommercialDemandLine>().Add(new CommercialDemandLine
+                {
+                    Id = DemandLine, BusinessUnitId = Tenant, RfqId = Rfq, RfqItemId = RfqItem,
+                    NexoraSerial = "NXR-DISPATCH", IdentityKey = "dispatch-line",
+                    CreatedBy = "tests", CreatedOn = now,
+                });
+                db.Set<SourcingCase>().Add(new SourcingCase
+                {
+                    Id = SourcingCase, BusinessUnitId = Tenant, CommercialDemandLineId = DemandLine,
+                    RfqId = Rfq, RfqItemId = RfqItem, NexoraSerial = "NXR-DISPATCH",
+                    Description = "Dispatch fixture line", RequestedQuantity = 10m,
+                    StockQuantity = 0m, UnfulfilledQuantity = 10m, SearchLimit = 10,
+                    Status = SourcingCaseStatuses.OutreachReady, NextAction = "Review known suppliers",
+                    ShortageDecisionKey = "dispatch-shortage", IdempotencyKey = "dispatch-case",
+                    RequestHash = new string('E', 64), CreatedBy = "tests", UpdatedBy = "tests",
+                    CreatedOn = now, UpdatedOn = now,
+                });
+                seededSolicitation.SourcingCaseId = SourcingCase;
+            }
             db.ProcurementOutboxMessages.Add(new ProcurementOutboxMessage
             {
                 Id = Message,
@@ -365,6 +498,35 @@ public sealed class ProcurementDispatchWorkerTests
                 UpdatedOn = now
             });
             db.SaveChanges();
+        }
+
+        /// <summary>
+        /// Returns the outbox row to the state the crash loop left it in: claimed, lease
+        /// expired, attempt count unchanged. The next cycle will treat it as a stale claim and
+        /// fence it again — with the idempotency key it has already written.
+        /// </summary>
+        public async Task ReopenStaleClaimAsync()
+        {
+            await using var db = _database.ContextFor(null);
+            var message = await db.ProcurementOutboxMessages.SingleAsync();
+            message.Status = ProcurementOutboxStatuses.Processing;
+            message.LeaseOwner = "stale-worker";
+            message.LeaseToken = Guid.NewGuid();
+            message.LeaseUntil = DateTime.UtcNow.AddMinutes(-5);
+            message.NextAttemptOn = DateTime.UtcNow.AddMinutes(-1);
+            await db.SaveChangesAsync();
+        }
+
+        /// <summary>
+        /// The real manual retry — RetrySolicitationAsync itself, so this fixture cannot
+        /// drift from what the workbench Retry button actually does to the row (attempt
+        /// counter reset to zero, round advanced, lease and error cleared).
+        /// </summary>
+        public async Task RetryThroughServiceAsync()
+        {
+            await using var db = _database.ContextFor(Tenant);
+            await new ProcurementApplicationService(db).RetrySolicitationAsync(
+                new RetrySolicitationCommand(Tenant, Solicitation, "manual-retry-1", "qa", "corr-manual-retry-1"));
         }
 
         public async Task<(ProcurementOutboxMessage Message, SupplierSolicitation Solicitation, List<ProcurementEvent> Events)> StateAsync()

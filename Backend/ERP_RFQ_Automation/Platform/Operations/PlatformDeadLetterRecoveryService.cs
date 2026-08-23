@@ -112,6 +112,10 @@ public sealed class PlatformDeadLetterRecoveryService(
                 EnsureNotLeased(row.LeaseOwner, row.LeaseToken, row.LeaseUntil);
                 row.Status = ProcurementOutboxStatuses.Pending;
                 row.AttemptCount = 0;
+                // Resetting the counter makes attempt numbers repeat, so the round is what
+                // keeps the recovered delivery's ledger events distinct facts from the first
+                // round's.
+                row.DispatchRound++;
                 row.NextAttemptOn = DateTime.UtcNow;
                 row.DeadLetteredOn = null;
                 row.LastErrorCode = null;

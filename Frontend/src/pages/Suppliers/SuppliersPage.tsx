@@ -29,6 +29,7 @@ import CustomFieldValuesEditor from '../../components/common/CustomFieldValuesEd
 import useColumnPreferences from '../../hooks/useColumnPreferences';
 import UploadExportToolbar from '../../components/common/UploadExportToolbar';
 import { useSnackbar } from 'notistack';
+import { statusLabel } from '../../utils/statusLabels';
 
 // ─── Empty forms ───────────────────────────────────────────────────────────
 const emptySupplier = {
@@ -340,8 +341,8 @@ const SuppliersPage: React.FC = () => {
     // Tier is a commercial classification, not a status: rendered as plain text next to the status
     // chips rather than as a chip of its own, so it cannot be read as an approval verdict.
     { field: 'tier', headerName: 'Tier', width: 175, renderCell: (p) => supplierTierLabel(p.value) },
-    { field: 'governanceStatus', headerName: 'Approval', width: 145, renderCell: (p) => <Chip label={(p.value || 'UNVERIFIED').replaceAll('_', ' ')} size="small" variant="outlined" /> },
-    { field: 'readinessStatus', headerName: 'RFQ readiness', width: 145, renderCell: (p) => <Chip label={(p.value || 'REVIEW_REQUIRED').replaceAll('_', ' ')} size="small" variant="outlined" /> },
+    { field: 'governanceStatus', headerName: 'Approval', width: 145, renderCell: (p) => <Chip label={statusLabel(p.value, 'Unverified')} size="small" variant="outlined" /> },
+    { field: 'readinessStatus', headerName: 'RFQ readiness', width: 145, renderCell: (p) => <Chip label={statusLabel(p.value, 'Review required')} size="small" variant="outlined" /> },
     { field: 'isActive', headerName: t('status'), width: 100, renderCell: (p) => <Chip label={p.value ? 'Active' : 'Inactive'} color={p.value ? 'success' : 'error'} size="small" variant="outlined" /> },
     { 
       field: 'actions', 

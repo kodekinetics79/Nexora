@@ -161,6 +161,16 @@ namespace ERP_RFQ_Automation.Services
             return LegacyQuoteStatusIds.TryGetValue(code, out var legacyId) ? legacyId : null;
         }
 
+        /// <summary>
+        /// Attribution for a created quote. The controller stamps this from the validated token
+        /// before the request ever reaches here, so the fallback is a belt-and-braces default
+        /// rather than an expected path — but the DTO no longer forces a value, and a service
+        /// should not depend on a caller having remembered. Never a blank string: Quote.CreatedBy
+        /// is non-nullable, and an empty actor is a worse audit record than a named default.
+        /// </summary>
+        private static string Actor(string? candidate)
+            => string.IsNullOrWhiteSpace(candidate) ? "System" : candidate.Trim();
+
         public async Task<QuoteResponseDTO> CreateQuoteAsync(QuoteCreateRequestDTO request)
         {
             var quoteNo = request.QuoteNo;
@@ -177,6 +187,12 @@ namespace ERP_RFQ_Automation.Services
             var quote = new Quote
             {
                 QuoteNo = quoteNo,
+                // Back-fill carries the customer's own number and marks its origin; both are
+                // null/PIPELINE for a quote this system produced, so the default path is unchanged.
+                ExternalQuoteReference = string.IsNullOrWhiteSpace(request.ExternalQuoteReference)
+                    ? null : request.ExternalQuoteReference.Trim(),
+                Origin = Models.QuoteOrigin.IsKnown(request.Origin)
+                    ? request.Origin! : Models.QuoteOrigin.Pipeline,
                 Rfqid = request.RfqId,
                 CustomerId = request.CustomerId,
                 BusinessUnitId = request.BusinessUnitId,
@@ -187,7 +203,7 @@ namespace ERP_RFQ_Automation.Services
                     : await ResolveQuoteStatusIdAsync("DRAFT", request.BusinessUnitId), // default: DRAFT (resolved via SetupMaster; legacy id 42 fallback)
                 CurrencyId = request.CurrencyId,
                 HeaderRemarks = request.HeaderRemarks,
-                CreatedBy = request.CreatedBy,
+                CreatedBy = Actor(request.CreatedBy),
                 CreatedDate = DateTime.UtcNow,
                 DiscountTypeId = request.DiscountTypeId,
                 DiscountValue = request.DiscountValue,
@@ -208,7 +224,7 @@ namespace ERP_RFQ_Automation.Services
                     TaxCategory = QuoteLineTaxCategories.Normalize(i.TaxCategory),
                     TaxCategoryReason = i.TaxCategoryReason?.Trim(),
                     DeliveryLeadTime = i.DeliveryLeadTime,
-                    CreatedBy = request.CreatedBy,
+                    CreatedBy = Actor(request.CreatedBy),
                     CreatedDate = DateTime.UtcNow
                 }).ToList()
             };
@@ -457,7 +473,19 @@ namespace ERP_RFQ_Automation.Services
             quote.ValidUntil = request.ValidUntil;
             if (request.StatusId != quote.StatusId)
                 throw new InvalidOperationException("Quote status changes require the governed lifecycle endpoint.");
-            quote.CurrencyId = request.CurrencyId;
+            // A quote's currency is not editable from any screen in this product, so an absent
+            // CurrencyId means "not supplied", never "set it to nothing". Assigning it
+            // unconditionally silently ERASED the currency on every save from the Edit screen,
+            // whose payload has never carried the field. The consequences are both bad and both
+            // silent: a DRAFT then fails PDF export on a currency field the Edit screen does not
+            // show, and a non-draft prints on the customer's document under the `?? "USD"`
+            // fallback further down this file — a 3.75x misstatement of price on a SAR quote,
+            // on our letterhead, with our VAT number on it.
+            //
+            // Changing a quote's currency mid-quote is not a journey this product has. If one is
+            // ever added it must be an explicit, audited transition, not a side effect of Save.
+            if (request.CurrencyId.HasValue)
+                quote.CurrencyId = request.CurrencyId;
             quote.HeaderRemarks = request.HeaderRemarks;
             quote.ModifiedBy = request.ModifiedBy;
             quote.ModifiedDate = DateTime.UtcNow;
@@ -583,10 +611,19 @@ namespace ERP_RFQ_Automation.Services
                 .Where(s => discountTypeIds.Contains(s.SetupId))
                 .ToDictionaryAsync(s => s.SetupId, s => s.SetupCode); // Assuming SetupCode is PERCENTAGE or FIXED
 
-            decimal quoteSubTotal = 0;
+            // ---------------------------------------------------------------- pass 1: line nets
+            // Every line's net BEFORE the header discount, which is the weight the header discount
+            // is allocated by and the base the header percentage is taken on. Tax is NOT derived
+            // yet: it cannot be, because the taxable base is not known until the header discount
+            // has been shared out below.
+            var lineNets = new decimal[quote.QuoteItems.Count];
+            var items = quote.QuoteItems.ToList();
+            decimal netSubTotal = 0;
 
-            foreach (var item in quote.QuoteItems)
+            for (var index = 0; index < items.Count; index++)
             {
+                var item = items[index];
+
                 // FIN-09: round the gross line value to currency scale before applying discount.
                 decimal itemTotal = RoundCurrency(item.Quantity * item.UnitPrice);
                 decimal itemDiscountAmount = 0;
@@ -607,46 +644,30 @@ namespace ERP_RFQ_Automation.Services
                 // FIN-09: round the discount to currency scale as well.
                 itemDiscountAmount = RoundCurrency(itemDiscountAmount);
 
-                // Ensure discount doesn't exceed total? Optional business rule.
+                // A discount larger than the line is a data error, not a negative supply.
                 if (itemDiscountAmount > itemTotal) itemDiscountAmount = itemTotal;
 
-                // Item TotalAmount usually stores the Net Amount? Or Gross? 
-                // Based on previous code: TotalAmount = Quantity * UnitPrice. It didn't account for discount.
-                // But usually TotalAmount on line item is (Qty * Price) - Discount.
-                // Let's assume TotalAmount is the final line amount.
-                item.Discount = itemDiscountAmount; // Store calculated amount in 'Discount' column?
-                // QuoteItem has 'Discount' (decimal) and now 'DiscountValue' (decimal).
-                // 'Discount' was likely the amount. 'DiscountValue' is the input value (e.g. 10 for 10%).
-                // YES.
+                // 'Discount' is the resolved AMOUNT; 'DiscountValue' is the input the user typed
+                // (10 meaning 10%). Only the line's own discount lives here — the header's share is
+                // kept separately in HeaderDiscountAllocated so the two never merge into one
+                // unattributable number.
+                item.Discount = itemDiscountAmount;
 
-                // R17/R19: derive the line's output tax from the net consideration the customer
-                // actually pays for this line. The category is normalised first so a null on a
-                // pre-R19 row is read as STANDARD rather than dropping through as "unknown".
-                var taxCategory = QuoteLineTaxCategories.Normalize(item.TaxCategory);
-                item.TaxCategory = taxCategory;
-                var taxableBase = OutputTaxFormula.TaxableBase(itemTotal, itemDiscountAmount);
-                var derivedTax = OutputTaxFormula.Derive(taxableBase, outputTaxRatePercent, taxCategory);
-                item.TaxAmount = derivedTax;
-                // Null here — and only here — means "never derived", which is what the send gate
-                // refuses on. A zero-rated line records the 0 it was actually taxed at.
-                item.TaxRatePercentApplied = derivedTax is null
-                    ? null
-                    : OutputTaxFormula.EffectiveRatePercent(outputTaxRatePercent, taxCategory);
-
-                // FIN-09: round each line net to currency scale before summing so the printed
-                // line totals reconcile with the printed grand total.
-                item.TotalAmount = RoundCurrency(taxableBase + (derivedTax ?? 0m));
-                quoteSubTotal += item.TotalAmount;
+                lineNets[index] = itemTotal - itemDiscountAmount;
+                netSubTotal += lineNets[index];
             }
 
-            // Quote Header Discount
+            // ------------------------------------------------------- header discount, on the NET
+            // Taken on the tax-EXCLUSIVE subtotal. It used to be taken on a subtotal that already
+            // included each line's tax, which quietly made the rep's "10%" worth 11.5% and put the
+            // create screen and the server 150.00 apart on a 10,000.00 quote.
             decimal quoteDiscountAmount = 0;
             if (quote.DiscountTypeId.HasValue && quote.DiscountValue.HasValue && discountTypes.ContainsKey(quote.DiscountTypeId.Value))
             {
                 string code = discountTypes[quote.DiscountTypeId.Value].ToUpper();
                 if (code == "PERCENTAGE")
                 {
-                    quoteDiscountAmount = quoteSubTotal * (quote.DiscountValue.Value / 100);
+                    quoteDiscountAmount = netSubTotal * (quote.DiscountValue.Value / 100);
                 }
                 else if (code == "FIXED")
                 {
@@ -655,10 +676,106 @@ namespace ERP_RFQ_Automation.Services
             }
 
             quoteDiscountAmount = RoundCurrency(quoteDiscountAmount);
-            if (quoteDiscountAmount > quoteSubTotal) quoteDiscountAmount = quoteSubTotal;
+            if (quoteDiscountAmount > netSubTotal) quoteDiscountAmount = netSubTotal;
+            if (quoteDiscountAmount < 0) quoteDiscountAmount = 0;
 
-            quote.TotalAmount = RoundCurrency(quoteSubTotal - quoteDiscountAmount);
+            // ------------------------------------------------------------------- allocation
+            // Share the header discount across lines in proportion to their net, using largest
+            // remainder so the shares sum EXACTLY to the header discount. Rounding each share
+            // independently would leave a residual that shows up as the printed total disagreeing
+            // with the sum of the printed lines.
+            var allocations = AllocateProRata(quoteDiscountAmount, lineNets);
+
+            // ----------------------------------------------------- pass 2: taxable base and tax
+            decimal quoteNetTotal = 0;
+            decimal quoteTaxTotal = 0;
+
+            for (var index = 0; index < items.Count; index++)
+            {
+                var item = items[index];
+                var allocated = allocations[index];
+                item.HeaderDiscountAllocated = allocated;
+
+                // R17/R19: derive the line's output tax from the net consideration the customer
+                // actually pays for this line — after its own discount AND its share of the header
+                // discount. Deriving it before the header discount overstated the VAT on every
+                // discounted quote, and VAT stated on a document is VAT that is owed.
+                var taxCategory = QuoteLineTaxCategories.Normalize(item.TaxCategory);
+                item.TaxCategory = taxCategory;
+                var taxableBase = OutputTaxFormula.TaxableBase(lineNets[index], allocated);
+                var derivedTax = OutputTaxFormula.Derive(taxableBase, outputTaxRatePercent, taxCategory);
+                item.TaxAmount = derivedTax;
+                // Null here — and only here — means "never derived", which is what the send gate
+                // refuses on. A zero-rated line records the 0 it was actually taxed at.
+                item.TaxRatePercentApplied = derivedTax is null
+                    ? null
+                    : OutputTaxFormula.EffectiveRatePercent(outputTaxRatePercent, taxCategory);
+
+                // FIN-09 / calculation version 2: the stored line total is the taxable base PLUS
+                // the line's tax. Presentation is a separate question — the printed document shows
+                // the base and states tax once at the end (QuoteItem.TaxableBase).
+                item.TotalAmount = RoundCurrency(taxableBase + (derivedTax ?? 0m));
+                quoteNetTotal += taxableBase;
+                quoteTaxTotal += derivedTax ?? 0m;
+            }
+
+            quote.TotalAmount = RoundCurrency(quoteNetTotal + quoteTaxTotal);
             quote.FinancialCalculationVersion = 2;
+        }
+
+        /// <summary>
+        /// Splits <paramref name="amount"/> across <paramref name="weights"/> in proportion to each
+        /// weight, at currency scale, guaranteeing the parts sum EXACTLY back to the amount.
+        ///
+        /// <para>Largest-remainder: round every share down, then hand the leftover halalas out one
+        /// at a time to the lines whose truncated remainder was biggest, tie-broken by the larger
+        /// weight so the residual lands on the line best able to absorb it. Rounding each share
+        /// independently instead would leave the document's total disagreeing with the sum of its
+        /// own lines by a halala or two — the class of defect a buyer's accounts-payable clerk
+        /// finds and a seller cannot explain.</para>
+        ///
+        /// <para>A zero or negative total weight means there is nothing to apportion against, so
+        /// nothing is allocated rather than the amount being dumped on an arbitrary line.</para>
+        /// </summary>
+        private static decimal[] AllocateProRata(decimal amount, decimal[] weights)
+        {
+            var allocations = new decimal[weights.Length];
+            if (weights.Length == 0 || amount <= 0m) return allocations;
+
+            decimal totalWeight = 0m;
+            foreach (var weight in weights) totalWeight += weight > 0m ? weight : 0m;
+            if (totalWeight <= 0m) return allocations;
+
+            const decimal unit = 0.01m;
+            var remainders = new (int Index, decimal Remainder, decimal Weight)[weights.Length];
+            decimal allocated = 0m;
+
+            for (var index = 0; index < weights.Length; index++)
+            {
+                var weight = weights[index] > 0m ? weights[index] : 0m;
+                var exact = amount * weight / totalWeight;
+                // Truncate toward zero, never away: the sum of the floors can only be short of the
+                // amount, so the leftover is always distributable and never has to be clawed back.
+                var floored = Math.Floor(exact / unit) * unit;
+                allocations[index] = floored;
+                allocated += floored;
+                remainders[index] = (index, exact - floored, weight);
+            }
+
+            var leftover = decimal.Round(amount - allocated, 2, MidpointRounding.AwayFromZero);
+            if (leftover <= 0m) return allocations;
+
+            foreach (var candidate in remainders
+                         .Where(r => r.Weight > 0m)
+                         .OrderByDescending(r => r.Remainder)
+                         .ThenByDescending(r => r.Weight))
+            {
+                if (leftover < unit) break;
+                allocations[candidate.Index] += unit;
+                leftover -= unit;
+            }
+
+            return allocations;
         }
 
         // Rounds a monetary value to the 2-decimal currency scale used on printed documents
@@ -793,6 +910,12 @@ namespace ERP_RFQ_Automation.Services
                .Include(q => q.Currency)
                .Include(q => q.Status)
                .Include(q => q.DiscountType)
+               // The RFQ was never included, so RfqNo answered null on every quote response for as
+               // long as the "// Add Include if needed" note beside it has been there. The note was
+               // right and nobody acted on it, which is how a TODO becomes a defect: the field is
+               // declared, the screen has somewhere to put it, and the API quietly says there is
+               // nothing to show. LeadId reads through the same navigation.
+               .Include(q => q.Rfq)
                .FirstOrDefaultAsync(q => q.Id == id);
 
             if (quote == null) return null;
@@ -832,7 +955,37 @@ namespace ERP_RFQ_Automation.Services
                 Id = quote.Id,
                 QuoteNo = quote.QuoteNo,
                 RfqId = quote.Rfqid,
-                RfqNo = quote.Rfq?.Rfqno, // Add Include if needed
+                RfqNo = quote.Rfq?.Rfqno,
+
+                // The commercial identity, which this projection used to drop on the floor.
+                //
+                // Quote.InheritCommercialIdentity stamps CommercialCaseId, NexoraSerial, CustomerId
+                // and ContactId, a PostgreSQL trigger refuses the row if they do not match the RFQ,
+                // and then EVERY caller of this method -- GET /api/Quote/{id} and the quote-draft
+                // response among them -- was handed NexoraSerial = null. A quote that carries the
+                // serial and a quote that never received one looked identical from outside, which
+                // is the worst way to lose a field: the screen shows nothing, the API says nothing
+                // is there, and the row has been correct the whole time.
+                //
+                // Found while asserting a seam: the test read this DTO, saw null, and would have
+                // reported a fabricated identity defect had it not been re-pointed at the row.
+                LeadId = quote.Rfq?.LeadId,
+                CommercialCaseId = quote.CommercialCaseId,
+                NexoraSerial = quote.NexoraSerial,
+                ContactId = quote.ContactId,
+                SourceLeadRevision = quote.SourceLeadRevision,
+                SourceRfqRevision = quote.SourceRfqRevision,
+
+                // The optimistic-concurrency token and the revision number the customer sees. This
+                // projection left both at their default 0 while the repository's projection of the
+                // same DTO set them, so which endpoint a caller reached decided whether the quote
+                // claimed to be version 0 or its real version. A client that echoes back a 0 as
+                // ExpectedVersion is refused by the lifecycle guard for a reason that is not its
+                // fault, so this is stated here rather than defaulted.
+                LifecycleVersion = quote.LifecycleVersion,
+                Version = quote.RevisionNo,
+                ItemCount = quote.QuoteItems.Count,
+
                 CustomerId = quote.CustomerId,
                 CustomerName = quote.Customer?.Name,
                 BusinessUnitId = quote.BusinessUnitId,
@@ -885,6 +1038,11 @@ namespace ERP_RFQ_Automation.Services
                     TaxCategory = i.TaxCategory,
                     TaxCategoryReason = i.TaxCategoryReason,
                     TaxRatePercentApplied = i.TaxRatePercentApplied,
+                    // Both are stored, and both are unrecoverable from the rest of the payload —
+                    // see QuoteItemResponseDTO. The PDF builder below already reads them; the
+                    // screen could not, and invented its own arithmetic instead.
+                    HeaderDiscountAllocated = i.HeaderDiscountAllocated,
+                    TaxableBase = i.TaxableBase,
                     DeliveryLeadTime = i.DeliveryLeadTime,
                     // Read through the existing RfqitemId link — never copied onto QuoteItem.
                     // See QuoteItemResponseDTO for why these are projected rather than stored.
@@ -994,10 +1152,58 @@ namespace ERP_RFQ_Automation.Services
                                 "6. Warranty and liability are as per the manufacturer's standard terms.\n" +
                                 "7. This quote is confidential and intended solely for the recipient.";
 
-            string companyAddress = config?.CompanyAddress ?? "123 Business Rd, Tech City, 54321";
-            string companyPhone = config?.CompanyPhone ?? "+1 800 555 0199";
-            string companyEmail = config?.CompanyEmail ?? quote.Rfq?.Lead?.Clientemail ?? "sales@company.com";
-            string footerText = config?.FooterText ?? "Professional Business Solutions";
+            // THE ISSUER, read from the tenant's own records and nowhere else — the same rule the
+            // delivery note already operates under (DeliveryNoteReadService.IssuerIdentity): every
+            // field may be null, and a null is reported as a gap rather than filled with something
+            // plausible, because the plausible one gets used.
+            //
+            // What this replaced was not a fallback but a wrong answer: `?? Lead.Clientemail` is
+            // the address the ENQUIRY ARRIVED FROM, so a tenant with no seller email on file sent
+            // the customer a quotation naming the customer as its sender, next to a placeholder
+            // street address and a +1 800 number. TenantBaselineSeeder deliberately leaves
+            // CompanyEmail null "so a blank sender line is a visible omission somebody will fix" —
+            // it was never blank, so nobody ever fixed it.
+            string companyAddress = config?.CompanyAddress;
+            string companyPhone = config?.CompanyPhone;
+            string companyEmail = config?.CompanyEmail;
+
+            // The legal entity, not the workspace label. Guaranteed present for an activated
+            // tenant: the identity.legal-customer activation control requires LegalName and
+            // RegistrationNumber before a tenant may be activated at all.
+            var issuer = await _context.Set<ERP_RFQ_Automation.Platform.Models.Tenant>()
+                .AsNoTracking()
+                .Where(t => t.PrimaryBusinessUnitId == quote.BusinessUnitId)
+                .OrderBy(t => t.Id)
+                .Select(t => new { t.LegalName, t.RegistrationNumber })
+                .FirstOrDefaultAsync(ct);
+
+            string sellerLegalName = string.IsNullOrWhiteSpace(issuer?.LegalName)
+                ? quote.BusinessUnit?.BusinessUnitName
+                : issuer.LegalName;
+            string sellerCommercialRegistration = issuer?.RegistrationNumber;
+            string sellerTaxRegistration = quote.BusinessUnit?.TaxRegistrationNumber;
+
+            // A document that cannot name its sender is not a document. Refuse, and name the
+            // screen — the rep who meets this did nothing wrong.
+            if (string.IsNullOrWhiteSpace(sellerLegalName))
+                throw new QuoteIssuerIdentityMissingException(
+                    "This quotation cannot be produced because the business unit sending it has no "
+                    + "name on file. Add the legal entity name under Setup → Business Units, then "
+                    + "download the quote again.");
+            if (string.IsNullOrWhiteSpace(companyAddress)
+                && string.IsNullOrWhiteSpace(companyPhone)
+                && string.IsNullOrWhiteSpace(companyEmail))
+                throw new QuoteIssuerIdentityMissingException(
+                    "This quotation cannot be produced because it would not tell the customer how "
+                    + "to reach you: no company address, telephone or email is configured. Fill in "
+                    + "Setup → Quote Format, then download the quote again.");
+
+            // Deliberately NOT a refusal. A VAT number is nullable by design, nothing has ever
+            // populated it automatically, and a tenant that is not yet VAT-registered still sends
+            // valid quotations. The delivery note prints the same gap on the face of the artefact
+            // rather than blocking; two customer-facing documents disagreeing about whether a
+            // missing registration is fatal would be worse than either rule alone.
+            string footerText = config?.FooterText;
 
             byte[] logoBytes = null;
             if (!string.IsNullOrEmpty(logoBase64))
@@ -1018,13 +1224,38 @@ namespace ERP_RFQ_Automation.Services
             decimal totalItemDiscounts = quote.QuoteItems.Sum(i => RoundCurrency(i.Discount ?? 0));
             decimal totalTax = quote.QuoteItems.Sum(i => RoundCurrency(i.TaxAmount ?? 0));
 
-            decimal headerDiscount = 0;
-            if (quote.DiscountTypeId.HasValue && quote.DiscountValue.HasValue)
+            // The header discount is READ from the per-line allocation, not reconstructed by
+            // subtracting the stored total from a sum of line values. The reconstruction printed
+            // the discount 15% too large, because the figures it subtracted had tax in them and the
+            // one it compared against did not: a rep who entered 10% on a 10,000.00 quote saw
+            // 1,150.00 on the customer's copy. Legacy rows written before the allocation column
+            // existed carry null, and for those the old inference is still the only answer
+            // available — so it stays, scoped to exactly those rows.
+            decimal headerDiscount = quote.QuoteItems.Sum(i => RoundCurrency(i.HeaderDiscountAllocated ?? 0));
+            if (headerDiscount == 0
+                && quote.QuoteItems.All(i => i.HeaderDiscountAllocated is null)
+                && quote.DiscountTypeId.HasValue && quote.DiscountValue.HasValue)
             {
                 decimal itemsNetTotal = subTotal - totalItemDiscounts + totalTax;
                 headerDiscount = itemsNetTotal - (quote.TotalAmount ?? 0);
                 if (headerDiscount < 0) headerDiscount = 0;
             }
+
+            // What the line column adds up to: every line's taxable base, tax excluded.
+            decimal netExcludingTax = quote.QuoteItems.Sum(i => RoundCurrency(i.TaxableBase));
+
+            // Name the rate on the document when every taxed line shares one — "VAT 15%" is what a
+            // buyer's finance team checks against. When a quote mixes treatments (a zero-rated
+            // export line beside a standard one) no single rate is true of the total, so the label
+            // stays bare and the per-line breakdown below carries the detail.
+            var appliedRates = quote.QuoteItems
+                .Where(i => i.TaxRatePercentApplied is > 0m)
+                .Select(i => i.TaxRatePercentApplied!.Value)
+                .Distinct()
+                .ToList();
+            string taxRateLabel = appliedRates.Count == 1
+                ? $" {decimal.Round(appliedRates[0], 2).ToString("0.##")}%"
+                : string.Empty;
 
             // The buyer's own RFQ number: Lead.Rfqno is the value the customer sent us;
             // Rfq.Rfqno equals it when it existed and is a synthetic internal serial otherwise,
@@ -1061,19 +1292,42 @@ namespace ERP_RFQ_Automation.Services
                                 }
                                 else
                                 {
-                                    c.Item().Text(quote.BusinessUnit?.BusinessUnitName ?? "Company Name")
+                                    c.Item().Text(sellerLegalName)
                                         .FontSize(22).Bold().FontColor(primaryColor);
                                 }
 
-                                c.Item().PaddingTop(8).Text(footerText)
-                                    .FontSize(9).Italic().FontColor(Colors.Grey.Darken1);
+                                if (!string.IsNullOrWhiteSpace(footerText))
+                                    c.Item().PaddingTop(8).Text(footerText)
+                                        .FontSize(9).Italic().FontColor(Colors.Grey.Darken1);
 
                                 c.Item().PaddingTop(10).Column(details =>
                                 {
                                     details.Spacing(1);
-                                    details.Item().Text(companyAddress).FontSize(8).FontColor(Colors.Grey.Medium);
-                                    details.Item().Text($"P: {companyPhone}").FontSize(8).FontColor(Colors.Grey.Medium);
-                                    details.Item().Text($"E: {companyEmail}").FontSize(8).FontColor(Colors.Grey.Medium);
+                                    // Each line appears only when it has something to say. A
+                                    // stray "P: " with nothing after it reads as a rendering
+                                    // fault; the refusal above already guarantees at least one
+                                    // of these three is present.
+                                    if (!string.IsNullOrWhiteSpace(companyAddress))
+                                        details.Item().Text(companyAddress).FontSize(8).FontColor(Colors.Grey.Medium);
+                                    if (!string.IsNullOrWhiteSpace(companyPhone))
+                                        details.Item().Text($"P: {companyPhone}").FontSize(8).FontColor(Colors.Grey.Medium);
+                                    if (!string.IsNullOrWhiteSpace(companyEmail))
+                                        details.Item().Text($"E: {companyEmail}").FontSize(8).FontColor(Colors.Grey.Medium);
+
+                                    // Registrations are printed as a NAMED GAP when absent rather
+                                    // than omitted. A Saudi buyer's finance team looks for the
+                                    // seller VAT number before it looks at the price; a line that
+                                    // is simply missing reads as an oversight by the reader,
+                                    // while "not on file" is unmistakably the sender's to fix —
+                                    // and the sender sees it on their own copy.
+                                    details.Item().PaddingTop(4).Text(
+                                        "CR: " + (string.IsNullOrWhiteSpace(sellerCommercialRegistration)
+                                            ? "not on file" : sellerCommercialRegistration))
+                                        .FontSize(8).FontColor(Colors.Grey.Medium);
+                                    details.Item().Text(
+                                        "VAT: " + (string.IsNullOrWhiteSpace(sellerTaxRegistration)
+                                            ? "not on file" : sellerTaxRegistration))
+                                        .FontSize(8).FontColor(Colors.Grey.Medium);
                                 });
                             });
 
@@ -1179,7 +1433,12 @@ namespace ERP_RFQ_Automation.Services
                                 table.Cell().Element(RowStyle).AlignRight().Text(item.x.Quantity.ToString("N0"));
                                 table.Cell().Element(RowStyle).Text(item.x.UnitOfMeasure ?? string.Empty);
                                 table.Cell().Element(RowStyle).AlignRight().Text(item.x.UnitPrice.ToString("N2"));
-                                table.Cell().Element(RowStyle).AlignRight().Text(item.x.TotalAmount.ToString("N2")).Bold();
+                                // The line's own consideration, tax EXCLUDED. The stored TotalAmount
+                                // carries the line's tax inside it (calculation version 2), so
+                                // printing it here put VAT in the line column and then added the
+                                // same VAT again in the summary below — the printed lines could not
+                                // be added up to the printed subtotal.
+                                table.Cell().Element(RowStyle).AlignRight().Text(item.x.TaxableBase.ToString("N2")).Bold();
                             }
                         });
 
@@ -1216,10 +1475,15 @@ namespace ERP_RFQ_Automation.Services
 
                                 c.Item().PaddingTop(10).Column(inner =>
                                 {
+                                    // Read top to bottom this is the arithmetic itself: gross, what
+                                    // came off it, the net the tax is charged on, the tax, the total.
+                                    // "Total excluding VAT" is the line column's own sum, so a buyer
+                                    // can add up the page and arrive here.
                                     FinancialRow("Subtotal", subTotal);
                                     if (totalItemDiscounts > 0) FinancialRow("Item Discounts", -totalItemDiscounts);
                                     if (headerDiscount > 0) FinancialRow("Additional Discount", -headerDiscount);
-                                    if (totalTax > 0) FinancialRow("Tax / VAT", totalTax);
+                                    FinancialRow("Total excluding VAT", netExcludingTax);
+                                    if (totalTax > 0) FinancialRow($"VAT{taxRateLabel}", totalTax);
 
                                     inner.Item().PaddingVertical(5).LineHorizontal(1).LineColor(Colors.Grey.Lighten3);
 
@@ -1318,9 +1582,14 @@ namespace ERP_RFQ_Automation.Services
                 }
             }
 
+            // "Our Company" and "Sales Team" below were the same defect as the PDF's placeholder
+            // identity, one layer out: a customer receiving mail from "Our Company" learns
+            // nothing and trusts less. BusinessUnitName is non-null in the schema, so naming it
+            // directly is not a narrowing — it removes a fallback that could only ever have
+            // fired on a broken row, and would have hidden that breakage behind a bland phrase.
             var subject = !string.IsNullOrEmpty(customSubject)
                 ? customSubject
-                : $"Quote #{quote.QuoteNo} from {quote.BusinessUnit?.BusinessUnitName ?? "Our Company"}";
+                : $"Quote #{quote.QuoteNo} from {quote.BusinessUnit?.BusinessUnitName}";
 
             var body = !string.IsNullOrEmpty(customBody)
                 ? customBody.Replace("\n", "<br/>")
@@ -1330,7 +1599,7 @@ namespace ERP_RFQ_Automation.Services
                 <p>Thank you for your business.</p>
                 <br/>
                 <p>Best Regards,</p>
-                <p>{quote.BusinessUnit?.BusinessUnitName ?? "Sales Team"}</p>
+                <p>{quote.BusinessUnit?.BusinessUnitName}</p>
             ";
 
             var deliveryKey = $"quote:{quote.Id}:delivery:v1";

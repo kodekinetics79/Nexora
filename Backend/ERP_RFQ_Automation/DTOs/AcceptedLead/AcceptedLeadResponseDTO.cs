@@ -103,6 +103,28 @@ public class UserDropdownDTO
 {
     public long Id { get; set; }
     public string FullName { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Whether governed routing will actually accept this person as an assignee right now.
+    ///
+    /// <para>This dropdown used to be a plain list of every active user in the tenant, but
+    /// <c>AssignCoreAsync</c> refuses anyone whose governed Sales Rep profile is missing,
+    /// switched off, or out of capacity. On a tenant whose <c>sales_rep_profiles</c> table is
+    /// empty that meant every single name in the list answered 409, with no clue as to why.
+    /// The list still shows everyone — a manager has to be able to see that Ana exists before
+    /// anyone can give Ana a profile — but each name now carries the verdict the server will
+    /// reach.</para>
+    /// </summary>
+    public bool IsEligibleForAssignment { get; set; }
+
+    /// <summary>The routing engine's own sentence explaining <see cref="IsEligibleForAssignment"/>.</summary>
+    public string EligibilityReason { get; set; } = string.Empty;
+
+    /// <summary>Remaining capacity, 0-100. Null when the user is not a routing candidate at all.</summary>
+    public int? CapacityPercent { get; set; }
+
+    /// <summary>Measured workload points. Null when the user is not a routing candidate at all.</summary>
+    public int? WorkloadPoints { get; set; }
 }
 
 // Updated Request DTO - now supports comment

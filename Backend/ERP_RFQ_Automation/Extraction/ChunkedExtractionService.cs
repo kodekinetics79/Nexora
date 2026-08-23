@@ -295,6 +295,23 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
     //   3. This absolute item ceiling, unchanged.
     private const int MaxItemsPerChunk = 200;
     private const int MaxChunkChars = 24_000;
+
+    /// <summary>
+    /// The most model calls one document may cost. Reached BEFORE any spending, so a runaway
+    /// plan is refused rather than discovered halfway through.
+    ///
+    /// <para>Every chunk resends the full extraction prompt — roughly 2,000 tokens of
+    /// instructions before a single line item is read — so the chunk count multiplies the bill
+    /// directly. A 54-page .docx whose regions were over-detected planned SEVENTY chunks,
+    /// consumed an entire tenant's monthly token budget, was refused partway at chunk 49 with
+    /// `hard_budget_exceeded`, and returned 24 real line items. The spend was irreversible and
+    /// the operator learned about it afterwards.</para>
+    ///
+    /// <para>Thirty covers the largest genuine bid list seen in the corpus (138 items at 23 per
+    /// chunk is six) with a wide margin. Beyond it the document is either mis-parsed or genuinely
+    /// too large to price automatically, and both deserve a human before the money is spent.</para>
+    /// </summary>
+    internal const int MaxChunksPerDocument = 30;
     private const int HeaderContextBudget = 6_000;
     private const double MinAcceptableConfidence = 0.60;
 
@@ -353,11 +370,60 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
         if (input.IsStructured && input.StructuredRows is { Count: > 0 })
             return ExtractStructuredAsync(input.StructuredRows, input.BusinessUnitId, input.SourceDocumentName, ct,
                 input.DocumentNarrative);
+
         return ExtractUnstructuredAsync(input, ct);
+    }
+
+    /// <summary>
+    /// Reassembles the document text the readers split into header and item regions. The
+    /// template parser works on the document as printed, not on the pipeline's view of it.
+    /// </summary>
+    private static string DocumentTextOf(DocumentExtractionInput input)
+    {
+        if (input.LineItemRegions.Count == 0) return input.HeaderText;
+        var builder = new StringBuilder(input.HeaderText.Length + 64 * input.LineItemRegions.Count);
+        if (!string.IsNullOrEmpty(input.HeaderText)) builder.Append(input.HeaderText).Append('\n');
+        foreach (var region in input.LineItemRegions) builder.Append(region).Append('\n');
+        return builder.ToString();
     }
 
     public async Task<ChunkedExtractionOutcome> ExtractUnstructuredAsync(DocumentExtractionInput input, CancellationToken ct = default)
     {
+        // ---- TEMPLATE PATH: a document we can read ourselves costs nothing to read. --------
+        //
+        // THIS IS THE DOOR WHERE MONEY IS SPENT, which is why the check lives here.
+        //
+        // It used to sit in ExtractAsync, one level up. ExtractionWorker — the path every real
+        // document takes — calls ExtractUnstructuredAsync directly, so the template was never
+        // consulted in production even once: zero hits since it shipped, while the parser
+        // recognises and parses the very documents that went to the model. Two Aramco bid lists
+        // uploaded on 2026-08-19 were read externally and returned 2 of 3 and 11 of 42 line
+        // items; the parser reads both cleanly, for nothing.
+        //
+        // Putting the guard on the paid call rather than on a dispatcher makes that class of
+        // mistake unreachable: a caller can skip a convenience method, but it cannot skip the
+        // model call it is trying to make.
+        //
+        // A refusal is a routing decision, not a failure — the document falls through and is
+        // read by the model exactly as before. Nothing is lost by trying.
+        if (Templates.AramcoBidListExtraction.TryExtract(
+                DocumentTextOf(input), input.SourceDocumentName, out var templateRejection) is { } templated)
+        {
+            _log.LogInformation(
+                "{Document} was read from the Aramco bid list template: {Items} line item(s), no model call.",
+                input.SourceDocumentName, templated.ExtractedItemCount);
+            return templated;
+        }
+
+        if (templateRejection is not null)
+        {
+            // Loud on purpose. A template that starts refusing is either a layout change at the
+            // sender or a defect here, and both are worth knowing about BEFORE the bill arrives.
+            _log.LogWarning(
+                "{Document} carries the Aramco masthead but was refused by the template ({Reason}); "
+                + "falling through to the model.", input.SourceDocumentName, templateRejection);
+        }
+
         var expected = input.LineItemRegions.Count;
         var diagnostics = new List<string>();
 
@@ -504,6 +570,22 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
 
         var itemsPerChunk = ItemsPerChunk();
         var chunks = BuildChunks(input.LineItemRegions, itemsPerChunk);
+
+        // PRE-FLIGHT COST GATE. Refuse before the first model call, not after the fortieth.
+        if (chunks.Count > MaxChunksPerDocument)
+        {
+            _log.LogWarning(
+                "Refusing {Document} before extraction: {Chunks} chunk(s) for {Expected} detected "
+                + "item(s) exceeds the {Limit}-chunk ceiling. No model call was made.",
+                input.SourceDocumentName, chunks.Count, expected, MaxChunksPerDocument);
+            return Failed(expected,
+                $"This document was read as {expected} line item(s), which would take "
+                + $"{chunks.Count} model calls — more than the {MaxChunksPerDocument} allowed for "
+                + "one document. Nothing was charged. It is either larger than the automatic "
+                + "reader handles or its layout was mis-read; a person should look before it is "
+                + "processed.", input);
+        }
+
         diagnostics.Add($"Document split into {chunks.Count} chunk(s) for {expected} line item(s).");
         _log.LogInformation(
             "Chunk plan for {Document}: {Chunks} chunk(s), {Expected} item(s), <={ItemsPerChunk} item(s) per chunk "
@@ -735,7 +817,7 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             return Task.FromResult(Failed(0, "Structured file contained no valid line items."));
 
         var primary = import.Documents.First();
-        var items = allItems.Select(MapCanonicalItem).ToList();
+        var items = InheritStatedCurrency(allItems.Select(MapCanonicalItem).ToList());
         var overall = ComputeOverallConfidence(items, header: primary);
         var result = BuildStructuredResult(primary, items, overall);
 
@@ -756,7 +838,7 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
                 splitResults = import.Documents
                     .Select(d =>
                     {
-                        var groupItems = d.LineItems.Select(MapCanonicalItem).ToList();
+                        var groupItems = InheritStatedCurrency(d.LineItems.Select(MapCanonicalItem).ToList());
                         return BuildStructuredResult(d, groupItems, ComputeOverallConfidence(groupItems, d));
                     })
                     .ToList();
@@ -954,6 +1036,41 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             RequiredDeliveryDateConfidence: (double)doc.RequiredDeliveryDate.Confidence,
             AgreementReference: doc.AgreementReference.Value,
             AgreementReferenceConfidence: (double)doc.AgreementReference.Confidence);
+
+
+    /// <summary>
+    /// Fills a blank line currency from the ONE currency the document actually stated.
+    ///
+    /// <para>An RFQ quotes in a single currency, stated once — usually in the header or on the
+    /// first priced row — and the model returns it only where it saw it. Every other line then
+    /// carries null, and the whole document reaches the buyer with no currency on 31 of its 32
+    /// lines. Measured on a real Aramco bid: currency was null on all 32.</para>
+    ///
+    /// <para>REFUSES TO GUESS when the document states more than one. A genuinely multi-currency
+    /// bid exists, and silently rewriting the minority to the majority would misprice it — the one
+    /// failure mode worse than a blank field, because a blank is visibly missing and a wrong
+    /// currency looks complete. Nothing is inferred here that the document did not say.</para>
+    /// </summary>
+    private static List<LeadItemData> InheritStatedCurrency(List<LeadItemData> items)
+    {
+        var stated = items
+            .Select(x => x.Currency)
+            .Where(c => !string.IsNullOrWhiteSpace(c))
+            .Select(c => c!.Trim().ToUpperInvariant())
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+
+        if (stated.Length != 1) return items;   // none stated, or genuinely mixed — leave it alone
+
+        var currency = stated[0];
+        for (var i = 0; i < items.Count; i++)
+            if (string.IsNullOrWhiteSpace(items[i].Currency))
+                // Confidence carries the provenance: this value was read from the document, but
+                // not from THIS line, and a reviewer should be able to tell the difference.
+                items[i] = items[i] with { Currency = currency, CurrencyConfidence = 0.75 };
+
+        return items;
+    }
 
     private static LeadItemData MapCanonicalItem(CanonicalRfqLineItem line)
         => new(

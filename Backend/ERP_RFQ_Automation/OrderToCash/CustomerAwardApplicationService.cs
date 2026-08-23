@@ -401,6 +401,16 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
                     && x.CustomerAwardId.HasValue && awardIds.Contains(x.CustomerAwardId.Value))
                 .Select(x => new { x.Id, x.OrderNo, AwardId = x.CustomerAwardId!.Value })
                 .ToListAsync(cancellationToken);
+        // The quotations these purchase orders were uploaded AGAINST, which is knowable the moment
+        // the document arrives and does not wait for an allocation. Read here because
+        // CustomerPurchaseOrder.QuoteId is a bare column with no navigation property, and batched
+        // because the alternative is one query per row on a 200-row inbox.
+        var directQuoteNumbers = await DirectQuoteNumbersAsync(businessUnitId,
+            purchaseOrders
+                .Where(x => x.QuoteId.HasValue
+                    && !x.Awards.Any(award => award.Status != CustomerAwardStatuses.Cancelled))
+                .Select(x => x.QuoteId!.Value),
+            cancellationToken);
         return purchaseOrders.Select(purchaseOrder =>
         {
             var award = purchaseOrder.Awards.Where(x => x.Status != CustomerAwardStatuses.Cancelled)
@@ -415,12 +425,60 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
             var outcome = award is null ? "POSSIBLE_MATCH_REVIEW"
                 : purchaseOrder.Status == CustomerPurchaseOrderStatuses.PartiallyAwarded ? "PARTIAL_AWARD"
                 : discrepancyCount > 0 ? "ACCEPTED_WITH_DIFFERENCES" : "EXACT_ACCEPTANCE";
+            var (quoteId, quoteNumber) = ResolveQuote(purchaseOrder, award, directQuoteNumbers);
             return new ClientPurchaseOrderInboxRow(purchaseOrder.Id, purchaseOrder.InternalNumber,
                 purchaseOrder.ExternalPoNumber, purchaseOrder.Customer.Name,
                 purchaseOrder.CommercialCase.MasterReference, purchaseOrder.ReceivedOn, purchaseOrder.Status,
-                award?.QuoteId, award?.Quote.QuoteNo, outcome, discrepancyCount,
+                quoteId, quoteNumber, outcome, discrepancyCount,
                 order?.Id, order?.OrderNo);
         }).ToList();
+    }
+
+    /// <summary>
+    /// Which quotation a captured customer PO answers, for the two screens a reviewer actually
+    /// looks at.
+    ///
+    /// <para><b>The defect this closes.</b> Both projections used to read the quote solely off the
+    /// award — <c>award?.QuoteId, award?.Quote.QuoteNo</c> — while
+    /// <see cref="CreatePurchaseOrderAsync"/> has always written <c>CustomerPurchaseOrder.QuoteId</c>
+    /// for exactly the opposite reason: "so the matcher can reach the quotation without going
+    /// through an award that may not exist yet". So a purchase order that had been uploaded and
+    /// attached to a quotation, but not yet allocated, displayed <i>Quote match pending</i> on the
+    /// Client PO Inbox and hid the "Customer Quote" button on the review screen. The link was in
+    /// the database and the product denied it existed.</para>
+    ///
+    /// <para>That state is not hypothetical. The capture workspace issues four sequential requests
+    /// — create PO, create award, confirm, convert — so any refusal after the first (the R17 tax
+    /// gate, a stale quote revision, an over-allocation) strands a saved purchase order whose only
+    /// record of what the buyer was answering is this column.</para>
+    ///
+    /// <para>The award still WINS when there is one. It is the stronger statement: a purchase order
+    /// can be split across awards, and the header award is the one whose quotation the rest of this
+    /// projection — the line allocations, the discrepancies, the blocking keys — is computed
+    /// against. Naming a different quotation in the header than the lines were compared to would be
+    /// worse than naming none.</para>
+    /// </summary>
+    private static (long? QuoteId, string? QuoteNumber) ResolveQuote(CustomerPurchaseOrder purchaseOrder,
+        CustomerAward? award, IReadOnlyDictionary<long, string> directQuoteNumbers)
+    {
+        if (award is not null) return (award.QuoteId, award.Quote.QuoteNo);
+        if (purchaseOrder.QuoteId is not { } quoteId) return (null, null);
+        // A quote id with no number beside it reads as a broken link, so an id we could not resolve
+        // inside the tenant is reported as no link at all rather than as half of one.
+        return directQuoteNumbers.TryGetValue(quoteId, out var quoteNumber) ? (quoteId, quoteNumber) : (null, null);
+    }
+
+    private async Task<Dictionary<long, string>> DirectQuoteNumbersAsync(long businessUnitId,
+        IEnumerable<long> quoteIds, CancellationToken cancellationToken)
+    {
+        var ids = quoteIds.Distinct().ToArray();
+        if (ids.Length == 0) return [];
+        // Scoped to the tenant, so a QuoteId that somehow names another business unit's quotation
+        // resolves to nothing and the caller reports an unlinked purchase order.
+        return await _db.Quotes.AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId && ids.Contains(x.Id))
+            .Select(x => new { x.Id, x.QuoteNo })
+            .ToDictionaryAsync(x => x.Id, x => x.QuoteNo, cancellationToken);
     }
 
     public async Task<ClientPurchaseOrderMatchView> GetPurchaseOrderMatchAsync(long businessUnitId,
@@ -483,10 +541,17 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
         var outcome = award is null ? "POSSIBLE_MATCH_REVIEW"
             : purchaseOrder.Status == CustomerPurchaseOrderStatuses.PartiallyAwarded ? "PARTIAL_AWARD"
             : discrepancyCount > 0 ? "ACCEPTED_WITH_DIFFERENCES" : "EXACT_ACCEPTANCE";
+        // See ResolveQuote: before an award exists the purchase order's own QuoteId is the only
+        // record of which quotation the buyer was answering, and it is the link the reviewer needs
+        // most — this is the screen where they decide what the PO should be allocated against.
+        var (headerQuoteId, headerQuoteNumber) = ResolveQuote(purchaseOrder, award,
+            award is null && purchaseOrder.QuoteId.HasValue
+                ? await DirectQuoteNumbersAsync(businessUnitId, [purchaseOrder.QuoteId.Value], cancellationToken)
+                : []);
         var header = new ClientPurchaseOrderInboxRow(purchaseOrder.Id, purchaseOrder.InternalNumber,
             purchaseOrder.ExternalPoNumber, purchaseOrder.Customer.Name,
             purchaseOrder.CommercialCase.MasterReference, purchaseOrder.ReceivedOn, purchaseOrder.Status,
-            award?.QuoteId, award?.Quote.QuoteNo, outcome, discrepancyCount, order?.Id, order?.OrderNo);
+            headerQuoteId, headerQuoteNumber, outcome, discrepancyCount, order?.Id, order?.OrderNo);
         // FR-COM-04. The gate ConvertToOrderAsync applies, computed here so the reviewer sees the
         // same answer BEFORE pressing the button rather than as a 409 afterwards.
         var accepted = await AcceptedDifferencesAsync(businessUnitId, purchaseOrder.Id, cancellationToken);
@@ -1583,20 +1648,74 @@ public sealed class CustomerAwardApplicationService(ErpRfqAutomationContext db) 
                 x.Id, award.Id, x.CustomerPurchaseOrderLineId, x.QuoteItemId, x.AwardedQuantity,
                 x.UnitPriceSnapshot, x.DiscountSnapshot, x.TaxSnapshot, x.TotalSnapshot, x.Version)).ToList());
 
+    /// <summary>
+    /// What one awarded quantity is worth, frozen onto the award: unit price, the discount the
+    /// customer was granted, the output tax, and the total those three imply.
+    ///
+    /// <para>The discount is the line's OWN discount plus its share of the QUOTE-LEVEL header
+    /// discount, and that share is now READ from <see cref="QuoteItem.HeaderDiscountAllocated"/>.
+    /// It used to be reconstructed as <c>sum(line totals) - quote.TotalAmount</c>. Allocating the
+    /// header discount down to the lines changed the meaning of both operands — a line total is
+    /// already net of its own share, and the quote total is the sum of those same lines — so that
+    /// subtraction became EXACTLY ZERO on every quote and this site was never updated. A rep's 10%
+    /// goodwill discount disappeared from the sales order her Client PO produced, and that order's
+    /// Financial Summary then contradicted itself: 10,000.00 subtotal, -0.00 discount, 1,350.00
+    /// tax, 10,350.00 grand total. Subtotal - Discount + Tax must equal Grand Total, and it did
+    /// not.</para>
+    /// </summary>
     private static (decimal UnitPrice, decimal Discount, decimal Tax, decimal Total) CalculateSnapshots(
         Quote quote, QuoteItem item, decimal quantity)
     {
         if (item.Quantity <= 0m) throw new CustomerAwardConflictException("A quoted quantity must be positive before it can be awarded.");
         var ratio = quantity / item.Quantity;
-        var lineTotalSum = quote.QuoteItems.Sum(x => x.TotalAmount);
-        var headerDiscount = quote.TotalAmount.HasValue ? Math.Max(0m, lineTotalSum - quote.TotalAmount.Value) : 0m;
-        var allocatedHeaderDiscount = lineTotalSum > 0m
-            ? Money(headerDiscount * (item.TotalAmount / lineTotalSum) * ratio)
-            : 0m;
+        var storedAllocation = HeaderDiscountIsAllocatedToLines(quote);
+        var allocatedHeaderDiscount = Money(ratio * (storedAllocation
+            ? item.HeaderDiscountAllocated ?? 0m
+            : InferredHeaderDiscountShare(quote, item)));
+
         return (decimal.Round(item.UnitPrice, 4, MidpointRounding.AwayFromZero),
             Money((item.Discount ?? 0m) * ratio + allocatedHeaderDiscount),
             Money((item.TaxAmount ?? 0m) * ratio),
-            Money(item.TotalAmount * ratio - allocatedHeaderDiscount));
+            // An allocated line already had the header discount taken OUT of TotalAmount by the
+            // quote calculator, so taking it out again here would charge the customer's own
+            // discount to him twice. Only an inferred share still has to be removed.
+            storedAllocation
+                ? Money(item.TotalAmount * ratio)
+                : Money(item.TotalAmount * ratio - allocatedHeaderDiscount));
+    }
+
+    /// <summary>
+    /// Whether this quote's header discount is written down on its lines. Null on every line means
+    /// the quote predates the allocation column, which is the only case left that has to infer.
+    /// Same test the quote document builder makes, so the printed quotation and the sales order
+    /// raised from it cannot pick different answers about the same quote.
+    /// </summary>
+    private static bool HeaderDiscountIsAllocatedToLines(Quote quote)
+        => quote.QuoteItems.Any(x => x.HeaderDiscountAllocated is not null);
+
+    /// <summary>
+    /// A legacy quote's header discount, inferred the only way still available: the gap between
+    /// what its lines add up to and the total that was actually stored, shared out pro rata.
+    ///
+    /// <para>Deliberately the same shape as <c>OrderService.CreateOrderFromQuoteAsync</c>, down to
+    /// the <see cref="Quote.FinancialCalculationVersion"/> branch, rather than a second opinion.
+    /// The branch is not decoration: from version 2 a line total carries its own tax, so a subtotal
+    /// compared against the stored total has to carry tax too — compare a tax-exclusive subtotal
+    /// against a tax-inclusive total and the inference comes back short by the entire VAT.</para>
+    /// </summary>
+    private static decimal InferredHeaderDiscountShare(Quote quote, QuoteItem item)
+    {
+        var grossSubtotal = quote.QuoteItems.Sum(x => Money(x.Quantity * x.UnitPrice));
+        var itemDiscounts = quote.QuoteItems.Sum(x => Money(x.Discount ?? 0m));
+        var itemTax = quote.QuoteItems.Sum(x => Money(x.TaxAmount ?? 0m));
+        var preHeaderTotal = quote.FinancialCalculationVersion >= 2
+            ? Money(grossSubtotal - itemDiscounts + itemTax)
+            : Money(grossSubtotal - itemDiscounts);
+        var headerDiscount = Math.Max(0m, Money(preHeaderTotal - (quote.TotalAmount ?? preHeaderTotal)));
+        var lineTotalSum = quote.QuoteItems.Sum(x => x.TotalAmount);
+        return headerDiscount > 0m && lineTotalSum > 0m
+            ? headerDiscount * (item.TotalAmount / lineTotalSum)
+            : 0m;
     }
 
     private static decimal Money(decimal value) => decimal.Round(value, 2, MidpointRounding.AwayFromZero);

@@ -15,6 +15,7 @@ import {
 import { toast } from 'react-hot-toast';
 import { useAuth } from '../../../context/AuthContext';
 import ProviderPicker from '../../../email/ProviderPicker';
+import ApiErrorNotice from '../../../components/common/ApiErrorNotice';
 import mailboxService, {
   type Mailbox, type MailboxWriteRequest, type MailboxProbeResult, type MailboxProtocol,
   type ProbeStatus,
@@ -124,7 +125,12 @@ const MailboxPage: React.FC = () => {
   const [probe, setProbe] = React.useState<MailboxProbeResult | null>(null);
   const [providerKey, setProviderKey] = React.useState('');
 
-  const { data: mailboxes = [], isLoading } = useQuery({
+  const {
+    data: mailboxes = [], isLoading,
+    // Without these three the `= []` default above WAS the failure handling: a 500 from
+    // GET /api/Mailbox rendered as "No inbox is connected yet". See the empty sections below.
+    isError: mailboxReadFailed, error: mailboxReadError, refetch: refetchMailboxes,
+  } = useQuery({
     queryKey: ['mailboxes'], queryFn: mailboxService.getAll,
   });
   const { data: outbound } = useQuery({
@@ -365,30 +371,57 @@ const MailboxPage: React.FC = () => {
         </Alert>
       )}
 
-      <Typography sx={{ fontWeight: 900, fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '0.03em', color: 'text.secondary', mb: 1.5 }}>
-        Incoming — where leads come from
-      </Typography>
-      {inboxes.length === 0 ? (
-        <Paper variant="outlined" sx={{ p: 3, borderRadius: 3, mb: 3, textAlign: 'center' }}>
-          <Typography color="text.secondary">
-            No inbox is connected yet, so no leads can arrive by email. Add an IMAP mailbox to start.
-          </Typography>
-        </Paper>
-      ) : (
-        <Grid container spacing={2} sx={{ mb: 3 }}>{inboxes.map(renderCard)}</Grid>
-      )}
+      {/*
+        A failed read is not a configuration fact.
 
-      <Typography sx={{ fontWeight: 900, fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '0.03em', color: 'text.secondary', mb: 1.5 }}>
-        Outgoing — where quotes are sent from
-      </Typography>
-      {senders.length === 0 ? (
-        <Paper variant="outlined" sx={{ p: 3, borderRadius: 3, textAlign: 'center' }}>
-          <Typography color="text.secondary">
-            No sending account is configured. Quotes and supplier emails cannot leave the system.
-          </Typography>
-        </Paper>
+        Both sections below state, in confident product copy, what IS and IS NOT connected. That
+        copy was reached whenever `mailboxes` was empty — and a 500 from GET /api/Mailbox left it
+        empty via the `= []` default, so a backend blip told an administrator "No inbox is
+        connected yet, so no leads can arrive by email". That is worse than a bare "No rows"
+        precisely because it is specific and reassuring: the remedy it names is to add a mailbox,
+        and the admin adds a SECOND copy of an inbox that already exists and is already polling
+        live customer correspondence.
+
+        The global toast (api/queryClient.ts) reports the failure once and then fades. This is the
+        persistent signal: until the list has actually been read, this screen says nothing at all
+        about what is configured.
+      */}
+      {mailboxReadFailed ? (
+        <ApiErrorNotice
+          error={mailboxReadError}
+          fallbackMessage="Nexora could not read your mailbox settings, so this page cannot say what is connected. Nothing has changed — do not add a mailbox until this list loads."
+          onRetry={() => void refetchMailboxes()}
+          retryLabel="Reload mailboxes"
+          sx={{ borderRadius: 2 }}
+        />
       ) : (
-        <Grid container spacing={2}>{senders.map(renderCard)}</Grid>
+        <>
+          <Typography sx={{ fontWeight: 900, fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '0.03em', color: 'text.secondary', mb: 1.5 }}>
+            Incoming — where leads come from
+          </Typography>
+          {inboxes.length === 0 ? (
+            <Paper variant="outlined" sx={{ p: 3, borderRadius: 3, mb: 3, textAlign: 'center' }}>
+              <Typography color="text.secondary">
+                No inbox is connected yet, so no leads can arrive by email. Add an IMAP mailbox to start.
+              </Typography>
+            </Paper>
+          ) : (
+            <Grid container spacing={2} sx={{ mb: 3 }}>{inboxes.map(renderCard)}</Grid>
+          )}
+
+          <Typography sx={{ fontWeight: 900, fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '0.03em', color: 'text.secondary', mb: 1.5 }}>
+            Outgoing — where quotes are sent from
+          </Typography>
+          {senders.length === 0 ? (
+            <Paper variant="outlined" sx={{ p: 3, borderRadius: 3, textAlign: 'center' }}>
+              <Typography color="text.secondary">
+                No sending account is configured. Quotes and supplier emails cannot leave the system.
+              </Typography>
+            </Paper>
+          ) : (
+            <Grid container spacing={2}>{senders.map(renderCard)}</Grid>
+          )}
+        </>
       )}
 
       {/* ---- add / edit ---- */}
@@ -399,18 +432,36 @@ const MailboxPage: React.FC = () => {
         {(saveMutation.isPending || testMutation.isPending) && <LinearProgress />}
         <DialogContent dividers>
           <Stack spacing={2.5} sx={{ pt: 1 }}>
-            <ToggleButtonGroup
-              exclusive fullWidth size="small" value={form.protocol}
-              onChange={(_, value) => value && setProtocol(value)}
-              disabled={!!editing}
-            >
-              <ToggleButton value="IMAP" sx={{ fontWeight: 800, gap: 1 }}>
-                <InboxIcon fontSize="small" /> Receive leads (IMAP)
-              </ToggleButton>
-              <ToggleButton value="SMTP" sx={{ fontWeight: 800, gap: 1 }}>
-                <SmtpIcon fontSize="small" /> Send quotes (SMTP)
-              </ToggleButton>
-            </ToggleButtonGroup>
+            {/*
+              The direction of an EXISTING mailbox is deliberately fixed: turning a live
+              receiving inbox into a sender would strand its poll history and silently change
+              what its credentials are used for. But a locked toggle with no explanation reads
+              as a broken control — someone trying to add sending opened Edit, found "Send
+              quotes (SMTP)" inert, and reasonably concluded the feature did not work. The
+              lock stays; the silence does not.
+            */}
+            <Stack spacing={0.75}>
+              <ToggleButtonGroup
+                exclusive fullWidth size="small" value={form.protocol}
+                onChange={(_, value) => value && setProtocol(value)}
+                disabled={!!editing}
+              >
+                <ToggleButton value="IMAP" sx={{ fontWeight: 800, gap: 1 }}>
+                  <InboxIcon fontSize="small" /> Receive leads (IMAP)
+                </ToggleButton>
+                <ToggleButton value="SMTP" sx={{ fontWeight: 800, gap: 1 }}>
+                  <SmtpIcon fontSize="small" /> Send quotes (SMTP)
+                </ToggleButton>
+              </ToggleButtonGroup>
+              {editing && (
+                <Alert severity="info" sx={{ py: 0.25 }}>
+                  This mailbox {form.protocol === 'IMAP' ? 'receives' : 'sends'}, and that cannot
+                  be changed after it is created. To {form.protocol === 'IMAP' ? 'send' : 'receive'}{' '}
+                  as well, close this and choose <strong>Add mailbox</strong> — receiving and
+                  sending are separate accounts, on different servers and ports.
+                </Alert>
+              )}
+            </Stack>
 
             <ProviderPicker
               providers={mailboxProviders}

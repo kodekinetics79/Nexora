@@ -416,6 +416,12 @@ public partial class ErpRfqAutomationContext : DbContext
             // for each. Recorded unconditionally so a dropped .msg on a quoted-only reply is
             // visible on the message it arrived with instead of nowhere.
             entity.Property(e => e.SkippedAttachmentsJson).HasMaxLength(2000);
+            // Thread identity (FR-RFQ-05/06): In-Reply-To joins against MessageID, so it shares
+            // that column's 255-char key space; References is a JSON id list in the same shape
+            // (and cap) as SkippedAttachmentsJson. Both indexed-by-content nowhere — they are
+            // read per message at reconciliation time through the ingest row itself.
+            entity.Property(e => e.InReplyToMessageId).HasMaxLength(255);
+            entity.Property(e => e.ReferencesJson).HasMaxLength(2000);
 
             entity.HasOne(d => d.EmailConfiguration).WithMany(p => p.EmailIngests)
                 .HasForeignKey(d => d.EmailConfigurationId)
@@ -1087,6 +1093,10 @@ public partial class ErpRfqAutomationContext : DbContext
                 "\"TaxCategory\" IS NULL OR \"TaxCategory\" = 'STANDARD' OR " +
                 "(\"TaxCategoryReason\" IS NOT NULL AND \"TaxCategoryReason\" <> '')");
             entity.Property(e => e.TotalAmount).HasColumnType("decimal(18, 6)");
+            // The line's share of the quote-level discount. Nullable on purpose: null marks a row
+            // written before the allocation existed, whose tax was derived on a base that ignored
+            // the header discount. A default of 0 would erase that distinction on read.
+            entity.Property(e => e.HeaderDiscountAllocated).HasColumnType("decimal(18, 6)");
             // Mirrors Rfqitem.UnitOfMeasure (max 200).
             entity.Property(e => e.UnitOfMeasure).HasMaxLength(200);
             entity.Property(e => e.UnitPrice).HasColumnType("decimal(18, 6)");
@@ -1118,7 +1128,14 @@ public partial class ErpRfqAutomationContext : DbContext
 
             entity.HasIndex(e => new { e.BusinessUnitId, e.NexoraSerial }, "IX_RFQ_BusinessUnitID_NexoraSerial");
 
-            entity.HasIndex(e => new { e.BusinessUnitId, e.LeadId }, "UX_RFQ_BusinessUnitID_LeadID")
+            // One lead, one RFQ — the database backstop for the single conversion door.
+            // Every gated path already answers a repeat conversion with the existing RFQ
+            // (read-then-return idempotency); this partial unique index is what makes a
+            // RACING second insert physically impossible rather than merely unlikely, on
+            // PostgreSQL and on the relational-SQLite test lane alike. Filtered to non-null
+            // LeadID because the leadless spreadsheet imports (RfqUploaderService /
+            // ManualUploadService) legitimately create RFQs that carry no lead.
+            entity.HasIndex(e => e.LeadId)
                 .IsUnique()
                 .HasFilter("\"LeadID\" IS NOT NULL");
 

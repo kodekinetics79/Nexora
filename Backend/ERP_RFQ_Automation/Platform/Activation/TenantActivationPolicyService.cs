@@ -97,12 +97,17 @@ public sealed class TenantActivationPolicyService(
              && (tenant.ContractEndOn is null || tenant.ContractEndOn >= tenant.ContractStartOn),
             "Effective commercial and billing dates must be approved and internally consistent.", $"tenant:{tenant.Id}:terms");
 
-        var typed = plan is not null && TypedEntitlementCatalog.TryParse(plan.Features, out var values, out _)
+        // The typed half now reads the TENANT's own grant, because 20260818013530 made that the
+        // authority for module access; the limits half still reads the plan, because capacity is
+        // still the plan's job. Both halves stay in one control: a customer that can open a module
+        // it has no capacity to use is as unactivatable as one with capacity and no modules.
+        var typed = TypedEntitlementCatalog.TryParse(tenant.Entitlements, out var values, out _)
                     && TypedEntitlementCatalog.Keys.All(values.ContainsKey);
         Add("entitlements.typed-hard-limits", typed && plan is
             { MaxSeats: > 0, MaxDocsPerMonth: > 0, MaxConcurrentExtractionJobs: > 0, Weight: > 0 },
-            "All typed keys and finite positive seat, document and extraction limits are required.",
-            plan is null ? null : $"plan:{plan.Id}:entitlements");
+            "Every module and capability must be explicitly decided for this customer, and its plan "
+            + "must carry finite positive seat, document and extraction limits.",
+            $"tenant:{tenant.Id}:entitlements");
 
         var adminActive = tenant.PrimaryBusinessUnitId is long bu && await (
                 from user in db.Users.IgnoreQueryFilters().AsNoTracking()

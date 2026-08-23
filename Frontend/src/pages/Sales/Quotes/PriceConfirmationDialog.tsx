@@ -43,9 +43,18 @@ interface PriceConfirmationDialogProps {
 const SOURCE_OPTIONS: { value: PriceAttestationSource; label: string; referenceLabel: string; helper: string }[] = [
   {
     value: 'SALES_MANAGER',
-    label: 'My sales manager gave me these prices',
-    referenceLabel: 'Name of the sales manager',
-    helper: 'Record who gave you the prices, so the quote can be checked against them later.',
+    // Deliberately broader than "a manager told me". A rep pricing from stock is applying the
+    // price list or standard margin that sales management set, which IS sales-management
+    // authority — but the old wording ("My sales manager gave me these prices") described only
+    // the direct case, so that rep had no true option and had to state something false to send.
+    // The gate itself is correct and stays: this product converts documents into RFQs and
+    // quotes, and a person takes responsibility before anything reaches a customer. An
+    // attestation people must lie to satisfy is worse than none, because it poisons the record
+    // the control exists to create.
+    label: 'Sales management set these prices \u2014 a manager directly, or the price list / standard margin they set',
+    referenceLabel: 'Manager\u2019s name, or the price list you used',
+    helper: 'A manager gave you these prices directly, or you applied the price list or standard '
+      + 'margin sales management set. Record which, so the quote can be checked later.',
   },
   {
     value: 'SUPPLIER_QUOTE',

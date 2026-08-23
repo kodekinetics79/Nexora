@@ -341,9 +341,54 @@ public class LeadController : ControllerBase
         }
     }
 
-    // CLIENT ORGANISATION: what the machine proposed for this lead, ranked, each with the
-    // reason behind it. Read-only — confirming a candidate goes through PUT {id}/review so
-    // there is exactly one governed path by which a lead acquires a customer.
+    // CLIENT ORGANISATION: the human decision about WHO sent this enquiry.
+    //
+    // Separate from PUT {id}/review on purpose. Review is a document-correction workflow and
+    // it CLOSES — its own first gate refuses any lead whose extraction already succeeded — so
+    // routing the client decision through it meant that a cleanly extracted enquiry could
+    // never be linked to a client by anyone. Since a lead cannot be qualified or converted
+    // without a customer, that stranded the enquiry permanently. See
+    // LeadRepository.LinkClientAsync for the full account.
+    //
+    // Edit permission on Leads, not manager: naming the buyer is ordinary desk work, and it
+    // is the same permission the review path this replaces already required.
+    [HttpPut("{id}/client")]
+    [RequireModulePermission("Leads", PermissionAction.Edit)]
+    public async Task<ActionResult<LeadResponseDTO>> LinkClient(long id, [FromBody] LeadClientLinkRequestDTO request)
+    {
+        try
+        {
+            if (!ModelState.IsValid) return BadRequest(ModelState);
+
+            var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+            if (businessUnitId == 0) return BadRequest("Business Unit ID is required.");
+
+            var linkedBy = User.FindFirstValue(ClaimTypes.NameIdentifier)
+                ?? User.FindFirstValue(ClaimTypes.Email)
+                ?? User.Identity?.Name
+                ?? string.Empty;
+
+            var lead = await _repository.LinkClientAsync(id, businessUnitId, request, linkedBy);
+            if (lead == null) return NotFound($"Lead with ID {id} not found.");
+
+            return Ok(lead);
+        }
+        catch (LeadReviewConflictException ex)
+        {
+            return Conflict(new { error = ex.Message });
+        }
+        catch (LeadReviewValidationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            return Unexpected(ex, "link-client");
+        }
+    }
+
+    // What the machine proposed for this lead, ranked, each with the reason behind it.
+    // Read-only; confirming one of them goes through PUT {id}/client above.
     [HttpGet("{id}/client-candidates")]
     [RequireModulePermission("Leads", PermissionAction.View)]
     public async Task<ActionResult<IEnumerable<ClientCandidateDTO>>> GetClientCandidates(long id)

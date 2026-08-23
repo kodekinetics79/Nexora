@@ -536,6 +536,8 @@ builder.Services.AddScoped<LeadUploaderService>();
 builder.Services.AddScoped<RfqUploaderService>();
 builder.Services.AddScoped<ICanonicalRfqNormalizer, CanonicalRfqNormalizer>();
 builder.Services.AddScoped<QuotationUploaderService>();
+builder.Services.AddScoped<QuoteBackfillSpine>();
+builder.Services.AddScoped<QuoteBackfillService>();
 builder.Services.AddScoped<FolderService>();
 builder.Services.AddScoped<IEmailService, EmailService>();
 builder.Services.AddScoped<ILLMService, OllamaLlmService>();
@@ -685,6 +687,9 @@ builder.Services.AddScoped<ERP_RFQ_Automation.Extraction.Conversational.IConvers
     ERP_RFQ_Automation.Extraction.Conversational.ConversationalExtractionService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.Ingestion.Triage.IEmailTriageService,
     ERP_RFQ_Automation.Ingestion.Triage.EmailTriageService>();
+// Spec §1: the canonical per-message intake record (read-only projection over the ledgers).
+builder.Services.AddScoped<ERP_RFQ_Automation.Ingestion.CanonicalRecord.ICanonicalIntakeRecordService,
+    ERP_RFQ_Automation.Ingestion.CanonicalRecord.CanonicalIntakeRecordService>();
 builder.Services.AddScoped<ILeadPersister, LeadPersister>();
 // The message barrier's payoff, registered here rather than with AddEmailInquiryAssembly
 // because it depends on ILeadPersister: one email message becomes ONE Lead, built from every
@@ -807,10 +812,6 @@ builder.Services.AddScoped<ERP_RFQ_Automation.Agent.IAgentTool, ERP_RFQ_Automati
 // Bid/Review/Skip with plain-language reasons; feeds the leads grid + dashboard.
 builder.Services.AddLeadDecisionIntelligence();
 builder.Services.AddScoped<ERP_RFQ_Automation.Agent.IAgentTool, ERP_RFQ_Automation.Intelligence.Decision.LeadDecisionBriefTool>();
-
-// WP-A3: duplicate-lead detection + quote-block (Deduplication/)
-builder.Services.AddScoped<ERP_RFQ_Automation.Deduplication.ILeadDuplicateDetector,
-                           ERP_RFQ_Automation.Deduplication.LeadDuplicateDetector>();
 
 // WP-A1/A2: tenant-configurable SLA policy reader (SlaPolicy-backed; default 2h).
 builder.Services.AddScoped<ERP_RFQ_Automation.MultiTenancy.ISlaPolicyReader,

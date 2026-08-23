@@ -104,15 +104,6 @@ public sealed class SimplifyLeadOwnershipAndQualification : Migration
             END $$;
             """);
 
-        // Database backstop for idempotent Lead -> RFQ creation.
-        // The squashed fresh-install baseline already contains this backstop, while upgraded
-        // databases may not. Keep the additive migration valid for both shapes.
-        migrationBuilder.Sql("""
-            CREATE UNIQUE INDEX IF NOT EXISTS "UX_RFQ_BusinessUnitID_LeadID"
-                ON "RFQ" ("BusinessUnitID", "LeadID")
-             WHERE "LeadID" IS NOT NULL;
-            """);
-
         migrationBuilder.DropCheckConstraint(name: "CK_RFQItems_Quantity_Positive", table: "RFQItems");
         migrationBuilder.AlterColumn<int>(
             name: "Quantity", table: "RFQItems", type: "integer", nullable: true,
@@ -124,7 +115,6 @@ public sealed class SimplifyLeadOwnershipAndQualification : Migration
 
     protected override void Down(MigrationBuilder migrationBuilder)
     {
-        migrationBuilder.Sql("DROP INDEX IF EXISTS \"UX_RFQ_BusinessUnitID_LeadID\";");
         migrationBuilder.DropIndex(name: "IX_Leads_BusinessUnitID_AssignTo_AssignmentMethod", table: "Leads");
         migrationBuilder.DropCheckConstraint(name: "CK_Leads_AssignmentMethod", table: "Leads");
         migrationBuilder.DropColumn(name: "AssignmentMethod", table: "lead_assignments");

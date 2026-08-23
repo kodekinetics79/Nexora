@@ -708,6 +708,73 @@ public class ChangeTenantPlanRequest
     public string? Reason { get; set; }
 }
 
+// ---- Tenant module & capability grants -----------------------------------
+
+/// <summary>
+/// One row of the tenant Modules screen: a catalogue key, whether THIS customer has it, and the
+/// two facts that decide whether the switch is even meaningful.
+/// </summary>
+/// <param name="Key">Closed <c>TypedEntitlementCatalog</c> key, e.g. <c>module.orders</c>.</param>
+/// <param name="Enabled">What this tenant is granted right now.</param>
+/// <param name="Available">
+/// Whether a production execution boundary exists for the key. Five catalogue keys — API access,
+/// Automation, SSO, SCIM and dedicated resources — are declared
+/// <c>RuntimeUnavailableBoundary</c>: the server denies them even when the grant says true,
+/// because the product surface does not exist yet. Sending this lets the console show them as
+/// "not built" instead of offering a switch that grants nothing, which is the "toggle exists,
+/// capability does not" pattern this codebase has shipped before.
+/// </param>
+/// <param name="FromPlanTemplate">
+/// What the tenant's plan declares for this key. Advisory only — the plan is no longer the
+/// authority (20260818013530) — but it is what the console shows as "differs from plan", which is
+/// how an operator spots a deliberate exception a year after making it.
+/// </param>
+public sealed record TenantModuleGrantDto(
+    string Key,
+    bool Enabled,
+    bool Available,
+    bool? FromPlanTemplate);
+
+/// <summary>The whole Modules screen in one read.</summary>
+public sealed record TenantModulesDto(
+    long TenantId,
+    string TenantName,
+    long? PlanId,
+    string? PlanCode,
+    IReadOnlyList<TenantModuleGrantDto> Modules);
+
+/// <summary>
+/// Replace this tenant's module grants wholesale.
+///
+/// <para>Wholesale rather than a patch of changed keys, deliberately. A partial write cannot say
+/// "off" and "undecided" apart, and the activation control
+/// <c>entitlements.typed-hard-limits</c> requires every key to be DECIDED — so a patch API would
+/// let an operator leave a customer permanently unactivatable through a screen that looked like
+/// it had saved. The server completes the set from the closed catalogue on the way in.</para>
+/// </summary>
+public class UpdateTenantModulesRequest
+{
+    /// <summary>Catalogue key → granted. Unknown keys are refused; absent keys are stored false.</summary>
+    [Required]
+    public Dictionary<string, bool> Modules { get; set; } = new();
+
+    /// <summary>
+    /// Why. Required, and required at a length that cannot be satisfied by "x": revoking a module
+    /// from a live customer removes access to work they may be in the middle of, and an audit row
+    /// reading "update" explains nothing to whoever finds it during a dispute.
+    /// </summary>
+    [Required]
+    [MinLength(TenantModuleGrantRules.MinimumReasonLength)]
+    [MaxLength(1000)]
+    public string Reason { get; set; } = null!;
+}
+
+/// <summary>Shared between the request validation and the console, so both agree on the bound.</summary>
+public static class TenantModuleGrantRules
+{
+    public const int MinimumReasonLength = 15;
+}
+
 // ---- Platform users ------------------------------------------------------
 
 public class PlatformUserDto

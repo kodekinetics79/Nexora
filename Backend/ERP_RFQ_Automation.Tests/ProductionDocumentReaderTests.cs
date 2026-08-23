@@ -242,6 +242,8 @@ public sealed class ProductionDocumentReaderTests
             => Task.FromResult(EntitlementDecision.Unlimited);
         public Task<EntitlementDecision> CheckDocumentQuotaAsync(long businessUnitId, CancellationToken ct = default)
             => Task.FromResult(EntitlementDecision.Unlimited);
+        public Task<IReadOnlyList<string>> GetEnabledFeaturesAsync(long businessUnitId, CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<string>>(Array.Empty<string>());
         public Task<double> GetQueueWeightAsync(long businessUnitId, double fallbackWeight, CancellationToken ct = default)
             => Task.FromResult(fallbackWeight);
     }

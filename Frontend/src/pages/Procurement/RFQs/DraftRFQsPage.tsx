@@ -20,6 +20,9 @@ import SearchField from '../../../components/common/SearchField';
 import EmailPromptDialog from '../../../components/common/EmailPromptDialog';
 import { useSnackbar } from 'notistack';
 import { useAuth } from '../../../context/AuthContext';
+import ApiErrorNotice from '../../../components/common/ApiErrorNotice';
+import { gridEmptyOverlay } from '../../../components/common/gridOverlays';
+import { formatDateSafe } from '../../../utils/dates';
 
 const DraftRFQsPage: React.FC = () => {
   const { t } = useTranslation();
@@ -34,7 +37,7 @@ const DraftRFQsPage: React.FC = () => {
   const [approvalDialogOpen, setApprovalDialogOpen] = useState(false);
   const [selectedRfq, setSelectedRfq] = useState<any>(null);
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['rfqs-draft', paginationModel, search],
     queryFn: () => rfqService.getAll({
       pageNumber: paginationModel.page + 1,
@@ -66,16 +69,20 @@ const DraftRFQsPage: React.FC = () => {
     onError: () => enqueueSnackbar('Failed to delete RFQ', { variant: 'error' }),
   });
 
-  const formatDate = (dateStr: string | null) => {
-    if (!dateStr) return '—';
-    const d = new Date(dateStr);
-    return isNaN(d.getTime()) ? '—' : d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
-  };
+  // Memoised because DataGrid takes a component TYPE here: rebuilding the factory on every
+  // render would hand it a new type each time and remount the overlay for no reason.
+  const noRowsOverlay = React.useMemo(() => gridEmptyOverlay({
+    title: 'No draft RFQs',
+    message: 'A converted lead lands here as a draft until it is reviewed and approved.',
+    icon: <ItemsIcon sx={{ fontSize: 48 }} />,
+    filtered: Boolean(search),
+    filteredMessage: 'No draft RFQ matches this search. Clear it to see every draft.',
+  }), [search]);
 
   const columns: GridColDef[] = [
     {
       field: 'rfqno',
-      headerName: t('rfq_management'),
+      headerName: t('rfq_number'),
       width: 180,
       renderCell: (p) => (
         <Box sx={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', height: '100%' }}>
@@ -110,12 +117,14 @@ const DraftRFQsPage: React.FC = () => {
     },
     {
       field: 'noOfLineItems',
-      headerName: t('invoice_items'),
-      width: 80,
+      headerName: t('line_count'),
+      width: 90,
+      align: 'right',
+      headerAlign: 'right',
       renderCell: (p) => (
-        <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', height: '100%' }}>
+        <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', justifyContent: 'flex-end', height: '100%', width: '100%' }}>
           <ItemsIcon sx={{ fontSize: 14, color: 'text.secondary' }} />
-          <Typography sx={{ fontSize: '0.85rem', fontWeight: 800 }}>{p.row.noOfLineItems || p.value || 0}</Typography>
+          <Typography sx={{ fontSize: '0.85rem', fontWeight: 800, fontVariantNumeric: 'tabular-nums' }}>{p.row.noOfLineItems || p.value || 0}</Typography>
         </Stack>
       )
     },
@@ -123,13 +132,13 @@ const DraftRFQsPage: React.FC = () => {
       field: 'recDate',
       headerName: t('date'),
       width: 120,
-      renderCell: (p) => <Typography sx={{ fontSize: '0.8rem', fontWeight: 700, py: 1.5 }}>{formatDate(p.row.recDate)}</Typography>
+      renderCell: (p) => <Typography sx={{ fontSize: '0.8rem', fontWeight: 700, py: 1.5 }}>{formatDateSafe(p.row.recDate)}</Typography>
     },
     {
       field: 'bidClosingDate',
       headerName: 'Deadline',
       width: 120,
-      renderCell: (p) => <Typography sx={{ fontSize: '0.8rem', fontWeight: 700, py: 1.5, color: 'error.main' }}>{formatDate(p.row.bidClosingDate)}</Typography>
+      renderCell: (p) => <Typography sx={{ fontSize: '0.8rem', fontWeight: 700, py: 1.5, color: 'error.main' }}>{formatDateSafe(p.row.bidClosingDate)}</Typography>
     },
     {
       field: 'actions',
@@ -181,11 +190,24 @@ const DraftRFQsPage: React.FC = () => {
       </Paper>
 
       <Paper sx={{ height: 'calc(100vh - 240px)', width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
-        <DataGrid
+        {/* See AllRFQsPage: an empty grid is a claim about the queue, and a failed request is
+            not entitled to make it. */}
+        {isError ? (
+          <Box sx={{ height: '100%', display: 'grid', placeItems: 'center', p: 3 }}>
+            <Box sx={{ maxWidth: 520 }}>
+              <ApiErrorNotice
+                error={error}
+                fallbackMessage="We couldn't load draft RFQs. No empty result has been assumed."
+                onRetry={() => refetch()}
+              />
+            </Box>
+          </Box>
+        ) : <DataGrid
           rows={data?.items ?? []}
           columns={columns}
           rowCount={data?.totalItems ?? 0}
           loading={isLoading}
+          slots={{ noRowsOverlay }}
           pageSizeOptions={[10, 25, 50]}
           paginationModel={paginationModel}
           paginationMode="server"
@@ -193,7 +215,7 @@ const DraftRFQsPage: React.FC = () => {
           disableRowSelectionOnClick
           getRowId={(r) => r.id}
           rowHeight={85}
-        />
+        />}
       </Paper>
 
       {selectedRfq && (

@@ -62,14 +62,32 @@ interface WatchedFolderSpec {
   purpose: string;
   /** Exact `LeadSource` the sweep stamps on every inquiry from this folder. */
   leadSource: string;
-  /** Extensions this door accepts (FolderService.IsAllowedUploadExtension). */
+  /** Extensions this door accepts (FolderService.WatchedFolderExtensions). */
   extensions: string[];
 }
 
 /**
- * The three doors the backend actually implements. FolderService rejects any other folder type,
- * and each door's accepted extensions are deliberately narrow — a file the folder does not accept
- * is quarantined by the sweep rather than ingested.
+ * Every watched folder accepts the SAME formats — the set document intake accepts everywhere.
+ *
+ * These lists used to differ per door: `.doc` for SEC, `.docx` for Aramco, five types for
+ * Shared. That mismatch was real and it cost documents. Every Aramco bid list in the corpus is
+ * a legacy `.doc`, so the folder named after that customer refused that customer's own files,
+ * and the `accept` attribute below meant the file picker would not even offer them.
+ *
+ * The backend unified on DocumentIntakeAllowList; this mirrors it, so the browser can no longer
+ * refuse a file the server would have taken. Keep the two in step — the sweep types every file
+ * from its BYTES anyway, which is stricter than any extension check and unaffected by renaming.
+ */
+const WATCHED_FOLDER_EXTENSIONS = [
+  '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.xlsm', '.csv', '.txt',
+  '.html', '.htm', '.eml', '.msg',
+  '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tif', '.tiff', '.webp',
+];
+
+/**
+ * The three doors the backend actually implements. FolderService rejects any other folder type.
+ * The folder records WHO a document came from; it has nothing to say about what a document is
+ * allowed to be.
  */
 const WATCHED_FOLDERS: WatchedFolderSpec[] = [
   {
@@ -78,23 +96,23 @@ const WATCHED_FOLDERS: WatchedFolderSpec[] = [
     purpose:
       'The general door. Use it for RFQ documents from any customer, and for scheduled exports dropped here by a portal or another system.',
     leadSource: 'Shared Leads',
-    extensions: ['.pdf', '.doc', '.docx', '.xls', '.xlsx'],
+    extensions: WATCHED_FOLDER_EXTENSIONS,
   },
   {
     key: 'SEC',
     title: 'SEC folder',
     purpose:
-      'A dedicated door for one customer that sends legacy Word documents. Anything that is not a .doc file is quarantined instead of ingested.',
+      'A dedicated door for SEC. Documents landing here are stamped as SEC leads, which is what the folder is for — it does not restrict the format.',
     leadSource: 'SEC Leads',
-    extensions: ['.doc'],
+    extensions: WATCHED_FOLDER_EXTENSIONS,
   },
   {
     key: 'Aramco',
     title: 'Aramco folder',
     purpose:
-      'A dedicated door for Aramco RFP documents. Anything that is not a .docx file is quarantined instead of ingested.',
+      'A dedicated door for Aramco. Bid lists arrive as legacy .doc and as .docx, and scanned pages are read by OCR — all of them are accepted here.',
     leadSource: 'Aramco Leads',
-    extensions: ['.docx'],
+    extensions: WATCHED_FOLDER_EXTENSIONS,
   },
 ];
 
@@ -167,7 +185,7 @@ const FolderCard: React.FC<FolderCardProps> = ({ spec, businessUnitId, canAddDoc
     if (unsupported.length > 0 || oversized.length > 0) {
       const reasons = [
         unsupported.length > 0
-          ? `this folder only accepts ${spec.extensions.join(', ')}`
+          ? `this folder accepts ${spec.extensions.length} document formats, and this is not one of them`
           : null,
         oversized.length > 0
           ? `${oversized.length} file${oversized.length === 1 ? ' is' : 's are'} over 25 MB`
@@ -275,9 +293,11 @@ const FolderCard: React.FC<FolderCardProps> = ({ spec, businessUnitId, canAddDoc
               Nothing has come through this folder yet.
             </Typography>
             <Typography variant="caption" sx={{ display: 'block' }}>
-              Put a {spec.extensions.join(' or ')} document into the directory above — by hand, from
-              a network share, or from a scheduled portal export — then press &quot;Sweep now&quot;.
-              If you cannot reach that directory, use &quot;Add documents&quot; below.
+              Put a document into the directory above — by hand, from a network share, or from a
+              scheduled portal export — then press &quot;Sweep now&quot;. Word, Excel, PDF, CSV,
+              text, web pages, saved emails and scanned images are all read; scans and photographs
+              go through OCR. If you cannot reach that directory, use &quot;Add documents&quot;
+              below.
             </Typography>
           </Alert>
         )}

@@ -48,11 +48,74 @@ interface MenuItem {
   children?: { key: string; label: string; path: string; moduleName?: string; icon?: React.ReactNode; activePrefixes?: string[] }[];
 }
 
+/**
+ * The pilot rail.
+ *
+ * The full navigation is 17 top-level rows and 68 leaf destinations. On a 1440x900 laptop that is
+ * roughly 1,095px of rail against 836px of viewport, so Customers, Inventory and Setup sit below
+ * the fold — and the first three rows are Today, Dashboard and Copilot, with the word "RFQ" first
+ * appearing at row six. A rep opening this on their first Monday, in their second language, with a
+ * tender closing Thursday, is solving a scanning problem before they can start work.
+ *
+ * This is an ALLOW-LIST, not a deletion. Every hidden screen keeps its route, its permissions, its
+ * page title and its tests; it is reachable by URL, by deep link from another screen, and by
+ * global search — which matches RFQ, quote, order, shipment, CR and VAT numbers server-side. The
+ * rule the product operates under is preserve-but-hide: out-of-scope surface is concealed from the
+ * pilot, never removed.
+ *
+ * `true` keeps a single-destination row whole. An array keeps a group and names the children that
+ * survive. Anything absent is hidden.
+ *
+ * Kept because the BRD v3.0 spine runs through it:
+ *   RFQ -> Quote -> Customer PO -> Sales Order -> Supplier PO -> Shipment
+ * plus the two screens a rep starts the day on, the catalogue they quote against, the customer
+ * record, and Setup.
+ */
+const PILOT_RAIL: Readonly<Record<string, true | readonly string[]>> = {
+  'role-today': ['today-sales'],
+  dashboard: ['analytics-deadlines'],
+  lead_mgmt: ['leads-all', 'leads-review', 'leads-bulk', 'leads-inbound-mail'],
+  rfq_mgmt: ['rfqs-all', 'rfqs-draft'],
+  quote_mgmt: ['quotes-draft', 'quotes-sent'],
+  'client-po-inbox': true,
+  orders: true,
+  supplier_mgmt: ['suppliers', 'supplier-quote-inbox', 'purchase-orders'],
+  shipments: true,
+  inventory: ['products'],
+  customers: true,
+  setup: true,
+};
+
+/**
+ * Off per tenant by granting this entitlement on the tenant's Modules screen in the platform
+ * console, which restores all 17 rows for that customer — audited, reason-required, no deploy.
+ *
+ * This REPLACED the VITE_PILOT_RAIL environment switch rather than joining it: two switches over
+ * the same rail can disagree, and the one an operator can see must be the one the product obeys.
+ * Absence — grant not made, bootstrap still loading, platform plane unreadable, or an older
+ * server that never reports entitlements — always lands on the trimmed rail: the floor, from
+ * which every screen stays reachable by URL, deep link and global search.
+ */
+export const FULL_NAVIGATION_ENTITLEMENT = 'capability.full-navigation';
+
+/** Applies the allow-list. Groups left with no surviving child disappear with them. */
+export const applyPilotRail = <T extends { key: string; children?: { key: string }[] }>(
+  items: T[],
+): T[] =>
+  items
+    .filter((item) => PILOT_RAIL[item.key] !== undefined)
+    .map((item) => {
+      const allowed = PILOT_RAIL[item.key];
+      if (!item.children || allowed === true) return item;
+      return { ...item, children: item.children.filter((child) => allowed.includes(child.key)) };
+    })
+    .filter((item) => !item.children || item.children.length > 0);
+
 const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
   const navigate = useNavigate();
   const location = useLocation();
   const { t } = useTranslation();
-  const { userData, hasPermission } = useAuth();
+  const { userData, hasPermission, hasEntitlement } = useAuth();
   const isManager = userData.isManager === true;
   // Two Sidebars are mounted at once (mobile drawer + permanent drawer), so
   // aria-controls targets must be unique per instance.
@@ -272,7 +335,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
     ];
 
     // Filter items based on permissions
-    return rawItems.filter(item => {
+    const permitted = rawItems.filter(item => {
       if (item.children) {
         // Filter children
         item.children = item.children.filter(child => !child.moduleName || hasPermission(child.moduleName));
@@ -281,14 +344,74 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
       }
       return !item.moduleName || hasPermission(item.moduleName);
     });
-  }, [t, hasPermission, isManager, setupIsReachable]);
+
+    // Permissions decide what a user MAY open; the pilot rail decides what the pilot SHOWS. Order
+    // matters: hiding first would let a row survive here that its owner has no permission for.
+    return hasEntitlement(FULL_NAVIGATION_ENTITLEMENT) ? permitted : applyPilotRail(permitted);
+  }, [t, hasPermission, hasEntitlement, isManager, setupIsReachable]);
+
+  /**
+   * Seven rail entries address a FILTERED view through a query string — the four quote states,
+   * "Ready for Quote", "Sourcing Cases" and lead "Revisions". `location.pathname` never carries a
+   * query, so the old path comparison could never match one of them: a rep who clicked
+   * "Sent Quotes" landed on three rows with nothing lit anywhere in the rail and no filter
+   * indicator on the page, and read that as an empty pipeline. Splitting the entry's own query off
+   * and comparing it against the address bar is what makes those seven entries reachable-looking.
+   */
+  const splitNavPath = (path: string): { pathname: string; params: [string, string][] } => {
+    const cut = path.indexOf('?');
+    if (cut < 0) return { pathname: path, params: [] };
+    return {
+      pathname: path.slice(0, cut),
+      params: Array.from(new URLSearchParams(path.slice(cut + 1)).entries()),
+    };
+  };
+
+  /**
+   * A bare entry and a filtered entry can share one pathname: "All RFQs" and "Ready for Quote" are
+   * both /procurement/rfqs/all. Lighting the bare entry on the filtered address is the same
+   * data-trust lie in the rail that the constant page heading was on the page — it tells the rep
+   * they are looking at everything while the grid shows a subset. So a bare entry stands down when
+   * the address carries one of the filter keys its own siblings claim. Only those keys count:
+   * an unrelated param (?page=2) must not blank the rail.
+   */
+  const filterKeysByPathname = useMemo(() => {
+    const keys = new Map<string, Set<string>>();
+    const record = (path?: string) => {
+      if (!path || !path.includes('?')) return;
+      const { pathname, params } = splitNavPath(path);
+      const set = keys.get(pathname) ?? new Set<string>();
+      params.forEach(([key]) => set.add(key));
+      keys.set(pathname, set);
+    };
+    menuItems.forEach((item) => {
+      record(item.path);
+      item.children?.forEach((child) => record(child.path));
+    });
+    return keys;
+  }, [menuItems]);
 
   const renderMenuItem = (item: MenuItem) => {
     const hasChildren = !!item.children;
     const isOpen = openGroups[item.key];
 
     const isPathMatched = (path: string, prefixes?: string[]) => {
-      if (location.pathname === path || (path.startsWith('/procurement') && location.pathname === path.replace('/procurement', ''))) return true;
+      const { pathname, params } = splitNavPath(path);
+      // The legacy alias strip has to happen on the pathname alone: `path.replace` used to run
+      // over the whole entry, so '/procurement/rfqs/all?state=ready-for-quote' became
+      // '/rfqs/all?state=ready-for-quote' and matched no address that exists.
+      const pathnameMatches = location.pathname === pathname
+        || (pathname.startsWith('/procurement') && location.pathname === pathname.replace('/procurement', ''));
+      if (pathnameMatches) {
+        const current = new URLSearchParams(location.search);
+        if (params.length > 0) {
+          if (params.every(([key, value]) => current.get(key) === value)) return true;
+        } else {
+          const claimed = filterKeysByPathname.get(pathname);
+          const showingASubset = claimed ? Array.from(claimed).some(key => !!current.get(key)) : false;
+          if (!showingASubset) return true;
+        }
+      }
       if (prefixes && prefixes.some(p => location.pathname.startsWith(p))) return true;
       return false;
     };

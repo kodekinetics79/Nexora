@@ -6,7 +6,7 @@ import {
   Box, Typography, Paper, Button, IconButton,
   Stack, Dialog, DialogTitle, DialogContent,
   DialogActions, TextField, MenuItem, Chip,
-  Tooltip,
+  Tooltip, Alert,
 } from '@mui/material';
 import {
   DataGrid, type GridColDef, type GridPaginationModel
@@ -18,10 +18,13 @@ import {
   FlashOn as ProcessIcon,
   Layers as ItemsIcon,
 } from '@mui/icons-material';
-import leadService from '../../../api/services/leadService';
+import leadService, { assignabilityNote } from '../../../api/services/leadService';
 import SearchField from '../../../components/common/SearchField';
 import { useSnackbar } from 'notistack';
 import { useAuth } from '../../../context/AuthContext';
+import ApiErrorNotice from '../../../components/common/ApiErrorNotice';
+import { gridEmptyOverlay } from '../../../components/common/gridOverlays';
+import { formatDateSafe } from '../../../utils/dates';
 
 const OutstandingRFQsPage: React.FC = () => {
   const { t } = useTranslation();
@@ -31,12 +34,6 @@ const OutstandingRFQsPage: React.FC = () => {
   const { enqueueSnackbar } = useSnackbar();
   const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ pageSize: 10, page: 0 });
   const [search, setSearch] = useState('');
-
-  const formatDate = (dateStr: string | null) => {
-    if (!dateStr) return '—';
-    const d = new Date(dateStr);
-    return isNaN(d.getTime()) ? '—' : d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
-  };
 
   const getUrgencyColor = (dateStr: string | null) => {
     if (!dateStr) return 'text.secondary';
@@ -56,7 +53,7 @@ const OutstandingRFQsPage: React.FC = () => {
 
   const isAdminOrManager = userData?.roleName?.toLowerCase().includes('admin') || userData?.roleName?.toLowerCase().includes('manager');
 
-  const { data, isLoading, refetch } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['rfqs-outstanding', paginationModel, search],
     queryFn: () => leadService.getOutstandingLeads({
       pageNumber: paginationModel.page + 1,
@@ -96,10 +93,20 @@ const OutstandingRFQsPage: React.FC = () => {
     }
   };
 
+  // Memoised because DataGrid takes a component TYPE here: rebuilding the factory on every
+  // render would hand it a new type each time and remount the overlay for no reason.
+  const noRowsOverlay = React.useMemo(() => gridEmptyOverlay({
+    title: 'No outstanding RFQs',
+    message: 'An assigned lead appears here until it has been processed into an RFQ.',
+    icon: <ItemsIcon sx={{ fontSize: 48 }} />,
+    filtered: Boolean(search),
+    filteredMessage: 'No outstanding RFQ matches this search. Clear it to see the whole queue.',
+  }), [search]);
+
   const columns: GridColDef[] = [
     {
       field: 'rfqno',
-      headerName: t('rfq_management'),
+      headerName: t('rfq_number'),
       width: 200,
       renderCell: (p) => (
         <Box sx={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', height: '100%' }}>
@@ -132,12 +139,17 @@ const OutstandingRFQsPage: React.FC = () => {
     },
     {
       field: 'noOfLineItems',
-      headerName: t('invoice_items'),
+      headerName: t('line_count'),
       width: 110,
+      // A count is a number and belongs on the right, where digits line up against the column
+      // edge and magnitudes can be compared down the column. The figures themselves come from
+      // the MuiCssBaseline block in context/ThemeContext.tsx, which is the theme that is mounted.
+      align: 'right',
+      headerAlign: 'right',
       renderCell: (p) => (
-        <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', height: '100%' }}>
+        <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', justifyContent: 'flex-end', height: '100%', width: '100%' }}>
           <ItemsIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
-          <Typography sx={{ fontSize: '0.85rem', fontWeight: 800 }}>{p.row.noOfLineItems || 0}</Typography>
+          <Typography sx={{ fontSize: '0.85rem', fontWeight: 800, fontVariantNumeric: 'tabular-nums' }}>{p.row.noOfLineItems || 0}</Typography>
         </Stack>
       )
     },
@@ -147,7 +159,7 @@ const OutstandingRFQsPage: React.FC = () => {
       field: 'recDate',
       headerName: 'Received',
       width: 120,
-      renderCell: (p) => <Typography sx={{ fontSize: '0.8rem', fontWeight: 700, py: 1.5 }}>{formatDate(p.row.recDate)}</Typography>
+      renderCell: (p) => <Typography sx={{ fontSize: '0.8rem', fontWeight: 700, py: 1.5 }}>{formatDateSafe(p.row.recDate)}</Typography>
     },
     {
       field: 'bidClosingDate',
@@ -155,7 +167,7 @@ const OutstandingRFQsPage: React.FC = () => {
       width: 120,
       renderCell: (p) => (
         <Typography sx={{ fontSize: '0.85rem', fontWeight: 900, color: getUrgencyColor(p.row.bidClosingDate) }}>
-          {formatDate(p.row.bidClosingDate)}
+          {formatDateSafe(p.row.bidClosingDate)}
         </Typography>
       )
     },
@@ -204,11 +216,25 @@ const OutstandingRFQsPage: React.FC = () => {
       </Paper>
 
       <Paper sx={{ height: 'calc(100vh - 240px)', width: '100%', borderRadius: 2, overflow: 'hidden', border: '1px solid', borderColor: 'divider' }}>
-        <DataGrid
+        {/* "No outstanding RFQs" is a decision a salesperson acts on, so it must never be what a
+            failed request looks like. Matches AllRFQsPage, the sibling screen that already did
+            this correctly. */}
+        {isError ? (
+          <Box sx={{ height: '100%', display: 'grid', placeItems: 'center', p: 3 }}>
+            <Box sx={{ maxWidth: 520 }}>
+              <ApiErrorNotice
+                error={error}
+                fallbackMessage="We couldn't load outstanding RFQs. No empty result has been assumed."
+                onRetry={() => refetch()}
+              />
+            </Box>
+          </Box>
+        ) : <DataGrid
           rows={data?.items ?? []}
           columns={columns}
           rowCount={data?.totalCount ?? 0}
           loading={isLoading}
+          slots={{ noRowsOverlay }}
           pageSizeOptions={[10, 25, 50]}
           paginationModel={paginationModel}
           paginationMode="server"
@@ -216,7 +242,7 @@ const OutstandingRFQsPage: React.FC = () => {
           disableRowSelectionOnClick
           getRowId={(r) => r.id}
           rowHeight={85}
-        />
+        />}
       </Paper>
 
       <Dialog open={assignDialogOpen} onClose={() => setAssignDialogOpen(false)} fullWidth>
@@ -230,10 +256,19 @@ const OutstandingRFQsPage: React.FC = () => {
               value={assignToUserId}
               onChange={(e) => setAssignToUserId(e.target.value)}
             >
-              {users.map((u: any) => (
-                <MenuItem key={u.id} value={u.id}>{u.fullName || u.userName}</MenuItem>
+              {users.map((u) => (
+                <MenuItem key={u.id} value={u.id} disabled={!u.isEligibleForAssignment}>
+                  {u.fullName} &mdash; {assignabilityNote(u)}
+                </MenuItem>
               ))}
             </TextField>
+            {users.length > 0 && !users.some((u) => u.isEligibleForAssignment) && (
+              <Alert severity="warning" sx={{ borderRadius: 2 }}>
+                Nobody in this business unit can currently receive a lead. Governed routing only
+                accepts a user who has an effective Sales Rep profile with capacity left, and there
+                is no such user right now. Give someone a profile in Sales &gt; Rep directory.
+              </Alert>
+            )}
             <TextField
               fullWidth
               multiline

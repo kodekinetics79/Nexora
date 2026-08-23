@@ -202,6 +202,30 @@ public class Tenant
     public string? DeploymentProfileApprovedBy { get; set; }
 
     public DateTime? DeploymentProfileApprovedOn { get; set; }
+
+    /// <summary>
+    /// Which product modules and capabilities THIS customer has, as a JSON object over the closed
+    /// <c>TypedEntitlementCatalog</c> — the same wire shape as <see cref="Plan.Features"/>.
+    ///
+    /// <para><b>This column is the authority, and the plan is not.</b> Entitlements used to resolve
+    /// from <c>Plan.Features</c>, which meant module access was a property of a PRICE TIER rather
+    /// than of a customer: granting one tenant Procurement, or revoking Inventory from one tenant,
+    /// could only be done by moving them to a different plan — which also moved their seats, their
+    /// document quota and what they are charged. Operators therefore cloned plans per customer, and
+    /// the plan catalogue stopped describing the commercial offer. A plan now carries capacity and
+    /// price; this column carries scope of access.</para>
+    ///
+    /// <para><b>Absent means denied, and that is deliberate.</b> The store default is <c>{}</c> and
+    /// the column is NOT NULL, so a row inserted by anything that does not know about it — an older
+    /// code path, a hand-written INSERT, a restored backup — grants nothing rather than everything.
+    /// 20260817090000 backfilled every existing tenant from its plan's features, so no live customer
+    /// changed what it could reach on the day this shipped.</para>
+    ///
+    /// <para>A plan's features are still copied in at PROVISIONING time so a new tenant does not
+    /// start from nothing — a copy taken once, not an inheritance re-read on every request. Editing
+    /// a plan afterwards does not reach back into tenants already provisioned from it.</para>
+    /// </summary>
+    public string Entitlements { get; set; } = "{}";
 }
 
 /// <summary>

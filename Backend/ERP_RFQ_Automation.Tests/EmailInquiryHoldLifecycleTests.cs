@@ -138,4 +138,42 @@ public class EmailInquiryHoldLifecycleTests
         Assert.NotEqual(first.AssemblyId, second.AssemblyId);
     }
 
+    /// <summary>
+    /// EVERY operator sentence must actually reach the operator.
+    ///
+    /// <para>The coordinator persists a hold as <c>"{code}: {detail}"</c>, and the Inbound Mail
+    /// screen renders it through <c>presentableServerText</c>
+    /// (<c>Frontend/src/utils/apiErrors.ts</c>), whose gate is
+    /// <c>value.length &lt;= MAX_MESSAGE_LENGTH</c> — a REJECT, not a truncation. A sentence one
+    /// character too long renders as nothing at all, so the message sits held on the screen with
+    /// no reason beside it. That is not a hypothetical: the first draft of
+    /// <see cref="EmailInquiryHoldReasons.NoRequestableContentDetail"/> was 359 characters and
+    /// would have shipped exactly that.</para>
+    ///
+    /// <para>The bound is duplicated here rather than imported because it lives in TypeScript.
+    /// A duplicated constant with the reason for its value written next to it is worth more than
+    /// a shared one nobody can trace, and this test is what makes the copy honest.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(EmailInquiryHoldReasons.AssemblyResultStorePending,
+        EmailInquiryHoldReasons.AssemblyResultStorePendingDetail)]
+    [InlineData(EmailInquiryHoldReasons.LeadNotProduced,
+        EmailInquiryHoldReasons.LeadNotProducedDetail)]
+    [InlineData(EmailInquiryHoldReasons.OwnershipUnresolved,
+        EmailInquiryHoldReasons.OwnershipUnresolvedDetail)]
+    [InlineData(EmailInquiryHoldReasons.NoRequestableContent,
+        EmailInquiryHoldReasons.NoRequestableContentDetail)]
+    [InlineData(EmailInquiryHoldReasons.ContentNotRecovered,
+        EmailInquiryHoldReasons.ContentNotRecoveredDetail)]
+    public void A_hold_reason_fits_the_sentence_gate_the_operator_screen_applies(
+        string code, string detail)
+    {
+        const int maxPresentableLength = 300;
+        var persisted = $"{code}: {detail}";
+
+        Assert.True(persisted.Length <= maxPresentableLength,
+            $"'{code}' composes to {persisted.Length} characters. The Inbound Mail screen "
+            + $"rejects anything over {maxPresentableLength} outright, so this hold would show "
+            + "with no reason at all. Shorten the sentence; do not raise the bound.");
+    }
 }

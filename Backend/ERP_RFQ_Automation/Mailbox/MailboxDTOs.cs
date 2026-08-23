@@ -46,7 +46,26 @@ public sealed record MailboxCreateRequestDTO
     [Required, StringLength(120, MinimumLength = 2)]
     public string ConfigurationName { get; init; } = string.Empty;
 
-    [Required, EmailAddress, StringLength(320)]
+    /// <summary>
+    /// 255 IS THE COLUMN LIMIT, NOT THE EMAIL LIMIT. <c>Email_Configurations."EmailAddress"</c> is
+    /// <c>character varying(255)</c>, so 255 is the longest address this system can STORE.
+    ///
+    /// <para><b>Do not "correct" this back to 320.</b> 320 is the right number for email — RFC 5321
+    /// caps an address at 64 characters of local part, an @, and 255 of domain — and it is exactly
+    /// what this attribute said before. That is what made it a defect rather than a typo: the
+    /// number was correct about the protocol and wrong about the table, so a 262-character address
+    /// passed ModelState, was mapped onto the entity, and died inside the INSERT as Postgres
+    /// <c>22001</c>. The mailbox screen answered "An unexpected error occurred." — on the one
+    /// screen a customer must finish before this product ingests anything at all.</para>
+    ///
+    /// <para>Refusing a genuinely valid 260-character address with a clean 400 is the accepted cost
+    /// of that. Addresses over 255 characters essentially do not occur; an unexplained 500 during
+    /// onboarding is not survivable. Widening the COLUMN would need a migration, and
+    /// <c>Program.cs</c> runs <c>MigrateAsync()</c> unguarded at startup — a failed migration fails
+    /// the DEPLOY rather than degrading. If the limit ever genuinely binds, the fix is a migration
+    /// widening BOTH columns to 320 with this cap raised in the same change, never this cap alone.</para>
+    /// </summary>
+    [Required, EmailAddress, StringLength(255)]
     public string EmailAddress { get; init; } = string.Empty;
 
     /// <summary>IMAP (read leads in) or SMTP (send quotes out).</summary>
@@ -59,7 +78,13 @@ public sealed record MailboxCreateRequestDTO
     [Range(1, 65535)]
     public int Port { get; init; }
 
-    [Required, StringLength(320)]
+    /// <summary>
+    /// 255 IS THE COLUMN LIMIT, NOT THE EMAIL LIMIT — <c>Email_Configurations."Username"</c> is
+    /// <c>character varying(255)</c>. See <see cref="EmailAddress"/> for the full account; the
+    /// sign-in name is frequently an address, so it carried the identical 320 and the identical
+    /// defect. Do not widen this without widening the column in the same change.
+    /// </summary>
+    [Required, StringLength(255)]
     public string Username { get; init; } = string.Empty;
 
     [Required, StringLength(1024, MinimumLength = 1)]
@@ -94,7 +119,8 @@ public sealed record MailboxUpdateRequestDTO
     [Required, StringLength(120, MinimumLength = 2)]
     public string ConfigurationName { get; init; } = string.Empty;
 
-    [Required, EmailAddress, StringLength(320)]
+    /// <inheritdoc cref="MailboxCreateRequestDTO.EmailAddress"/>
+    [Required, EmailAddress, StringLength(255)]
     public string EmailAddress { get; init; } = string.Empty;
 
     [Required, StringLength(253, MinimumLength = 3)]
@@ -103,7 +129,8 @@ public sealed record MailboxUpdateRequestDTO
     [Range(1, 65535)]
     public int Port { get; init; }
 
-    [Required, StringLength(320)]
+    /// <inheritdoc cref="MailboxCreateRequestDTO.Username"/>
+    [Required, StringLength(255)]
     public string Username { get; init; } = string.Empty;
 
     /// <summary>Null or empty KEEPS the stored password. The UI never receives the current one, so

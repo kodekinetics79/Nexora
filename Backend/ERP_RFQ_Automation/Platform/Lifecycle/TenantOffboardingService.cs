@@ -128,7 +128,10 @@ public sealed class TenantOffboardingService(
         return ToStatusDto(
             tenant, record, history, exports,
             sameHand,
-            scheduler?.ActorPlatformUserId > 0 ? scheduler.ActorEmail : null);
+            scheduler?.ActorPlatformUserId > 0 ? scheduler.ActorEmail : null,
+            // Asked of the readiness service rather than re-derived here, so the screen and the
+            // gate cannot drift apart.
+            commercialEvidenceWaived: !await readiness.CommercialEvidenceAppliesAsync(tenant, ct));
     }
 
     /// <summary>
@@ -967,7 +970,8 @@ public sealed class TenantOffboardingService(
     private TenantOffboardingStatusDto ToStatusDto(
         Tenant tenant, TenantOffboarding? record,
         IReadOnlyList<TenantLifecycleEventDto> history, IReadOnlyList<TenantExportReceiptDto> exports,
-        bool purgeRequiresDifferentApprover, string? deletionApprovedBy)
+        bool purgeRequiresDifferentApprover, string? deletionApprovedBy,
+        bool commercialEvidenceWaived = false)
     {
         var now = UtcNow;
         var stage = record?.Stage ?? TenantOffboardingStage.NotScheduled;
@@ -1001,6 +1005,10 @@ public sealed class TenantOffboardingService(
             Exports: exports,
             Disclosures:
             [
+                // First, when it applies: it changes what the rest of the list is describing.
+                .. commercialEvidenceWaived
+                    ? new[] { TenantOffboardingDisclosure.NoCommercialEvidenceRequired }
+                    : [],
                 TenantOffboardingDisclosure.Irreversible,
                 TenantOffboardingDisclosure.Survives,
                 TenantOffboardingDisclosure.StatutoryRecordsMoveWithTheCustomer,

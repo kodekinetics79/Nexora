@@ -15,6 +15,7 @@ import {
   Edit as EditIcon,
 } from '@mui/icons-material';
 import { useAuth } from '../../../context/AuthContext';
+import { useUnsavedWorkGuard } from '../../../hooks/useUnsavedWorkGuard';
 import customerService from '../../../api/services/customerService';
 import quoteService from '../../../api/services/quoteService';
 import setupService from '../../../api/services/setupService';
@@ -25,6 +26,8 @@ import {
   TAX_CATEGORIES, TAX_CATEGORY_STANDARD, taxCategoryLabel, taxCategoryRequiresReason,
 } from '../../../constants/taxCategories';
 import { toast } from 'react-hot-toast';
+import { calculateQuoteTotals, type DiscountKind } from './quoteTotals';
+import { formatMoney } from '../../../utils/currency';
 
 interface QuoteItem {
   id?: number;
@@ -72,6 +75,16 @@ const EditQuotePage: React.FC = () => {
   // Header Discount
   const [discountTypeId, setDiscountTypeId] = useState<number | null>(null);
   const [discountValue, setDiscountValue] = useState<number>(0);
+  /**
+   * The currency the quote is denominated in, read from the record.
+   *
+   * This screen printed a literal "$" on the unit price, both discount adornments and every row of
+   * the summary, while the quote it was editing was stored with a CurrencyId — so a SAR quote was
+   * edited in dollars. There is no fallback here on purpose: `formatMoney` renders a bare number
+   * when the record carries no currency, which is the honest output. Inventing a symbol is the
+   * defect, not the absence of one.
+   */
+  const [currencyCode, setCurrencyCode] = useState<string | null>(null);
 
   const [items, setItems] = useState<QuoteItem[]>([]);
 
@@ -108,9 +121,12 @@ const EditQuotePage: React.FC = () => {
       setStatusValue(quote.statusValue || '');
       setDiscountTypeId(quote.discountTypeId || null);
       setDiscountValue(quote.discountValue || 0);
+      // The quote's OWN currency. Every amount on this screen is denominated in it; there is no
+      // house default, and a quote with none renders a bare number rather than an invented symbol.
+      setCurrencyCode(quote.currencyCode ?? null);
       setItems(quote.quoteItems.map(i => ({
         id: i.id,
-        productId: i.productId,
+        productId: i.productId ?? null,
         productName: i.productName || '',
         itemDescription: i.itemDescription || '',
         quantity: i.quantity,
@@ -144,41 +160,71 @@ const EditQuotePage: React.FC = () => {
   });
   const outputTaxRatePercent = commercialPolicy?.outputTaxRatePercent ?? null;
 
-  // Calculate Totals
-  const subtotal = useMemo(() => {
-    return items.filter(i => !i.isDeleted).reduce((sum, item) => {
-      const itemTotal = item.quantity * item.unitPrice;
-      let itemDiscount = 0;
-      const type = discountTypes.find(t => t.setupId === item.discountTypeId);
-      if (type) {
-        if (type.setupCode === 'PERCENTAGE') itemDiscount = itemTotal * (item.discountValue / 100);
-        else if (type.setupCode === 'FIXED') itemDiscount = item.discountValue;
-      }
-      return sum + (itemTotal - itemDiscount);
-    }, 0);
-  }, [items, discountTypes]);
+  // Totals. Same shared implementation as the create screen and the server (quoteTotals.ts): the
+  // header discount comes off the tax-EXCLUSIVE net, is allocated across lines pro rata, and each
+  // line's tax follows the discounted base. This page previously previewed a header discount taken
+  // on an ex-VAT subtotal while the server took it on a VAT-inclusive one, and summed each line's
+  // tax from BEFORE the header discount — so it showed a total the server never saved and a VAT
+  // figure larger than the one that was due.
+  const liveItems = useMemo(() => items.filter(i => !i.isDeleted), [items]);
 
-  const totalTax = useMemo(() => items.filter(i => !i.isDeleted).reduce((sum, item) => sum + (item.taxAmount || 0), 0), [items]);
-  
-  const calculatedHeaderDiscount = useMemo(() => {
-    const type = discountTypes.find(t => t.setupId === discountTypeId);
-    if (!type) return 0;
-    if (type.setupCode === 'PERCENTAGE') return subtotal * (discountValue / 100);
-    else if (type.setupCode === 'FIXED') return discountValue;
-    return 0;
-  }, [subtotal, discountTypeId, discountValue, discountTypes]);
+  const discountKindOf = (id: number | null): DiscountKind => {
+    const code = discountTypes.find(t => t.setupId === id)?.setupCode?.toUpperCase();
+    return code === 'PERCENTAGE' ? 'PERCENTAGE' : code === 'FIXED' ? 'FIXED' : null;
+  };
 
-  const grandTotal = subtotal - calculatedHeaderDiscount + totalTax;
+  const totals = useMemo(() => calculateQuoteTotals(
+    liveItems.map(item => ({
+      quantity: item.quantity,
+      unitPrice: item.unitPrice,
+      discountKind: discountKindOf(item.discountTypeId),
+      discountValue: item.discountValue,
+      taxCategory: item.taxCategory,
+    })),
+    discountKindOf(discountTypeId),
+    discountValue,
+    outputTaxRatePercent,
+  ), [liveItems, discountTypes, discountTypeId, discountValue, outputTaxRatePercent]);
+
+  /*
+   * Unsaved-work protection. This screen is where a rep spends 25 minutes pricing 40 lines, and
+   * it had none: the button below labelled "Discard" navigated away on click with no prompt, and
+   * every line lived in useState, so a mistaken sidebar click lost all of it silently. The one
+   * page in the product that did protect this (ExtractionReviewDetailPage) says why in its own
+   * comment: "A reviewer who loses twenty minutes of corrections once goes back to Excel
+   * permanently."
+   */
+  const guard = useUnsavedWorkGuard({
+    storageKey: id ? `nexora.quote.edit.${id}` : '',
+    value: { quoteNo, customerId, quoteDate, validUntil, headerRemarks, discountTypeId, discountValue, items },
+    enabled: Boolean(quote),
+  });
+
+
+  // The render loop walks `items` (deleted rows included, hidden); `totals.lines` is indexed over
+  // the live rows only. This maps one to the other so a line never reads another line's figures.
+  const pricedByItemIndex = useMemo(() => {
+    const map = new Map<number, (typeof totals.lines)[number]>();
+    let live = 0;
+    items.forEach((item, index) => {
+      if (!item.isDeleted) map.set(index, totals.lines[live++]);
+    });
+    return map;
+  }, [items, totals]);
+
+  const subtotal = totals.grossSubTotal - totals.totalLineDiscounts;
+  const totalTax = totals.totalTax;
+  const calculatedHeaderDiscount = totals.headerDiscount;
+  const grandTotal = totals.grandTotal;
 
   const updateMutation = useMutation({
     mutationFn: (data: any) => quoteService.update(Number(id), data),
     onSuccess: () => {
       toast.success('Quote updated successfully');
+      // Re-baseline before navigating, so the saved work is not still offered as a stray draft.
+      guard.markSaved({ quoteNo, customerId, quoteDate, validUntil, headerRemarks, discountTypeId, discountValue, items });
       navigate(`/sales/quotes/view/${id}`);
     },
-    onError: (error: any) => {
-      toast.error(error?.response?.data || 'Failed to update quote');
-    }
   });
 
   const handleAddItem = () => {
@@ -200,7 +246,9 @@ const EditQuotePage: React.FC = () => {
         if (prod) {
             item.productName = prod.productName || '';
             item.itemDescription = prod.description || prod.productName || '';
-            item.unitPrice = prod.sellingPrice || prod.unitCost || 0;
+            // D5: seed from the SELLING price only. Falling back to `unitCost` quoted any product
+            // without a list price at cost — a zero-margin line with nothing on screen saying so.
+            item.unitPrice = prod.sellingPrice ?? 0;
         }
     }
 
@@ -214,16 +262,11 @@ const EditQuotePage: React.FC = () => {
     item.totalAmount = itemRawTotal - itemDiscount;
     item.discount = itemDiscount;
 
-    // Preview the derivation the server will perform on save, using the same rule: the tenant's
-    // rate on a standard-rated line, zero on any other category, and NOTHING when the line is
-    // standard-rated and the tenant has stated no rate. That last case is why the rate is nullable
-    // — showing zero there would be the defect this whole change exists to remove.
+    // Tax is no longer derived per line here: the header discount has to be shared across the
+    // whole quote before any line's taxable base is known. `totals` above owns that, and the
+    // server recomputes all of it on save regardless.
     const effectiveRate = item.taxCategory === TAX_CATEGORY_STANDARD ? outputTaxRatePercent : 0;
-    const taxableBase = Math.max(0, Math.round((itemRawTotal - itemDiscount) * 100) / 100);
     item.taxRatePercentApplied = effectiveRate;
-    item.taxAmount = effectiveRate === null
-      ? 0
-      : Math.round(taxableBase * effectiveRate) / 100;
     // A line that goes back to standard rated carries no reason to state.
     if (!taxCategoryRequiresReason(item.taxCategory)) item.taxCategoryReason = '';
 
@@ -256,18 +299,34 @@ const EditQuotePage: React.FC = () => {
       return;
     }
     const payload = {
-      id: Number(id), quoteNo, customerId, quoteDate, validUntil, headerRemarks,
+      id: Number(id), quoteNo, customerId,
+      // Empty date inputs must go over the wire as null, not "".
+      //
+      // A quote whose validUntil is null on the server loads into this form as '' (line ~107),
+      // and '' round-tripped back is not a DateTime?: ASP.NET fails to bind the WHOLE request,
+      // so the 400 reads "The request field is required" and the record cannot be saved AT ALL.
+      // Found on the live tenant, where quote QT-0826-0002 carries validUntil = null and was
+      // therefore permanently unsaveable from this screen.
+      quoteDate: quoteDate || null,
+      validUntil: validUntil || null,
+      // Round-trip the currency the record already has. The server now treats an absent
+      // CurrencyId as "not supplied" rather than "clear it", so this is belt AND braces: the
+      // payload states the truth, and the server no longer destroys it if some future caller
+      // forgets to. This screen deliberately offers no way to CHANGE the currency.
+      currencyId: quote?.currencyId ?? null,
+      headerRemarks,
       discountTypeId, discountValue, statusId,
       modifiedBy: userData?.userName || 'System',
       totalAmount: grandTotal,
-      quoteItems: items.map(item => ({
+      quoteItems: items.map((item, index) => ({
         id: item.id, productId: item.productId, itemDescription: item.itemDescription || item.productName,
-        quantity: item.quantity, unitPrice: item.unitPrice, totalAmount: item.totalAmount,
+        quantity: item.quantity, unitPrice: item.unitPrice,
+        totalAmount: pricedByItemIndex.get(index)?.taxableBase ?? 0,
         unitOfMeasure: item.unitOfMeasure || null, customerLineRef: item.customerLineRef || null,
         discountTypeId: item.discountTypeId, discountValue: item.discountValue,
         // taxAmount is sent for wire compatibility only — the server re-derives it and discards
         // whatever arrives here. The category and its reason ARE the user's input.
-        taxAmount: item.taxAmount,
+        taxAmount: pricedByItemIndex.get(index)?.taxAmount ?? 0,
         taxCategory: item.taxCategory,
         taxCategoryReason: item.taxCategoryReason.trim() || null,
         deliveryLeadTime: item.deliveryLeadTime,
@@ -310,7 +369,14 @@ const EditQuotePage: React.FC = () => {
           </Stack>
         </Box>
         <Stack direction="row" spacing={1.5}>
-          <Button variant="outlined" startIcon={<BackIcon />} onClick={() => navigate(`/sales/quotes/view/${id}`)} size="small">Discard</Button>
+          <Button variant="outlined" startIcon={<BackIcon />} size="small"
+            onClick={() => {
+              // "Discard" sat next to Save and threw the work away on a single click. It now says
+              // what it does, and asks first when there is something to lose.
+              if (guard.isDirty
+                && !window.confirm('Leave without saving? The pricing you have entered on this quote will be lost.')) return;
+              navigate(`/sales/quotes/view/${id}`);
+            }}>Cancel</Button>
           <Button 
             variant="contained" 
             startIcon={updateMutation.isPending ? <CircularProgress size={20} color="inherit" /> : <SaveIcon />} 
@@ -364,7 +430,7 @@ const EditQuotePage: React.FC = () => {
               <Grid size={{ xs: 12, md: 2 }}>
                 <TextField 
                   fullWidth type="number" label="Disc. Val" size="small" value={discountValue} onChange={(e) => setDiscountValue(Number(e.target.value))}
-                  slotProps={{ input: { endAdornment: <InputAdornment position="end">{discountTypes.find(t => t.setupId === discountTypeId)?.setupCode === 'PERCENTAGE' ? '%' : '$'}</InputAdornment> } }}
+                  slotProps={{ input: { endAdornment: <InputAdornment position="end">{discountTypes.find(t => t.setupId === discountTypeId)?.setupCode === 'PERCENTAGE' ? '%' : (currencyCode ?? '')}</InputAdornment> } }}
                 />
               </Grid>
             </Grid>
@@ -420,7 +486,7 @@ const EditQuotePage: React.FC = () => {
                     <TableCell align="center">
                       <TextField 
                         type="number" size="small" variant="standard" sx={{ width: 90 }} 
-                        slotProps={{ input: { startAdornment: <Typography variant="caption" sx={{ mr: 0.5 }}>$</Typography> } }} 
+                        slotProps={{ input: { startAdornment: <Typography variant="caption" sx={{ mr: 0.5 }}>{currencyCode ?? ''}</Typography> } }} 
                         value={item.unitPrice} onChange={(e) => updateItem(index, { unitPrice: Number(e.target.value) })} 
                       />
                     </TableCell>
@@ -432,7 +498,7 @@ const EditQuotePage: React.FC = () => {
                                 onChange={(e) => updateItem(index, { discountTypeId: Number(e.target.value) || null })}
                             >
                                 <MenuItem value=""><Typography variant="caption">N/A</Typography></MenuItem>
-                                {discountTypes.map(t => <MenuItem key={t.setupId} value={t.setupId}><Typography variant="caption">{t.setupCode === 'PERCENTAGE' ? '%' : '$'}</Typography></MenuItem>)}
+                                {discountTypes.map(t => <MenuItem key={t.setupId} value={t.setupId}><Typography variant="caption">{t.setupCode === 'PERCENTAGE' ? '%' : (currencyCode ?? 'AMT')}</Typography></MenuItem>)}
                             </Select>
                             <TextField 
                                 type="number" size="small" variant="standard" sx={{ width: 40 }} 
@@ -456,10 +522,10 @@ const EditQuotePage: React.FC = () => {
                             </MenuItem>
                           ))}
                         </Select>
-                        <Typography variant="caption" color={item.taxRatePercentApplied === null ? 'warning.main' : 'text.secondary'}>
-                          {item.taxRatePercentApplied === null
-                            ? 'Tax not calculated yet'
-                            : `$ ${item.taxAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })} @ ${item.taxRatePercentApplied}%`}
+                        <Typography variant="caption" color={pricedByItemIndex.get(index)?.taxAmount === null ? 'warning.main' : 'text.secondary'}>
+                          {pricedByItemIndex.get(index)?.taxAmount === null
+                            ? 'No output tax rate configured — this quote cannot be sent'
+                            : `${(pricedByItemIndex.get(index)?.taxAmount ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })} @ ${item.taxCategory === TAX_CATEGORY_STANDARD ? outputTaxRatePercent : 0}%`}
                         </Typography>
                         {taxCategoryRequiresReason(item.taxCategory) && (
                           <TextField
@@ -473,7 +539,7 @@ const EditQuotePage: React.FC = () => {
                       </Stack>
                     </TableCell>
                     <TableCell align="center">
-                      <Typography sx={{ fontWeight: 700, fontSize: '0.875rem' }}>$ {item.totalAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</Typography>
+                      <Typography sx={{ fontWeight: 700, fontSize: '0.875rem' }}>{(pricedByItemIndex.get(index)?.net ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}</Typography>
                     </TableCell>
                     <TableCell align="center">
                       <IconButton color="error" size="small" onClick={() => removeItem(index)}><DeleteIcon fontSize="small" /></IconButton>
@@ -491,23 +557,23 @@ const EditQuotePage: React.FC = () => {
               <Stack spacing={1.5}>
                 <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
                   <Typography variant="body2" color="text.secondary">Gross Total</Typography>
-                  <Typography variant="body2" sx={{ fontWeight: 700 }}>$ {subtotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}</Typography>
+                  <Typography variant="body2" sx={{ fontWeight: 700 }}>{formatMoney(subtotal, currencyCode)}</Typography>
                 </Box>
                 {calculatedHeaderDiscount > 0 && (
                   <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
                     <Typography variant="body2" color="error">Addit. Discount</Typography>
-                    <Typography variant="body2" color="error" sx={{ fontWeight: 700 }}>- $ {calculatedHeaderDiscount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</Typography>
+                    <Typography variant="body2" color="error" sx={{ fontWeight: 700 }}>- {formatMoney(calculatedHeaderDiscount, currencyCode)}</Typography>
                   </Box>
                 )}
                 <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
                   <Typography variant="body2" color="text.secondary">Tax Amount</Typography>
-                  <Typography variant="body2" sx={{ fontWeight: 700 }}>$ {totalTax.toLocaleString(undefined, { minimumFractionDigits: 2 })}</Typography>
+                  <Typography variant="body2" sx={{ fontWeight: 700 }}>{formatMoney(totalTax, currencyCode)}</Typography>
                 </Box>
                 <Divider />
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <Typography variant="h6" sx={{ fontWeight: 900 }}>Total</Typography>
                   <Typography variant="h5" sx={{ fontWeight: 900, color: 'primary.main' }}>
-                    $ {grandTotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                    {formatMoney(grandTotal, currencyCode)}
                   </Typography>
                 </Box>
               </Stack>

@@ -183,13 +183,18 @@ namespace ERP_RFQ_Automation.Services
             Directory.CreateDirectory(aramco);
             Directory.CreateDirectory(shared);
             var report = new FolderProcessingReport();
+            // ONE filter for all three folders. These used to differ — .doc for SEC, .docx for
+            // Aramco, five types for Shared — and the mismatch was live: the Aramco corpus is
+            // entirely .doc, so its own folder skipped every file it was given. See
+            // WatchedFolderExtensions for why the extension gate never protected anything that
+            // byte-level inspection does not already protect better.
+            bool Readable(string ext) => WatchedFolderExtensions.Contains(ext);
             await EnqueueFolderFilesAsync(
-                sec, "SEC Leads", IsSupportedExtension, businessUnitId, report, cancellationToken);
+                sec, "SEC Leads", Readable, businessUnitId, report, cancellationToken);
             await EnqueueFolderFilesAsync(
-                aramco, "Aramco Leads", ext => ext == ".docx", businessUnitId, report, cancellationToken);
+                aramco, "Aramco Leads", Readable, businessUnitId, report, cancellationToken);
             await EnqueueFolderFilesAsync(
-                shared, "Shared Leads", ext => SharedFolderExtensions.Contains(ext),
-                businessUnitId, report, cancellationToken);
+                shared, "Shared Leads", Readable, businessUnitId, report, cancellationToken);
             return report;
         }
 
@@ -357,157 +362,6 @@ namespace ERP_RFQ_Automation.Services
                             File.Move(claimedPath, filePath, false);
                         report.Failed++;
                     }
-                }
-            }
-        }
-
-        private async Task ProcessLegacyAramcoFolderAsync()
-        {
-            var targetFolder = _aramcoFolderPath;
-            _logger.LogInformation("Processing Aramco folder: {Path}", targetFolder);
-            
-            var filePaths = Directory.GetFiles(targetFolder);
-            if (!filePaths.Any())
-            {
-                _logger.LogInformation("No files found in Aramco folder.");
-                return;
-            }
-
-            var defaultConfig = await _context.EmailConfigurations
-                .AsNoTracking()
-                .FirstOrDefaultAsync(e => e.IsActive);
-
-            if (defaultConfig == null)
-            {
-                _logger.LogWarning("No active email configuration found for Aramco folder processing. Aborting.");
-                return;
-            }
-
-            foreach (var filePath in filePaths)
-            {
-                var fileName = Path.GetFileName(filePath);
-                var ext = Path.GetExtension(fileName).ToLowerInvariant();
-                
-                if (ext != ".docx")
-                {
-                    _logger.LogInformation("Skipping non-docx file: {FileName}", fileName);
-                    continue;
-                }
-
-                _logger.LogInformation("Processing Aramco file: {FileName}", fileName);
-
-                try
-                {
-                    var fileBytes = await File.ReadAllBytesAsync(filePath);
-                    if (fileBytes.Length > MAX_ATTACHMENT_SIZE)
-                    {
-                        _logger.LogWarning("File {FileName} exceeds max size. Skipping.", fileName);
-                        continue;
-                    }
-
-                    LeadExtractionResult extractionResult;
-                    using (var ms = new MemoryStream(fileBytes))
-                    {
-                        extractionResult = ParseAramcoRFP(ms, fileName);
-                    }
-
-                    if (extractionResult == null || !extractionResult.Items.Any())
-                    {
-                        _logger.LogWarning("No items extracted from {FileName}. Skipping.", fileName);
-                        continue;
-                    }
-
-                    var dummyIngest = new EmailIngest
-                    {
-                        MessageId = $"AramcoLead_{Guid.NewGuid()}_{fileName}",
-                        EmailSubject = $"Aramco RFP: {fileName}",
-                        FromEmail = "aramco@system.com",
-                        ToEmail = "system@rfq.com",
-                        EmailConfigurationId = defaultConfig.Id,
-                        CreatedOn = DateTime.UtcNow,
-                        ParseStatus = "Pending",
-                        RawEmailPath = null
-                    };
-                    _context.EmailIngests.Add(dummyIngest);
-                    await _context.SaveChangesAsync();
-
-                    try
-                    {
-                        DateTime recDate = ParseDate(extractionResult.RecDate) ?? DateTime.UtcNow;
-                        DateTime? bidClosingDate = ParseDate(extractionResult.BidClosingDate);
-                        DateTime? acknowledgmentDate = ParseDate(extractionResult.AcknowledgmentDate);
-                        DateTime? subDate = ParseDate(extractionResult.SubDate);
-
-                        // Every extracted line is kept. Filtering on Quantity > 0 silently discarded any line
-                        // whose quantity the document did not state — the extractor is instructed to return
-                        // null in exactly that case — and the line count was taken from the filtered list, so
-                        // the loss was self-consistent and invisible. A line a reviewer can see and correct is
-                        // always better than a line that never existed.
-                        var items = extractionResult.Items.ToList();
-
-                        var lead = new Lead
-                        {
-                            Rfqno = Truncate(extractionResult.Rfqno ?? Path.GetFileNameWithoutExtension(fileName), 100),
-                            BuyersName = Truncate(extractionResult.BuyersName ?? "Aramco RFP", 255),
-                            RecDate = recDate,
-                            BidClosingDate = bidClosingDate,
-                            BiddingDecision = Truncate(extractionResult.BiddingDecision, 100),
-                            AcknowledgmentDate = acknowledgmentDate,
-                            SubDate = subDate,
-                            HeaderRemarks = Truncate(extractionResult.HeaderRemarks, 8000),
-                            OpportunityNo = Truncate(extractionResult.OpportunityNo, 100),
-                            NoOfLineItems = items.Count,
-                            Rfqtype = Truncate(extractionResult.Rfqtype ?? "RFP", 50),
-                            DurationAgreement = Truncate(extractionResult.DurationAgreement, 100),
-                            LeadSource = "Aramco Leads",
-                            EmailSource = "Aramco RFP Document",
-                            Clientemail = "",
-                            Aiconfidence = (decimal?)extractionResult.OverallConfidence,
-                            ReviewVersion = 1,
-                            RequiresCommercialReview = true,
-                            CommercialFactsVerified = false,
-                            CreatedBy = "System",
-                            CreatedDate = DateTime.UtcNow,
-                            BusinessUnitId = defaultConfig.BusinessUnitId,
-                            EmailIngestsId = dummyIngest.Id
-                        };
-
-                        _context.Leads.Add(lead);
-                        await _context.SaveChangesAsync();
-
-                        int itemsWithManufacturer = 0;
-                        foreach (var aiItem in items)
-                        {
-                            _context.LeadItems.Add(CreateLeadItem(lead.Id, aiItem));
-                            if (!string.IsNullOrEmpty(aiItem.ManufacturerName))
-                                itemsWithManufacturer++;
-                        }
-
-                        if (items.Count > 0)
-                            await _context.SaveChangesAsync();
-
-                        var fileStreamData = new List<(string FileName, MemoryStream Stream, string Extension, string OriginalPath)>();
-                        fileStreamData.Add((fileName, new MemoryStream(fileBytes), ext, filePath));
-
-                        await SaveAttachmentsAsync(fileStreamData, lead.Id);
-
-                        dummyIngest.ParsedAt = DateTime.UtcNow;
-                        dummyIngest.ParseStatus = "NeedsReview";
-                        await _context.SaveChangesAsync();
-
-                        _logger.LogInformation("Successfully created Aramco lead {LeadId} with {ItemCount} items ({MfgCount} with manufacturer info) from {FileName}.", 
-                            lead.Id, items.Count, itemsWithManufacturer, fileName);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "Failed to process Aramco lead from {FileName}.", fileName);
-                        dummyIngest.ParseStatus = "Failed";
-                        await _context.SaveChangesAsync();
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Failed to read or parse Aramco file: {FileName}", fileName);
                 }
             }
         }
@@ -725,163 +579,6 @@ namespace ERP_RFQ_Automation.Services
             return string.Join("", texts);
         }
 
-        private async Task ProcessLegacySecFolderAsync()
-        {
-            var targetFolder = _secFolderPath;
-            _logger.LogInformation("ProcessSECFoldersAsync started. Folder path: {Path}", Path.GetFullPath(targetFolder));
-
-            var filePaths = Directory.GetFiles(targetFolder);
-            _logger.LogInformation("Found {Count} files in folder.", filePaths.Length);
-
-            if (!filePaths.Any())
-            {
-                _logger.LogInformation("No files found in folder.");
-                return;
-            }
-
-            var defaultConfig = await _context.EmailConfigurations
-                .AsNoTracking()
-                .FirstOrDefaultAsync(e => e.IsActive);
-
-            if (defaultConfig == null)
-            {
-                _logger.LogWarning("No active email configuration found for folder processing. Aborting.");
-                return;
-            }
-
-            foreach (var filePath in filePaths)
-            {
-                var fileName = Path.GetFileName(filePath);
-                var ext = Path.GetExtension(fileName).ToLowerInvariant();
-                if (!IsSupportedExtension(ext)) continue;
-
-                _logger.LogInformation("Processing SEC file: {FileName}", fileName);
-
-                try
-                {
-                    var fileBytes = await File.ReadAllBytesAsync(filePath);
-                    if (fileBytes.Length > MAX_ATTACHMENT_SIZE)
-                    {
-                        _logger.LogWarning("File {FileName} exceeds max size. Skipping.", fileName);
-                        continue;
-                    }
-
-                    string extractedText = "";
-                    using (var ms = new MemoryStream(fileBytes))
-                    {
-                        extractedText = ExtractTextFromDoc(ms);
-                    }
-
-                    if (string.IsNullOrWhiteSpace(extractedText))
-                    {
-                        _logger.LogWarning("No text extracted from {FileName}. Skipping.", fileName);
-                        continue;
-                    }
-
-                    // Log a sample for debugging
-                    var preview = extractedText.Length > 500 ? extractedText.Substring(0, 500) : extractedText;
-                    _logger.LogInformation("Extracted text preview: {Preview}...", preview.Replace("\n", " ").Replace("\r", " "));
-
-                    var dummyIngest = new EmailIngest
-                    {
-                        MessageId = $"SECLead_{Guid.NewGuid()}_{fileName}",
-                        EmailSubject = $"SEC Lead: {fileName}",
-                        FromEmail = "sec@system.com",
-                        ToEmail = "system@rfq.com",
-                        EmailConfigurationId = defaultConfig.Id,
-                        CreatedOn = DateTime.UtcNow,
-                        ParseStatus = "Pending",
-                        RawEmailPath = null
-                    };
-                    _context.EmailIngests.Add(dummyIngest);
-                    await _context.SaveChangesAsync();
-
-                    try
-                    {
-                        var ai = BuildExtraction(extractedText);
-
-                        if (string.IsNullOrWhiteSpace(ai.Rfqno))
-                            ai = ai with { Rfqno = Path.GetFileNameWithoutExtension(fileName) };
-
-                        DateTime recDate            = ParseDate(ai.RecDate) ?? DateTime.UtcNow;
-                        DateTime? bidClosingDate    = ParseDate(ai.BidClosingDate);
-                        DateTime? acknowledgmentDate = ParseDate(ai.AcknowledgmentDate);
-                        DateTime? subDate           = ParseDate(ai.SubDate);
-
-                        // Every extracted line is kept. Filtering on Quantity > 0 silently discarded any line
-                        // whose quantity the document did not state — the extractor is instructed to return
-                        // null in exactly that case — and the line count was taken from the filtered list, so
-                        // the loss was self-consistent and invisible. A line a reviewer can see and correct is
-                        // always better than a line that never existed.
-                        var items = ai.Items.ToList();
-
-                        var lead = new Lead
-                        {
-                            Rfqno            = Truncate(ai.Rfqno, 100),
-                            BuyersName       = Truncate(ai.BuyersName ?? "SEC", 255),
-                            RecDate          = recDate,
-                            BidClosingDate   = bidClosingDate,
-                            BiddingDecision  = Truncate(ai.BiddingDecision, 100),
-                            AcknowledgmentDate = acknowledgmentDate,
-                            SubDate          = subDate,
-                            HeaderRemarks    = Truncate(BuildHeaderRemarks(ai, extractedText), 8000),
-                            OpportunityNo    = Truncate(ai.OpportunityNo, 100),
-                            NoOfLineItems    = items.Count,
-                            Rfqtype          = Truncate(ai.Rfqtype, 50),
-                            DurationAgreement = Truncate(ai.DurationAgreement, 100),
-                            LeadSource       = "SEC Leads",
-                            EmailSource      = GetFileTypeLabel(ext),
-                            Clientemail      = "",
-                            Aiconfidence     = (decimal?)ai.OverallConfidence,
-                            ReviewVersion = 1,
-                            RequiresCommercialReview = true,
-                            CommercialFactsVerified = false,
-                            CreatedBy        = "System",
-                            CreatedDate      = DateTime.UtcNow,
-                            BusinessUnitId   = defaultConfig.BusinessUnitId,
-                            EmailIngestsId   = dummyIngest.Id
-                        };
-
-                        _context.Leads.Add(lead);
-                        await _context.SaveChangesAsync();
-
-                        int itemsWithManufacturer = 0;
-                        foreach (var aiItem in items)
-                        {
-                            _context.LeadItems.Add(CreateLeadItem(lead.Id, aiItem));
-                            if (!string.IsNullOrEmpty(aiItem.ManufacturerName))
-                                itemsWithManufacturer++;
-                        }
-
-                        if (items.Count > 0)
-                            await _context.SaveChangesAsync();
-
-                        var fileStreamData = new List<(string FileName, MemoryStream Stream, string Extension, string OriginalPath)>();
-                        fileStreamData.Add((fileName, new MemoryStream(fileBytes), ext, filePath));
-
-                        await SaveAttachmentsAsync(fileStreamData, lead.Id);
-
-                        dummyIngest.ParsedAt   = DateTime.UtcNow;
-                        dummyIngest.ParseStatus = "NeedsReview";
-                        await _context.SaveChangesAsync();
-
-                        _logger.LogInformation("Successfully created SEC lead {LeadId} with {ItemCount} items ({MfgCount} with manufacturer) from {FileName}.", 
-                            lead.Id, items.Count, itemsWithManufacturer, fileName);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "Failed to process SEC lead from {FileName}.", fileName);
-                        dummyIngest.ParseStatus = "Failed";
-                        await _context.SaveChangesAsync();
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Failed to read or ingest SEC file: {FileName}", fileName);
-                }
-            }
-        }
-
         private async Task SaveAttachmentsAsync(List<(string FileName, MemoryStream Stream, string Extension, string OriginalPath)> files, long leadId)
         {
             var attachmentTasks = new List<Task>();
@@ -952,11 +649,30 @@ namespace ERP_RFQ_Automation.Services
         private LeadItem CreateLeadItem(long leadId, LeadItemData aiItem)
             => LeadItemMapper.Map(aiItem, ParseDate, leadId);
 
+        /// <summary>
+        /// A human label for the format a folder document arrived in. It is shown to reviewers
+        /// as the Lead's source, so it names the FORMAT and never a customer: ".doc" used to
+        /// read "SEC Word Document", which mislabelled every legacy Word file that came from
+        /// anyone else — and the Aramco corpus is entirely .doc.
+        ///
+        /// <para>Every extension the folder door now accepts has an entry. "Unknown" previously
+        /// covered everything but Word, so the moment the door widened it would have become the
+        /// most common answer on the screen.</para>
+        /// </summary>
         private string GetFileTypeLabel(string ext) => ext switch
         {
-            ".doc"  => "SEC Word Document",
-            ".docx" => "Word DOCX",
-            _       => "Unknown"
+            ".doc"                  => "Word Document (legacy)",
+            ".docx"                 => "Word Document",
+            ".pdf"                  => "PDF Document",
+            ".xls"                  => "Excel Workbook (legacy)",
+            ".xlsx" or ".xlsm"      => "Excel Workbook",
+            ".csv"                  => "CSV Spreadsheet",
+            ".txt"                  => "Text Document",
+            ".htm" or ".html"       => "Web Page",
+            ".eml" or ".msg"        => "Email Message",
+            ".png" or ".jpg" or ".jpeg" or ".gif"
+                or ".bmp" or ".tif" or ".tiff" or ".webp" => "Scanned Image",
+            _                       => "Document"
         };
 
         private bool IsSupportedExtension(string ext) => ext == ".doc";
@@ -1349,28 +1065,44 @@ namespace ERP_RFQ_Automation.Services
                 "Tenants", businessUnitId.ToString(CultureInfo.InvariantCulture), "Watched", folder);
         }
 
-        // The Shared watched-folder accepts general trading documents. This is a
-        // DELIBERATELY narrower set than the full DocumentIntakeAllowList (no images or
-        // free text from an unattended folder), but it must remain a SUBSET of that
-        // allow-list so nothing a folder accepts is later rejected by security
-        // inspection — asserted by DocumentIntakeAllowListTests. Both the upload gate
-        // and the watcher use THIS single set so the two sites cannot drift apart.
-        internal static readonly IReadOnlySet<string> SharedFolderExtensions =
-            new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            {
-                ".doc", ".docx", ".pdf", ".xlsx", ".xls"
-            };
+        /// <summary>
+        /// What a watched folder accepts: EXACTLY what every other intake door accepts.
+        ///
+        /// <para>This is the allow-list object itself, not a copy of it, so the folder door
+        /// cannot drift from inspection and from the extraction reader the way it previously
+        /// did.</para>
+        ///
+        /// <para><b>Why the per-folder lists went away.</b> Each folder used to carry its own
+        /// narrow filter — SEC accepted only <c>.doc</c>, Aramco only <c>.docx</c>, Shared five
+        /// document types — on the reasoning that a customer-specific door should be tight. In
+        /// practice it silently discarded real work: every Aramco bid list in the live corpus is
+        /// a <c>.doc</c>, so the folder named after that customer rejected that customer's own
+        /// documents, and the file was skipped with nothing raised to anyone.</para>
+        ///
+        /// <para><b>Why the extension gate was not protecting anything.</b> A filename is a
+        /// claim, and this gate believed it in both directions: a hostile <c>.exe</c> renamed to
+        /// <c>.doc</c> passed it, and a genuine <c>.doc</c> named <c>.docx</c> was refused. The
+        /// gate that actually decides is <c>DocumentFileInspectionService</c>, which types every
+        /// file from its BYTES and is unaffected by this change. Removing a filter that a rename
+        /// defeats costs no security and stops discarding readable documents.</para>
+        ///
+        /// <para>Narrowing a door again is a legitimate decision, but it belongs in tenant
+        /// configuration where a customer can see and change it — not compiled into three
+        /// hard-coded lists whose disagreement is invisible until a bid goes missing.</para>
+        /// </summary>
+        internal static readonly IReadOnlySet<string> WatchedFolderExtensions =
+            ERP_RFQ_Automation.Security.DocumentInspection.DocumentIntakeAllowList.Extensions;
 
+        /// <summary>
+        /// What may be uploaded INTO a watched folder. The folder chosen says who the document
+        /// is from; it does not say what a document is allowed to be, so every folder takes the
+        /// same set — the one the sweep will later read. When these two disagreed, a file could
+        /// be accepted by the upload and then skipped for ever by the sweep that followed it.
+        /// </summary>
         private static bool IsAllowedUploadExtension(string folderType, string extension)
-            => folderType.Trim().ToUpperInvariant() switch
-            {
-                // SEC and Aramco are deliberately narrow, customer-specific doors
-                // (SEC sends legacy .doc, Aramco sends .docx) — do not widen them.
-                "SEC" or "CUSTOMER1" => extension == ".doc",
-                "ARAMCO" or "CUSTOMER2" => extension == ".docx",
-                "SHARED" => SharedFolderExtensions.Contains(extension),
-                _ => false
-            };
+            => folderType.Trim().ToUpperInvariant() is "SEC" or "CUSTOMER1"
+                or "ARAMCO" or "CUSTOMER2" or "SHARED"
+               && WatchedFolderExtensions.Contains(extension);
 
         public IReadOnlyList<long> DiscoverTenantFolderIds()
         {

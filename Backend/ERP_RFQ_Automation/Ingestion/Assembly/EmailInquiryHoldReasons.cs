@@ -40,6 +40,86 @@ public static class EmailInquiryHoldReasons
     public const string OwnershipUnresolved = "assembly_ownership_unresolved";
 
     /// <summary>
+    /// The whole message was read successfully and asked for nothing that can be quoted.
+    ///
+    /// <para>This is the disposition for marketing mail, cold outreach and newsletters that
+    /// carry no bulk headers — a human wrote them to a human, so no header rule can see them,
+    /// and structurally they are identical to a first-time buyer's opening email. The
+    /// difference only becomes visible AFTER the message has been read: a buyer asks for
+    /// something, an agency does not.</para>
+    ///
+    /// <para><b>Why the judgement is not made at triage.</b>
+    /// <c>DeterministicEmailTriage</c> stops mail only on positive, machine-verifiable evidence
+    /// that it is not business mail, and absence of RFQ vocabulary is deliberately not such
+    /// evidence: "Do you carry Schneider NSX250N MCCBs?" contains no quantity, no request verb
+    /// and no RFQ reference, yet it is a real deal. Gating on that absence before extraction
+    /// would suppress exactly that buyer. Gating on it after extraction cannot, because a
+    /// message with one extracted line never reaches this reason.</para>
+    ///
+    /// <para><b>Why held rather than closed.</b> Zero requestable lines is not proof that
+    /// nothing was requested. A public-procurement notification — BidNet Direct, DemandStar,
+    /// SAM.gov — states the solicitation in a portal behind a link, so it extracts to zero
+    /// lines and is still a real bid opportunity. <c>NoInquiry</c> is terminal and absorbing;
+    /// this state is neither, and the message stays on the Email Intake screen with its reason
+    /// showing.</para>
+    /// </summary>
+    public const string NoRequestableContent = "assembly_no_requestable_content";
+
+    /// <summary>
+    /// What an operator is told when the message was read and asked for nothing.
+    ///
+    /// <para>Says what is true and stops: read in full, nothing requestable found, no inquiry
+    /// created, nothing lost. It does not call the sender a spammer — the same sentence has to
+    /// be right for a marketing blast and for a solicitation whose detail is behind a login.
+    /// </para>
+    ///
+    /// <para><b>Length is load bearing.</b> The coordinator stores these as
+    /// <c>"{code}: {detail}"</c>, and the Inbound Mail screen puts that string through
+    /// <c>presentableServerText</c>, which REJECTS — does not truncate — anything over
+    /// <c>MAX_MESSAGE_LENGTH</c> (300 characters, <c>Frontend/src/utils/apiErrors.ts</c>). The
+    /// first draft of this sentence was 359 characters, which would have rendered the held
+    /// message with a blank reason: the message visible and the explanation gone, which is the
+    /// half of "captured and held" that is worth nothing. Pinned by
+    /// <c>EmailInquiryHoldLifecycleTests</c>.</para>
+    /// </summary>
+    public const string NoRequestableContentDetail =
+        "This message was read in full and names no product, quantity or specification anywhere, "
+        + "so no inquiry was created. Nothing is lost — the original email is retained. If it "
+        + "is a real request, its detail is somewhere Nexora could not read, such as a portal "
+        + "link.";
+
+    /// <summary>
+    /// The message carried content that could have held a request, and none of it survived
+    /// into an inquiry.
+    ///
+    /// <para>The same zero-line merge as <see cref="NoRequestableContent"/>, reached for the
+    /// opposite reason. Here the extractors DID see candidate lines — parsed text regions on a
+    /// document, model-named items before anchor verification on a body — and none of them
+    /// became a requestable line. A scanned RFQ whose OCR came back partial is the case that
+    /// matters: it is a real customer request, and telling the operator it asked for nothing
+    /// sends them to chase a sender who did their part.</para>
+    ///
+    /// <para>Held, not closed, exactly as the other case is: the content is still there to be
+    /// read, and reprocessing the message can still produce the inquiry.</para>
+    /// </summary>
+    public const string ContentNotRecovered = "assembly_content_not_recovered";
+
+    /// <summary>
+    /// What an operator is told when the message was not read well enough to quote from.
+    ///
+    /// <para>It says the one thing that changes what they do next: the failure is on Nexora's
+    /// side of the exchange, so the next step is to read or reprocess the message, not to reply
+    /// to the sender. Length obeys the same 300-character screen gate as every sentence here,
+    /// which is why the extractor's own review reasons are LOGGED rather than appended — they
+    /// are unbounded, and a reason one character too long renders as no reason at all.</para>
+    /// </summary>
+    public const string ContentNotRecoveredDetail =
+        "Nexora found content in this message but could not recover any product, quantity or "
+        + "specification from it, so no inquiry was created. Nothing is lost — the original "
+        + "email is retained. Read it before replying: this is not a message that asked for "
+        + "nothing.";
+
+    /// <summary>
     /// The message merged cleanly, but the persist path produced no Lead.
     ///
     /// <para>The persister returns a lead id, and a NON-POSITIVE one is not an id — it is

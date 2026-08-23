@@ -81,5 +81,49 @@ namespace ERP_RFQ_Automation.Controllers
                 return StatusCode(500, new { success = false, message = "Internal server error." });
             }
         }
+
+        /// <summary>
+        /// Bulk BACK-FILL: quotes the tenant issued before Nexora existed.
+        ///
+        /// <para>A separate route rather than a flag on the ordinary upload, deliberately. A blank
+        /// 'Customer RFQ No' on a normal sheet is overwhelmingly a mistake, and a mode that
+        /// silently invented an inquiry to absorb it would corrupt the commercial spine to save
+        /// the operator a correction. Choosing this endpoint is the operator saying, explicitly,
+        /// that these quotes predate the system.</para>
+        ///
+        /// <para>Rows that DO name an RFQ are resolved normally, so a mixed sheet still attaches
+        /// each quote to its real inquiry where one exists.</para>
+        /// </summary>
+        [HttpPost("upload-backfill")]
+        [RequireModulePermission("Quotations", PermissionAction.Create)]
+        public async Task<IActionResult> UploadBackfill(IFormFile file, [FromForm] long? businessUnitId = null)
+        {
+            var claimBUIdAttr = User.FindFirst("businessUnitId")?.Value;
+            var claimBUId = string.IsNullOrEmpty(claimBUIdAttr) ? 0 : long.Parse(claimBUIdAttr);
+            var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
+
+            if (targetBUId <= 0)
+                return BadRequest(new { success = false, message = "Business Unit ID is required." });
+
+            if (file == null || file.Length == 0)
+                return BadRequest(new { success = false, message = "No file uploaded." });
+
+            try
+            {
+                var createdBy = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? "system";
+                using var stream = file.OpenReadStream();
+                var result = await _service.UploadTemplateAsync(stream, targetBUId, createdBy, backfill: true);
+
+                if (!result.Success)
+                    return BadRequest(new { success = false, message = result.Message });
+
+                return Ok(new { success = true, message = result.Message });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error back-filling quotations.");
+                return StatusCode(500, new { success = false, message = "Internal server error." });
+            }
+        }
     }
 }

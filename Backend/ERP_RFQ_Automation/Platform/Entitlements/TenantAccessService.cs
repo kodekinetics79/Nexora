@@ -227,7 +227,12 @@ public sealed class TenantAccessService : ITenantAccessService
             // Distinguishing this from "the read failed" is the whole of Sec-D1.
             return new TenantAccessSnapshot(businessUnitId, null, null, null);
 
-        var snapshot = new TenantAccessSnapshot(businessUnitId, core.TenantId, core.Status, core.Plan);
+        var snapshot = new TenantAccessSnapshot(businessUnitId, core.TenantId, core.Status, core.Plan)
+        {
+            // NOT NULL in the schema with a store default of {}, so the coalesce only fires for a
+            // reduced model or a test double. It resolves to the deny-everything value either way.
+            Entitlements = core.Entitlements ?? "{}"
+        };
         snapshot = await AddBillingTermsAsync(snapshot, core.TenantId, ct);
 
         // The exemption flag decides nothing for a mode that IS charged: for Billable and
@@ -344,6 +349,11 @@ public sealed class TenantAccessService : ITenantAccessService
     /// Status, PlanId) and Plans(Id, Code, Weight, MaxConcurrentExtractionJobs,
     /// MaxDocsPerMonth, MaxSeats). Plans.Name is NOT among them, which is why
     /// <see cref="PlanSnapshot"/> identifies a plan by its Code.
+    ///
+    /// <para>Plus Tenants.Entitlements, granted by 20260818013530 and declared in
+    /// <see cref="TenantAccessGrantContract.RequiredColumns"/> in the same change. It is read
+    /// here, on the enforcement-critical path, rather than in a later layer, because it decides
+    /// whether a request reaches a module at all — the same class of answer as Status.</para>
     /// </summary>
     private IQueryable<CoreProjection> CoreQuery(long businessUnitId)
         => _context.Set<Tenant>()
@@ -354,6 +364,7 @@ public sealed class TenantAccessService : ITenantAccessService
             .Select(t => new CoreProjection(
                 t.Id,
                 t.Status,
+                t.Entitlements,
                 t.Plan == null
                     ? null
                     : new PlanSnapshot(
@@ -380,7 +391,8 @@ public sealed class TenantAccessService : ITenantAccessService
 
     public void Evict(long businessUnitId) => _cache.Remove(CacheKey(businessUnitId));
 
-    private sealed record CoreProjection(long TenantId, TenantStatus Status, PlanSnapshot? Plan);
+    private sealed record CoreProjection(
+        long TenantId, TenantStatus Status, string? Entitlements, PlanSnapshot? Plan);
 
     private sealed record BillingTermsProjection(TenantBillingMode BillingMode, DateTime CreatedOn);
 }

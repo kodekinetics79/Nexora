@@ -108,12 +108,44 @@ RUN dotnet publish ERP_RFQ_Automation/ERP_RFQ_Automation.csproj -c Release -o /a
 
 # ---- runtime ----
 FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
-# Native libs for Tesseract/Leptonica OCR (the Tesseract nuget also ships linux-x64 natives).
+# Native libs for Tesseract/Leptonica OCR.
+#
+# The comment here used to claim "the Tesseract nuget also ships linux-x64 natives". It does
+# not — Tesseract 5.2.0 contains no .so and no runtimes/ directory at all, so the managed
+# wrapper depends entirely on what this image provides, under the exact names it probes for.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends libleptonica-dev libtesseract-dev tesseract-ocr \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=build /app ./
+
+# THE NAMES ARE THE WHOLE PROBLEM, and this was silently broken in production: every scanned
+# PDF and every image returned no text, while /ready reported ocr-engine as Degraded and the
+# startup probe logged only the outer TargetInvocationException.
+#
+# Reproduced in this exact base image. The inner exception the probe swallowed is:
+#
+#   DllNotFoundException: Failed to find library "libleptonica-1.82.0.so" for platform x64.
+#
+# Tesseract.dll hard-codes the names "tesseract50" and "leptonica-1.82.0" (readable with
+# `strings`), so it looks for libtesseract50.so and libleptonica-1.82.0.so. Debian ships
+# libtesseract.so.5 and liblept.so.5. Neither probed name exists, so the load always failed.
+#
+# The loader searches APP-RELATIVE paths, not the system library path — linking these into
+# /usr/lib alone does nothing, which is why the obvious fix does not work. It wants an x64/
+# subdirectory beside the assembly, exactly as the "for platform x64" in the error says.
+#
+# The third link is separate: glibc 2.34 folded libdl into libc and stopped shipping
+# libdl.so, but the wrapper's loader still dlopen()s "libdl" before anything else. Without
+# it the load fails one step later, complaining about libdl rather than about Tesseract.
+#
+# Verified in this base image: without these three it raises TargetInvocationException, with
+# them it prints "OCR ENGINE LOADED OK — version 5.3.0".
+RUN set -eux; L=/usr/lib/x86_64-linux-gnu; mkdir -p /app/x64; \
+    ln -sf "$L/libtesseract.so.5" /app/x64/libtesseract50.so; \
+    ln -sf "$L/liblept.so.5"      /app/x64/libleptonica-1.82.0.so; \
+    ln -sf "$L/libdl.so.2"        "$L/libdl.so"; \
+    test -e /app/x64/libtesseract50.so && test -e /app/x64/libleptonica-1.82.0.so
 # Containers listen on 8080 by convention; the host maps it to 443/80.
 ENV ASPNETCORE_URLS=http://+:8080
 ENV ASPNETCORE_ENVIRONMENT=Production

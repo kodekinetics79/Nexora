@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Box, Card, CardContent, Chip, Divider, Skeleton, Stack, Typography } from '@mui/material';
 import { History as HistoryIcon } from '@mui/icons-material';
 import intelligenceService from '../../../api/services/intelligenceService';
+import { statusLabel } from '../../../utils/statusLabels';
 
 interface CustomerContextPanelProps {
   /** The customer currently selected on the quote form; null hides the panel. */
@@ -116,7 +117,7 @@ const CustomerContextPanel: React.FC<CustomerContextPanelProps> = ({ customerId 
                 </Typography>
                 <Typography variant="body2" sx={{ fontWeight: 700 }}>
                   {data.ordersLast24Months} · {data.orderValueLast24Months == null
-                    ? data.orderValueStatus.replaceAll('_', ' ')
+                    ? statusLabel(data.orderValueStatus)
                     : money(data.orderValueLast24Months)}
                 </Typography>
               </Box>

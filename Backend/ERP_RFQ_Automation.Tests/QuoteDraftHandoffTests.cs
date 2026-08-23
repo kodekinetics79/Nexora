@@ -288,9 +288,23 @@ public sealed class QuoteDraftHandoffTests
 
     /// <summary>PDF export path only needs the lookup; "no configuration row" exercises
     /// every built-in default (colors, terms, company block).</summary>
+    /// <summary>
+    /// A CONFIGURED seller, because the PDF now refuses to render for a business unit whose own
+    /// records cannot say who is sending the quotation. These tests are about line rendering, not
+    /// about identity, so the fixture supplies the identity a real tenant has and lets them go on
+    /// asserting what they were written to assert. The refusal itself is pinned separately by
+    /// QuoteIssuerIdentityTests.
+    /// </summary>
     private sealed class NullQuoteConfigurationRepository : IQuoteConfigurationRepository
     {
-        public Task<QuoteConfiguration?> GetByBusinessUnitIdAsync(long businessUnitId) => Task.FromResult<QuoteConfiguration?>(null);
+        public Task<QuoteConfiguration?> GetByBusinessUnitIdAsync(long businessUnitId)
+            => Task.FromResult<QuoteConfiguration?>(new QuoteConfiguration
+            {
+                BusinessUnitId = businessUnitId,
+                CompanyAddress = "King Fahd Road, Al Khobar 34423",
+                CompanyPhone = "+966 13 800 0000",
+                CompanyEmail = "sales@noorandsons.example"
+            });
         public Task AddAsync(QuoteConfiguration config) => Task.CompletedTask;
         public Task UpdateAsync(QuoteConfiguration config) => Task.CompletedTask;
     }

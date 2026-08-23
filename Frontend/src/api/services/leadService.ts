@@ -46,6 +46,20 @@ export interface ClientCandidateDTO {
   explanation?: string | null;
 }
 
+/**
+ * What a tenant-wide re-run of client matching actually did. Every number is a real count
+ * of rows the server touched — `CustomerResolutionBackfillResult` verbatim — so the result
+ * can be reported to the operator instead of a cheerful "done".
+ */
+export interface ClientResolutionRunDTO {
+  examined: number;
+  autoMatched: number;
+  suggested: number;
+  ambiguous: number;
+  unresolved: number;
+  failed: number;
+}
+
 export interface LeadResponseDTO {
   id: number;
   commercialCaseId?: number | null;
@@ -103,6 +117,19 @@ export interface LeadResponseDTO {
   emailSource: string;
   clientemail: string;
   status: string;
+  /**
+   * The lead's lifecycle state as a governed code — 'RECEIVED' | 'PENDING_IDENTIFICATION' |
+   * 'ASSIGNED' | 'UNDER_REVIEW' | 'QUALIFIED' | 'CONVERTED_TO_RFQ' | 'QUOTED' | 'NEGOTIATION' |
+   * 'AWARDED' | 'PARTIALLY_AWARDED' | 'DISQUALIFIED' | 'LOST' | 'CANCELLED' | 'COMPLETED' |
+   * 'DUPLICATED'. Absent means the enquiry has never been triaged.
+   *
+   * Read this, not `leadStatusId` (a tenant-local integer) and not `isRejected` (the legacy
+   * id-25 hardcode): those are why screens used to infer "not started yet" from the id being
+   * null, and the deadline board dropped every enquiry the moment someone advanced it.
+   */
+  leadStatusCode?: string | null;
+  /** The tenant's own label for that state, e.g. "Qualified". */
+  leadStatusLabel?: string | null;
   isAccepted: boolean;
   isRejected: boolean;
   aiconfidence: number;
@@ -610,6 +637,31 @@ export interface LeadReconciliationResultDTO {
   shouldRoute: boolean;
 }
 
+/**
+ * A candidate assignee for a lead or an RFQ, as returned by
+ * `GET /api/UnAssignedLead/users-for-assignment`.
+ *
+ * The list is every active user in the tenant, but governed routing will only accept the ones
+ * carrying an effective, eligible Sales Rep profile with capacity left. `isEligibleForAssignment`
+ * is the server's own verdict and `eligibilityReason` is the sentence the routing engine uses,
+ * so a dialog can grey out a name and say why instead of letting the assignment fail with a 409.
+ */
+export interface AssignableUserDTO {
+  id: number;
+  fullName: string;
+  isEligibleForAssignment: boolean;
+  eligibilityReason: string;
+  /** Null when the user is not a routing candidate at all (no profile row). */
+  capacityPercent?: number | null;
+  workloadPoints?: number | null;
+}
+
+/** The one-line justification shown under an assignee's name in every assignment picker. */
+export const assignabilityNote = (user: AssignableUserDTO): string =>
+  user.isEligibleForAssignment
+    ? `${user.workloadPoints ?? 0} workload points, ${user.capacityPercent ?? 0}% capacity`
+    : user.eligibilityReason;
+
 const leadService = {
   getAll: async (filters: LeadFilters): Promise<PaginatedResponse<LeadResponseDTO>> => {
     const r = await axiosInstance.get('/api/Lead', { params: filters });
@@ -640,6 +692,52 @@ const leadService = {
       if (status === 404 || status === 403) return [];
       throw error;
     }
+  },
+
+  /**
+   * Links this lead to the client organisation a person picked.
+   * PUT /api/Lead/{id}/client (Leads:Edit).
+   *
+   * This used to go through `extractionReviewService.submitReview`, and that was a
+   * dead end for most leads: the review endpoint's first gate refuses any lead whose
+   * extraction already succeeded, which on the happy path is every lead. Since a lead
+   * cannot be qualified or converted without a client, the enquiry was stranded with
+   * no route forward. This endpoint carries the same decision with none of the
+   * extraction-review preconditions.
+   *
+   * `expectedVersion` is deliberately NOT sent from here. It exists for callers that
+   * are holding a review snapshot; a grid row or a deadline-board row is not, and
+   * inventing a version to satisfy the wire format would turn a stale render into a
+   * spurious conflict.
+   */
+  linkClient: async (
+    id: number,
+    body: { customerId: number; contactId?: number | null; reason?: string },
+  ): Promise<LeadResponseDTO> => {
+    const r = await axiosInstance.put<LeadResponseDTO>(`/api/Lead/${id}/client`, {
+      customerId: body.customerId,
+      ...(body.contactId != null ? { contactId: body.contactId } : {}),
+      ...(body.reason ? { reason: body.reason } : {}),
+    });
+    return r.data;
+  },
+
+  /**
+   * Re-runs deterministic client matching across every lead in the tenant that a person
+   * has not already decided. POST /api/Lead/resolve-clients (manager + Leads:Edit).
+   *
+   * This endpoint has existed, tested, since the client-identity release, and until now
+   * NOTHING in the product called it — so the one action that could clear an accumulated
+   * backlog of unlinked enquiries was unreachable. It matters most immediately after a
+   * person links a client by hand: that link teaches the matcher the buyer's domain, and
+   * this is what then applies the lesson to every other enquiry already sitting in the
+   * pile. It never touches a lead a person has decided.
+   */
+  resolveClients: async (
+    params: { maxLeads?: number; includeSuggested?: boolean } = {},
+  ): Promise<ClientResolutionRunDTO> => {
+    const r = await axiosInstance.post<ClientResolutionRunDTO>('/api/Lead/resolve-clients', null, { params });
+    return r.data;
   },
 
   getIngestionBatch: async (batchId: string): Promise<BatchReconciliationDTO> => {
@@ -730,8 +828,8 @@ const leadService = {
     return r.data;
   },
 
-  getUsersForAssignment: async (buid: number) => {
-    const r = await axiosInstance.get('/api/UnAssignedLead/users-for-assignment', { params: { businessUnitId: buid } });
+  getUsersForAssignment: async (buid: number): Promise<AssignableUserDTO[]> => {
+    const r = await axiosInstance.get<AssignableUserDTO[]>('/api/UnAssignedLead/users-for-assignment', { params: { businessUnitId: buid } });
     return r.data;
   },
 

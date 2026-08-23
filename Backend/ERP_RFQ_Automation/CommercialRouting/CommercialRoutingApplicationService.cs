@@ -903,10 +903,11 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
                 user.IsActive ? capacity : 0,
                 workload,
                 profile != null,
-                !user.IsActive ? "User is inactive" : profile == null ? "Governed Sales Rep profile is required"
-                    : !profileEligible ? "Governed Sales Rep profile is not routing eligible"
-                    : capacity <= 0 ? "Configured or measured capacity is exhausted"
-                    : "Governed Sales Rep profile is active and eligible");
+                !user.IsActive ? RoutingEligibilityReasons.UserInactive
+                    : profile == null ? RoutingEligibilityReasons.ProfileRequired
+                    : !profileEligible ? RoutingEligibilityReasons.ProfileNotEligible
+                    : capacity <= 0 ? RoutingEligibilityReasons.CapacityExhausted
+                    : RoutingEligibilityReasons.Eligible);
         }).ToList();
     }
 

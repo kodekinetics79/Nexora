@@ -305,16 +305,22 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
         };
         db.Set<Plan>().Add(plan);
         db.Set<Tenant>().AddRange(
+            // Entitlements set on each TENANT, not inherited from the shared plan: since
+            // 20260818013530 the plan is a provisioning template and the tenant's own grant is what
+            // [RequiresEntitlement] reads. Seeding only the plan is exactly the mistake the
+            // migration's backfill exists to prevent in production.
             new Tenant
             {
                 Id = 89_901, Name = "HTTP Tenant A", Slug = "http-tenant-a",
                 Status = TenantStatus.Active, Plan = plan, PrimaryBusinessUnitId = TenantA,
+                Entitlements = enabledFeatures,
                 CreatedOn = now.UtcDateTime, CreatedBy = "release-01b-tests"
             },
             new Tenant
             {
                 Id = 89_902, Name = "HTTP Tenant B", Slug = "http-tenant-b",
                 Status = TenantStatus.Active, Plan = plan, PrimaryBusinessUnitId = TenantB,
+                Entitlements = enabledFeatures,
                 CreatedOn = now.UtcDateTime, CreatedBy = "release-01b-tests"
             });
         db.BusinessUnits.AddRange(

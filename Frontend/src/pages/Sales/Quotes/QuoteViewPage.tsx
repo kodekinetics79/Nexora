@@ -27,10 +27,12 @@ import { CustomerAwardDialog, type CustomerAwardQuote } from './customer-awards'
 import { useAuth } from '../../../context/AuthContext';
 import { presentableErrorMessage } from '../../../utils/apiErrors';
 import { formatMoney } from '../../../utils/currency';
+import { summariseStoredQuote } from './quoteTotals';
 import dayjs from 'dayjs';
 import { toast } from 'react-hot-toast';
 import CommercialLineIntelligence from '../../../components/common/CommercialLineIntelligence';
 import procurementService from '../../../api/services/procurementService';
+import { statusLabel } from '../../../utils/statusLabels';
 
 const QuoteViewPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -49,14 +51,6 @@ const QuoteViewPage: React.FC = () => {
     queryFn: () => procurementService.getWorkbench(Number(quote?.rfqId)),
     enabled: Boolean(quote?.rfqId),
     retry: 1,
-  });
-
-  const statusMutation = useMutation({
-    mutationFn: (status: string) => quoteService.transitionStatus(Number(id), status, quote?.lifecycleVersion ?? 1),
-    onSuccess: () => {
-      toast.success('Status updated successfully');
-      queryClient.invalidateQueries({ queryKey: ['quote-detail', id] });
-    }
   });
 
   const pdfMutation = useMutation({
@@ -180,13 +174,28 @@ const QuoteViewPage: React.FC = () => {
   if (isError) return <Box sx={{ p: 4 }}><Alert severity="error" action={<Button color="inherit" onClick={() => refetch()}>Retry</Button>}>We couldn't load this quote.</Alert></Box>;
   if (!quote) return <Box sx={{ p: 4 }}>Quote not found</Box>;
 
-  // Manual Calculation for header discount if not already in totalAmount
-  // Actually the backend stores TotalAmount as the final grand total.
-  // We need to show the breakdown.
-  const itemsSubtotal = quote.quoteItems.reduce((sum, i) => sum + (i.quantity * i.unitPrice), 0);
-  const itemsDiscounts = quote.quoteItems.reduce((sum, i) => sum + (i.discount || 0), 0);
-  const itemsNetTotal = itemsSubtotal - itemsDiscounts;
-  const headerDiscount = itemsNetTotal - (quote.totalAmount || 0); // This is an approximation if tax is involved
+  // The financial breakdown, READ from what the server stored — never reconstructed.
+  //
+  // This block used to compute `headerDiscount = (gross - lineDiscounts) - quote.totalAmount`,
+  // subtracting a tax-INCLUSIVE grand total from a tax-EXCLUSIVE net. On a 1,000.00 quote at 15%
+  // with no header discount that is -150.00, suppressed by the `> 0` guard, leaving a panel that
+  // read 1,000.00 / 0.00 / 1,150.00 and did not add up. With a 200.00 header discount it printed
+  // 80.00. The same reconstruction, in the PDF builder, is what QuoteItem.HeaderDiscountAllocated
+  // was added to stop; the column has always been on the row and simply never reached this screen.
+  //
+  // Every figure below is a stored per-line value or a sum of them, matching QuoteService's PDF
+  // builder line for line. The customer's copy and the rep's screen now state one arithmetic.
+  const totals = summariseStoredQuote(
+    quote.quoteItems,
+    quote.discountTypeId != null && quote.discountValue != null,
+    quote.totalAmount || 0,
+  );
+  const itemsSubtotal = totals.grossSubTotal;
+  const itemsDiscounts = totals.totalLineDiscounts;
+  const headerDiscount = totals.headerDiscount;
+  // Name the rate only when every taxed line shares one. A quote that mixes a zero-rated export
+  // with a standard line has no single rate true of its total, so the label stays bare.
+  const vatLabel = totals.singleTaxRatePercent === null ? 'VAT' : `VAT ${totals.singleTaxRatePercent}%`;
   const awardQuote: CustomerAwardQuote | null = quote.commercialCaseId && quote.customerId && quote.currencyId
     ? {
         id: quote.id,
@@ -222,6 +231,7 @@ const QuoteViewPage: React.FC = () => {
     !offer.validUntil || dayjs(offer.validUntil).isBefore(dayjs()) ||
     Boolean(quote.validUntil && dayjs(offer.validUntil).isBefore(dayjs(quote.validUntil)))
   ));
+  const isDraftQuote = (quote.statusCode || quote.statusValue || '').toUpperCase() === 'DRAFT';
   const isUnpricedDraft = (quote.statusCode || quote.statusValue || '').toUpperCase() === 'DRAFT'
     && !quote.currencyId
     && quote.quoteItems.every((item) => Number(item.unitPrice || 0) === 0);
@@ -313,14 +323,30 @@ const QuoteViewPage: React.FC = () => {
           >
             Export PDF
           </Button>
-          {hasPermission('Quotations', 'edit') && quote.statusValue === 'Sent' && <Button
-            variant="outlined"
-            startIcon={<EmailIcon />}
-            disabled={quote.statusValue?.toUpperCase() === 'ORDERED'}
+          {/*
+            The ONE control that puts this quote in front of the customer.
+
+            It used to render only once statusValue was already 'Sent', behind a contained
+            "Ready to Send" button that merely transitioned the lifecycle and emailed nobody. A rep
+            who clicked the prominent one got a success toast and a green Sent chip while the buyer
+            received nothing — and the quote's SentOn stayed null, so the status was a claim the
+            delivery record did not support.
+
+            The server owns the real transition: FinalizeQuoteDeliveryAsync stamps SentOn, moves the
+            lifecycle to SENT and creates the follow-up task when the mail is actually delivered. So
+            this button never touches status. It opens the recipient -> price-confirmation chain and
+            lets delivery report itself.
+          */}
+          {hasPermission('Quotations', 'edit')
+            && quote.statusValue?.toUpperCase() !== 'ORDERED'
+            && (isDraftQuote || quote.statusValue === 'Sent') && <Button
+            variant={isDraftQuote ? 'contained' : 'outlined'}
+            startIcon={isDraftQuote ? <SendIcon /> : <EmailIcon />}
+            disabled={isUnpricedDraft}
             onClick={() => setEmailOpen(true)}
             sx={{ borderRadius: 2 }}
           >
-            Email
+            {isDraftQuote ? 'Send to customer' : 'Send again'}
           </Button>}
 
           {/*
@@ -358,8 +384,6 @@ const QuoteViewPage: React.FC = () => {
               </Button>
             </Tooltip>
           )}
-
-          {hasPermission('Quotations', 'edit') && quote.statusValue === 'Draft' && <Button variant="contained" startIcon={<SendIcon />} onClick={() => statusMutation.mutate('Sent')} disabled={isUnpricedDraft} sx={{ borderRadius: 2 }}>Ready to Send</Button>}
 
           {quote.rfqId && <Button variant="outlined" startIcon={<OutcomeIcon />} onClick={() => navigate(`/procurement/rfqs/${quote.rfqId}/sourcing`)}>Sourcing & offers</Button>}
 
@@ -503,7 +527,7 @@ const QuoteViewPage: React.FC = () => {
                       {(() => {
                         const source = sourceFor(item);
                         return <Stack spacing={0.5} sx={{ alignItems: 'flex-start' }}>
-                          <Chip size="small" color={source.source === 'COST_SOURCE_PENDING' ? 'warning' : 'info'} label={source.source.replaceAll('_', ' ')} />
+                          <Chip size="small" color={source.source === 'COST_SOURCE_PENDING' ? 'warning' : 'info'} label={statusLabel(source.source)} />
                           {source.offer && <Typography variant="caption" color="text.secondary">{source.offer.supplierName} · {source.offer.quoteReference || 'No supplier reference'} · valid {source.offer.validUntil ? dayjs(source.offer.validUntil).format('DD MMM YYYY') : 'not stated'}</Typography>}
                           {quote.rfqId && source.rfqItemId > 0 && <Button size="small" sx={{ px: 0 }} onClick={() => navigate(`/procurement/rfqs/${quote.rfqId}/sourcing`)}>View cost evidence</Button>}
                         </Stack>;
@@ -511,7 +535,7 @@ const QuoteViewPage: React.FC = () => {
                     </TableCell>
                     <TableCell align="right">{Number(item.unitPrice || 0) === 0 ? <Chip size="small" label="Pricing Pending" color="warning" variant="outlined" /> : formatMoney(item.unitPrice, quote.currencyCode)}</TableCell>
                     <TableCell align="right">
-                      {item.discount > 0 ? (
+                      {(item.discount ?? 0) > 0 ? (
                         <Typography variant="caption" color="error.main" sx={{ fontWeight: 700 }}>
                           - {formatMoney(item.discount, quote.currencyCode)}
                           <br />
@@ -535,6 +559,17 @@ const QuoteViewPage: React.FC = () => {
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}><Typography color="text.secondary">Gross Subtotal</Typography><Typography sx={{ fontWeight: 700 }}>{isUnpricedDraft ? 'Pricing Pending' : formatMoney(itemsSubtotal, quote.currencyCode)}</Typography></Box>
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}><Typography color="text.secondary">Item Discounts</Typography><Typography sx={{ fontWeight: 700, color: 'error.main' }}>{isUnpricedDraft ? 'Pending' : `- ${formatMoney(itemsDiscounts, quote.currencyCode)}`}</Typography></Box>
                 {headerDiscount > 0 && <Box sx={{ display: 'flex', justifyContent: 'space-between' }}><Typography color="text.secondary">Header Discount</Typography><Typography sx={{ fontWeight: 700, color: 'error.main' }}>- {formatMoney(headerDiscount, quote.currencyCode)}</Typography></Box>}
+                {/* The two rows the panel had no way to show, and without which the numbers on it
+                    could not be added up: the base the tax is charged on, and the tax. Same three
+                    lines, same order, as the printed quote. */}
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}><Typography color="text.secondary">Total excluding VAT</Typography><Typography sx={{ fontWeight: 700 }}>{isUnpricedDraft ? 'Pending' : formatMoney(totals.netExcludingTax, quote.currencyCode)}</Typography></Box>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}>
+                  <Typography color={totals.hasUnderivedTax ? 'warning.main' : 'text.secondary'}>{vatLabel}</Typography>
+                  <Typography sx={{ fontWeight: 700 }} color={totals.hasUnderivedTax ? 'warning.main' : undefined}>
+                    {totals.hasUnderivedTax ? 'Not derived' : formatMoney(totals.totalTax, quote.currencyCode)}
+                  </Typography>
+                </Box>
+                {totals.hasUnderivedTax && <Alert severity="warning" sx={{ py: 0 }}>No output tax rate is configured, so this quote cannot be sent.</Alert>}
                 <Divider />
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}><Typography variant="h5" sx={{ fontWeight: 900 }}>Grand Total</Typography><Typography variant="h5" sx={{ fontWeight: 900, color: isUnpricedDraft ? 'warning.main' : 'primary.main' }}>{isUnpricedDraft ? 'Pricing Pending' : formatMoney(quote.totalAmount, quote.currencyCode)}</Typography></Box>
               </Stack>
@@ -575,6 +610,8 @@ const QuoteViewPage: React.FC = () => {
         title={`Email quote ${quote.quoteNo}`}
         initialEmail={quote.customerEmail || ''}
         loading={sendMutation.isPending}
+        composerFields="recipient-only"
+        confirmLabel="Send quote"
         businessUnitId={businessUnitId}
         customerId={quote.customerId ?? null}
         onCancel={() => setEmailOpen(false)}
