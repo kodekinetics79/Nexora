@@ -33,7 +33,12 @@ public static class EmailInquiryComponentClosure
     /// <para>The list is CLOSED and deliberately short. Anything not named here is treated as a
     /// content fault, which is the safe direction: a content fault sends the message to a human,
     /// while an infrastructure hold parks it until an operator notices. Nothing sweeps a held
-    /// component back into flight, so "hold" is the more expensive mistake of the two.</para>
+    /// component back into flight AUTOMATICALLY, so "hold" is still the more expensive mistake of
+    /// the two — but it is no longer a permanent one: the audited manual reopen on the Inbound
+    /// Mail screen puts a held message back through the pipeline (see
+    /// <see cref="EmailInquiryAssemblyStateMachine.CanGovernedTriageReopenTransition"/>), and a
+    /// hold that is bound to an exhausted extraction job is recovered by the dead-letter replay
+    /// instead.</para>
     /// </summary>
     public static bool IsInfrastructureFailure(string? errorCode) =>
         errorCode is "evidence_missing" or "evidence_bucket_mismatch" or "storage_unavailable"

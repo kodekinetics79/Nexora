@@ -1158,9 +1158,17 @@ app.MapHealthChecks("/health", new Microsoft.AspNetCore.Diagnostics.HealthChecks
 {
     Predicate = registration => registration.Tags.Contains("live")
 }).AllowAnonymous();
+// /ready names the checks that failed and why. The default writer emits the single word
+// "Unhealthy": on 2026-08-24 the deployment had been 503-ing for the life of the process and the
+// two failing check names had to be recovered from the Render log stream, which is exactly the
+// second system a probe exists to make unnecessary. The writer excludes exceptions and each
+// check's Data bag, and redacts addresses and secret-shaped key/value pairs out of the
+// descriptions — see HealthReportResponseWriter for why each of those is excluded rather than
+// filtered case by case.
 app.MapHealthChecks("/ready", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
 {
-    Predicate = registration => registration.Tags.Contains("ready")
+    Predicate = registration => registration.Tags.Contains("ready"),
+    ResponseWriter = ERP_RFQ_Automation.HealthChecks.HealthReportResponseWriter.WriteAsync
 }).AllowAnonymous();
 // Deployment identity is deliberately public and narrowly bounded. Render supplies
 // RENDER_GIT_COMMIT; exposing that value lets operators prove which immutable revision is

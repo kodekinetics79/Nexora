@@ -25,6 +25,7 @@ import { useAuth } from '../../context/AuthContext';
 import { presentableErrorMessage } from '../../utils/apiErrors';
 import ApiErrorNotice from '../../components/common/ApiErrorNotice';
 import { gridEmptyOverlay } from '../../components/common/gridOverlays';
+import ViewTabs from '../../components/layout/ViewTabs';
 import { formatDateSafe } from '../../utils/dates';
 import ClientCell from './ClientCell';
 import ResolveClientDialog from './ResolveClientDialog';
@@ -93,9 +94,19 @@ const AssignedLeadsPage: React.FC = () => {
     title: myLeadsOnly ? 'No leads are assigned to you' : 'No leads are assigned yet',
     message: 'A lead appears here once it has an owner, and leaves when it is converted to an RFQ.',
     icon: <ItemsIcon sx={{ fontSize: 48 }} />,
+    action: (
+      <Button variant="contained" onClick={() => navigate('/procurement/leads/outstanding')} sx={{ fontWeight: 700 }}>
+        See unassigned inquiries
+      </Button>
+    ),
     filtered: Boolean(search),
     filteredMessage: 'No assigned lead matches this search. Clear it to see the whole queue.',
-  }), [search, myLeadsOnly]);
+    filteredAction: (
+      <Button variant="outlined" onClick={() => setSearch('')} sx={{ fontWeight: 700 }}>
+        Clear the search
+      </Button>
+    ),
+  }), [search, myLeadsOnly, navigate]);
 
   const columns: GridColDef[] = [
     {
@@ -278,6 +289,8 @@ const AssignedLeadsPage: React.FC = () => {
         </Box>
         <Button variant="outlined" startIcon={<RefreshIcon />} onClick={() => refetch()} size="small" sx={{ fontWeight: 800 }}>Refresh Dashboard</Button>
       </Box>
+
+      <ViewTabs primaryKey="leads" ariaLabel="Inquiry views" />
 
       {/* Search + filters */}
       <Paper sx={{ p: 2, mb: 2, borderRadius: 3, border: '1px solid', borderColor: 'divider', boxShadow: 'none', display: 'flex', alignItems: 'center', gap: 3, flexWrap: 'wrap' }}>

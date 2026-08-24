@@ -15,6 +15,13 @@ const LoginPage = lazy(() => import('./pages/Login/LoginPage'));
 // `pages/Setup/setupRoutes.tsx` and mapped into the route tree further down.
 const SetupShell = lazy(() => import('./pages/Setup/SetupShell'));
 const SetupHubPage = lazy(() => import('./pages/Setup/SetupHubPage'));
+// The landing screen: one prioritised queue of everything waiting on this user, built from the
+// endpoints the individual queue screens already read. It replaced `/analytics/deadlines`, which
+// could only show enquiries and whose only outbound link was to a single lead.
+const InboxPage = lazy(() => import('./pages/Inbox/InboxPage'));
+// The directory of every screen the five-row rail no longer carries. Nothing is deleted to shrink
+// the rail; it is listed here, grouped and described, with its route unchanged.
+const AllScreensPage = lazy(() => import('./pages/Advanced/AllScreensPage'));
 const ProductsPage = lazy(() => import('./pages/Inventory/ProductsPage'));
 const ProductDetailPage = lazy(() => import('./pages/Inventory/ProductDetailPage'));
 const ProductCategoryPage = lazy(() => import('./pages/Inventory/ProductCategoryPage'));
@@ -164,6 +171,21 @@ function App() {
     <Suspense fallback={<PageLoader />}>
     <Routes>
       <Route path="/" element={<Navigate to="/login" replace />} />
+
+      {/* The landing screen. Deliberately UNGUARDED at the route: it is the first screen after
+          sign-in, and a user whose grants are still loading — or who holds none — must land on a
+          page that explains that rather than on "Access Denied". Each queue inside asks for its own
+          module and is simply not requested when the grant is absent. */}
+      <Route path="/inbox" element={<MainLayout><InboxPage /></MainLayout>} />
+      {/* Every screen the rail relocated, grouped and searchable. Ungated for the same reason the
+          Setup hub is: the cards are filtered by permission, so an unpermitted user sees a stated
+          reason instead of a denial. */}
+      <Route path="/advanced" element={<MainLayout><AllScreensPage /></MainLayout>} />
+      {/* Old landing addresses. `/analytics/deadlines` stays a live screen (it is listed under
+          Dashboards & analytics); these two are the shortcuts people type. */}
+      <Route path="/home" element={<Navigate to="/inbox" replace />} />
+      <Route path="/today" element={<Navigate to="/inbox" replace />} />
+
       <Route path="/dashboard" element={<MainLayout><PermissionGuard moduleName="Dashboard"><DashboardPage /></PermissionGuard></MainLayout>} />
       <Route path="/dashboard/team" element={<MainLayout><PermissionGuard moduleName="Dashboard"><TeamWorkloadPage /></PermissionGuard></MainLayout>} />
       {/* Analytics built only on data the tenant actually holds. The deadline

@@ -10,6 +10,7 @@ using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.Ingestion.Assembly;
 using ERP_RFQ_Automation.Infrastructure.Storage;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Security.DocumentInspection;
 using Microsoft.Extensions.Logging;
 using MimeKit;
 
@@ -70,6 +71,31 @@ public static class EmailIngestEnqueuer
     public const string SchedulingFailedReason = "scheduling_failed";
 
     /// <summary>
+    /// Reason recorded when the malware scanner REFUSED a part of the message.
+    ///
+    /// <para>Distinct from <see cref="SchedulingFailedReason"/> on purpose. A refusal is a
+    /// verdict, not an outage: it is terminal, it outranks every other component's outcome, and
+    /// the message must be acknowledged to the mailbox so the same infected attachment is not
+    /// re-downloaded, re-decoded and re-fed to the scanner on every poll for the next day.</para>
+    /// </summary>
+    public const string MalwareRefusedReason = "malware_detected";
+
+    /// <summary>What a person is told when a part of their message was refused by the scanner.</summary>
+    public const string MalwareRefusedDetail =
+        "A part of this message was refused because the malware scanner reported it as unsafe. "
+        + "It has not been opened or processed, and no inquiry was created from it.";
+
+    /// <summary>What a person is told when inspection stopped without a verdict.</summary>
+    public const string InspectionUnavailableDetail =
+        "This part of the message could not be checked for malware because the scanner was "
+        + "unavailable, so it has not been processed yet.";
+
+    /// <summary>What a person is told when inspection refused the file on its own merits.</summary>
+    public const string InspectionRefusedDetail =
+        "This part of the message could not be accepted for processing, so it was not read. "
+        + "The original email and every part of it are retained.";
+
+    /// <summary>
     /// Schedules every Process component of a message that does not already hold a durable job.
     ///
     /// <para><b>Idempotency is the database's, not ours.</b>
@@ -100,7 +126,11 @@ public static class EmailIngestEnqueuer
         EmailTriageDecision triage,
         IEmailInquiryAssemblyCoordinator coordinator,
         ILogger logger,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        // Present only on a GOVERNED reopen — a resume that may take a message out of a person's
+        // review tray, and therefore may only happen with an actor and a reason on the record.
+        // The ordinary poll and the ordinary reprocess both leave it null.
+        EmailInquirySchedulingGrant? grant = null)
     {
         ArgumentNullException.ThrowIfNull(assembly);
         ArgumentNullException.ThrowIfNull(components);
@@ -139,6 +169,10 @@ public static class EmailIngestEnqueuer
                     ManifestMismatchReason, detail, null, ct);
                 held++;
             }
+            // Evaluated here for the same reason as the compatible path below: a refused manifest
+            // whose components are ALL already terminal records no outcome, so nothing else would
+            // ever ask the barrier what the message now is.
+            await coordinator.ReevaluateAsync(assembly.Id, assembly.BusinessUnitId, ct);
             return new EmailScheduleResult(batchId, 0, 0, held, verification.Verdict);
         }
 
@@ -210,7 +244,7 @@ public static class EmailIngestEnqueuer
 
                 await coordinator.RecordComponentQueuedAsync(
                     assembly.BusinessUnitId, assembly.Id, component.ComponentKey, result.JobId, ct,
-                    result.StoragePath, result.SourceDocumentOccurrenceId);
+                    result.StoragePath, result.SourceDocumentOccurrenceId, grant);
                 scheduled++;
 
                 logger.LogInformation(
@@ -239,6 +273,59 @@ public static class EmailIngestEnqueuer
                     null, ct);
                 heldByFailure++;
             }
+            // BEFORE the catch-all, and that order is the whole point.
+            //
+            // Inspection runs SYNCHRONOUSLY inside IngestAsync — quarantine, scan, promote —
+            // so its verdict arrives here as an exception rather than as a job outcome. The
+            // catch-all below swallowed it and recorded the generic "could not be queued yet",
+            // which had two consequences and both cost real money. A malware verdict became a
+            // RECOVERABLE hold, so EmailInquiryComponentStatus.RefusedSecurity had no writer at
+            // all and the state machine's highest-priority branch was unreachable; and because a
+            // hold makes the message unsafe to acknowledge, the mailbox kept the infected message
+            // unread and every poll cycle re-downloaded it, re-decoded it and re-fed it to the
+            // scanner. The retryable case lost just as much: the generic constant erased the
+            // security_scanner_unavailable code that EmailInquiryComponentClosure keys on, so a
+            // scanner outage was indistinguishable from an unreadable file.
+            catch (DocumentInspectionException exception)
+            {
+                var errorCode = exception.Inspection.ErrorCode;
+
+                // A refusal outranks everything. Terminal, absorbing, and NOT held: the message
+                // is safe to acknowledge precisely because there is nothing left to retry.
+                if (exception.Inspection.MalwareStatus == MalwareScanStatus.Infected)
+                {
+                    logger.LogWarning(
+                        "Component {ComponentKey} of assembly {AssemblyId} was refused by the "
+                        + "malware scanner ({ErrorCode}); the message is refused on security "
+                        + "grounds and will not be re-fetched.",
+                        component.ComponentKey, assembly.Id, errorCode);
+                    await coordinator.RecordComponentOutcomeAsync(
+                        assembly.BusinessUnitId, assembly.Id, component.ComponentKey,
+                        EmailInquiryComponentStatus.RefusedSecurity,
+                        MalwareRefusedReason, MalwareRefusedDetail, null, ct);
+                    continue;
+                }
+
+                // Everything else is decided by the ONE shared infrastructure-vs-content rule,
+                // fed the scanner's own code rather than a constant. A scanner outage HOLDS (the
+                // file is presumed readable once it is back); a file inspection refused on its
+                // own merits — a macro-enabled workbook, an unreadable container — is a content
+                // fault and is terminal, because no job exists to dead-letter it and a hold with
+                // no mover is how a message disappears.
+                var resolved = EmailInquiryComponentClosure.StatusFor(errorCode);
+                logger.LogError(exception,
+                    "Document inspection stopped component {ComponentKey} of assembly "
+                    + "{AssemblyId} ({ErrorCode}); it is recorded as {Resolved}.",
+                    component.ComponentKey, assembly.Id, errorCode, resolved);
+                await coordinator.RecordComponentOutcomeAsync(
+                    assembly.BusinessUnitId, assembly.Id, component.ComponentKey, resolved,
+                    errorCode,
+                    resolved == EmailInquiryComponentStatus.FailedRecoverable
+                        ? InspectionUnavailableDetail
+                        : InspectionRefusedDetail,
+                    null, ct);
+                if (resolved == EmailInquiryComponentStatus.FailedRecoverable) heldByFailure++;
+            }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
                 logger.LogError(exception,
@@ -253,6 +340,26 @@ public static class EmailIngestEnqueuer
                 heldByFailure++;
             }
         }
+
+        // THE MESSAGE IS EVALUATED BEFORE THIS METHOD RETURNS, on every path.
+        //
+        // Every other trigger for the barrier is a REPORT — a component was queued, a component
+        // failed, a component produced a result. A message whose every part was already terminal
+        // at capture produces no report of any kind: the loop above skips each terminal component
+        // and falls straight out, so nothing was queued, nothing failed, and none of the four
+        // callers of ReevaluateCoreAsync ever fired. That message stayed at Captured with
+        // CompletedComponentCount = 0 forever, and — because a manifest-compatible pass with
+        // nothing held is safe to acknowledge — it was flagged \Seen and suppressed by the ledger
+        // on every subsequent poll. It could not be found afterwards either: the recovery sweep
+        // asks for ReadyForAssembly assemblies and non-terminal components, and this message has
+        // neither.
+        //
+        // The evaluation belongs HERE rather than at the call site because this is the door every
+        // scheduling pass goes through. Guarding the callers one at a time leaves the next one to
+        // reintroduce the silence. It is idempotent — the verdict is a pure function of the
+        // component rows — so the passes that already reevaluated simply recompute the same
+        // answer.
+        await coordinator.ReevaluateAsync(assembly.Id, assembly.BusinessUnitId, ct);
 
         return new EmailScheduleResult(
             batchId, scheduled, alreadyScheduled, heldByFailure, EmailManifestVerdict.Compatible);

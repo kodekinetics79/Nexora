@@ -29,6 +29,21 @@ const tokenFor = (role) => {
   return `${encode({ alg: 'none', typ: 'JWT' })}.${encode({ sub: String(role.id), role: role.roleName, exp: 4102444800 })}.fixture`;
 };
 
+// The signed-in caller, recovered from the fixture bearer token. Kept beside tokenFor so the two
+// halves of the fake session cannot drift apart.
+const callerFromRequest = (req) => {
+  const header = req.headers.authorization || '';
+  const raw = header.startsWith('Bearer ') ? header.slice(7) : '';
+  const payload = raw.split('.')[1];
+  if (!payload) return null;
+  try {
+    const claims = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    return Object.values(roles).find((role) => String(role.id) === String(claims.sub)) ?? null;
+  } catch {
+    return null;
+  }
+};
+
 const lead = {
   id: Number(contract.leadId), commercialCaseId: 501, commercialCaseReference: contract.nexoraSerial,
   nexoraSerial: contract.nexoraSerial, customerId: 401, contactId: 402, customerMatchStatus: 'Matched',
@@ -125,6 +140,34 @@ const server = http.createServer(async (req, res) => {
     const items = permissions[roleId] ?? [];
     return json(res, 200, { items, totalCount: items.length, pageNumber: 1, pageSize: 1000 });
   }
+  // The app reads its effective grants here the moment a token is issued. While this route was
+  // missing, login returned 200 and the UI then sat on /login with an alert about an unimplemented
+  // fixture route -- so EVERY browser acceptance spec was unrunnable, on main, silently.
+  if (req.method === 'GET' && path === '/api/user/me/permissions') {
+    const caller = callerFromRequest(req);
+    if (!caller) return json(res, 401, { message: 'Fixture: missing or unreadable bearer token' });
+    const grants = (permissions[caller.roleId] ?? []).map((row) => ({
+      moduleId: row.moduleId,
+      moduleName: row.moduleName,
+      // The rolepermission fixture rows carry no canView: a row existing IS the view grant there.
+      canView: true,
+      canCreate: row.canCreate,
+      canEdit: row.canEdit,
+      canDelete: row.canDelete,
+    }));
+    return json(res, 200, {
+      userId: caller.id,
+      roleId: caller.roleId,
+      roleName: caller.roleName,
+      businessUnitId: Number(contract.businessUnitId),
+      isSuperAdmin: false,
+      isManager: caller.roleId === 1,
+      permissions: grants,
+      // entitlements deliberately omitted: a server predating the field omits it, and omission
+      // must read as "no optional surface", never as an error.
+    });
+  }
+
   if (req.method === 'GET' && path === '/api/dashboard/release-01') return json(res, 200, dashboard);
   if (req.method === 'GET' && path === `/api/lead/${contract.leadId}`) return json(res, 200, lead);
   if (req.method === 'GET' && path === `/api/leadingestion/leads/${contract.revisionLeadId}/revisions`) return json(res, 200, revisions);

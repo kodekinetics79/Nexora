@@ -612,10 +612,16 @@ const ExtractionReviewDetailPage: React.FC = () => {
       );
       queryClient.invalidateQueries({ queryKey: ['needs-review'] });
       queryClient.invalidateQueries({ queryKey: ['needs-review-detail', leadId] });
-      // A save keeps the reviewer where they are — only an approval finishes the
-      // document and returns to the queue. Navigating away on save discarded the
-      // reviewer's place in a long document for no reason.
-      if (action === 'approve') navigate('/procurement/extraction/review');
+      // A save keeps the reviewer where they are — only an approval finishes the document.
+      //
+      // An approval used to return to the QUEUE, which is a dead end on the one journey this
+      // screen exists to serve: the reviewer has just confirmed what a document says, the next
+      // thing they do is qualify the enquiry it became, and nothing anywhere in
+      // `pages/ExtractionReview/` linked to a lead. They had to go back to the sidebar and find
+      // "All Inquiries" to reach the record they had been looking at a second earlier. Going
+      // forward to that lead is the answer to "what now"; the queue is one click away on the
+      // Inbox tab strip if there is nothing to do with it yet.
+      if (action === 'approve') navigate(`/procurement/leads/view/${leadId}`);
     },
     onError: (err: any) => {
       const data = err?.response?.data;

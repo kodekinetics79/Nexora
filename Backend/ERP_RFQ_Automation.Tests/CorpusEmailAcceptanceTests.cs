@@ -152,6 +152,7 @@ public sealed class CorpusEmailAcceptanceTests : IDisposable
             new EmailInquiryAssemblyCoordinator(ctx,
                 NullLogger<EmailInquiryAssemblyCoordinator>.Instance),
             ingestion,
+            new RawEmailEvidenceReader(ctx, evidence, NullLogger<RawEmailEvidenceReader>.Instance),
             NullLogger<EmailInquiryIntakeService>.Instance);
     }
 

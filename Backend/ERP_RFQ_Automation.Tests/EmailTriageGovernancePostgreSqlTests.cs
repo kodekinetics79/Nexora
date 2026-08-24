@@ -14,7 +14,15 @@ public sealed class EmailTriageGovernancePostgreSqlTests(PostgreSqlTestDatabase 
     [Trait("Category", "PostgreSQL")]
     public async Task Concurrent_identical_reprocess_commands_append_one_audit_and_one_reopen()
     {
-        var tenant = 98_800L + Random.Shared.Next(1, 500);
+        // FIXED, not drawn from a 499-wide random range.
+        //
+        // The tenant id has nothing to do with what this test proves — two identical reprocess
+        // commands must append one audit row and perform one reopen — so randomising it buys
+        // nothing and costs determinism: a collision with another class in this shared database
+        // would show up as a one-in-five-hundred failure that never reproduces, which is the most
+        // expensive kind of test there is. 98_801 is exclusive to this test; the neighbouring
+        // 99_001 in ManualUploadControllerTrustTests is on SQLite and never reaches this database.
+        const long tenant = 98_801L;
         var ingestId = await SeedNoiseAsync(tenant);
         const string key = "concurrent-noise-reopen";
 
@@ -129,5 +137,14 @@ public sealed class EmailTriageGovernancePostgreSqlTests(PostgreSqlTestDatabase 
                 1, Guid.NewGuid(), Scheduled: 1, AlreadyScheduled: 0, Held: 0,
                 ExpectedComponents: 1, AlreadyCaptured: true, SafeToAcknowledge: true,
                 FailureReason: null));
+        /// <summary>
+        /// Not this stub's subject. The resume path is proved against the real intake service on
+        /// PostgreSQL; a stand-in here would only assert its own return value.
+        /// </summary>
+        public Task<ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryResumeResult> ResumeSchedulingAsync(
+            long businessUnitId, long assemblyId, CancellationToken ct = default,
+            ERP_RFQ_Automation.Ingestion.Assembly.EmailInquirySchedulingGrant? grant = null)
+            => Task.FromResult(new ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryResumeResult(
+                ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryResumeOutcome.NothingToResume, 0, 0));
     }
 }

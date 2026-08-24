@@ -409,7 +409,8 @@ public sealed class EmailInquiryStrandedComponentSweepPostgreSqlTests(PostgreSql
         public Task RecordComponentQueuedAsync(
             long businessUnitId, long assemblyId, string componentKey, long extractionJobId,
             CancellationToken ct = default, string? evidenceUri = null,
-            long? sourceDocumentOccurrenceId = null)
+            long? sourceDocumentOccurrenceId = null,
+            ERP_RFQ_Automation.Ingestion.Assembly.EmailInquirySchedulingGrant? grant = null)
             => inner.RecordComponentQueuedAsync(businessUnitId, assemblyId, componentKey,
                 extractionJobId, ct, evidenceUri, sourceDocumentOccurrenceId);
 

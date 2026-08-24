@@ -24,6 +24,7 @@ import { useSnackbar } from 'notistack';
 import { useAuth } from '../../../context/AuthContext';
 import ApiErrorNotice from '../../../components/common/ApiErrorNotice';
 import { gridEmptyOverlay } from '../../../components/common/gridOverlays';
+import ViewTabs from '../../../components/layout/ViewTabs';
 import { formatDateSafe } from '../../../utils/dates';
 
 const OutstandingRFQsPage: React.FC = () => {
@@ -99,9 +100,19 @@ const OutstandingRFQsPage: React.FC = () => {
     title: 'No outstanding RFQs',
     message: 'An assigned lead appears here until it has been processed into an RFQ.',
     icon: <ItemsIcon sx={{ fontSize: 48 }} />,
+    action: (
+      <Button variant="contained" onClick={() => navigate('/procurement/leads/assigned')} sx={{ fontWeight: 700 }}>
+        See assigned inquiries
+      </Button>
+    ),
     filtered: Boolean(search),
     filteredMessage: 'No outstanding RFQ matches this search. Clear it to see the whole queue.',
-  }), [search]);
+    filteredAction: (
+      <Button variant="outlined" onClick={() => setSearch('')} sx={{ fontWeight: 700 }}>
+        Clear the search
+      </Button>
+    ),
+  }), [search, navigate]);
 
   const columns: GridColDef[] = [
     {
@@ -210,6 +221,8 @@ const OutstandingRFQsPage: React.FC = () => {
         </Box>
         <Button variant="outlined" startIcon={<RefreshIcon />} onClick={() => refetch()} size="small" sx={{ fontWeight: 800 }}>Refresh</Button>
       </Box>
+
+      <ViewTabs primaryKey="rfqs" ariaLabel="RFQ views" />
 
       <Paper sx={{ p: 1.5, mb: 1.5, display: 'flex', gap: 2, alignItems: 'center', borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
         <SearchField width="400px" value={search} onChange={setSearch} placeholder="Filter outstanding RFQs..." />

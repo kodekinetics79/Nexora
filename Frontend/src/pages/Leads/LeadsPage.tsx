@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
@@ -19,6 +19,8 @@ import {
   Email as EmailIcon,
   AutoAwesome as SparkleIcon,
   MoreVert as MoreIcon,
+  FilterAltOff as ClearFiltersIcon,
+  MarkEmailRead as InboxIcon,
 } from '@mui/icons-material';
 import useColumnPreferences from '../../hooks/useColumnPreferences';
 import ColumnPreferences from '../../components/common/ColumnPreferences';
@@ -28,6 +30,8 @@ import LateIngestedBadge from './LateIngestedBadge';
 import ClientCell from './ClientCell';
 import ResolveClientDialog from './ResolveClientDialog';
 import SearchField from '../../components/common/SearchField';
+import gridEmptyOverlay from '../../components/common/gridOverlays';
+import ViewTabs from '../../components/layout/ViewTabs';
 import { useSnackbar } from 'notistack';
 import { formatDateSafe, parseDateSafe } from '../../utils/dates';
 import { useAuth } from '../../context/AuthContext';
@@ -158,7 +162,7 @@ const decisionFacts = (s: LeadDecisionSummary): string[] => {
 const LeadsPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const view = searchParams.get('view') || searchParams.get('state') || undefined;
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
@@ -193,6 +197,26 @@ const LeadsPage: React.FC = () => {
     setRowMenuAnchor(null);
     setRowMenuLeadId(null);
   };
+
+  // Everything that can narrow this list. `view` is included because it is a filter the reader
+  // did not type: arriving from a dashboard tile can empty the grid with nothing on screen
+  // explaining it, which is exactly the "no data" / "filtered to zero" confusion below.
+  const filtersActive = search.trim().length > 0 || leadSource !== 'all' || Boolean(view);
+  // useCallback, not a bare closure: the no-rows overlay below is memoised because DataGrid
+  // takes a component TYPE, and a fresh function identity each render would rebuild that type
+  // and remount the overlay under the user.
+  const clearFilters = useCallback(() => {
+    setSearch('');
+    setLeadSource('all');
+    setPaginationModel((current) => ({ ...current, page: 0 }));
+    if (view) {
+      // Drop only the view/state keys; anything else on the URL belongs to someone else.
+      const next = new URLSearchParams(searchParams);
+      next.delete('view');
+      next.delete('state');
+      setSearchParams(next, { replace: true });
+    }
+  }, [view, searchParams, setSearchParams]);
 
   const syncEmailsMutation = useMutation({
     mutationFn: () => leadService.fetchEmails(),
@@ -236,6 +260,43 @@ const LeadsPage: React.FC = () => {
       view,
     }),
   });
+
+  /**
+   * The top-of-funnel grid shipped MUI's bare "No rows" — the string a rep reads on day one when
+   * the mailbox has not yet been configured, and the same string they read when a search matched
+   * nothing. Neither reading tells them what to do, and one of the two is a setup problem they can
+   * fix themselves. Memoised because DataGrid takes a component TYPE here.
+   */
+  const noRowsOverlay = useMemo(() => gridEmptyOverlay({
+    title: 'No inquiries yet',
+    message: 'Enquiries arrive on their own once a mailbox is connected — or you can read documents in from your machine right now.',
+    action: (
+      <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', justifyContent: 'center' }}>
+        <Button variant="contained" onClick={() => navigate('/procurement/leads/manual-upload')} sx={{ fontWeight: 700 }}>
+          Upload a document
+        </Button>
+        {/* An empty grid is also what a BROKEN intake looks like. Inbound Mail is the only screen
+            that can tell the user which of the two they are looking at, so it must be reachable
+            from here rather than only from the sidebar. */}
+        <Button variant="outlined" startIcon={<InboxIcon />} onClick={() => navigate('/procurement/leads/inbound-mail')} sx={{ fontWeight: 700 }}>
+          Open Inbound Mail
+        </Button>
+      </Box>
+    ),
+    filtered: filtersActive,
+    filteredTitle: 'No inquiries match these filters',
+    filteredMessage: 'Nothing matches the search and filters currently applied. Clearing them shows every inquiry this business unit has.',
+    filteredAction: (
+      <Button
+        variant="outlined"
+        startIcon={<ClearFiltersIcon />}
+        onClick={clearFilters}
+        sx={{ fontWeight: 700 }}
+      >
+        Clear filters
+      </Button>
+    ),
+  }), [filtersActive, clearFilters, navigate]);
 
   // Decision Brief summaries: one batched call for the current page's ids,
   // fired only after the leads query resolves. This never blocks the grid —
@@ -662,6 +723,10 @@ const LeadsPage: React.FC = () => {
         </Stack>
       </Stack>
 
+      {/* The lead queues, as one level of tabs on the screen they filter. "Unassigned", "Assigned"
+          and "Revisions" were separate rail destinations over what a rep reads as one list. */}
+      <ViewTabs primaryKey="leads" ariaLabel="Inquiry views" />
+
       {/* Filters + view controls */}
       <Paper sx={{ p: 1.5, mb: 1.5, display: 'flex', flexWrap: 'wrap', gap: 1.5, alignItems: 'center', borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
         <Box sx={{ width: { xs: '100%', sm: 360 }, maxWidth: '100%' }}>
@@ -711,6 +776,7 @@ const LeadsPage: React.FC = () => {
             columns={orderedColumns}
             rowCount={totalCount}
             loading={isLoading}
+            slots={{ noRowsOverlay }}
             pageSizeOptions={[10, 25, 50]}
             paginationModel={paginationModel}
             paginationMode="server"

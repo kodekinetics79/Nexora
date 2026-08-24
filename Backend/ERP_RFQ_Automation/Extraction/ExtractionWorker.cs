@@ -271,6 +271,18 @@ public sealed class ExtractionWorker : BackgroundService
                     return true;
                 }
                 await MarkIntakeFinalizedAsync(job, ct);
+                // AND THE MESSAGE'S BARRIER IS SETTLED, NOW, TRUTHFULLY.
+                //
+                // This branch is the one success path that produces no Lead and therefore no
+                // component result, so nothing else ever closed the component: it stayed
+                // Extracting until the stranded sweep found it thirty minutes later, saw a
+                // Succeeded job with no result row, and closed it Skipped —
+                // "No part of this message could be read". Every part WAS read; it was
+                // deliberately routed away from Lead creation. The message spent half an hour
+                // claiming to be in progress and then landed in a human's tray under a reason
+                // that was not true.
+                await IgnoreAssemblyComponentAsync(
+                    job, CommercialNonInquiryReason, CommercialNonInquiryDetail, ct);
                 _metrics?.JobSucceeded(ElapsedMs(), job.BusinessUnitId);
                 _log.LogInformation(
                     "Job {JobId} completed as a non-Lead commercial document for tenant {BusinessUnitId}.",
@@ -518,6 +530,17 @@ public sealed class ExtractionWorker : BackgroundService
                 else
                 {
                     await MarkIntakeFailureAsync(job, "unexpected_extraction_failure", CancellationToken.None);
+                    // THE ONE FAILURE PATH THAT DID NOT CLOSE ITS COMPONENT.
+                    //
+                    // Its three siblings above — extraction failure, parse failure, evidence
+                    // integrity — all do. An UNEXPECTED exception that exhausted MaxAttempts
+                    // therefore dead-lettered the job and left the component Extracting with
+                    // nothing in flight: the message waited on a part no worker would ever pick
+                    // up again until the thirty-minute sweep noticed. The closure is best-effort
+                    // and idempotent, and the sweep remains the backstop for the dead letters the
+                    // queue's own claim statement writes with no worker in the loop.
+                    await CloseAssemblyComponentAsync(
+                        job, "unexpected_extraction_failure", permanent: false, CancellationToken.None);
                     await MarkIngestDeadLetterVisibleAsync(job, permanent: false, CancellationToken.None);
                     RecordFailureMetrics(job, "unexpected_extraction_failure", ex.Message, ElapsedMs());
                 }
@@ -869,6 +892,80 @@ public sealed class ExtractionWorker : BackgroundService
             // stranded-component sweep is the backstop.
             _log.LogError(exception,
                 "Could not close the assembly component for extraction job {JobId}.", job.Id);
+        }
+    }
+
+    /// <summary>Reason recorded when a message's part was read and routed away from Lead creation.</summary>
+    internal const string CommercialNonInquiryReason = "commercial_non_inquiry";
+
+    /// <summary>
+    /// What a person is told about a part that was read and deliberately not turned into an
+    /// inquiry. It says what happened rather than reporting a failure, because nothing failed.
+    /// </summary>
+    internal const string CommercialNonInquiryDetail =
+        "This part of the message was read and identified as a supplier document rather than a "
+        + "request to quote, so no inquiry was created from it. Nothing has been lost.";
+
+    /// <summary>
+    /// Settles a component that was READ and deliberately produced no Lead.
+    ///
+    /// <para>Deliberately not <see cref="CloseAssemblyComponentAsync"/>. That method exists for a
+    /// job that STOPPED TRYING and splits its outcome between an infrastructure hold and a
+    /// content refusal — both of which are statements that something went wrong. This one settles
+    /// a success: the part was read, a rule routed it away from Lead creation, and
+    /// <see cref="ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponentStatus.Ignored"/> is
+    /// the one terminal status the state machine already treats as "accounted for, and not a part
+    /// the sender attached that went unread".</para>
+    ///
+    /// <para>Written through the coordinator so the barrier is recomputed in the same unit of
+    /// work, and best-effort for the same reason as its sibling: a job must never fail because
+    /// its component could not be annotated.</para>
+    /// </summary>
+    private async Task IgnoreAssemblyComponentAsync(
+        ExtractionJob job, string reasonCode, string reasonDetail, CancellationToken ct)
+    {
+        try
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetService<ErpRfqAutomationContext>();
+            if (db is null
+                || db.Model.FindEntityType(
+                    typeof(ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponent)) is null)
+                return;
+
+            var component = await db.Set<ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponent>()
+                .AsNoTracking()
+                .SingleOrDefaultAsync(
+                    x => x.BusinessUnitId == job.BusinessUnitId && x.ExtractionJobId == job.Id, ct);
+            if (component is null) return;
+
+            // Never overwrite a decision reached with more information — a security refusal, a
+            // completed extraction, an already recorded hold.
+            if (!ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponentClosure.IsClosable(
+                    component.Status))
+                return;
+
+            if (scope.ServiceProvider.GetService<
+                    ERP_RFQ_Automation.Ingestion.Assembly.IEmailInquiryAssemblyCoordinator>()
+                is not { } coordinator)
+                return;
+
+            await coordinator.RecordComponentOutcomeAsync(
+                job.BusinessUnitId, component.AssemblyId, component.ComponentKey,
+                ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponentStatus.Ignored,
+                reasonCode, reasonDetail, sourceDocumentOccurrenceId: null, ct);
+
+            _log.LogInformation(
+                "Assembly component {ComponentId} settled as Ignored ({ReasonCode}) because job "
+                + "{JobId} read it and routed it away from lead creation; its message finalizes "
+                + "now instead of waiting for the stranded sweep.",
+                component.Id, reasonCode, job.Id);
+        }
+        catch (Exception exception)
+        {
+            _log.LogError(exception,
+                "Could not settle the assembly component for non-Lead extraction job {JobId}; the "
+                + "stranded-component sweep remains the backstop.", job.Id);
         }
     }
 

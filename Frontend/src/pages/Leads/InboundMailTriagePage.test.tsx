@@ -5,6 +5,9 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import InboundMailTriagePage from './InboundMailTriagePage';
 import {
   describeAssemblyState,
+  describeMessageProgress,
+  describeReopenAbility,
+  isTriageUnavailable,
   readPollFailureReport,
   readPollReport,
   readTriagePage,
@@ -34,12 +37,18 @@ vi.mock('../../api/services/emailTriageService', async (importOriginal) => {
     ...actual,
     default: {
       listTriage: (params: unknown) => listTriage(params),
-      reprocess: (id: number, reason: string) => reprocess(id, reason),
+      reprocess: (id: number, reason: string, key?: string) => reprocess(id, reason, key),
       pollMailboxes: () => pollMailboxes(),
       getMessage: (id: number) => getMessage(id),
     },
   };
 });
+
+const getMailboxes = vi.fn();
+
+vi.mock('../../api/services/mailboxService', () => ({
+  default: { getAll: () => getMailboxes() },
+}));
 
 const hasPermission = vi.fn();
 
@@ -239,6 +248,71 @@ const SKIPPED_MESSAGE = readTriageRow({
   ],
 });
 
+/** A connected, active, healthy IMAP inbox — the case where an empty list really is empty. */
+const HEALTHY_MAILBOX = {
+  id: 1,
+  configurationName: 'Enquiries',
+  emailAddress: 'enquiries@example.test',
+  protocol: 'IMAP' as const,
+  host: 'imap.example.test',
+  port: 993,
+  username: 'enquiries',
+  useSsl: true,
+  pollingInterval: 5,
+  isActive: true,
+  createdOn: '2026-08-01T00:00:00Z',
+  lastSuccessfulPollOn: '2026-08-06T06:00:00Z',
+  lastPollAttemptOn: '2026-08-06T06:00:00Z',
+  lastPollError: null,
+  consecutivePollFailures: 0,
+  healthState: 'Healthy' as const,
+  healthDetail: 'Polling normally.',
+  credentialsSentInClear: false,
+};
+
+/**
+ * The three assembly states that leave a message with NO lead and no usable reprocess — the dead
+ * ends this screen used to render as a row with one button that could only answer 422.
+ */
+const DEAD_END_PAGE = readTriagePage(
+  {
+    items: [
+      {
+        id: 301,
+        receivedOn: '2026-08-07T06:00:00Z',
+        from: 'buying@qcon.qa',
+        subject: 'Scanned enquiry needing a person',
+        outcome: 'Uncertain',
+        reasonCodes: [],
+        assemblyState: 'NeedsReview',
+        linkedBatchId: 'batch-3001',
+      },
+      {
+        id: 302,
+        receivedOn: '2026-08-07T07:00:00Z',
+        from: 'projects@dana-cont.qa',
+        subject: 'Attachment refused on security grounds',
+        outcome: 'Uncertain',
+        reasonCodes: [],
+        assemblyState: 'RejectedSecurity',
+      },
+      {
+        id: 303,
+        receivedOn: '2026-08-07T08:00:00Z',
+        from: 'noreply@portal.example',
+        subject: 'Held while storage was down',
+        outcome: 'Inquiry',
+        reasonCodes: [],
+        assemblyState: 'FailedRecoverable',
+      },
+    ],
+    totalCount: 3,
+    pageNumber: 1,
+    pageSize: 25,
+  },
+  1,
+);
+
 const renderPage = () => {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -262,6 +336,9 @@ const rowFor = async (subject: RegExp): Promise<HTMLElement> => {
 beforeEach(() => {
   vi.clearAllMocks();
   hasPermission.mockReturnValue(true);
+  // A healthy inbound mailbox is the default, so the empty-state tests below are about the LIST
+  // and not about the plumbing. The obstacle cases set their own fixture.
+  getMailboxes.mockResolvedValue([HEALTHY_MAILBOX]);
   listTriage.mockResolvedValue(NOISE_PAGE);
   reprocess.mockResolvedValue({ id: 41, status: 'Queued', batchId: 'batch-42', replayed: false });
   pollMailboxes.mockResolvedValue(
@@ -369,8 +446,34 @@ describe('InboundMailTriagePage', () => {
     });
     fireEvent.click(within(dialog).getByRole('button', { name: /^reprocess as inquiry$/i }));
 
-    await waitFor(() => expect(reprocess).toHaveBeenCalledWith(41, 'Real enquiry hidden behind an auto-reply.'));
+    await waitFor(() =>
+      expect(reprocess).toHaveBeenCalledWith(
+        41, 'Real enquiry hidden behind an auto-reply.', expect.any(String)));
     expect(await screen.findByText(/was sent back through extraction as an inquiry/i)).toBeInTheDocument();
+  });
+
+  it('sendsOneIdempotencyKeyPerOverride_soADoubleClickIsOneCommand', async () => {
+    // The key used to be minted inside the service on every call, so two clicks were two
+    // DIFFERENT audited overrides and the second landed on a message the first had moved.
+    let resolveFirst: (value: unknown) => void = () => {};
+    reprocess.mockImplementation(() => new Promise((resolve) => { resolveFirst = resolve; }));
+    renderPage();
+    const row = await rowFor(/Automatic reply: Cable tray enquiry/);
+    fireEvent.click(within(row).getByRole('button', { name: /reprocess as inquiry/i }));
+
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText(/why is this an inquiry/i), {
+      target: { value: 'Real enquiry hidden behind an auto-reply.' },
+    });
+    const confirm = within(dialog).getByRole('button', { name: /^reprocess as inquiry$/i });
+    fireEvent.click(confirm);
+    fireEvent.click(confirm);
+
+    await waitFor(() => expect(reprocess).toHaveBeenCalled());
+    const keys = new Set(reprocess.mock.calls.map((call) => call[2]));
+    expect(keys.size).toBe(1);
+    expect([...keys][0]).toBeTruthy();
+    resolveFirst({ id: 41, status: 'Queued', batchId: 'batch-42', replayed: false });
   });
 
   it('hidesTheOverrideWhenTheRoleCannotUseIt', async () => {
@@ -378,7 +481,7 @@ describe('InboundMailTriagePage', () => {
     renderPage();
     await screen.findByText(/Automatic reply: Cable tray enquiry/);
     expect(screen.queryByRole('button', { name: /reprocess as inquiry/i })).not.toBeInTheDocument();
-    expect(screen.getByText(/needs the Leads permission/i)).toBeInTheDocument();
+    expect(screen.getByText(/needs the .edit leads. permission/i)).toBeInTheDocument();
   });
 
   it('queriesTheSelectedOutcomeWhenTheTabChanges', async () => {
@@ -386,7 +489,7 @@ describe('InboundMailTriagePage', () => {
     await screen.findByText(/Automatic reply: Cable tray enquiry/);
     listTriage.mockResolvedValue(INQUIRY_PAGE);
 
-    fireEvent.click(screen.getByRole('tab', { name: /^extracted$/i }));
+    fireEvent.click(screen.getByRole('tab', { name: /^extracted\b/i }));
 
     await waitFor(() => expect(listTriage).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'Inquiry' })));
     expect(await screen.findByText(/Requirement — Jebel Ali/)).toBeInTheDocument();
@@ -395,7 +498,7 @@ describe('InboundMailTriagePage', () => {
   it('explainsAMissingBackendInsteadOfShowingAFailure', async () => {
     listTriage.mockRejectedValue({ response: { status: 404 }, isAxiosError: true });
     renderPage();
-    expect(await screen.findByText(/not available in this deployment yet/i)).toBeInTheDocument();
+    expect(await screen.findByText(/not switched on for this account/i)).toBeInTheDocument();
     expect(screen.getByText(/no message has been hidden/i)).toBeInTheDocument();
   });
 
@@ -404,6 +507,207 @@ describe('InboundMailTriagePage', () => {
     renderPage();
     expect(await screen.findByRole('alert')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /try again/i })).toBeInTheDocument();
+  });
+
+  it('sendsNoOutcomeFilterOnTheAllTab_soMailWithNoDecisionIsReachable', async () => {
+    // A row whose TriageOutcome is null matches none of the four decision filters, so before
+    // this tab existed a message written by manual upload, a watched folder or lead identity
+    // reconciliation appeared on NO tab at all.
+    renderPage();
+    await screen.findByText(/Automatic reply: Cable tray enquiry/);
+    listTriage.mockClear();
+
+    fireEvent.click(screen.getByRole('tab', { name: /^all messages\b/i }));
+
+    await waitFor(() => expect(listTriage).toHaveBeenCalled());
+    const params = listTriage.mock.calls.at(-1)?.[0] as { outcome?: unknown };
+    expect(params.outcome).toBeUndefined();
+  });
+
+  it('countsWhatIsSittingBehindEachTab', async () => {
+    // Nothing counted stranded mail: thirteen held messages looked exactly like none.
+    renderPage();
+    expect(await screen.findByRole('tab', { name: /rejected as noise \(2\)/i })).toBeInTheDocument();
+  });
+});
+
+describe('InboundMailTriagePage — a row is never a dead end', () => {
+  beforeEach(() => {
+    listTriage.mockResolvedValue(DEAD_END_PAGE);
+  });
+
+  it('offersTheIngestionBatchWhereAMessageNeedsAPersonAndHasNoLead', async () => {
+    renderPage();
+    const row = await rowFor(/Scanned enquiry needing a person/);
+
+    fireEvent.click(within(row).getByRole('button', { name: /open ingestion batch/i }));
+    expect(navigate).toHaveBeenCalledWith('/procurement/leads/ingestion/batch-3001');
+  });
+
+  it('offersTheDeadLetterReplayToAnAdministrator', async () => {
+    renderPage();
+    const row = await rowFor(/Scanned enquiry needing a person/);
+    fireEvent.click(within(row).getByRole('button', { name: /retry failed processing/i }));
+    expect(navigate).toHaveBeenCalledWith('/admin/operations');
+  });
+
+  it('hidesTheDeadLetterReplayFromARoleThatCannotOpenIt', async () => {
+    // A link the reader's role cannot open is another dead end, not a fix for one.
+    hasPermission.mockImplementation((module: string) => module !== 'Users');
+    renderPage();
+    const row = await rowFor(/Scanned enquiry needing a person/);
+    expect(within(row).queryByRole('button', { name: /retry failed processing/i })).not.toBeInTheDocument();
+    // The batch link is unaffected: it is the action this row actually has.
+    expect(within(row).getByRole('button', { name: /open ingestion batch/i })).toBeInTheDocument();
+  });
+
+  it('hidesReprocessWhereItCanOnlyFail_andSaysWhyInPlainEnglish', async () => {
+    renderPage();
+
+    const review = await rowFor(/Scanned enquiry needing a person/);
+    expect(within(review).queryByRole('button', { name: /reprocess as inquiry/i })).not.toBeInTheDocument();
+    expect(within(review).getAllByText(/already waiting for a person/i).length).toBeGreaterThan(0);
+
+    const security = await rowFor(/Attachment refused on security grounds/);
+    expect(within(security).queryByRole('button', { name: /reprocess as inquiry/i })).not.toBeInTheDocument();
+    expect(
+      within(security).getAllByText(/cannot be sent back through extraction/i).length,
+    ).toBeGreaterThan(0);
+  });
+
+  it('keepsReprocessOnAHeldMessage_becauseThatIsTheOneThingThatFreesIt', async () => {
+    // The P0: nothing sweeps a held message, so this button is its only way back into flight.
+    renderPage();
+    const held = await rowFor(/Held while storage was down/);
+    expect(within(held).getByRole('button', { name: /reprocess as inquiry/i })).toBeInTheDocument();
+  });
+
+  it('neverPrintsAnInternalStateNameAtTheReader', async () => {
+    renderPage();
+    await screen.findByText(/Scanned enquiry needing a person/);
+    for (const enumName of ['NeedsReview', 'RejectedSecurity', 'FailedRecoverable', 'ReadyForAssembly']) {
+      expect(screen.queryByText(new RegExp(enumName))).not.toBeInTheDocument();
+    }
+  });
+});
+
+/**
+ * The live inversion, driven through the screen.
+ *
+ * Both rows carry the checkpoint the API actually returns, and it means the OPPOSITE of what it
+ * reads as in each case. Neither string may appear, and the two rows must not look alike.
+ */
+const INVERTED_CHECKPOINT_PAGE = readTriagePage(
+  {
+    items: [
+      {
+        // Live shape of ingests 997/999/1001/1003: closed at NeedsReview, checkpoint says Queued.
+        id: 997,
+        receivedOn: '2026-08-24T06:00:00Z',
+        from: 'buying@qcon.qa',
+        subject: 'Finished and produced nothing',
+        outcome: 'Uncertain',
+        reasonCodes: [],
+        assemblyState: 'NeedsReview',
+        parseStatus: 'Queued',
+      },
+      {
+        // The successful shape: a lead exists, checkpoint says NeedsReview.
+        id: 998,
+        receivedOn: '2026-08-24T07:00:00Z',
+        from: 'buyer@gulfmep.ae',
+        subject: 'Finished and produced a lead',
+        outcome: 'Inquiry',
+        reasonCodes: [],
+        assemblyState: 'NeedsReview',
+        assembledLeadId: 8110,
+        parseStatus: 'NeedsReview',
+      },
+    ],
+    totalCount: 2,
+    pageNumber: 1,
+    pageSize: 25,
+  },
+  1,
+);
+
+describe('InboundMailTriagePage — the per-ingest checkpoint never reaches the reader', () => {
+  beforeEach(() => {
+    listTriage.mockResolvedValue(INVERTED_CHECKPOINT_PAGE);
+  });
+
+  it('showsTheLossAsALoss_notAsWorkStillInProgress', async () => {
+    renderPage();
+    const row = await rowFor(/Finished and produced nothing/);
+
+    expect(within(row).getByText('No inquiry — needs review')).toBeInTheDocument();
+    expect(within(row).queryByRole('button', { name: /open lead/i })).not.toBeInTheDocument();
+    // The word the checkpoint would have put here, which means the opposite of the truth.
+    expect(within(row).queryByText(/queued/i)).not.toBeInTheDocument();
+  });
+
+  it('showsTheSuccessAsASuccess_notAsAProblem', async () => {
+    renderPage();
+    const row = await rowFor(/Finished and produced a lead/);
+
+    expect(within(row).getByText('Inquiry created — needs your review')).toBeInTheDocument();
+    fireEvent.click(within(row).getByRole('button', { name: /open lead/i }));
+    expect(navigate).toHaveBeenCalledWith('/procurement/leads/view/8110');
+  });
+
+  it('doesNotMakeTheTwoLookAlike', async () => {
+    renderPage();
+    const loss = await rowFor(/Finished and produced nothing/);
+    const win = await rowFor(/Finished and produced a lead/);
+
+    // Same assembly state, same checkpoint family, opposite commercial outcomes. If these two
+    // ever render the same string the screen is back to hiding losses in plain sight.
+    expect(within(loss).getByText(/^No inquiry/).textContent)
+      .not.toEqual(within(win).getByText(/^Inquiry created/).textContent);
+  });
+});
+
+describe('InboundMailTriagePage — an empty list states its real cause', () => {
+  const EMPTY = readTriagePage({ items: [], totalCount: 0, pageNumber: 1, pageSize: 25 }, 1);
+
+  it('doesNotSayNothingIsHiddenWhenNoInboxIsConnected', async () => {
+    listTriage.mockResolvedValue(EMPTY);
+    getMailboxes.mockResolvedValue([]);
+    renderPage();
+
+    expect(await screen.findByText(/no inbox is connected/i)).toBeInTheDocument();
+    expect(screen.queryByText(/nothing is being hidden from you/i)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /open email inboxes/i }));
+    expect(navigate).toHaveBeenCalledWith('/setup/mailboxes');
+  });
+
+  it('namesAFailingInboxRatherThanReassuringTheReader', async () => {
+    listTriage.mockResolvedValue(EMPTY);
+    getMailboxes.mockResolvedValue([
+      { ...HEALTHY_MAILBOX, healthState: 'Failing', lastPollError: 'authentication failed' },
+    ]);
+    renderPage();
+
+    expect(await screen.findByText(/cannot be read/i)).toBeInTheDocument();
+    expect(screen.getByText(/enquiries@example\.test/)).toBeInTheDocument();
+  });
+
+  it('keepsTheReassuringEmptyStateWhenTheMailboxIsGenuinelyHealthy', async () => {
+    listTriage.mockResolvedValue(EMPTY);
+    renderPage();
+
+    expect(await screen.findByText(/nothing is being hidden from you/i)).toBeInTheDocument();
+  });
+
+  it('saysNothingAboutMailboxesToARoleThatCannotSeeThem', async () => {
+    // A 403 on /api/Mailbox is indistinguishable from "no mailbox exists", and a warning built
+    // on that guess would be false. The query is not made at all.
+    listTriage.mockResolvedValue(EMPTY);
+    hasPermission.mockImplementation((module: string) => module !== 'Email & SMTP');
+    renderPage();
+
+    await screen.findByText(/nothing is being hidden from you/i);
+    expect(getMailboxes).not.toHaveBeenCalled();
   });
 });
 
@@ -514,11 +818,13 @@ describe('InboundMailTriagePage — assembly', () => {
     renderPage();
 
     const assembled = await rowFor(/RFQ 8891 — pipe supports/);
-    expect(within(assembled).getByText('Assembled')).toBeInTheDocument();
+    // Named for the OUTCOME, not the internal state: this message produced an inquiry.
+    expect(within(assembled).getByText('Inquiry created')).toBeInTheDocument();
     expect(within(assembled).getByText('2 of 2 parts assembled')).toBeInTheDocument();
 
     const review = await rowFor(/Scanned enquiry/);
-    expect(within(review).getByText('Needs review')).toBeInTheDocument();
+    // Finished, and it produced NOTHING. That is the fact the reader has to see.
+    expect(within(review).getByText('No inquiry — needs review')).toBeInTheDocument();
     expect(
       within(review).getByText('An attachment could not be read, so a person has to look at this message.'),
     ).toBeInTheDocument();
@@ -591,7 +897,7 @@ describe('InboundMailTriagePage — assembly', () => {
     const detail = await screen.findByRole('region', { name: /message and extraction/i });
     expect(await within(detail).findByRole('alert')).toBeInTheDocument();
     // The decision the panel already had must survive the parts failing to load.
-    expect(within(detail).getByText(/Assembly — Needs review/)).toBeInTheDocument();
+    expect(within(detail).getByText(/What became of it — No inquiry — needs review/)).toBeInTheDocument();
   });
 });
 
@@ -627,7 +933,7 @@ describe('InboundMailTriagePage — skipped attachments', () => {
     await within(detail).findByRole('table', { name: /skipped attachments of/i });
 
     // The message is finished and says so — skips do not turn an assembled message into a failure.
-    expect(within(detail).getByText(/Assembly — Assembled/)).toBeInTheDocument();
+    expect(within(detail).getByText(/What became of it — Inquiry created/)).toBeInTheDocument();
     expect(screen.getByText('2 of 2 parts assembled')).toBeInTheDocument();
 
     // The parts table is the scheduled work only: two components, neither of them a skip.
@@ -892,5 +1198,120 @@ describe('readTriageRow', () => {
     expect(page.items).toHaveLength(1);
     expect(page.pageNumber).toBe(3);
     expect(page.pageSize).toBeNull();
+  });
+});
+
+describe('isTriageUnavailable', () => {
+  it('treatsAnUnentitledTenantAsNotSwitchedOn_notAsAPermissionToAskFor', () => {
+    // The generic 403 copy is "ask an administrator if you need it", and no administrator can
+    // grant an entitlement — it is a plan-level switch. Matching it here is what replaces that
+    // dead end with an honest explanation.
+    expect(
+      isTriageUnavailable({
+        response: {
+          status: 403,
+          data: {
+            type: 'https://nexora.invalid/problems/feature-not-entitled',
+            title: 'Feature is not entitled',
+          },
+        },
+      }),
+    ).toBe(true);
+  });
+
+  it('leavesAnOrdinaryRoleDenialAlone', () => {
+    // A role denial IS something an administrator can fix, so it must keep its own wording.
+    expect(isTriageUnavailable({ response: { status: 403, data: { title: 'Forbidden' } } })).toBe(false);
+    expect(isTriageUnavailable({ response: { status: 403 } })).toBe(false);
+  });
+
+  it('stillTreatsAnAbsentEndpointAsNotShipped', () => {
+    expect(isTriageUnavailable({ response: { status: 404 } })).toBe(true);
+    expect(isTriageUnavailable({ response: { status: 501 } })).toBe(true);
+    expect(isTriageUnavailable({ response: { status: 500 } })).toBe(false);
+  });
+});
+
+describe('describeReopenAbility', () => {
+  it('allowsTheTwoShapesOfStrandedMessage', () => {
+    // These are exactly the two the governed reopen accepts server-side. A held message is the
+    // P0: nothing else in the system sweeps one back into flight.
+    expect(describeReopenAbility('NoInquiry')).toEqual({ canReopen: true, disabledReason: null });
+    expect(describeReopenAbility('FailedRecoverable')).toEqual({ canReopen: true, disabledReason: null });
+  });
+
+  it('refusesTheStatesTheEndpointRefuses_andSaysWhyWithoutNamingThem', () => {
+    for (const state of ['Assembled', 'NeedsReview', 'RejectedSecurity', 'Extracting', 'ReadyForAssembly']) {
+      const ability = describeReopenAbility(state);
+      expect(ability.canReopen).toBe(false);
+      expect(ability.disabledReason).toBeTruthy();
+      expect(ability.disabledReason).not.toContain(state);
+    }
+  });
+
+  it('resolvesTheWorkerKeySpellingsThroughTheSameAliasTable', () => {
+    // `completed` is the worker's spelling of Assembled. Reading it as an unknown state would put
+    // the button back on a message that already became an inquiry.
+    expect(describeReopenAbility('completed').canReopen).toBe(false);
+    expect(describeReopenAbility('review').canReopen).toBe(false);
+    expect(describeReopenAbility('held').canReopen).toBe(true);
+  });
+
+  it('keepsTheControlWhereThisBuildCannotJudge', () => {
+    // Mail that predates the assembly aggregate reports no state, and its legacy reopen path is
+    // still live. Hiding a real recovery because the wording drifted is the worse mistake.
+    expect(describeReopenAbility(null).canReopen).toBe(true);
+    expect(describeReopenAbility('SomethingThisBuildHasNeverSeen').canReopen).toBe(true);
+  });
+});
+
+describe('describeMessageProgress — the checkpoint reads backwards, so the screen never uses it', () => {
+  it('callsAFinishedMessageThatProducedNothingALoss_evenWhenTheCheckpointSaysQueued', () => {
+    // Measured live: ingests whose assembly is CLOSED at NeedsReview carry ParseStatus = Queued,
+    // which reads as "still being worked on". It is finished, and it produced nothing.
+    const progress = describeMessageProgress('NeedsReview', false);
+    expect(progress.kind).toBe('no-inquiry');
+    expect(progress.label).toMatch(/^No inquiry/i);
+    expect(progress.chipColor).not.toBe('success');
+  });
+
+  it('callsAMessageThatProducedALeadASuccess_evenWhenTheCheckpointSaysNeedsReview', () => {
+    // The other half of the inversion: a SUCCESSFUL ingest carries ParseStatus = NeedsReview,
+    // which reads as a problem. A lead exists — the only thing outstanding is a human decision.
+    const progress = describeMessageProgress('NeedsReview', true);
+    expect(progress.kind).toBe('inquiry-created');
+    expect(progress.label).toBe('Inquiry created — needs your review');
+    expect(progress.chipColor).toBe('success');
+  });
+
+  it('keepsInFlightDistinctFromBothFinishedAnswers', () => {
+    for (const state of ['Captured', 'Inspecting', 'Extracting', 'ReadyForAssembly']) {
+      expect(describeMessageProgress(state, false).kind).toBe('in-flight');
+    }
+  });
+
+  it('readsTheAssemblyAsTheTruthWhereTheTwoDisagree', () => {
+    // A message with a lead is an inquiry however it got there; one without is not, whatever the
+    // per-ingest checkpoint says. The checkpoint is not an input to this function at all.
+    expect(describeMessageProgress('Assembled', true).kind).toBe('inquiry-created');
+    expect(describeMessageProgress('NoInquiry', false).kind).toBe('no-inquiry');
+    expect(describeMessageProgress('FailedRecoverable', false).kind).toBe('no-inquiry');
+    expect(describeMessageProgress('RejectedSecurity', false).kind).toBe('no-inquiry');
+  });
+
+  it('judgesPreAssemblyMailOnTheLeadAlone', () => {
+    expect(describeMessageProgress(null, true).kind).toBe('inquiry-created');
+    expect(describeMessageProgress(null, false).kind).toBe('unknown');
+    // An unrecognised state is never called finished-and-successful on its own.
+    expect(describeMessageProgress('QuantumSuperposition', false).kind).toBe('unknown');
+  });
+
+  it('neverPrintsAnInternalStateNameAsALabel', () => {
+    for (const state of ['Captured', 'Inspecting', 'Assembled', 'ReadyForAssembly', 'NeedsReview',
+      'FailedRecoverable', 'NoInquiry', 'RejectedSecurity']) {
+      for (const hasLead of [true, false]) {
+        expect(describeMessageProgress(state, hasLead).label).not.toContain(state);
+      }
+    }
   });
 });

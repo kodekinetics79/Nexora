@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Box, Tab, Tabs, Typography } from '@mui/material';
+import { Box, ToggleButton, ToggleButtonGroup, Typography } from '@mui/material';
 import Stack from '../../components/Flex';
 import AuditExplorer from '../../components/AuditExplorer';
 import PageSection from '../../components/PageSection';
@@ -37,10 +37,26 @@ export default function AuditTab({ tenant }: { tenant: Tenant }) {
 
   return (
     <Stack spacing={2}>
-      <Tabs value={view} onChange={(_event, next) => setView(next)}>
-        <Tab value="explorer" label="Audit entries" />
-        <Tab value="timeline" label="Merged timeline" />
-      </Tabs>
+      {/*
+        This was a second `<Tabs>` INSIDE the tenant page's twelve-tab strip — the only genuine
+        tab-within-tab in the product. Two identical strips stacked make the inner one read as a
+        third level of navigation, and a reader who clicked "Merged timeline" could not tell
+        whether they had changed page or changed filter.
+
+        It is a segmented control now: a filter over one screen, visually distinct from the tab
+        strip above it. Same two readings, same state, one level of tabs on the page.
+      */}
+      <ToggleButtonGroup
+        exclusive
+        size="small"
+        value={view}
+        onChange={(_event, next: 'explorer' | 'timeline' | null) => next && setView(next)}
+        aria-label="Audit reading"
+        sx={{ alignSelf: 'flex-start' }}
+      >
+        <ToggleButton value="explorer">Audit entries</ToggleButton>
+        <ToggleButton value="timeline">Merged timeline</ToggleButton>
+      </ToggleButtonGroup>
 
       {view === 'explorer' ? (
         <AuditExplorer tenantId={tenant.id} height={560} />

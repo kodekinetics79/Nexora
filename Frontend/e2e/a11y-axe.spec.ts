@@ -108,6 +108,10 @@ test.describe('WCAG 2.1 AA — axe scan', () => {
       ['/procurement/rfqs/outstanding', 'Outstanding RFQs | NEXORA'],
       ['/sales/quotes', 'Quotes | NEXORA'],
       ['/analytics/deadlines', 'Deadline Board | NEXORA'],
+      // The landing screen and the directory that replaced the 69-row rail. The first screen after
+      // sign-in is the one that can least afford an accessibility regression.
+      ['/inbox', 'Inbox | NEXORA'],
+      ['/advanced', 'All Screens | NEXORA'],
     ] as const) {
       test(`${route} has no critical accessibility violations`, async ({ page }) => {
         await page.goto(route);
@@ -162,6 +166,8 @@ test.describe('login form error handling', () => {
     const credentials = credentialsFor('manager');
     expect(credentials, 'fixture credentials are required for this spec').not.toBeNull();
     await loginThroughUi(page, credentials!);
-    await expect(page).toHaveTitle('Dashboard | NEXORA');
+    // Landing is the work queue, not a dashboard — see landingRoute.test.ts, which pins /inbox
+    // for every role including one with no modules at all.
+    await expect(page).toHaveTitle('Inbox | NEXORA');
   });
 });

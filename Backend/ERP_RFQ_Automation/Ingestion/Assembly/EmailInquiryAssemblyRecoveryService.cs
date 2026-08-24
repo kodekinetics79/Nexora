@@ -1,3 +1,4 @@
+using ERP_RFQ_Automation.Ingestion.Triage;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.MultiTenancy;
 using ERP_RFQ_Automation.Platform.Lifecycle;
@@ -52,6 +53,51 @@ public sealed class EmailInquiryAssemblyRecoveryOptions
     /// </summary>
     public int StrandedComponentSweepMinutes { get; set; } = 30;
 
+    /// <summary>
+    /// How long a part HELD WITHOUT A PROCESSING JOB may keep being re-driven from the stored
+    /// original before the message is decided instead.
+    ///
+    /// <para>The bound is the point. A component held with no job has no queue row to exhaust its
+    /// attempts, so without a deadline the sweep would re-attempt a permanently unschedulable
+    /// part every two minutes forever and the message would never reach anybody. Measured from
+    /// the component's CAPTURE time, not from the last attempt, so a part that has been held for
+    /// days is decided on the first sweep that sees it rather than being given a fresh window it
+    /// has already proved it cannot use.</para>
+    /// </summary>
+    public int SchedulingResumeWindowMinutes { get; set; } = 240;
+
+    /// <summary>
+    /// How long an ingest may read as in-flight ("Pending"/"Queued") before the sweep reconciles
+    /// its ledger status with what actually became of the message.
+    ///
+    /// <para>Generous, because the ledger is a display of progress and a premature correction
+    /// would report a healthy message as failed. What decides the correction is never the clock:
+    /// it is whether a live extraction job or a non-terminal assembly still exists.</para>
+    /// </summary>
+    public int LedgerReconciliationMinutes { get; set; } = 60;
+
+    /// <summary>
+    /// How long a message that is still <see cref="EmailInquiryAssemblyStatus.Captured"/> is
+    /// treated as OWNED BY THE SCHEDULING PASS that captured it, and therefore off limits to this
+    /// sweep.
+    ///
+    /// <para><b>Why this needs its own knob with a floor.</b> Capture and scheduling are one
+    /// operation from the caller's point of view but two steps in the database: the assembly and
+    /// its component rows are committed first, and the extraction jobs are bound afterwards, one
+    /// component at a time. In between, every part of a perfectly healthy message looks exactly
+    /// like a part that will never be scheduled — Pending, with no job. The only thing that tells
+    /// the two apart is time.</para>
+    ///
+    /// <para>The stranded-component threshold cannot serve here, because it is legitimately set
+    /// to zero in tests: what happens to a component is decided by the durable state of its job,
+    /// so age was never load bearing. That stopped being true for a component with NO job, and it
+    /// stopped being safe when the barrier learned to move a Captured message to NeedsReview —
+    /// before that, the sweep's verdict on a mid-capture message was an illegal transition and was
+    /// discarded, which hid the race. It is a real one: the sweep would close the parts of a
+    /// message the live scheduler was still binding, and the two would fight over it.</para>
+    /// </summary>
+    public int CaptureGraceSeconds { get; set; } = 120;
+
     public bool Enabled { get; set; } = true;
 
     public TimeSpan ValidatedInterval =>
@@ -77,6 +123,27 @@ public sealed class EmailInquiryAssemblyRecoveryOptions
     /// </summary>
     public TimeSpan ValidatedStrandedComponentAge =>
         TimeSpan.FromMinutes(Math.Clamp(StrandedComponentSweepMinutes, 0, 7 * 24 * 60));
+
+    /// <summary>
+    /// Clamped like the rest. Zero is permitted and means "never re-drive, decide immediately",
+    /// which is a legitimate operator choice during an incident and is what the tests that prove
+    /// the terminal path use.
+    /// </summary>
+    public TimeSpan ValidatedSchedulingResumeWindow =>
+        TimeSpan.FromMinutes(Math.Clamp(SchedulingResumeWindowMinutes, 0, 7 * 24 * 60));
+
+    public TimeSpan ValidatedLedgerReconciliationAge =>
+        TimeSpan.FromMinutes(Math.Clamp(LedgerReconciliationMinutes, 0, 7 * 24 * 60));
+
+    /// <summary>
+    /// FLOORED AT THIRTY SECONDS, and unlike every other threshold here it may NOT be set to
+    /// zero. Zero would mean "sweep a message the scheduler committed a millisecond ago", and
+    /// there is no operator intent that value could express: a genuinely stranded message is
+    /// minutes to days old, so nothing is lost by waiting, and a test that wants to prove the
+    /// sweep works ages its rows rather than disabling the guard.
+    /// </summary>
+    public TimeSpan ValidatedCaptureGrace =>
+        TimeSpan.FromSeconds(Math.Clamp(CaptureGraceSeconds, 30, 7 * 24 * 60 * 60));
 }
 
 /// <summary>
@@ -90,9 +157,15 @@ public sealed class EmailInquiryAssemblyRecoveryOptions
 /// held rather than quoted without a document that still exists.</param>
 /// <param name="LeftInFlight">Genuinely still running. Untouched, and counted so that "the sweep
 /// found nothing" and "the sweep found live work" stay distinguishable.</param>
+/// <param name="Rescheduled">
+/// Held with no processing job at all, and re-driven from the stored original so the part now
+/// holds one. The ONLY disposition in this record that puts work back into the pipeline rather
+/// than closing it.
+/// </param>
 /// <param name="Failed">Rows that threw. One never stops the sweep.</param>
 public readonly record struct EmailInquiryStrandedComponentOutcome(
-    int Examined, int Reconciled, int Skipped, int Held, int LeftInFlight, int Failed)
+    int Examined, int Reconciled, int Skipped, int Held, int LeftInFlight, int Failed,
+    int Rescheduled = 0)
 {
     public int Resolved => Reconciled + Skipped + Held;
 
@@ -100,7 +173,25 @@ public readonly record struct EmailInquiryStrandedComponentOutcome(
         EmailInquiryStrandedComponentOutcome left, EmailInquiryStrandedComponentOutcome right)
         => new(left.Examined + right.Examined, left.Reconciled + right.Reconciled,
             left.Skipped + right.Skipped, left.Held + right.Held,
-            left.LeftInFlight + right.LeftInFlight, left.Failed + right.Failed);
+            left.LeftInFlight + right.LeftInFlight, left.Failed + right.Failed,
+            left.Rescheduled + right.Rescheduled);
+}
+
+/// <summary>
+/// What the LEDGER half of a sweep did — the EmailIngest rows whose ParseStatus still claims the
+/// message is in flight when nothing is moving it.
+/// </summary>
+/// <param name="Examined">Ingests reading Pending/Queued past the reconciliation age.</param>
+/// <param name="Corrected">Ingests whose status was moved to what actually became of them.</param>
+/// <param name="StillMoving">Left alone: a live job or a non-terminal assembly still owns them.</param>
+/// <param name="Failed">Rows that threw. One never stops the sweep.</param>
+public readonly record struct EmailInquiryLedgerReconciliationOutcome(
+    int Examined, int Corrected, int StillMoving, int Failed)
+{
+    public static EmailInquiryLedgerReconciliationOutcome operator +(
+        EmailInquiryLedgerReconciliationOutcome left, EmailInquiryLedgerReconciliationOutcome right)
+        => new(left.Examined + right.Examined, left.Corrected + right.Corrected,
+            left.StillMoving + right.StillMoving, left.Failed + right.Failed);
 }
 
 /// <summary>What one sweep did. Counts only; never message content.</summary>
@@ -114,7 +205,8 @@ public sealed record EmailInquiryRecoverySweepResult(
     int Unexpected,
     int Failed,
     TimeSpan Duration,
-    EmailInquiryStrandedComponentOutcome StrandedComponents = default)
+    EmailInquiryStrandedComponentOutcome StrandedComponents = default,
+    EmailInquiryLedgerReconciliationOutcome Ledger = default)
 {
     public static readonly EmailInquiryRecoverySweepResult Skipped =
         new(0, 0, 0, 0, 0, 0, 0, 0, TimeSpan.Zero);
@@ -123,6 +215,83 @@ public sealed record EmailInquiryRecoverySweepResult(
 public interface IEmailInquiryAssemblyRecoveryService
 {
     Task<EmailInquiryRecoverySweepResult> SweepOnceAsync(CancellationToken ct = default);
+}
+
+/// <summary>
+/// THE rule that decides whether an <c>EmailIngest.ParseStatus</c> is still telling the truth,
+/// expressed as a pure function so it can be asserted without a database.
+///
+/// <para><b>The defect it closes.</b> "Queued" is written when a message's parts are handed to
+/// the extraction queue, and it is only ever cleared by the persist path or by a worker's
+/// dead-letter annotation. Neither runs when the queue's own claim statement dead-letters a job:
+/// the exhausted-lease and lineage-quarantine CTEs move a row to <c>DeadLetter</c> with no worker
+/// in the loop, so nothing tells the ledger. The result is a terminal state that presents itself
+/// as in-flight — an inbox showing work in progress over jobs that stopped days ago, which is
+/// precisely why nobody noticed. The mirror case is just as bad: a message whose assembly is
+/// already decided (NeedsReview, NoInquiry) while its ledger row still says Queued.</para>
+///
+/// <para><b>What it must never do</b> is contradict live work. A correction is only ever made
+/// when the assembly has reached a decision, or when the message has no live extraction job left
+/// at all. Age decides which rows are LOOKED at; durable state decides what happens to them.</para>
+/// </summary>
+public static class EmailInquiryLedgerReconciliation
+{
+    /// <summary>ParseStatus values that CLAIM the message is still being worked on.</summary>
+    public const string InFlightQueued = "Queued";
+
+    public const string InFlightPending = "Pending";
+
+    /// <summary>A person has to look at this message.</summary>
+    public const string NeedsReview = "NeedsReview";
+
+    /// <summary>The message was decided to be something other than an inquiry.</summary>
+    public const string Rejected = "Rejected";
+
+    /// <summary>Nothing on this message was ever handed to processing.</summary>
+    public const string NothingToExtract = "Failed - nothing to extract";
+
+    public static bool ClaimsInFlight(string? parseStatus) =>
+        parseStatus is InFlightQueued or InFlightPending;
+
+    /// <summary>
+    /// The status this ingest should read, or null to leave it exactly as it is.
+    /// </summary>
+    /// <param name="assemblyStatus">Null when the message predates the assembly barrier.</param>
+    /// <param name="hasRunnableJob">A queue row a worker will still claim.</param>
+    /// <param name="hasStoppedJob">A queue row that exists and has stopped trying.</param>
+    public static string? StatusFor(
+        string? parseStatus,
+        EmailInquiryAssemblyStatus? assemblyStatus,
+        bool hasRunnableJob,
+        bool hasStoppedJob)
+    {
+        // Only a claim of progress can be wrong in the way this fixes. Every other value is a
+        // decision something else made with more information.
+        if (!ClaimsInFlight(parseStatus)) return null;
+
+        // A live job outranks everything, including a decided assembly: the message really is
+        // still moving, and re-labelling it would be the same lie in the other direction.
+        if (hasRunnableJob) return null;
+
+        return assemblyStatus switch
+        {
+            // The barrier reached a decision and the ledger never heard.
+            EmailInquiryAssemblyStatus.Assembled => NeedsReview,
+            EmailInquiryAssemblyStatus.NeedsReview => NeedsReview,
+            EmailInquiryAssemblyStatus.NoInquiry => Rejected,
+            EmailInquiryAssemblyStatus.RejectedSecurity => Rejected,
+
+            // Still genuinely in the pipeline. The component sweep and the assembly sweep own
+            // these, and a ledger correction here would report a message as finished while the
+            // machinery that finishes it is still running.
+            not null => null,
+
+            // No assembly at all — a message ingested before the barrier existed. The jobs are
+            // the only evidence there is.
+            null when hasStoppedJob => ERP_RFQ_Automation.Extraction.ExtractionWorker.DeadLetterParseStatus,
+            null => NothingToExtract
+        };
+    }
 }
 
 /// <summary>
@@ -170,6 +339,36 @@ public interface IEmailInquiryAssemblyRecoveryService
 /// </summary>
 public sealed class EmailInquiryAssemblyRecoveryService : IEmailInquiryAssemblyRecoveryService
 {
+    /// <summary>
+    /// The component states this sweep claims WHATEVER their job says — the states in which a
+    /// part is waiting on work someone else was supposed to be doing.
+    ///
+    /// <para>Declared once and used by the queries themselves (EF translates
+    /// <c>Contains</c> to <c>IN</c>), so the list a test asserts against is the list production
+    /// runs. The alternative — a predicate in the query and a copy of it in a test — asserts that
+    /// the copy is correct, which is how a component state gets added with no sweep behind it and
+    /// nobody notices for a month.</para>
+    ///
+    /// <para><see cref="EmailInquiryComponentStatus.FailedRecoverable"/> is deliberately NOT
+    /// here: it is claimed conditionally, only when the component holds no job, because a
+    /// job-bound hold belongs to the audited dead-letter recovery command instead. Both halves
+    /// together must cover every non-terminal state — that is the invariant
+    /// <c>EmailInquiryStrandingInvariantTests</c> enforces over the whole enum.</para>
+    /// </summary>
+    public static readonly EmailInquiryComponentStatus[] SweptRegardlessOfJob =
+    [
+        EmailInquiryComponentStatus.Pending,
+        EmailInquiryComponentStatus.Inspecting,
+        EmailInquiryComponentStatus.Extracting
+    ];
+
+    /// <summary>
+    /// The one non-terminal state claimed only when the component has NO durable job — see
+    /// <see cref="SweptRegardlessOfJob"/> for why it is separate.
+    /// </summary>
+    public const EmailInquiryComponentStatus SweptOnlyWithoutJob =
+        EmailInquiryComponentStatus.FailedRecoverable;
+
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ITenantScopeAccessor _tenantScope;
     private readonly EmailInquiryAssemblyRecoveryOptions _options;
@@ -203,6 +402,7 @@ public sealed class EmailInquiryAssemblyRecoveryService : IEmailInquiryAssemblyR
         var unexpected = 0;
         var failed = 0;
         var components = default(EmailInquiryStrandedComponentOutcome);
+        var ledger = default(EmailInquiryLedgerReconciliationOutcome);
 
         foreach (var businessUnitId in tenants)
         {
@@ -226,6 +426,11 @@ public sealed class EmailInquiryAssemblyRecoveryService : IEmailInquiryAssemblyR
                 stillRecoverable += tenantResult.StillRecoverable;
                 unexpected += tenantResult.Unexpected;
                 failed += tenantResult.Failed;
+
+                // LAST, and it has to be. Both phases above can move a message to a decision in
+                // this same cycle, and reconciling the ledger before them would read the status
+                // they are about to change and then leave the row one cycle behind the truth.
+                ledger += await ReconcileLedgerAsync(businessUnitId, ct);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception exception)
@@ -243,11 +448,11 @@ public sealed class EmailInquiryAssemblyRecoveryService : IEmailInquiryAssemblyR
         var duration = System.Diagnostics.Stopwatch.GetElapsedTime(started);
         var result = new EmailInquiryRecoverySweepResult(
             tenants.Count, candidates, recovered, alreadyCompleted, heldForReview,
-            stillRecoverable, unexpected, failed, duration, components);
+            stillRecoverable, unexpected, failed, duration, components, ledger);
 
         // Logged at Information only when it did something, so an idle platform does not emit a
         // line every two minutes that operators learn to scroll past.
-        if (candidates > 0 || failed > 0 || components.Examined > 0)
+        if (candidates > 0 || failed > 0 || components.Examined > 0 || ledger.Corrected > 0)
         {
             _log.LogInformation(
                 "Email inquiry assembly recovery swept {Tenants} tenant(s) in {DurationMs}ms: "
@@ -255,13 +460,17 @@ public sealed class EmailInquiryAssemblyRecoveryService : IEmailInquiryAssemblyR
                 + "complete, {HeldForReview} held for review, {StillRecoverable} still "
                 + "recoverable, {Unexpected} in an unexpected state, {Failed} failed; "
                 + "{ComponentsExamined} stranded part(s) examined, {ComponentsReconciled} "
-                + "reconciled, {ComponentsSkipped} skipped, {ComponentsHeld} held, "
-                + "{ComponentsInFlight} still in flight, {ComponentsFailed} failed.",
+                + "reconciled, {ComponentsRescheduled} rescheduled, {ComponentsSkipped} skipped, "
+                + "{ComponentsHeld} held, {ComponentsInFlight} still in flight, "
+                + "{ComponentsFailed} failed; {LedgerExamined} ledger row(s) examined, "
+                + "{LedgerCorrected} corrected, {LedgerStillMoving} still moving, "
+                + "{LedgerFailed} failed.",
                 result.TenantsSwept, (long)duration.TotalMilliseconds, result.Candidates,
                 result.Recovered, result.AlreadyCompleted, result.HeldForReview,
                 result.StillRecoverable, result.Unexpected, result.Failed,
-                components.Examined, components.Reconciled, components.Skipped,
-                components.Held, components.LeftInFlight, components.Failed);
+                components.Examined, components.Reconciled, components.Rescheduled,
+                components.Skipped, components.Held, components.LeftInFlight, components.Failed,
+                ledger.Examined, ledger.Corrected, ledger.StillMoving, ledger.Failed);
         }
 
         return result;
@@ -283,6 +492,7 @@ public sealed class EmailInquiryAssemblyRecoveryService : IEmailInquiryAssemblyR
 
         var cutoff = _time.GetUtcNow() - _options.ValidatedMinimumAge;
         var componentCutoff = _time.GetUtcNow() - _options.ValidatedStrandedComponentAge;
+        var captureCutoff = _time.GetUtcNow() - _options.ValidatedCaptureGrace;
 
         // No IgnoreQueryFilters. With no tenant pushed the filter
         // (`CurrentTenantId == null || ...`) is already a no-op, so the call bought nothing and
@@ -310,15 +520,37 @@ public sealed class EmailInquiryAssemblyRecoveryService : IEmailInquiryAssemblyR
         // cannot find both.
         var withStrandedParts = await context.EmailInquiryComponents
             .AsNoTracking()
-            .Where(c => (c.Status == EmailInquiryComponentStatus.Pending
-                         || c.Status == EmailInquiryComponentStatus.Inspecting
-                         || c.Status == EmailInquiryComponentStatus.Extracting)
-                        && c.UpdatedAtUtc <= componentCutoff)
+            .Where(c => (SweptRegardlessOfJob.Contains(c.Status)
+                         // HELD WITH NO JOB — the population that had no path out of the system
+                         // at all. Not in flight (nothing is running), not dead-lettered (there
+                         // is no queue row to dead-letter), and invisible to the query above
+                         // because its message can never reach ReadyForAssembly on its own.
+                         || (c.Status == SweptOnlyWithoutJob && c.ExtractionJobId == null))
+                        && c.UpdatedAtUtc <= componentCutoff
+                        && !(c.ExtractionJobId == null
+                             && c.Assembly.Status == EmailInquiryAssemblyStatus.Captured
+                             && c.Assembly.UpdatedAtUtc > captureCutoff))
             .Select(c => c.BusinessUnitId)
             .Distinct()
             .ToListAsync(ct);
 
-        var tenants = owedALead.Union(withStrandedParts).OrderBy(id => id).ToList();
+        // A ledger row can claim a message is in flight when neither of the populations above
+        // holds it — a pre-assembly ingest whose jobs all died, or a message whose assembly is
+        // already decided. Asked separately for the same reason the two above are.
+        var ledgerCutoff = _time.GetUtcNow() - _options.ValidatedLedgerReconciliationAge;
+        var withStaleLedger = await context.EmailIngests
+            .AsNoTracking()
+            .Where(e => (e.ParseStatus == EmailInquiryLedgerReconciliation.InFlightQueued
+                         || e.ParseStatus == EmailInquiryLedgerReconciliation.InFlightPending)
+                        && e.CreatedOn <= ledgerCutoff.UtcDateTime)
+            .Select(e => e.EmailConfiguration.BusinessUnitId)
+            .Distinct()
+            .ToListAsync(ct);
+
+        var tenants = owedALead
+            .Union(withStrandedParts)
+            .Union(withStaleLedger)
+            .OrderBy(id => id).ToList();
         if (tenants.Count == 0) return tenants;
 
         // Resolved from THIS scope, not injected, because the gate must be consulted with no
@@ -351,34 +583,122 @@ public sealed class EmailInquiryAssemblyRecoveryService : IEmailInquiryAssemblyR
         AssertTenantScope(context, businessUnitId);
 
         var coordinator = scope.ServiceProvider.GetRequiredService<IEmailInquiryAssemblyCoordinator>();
+        // REQUIRED, not optional. A composition that dropped the intake registration would
+        // silently stop re-driving every part held without a job — the exact invisible regression
+        // this sweep exists to end — and the per-tenant handler above turns the throw into a
+        // counted, logged failure rather than a stopped platform.
+        var intake = scope.ServiceProvider.GetRequiredService<IEmailInquiryIntakeService>();
         var cutoff = _time.GetUtcNow() - _options.ValidatedStrandedComponentAge;
+        var resumeDeadline = _time.GetUtcNow() - _options.ValidatedSchedulingResumeWindow;
+        var captureCutoff = _time.GetUtcNow() - _options.ValidatedCaptureGrace;
 
         // Oldest first, bounded per cycle. One tenant's backlog of stranded parts cannot hold the
         // sweep for every other tenant on the platform.
         var candidates = await context.EmailInquiryComponents
             .AsNoTracking()
             .Where(c => c.BusinessUnitId == businessUnitId
-                        && (c.Status == EmailInquiryComponentStatus.Pending
-                            || c.Status == EmailInquiryComponentStatus.Inspecting
-                            || c.Status == EmailInquiryComponentStatus.Extracting)
-                        && c.UpdatedAtUtc <= cutoff)
+                        && (SweptRegardlessOfJob.Contains(c.Status)
+                            || (c.Status == SweptOnlyWithoutJob && c.ExtractionJobId == null))
+                        && c.UpdatedAtUtc <= cutoff
+                        // THE MESSAGE IS STILL BEING SCHEDULED. Capture commits the assembly and
+                        // its parts, then binds a job to each part in turn; in between, a healthy
+                        // part is indistinguishable from one that will never be scheduled. Only
+                        // time separates them, so a Captured message is left to the pass that owns
+                        // it. Nothing is lost by waiting: real stranded work is minutes old at the
+                        // very least, and this window is seconds.
+                        && !(c.ExtractionJobId == null
+                             && c.Assembly.Status == EmailInquiryAssemblyStatus.Captured
+                             && c.Assembly.UpdatedAtUtc > captureCutoff))
             .OrderBy(c => c.UpdatedAtUtc).ThenBy(c => c.Id)
             .Take(_options.ValidatedBatchSize)
             .Select(c => new
             {
-                c.Id, c.AssemblyId, c.ComponentKey, c.Status, c.FileName, c.ExtractionJobId
+                c.Id, c.AssemblyId, c.ComponentKey, c.Status, c.FileName, c.ExtractionJobId,
+                c.ReasonCode, c.CreatedAtUtc
             })
             .ToListAsync(ct);
 
         var outcome = new EmailInquiryStrandedComponentOutcome(
             Examined: candidates.Count, 0, 0, 0, 0, 0);
         var touched = new HashSet<long>();
+        // Re-driving is per MESSAGE, not per part: ScheduleAsync walks every component of the
+        // assembly. Attempting it once per held component would schedule the first one and then
+        // burn a second and third pass discovering there is nothing left to do.
+        var resumeAttempted = new HashSet<long>();
 
         foreach (var candidate in candidates)
         {
             ct.ThrowIfCancellationRequested();
             try
             {
+                // HELD WITH NO PROCESSING JOB. Handled before anything below, because the whole
+                // job-consulting apparatus has nothing to consult: there is no queue row.
+                if (candidate.Status == EmailInquiryComponentStatus.FailedRecoverable)
+                {
+                    // RE-READ FIRST, past the change tracker.
+                    //
+                    // Re-driving is per MESSAGE: one call schedules every held part of the
+                    // assembly. So by the time this loop reaches the SECOND held part of a message
+                    // it may already be Extracting with a durable job — and closing it as
+                    // unrecoverable here would throw away work that is running, which is the one
+                    // mistake this sweep must never make. The candidate list was read before any
+                    // of that happened, so it cannot be trusted for this branch.
+                    var current = await context.EmailInquiryComponents
+                        .AsNoTracking()
+                        .Where(c => c.BusinessUnitId == businessUnitId && c.Id == candidate.Id)
+                        .Select(c => new { c.Status, c.ExtractionJobId })
+                        .FirstOrDefaultAsync(ct);
+
+                    if (current is null
+                        || current.Status != EmailInquiryComponentStatus.FailedRecoverable
+                        || current.ExtractionJobId is not null)
+                    {
+                        // A sibling's re-drive already moved it. Counted as rescheduled rather
+                        // than silently ignored, so "the sweep did nothing" and "the sweep put
+                        // this message back into the pipeline" stay distinguishable.
+                        outcome = outcome with { Rescheduled = outcome.Rescheduled + 1 };
+                        touched.Add(candidate.AssemblyId);
+                        continue;
+                    }
+
+                    var (disposition, code, detail, rescheduled) = await ResolveUnscheduledHoldAsync(
+                        intake, businessUnitId, candidate.AssemblyId, candidate.ComponentKey,
+                        candidate.ReasonCode, candidate.CreatedAtUtc, resumeDeadline,
+                        resumeAttempted, ct);
+
+                    if (rescheduled)
+                    {
+                        // Back in the pipeline. Its component row was moved to Extracting by the
+                        // coordinator inside the scheduling transaction, so there is nothing to
+                        // close and the message is genuinely in flight again.
+                        outcome = outcome with { Rescheduled = outcome.Rescheduled + 1 };
+                        touched.Add(candidate.AssemblyId);
+                        _log.LogInformation(
+                            "Stranded assembly component {ComponentId} ('{FileName}') of assembly "
+                            + "{AssemblyId} for business unit {BusinessUnitId} was held with no "
+                            + "processing job; scheduling was re-driven from the stored original "
+                            + "and it is running again.",
+                            candidate.Id, candidate.FileName, candidate.AssemblyId, businessUnitId);
+                        continue;
+                    }
+
+                    await coordinator.RecordComponentOutcomeAsync(
+                        businessUnitId, candidate.AssemblyId, candidate.ComponentKey, disposition,
+                        code, detail, sourceDocumentOccurrenceId: null, ct);
+                    touched.Add(candidate.AssemblyId);
+                    outcome = disposition == EmailInquiryComponentStatus.FailedRecoverable
+                        ? outcome with { Held = outcome.Held + 1 }
+                        : outcome with { Skipped = outcome.Skipped + 1 };
+                    _log.LogWarning(
+                        "Stranded assembly component {ComponentId} ('{FileName}') of assembly "
+                        + "{AssemblyId} for business unit {BusinessUnitId} was held with no "
+                        + "processing job and could not be re-driven; it is now {Resolved} "
+                        + "({Reason}) so its message reaches a person instead of nobody.",
+                        candidate.Id, candidate.FileName, candidate.AssemblyId, businessUnitId,
+                        disposition, code);
+                    continue;
+                }
+
                 // The job is the authority. Read past the change tracker so a previous iteration
                 // in this scope cannot answer for this one.
                 var job = candidate.ExtractionJobId is { } jobId
@@ -504,6 +824,107 @@ public sealed class EmailInquiryAssemblyRecoveryService : IEmailInquiryAssemblyR
         }
 
         return (outcome, touched);
+    }
+
+    /// <summary>
+    /// Decides what becomes of a part that is HELD WITH NO PROCESSING JOB — re-drive it, or end
+    /// its message's wait.
+    ///
+    /// <para><b>This population had no path out of the system at all.</b> Four scheduling
+    /// failures write it: a manifest refusal, an evidence-storage outage, an inspection fault and
+    /// the catch-all. The sweep looked only at Pending/Inspecting/Extracting; the operator
+    /// dead-letter queue needs a job that was never created; and the mailbox stops offering the
+    /// message once it falls out of the poller's lookback window. So the message was captured,
+    /// durable, invisible and finished — the exact opposite of the rule this module enforces.</para>
+    ///
+    /// <para><b>Two of the reasons can never improve, and pretending otherwise is the trap.</b> A
+    /// manifest refusal is a disagreement between two durable records; a lost original cannot come
+    /// back. Re-driving either forever would keep the message technically "recoverable" and
+    /// permanently undecided, which reads as diligence and behaves as loss. They go straight to a
+    /// terminal, explained refusal that puts the message in a person's hands.</para>
+    /// </summary>
+    /// <returns>
+    /// The disposition to record, its reason, and whether scheduling was successfully re-driven —
+    /// in which case the caller records nothing, because the scheduler already moved the row.
+    /// </returns>
+    private async Task<(EmailInquiryComponentStatus Disposition, string Code, string Detail, bool Rescheduled)>
+        ResolveUnscheduledHoldAsync(
+            IEmailInquiryIntakeService intake,
+            long businessUnitId,
+            long assemblyId,
+            string componentKey,
+            string? heldReason,
+            DateTimeOffset capturedAtUtc,
+            DateTimeOffset resumeDeadline,
+            HashSet<long> resumeAttempted,
+            CancellationToken ct)
+    {
+        // A manifest refusal is about two durable records disagreeing. Re-planning the same bytes
+        // produces the same disagreement, every time, forever.
+        if (string.Equals(heldReason, EmailIngestEnqueuer.ManifestMismatchReason, StringComparison.Ordinal))
+            return (EmailInquiryComponentStatus.Skipped,
+                EmailInquiryHoldReasons.SchedulingRefusedByManifest,
+                EmailInquiryHoldReasons.SchedulingNotRecoveredDetail, false);
+
+        // Measured from CAPTURE, so a part held for days is decided on the first sweep that sees
+        // it rather than being handed a fresh window it has already proved it cannot use.
+        if (capturedAtUtc <= resumeDeadline)
+            return (EmailInquiryComponentStatus.Skipped,
+                EmailInquiryHoldReasons.SchedulingNotRecovered,
+                EmailInquiryHoldReasons.SchedulingNotRecoveredDetail, false);
+
+        // One attempt per MESSAGE per cycle: scheduling walks every component of the assembly, so
+        // a second call for a sibling part would find nothing left to schedule. A part the first
+        // attempt could not place stays HELD — never closed — because closing it here would end a
+        // message on the strength of a call this cycle deliberately did not make.
+        if (!resumeAttempted.Add(assemblyId))
+            return (EmailInquiryComponentStatus.FailedRecoverable,
+                heldReason ?? EmailIngestEnqueuer.SchedulingFailedReason,
+                EmailInquiryHoldReasons.SchedulingNotRecoveredDetail, false);
+
+        // GOVERNED, always — including when the assembly is still inside the pipeline and the
+        // narrower automatic authority would have done. The sweep can reopen a message that has
+        // already reached a person's tray, so it signs every reopen it makes with the same named
+        // actor rather than only the ones that strictly need it. A rescue nobody can attribute is
+        // the thing this grant exists to prevent, and "only sometimes attributable" is not a
+        // property worth having.
+        var resume = await intake.ResumeSchedulingAsync(
+            businessUnitId, assemblyId, ct, EmailInquirySchedulingGrant.RecoverySweep);
+        return resume.Outcome switch
+        {
+            EmailInquiryResumeOutcome.Resumed =>
+                (EmailInquiryComponentStatus.Extracting, string.Empty, string.Empty, true),
+
+            // Scheduling ran and this part still could not be queued — but the fault it hit may
+            // clear, and the deadline above is what stops that being forever. Left held, its
+            // reason untouched, for the next cycle.
+            EmailInquiryResumeOutcome.StillHeld or EmailInquiryResumeOutcome.NothingToResume =>
+                (EmailInquiryComponentStatus.FailedRecoverable,
+                    heldReason ?? EmailIngestEnqueuer.SchedulingFailedReason,
+                    EmailInquiryHoldReasons.SchedulingNotRecoveredDetail, false),
+
+            EmailInquiryResumeOutcome.EvidenceLost =>
+                (EmailInquiryComponentStatus.Skipped,
+                    EmailInquiryHoldReasons.SchedulingEvidenceLost,
+                    EmailInquiryHoldReasons.SchedulingEvidenceLostDetail, false),
+
+            EmailInquiryResumeOutcome.ManifestRefused =>
+                (EmailInquiryComponentStatus.Skipped,
+                    EmailInquiryHoldReasons.SchedulingRefusedByManifest,
+                    EmailInquiryHoldReasons.SchedulingNotRecoveredDetail, false),
+
+            // Nothing failed. The gate decided this message is a supplier document, so its parts
+            // were never owed extraction jobs — Ignored is the terminal status the state machine
+            // already treats as "accounted for", not as a part that went unread.
+            EmailInquiryResumeOutcome.NotAnInquiry =>
+                (EmailInquiryComponentStatus.Ignored,
+                    EmailInquiryHoldReasons.SchedulingNotAnInquiry,
+                    EmailInquiryHoldReasons.SchedulingNotAnInquiryDetail, false),
+
+            _ => (EmailInquiryComponentStatus.Skipped,
+                EmailInquiryHoldReasons.SchedulingNotRecovered,
+                EmailInquiryHoldReasons.SchedulingNotRecoveredDetail, false)
+        };
     }
 
     /// <summary>
@@ -643,6 +1064,146 @@ public sealed class EmailInquiryAssemblyRecoveryService : IEmailInquiryAssemblyR
         return new EmailInquiryRecoverySweepResult(
             1, candidates.Count, recovered, alreadyCompleted, heldForReview, stillRecoverable,
             unexpected, failed, TimeSpan.Zero);
+    }
+
+    /// <summary>
+    /// PHASE 3 — make the LEDGER stop claiming a message is in flight when nothing is moving it.
+    ///
+    /// <para><b>Why a third phase and not a column on the second.</b> The two phases above are
+    /// about the assembly aggregate: parts that never reported, and messages that owe a Lead.
+    /// This one is about the <c>EmailIngest</c> row, which is the record a person actually reads
+    /// on the Inbound Mail screen, and its population is disjoint from both. A message ingested
+    /// before the barrier existed has no assembly at all, so no query over assemblies or
+    /// components can find it; and a message whose assembly is already NeedsReview is invisible
+    /// to phase 1 (its components are terminal) and to phase 2 (it is not ReadyForAssembly), yet
+    /// its ledger row can still say "Queued" for as long as the row exists.</para>
+    ///
+    /// <para><b>The failure it ends.</b> "Queued" has exactly two writers that clear it — the
+    /// persist path, and the worker's dead-letter annotation — and NEITHER runs when the queue's
+    /// own claim statement dead-letters a job. The exhausted-lease and lineage-quarantine CTEs
+    /// move a row to <c>DeadLetter</c> inside the claim, with no worker in the loop, so nothing
+    /// tells the ledger and the screen shows work in progress over jobs that stopped days ago.
+    /// A terminal state that presents itself as in-flight is worse than a visible failure: it is
+    /// the reason nobody looks.</para>
+    ///
+    /// <para>Nothing here re-drives work or invents an outcome. It reports what already happened,
+    /// and it refuses to touch a message with a live job — see
+    /// <see cref="EmailInquiryLedgerReconciliation.StatusFor"/>, which holds the whole rule and is
+    /// asserted on its own.</para>
+    /// </summary>
+    private async Task<EmailInquiryLedgerReconciliationOutcome> ReconcileLedgerAsync(
+        long businessUnitId, CancellationToken ct)
+    {
+        using var tenant = _tenantScope.Push(businessUnitId);
+        using var scope = _scopeFactory.CreateScope();
+
+        var context = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+        AssertTenantScope(context, businessUnitId);
+
+        var cutoff = (_time.GetUtcNow() - _options.ValidatedLedgerReconciliationAge).UtcDateTime;
+
+        var candidates = await context.EmailIngests
+            .AsNoTracking()
+            .Where(e => e.EmailConfiguration.BusinessUnitId == businessUnitId
+                        && (e.ParseStatus == EmailInquiryLedgerReconciliation.InFlightQueued
+                            || e.ParseStatus == EmailInquiryLedgerReconciliation.InFlightPending)
+                        && e.CreatedOn <= cutoff)
+            .OrderBy(e => e.CreatedOn).ThenBy(e => e.Id)
+            .Take(_options.ValidatedBatchSize)
+            .Select(e => new { e.Id, e.MessageId, e.ParseStatus })
+            .ToListAsync(ct);
+
+        var outcome = new EmailInquiryLedgerReconciliationOutcome(candidates.Count, 0, 0, 0);
+
+        foreach (var candidate in candidates)
+        {
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                var assemblyStatus = await context.EmailInquiryAssemblies
+                    .AsNoTracking()
+                    .Where(a => a.BusinessUnitId == businessUnitId && a.EmailIngestId == candidate.Id)
+                    .Select(a => (EmailInquiryAssemblyStatus?)a.Status)
+                    .FirstOrDefaultAsync(ct);
+
+                // The message's jobs, found the way the ledger itself joins them: every extraction
+                // occurrence recorded under this message's logical group key. It is the ONE link
+                // that works for a pre-assembly ingest as well as a modern one, because the key is
+                // built from the Message-Id in both.
+                var groupKey = $"email:{candidate.MessageId}";
+                var jobStates = await (
+                    from occurrence in context
+                        .Set<ERP_RFQ_Automation.DocumentIntelligence.Persistence.SourceDocumentOccurrence>()
+                        .AsNoTracking()
+                    join job in context.Set<ERP_RFQ_Automation.Extraction.ExtractionJob>().AsNoTracking()
+                        on occurrence.ExtractionJobId equals job.Id
+                    where occurrence.BusinessUnitId == businessUnitId
+                          && occurrence.LogicalGroupKey == groupKey
+                          && job.BusinessUnitId == businessUnitId
+                    select new { job.Status, job.Attempts, job.MaxAttempts })
+                    .ToListAsync(ct);
+
+                var hasRunnableJob = jobStates.Any(
+                    j => IsStillRunnable(j.Status, j.Attempts, j.MaxAttempts));
+                var hasStoppedJob = jobStates.Count > 0 && !hasRunnableJob;
+
+                var corrected = EmailInquiryLedgerReconciliation.StatusFor(
+                    candidate.ParseStatus, assemblyStatus, hasRunnableJob, hasStoppedJob);
+                if (corrected is null)
+                {
+                    outcome = outcome with { StillMoving = outcome.StillMoving + 1 };
+                    continue;
+                }
+
+                // Written with a guarded UPDATE rather than a tracked entity: the poller, the
+                // persister and this sweep can all touch the same row, and re-asserting the exact
+                // status we decided from is what makes a concurrent write win instead of being
+                // clobbered by a stale read.
+                //
+                // The tenant predicate is repeated in the statement even though the candidate came
+                // from a tenant-scoped query. EmailIngests carries no BusinessUnitId of its own —
+                // it is a tenant of its mailbox — so raw SQL against it has no row-level filter to
+                // inherit, and an id that reached here from anywhere else would write across a
+                // tenant boundary. Cheap, and the one place a mistake would be invisible.
+                var written = await context.Database.ExecuteSqlAsync(
+                    $"""
+                    UPDATE public."EmailIngests" e
+                    SET "ParseStatus" = {corrected}, "ParsedAt" = now()
+                    WHERE e."ID" = {candidate.Id}
+                      AND e."ParseStatus" = {candidate.ParseStatus}
+                      AND EXISTS (
+                        SELECT 1 FROM public."Email_Configurations" c
+                        WHERE c."ID" = e."EmailConfigurationID"
+                          AND c."BusinessUnitID" = {businessUnitId})
+                    """, ct);
+                if (written == 0)
+                {
+                    outcome = outcome with { StillMoving = outcome.StillMoving + 1 };
+                    continue;
+                }
+
+                outcome = outcome with { Corrected = outcome.Corrected + 1 };
+                _log.LogWarning(
+                    "Email ingest {IngestId} for business unit {BusinessUnitId} read "
+                    + "'{Previous}' with no live processing job (assembly {AssemblyStatus}, "
+                    + "{JobCount} job(s)); its ledger status is now '{Corrected}' so the screen "
+                    + "stops reporting progress on work that stopped.",
+                    candidate.Id, businessUnitId, candidate.ParseStatus,
+                    assemblyStatus?.ToString() ?? "<none>", jobStates.Count, corrected);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception exception)
+            {
+                outcome = outcome with { Failed = outcome.Failed + 1 };
+                context.ChangeTracker.Clear();
+                _log.LogError(exception,
+                    "Could not reconcile the ledger status of email ingest {IngestId} for business "
+                    + "unit {BusinessUnitId}; continuing with the next message.",
+                    candidate.Id, businessUnitId);
+            }
+        }
+
+        return outcome;
     }
 
     /// <summary>

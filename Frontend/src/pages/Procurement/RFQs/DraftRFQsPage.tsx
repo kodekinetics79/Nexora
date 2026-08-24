@@ -22,6 +22,7 @@ import { useSnackbar } from 'notistack';
 import { useAuth } from '../../../context/AuthContext';
 import ApiErrorNotice from '../../../components/common/ApiErrorNotice';
 import { gridEmptyOverlay } from '../../../components/common/gridOverlays';
+import ViewTabs from '../../../components/layout/ViewTabs';
 import { formatDateSafe } from '../../../utils/dates';
 
 const DraftRFQsPage: React.FC = () => {
@@ -75,9 +76,21 @@ const DraftRFQsPage: React.FC = () => {
     title: 'No draft RFQs',
     message: 'A converted lead lands here as a draft until it is reviewed and approved.',
     icon: <ItemsIcon sx={{ fontSize: 48 }} />,
+    // A clear queue with no way forward is still a dead end: the reader now knows there is nothing
+    // to approve and has to work out on their own where drafts come from.
+    action: (
+      <Button variant="contained" onClick={() => navigate('/procurement/leads/all')} sx={{ fontWeight: 700 }}>
+        See all inquiries
+      </Button>
+    ),
     filtered: Boolean(search),
     filteredMessage: 'No draft RFQ matches this search. Clear it to see every draft.',
-  }), [search]);
+    filteredAction: (
+      <Button variant="outlined" onClick={() => setSearch('')} sx={{ fontWeight: 700 }}>
+        Clear the search
+      </Button>
+    ),
+  }), [search, navigate]);
 
   const columns: GridColDef[] = [
     {
@@ -184,6 +197,10 @@ const DraftRFQsPage: React.FC = () => {
           Process Outstanding Leads
         </Button>
       </Stack>
+
+      {/* One tab strip across the RFQ views, so Drafts reads as a view of the RFQ list rather than
+          a destination of its own. It used to be a separate rail row. */}
+      <ViewTabs primaryKey="rfqs" ariaLabel="RFQ views" />
 
       <Paper sx={{ p: 1.5, mb: 1.5, display: 'flex', gap: 2, alignItems: 'center', borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
         <SearchField width="400px" value={search} onChange={setSearch} placeholder="Search draft RFQs..." />

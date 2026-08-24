@@ -201,8 +201,24 @@ export default function SupplierQuoteInboxPage() {
       <MenuItem value="ALL">All statuses</MenuItem><MenuItem value="REVIEW_REQUIRED">Review required</MenuItem><MenuItem value="READY_FOR_COMPARISON">Ready for comparison</MenuItem>
     </TextField>
     {query.isLoading && <Paper variant="outlined" sx={{ p: 5, textAlign: "center" }}><CircularProgress /></Paper>}
-    {query.isError && <Alert severity="error">Supplier Quotes could not be loaded. No empty result has been assumed.</Alert>}
-    {!query.isLoading && !query.isError && items.length === 0 && <Paper variant="outlined" sx={{ p: 5, textAlign: "center" }}><InboxOutlined color="disabled" sx={{ fontSize: 44 }} /><Typography>No Supplier Quotes match this status.</Typography></Paper>}
+    {query.isError && <Alert severity="error" action={<Button color="inherit" startIcon={<Refresh />} onClick={() => query.refetch()}>Retry</Button>}>Supplier Quotes could not be loaded. No empty result has been assumed.</Alert>}
+    {/*
+      Was a single grey sentence — "No Supplier Quotes match this status." — which reads as a
+      filter result even when the filter is "All statuses", and offers nothing to do about either
+      case. The two nothings are separated now, and both end in a button.
+    */}
+    {!query.isLoading && !query.isError && items.length === 0 && <Paper variant="outlined" sx={{ p: 5, textAlign: "center" }}>
+      <InboxOutlined color="disabled" sx={{ fontSize: 44 }} />
+      <Typography sx={{ fontWeight: 800, mt: 1 }}>{status === "ALL" ? "No supplier has replied yet" : "Nothing is in this status"}</Typography>
+      <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, maxWidth: 460, mx: "auto" }}>
+        {status === "ALL"
+          ? "Replies land here once a supplier answers a request you sent. Send one from an RFQ whose lines stock cannot cover."
+          : "Other supplier quotes may exist under a different status. Clear the filter to see all of them."}
+      </Typography>
+      {status === "ALL"
+        ? <Button variant="contained" sx={{ mt: 2, fontWeight: 700 }} onClick={() => navigate("/procurement/rfqs/all?state=requires-sourcing")}>RFQs needing sourcing</Button>
+        : <Button variant="outlined" sx={{ mt: 2, fontWeight: 700 }} onClick={() => setStatus("ALL")}>Show all statuses</Button>}
+    </Paper>}
     {items.length > 0 && <TableContainer component={Paper} variant="outlined"><Table><TableHead><TableRow><TableCell>Supplier / Quote</TableCell><TableCell>Commercial lineage</TableCell><TableCell>Revision</TableCell><TableCell>Status</TableCell><TableCell>Updated</TableCell><TableCell align="right">Action</TableCell></TableRow></TableHead><TableBody>{items.map((item) => <TableRow hover key={item.supplierQuoteId}><TableCell><Typography sx={{ fontWeight: 700 }}>{item.supplierName}</Typography><Typography variant="body2">{item.supplierQuoteReference}</Typography></TableCell><TableCell>{item.nexoraSerial}<Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>Sourcing Case {item.sourcingCaseId}</Typography></TableCell><TableCell>{item.currentRevisionNumber}</TableCell><TableCell><Chip size="small" color={item.inboxStatus === "READY_FOR_COMPARISON" ? "success" : "warning"} label={item.inboxStatus.replaceAll("_", " ")} />{item.reviewRequiredCount > 0 && <Typography variant="caption" sx={{ display: "block" }}>{item.reviewRequiredCount} fields</Typography>}</TableCell><TableCell>{new Date(item.updatedOn).toLocaleString()}</TableCell><TableCell align="right"><Button endIcon={<OpenInNew />} onClick={() => navigate(`/procurement/supplier-quotes/${item.supplierQuoteId}`)}>Review</Button></TableCell></TableRow>)}</TableBody></Table></TableContainer>}
     <CaptureDialog open={captureOpen} onClose={() => setCaptureOpen(false)} />
     <UploadDialog open={uploadOpen} onClose={() => setUploadOpen(false)} />

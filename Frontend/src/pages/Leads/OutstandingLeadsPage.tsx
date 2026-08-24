@@ -25,6 +25,7 @@ import {
 } from '@mui/icons-material';
 import leadService, { assignabilityNote, type AcceptedLeadResponseDTO } from '../../api/services/leadService';
 import SearchField from '../../components/common/SearchField';
+import ViewTabs from '../../components/layout/ViewTabs';
 import { useSnackbar } from 'notistack';
 import { useAuth } from '../../context/AuthContext';
 import { presentableErrorMessage } from '../../utils/apiErrors';
@@ -123,9 +124,19 @@ const OutstandingLeadsPage: React.FC = () => {
     title: unassignedOnly ? 'Every accepted lead has an owner' : 'No outstanding leads',
     message: 'Accepted leads appear here until they are assigned and converted to an RFQ.',
     icon: <ItemsIcon sx={{ fontSize: 48 }} />,
+    action: (
+      <Button variant="contained" onClick={() => navigate('/procurement/leads/all')} sx={{ fontWeight: 700 }}>
+        See all inquiries
+      </Button>
+    ),
     filtered: Boolean(search),
     filteredMessage: 'No outstanding lead matches this search. Clear it to see the whole queue.',
-  }), [search, unassignedOnly]);
+    filteredAction: (
+      <Button variant="outlined" onClick={() => setSearch('')} sx={{ fontWeight: 700 }}>
+        Clear the search
+      </Button>
+    ),
+  }), [search, unassignedOnly, navigate]);
 
   const columns: GridColDef[] = [
     {
@@ -329,6 +340,10 @@ const OutstandingLeadsPage: React.FC = () => {
         </Box>
         <Button variant="outlined" startIcon={<RefreshIcon />} onClick={() => refetch()} size="small" sx={{ fontWeight: 800 }}>Refresh Dashboard</Button>
       </Box>
+
+      {/* The lead queues, as one level of tabs. This page used to be reachable only by URL — it
+          had a route and no rail entry at all. */}
+      <ViewTabs primaryKey="leads" ariaLabel="Inquiry views" />
 
       {/* Search + filters */}
       <Paper sx={{ p: 2, mb: 2, borderRadius: 3, border: '1px solid', borderColor: 'divider', boxShadow: 'none', display: 'flex', alignItems: 'center', gap: 3, flexWrap: 'wrap' }}>

@@ -454,18 +454,33 @@ namespace ERP_RFQ_Automation.Services
         /// ING-08: mirrors the cycle's real outcome into the readiness surface. A mailbox that
         /// refused authentication is a PERMANENT failure — it will not heal by being retried —
         /// so <c>/ready</c> is allowed to go red on the first occurrence instead of after three.
+        ///
+        /// <para>ING-08b, 2026-08-24 — PER MAILBOX. This used to publish ONE verdict for the whole
+        /// cycle: <c>RecordFailure(FailureSummary)</c> if <c>AnyFailed</c>, and
+        /// <c>RecordSuccess()</c> only if <c>AllSucceeded</c>. With two production mailboxes, one
+        /// of which had never authenticated in its life, the second branch was unreachable — so a
+        /// mailbox being read cleanly every seventy seconds had its success erased from the health
+        /// record by its neighbour, and <c>/ready</c> reported "Last successful poll: never" about
+        /// a channel that was working. Each mailbox now reports under its own id.</para>
+        ///
+        /// Zero configured mailboxes records nothing at all: neither success nor failure was
+        /// demonstrated, and claiming success would advance "last successful poll" for a door
+        /// that was never opened.
         /// </summary>
         private void PublishChannelHealth(MailboxPollReport report)
         {
             if (_pollerHealth is null) return;
             var now = DateTimeOffset.UtcNow;
-            if (report.AnyFailed)
-                _pollerHealth.RecordFailure(report.FailureSummary, report.AnyPermanentFailure, now);
-            else if (report.AllSucceeded)
-                _pollerHealth.RecordSuccess(now);
-            // Zero configured mailboxes: neither success nor failure was demonstrated, so
-            // nothing is recorded. Claiming success here would advance "last successful poll"
-            // for a door that was never opened.
+            foreach (var mailbox in report.Mailboxes)
+            {
+                if (mailbox.Succeeded)
+                    _pollerHealth.RecordSuccess(mailbox.EmailConfigurationId, mailbox.EmailAddress, now);
+                else
+                    _pollerHealth.RecordFailure(
+                        mailbox.EmailConfigurationId, mailbox.EmailAddress,
+                        mailbox.FailureReason ?? "Unspecified mailbox failure.",
+                        mailbox.FailureIsPermanent, now);
+            }
         }
 
         /// <summary>
@@ -1238,18 +1253,76 @@ namespace ERP_RFQ_Automation.Services
                     // key the triage screen joins on). Only the missing status write is replayed
                     // — re-reading and re-hashing every document would prove nothing more.
                     var groupKey = $"email:{ingest.MessageId}";
-                    var alreadyEnqueued = await context
+                    // NOT "does extraction work exist" — "will anything still RUN it".
+                    //
+                    // Existence alone was the whole defect. This branch flipped the row to Queued
+                    // on the strength of an occurrence row and stopped, and Queued is a state with
+                    // exactly two writers that ever clear it: the persist path, and the worker's
+                    // dead-letter annotation. Neither runs for a job the queue's own claim
+                    // statement dead-lettered (the exhausted-lease and lineage-quarantine CTEs
+                    // move a row to DeadLetter with no worker in the loop). So a message whose
+                    // every job had stopped at 5/5 attempts was "recovered" into a state nothing
+                    // consumes, reported as progress, and left exactly where it was — for ten
+                    // days, on real customer RFQs.
+                    var jobStates = await (
+                        from occurrence in context
+                            .Set<ERP_RFQ_Automation.DocumentIntelligence.Persistence.SourceDocumentOccurrence>()
+                            .AsNoTracking()
+                        join job in context.Set<ERP_RFQ_Automation.Extraction.ExtractionJob>().AsNoTracking()
+                            on occurrence.ExtractionJobId equals job.Id
+                        where occurrence.BusinessUnitId == businessUnitId
+                              && occurrence.LogicalGroupKey == groupKey
+                              && job.BusinessUnitId == businessUnitId
+                        select new { job.Status, job.Attempts, job.MaxAttempts })
+                        .ToListAsync();
+
+                    var alreadyEnqueued = jobStates.Count > 0 || await context
                         .Set<ERP_RFQ_Automation.DocumentIntelligence.Persistence.SourceDocumentOccurrence>()
                         .AsNoTracking()
                         .AnyAsync(o => o.BusinessUnitId == businessUnitId && o.LogicalGroupKey == groupKey);
                     if (alreadyEnqueued)
                     {
-                        ingest.ParseStatus = STATUS_QUEUED; // persister flips to Success/NeedsReview
+                        var runnable = jobStates.Any(j =>
+                            j.Status is ERP_RFQ_Automation.Extraction.ExtractionStatus.Pending
+                                or ERP_RFQ_Automation.Extraction.ExtractionStatus.Leased
+                                or ERP_RFQ_Automation.Extraction.ExtractionStatus.Extracting
+                                or ERP_RFQ_Automation.Extraction.ExtractionStatus.Persisting
+                            && j.Attempts < j.MaxAttempts);
+
+                        if (runnable)
+                        {
+                            ingest.ParseStatus = STATUS_QUEUED; // persister flips to Success/NeedsReview
+                            await context.SaveChangesAsync();
+                            recovered++;
+                            _logger.LogInformation(
+                                "Stranded ingest {IngestId} already had live extraction work under "
+                                + "{GroupKey}; ParseStatus restored to Queued.", ingest.Id, groupKey);
+                            continue;
+                        }
+
+                        // Nothing will run it again. Say so, through the ONE rule that owns this
+                        // decision — the assembly recovery sweep applies the same one to every
+                        // ledger row that drifts, so the two cannot disagree about what a message
+                        // with no live job is.
+                        var assemblyStatus = await context
+                            .Set<ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssembly>()
+                            .AsNoTracking()
+                            .Where(a => a.BusinessUnitId == businessUnitId && a.EmailIngestId == ingest.Id)
+                            .Select(a => (ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssemblyStatus?)a.Status)
+                            .FirstOrDefaultAsync();
+                        ingest.ParseStatus =
+                            ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryLedgerReconciliation.StatusFor(
+                                STATUS_QUEUED, assemblyStatus, hasRunnableJob: false,
+                                hasStoppedJob: jobStates.Count > 0)
+                            ?? STATUS_QUEUED;
+                        ingest.ParsedAt = DateTime.UtcNow;
                         await context.SaveChangesAsync();
                         recovered++;
-                        _logger.LogInformation(
-                            "Stranded ingest {IngestId} already had extraction work under {GroupKey}; "
-                            + "ParseStatus restored to Queued.", ingest.Id, groupKey);
+                        _logger.LogWarning(
+                            "Stranded ingest {IngestId} had extraction work under {GroupKey} but "
+                            + "none of its {JobCount} job(s) will run again; ParseStatus is now "
+                            + "'{Status}' rather than a claim of progress nothing can honour.",
+                            ingest.Id, groupKey, jobStates.Count, ingest.ParseStatus);
                         continue;
                     }
 

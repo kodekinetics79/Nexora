@@ -596,24 +596,58 @@ public sealed class EmailTriageService : IEmailTriageService
                 .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId
                                            && x.EmailIngestId == ingestId, ct);
 
-            // A first command may rescue either a canonical NoInquiry assembly or a legacy
-            // rejected row that predates canonical capture. Progressed/assembled messages are not
-            // silently rewritten; only a replay of their original audit may resume them above.
+            // A first command may rescue a canonical NoInquiry assembly, a message HELD by an
+            // infrastructure fault, or a legacy rejected row that predates canonical capture.
+            // Progressed/assembled messages are not silently rewritten; only a replay of their
+            // original audit may resume them above.
             if (assembly is not null)
             {
                 if (!EmailInquiryAssemblyStateMachine.CanGovernedTriageReopenTransition(assembly.Status))
                     throw new InvalidOperationException(
-                        $"Email ingest {ingestId} is already {assembly.Status} and cannot be manually reopened.");
+                        "This message is "
+                        + EmailInquiryAssemblyStateMachine.DescribeForReader(assembly.Status)
+                        + ", so it cannot be sent back through extraction.");
 
-                var rejectedComponents = assembly.Components.Where(x =>
-                        x.Status == EmailInquiryComponentStatus.Ignored
-                        && x.ReasonCode == "no_inquiry")
+                // The two shapes a stranded part can take, and the ONE difference that matters:
+                //   - the triage gate closed it (Ignored / no_inquiry) — a decision to reverse;
+                //   - an infrastructure fault held it (FailedRecoverable) and NOTHING sweeps it
+                //     back into flight, so the operator's override is its only way out.
+                //
+                // A held part is reopened only when it carries no durable job. A job-bound hold
+                // cannot be restarted from here: re-submitting the same bytes resolves to that
+                // same exhausted job (EmailIngestEnqueuer refuses it for exactly this reason), so
+                // the component would look active while nothing could ever claim it. That case
+                // belongs to the audited dead-letter recovery, and is named below rather than
+                // silently retried.
+                var reopenable = assembly.Components.Where(x =>
+                        (x.Status == EmailInquiryComponentStatus.Ignored
+                            && x.ReasonCode == "no_inquiry")
+                        || (x.Status == EmailInquiryComponentStatus.FailedRecoverable
+                            && x.ExtractionJobId is null))
                     .ToList();
-                if (rejectedComponents.Count == 0)
-                    throw new InvalidOperationException(
-                        $"Email ingest {ingestId} was not closed by the triage gate and cannot be manually reopened.");
 
-                foreach (var component in rejectedComponents)
+                if (reopenable.Count == 0)
+                {
+                    if (assembly.Components.Any(x =>
+                            x.Status == EmailInquiryComponentStatus.FailedRecoverable
+                            && x.ExtractionJobId is not null))
+                        throw new InvalidOperationException(
+                            "This message is waiting on a part whose processing job already ran "
+                            + "out of attempts. Sending it back here cannot start that job again "
+                            + "— an administrator has to replay it from Operations, where failed "
+                            + "processing jobs are retried.");
+
+                    // A held message with nothing to reset is the case where a part of the message
+                    // has no record at all: the barrier counts a missing row as outstanding, which
+                    // is why the whole message is held. Capture below re-plans the message from its
+                    // stored original, so this reopen still has real work to do.
+                    if (assembly.Status != EmailInquiryAssemblyStatus.FailedRecoverable)
+                        throw new InvalidOperationException(
+                            "This message was not stopped by the inbound-mail gate, so there is "
+                            + "nothing to put back.");
+                }
+
+                foreach (var component in reopenable)
                 {
                     component.Status = EmailInquiryComponentStatus.Pending;
                     component.ReasonCode = null;
@@ -628,7 +662,8 @@ public sealed class EmailTriageService : IEmailTriageService
                      || authoritativeIngest.TriageOutcome != EmailTriageOutcome.Noise.ToString())
             {
                 throw new InvalidOperationException(
-                    $"Email ingest {ingestId} is not a rejected triage decision and cannot be manually reopened.");
+                    "This message was not rejected by the inbound-mail gate, so there is nothing "
+                    + "to put back.");
             }
 
             var beforeOutcome = authoritativeIngest.TriageOutcome;
