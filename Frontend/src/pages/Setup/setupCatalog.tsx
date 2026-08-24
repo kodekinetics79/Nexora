@@ -115,7 +115,7 @@ export const SETUP_GROUPS: SetupGroup[] = [
         description: 'The countries, states and cities used for addresses, delivery terms and routing.',
         path: '/setup/locations',
         icon: <LocationIcon />,
-        moduleName: 'Locations',
+        moduleName: 'Business Units',
         keywords: ['country', 'state', 'city', 'region', 'address', 'geography'],
       },
       {
@@ -125,7 +125,7 @@ export const SETUP_GROUPS: SetupGroup[] = [
         description: 'The physical stores stock can sit in — codes, addresses and which ones are still in use.',
         path: '/setup/warehouse',
         icon: <WarehouseIcon />,
-        moduleName: 'Warehouse',
+        moduleName: 'Products',
         keywords: ['warehouses', 'store', 'depot', 'site', 'stock location'],
         seeAlso: {
           label: 'Inventory → Warehouses',
@@ -147,7 +147,7 @@ export const SETUP_GROUPS: SetupGroup[] = [
         description: 'The currencies you buy and sell in, and the symbols and decimals they print with.',
         path: '/setup/currency',
         icon: <CurrencyIcon />,
-        moduleName: 'Currency',
+        moduleName: 'Currencies',
         // The label is the product's own word for it ('Currency', as the supplier grid heads the
         // column). The plural and the spelled-out names people actually type live here instead,
         // so the terse label costs nothing at the search box.
@@ -160,7 +160,7 @@ export const SETUP_GROUPS: SetupGroup[] = [
         description: 'The units lines are quoted in, and the short codes extraction is allowed to recognise.',
         path: '/setup/uom',
         icon: <UomIcon />,
-        moduleName: 'UOM',
+        moduleName: 'Products',
         keywords: ['units of measure', 'unit of measure', 'units', 'measure', 'each', 'metre', 'kg', 'quantity'],
       },
       {
@@ -169,7 +169,7 @@ export const SETUP_GROUPS: SetupGroup[] = [
         description: 'The named margin and mark-up structures a quote line can be priced against.',
         path: '/setup/price-structure',
         icon: <PriceStructureIcon />,
-        moduleName: 'UOM',
+        moduleName: 'Quotations',
         keywords: ['margin', 'markup', 'pricing', 'uplift', 'cost plus'],
       },
       {
@@ -178,7 +178,7 @@ export const SETUP_GROUPS: SetupGroup[] = [
         description: 'Tax rates, rounding and tolerance, and the weights that decide how suppliers rank.',
         path: '/setup/commercial-policy',
         icon: <CommercialPolicyIcon />,
-        moduleName: 'UOM',
+        moduleName: 'Quotations',
         keywords: ['tax', 'vat', 'zatca', 'tolerance', 'rounding', 'supplier scoring', 'weights'],
       },
       {
@@ -227,7 +227,7 @@ export const SETUP_GROUPS: SetupGroup[] = [
         description: 'How long each stage may sit before it is late, and who hears about it when it is.',
         path: '/setup/sla',
         icon: <SlaIcon />,
-        moduleName: 'UOM',
+        moduleName: 'Dashboard',
         keywords: ['sla', 'due date', 'escalation', 'reminder', 'ageing', 'breach'],
       },
       {
@@ -252,7 +252,7 @@ export const SETUP_GROUPS: SetupGroup[] = [
         description: 'Extra fields your team needs on leads, quotes and orders that the standard record has no place for.',
         path: '/setup/custom-fields',
         icon: <CustomFieldIcon />,
-        moduleName: 'UOM',
+        moduleName: 'Customers',
         keywords: ['attribute', 'extra field', 'metadata', 'form', 'tenant field'],
       },
       {
@@ -261,7 +261,7 @@ export const SETUP_GROUPS: SetupGroup[] = [
         description: 'The values behind the dropdowns — statuses, reasons and categories used across the platform.',
         path: '/setup/master',
         icon: <ListsIcon />,
-        moduleName: 'UOM',
+        moduleName: 'Business Units',
         // Not "taxonomy": it belongs to Taxonomy & Document Skills below, and it makes a search
         // for "tax" answer with this screen instead of Commercial Policy.
         keywords: ['setup master', 'master sub', 'lookup', 'dropdown', 'reason', 'status', 'picklist'],
@@ -292,7 +292,14 @@ export const SETUP_GROUPS: SetupGroup[] = [
         description: 'The job titles people can be given, and the authority tier each one carries.',
         path: '/setup/master?type=role',
         icon: <RoleIcon />,
-        moduleName: 'UOM',
+        // The one gate here that the server actually honours. SetupMasterController's
+        // RoleAdministrationDenialAsync checks "Roles & Permissions" for the matching action
+        // before any role row is created, edited or deleted, so this card is offered to exactly
+        // the people who can act on it. It is deliberately TIGHTER than the /setup/master route
+        // it deep-links into: that route also serves ordinary picklists, which need no such
+        // authority. Reading a role row through the looser route grants nothing — the server
+        // still refuses the write.
+        moduleName: 'Roles & Permissions',
         keywords: ['role', 'job title', 'authority', 'rank', 'tier', 'manager', 'administrator'],
       },
       {

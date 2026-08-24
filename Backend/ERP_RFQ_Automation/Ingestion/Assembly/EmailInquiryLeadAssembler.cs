@@ -307,6 +307,10 @@ public sealed class EmailInquiryLeadAssembler : IEmailInquiryLeadAssembler
         var expected = 0;
         var extracted = 0;
         var reviewReasons = new List<string>();
+        // Whether EVERY part of this message was read to the end and named nothing. Accumulated
+        // here rather than inferred afterwards from `expected`, because `expected` cannot answer
+        // it — see the zero-line gate below.
+        var readInFull = true;
         // Provenance is MERGED, not invented. Hardcoding a deterministic path made every
         // assembled Lead read as external-AI-derived downstream — which is what the identity
         // ledger and the Trust Center report to the customer — even when every component was a
@@ -336,7 +340,13 @@ public sealed class EmailInquiryLeadAssembler : IEmailInquiryLeadAssembler
                 return new AssembleOutcome(null, null);
             }
 
-            if (parsed is null) continue;
+            if (parsed is null)
+            {
+                // Stored, versioned, deserialized to nothing. Its counts are not read below, so
+                // it must not be allowed to look like a part that was read and found empty.
+                readInFull = false;
+                continue;
+            }
 
             header ??= parsed;
             if (parsed.Items is { Count: > 0 })
@@ -348,6 +358,7 @@ public sealed class EmailInquiryLeadAssembler : IEmailInquiryLeadAssembler
             processingPaths.Add(result.ProcessingPath);
             if (!string.IsNullOrWhiteSpace(result.ReviewReason))
                 reviewReasons.Add(result.ReviewReason!);
+            if (!IsCompleteAndEmptyRead(result)) readInFull = false;
         }
 
         if (header is null)
@@ -400,33 +411,58 @@ public sealed class EmailInquiryLeadAssembler : IEmailInquiryLeadAssembler
         // or SAM.gov solicitation states the requirement in a portal behind a link and extracts
         // to zero lines every time; it is a bid opportunity, and it triages identically to the
         // marketing mail (Uncertain / no_signal), so no triage-side discriminator can separate
-        // the two. NoInquiry is terminal AND absorbing, so guessing wrong there is unrecoverable
-        // and would re-break the 2026-08-13 fix that stopped discarding public procurement.
-        // NeedsReview costs a human a glance and can still become either.
+        // the two. NeedsReview costs a human a glance and can still become either.
+        //
+        // NoInquiry — the terminal "this carried nothing to quote" — is the disposition this
+        // branch WANTS and cannot yet use, and the blocker is not the state machine. That door
+        // is open (EmailInquiryAssemblyStateMachine allows ReadyForAssembly -> NoInquiry, and
+        // CanGovernedTriageReopenTransition accepts NoInquiry). The blocker is that reopening it
+        // does not work for a message that got this far: EmailTriageService.GovernedReopenAsync
+        // only puts back components that are Ignored/no_inquiry or job-less FailedRecoverable,
+        // and every part of a message that reached this method is Completed and job-bound — so
+        // the reopen throws, and the Inbound Mail screen offers the button anyway
+        // (describeReopenAbility returns canReopen for NoInquiry). Closing here would therefore
+        // hand the customer a one-way door with a control on it that answers 422. Even with the
+        // reopen widened, EmailIngestEnqueuer counts a component whose durable job still exists
+        // as alreadyScheduled, so the re-opened part would sit Pending with nothing to claim it.
+        // Reversible first, terminal second.
         //
         // A REAL FIRST-TIME BUYER IS UNREACHABLE FROM HERE. One extracted line anywhere in the
         // message — body or attachment — makes merged non-empty and this branch dead. That is
         // the property that matters most in this change and it holds by construction, not by
         // keyword tuning.
         //
-        // WHAT THE OPERATOR IS TOLD SPLITS ON `expected`, BECAUSE ZERO LINES HAS TWO CAUSES.
-        // `expected` is how many candidate lines the extractors SAW before anything was
-        // discarded: parsed text regions on the document path (ChunkedExtractionService), the
-        // model's own item count before prose-anchor verification on the body path
-        // (ConversationalExtractionService).
+        // WHAT THE OPERATOR IS TOLD SPLITS ON WHETHER THE MESSAGE WAS READ IN FULL, BECAUSE
+        // ZERO LINES HAS TWO CAUSES AND ONLY ONE OF THEM IS ABOUT THE SENDER.
         //
-        //   expected == 0 — every part was looked at and nothing in the message even resembled a
-        //     requestable line. That is the marketing case, and "read in full, asked for nothing"
-        //     is a true sentence to put in front of an operator.
+        //   read in full — every part reached the end of its source and named nothing that even
+        //     resembled a requestable line. That is the marketing case, and "read in full, asked
+        //     for nothing" is a true sentence to put in front of an operator.
         //
-        //   expected  > 0 — there WAS content that could have carried the request and none of it
-        //     survived into an inquiry. A scanned RFQ PDF whose OCR came back partial is the case
-        //     that matters: ChunkedExtractionService emits NeedsReview with a non-null result,
-        //     zero items and a positive expected count ("OCR was incomplete; omitted content
-        //     requires review"), and the worker does not divert a NeedsReview outcome — it records
-        //     it and this method runs. Telling that operator the sender asked for nothing is
-        //     false, and false about a real customer RFQ: they would chase a buyer who did their
-        //     part instead of re-reading the document.
+        //   not read in full — there WAS content that could have carried the request and none of
+        //     it survived into an inquiry. A scanned RFQ PDF whose OCR came back partial is the
+        //     case that matters: ChunkedExtractionService emits NeedsReview with a non-null
+        //     result and zero items, and the worker does not divert a NeedsReview outcome — it
+        //     records it and this method runs. Telling that operator the sender asked for nothing
+        //     is false, and false about a real customer RFQ: they would chase a buyer who did
+        //     their part instead of re-reading the document.
+        //
+        // THIS USED TO SPLIT ON `expected > 0` AND THAT TEST IS WRONG, in the dangerous
+        // direction, on a shape production really emits. `expected` means two different things
+        // on the two document paths. When the parser finds line-item regions, it is the region
+        // count and a partial-OCR scan does have a positive one. When it finds NONE — which is
+        // the normal outcome for a scan whose OCR degraded — ChunkedExtractionService takes the
+        // whole-document branch and sets ExpectedItemCount to the MODEL'S OWN ITEM COUNT, which
+        // for a document it could not read is zero. So the exact message this split exists to
+        // protect, a customer's scanned RFQ, landed on the marketing sentence.
+        //
+        // The replacement asks for POSITIVE evidence instead of inferring from a count: a part
+        // counts as read in full only when its extractor said so. Anything else — an incomplete
+        // OCR, a failed chunk, a truncated body, a confidence too low to stand on, a payload
+        // that deserialized to nothing, or any review sentence this build does not recognise —
+        // is NOT read in full. The default is the cautious sentence, so a future extractor that
+        // invents a new reason degrades to "we could not recover it" rather than to "you asked
+        // for nothing".
         //
         // The disposition is the same HOLD either way — zero lines still proves nothing about
         // intent — and only the sentence differs, because the sentence is the whole of what
@@ -435,25 +471,25 @@ public sealed class EmailInquiryLeadAssembler : IEmailInquiryLeadAssembler
         // operator screen REJECTS a reason over 300 characters outright (EmailInquiryHoldReasons).
         if (merged.Count == 0)
         {
-            var sawCandidateLines = expected > 0;
             _log.LogInformation(
                 "Assembly {AssemblyId} for business unit {BusinessUnitId} was read "
-                + "({Results} component result(s)), saw {Expected} candidate line(s) and names no "
-                + "requestable line; it is held for review as {Reason} rather than becoming an "
-                + "empty lead. Extractor review reason(s): {ReviewReasons}",
-                assemblyId, businessUnitId, ordered.Count, expected,
-                sawCandidateLines
-                    ? EmailInquiryHoldReasons.ContentNotRecovered
-                    : EmailInquiryHoldReasons.NoRequestableContent,
+                + "({Results} component result(s)), saw {Expected} candidate line(s), read in "
+                + "full = {ReadInFull}, and names no requestable line; it is held for review as "
+                + "{Reason} rather than becoming an empty lead. Extractor review reason(s): "
+                + "{ReviewReasons}",
+                assemblyId, businessUnitId, ordered.Count, expected, readInFull,
+                readInFull
+                    ? EmailInquiryHoldReasons.NoRequestableContent
+                    : EmailInquiryHoldReasons.ContentNotRecovered,
                 reviewReasons.Count > 0 ? string.Join("; ", reviewReasons) : "(none reported)");
             await _coordinator.HoldForReviewAsync(
                 businessUnitId, assemblyId,
-                sawCandidateLines
-                    ? EmailInquiryHoldReasons.ContentNotRecovered
-                    : EmailInquiryHoldReasons.NoRequestableContent,
-                sawCandidateLines
-                    ? EmailInquiryHoldReasons.ContentNotRecoveredDetail
-                    : EmailInquiryHoldReasons.NoRequestableContentDetail, ct);
+                readInFull
+                    ? EmailInquiryHoldReasons.NoRequestableContent
+                    : EmailInquiryHoldReasons.ContentNotRecovered,
+                readInFull
+                    ? EmailInquiryHoldReasons.NoRequestableContentDetail
+                    : EmailInquiryHoldReasons.ContentNotRecoveredDetail, ct);
             return new AssembleOutcome(null, null);
         }
 
@@ -540,6 +576,53 @@ public sealed class EmailInquiryLeadAssembler : IEmailInquiryLeadAssembler
 
         return new AssembleOutcome(leadId, anchorJob);
     }
+
+    /// <summary>
+    /// Did this part reach the END of its source and find nothing being asked for?
+    ///
+    /// <para>The question the zero-line gate has to answer, and the one that decides whether an
+    /// operator is told the SENDER asked for nothing or told that WE could not recover what was
+    /// there. Getting it backwards on a real customer RFQ sends a salesperson to chase a buyer
+    /// who did their part.</para>
+    ///
+    /// <para><b>Positive evidence only.</b> Three facts must all hold, and the absence of any of
+    /// them means "not read in full":</para>
+    /// <list type="number">
+    /// <item>No line survived (<c>ExtractedItemCount == 0</c>) — otherwise there is nothing
+    /// empty about this part.</item>
+    /// <item>No line was even seen (<c>ExpectedItemCount == 0</c>). A positive count is content
+    /// that could have carried the request and did not survive; that is the OTHER sentence.</item>
+    /// <item>The extractor's own verdict is one that can only be produced by a complete read.
+    /// <c>null</c> is the deterministic and clean-document case: a CSV with nothing but a header,
+    /// or a whole document the model read and found no request in, both come back Ok with no
+    /// review reason at all. The conversational constant is the body path saying the same thing
+    /// about a message it received in full — and it is a CONSTANT precisely so that
+    /// <c>ConversationalExtractionService</c> and this decision cannot
+    /// drift apart silently.</item>
+    /// </list>
+    ///
+    /// <para><b>Everything else is a hold, including reasons this build has never seen.</b> An
+    /// incomplete OCR, a failed chunk, a body clipped at the input ceiling and a confidence
+    /// below the floor all name themselves in the review reason, and none of them is evidence
+    /// that the sender asked for nothing. So does whatever a future extractor invents — and the
+    /// unknown-reason default lands on "we could not recover it", which is the sentence that
+    /// costs a glance rather than a deal.</para>
+    ///
+    /// <para>A FAILED extraction never reaches here at all: <c>ExtractionWorker</c> diverts on
+    /// <c>Failed</c> or a null result before any component result is written, so there is no row
+    /// for this predicate to see. That is the property that keeps a dead-lettered RFQ out of
+    /// this branch entirely, and it is asserted rather than assumed
+    /// (MarketingMailDoesNotBecomeLeadPostgreSqlTests).</para>
+    /// </summary>
+    private static bool IsCompleteAndEmptyRead(EmailInquiryComponentResult result)
+        => result.ExtractedItemCount == 0
+           && result.ExpectedItemCount == 0
+           && (result.ReviewReason is null
+               || string.Equals(
+                   result.ReviewReason,
+                   ERP_RFQ_Automation.Extraction.Conversational.ConversationalExtractionService
+                       .NoRequestableItemsReviewReason,
+                   StringComparison.Ordinal));
 
     /// <summary>External if ANY component used an external model; null when none did.</summary>
     private static AiProviderClass? MergedProviderClass(HashSet<string> classes)

@@ -113,7 +113,19 @@ public sealed record RoutingRequest(
     // Audit-only: ScopeKeys above still decides what matches, so supplying this changes no
     // routing outcome. It exists so a rule that never fires can be told apart from a rule whose
     // scope has no source on this RFQ at all — see ScopeKeyDerivation.
-    IReadOnlyCollection<ScopeKeyDerivation>? ScopeKeyDerivations = null);
+    IReadOnlyCollection<ScopeKeyDerivation>? ScopeKeyDerivations = null,
+    // The tenant's ONE customer-set answer to "when Nexora cannot work out who owns an inquiry,
+    // give it to ___" (BusinessUnit.DefaultLeadOwnerUserId). Supplied by the application service
+    // alongside UserAvailability so the engine stays pure: it reads this field and the availability
+    // it was handed, and never queries for either.
+    //
+    // It is a FALLBACK, not a rule. Every ownership rule, precedence, threshold and ambiguity
+    // check runs first and unchanged; this is consulted only on the paths that would otherwise
+    // park the lead on the unassigned queue, and only when the named person passes the SAME
+    // IsAvailable test every other candidate passes. Unset or ineligible means the queue, exactly
+    // as before. Deliberately not a round-robin or a load balancer: account continuity matters
+    // more than even distribution on a team small enough to need a fallback at all.
+    long? DefaultOwnerUserId = null);
 
 public sealed record RoutingResult(
     LeadRoutingDecision Decision,

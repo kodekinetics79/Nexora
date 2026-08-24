@@ -1,3 +1,4 @@
+using ERP_RFQ_Automation.Infrastructure.Storage;
 using System.Text;
 using System.Text.Json;
 using ERP_RFQ_Automation.Models;
@@ -160,6 +161,278 @@ public sealed class TenantLifecyclePostgreSqlTests
 
         // Untouched: every byte of the neighbour, everywhere.
         Assert.Equal(before, await FingerprintAsync(neighbour));
+    }
+
+    /// <summary>
+    /// DEFECT P0-3. A purge issued SQL and nothing else.
+    ///
+    /// <para>A full tenant purge left every stored object exactly where it was: 273 objects under
+    /// <c>Evidence/tenants/{bu}/</c> in production and a 5 GB disk at
+    /// <c>/var/data/nexora/uploads/</c>, including the raw <c>.eml</c> of every message the tenant
+    /// ever received. And it left them UNATTRIBUTABLE as well as undeleted, because deleting the
+    /// rows destroyed the only index back to the bytes.</para>
+    ///
+    /// <para>The neighbour's file is the assertion that matters second. A prefix sweep is the right
+    /// shape for this problem and the wrong prefix would take out a live customer's evidence, so
+    /// the test asserts the boundary rather than only the deletion.</para>
+    /// </summary>
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task A_purge_deletes_the_tenants_stored_bytes_and_leaves_the_neighbours()
+    {
+        const long doomed = 88_140, neighbour = 88_141;
+        var tenant = await SchedulePurgeableAsync(doomed, "purge-bytes");
+        await SeedTenantAsync(neighbour, "purge-bytes-neighbour");
+
+        var root = NewStorageRoot();
+        var doomedFile = WriteStoredObject(root, doomed, "raw-mail", "a.eml", "the customer's message");
+        var neighbourFile = WriteStoredObject(root, neighbour, "cleared", "b.pdf", "somebody else's quote");
+
+        // The SECOND tenant-prefixed tree on the same volume. FolderService stages watched-folder
+        // intake here, and it is not evidence, so a sweep written only against Evidence/ leaves
+        // every document the customer ever dropped into a watched folder on the disk.
+        var doomedWatched = WriteWatchedFile(root, doomed, "dropped.pdf");
+        var neighbourWatched = WriteWatchedFile(root, neighbour, "theirs.pdf");
+
+        await using var db = Context();
+        var result = await TenantLifecycleHarness
+            .Service(db, _database.ConnectionString,
+                storagePurger: TenantLifecycleHarness.StoragePurger(root))
+            .PurgeAsync(tenant.Id,
+                new ConfirmTenantDestructionRequest { Reason = OffboardingReason, Confirmation = tenant.Name },
+                TenantLifecycleHarness.SecondApprover(), null, CancellationToken.None);
+
+        Assert.False(File.Exists(doomedFile), "The purged tenant's stored bytes are still on disk.");
+        Assert.True(File.Exists(neighbourFile), "The purge deleted a neighbouring tenant's bytes.");
+        Assert.False(Directory.Exists(Path.Combine(root, "Evidence", "tenants", doomed.ToString()))
+                     && Directory.EnumerateFiles(
+                            Path.Combine(root, "Evidence", "tenants", doomed.ToString()),
+                            "*", SearchOption.AllDirectories).Any(),
+            "The purged tenant's evidence prefix still holds files.");
+
+        Assert.False(File.Exists(doomedWatched), "The purged tenant's watched-folder files survived.");
+        Assert.True(File.Exists(neighbourWatched), "The purge deleted a neighbour's watched-folder file.");
+
+        // The report says so, in its own count rather than folded into the row count. An
+        // offboarding that quotes rows alone is exactly what this defect looked like.
+        Assert.Equal(2, result.StoredObjectsDeleted);
+        Assert.True(result.StorageBytesFreed > 0);
+        Assert.Contains("stored object", result.Summary);
+
+        var record = await db.Set<TenantOffboarding>().AsNoTracking()
+            .SingleAsync(r => r.TenantId == tenant.Id);
+        Assert.NotNull(record.StoragePurgeCompletedOn);
+        Assert.Equal(0, record.StoragePurgeOutstandingCount);
+    }
+
+    /// <summary>
+    /// A store that will not delete makes the purge INCOMPLETE, not successful — and the step
+    /// resumes when the store comes back.
+    ///
+    /// <para>This is the governing rule of the whole path, tested where it is easiest to violate.
+    /// The bytes are the one part of an offboarding that can legitimately be half-done: object
+    /// storage has no rollback, so it cannot join the destructive transaction. The answer is not
+    /// to ignore the failure but to record the inventory before destroying the rows and treat the
+    /// deletion as a resumable step — which is what the second half of this test proves, by
+    /// re-running the same purge against a working store and watching it finish.</para>
+    ///
+    /// <para>Note the assertion about the stage. The tenant is NOT recorded as Purged while their
+    /// files are still stored; the offboarding sits in the recoverable state the module already
+    /// calls tolerable, and it is visible — <c>PurgeExecutedOn</c> set, <c>PurgedOn</c> null,
+    /// <c>StoragePurgeOutstandingCount</c> above zero.</para>
+    /// </summary>
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task A_purge_that_cannot_delete_the_bytes_reports_incomplete_and_resumes_later()
+    {
+        const long doomed = 88_142;
+        var tenant = await SchedulePurgeableAsync(doomed, "purge-bytes-refused");
+
+        var root = NewStorageRoot();
+        var storedFile = WriteStoredObject(root, doomed, "cleared", "c.pdf", "the customer's quote");
+
+        var files = new LocalFileStorage(root, root);
+        var refusing = new RefusingEvidenceObjectStorage(new LocalEvidenceObjectStorage(files));
+        var refusingPurger = new TenantStoragePurger(
+            refusing, files, NullLogger<TenantStoragePurger>.Instance);
+
+        await using var db = Context();
+        var request = new ConfirmTenantDestructionRequest
+        {
+            Reason = OffboardingReason,
+            Confirmation = tenant.Name
+        };
+
+        var failure = await Assert.ThrowsAsync<TenantOffboardingRefusedException>(
+            () => TenantLifecycleHarness
+                .Service(db, _database.ConnectionString, storagePurger: refusingPurger)
+                .PurgeAsync(tenant.Id, request,
+                    TenantLifecycleHarness.SecondApprover(), null, CancellationToken.None));
+
+        Assert.Contains("INCOMPLETE", failure.Message);
+        Assert.Contains("re-run the purge", failure.Message);
+
+        // The rows really are gone — that half committed — and the record says so honestly.
+        await using (var probe = Context())
+        {
+            var record = await probe.Set<TenantOffboarding>().AsNoTracking()
+                .SingleAsync(r => r.TenantId == tenant.Id);
+            Assert.NotNull(record.PurgeExecutedOn);
+            Assert.Null(record.PurgedOn);
+            Assert.Equal(TenantOffboardingStage.PendingDeletion, record.Stage);
+            Assert.Equal(1, record.StoragePurgeOutstandingCount);
+            Assert.Null(record.StoragePurgeCompletedOn);
+            Assert.NotNull(record.StoragePurgeInventory);
+        }
+
+        Assert.True(File.Exists(storedFile), "The refusing store should not have deleted anything.");
+
+        // ---- the store comes back, and the SAME purge finishes --------------------------------
+        // The inventory outlived the rows, which is the entire reason it is captured first: by now
+        // nothing else in the database can name this object.
+        await using var resumed = Context();
+        var completed = await TenantLifecycleHarness
+            .Service(resumed, _database.ConnectionString,
+                storagePurger: TenantLifecycleHarness.StoragePurger(root))
+            .PurgeAsync(tenant.Id, request,
+                TenantLifecycleHarness.SecondApprover(), null, CancellationToken.None);
+
+        Assert.False(File.Exists(storedFile), "The resumed purge left the tenant's bytes in place.");
+        Assert.Equal(1, completed.StoredObjectsDeleted);
+
+        var finished = await resumed.Set<TenantOffboarding>().AsNoTracking()
+            .SingleAsync(r => r.TenantId == tenant.Id);
+        Assert.Equal(TenantOffboardingStage.Purged, finished.Stage);
+        Assert.Equal(0, finished.StoragePurgeOutstandingCount);
+        Assert.NotNull(finished.StoragePurgeCompletedOn);
+    }
+
+    /// <summary>
+    /// A purge that committed its rows under an earlier build has no byte inventory — and is still
+    /// swept, by prefix, with the gap recorded rather than papered over.
+    ///
+    /// <para>The first version of this path refused: no inventory, no way to know which objects
+    /// were theirs, escalate. That is the wrong kind of caution. The rows are already destroyed,
+    /// so refusing strands the tenant forever, and it leaves every recoverable object in place to
+    /// protect the handful that are not recoverable either way. The two prefix trees are keyed by
+    /// the business unit id and need no row at all, so they are swept; the legacy flat folders are
+    /// not partitioned by anything, so a file there whose row is gone is unattributable and the
+    /// inventory says so with <c>ReconstructedFromPrefixesOnly</c>.</para>
+    /// </summary>
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task A_recovered_purge_with_no_recorded_inventory_still_sweeps_the_tenant_prefixes()
+    {
+        const long doomed = 88_143;
+        var tenant = await SchedulePurgeableAsync(doomed, "purge-bytes-recovered");
+
+        var root = NewStorageRoot();
+        var storedFile = WriteStoredObject(root, doomed, "cleared", "d.pdf", "the customer's quote");
+
+        // A committed destructive transaction whose completion was never written, and which — being
+        // from before this change — recorded no inventory at all.
+        await using (var crashed = Context())
+        {
+            var record = await crashed.Set<TenantOffboarding>()
+                .SingleAsync(r => r.TenantId == tenant.Id);
+            record.PurgeStartedOn = DateTime.UtcNow;
+            record.PurgeAttemptId = Guid.NewGuid();
+            record.PurgeExecutedOn = DateTime.UtcNow;
+            record.PurgeExecutedRowCount = 41;
+            record.PurgeExecutionDetail = "[]";
+            record.PurgeReason = OffboardingReason;
+            record.StoragePurgeInventory = null;
+            await crashed.SaveChangesAsync();
+        }
+
+        await using var db = Context();
+        var result = await TenantLifecycleHarness
+            .Service(db, _database.ConnectionString,
+                storagePurger: TenantLifecycleHarness.StoragePurger(root))
+            .PurgeAsync(tenant.Id,
+                new ConfirmTenantDestructionRequest { Reason = OffboardingReason, Confirmation = tenant.Name },
+                TenantLifecycleHarness.SecondApprover(), null, CancellationToken.None);
+
+        Assert.False(File.Exists(storedFile), "The recovered purge left the tenant's bytes in place.");
+        Assert.Equal(1, result.StoredObjectsDeleted);
+
+        var record2 = await db.Set<TenantOffboarding>().AsNoTracking()
+            .SingleAsync(r => r.TenantId == tenant.Id);
+        Assert.Equal(TenantOffboardingStage.Purged, record2.Stage);
+        Assert.Equal(0, record2.StoragePurgeOutstandingCount);
+
+        // And it is on the record that this sweep could not see the row-derived half, so nobody
+        // later reads it as exhaustive.
+        Assert.NotNull(record2.StoragePurgeInventory);
+        Assert.Contains("ReconstructedFromPrefixesOnly", record2.StoragePurgeInventory);
+        Assert.True(
+            JsonSerializer.Deserialize<TenantStoragePurgeInventory>(record2.StoragePurgeInventory!)!
+                .ReconstructedFromPrefixesOnly,
+            "A rebuilt inventory must say it was rebuilt from prefixes alone.");
+    }
+
+    private static string NewStorageRoot()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(), "nexora-purge-bytes", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        return root;
+    }
+
+    /// <summary>A file at the exact path <c>FolderService.GetTenantFolderPath</c> stages intake
+    /// into, so the sweep is enumerating the real layout rather than one invented for the test.
+    /// </summary>
+    private static string WriteWatchedFile(string root, long businessUnitId, string name)
+    {
+        var path = Path.Combine(
+            root, "Tenants", businessUnitId.ToString(), "Watched", "Shared", name);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, "a document dropped into a watched folder");
+        return path;
+    }
+
+    /// <summary>
+    /// A file at the exact key <c>LocalEvidenceObjectStorage.BuildKey</c> produces, so the sweep is
+    /// enumerating the real layout rather than one invented for the test.
+    /// </summary>
+    private static string WriteStoredObject(
+        string root, long businessUnitId, string zone, string name, string content)
+    {
+        var path = Path.Combine(
+            root, "Evidence", "tenants", businessUnitId.ToString(), zone, "sha256",
+            name[..2], name);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, content);
+        return path;
+    }
+
+    /// <summary>
+    /// Enumerates like the real store and refuses every delete. Models the store being unreachable
+    /// or the credentials being wrong — the case where the rows are already destroyed and the bytes
+    /// cannot be, which is the only genuinely awkward state on this path.
+    /// </summary>
+    private sealed class RefusingEvidenceObjectStorage(IEvidenceObjectStorage inner) : IEvidenceObjectStorage
+    {
+        public bool IsDurable => true;
+
+        public Task ProbeAsync(CancellationToken ct = default) => inner.ProbeAsync(ct);
+
+        public Task<EvidenceObject> WriteImmutableAsync(
+            long businessUnitId, string zone, string sha256, string extension,
+            ReadOnlyMemory<byte> content, CancellationToken ct = default)
+            => inner.WriteImmutableAsync(businessUnitId, zone, sha256, extension, content, ct);
+
+        public Task<Stream> OpenVerifiedReadAsync(
+            string storageUri, string expectedSha256, CancellationToken ct = default)
+            => inner.OpenVerifiedReadAsync(storageUri, expectedSha256, ct);
+
+        public Task<IReadOnlyList<TenantStoredObject>> ListTenantObjectsAsync(
+            long businessUnitId, CancellationToken ct = default)
+            => inner.ListTenantObjectsAsync(businessUnitId, ct);
+
+        public Task<EvidenceObjectPurgeResult> TryDeletePurgedObjectAsync(
+            string bucket, string key, string version, CancellationToken ct = default)
+            => throw new EvidenceStorageUnavailableException(isConfigurationFault: false);
     }
 
     [Fact]

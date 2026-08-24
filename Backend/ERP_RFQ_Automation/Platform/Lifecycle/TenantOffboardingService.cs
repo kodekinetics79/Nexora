@@ -38,6 +38,7 @@ public sealed class TenantOffboardingService(
     ErpRfqAutomationContext context,
     IPlatformAuditService audit,
     TenantPurgeExecutor purge,
+    TenantStoragePurger storage,
     TenantPersonalDataEraser eraser,
     TenantDataExportService export,
     IOptions<TenantLifecycleOptions> options,
@@ -578,6 +579,36 @@ public sealed class TenantOffboardingService(
             if (outcome is null)
             try
             {
+                // THE BYTE INVENTORY, taken and COMMITTED before a single row is deleted.
+                //
+                // A purge used to issue SQL and nothing else, so a completed offboarding left 273
+                // evidence objects and a 5 GB disk untouched — the raw .eml of every message the
+                // tenant ever received included — while telling the customer their data was gone.
+                // It cannot be fixed by deleting the bytes afterwards: destroying the rows
+                // destroys the only index back to them, and after the transaction nothing can name
+                // them any more.
+                //
+                // It also cannot join the destructive transaction. Object storage has no rollback,
+                // so a delete inside the transaction would be permanent even when the transaction
+                // was not — a tenant whose purge was correctly aborted would find their files gone
+                // regardless. So the list is written down first, and the deletion is a recorded
+                // follow-up step against it. That is what makes it resumable, and what makes a
+                // half-emptied bucket a state somebody can find rather than one nobody can see.
+                var captured = await storage.CaptureAsync(
+                    businessUnitId, await purge.CaptureStoragePathsAsync(businessUnitId, ct), ct);
+                var capturedJson = JsonSerializer.Serialize(captured);
+                await InTransactionAsync(async () =>
+                {
+                    await context.Set<TenantOffboarding>()
+                        .Where(r => r.TenantId == tenant.Id && r.PurgeAttemptId == purgeAttemptId)
+                        .ExecuteUpdateAsync(setters => setters
+                            .SetProperty(r => r.StoragePurgeInventory, capturedJson)
+                            .SetProperty(r => r.StoragePurgeCompletedOn, (DateTime?)null)
+                            .SetProperty(r => r.StoragePurgeOutstandingCount, (int?)null), ct);
+                    context.Entry(record).Property(r => r.StoragePurgeInventory).CurrentValue = capturedJson;
+                    context.Entry(record).Property(r => r.StoragePurgeInventory).IsModified = false;
+                }, ct);
+
                 outcome = await purge.ExecuteAsync(tenant.Id, businessUnitId, purgeAttemptId, ct);
             }
             catch (Exception exception)
@@ -622,6 +653,23 @@ public sealed class TenantOffboardingService(
         // The branch above either restored a committed execution or executed one now.
         var completedOutcome = outcome
             ?? throw new InvalidOperationException("The fenced purge produced no durable outcome.");
+
+        // ---- 2b. the bytes ------------------------------------------------------------------
+        // Re-run safe by construction: every object is addressed by (bucket, key, version) and an
+        // absent one counts as success, so a retry after a partial sweep finishes the job rather
+        // than failing on what it already did. This is where a recovered attempt resumes too — the
+        // inventory outlived the rows precisely so that it could.
+        var storageReport = await PurgeStoredBytesAsync(tenant.Id, businessUnitId, purgeAttemptId, record, ct);
+        if (!storageReport.IsComplete)
+            throw TenantOffboardingRefusedException.Conflict(
+                $"Tenant {tenant.Id}'s rows are destroyed, but {storageReport.Outstanding} stored "
+                + "object(s) could not be deleted, so this purge is INCOMPLETE and has not been "
+                + "recorded as finished. "
+                + string.Join("; ", storageReport.Refusals.Take(5)
+                    .Select(r => $"{r.Bucket}/{r.Key}: {r.Refusal}"))
+                + ". The inventory is held on the offboarding record; re-run the purge once the "
+                + "store is reachable and it will resume from where it stopped. A purge that could "
+                + "not delete the customer's files must not report that it did.");
 
         // ---- 3. completion -------------------------------------------------------------------
         var completedOn = UtcNow;
@@ -690,12 +738,18 @@ public sealed class TenantOffboardingService(
         return new TenantPurgeResultDto(
             tenant.Id, tenant.Slug, completedOutcome.RowsDeleted, completedOutcome.Deleted.Count, completedOutcome.Deleted,
             lifecycleEvents, auditRecords, support.TicketsRedacted, support.NotesErased,
-            $"Destroyed {completedOutcome.RowsDeleted:N0} row(s) across {completedOutcome.Deleted.Count} table(s) for "
-            + $"tenant '{tenant.Slug}'. {lifecycleEvents:N0} lifecycle event(s) and {auditRecords:N0} "
-            + "platform audit record(s) were retained.",
+            $"Destroyed {completedOutcome.RowsDeleted:N0} row(s) across {completedOutcome.Deleted.Count} table(s) "
+            + $"and {storageReport.Deleted:N0} stored object(s) ({storageReport.BytesFreed:N0} byte(s) "
+            + $"reclaimed) for tenant '{tenant.Slug}'. {lifecycleEvents:N0} lifecycle event(s) and "
+            + $"{auditRecords:N0} platform audit record(s) were retained.",
             [TenantOffboardingDisclosure.Irreversible, TenantOffboardingDisclosure.Survives,
              TenantOffboardingDisclosure.StatutoryRecordsMoveWithTheCustomer,
-             TenantOffboardingDisclosure.DeletionIsNotErasure]);
+             TenantOffboardingDisclosure.DeletionIsNotErasure])
+        {
+            StoredObjectsDeleted = storageReport.Deleted,
+            StoredObjectsAlreadyAbsent = storageReport.AlreadyAbsent,
+            StorageBytesFreed = storageReport.BytesFreed
+        };
     }
 
     // ------------------------------------------------------------------------------- erasure
@@ -836,6 +890,89 @@ public sealed class TenantOffboardingService(
                 + "a customer's records requires a second platform Owner: the person who decided it "
                 + "must not also be the person who carries it out. Have another Owner run the purge, "
                 + "or cancel the deletion if the decision has changed.");
+    }
+
+    /// <summary>
+    /// Deletes the tenant's stored bytes against the inventory committed before the destruction,
+    /// and writes down per object what it managed.
+    ///
+    /// <para>Records the outcome whether or not it is complete. An incomplete sweep with nothing
+    /// written down is indistinguishable from one that never ran, and the whole reason the
+    /// inventory is durable is that after the destructive transaction nothing else can name these
+    /// objects.</para>
+    /// </summary>
+    private async Task<TenantStoragePurgeReport> PurgeStoredBytesAsync(
+        long tenantId, long businessUnitId, Guid purgeAttemptId, TenantOffboarding record,
+        CancellationToken ct)
+    {
+        // Read back rather than carried in a field: a recovered attempt re-enters here with no
+        // in-memory inventory at all, and this is the path that has to work for it.
+        var stored = await context.Set<TenantOffboarding>().AsNoTracking()
+            .Where(r => r.TenantId == tenantId)
+            .Select(r => r.StoragePurgeInventory)
+            .FirstOrDefaultAsync(ct);
+
+        var inventory = string.IsNullOrWhiteSpace(stored)
+            ? null
+            : JsonSerializer.Deserialize<TenantStoragePurgeInventory>(stored);
+
+        if (inventory is null)
+        {
+            // No inventory: a purge that committed under an earlier build, or an attempt that died
+            // between destroying the rows and recording what it was about to delete. The rows are
+            // gone, so the row-derived half cannot be reconstructed — but the two PREFIX trees can
+            // be, because they are keyed by the business unit id and need no row at all.
+            //
+            // Refusing here was the first version and it was wrong. It stranded a tenant whose data
+            // was already destroyed and left every one of the recoverable objects in place in order
+            // to protect a handful that were not recoverable either way. Sweeping what is
+            // enumerable and SAYING which half could not be is the honest form of the same
+            // caution: recorded on the offboarding, so nobody later mistakes it for exhaustive.
+            logger.LogWarning(
+                "Tenant {TenantId} (business unit {BusinessUnitId}) has no recorded storage "
+                + "inventory, so it is being rebuilt from the tenant prefixes alone. Files in the "
+                + "legacy flat folders whose rows are already deleted cannot be attributed to this "
+                + "tenant by any means and are NOT covered by this sweep.",
+                tenantId, businessUnitId);
+
+            inventory = (await storage.CaptureAsync(businessUnitId, [], ct))
+                with { ReconstructedFromPrefixesOnly = true };
+
+            var rebuiltJson = JsonSerializer.Serialize(inventory);
+            await InTransactionAsync(async () =>
+            {
+                await context.Set<TenantOffboarding>()
+                    .Where(r => r.TenantId == tenantId && r.PurgeAttemptId == purgeAttemptId)
+                    .ExecuteUpdateAsync(setters => setters
+                        .SetProperty(r => r.StoragePurgeInventory, rebuiltJson), ct);
+            }, ct);
+        }
+
+        var report = await storage.ExecuteAsync(inventory, ct);
+        var completedOn = report.IsComplete ? UtcNow : (DateTime?)null;
+        var detail = JsonSerializer.Serialize(report.Entries);
+
+        await InTransactionAsync(async () =>
+        {
+            await context.Set<TenantOffboarding>()
+                .Where(r => r.TenantId == tenantId && r.PurgeAttemptId == purgeAttemptId)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(r => r.StoragePurgeDetail, detail)
+                    .SetProperty(r => r.StoragePurgeOutstandingCount, report.Outstanding)
+                    .SetProperty(r => r.StoragePurgeCompletedOn, completedOn), ct);
+        }, ct);
+
+        if (context.Entry(record).State != EntityState.Detached)
+        {
+            context.Entry(record).Property(r => r.StoragePurgeDetail).CurrentValue = detail;
+            context.Entry(record).Property(r => r.StoragePurgeDetail).IsModified = false;
+            context.Entry(record).Property(r => r.StoragePurgeOutstandingCount).CurrentValue = report.Outstanding;
+            context.Entry(record).Property(r => r.StoragePurgeOutstandingCount).IsModified = false;
+            context.Entry(record).Property(r => r.StoragePurgeCompletedOn).CurrentValue = completedOn;
+            context.Entry(record).Property(r => r.StoragePurgeCompletedOn).IsModified = false;
+        }
+
+        return report;
     }
 
     private async Task RequireReadinessAsync(

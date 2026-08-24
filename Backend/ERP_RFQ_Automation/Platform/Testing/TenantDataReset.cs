@@ -157,7 +157,14 @@ public sealed class TenantDataReset(
               ON t.table_schema = c.table_schema AND t.table_name = c.table_name
              AND t.table_type = 'BASE TABLE'
             WHERE c.table_schema NOT IN ('pg_catalog', 'information_schema')
-              AND lower(c.column_name) IN ('businessunitid', 'buid')
+              -- Underscores stripped before comparing, and that is not a tidy-up. This schema
+              -- spells the same concept "BusinessUnitId", "BUID" and business_unit_id, and the
+              -- old rule recognised only the first two — so the eleven snake_case evidence and
+              -- extraction tables (source_documents, canonical_inquiries, field_evidence and
+              -- eight more) were never reset. A pilot was told it had a clean slate and re-ingested
+              -- on top of the previous run's extraction artefacts. Same defect as the tenant
+              -- purge's, in the machinery this deliberately shares with it.
+              AND lower(replace(c.column_name, '_', '')) IN ('businessunitid', 'buid')
             ORDER BY c.table_schema, c.table_name;
             """, connection);
 
@@ -298,7 +305,7 @@ public sealed class TenantDataReset(
             """
             SELECT column_name FROM information_schema.columns
             WHERE table_schema = 'public' AND table_name = @table
-              AND lower(column_name) IN ('businessunitid', 'buid')
+              AND lower(replace(column_name, '_', '')) IN ('businessunitid', 'buid')
             LIMIT 1;
             """, connection, transaction);
         command.Parameters.AddWithValue("table", table);

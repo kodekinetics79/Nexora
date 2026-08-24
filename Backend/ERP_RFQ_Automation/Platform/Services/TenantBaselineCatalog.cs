@@ -154,13 +154,20 @@ public static class TenantBaselineCatalog
     /// The four desks of a trading business, alongside the founding Super Administrator that
     /// provisioning creates separately.
     ///
-    /// <para><b>Why nothing here sits at <see cref="RoleRanks.Admin"/> or above.</b>
-    /// <c>PermissionHandler</c> satisfies EVERY module requirement for a role at Admin or above
-    /// before it reads a single RolePermissions row. A starter role at that tier would therefore
-    /// hold the entire tenant while displaying a carefully curated set of ticked boxes on the
-    /// Roles &amp; Permissions matrix — a permission screen that actively lies. Delegated
-    /// administration is a decision the customer's own Super Administrator makes, with the rank
-    /// stated; it is not something to hand out at provisioning under a reassuring name.</para>
+    /// <para><b>Why only ONE role here sits at <see cref="RoleRanks.Admin"/>, and why it grants
+    /// nothing.</b> <c>PermissionHandler</c> satisfies EVERY module requirement for a role at Admin
+    /// or above before it reads a single RolePermissions row. A starter role at that tier carrying
+    /// a curated set of ticked boxes would therefore hold the entire tenant while the Roles &amp;
+    /// Permissions matrix described something narrower — a permission screen that actively lies.
+    ///
+    /// The answer is not to refuse the tier: a customer needs a delegated administrator, and
+    /// withholding one is why every user in the live tenant sits at Owner. The answer is to make
+    /// the tier's honesty structural. <c>SYSTEM_ADMIN</c> carries an EMPTY grant list, so there is
+    /// no curated matrix to contradict, and the roles screen renders one sentence in place of the
+    /// checkboxes rather than 212 controls that change nothing. A grant list on this role is not a
+    /// nicety this catalogue happens to omit — it is the defect, which is why
+    /// <c>TenantBaselineRoleTemplateTests</c> asserts that a role at Admin or above holds no grants
+    /// at all.</para>
     ///
     /// <para><b>Why the sales manager is a strict superset of the sales representative.</b>
     /// <c>RoleGate.CanManageRoleAsync</c> refuses to let one role administer another that holds a
@@ -171,6 +178,16 @@ public static class TenantBaselineCatalog
     /// </summary>
     public static readonly IReadOnlyList<StarterRole> StarterRoles =
     [
+        new("SYSTEM_ADMIN", "System Administrator",
+            "Administers everything in this organization. Individual permission lines do not apply " +
+            "to this role — its authority comes from its level, not from a list.",
+            RoleRanks.Admin,
+            // Deliberately empty, and asserted to be. Every module check succeeds by rank before a
+            // RolePermissions row is consulted, so any entry here would be decorative: ticking it
+            // would grant nothing that was not already held, and un-ticking it would revoke
+            // nothing. The empty list is what lets the roles screen tell the truth in one sentence.
+            []),
+
         new("SALES_MANAGER", "Sales Manager",
             "Runs the sales desk: owns the pipeline end to end, sets quote branding and terms, and " +
             "sees what customers owe without being able to move money.",

@@ -20,6 +20,14 @@ public static class CommercialRoutingModelBuilderExtensions
             entity.HasCheckConstraint("CK_Leads_AssignmentMethod", "\"AssignmentMethod\" IN ('AUTOMATIC','MANUAL')");
         });
 
+        // BusinessUnit.DefaultLeadOwnerUserId (BusinessUnit.RoutingDefaults.cs) needs no
+        // configuration here: it maps by convention as a nullable bigint. It gets no foreign key to
+        // Users on purpose — every other user edge in this module is Restrict, which here would
+        // make the nominated fallback owner undeletable, and a dangling id is already the safe
+        // case: DeterministicRoutingEngine only uses the value after it clears the same
+        // IsAvailable test as any other candidate, so an id that no longer resolves parks the lead
+        // on the queue exactly as an unset value does.
+
         modelBuilder.Entity<CustomerIdentifier>(entity =>
         {
             entity.ToTable("customer_identifiers");

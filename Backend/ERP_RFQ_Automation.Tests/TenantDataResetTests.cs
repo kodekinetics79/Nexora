@@ -285,6 +285,76 @@ public sealed class TenantDataResetPostgreSqlTests(PostgreSqlTestDatabase databa
         Assert.Equal(0, await StaleMailboxPollStateAsync(Tenant));
     }
 
+    /// <summary>
+    /// The reset clears the snake_case evidence and extraction tables too.
+    ///
+    /// <para>The same defect as the tenant purge's, in the machinery this file deliberately
+    /// shares with it: targets were discovered with
+    /// <c>lower(column_name) IN ('businessunitid', 'buid')</c>, and eleven tables spell it
+    /// <c>business_unit_id</c>. A pilot asked for a clean slate, was told it had one, and
+    /// re-ingested on top of the previous run's source documents and extraction runs — which is
+    /// worse than an untouched database, because the leftovers are invisible until something
+    /// collides with them.</para>
+    /// </summary>
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task The_reset_clears_snake_case_business_unit_tables()
+    {
+        const long Tenant = 77_318;
+        await SeedAsync(Tenant);
+        await SeedSnakeCaseEvidenceAsync(Tenant);
+
+        Assert.Equal(1, await SnakeCaseRowsAsync("document_corpora", Tenant));
+        Assert.Equal(1, await SnakeCaseRowsAsync("source_documents", Tenant));
+
+        await using var db = database.ContextFor(null);
+        var outcome = await Build(db).ExecuteAsync(Tenant, TenantName, CancellationToken.None);
+
+        Assert.Equal(0, await SnakeCaseRowsAsync("document_corpora", Tenant));
+        Assert.Equal(0, await SnakeCaseRowsAsync("source_documents", Tenant));
+        Assert.Contains(outcome.Deleted, d => d.Table.Contains("source_documents"));
+    }
+
+    /// <summary>One corpus and one source document, carrying <c>business_unit_id</c>.</summary>
+    private async Task SeedSnakeCaseEvidenceAsync(long tenant)
+    {
+        await using var connection = new NpgsqlConnection(database.ConnectionString);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand($"""
+            SET session_replication_role = replica;
+
+            DELETE FROM public.source_documents WHERE business_unit_id = {tenant};
+            DELETE FROM public.document_corpora  WHERE business_unit_id = {tenant};
+
+            INSERT INTO public.document_corpora
+                (id, business_unit_id, batch_id, source_type, status, created_on, updated_on)
+            VALUES ({tenant}, {tenant}, gen_random_uuid(), 'Upload', 'Complete', now(), now());
+
+            INSERT INTO public.source_documents
+                (id, business_unit_id, corpus_id, content_hash, original_file_name,
+                 detected_mime_type, object_bucket, object_key, object_version, byte_size,
+                 page_count, security_status, processing_status, created_on, updated_on)
+            VALUES ({tenant}, {tenant}, {tenant}, repeat('a', 64), 'reset.pdf', 'application/pdf',
+                    'NexoraBucket', 'Evidence/tenants/{tenant}/cleared/sha256/aa/a.pdf',
+                    'v1', 10, 1, 'Cleared', 'Complete', now(), now());
+
+            SET session_replication_role = origin;
+            """, connection);
+        await command.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>Counted directly rather than through <c>TenantRowsAsync</c>, whose catalogue lookup
+    /// deliberately mirrors the OLD spelling rule and so cannot see these tables either.</summary>
+    private async Task<int> SnakeCaseRowsAsync(string table, long tenant)
+    {
+        await using var connection = new NpgsqlConnection(database.ConnectionString);
+        await connection.OpenAsync();
+        await using var count = new NpgsqlCommand(
+            $"SELECT count(*)::int FROM public.{table} WHERE business_unit_id = @tenant;", connection);
+        count.Parameters.AddWithValue("tenant", tenant);
+        return (int)(await count.ExecuteScalarAsync())!;
+    }
+
     [Fact]
     [Trait("Category", "PostgreSQL")]
     public async Task The_append_only_guards_are_restored_after_the_reset_commits()

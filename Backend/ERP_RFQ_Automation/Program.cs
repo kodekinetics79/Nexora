@@ -857,6 +857,7 @@ builder.Services.AddScoped<ERP_RFQ_Automation.PlatformGovernance.QualityAnalytic
 // triggers make the tombstone stronger proof than the file it replaces.
 builder.Services.AddScoped<ERP_RFQ_Automation.Retention.LegacyAttachmentPurgeResolver>();
 builder.Services.AddScoped<ERP_RFQ_Automation.Retention.EvidenceRetentionService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.Retention.TenantDataControlService>();
 
 // SEC-H6: the app sits behind a TLS-terminating reverse proxy, so the socket peer is the
 // proxy, not the client. Without this, the rate limiter's per-IP partition

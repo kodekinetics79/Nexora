@@ -179,9 +179,25 @@ public sealed class CommercialDocumentArchiveService(ErpRfqAutomationContext db)
             "Idempotency-Key is required.");
         var action = PlatformGovernanceService.Required(command.Action, 48, "Action is required.")
             .ToUpperInvariant();
+        // DELETION_REQUESTED and DELETION_CANCELLED are deliberately absent.
+        //
+        // There was never an approver. Nothing in this service, this controller or this product
+        // could ever move a request to approved — no DELETION_APPROVED action existed anywhere —
+        // so every request was permanent by construction. And the flag was not merely inert: the
+        // retention purge read it as an EXCLUSION, so asking for a document to be deleted was the
+        // one reliable way to stop it ever being deleted. A tenant on this deployment has had a
+        // document stuck in that state since 2026-08-12.
+        //
+        // Removing the action is the fix rather than inventing an approver, because a deletion
+        // approval workflow is a second, slower, human-gated path to a deletion the tenant can
+        // already perform himself on the Storage & Retention screen, with a stronger gate. The
+        // historical events stay folded by State/GovernanceStateAsync so the append-only log
+        // remains readable; nothing acts on the result any more.
         if (action is not ("ACCESS_RECORDED" or "HOLD_APPLIED" or "HOLD_RELEASED"
-            or "EXPORT_REQUESTED" or "DELETION_REQUESTED" or "DELETION_CANCELLED"))
-            throw new PlatformGovernanceValidationException("Unsupported archive governance action.");
+            or "EXPORT_REQUESTED"))
+            throw new PlatformGovernanceValidationException(
+                "That is not something this archive can record. A document's stored file is "
+                + "deleted from Storage & Retention, not from here.");
         var reason = PlatformGovernanceService.Required(command.Reason, 1000,
             "A governance reason is required.");
 
@@ -206,8 +222,6 @@ public sealed class CommercialDocumentArchiveService(ErpRfqAutomationContext db)
             if (command.ExpectedVersion != state.Version)
                 throw new PlatformGovernanceConflictException(
                     $"Archive governance version is {state.Version}; refresh and retry.");
-            if (action == "DELETION_REQUESTED" && state.LegalHold)
-                throw new PlatformGovernanceConflictException("Deletion cannot be requested while legal hold is active.");
             if (action == "HOLD_RELEASED" && !state.LegalHold)
                 throw new PlatformGovernanceConflictException("The document is not on legal hold.");
 

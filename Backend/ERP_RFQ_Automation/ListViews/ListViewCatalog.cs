@@ -87,6 +87,13 @@ public static class ListViewCatalog
                 new("itemCount", "Items"),
                 new("leadSource", "Source"),
                 new("status", "Status"),
+                // WHO OWNS IT, and the control that changes that. Assigning a lead used to cost
+                // four clicks and two page loads because the only owner control in the product
+                // lived on the lead DETAIL screen; this column is both the answer and the
+                // affordance. Default-visible: a queue that will not say who is working a row is
+                // the reason two reps quote the same tender. Listed here so the reader who does
+                // not want it can switch it off like any other column.
+                new("assignee", "Owner"),
                 new("decision", "Decision"),
                 new("estimatedValue", "Estimated value", DefaultVisible: false),
                 new("actions", "Actions", Locked: true)
