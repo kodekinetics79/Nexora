@@ -454,18 +454,33 @@ namespace ERP_RFQ_Automation.Services
         /// ING-08: mirrors the cycle's real outcome into the readiness surface. A mailbox that
         /// refused authentication is a PERMANENT failure — it will not heal by being retried —
         /// so <c>/ready</c> is allowed to go red on the first occurrence instead of after three.
+        ///
+        /// <para>ING-08b, 2026-08-24 — PER MAILBOX. This used to publish ONE verdict for the whole
+        /// cycle: <c>RecordFailure(FailureSummary)</c> if <c>AnyFailed</c>, and
+        /// <c>RecordSuccess()</c> only if <c>AllSucceeded</c>. With two production mailboxes, one
+        /// of which had never authenticated in its life, the second branch was unreachable — so a
+        /// mailbox being read cleanly every seventy seconds had its success erased from the health
+        /// record by its neighbour, and <c>/ready</c> reported "Last successful poll: never" about
+        /// a channel that was working. Each mailbox now reports under its own id.</para>
+        ///
+        /// Zero configured mailboxes records nothing at all: neither success nor failure was
+        /// demonstrated, and claiming success would advance "last successful poll" for a door
+        /// that was never opened.
         /// </summary>
         private void PublishChannelHealth(MailboxPollReport report)
         {
             if (_pollerHealth is null) return;
             var now = DateTimeOffset.UtcNow;
-            if (report.AnyFailed)
-                _pollerHealth.RecordFailure(report.FailureSummary, report.AnyPermanentFailure, now);
-            else if (report.AllSucceeded)
-                _pollerHealth.RecordSuccess(now);
-            // Zero configured mailboxes: neither success nor failure was demonstrated, so
-            // nothing is recorded. Claiming success here would advance "last successful poll"
-            // for a door that was never opened.
+            foreach (var mailbox in report.Mailboxes)
+            {
+                if (mailbox.Succeeded)
+                    _pollerHealth.RecordSuccess(mailbox.EmailConfigurationId, mailbox.EmailAddress, now);
+                else
+                    _pollerHealth.RecordFailure(
+                        mailbox.EmailConfigurationId, mailbox.EmailAddress,
+                        mailbox.FailureReason ?? "Unspecified mailbox failure.",
+                        mailbox.FailureIsPermanent, now);
+            }
         }
 
         /// <summary>
