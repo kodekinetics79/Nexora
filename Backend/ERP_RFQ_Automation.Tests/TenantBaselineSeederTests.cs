@@ -379,7 +379,9 @@ public sealed class TenantBaselineSeederTests
         // tenant, and a support engineer can call it again months later.
         var first = await Seeder(context).SeedAsync(Bu, AcmeProfile, Actor);
         Assert.Equal(1, first.CurrenciesCreated);
-        Assert.Equal(4, first.RolesCreated);
+        // Derived, not typed: a role added to the catalogue must not need this literal edited, or
+        // the test measures what someone once expected rather than what the catalogue says.
+        Assert.Equal(TenantBaselineCatalog.StarterRoles.Count, first.RolesCreated);
 
         // Between the two runs the customer edits their terms and narrows a seeded role — the
         // exact state a re-run must not undo. Unticking every box writes an all-false row rather
@@ -600,9 +602,21 @@ public sealed class TenantBaselineSeederTests
 
         Assert.Equal(Bu, summary.BusinessUnitId);
         Assert.Equal(
-            ["Sales Manager", "Sales Representative", "Procurement Officer", "Finance Officer"],
+            TenantBaselineCatalog.StarterRoles.Select(role => role.Name).ToArray(),
             summary.RoleNames);
-        Assert.All(summary.Roles, role => Assert.True(role.Grants > 0));
+
+        // Every role below Admin must arrive with grants — a role that grants nothing is a role
+        // nobody can use. System Administrator is the deliberate exception: it holds the tenant by
+        // RANK, so a grant row on it would be a checkbox that revokes nothing when cleared.
+        Assert.All(
+            summary.Roles.Where(role =>
+                TenantBaselineCatalog.StarterRoles.Single(t => t.Name == role.Name).Rank < RoleRanks.Admin),
+            role => Assert.True(role.Grants > 0, $"{role.Name} was seeded with no grants."));
+        Assert.All(
+            summary.Roles.Where(role =>
+                TenantBaselineCatalog.StarterRoles.Single(t => t.Name == role.Name).Rank >= RoleRanks.Admin),
+            role => Assert.True(role.Grants == 0,
+                $"{role.Name} administers the tenant by rank, so its {role.Grants} grant row(s) are decorative."));
         Assert.Equal(TenantBaselineCatalog.DiscountTypes.Count, summary.DiscountTypesCreated);
 
         // The counts are rows, not intentions.

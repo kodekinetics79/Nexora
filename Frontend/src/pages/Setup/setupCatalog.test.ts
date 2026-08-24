@@ -9,6 +9,7 @@ import {
   setupEntryLabel,
 } from './setupCatalog';
 import { SETUP_ROUTES, SETUP_ADOPTED_ROUTES } from './setupRoutes';
+import { ENFORCED_MODULE_NAMES } from './permissionModules';
 
 /**
  * The catalogue is the register of what Setup governs, and these tests are what make it binding.
@@ -71,14 +72,39 @@ describe('the setup catalogue', () => {
   it('gates each entry on the module its route actually guards', () => {
     // A card gated on a different module than its route is worse than no card: it either offers a
     // screen that answers Access Denied, or hides one the user is entitled to open.
+    //
+    // The one permitted divergence is a DEEP-LINKED entry — one whose path carries a query that
+    // narrows a shared screen. Roles is /setup/master?type=role: the route serves ordinary
+    // picklists too, so it is gated on the looser module, while the Roles card is gated on
+    // "Roles & Permissions" because that is what the server demands before a role row may be
+    // written (SetupMasterController.RoleAdministrationDenialAsync). Offering that card to
+    // someone who cannot act on it is the failure this rule prevents; a tighter card is the
+    // remedy, not a violation.
     for (const entry of SETUP_ENTRIES) {
       const route = routeFor(entry.path);
       expect(route, `${entry.key} should have a route`).toBeDefined();
+      if (entry.path.includes('?')) continue;
       expect(
         entry.moduleName,
         `${entry.key} is listed under "${entry.moduleName}" but its route guards "${route!.moduleName}"`,
       ).toBe(route!.moduleName);
     }
+  });
+
+  it('never gates a screen on a module the permission matrix cannot grant', () => {
+    // The defect this closes: seven Setup entries — Roles among them — were gated on "UOM", which
+    // is not a permission module at all. It appears in no [RequireModulePermission] anywhere in
+    // the backend and is absent from ModuleCatalog, so hasPermission('UOM') could only ever be
+    // true for a super admin. Every one of those screens answered "Access Denied — you do not have
+    // permission to access the UOM module" to a genuine administrator, naming a grant no
+    // administrator could ever tick.
+    const ungrantable = SETUP_ENTRIES
+      .filter((entry) => entry.moduleName && !ENFORCED_MODULE_NAMES.has(entry.moduleName))
+      .map((entry) => `${entry.key} -> ${entry.moduleName}`);
+    expect(
+      ungrantable,
+      'these entries are gated on modules that grant nothing and can never be granted',
+    ).toEqual([]);
   });
 
   it('leaves an adopted screen at the address it already had', () => {

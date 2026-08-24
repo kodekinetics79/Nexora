@@ -44,15 +44,63 @@ public sealed class TenantBaselineRoleTemplateTests
     public void No_starter_role_sits_at_a_rank_that_would_bypass_its_own_permission_matrix()
     {
         // PermissionHandler succeeds on rank >= Admin before consulting a single RolePermissions
-        // row. A starter role at that tier would hold everything while displaying a curated set of
-        // ticked boxes — a permissions screen that states the opposite of what is enforced.
+        // row. A starter role at that tier holding a curated set of ticked boxes would be a
+        // permissions screen that states the opposite of what is enforced.
+        //
+        // The rule is therefore NOT "no role may sit at Admin" — a tenant needs a delegated
+        // administrator, and refusing to ship one is why every user in the live tenant sits at
+        // Owner. The rule is that authority must come from exactly one place per role: below Admin
+        // it comes from the grants, at Admin and above it comes from the rank and the grant list
+        // must be empty. A single entry here would be a checkbox that cannot change anything.
         Assert.All(TenantBaselineCatalog.StarterRoles, role =>
         {
             Assert.True(RoleRanks.IsDefined(role.Rank), $"{role.Code} has an unstorable rank.");
-            Assert.True(role.Rank < RoleRanks.Admin,
-                $"{role.Code} sits at {RoleRanks.Describe(role.Rank)}, which satisfies every module " +
-                "check by rank and makes its grants decorative.");
+
+            if (role.Rank >= RoleRanks.Admin)
+            {
+                Assert.True(role.Grants.Count == 0,
+                    $"{role.Code} sits at {RoleRanks.Describe(role.Rank)}, which satisfies every " +
+                    "module check by rank, yet it names " +
+                    $"{string.Join(", ", role.Grants.Select(grant => grant.Module))}. Those grants " +
+                    "are decorative: they would render as ticked boxes that revoke nothing when " +
+                    "cleared. A role at this tier must hold no grants at all.");
+            }
+            else
+            {
+                Assert.True(role.Grants.Count > 0,
+                    $"{role.Code} sits below Admin and names no modules, so it grants nothing and " +
+                    "cannot be used for anything.");
+            }
         });
+    }
+
+    [Fact]
+    public void Exactly_one_starter_role_administers_the_whole_tenant()
+    {
+        // Two administrator presets would put the customer's first decision — "which of these two
+        // identical-sounding roles administers everything" — in front of them for no reason, and
+        // BU 1 in production already carries two identical super-admin roles from exactly this
+        // kind of drift.
+        var administrators = TenantBaselineCatalog.StarterRoles
+            .Where(role => role.Rank >= RoleRanks.Admin)
+            .Select(role => role.Code)
+            .ToList();
+
+        Assert.True(administrators.Count == 1,
+            "Expected exactly one tenant-administering starter role, found: " +
+            (administrators.Count == 0 ? "none" : string.Join(", ", administrators)));
+        Assert.Equal("SYSTEM_ADMIN", administrators[0]);
+    }
+
+    [Fact]
+    public void No_starter_role_is_provisioned_at_owner()
+    {
+        // Owner is the founding super administrator that provisioning creates separately. Offering
+        // it as a starter preset is what produced a live tenant where all six users hold the top
+        // of the tenant plane and nobody can be given anything narrower.
+        Assert.All(TenantBaselineCatalog.StarterRoles, role =>
+            Assert.True(role.Rank < RoleRanks.Owner,
+                $"{role.Code} is provisioned at Owner; that tier belongs to the founding account."));
     }
 
     [Fact]
