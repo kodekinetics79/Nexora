@@ -502,7 +502,191 @@ public sealed class EmailInquiryStrandingHasAWayOutPostgreSqlTests(PostgreSqlTes
     }
 
     // =====================================================================================
-    // 5. AN UNEXPECTED FAILURE CLOSES ITS PART LIKE EVERY OTHER FAILURE DOES
+    // 5. A MESSAGE ALREADY IN A PERSON'S TRAY, WITH A PART THAT NEVER REACHED THE QUEUE
+    // =====================================================================================
+
+    /// <summary>
+    /// The shape the old "retry blocked files" control left behind: assembly NeedsReview,
+    /// component FailedRecoverable, ExtractionJobId null.
+    ///
+    /// <para><b>Every door was shut on it.</b> The security sweep no longer sees it (its hold is
+    /// not AwaitingSecurityScan or Rejected); automatic scheduling recovery excludes NeedsReview;
+    /// governed dead-letter recovery needs a job that does not exist; and the governed triage
+    /// reopen covers NoInquiry only. Worse, the hold text told the operator to reprocess the
+    /// message, and the reprocess command throws on exactly this shape — the one instruction the
+    /// product gave was guaranteed to fail.</para>
+    ///
+    /// <para><b>Written as durable state on purpose.</b> No code path in this module can produce
+    /// it: a held part outranks an unread one, so a message with a hold never reaches NeedsReview
+    /// on its own. It got there because something else detached an already-decided message's
+    /// component. The sweep's job is to handle the state it is handed, and this is the state.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_message_already_in_review_with_a_part_that_never_reached_the_queue_is_recovered()
+    {
+        const long bu = 948_012;
+        const string messageId = "wayout-0012@buyer.example";
+        await SeedAsync(bu, messageId);
+
+        await using var services = BuildGraph();
+        var message = EmailToLeadHarness.BuildMessage(messageId);
+        var (assemblyId, schedule) = await CaptureAndScheduleAsync(services, bu, message);
+        Assert.Equal(3, schedule.Scheduled);
+
+        // THE DAMAGE. The component is detached from the job it owned and the message is already
+        // sitting in a human's tray, which is what closed every recovery door at once.
+        await ExecuteAsync($"""
+            UPDATE public."EmailInquiryComponents"
+            SET "Status" = 'FailedRecoverable', "ExtractionJobId" = NULL,
+                "ReasonCode" = 'assembly_ownership_unresolved',
+                "ReasonDetail" = 'A part of this message was processed without being linked back to the message.'
+            WHERE "AssemblyId" = {assemblyId} AND "FileName" = 'gaskets.csv';
+            UPDATE public."EmailInquiryAssemblies"
+            SET "Status" = 'NeedsReview',
+                "StatusReason" = 'assembly_ownership_unresolved: a part was not linked back.'
+            WHERE "Id" = {assemblyId};
+            """);
+
+        Assert.Equal(EmailInquiryAssemblyStatus.NeedsReview, await StatusAsync(assemblyId));
+        Assert.Null(await ComponentJobIdAsync(assemblyId, "gaskets.csv"));
+
+        // THE RECOVERY. Governed rather than automatic: the message leaves a person's tray only
+        // by a recorded act, and the sweep names itself as the actor rather than having none.
+        var sweep = await SweepAsync(services);
+
+        Assert.Equal(0, sweep.StrandedComponents.Failed);
+        Assert.Equal(1, sweep.StrandedComponents.Rescheduled);
+
+        Assert.Equal(EmailInquiryComponentStatus.Extracting,
+            await ComponentStatusAsync(assemblyId, "gaskets.csv"));
+        Assert.NotNull(await ComponentJobIdAsync(assemblyId, "gaskets.csv"));
+        Assert.Equal(EmailInquiryAssemblyStatus.Extracting, await StatusAsync(assemblyId));
+
+        // THE AUDIT. Who reopened it and why, on the record the operator reads — and on the PART,
+        // because the assembly's status reason is recomputed by the barrier on every evaluation
+        // and cannot hold anything.
+        Assert.Equal(EmailInquiryAssemblyCoordinator.ReopenedReasonCode,
+            await ComponentReasonAsync(assemblyId, "gaskets.csv"));
+        var audit = await ComponentDetailAsync(assemblyId, "gaskets.csv");
+        Assert.False(string.IsNullOrWhiteSpace(audit));
+        Assert.Contains(EmailInquirySchedulingGrant.RecoverySweepActor, audit!, StringComparison.Ordinal);
+        AssertNoInternalNames(audit!);
+
+        // AND IT FINISHES. A reopened part is worth nothing if nothing runs it.
+        await EmailToLeadHarness.DrainQueueAsync(services, bu, assertNoFailures: true);
+        await SweepAsync(services);
+
+        Assert.Equal(EmailInquiryAssemblyStatus.Assembled, await StatusAsync(assemblyId));
+        var leadId = await ScalarAsync($"""
+            SELECT COALESCE("AssembledLeadId", 0) FROM public."EmailInquiryAssemblies" WHERE "Id" = {assemblyId};
+            """);
+        Assert.Equal(
+            ["VLV-1001", "VLV-1002", "GSK-3007", "GSK-3008", "GSK-3009"],
+            await QueryAsync($"""
+                SELECT "ManufacturerPartNumber" FROM public."LeadItems"
+                WHERE "LeadID" = {leadId} ORDER BY "ID";
+                """));
+    }
+
+    /// <summary>
+    /// The same shape past its window. A reopen that can never succeed must not keep a message
+    /// technically recoverable and permanently undecided — it ends in a refusal a person can read.
+    /// </summary>
+    [Fact]
+    public async Task A_message_in_review_whose_part_cannot_be_reopened_reaches_an_explicit_refusal()
+    {
+        const long bu = 948_013;
+        const string messageId = "wayout-0013@buyer.example";
+        await SeedAsync(bu, messageId);
+
+        await using var seeding = BuildGraph();
+        var message = EmailToLeadHarness.BuildMessage(messageId);
+        var (assemblyId, _) = await CaptureAndScheduleAsync(seeding, bu, message);
+
+        await ExecuteAsync($"""
+            UPDATE public."EmailInquiryComponents"
+            SET "Status" = 'FailedRecoverable', "ExtractionJobId" = NULL,
+                "ReasonCode" = 'assembly_ownership_unresolved'
+            WHERE "AssemblyId" = {assemblyId} AND "FileName" = 'gaskets.csv';
+            UPDATE public."EmailInquiryAssemblies" SET "Status" = 'NeedsReview' WHERE "Id" = {assemblyId};
+            """);
+
+        await using var expired = BuildGraph(s => s.AddSingleton(RecoveryOptions(resumeWindowMinutes: 0)));
+        var sweep = await SweepAsync(expired);
+
+        Assert.Equal(0, sweep.StrandedComponents.Failed);
+        Assert.Equal(1, sweep.StrandedComponents.Skipped);
+        Assert.Equal(EmailInquiryComponentStatus.Skipped,
+            await ComponentStatusAsync(assemblyId, "gaskets.csv"));
+        Assert.Equal(EmailInquiryHoldReasons.SchedulingNotRecovered,
+            await ComponentReasonAsync(assemblyId, "gaskets.csv"));
+
+        // It stays where a person can see it, and the refused part is never revisited. The two
+        // siblings ARE examined again and left alone — they hold Pending jobs with every attempt
+        // intact, which is the sweep declining to tidy away live work.
+        Assert.Equal(EmailInquiryAssemblyStatus.NeedsReview, await StatusAsync(assemblyId));
+        var second = await SweepAsync(expired);
+        Assert.Equal(0, second.StrandedComponents.Resolved);
+        Assert.Equal(0, second.StrandedComponents.Rescheduled);
+        Assert.Equal(2, second.StrandedComponents.LeftInFlight);
+    }
+
+    /// <summary>
+    /// A message the SCHEDULER IS STILL WORKING ON must not be claimed by the sweep.
+    ///
+    /// <para><b>The window is real and it is invisible from the rows.</b> Capture commits the
+    /// assembly and every component in one transaction, then binds an extraction job to each
+    /// component in turn. In between, a perfectly healthy part looks exactly like a part that will
+    /// never be scheduled: Pending, no job. Nothing in the data distinguishes them — only time
+    /// does.</para>
+    ///
+    /// <para><b>Why the existing threshold could not serve.</b> The stranded-component threshold
+    /// is legitimately set to zero in tests, on the documented reasoning that age decides only
+    /// which rows are LOOKED at while the durable state of the job decides what happens to them.
+    /// That reasoning holds for a component that HAS a job and fails for one that does not — and
+    /// it became load bearing when the barrier learned to move a Captured message to NeedsReview.
+    /// Before that, the sweep's verdict on a mid-capture message was an illegal transition and was
+    /// thrown away, which hid this race rather than preventing it.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_message_the_scheduler_is_still_binding_jobs_for_is_left_alone()
+    {
+        const long bu = 948_014;
+        const string messageId = "wayout-0014@buyer.example";
+        await SeedAsync(bu, messageId);
+        await using var services = BuildGraph();
+
+        // CAPTURED BUT NOT SCHEDULED — the exact instant between the two halves of intake.
+        var assemblyId = await CaptureOnlyAsync(services, bu, EmailToLeadHarness.BuildMessage(messageId));
+
+        Assert.Equal(EmailInquiryAssemblyStatus.Captured, await StatusAsync(assemblyId));
+        Assert.Equal(3, await CountComponentsAsync(assemblyId,
+            "\"Status\" = 'Pending' AND \"ExtractionJobId\" IS NULL"));
+
+        // The sweep does not even look at it, with every other threshold at zero.
+        var sweep = await SweepAsync(services);
+        Assert.Equal(0, sweep.StrandedComponents.Examined);
+        Assert.Equal(EmailInquiryAssemblyStatus.Captured, await StatusAsync(assemblyId));
+        Assert.Equal(3, await CountComponentsAsync(assemblyId, "\"Status\" = 'Pending'"));
+
+        // THE POSITIVE CONTROL. The same rows, past the grace, ARE claimed — so the zero above is
+        // the guard doing its job and not the sweep being broken. A message that really did die
+        // between capture and scheduling still reaches a person.
+        await ExecuteAsync($"""
+            UPDATE public."EmailInquiryAssemblies"
+            SET "UpdatedAtUtc" = now() - interval '10 minutes' WHERE "Id" = {assemblyId};
+            """);
+
+        var second = await SweepAsync(services);
+        Assert.Equal(3, second.StrandedComponents.Examined);
+        Assert.Equal(3, second.StrandedComponents.Skipped);
+        Assert.Equal(EmailInquiryAssemblyStatus.NeedsReview, await StatusAsync(assemblyId));
+        Assert.Equal(EmailInquiryHoldReasons.StrandedWithoutJob,
+            await ComponentReasonAsync(assemblyId, "gaskets.csv"));
+    }
+
+    // =====================================================================================
+    // 6. AN UNEXPECTED FAILURE CLOSES ITS PART LIKE EVERY OTHER FAILURE DOES
     // =====================================================================================
 
     /// <summary>
@@ -557,7 +741,7 @@ public sealed class EmailInquiryStrandingHasAWayOutPostgreSqlTests(PostgreSqlTes
     }
 
     // =====================================================================================
-    // 6. THE LEDGER STOPS CLAIMING PROGRESS OVER WORK THAT STOPPED
+    // 7. THE LEDGER STOPS CLAIMING PROGRESS OVER WORK THAT STOPPED
     // =====================================================================================
 
     [Fact]
@@ -819,6 +1003,28 @@ public sealed class EmailInquiryStrandingHasAWayOutPostgreSqlTests(PostgreSqlTes
         message.MessageId = messageId;
         message.Date = new DateTimeOffset(2026, 8, 14, 9, 0, 0, TimeSpan.Zero);
         return message;
+    }
+
+    /// <summary>
+    /// Durable capture WITHOUT scheduling — the state that exists for as long as the scheduling
+    /// half of intake is still running. Nothing is faked: this is the real capture service, and
+    /// the rows it writes are the rows production writes.
+    /// </summary>
+    private static async Task<long> CaptureOnlyAsync(
+        ServiceProvider services, long businessUnitId, MimeMessage message)
+    {
+        using var scope = services.CreateScope();
+        using var tenant = scope.ServiceProvider
+            .GetRequiredService<ITenantScopeAccessor>().Push(businessUnitId);
+        var context = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+        var configuration = await context.EmailConfigurations.SingleAsync(c => c.Id == businessUnitId);
+        var ingest = await context.EmailIngests.SingleAsync(i => i.MessageId == message.MessageId);
+
+        var capture = await scope.ServiceProvider.GetRequiredService<IEmailInquiryCaptureService>()
+            .CaptureAsync(message, ingest, configuration, ProductionFreshBody(message));
+
+        Assert.NotNull(capture.Assembly);
+        return capture.Assembly!.Id;
     }
 
     private static async Task<EmailInquiryRecoverySweepResult> SweepAsync(ServiceProvider services)

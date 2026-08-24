@@ -399,7 +399,8 @@ public sealed class EmailCallerCutoverTests : IDisposable
         /// PostgreSQL; a stand-in here would only assert its own return value.
         /// </summary>
         public Task<ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryResumeResult> ResumeSchedulingAsync(
-            long businessUnitId, long assemblyId, CancellationToken ct = default)
+            long businessUnitId, long assemblyId, CancellationToken ct = default,
+            ERP_RFQ_Automation.Ingestion.Assembly.EmailInquirySchedulingGrant? grant = null)
             => Task.FromResult(new ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryResumeResult(
                 ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryResumeOutcome.NothingToResume, 0, 0));
     }

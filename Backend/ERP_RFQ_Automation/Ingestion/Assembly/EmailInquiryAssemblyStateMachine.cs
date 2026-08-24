@@ -160,6 +160,38 @@ public static class EmailInquiryAssemblyStateMachine
         => from is EmailInquiryAssemblyStatus.FailedRecoverable
             or EmailInquiryAssemblyStatus.Extracting;
 
+    /// <summary>
+    /// The GOVERNED counterpart of <see cref="CanAutomaticSchedulingRecoveryTransition"/>, and the
+    /// door that was missing entirely.
+    ///
+    /// <para><b>The shape it exists for.</b> A message in a person's tray whose part holds no
+    /// extraction job: assembly <see cref="EmailInquiryAssemblyStatus.NeedsReview"/>, component
+    /// <see cref="EmailInquiryComponentStatus.FailedRecoverable"/>, <c>ExtractionJobId</c> null.
+    /// Every recovery door was shut on it at once. The security sweep does not see that hold;
+    /// automatic scheduling recovery excludes NeedsReview because an automatic act must not pull
+    /// a message out of a human's queue; governed dead-letter recovery matches on
+    /// <c>component.ExtractionJobId == job.Id</c> and there is no job to match; and the governed
+    /// triage reopen covers <see cref="EmailInquiryAssemblyStatus.NoInquiry"/> only. The message
+    /// was captured, visible, and permanently unfinishable.</para>
+    ///
+    /// <para><b>Why it is governed and not simply added to the automatic set.</b> Leaving a
+    /// human's tray is a decision, not a side effect. This authority is only usable by a caller
+    /// carrying an <see cref="EmailInquirySchedulingGrant"/> — an actor and a reason that are
+    /// written onto the assembly where the operator reads them — so the message never moves
+    /// without a record of who moved it. The background sweep names ITSELF as that actor rather
+    /// than acting with none.</para>
+    ///
+    /// <para><see cref="EmailInquiryAssemblyStatus.NoInquiry"/> and
+    /// <see cref="EmailInquiryAssemblyStatus.RejectedSecurity"/> stay out: the first belongs to
+    /// the triage reopen, and the second is absorbing because malware is not "retry later".</para>
+    /// </summary>
+    public static bool CanGovernedSchedulingRecoveryTransition(EmailInquiryAssemblyStatus from)
+        => from is EmailInquiryAssemblyStatus.NeedsReview
+            or EmailInquiryAssemblyStatus.FailedRecoverable
+            or EmailInquiryAssemblyStatus.Extracting
+            or EmailInquiryAssemblyStatus.Captured
+            or EmailInquiryAssemblyStatus.Inspecting;
+
     /// <summary>Only the audited manual-triage command may reverse a NoInquiry decision.</summary>
     public static bool CanGovernedTriageReopenTransition(EmailInquiryAssemblyStatus from)
         => from == EmailInquiryAssemblyStatus.NoInquiry;

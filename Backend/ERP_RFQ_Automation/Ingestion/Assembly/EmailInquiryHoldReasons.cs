@@ -155,10 +155,17 @@ public static class EmailInquiryHoldReasons
     /// fragment, and the message is intact. It deliberately does not name the job, the queue or
     /// the storage layout — this string is rendered on a screen a salesperson reads.</para>
     /// </summary>
+    /// <para><b>The last sentence used to be a lie.</b> It said "reprocess the message to rebuild
+    /// it as one inquiry", and <c>EmailTriageService.ReprocessAsync</c> throws "The message could
+    /// not be captured durably" on exactly this shape — so the one instruction the product gave
+    /// an operator was guaranteed to fail, every time, on the messages that needed it most. It
+    /// now says what the system actually does: the part is sent to processing again on its own,
+    /// under the governed scheduling reopen, and a person is told plainly if that stops helping.
+    /// </para>
     public const string OwnershipUnresolvedDetail =
         "A part of this message was processed without being linked back to the message, so no "
-        + "inquiry was created from it on its own. The email and every part of it are retained; "
-        + "reprocess the message to rebuild it as one inquiry.";
+        + "inquiry was created from it on its own. Nothing is lost — the email and every part of "
+        + "it are retained, and that part is being sent to processing again automatically.";
 
     // =====================================================================================
     // The stranded-component sweep. Five codes rather than one, because "why did this part

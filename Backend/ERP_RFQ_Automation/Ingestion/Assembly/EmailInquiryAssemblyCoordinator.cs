@@ -28,10 +28,16 @@ public interface IEmailInquiryAssemblyCoordinator
     Task<EmailInquiryComponent?> FindComponentAsync(
         long businessUnitId, long assemblyId, string componentKey, CancellationToken ct = default);
 
+    /// <param name="grant">
+    /// Present when this is a GOVERNED reopen of a part that holds no job — the wider authority
+    /// that may take a message out of a person's review tray. Null is the ordinary path, which
+    /// may only resume a message still inside the pipeline.
+    /// </param>
     Task RecordComponentQueuedAsync(
         long businessUnitId, long assemblyId, string componentKey, long extractionJobId,
         CancellationToken ct = default, string? evidenceUri = null,
-        long? sourceDocumentOccurrenceId = null);
+        long? sourceDocumentOccurrenceId = null,
+        EmailInquirySchedulingGrant? grant = null);
 
     Task RecordComponentOutcomeAsync(
         long businessUnitId, long assemblyId, string componentKey,
@@ -111,6 +117,12 @@ public sealed class EmailInquiryAssemblyCoordinator : IEmailInquiryAssemblyCoord
         _logger = logger;
     }
 
+    /// <summary>
+    /// Recorded on a part that a governed act put back into the pipeline. Distinct from every
+    /// hold reason: nothing is wrong with this part — somebody decided to run it again.
+    /// </summary>
+    public const string ReopenedReasonCode = "scheduling_reopened";
+
     public Task<EmailInquiryComponent?> FindComponentAsync(
         long businessUnitId, long assemblyId, string componentKey, CancellationToken ct = default)
         // SingleOrDefault, not FirstOrDefault: this tuple IS the unique index, so a second match
@@ -125,7 +137,8 @@ public sealed class EmailInquiryAssemblyCoordinator : IEmailInquiryAssemblyCoord
     public async Task RecordComponentQueuedAsync(
         long businessUnitId, long assemblyId, string componentKey, long extractionJobId,
         CancellationToken ct = default, string? evidenceUri = null,
-        long? sourceDocumentOccurrenceId = null)
+        long? sourceDocumentOccurrenceId = null,
+        EmailInquirySchedulingGrant? grant = null)
     {
         await ExecuteInTransactionAsync(async () =>
         {
@@ -137,13 +150,27 @@ public sealed class EmailInquiryAssemblyCoordinator : IEmailInquiryAssemblyCoord
                     $"Component '{componentKey}' of assembly {assemblyId} was not found for "
                     + $"business unit {businessUnitId}; the job binding has no owner.");
 
-            var automaticRecovery = component.Status == EmailInquiryComponentStatus.FailedRecoverable
+            // A part that holds no job is being put back into the pipeline. WHICH authority
+            // that needs depends on where the message is, and the two are deliberately different
+            // widths: the automatic one may only resume a message still inside the pipeline,
+            // while the governed one may also take a message out of a person's review tray —
+            // which is a decision, so it may only be exercised with an actor and a reason.
+            var resumingUnscheduled = component.Status == EmailInquiryComponentStatus.FailedRecoverable
                 && component.ExtractionJobId == null;
-            if (automaticRecovery && !EmailInquiryAssemblyStateMachine
-                    .CanAutomaticSchedulingRecoveryTransition(component.Assembly.Status))
-                throw new InvalidOperationException(
-                    $"Component '{componentKey}' cannot automatically resume while assembly "
-                    + $"{assemblyId} is {component.Assembly.Status}.");
+            if (resumingUnscheduled)
+            {
+                var permitted = grant is null
+                    ? EmailInquiryAssemblyStateMachine.CanAutomaticSchedulingRecoveryTransition(
+                        component.Assembly.Status)
+                    : EmailInquiryAssemblyStateMachine.CanGovernedSchedulingRecoveryTransition(
+                        component.Assembly.Status);
+                if (!permitted)
+                    throw new InvalidOperationException(
+                        $"Component '{componentKey}' cannot resume while assembly {assemblyId} is "
+                        + $"{component.Assembly.Status}"
+                        + (grant is null ? " without a recorded actor." : "."));
+            }
+            var automaticRecovery = resumingUnscheduled;
 
             component.ExtractionJobId = extractionJobId;
             // Bind the exact immutable object and occurrence at the same moment as its job.
@@ -160,8 +187,20 @@ public sealed class EmailInquiryAssemblyCoordinator : IEmailInquiryAssemblyCoord
             else if (automaticRecovery)
             {
                 component.Status = EmailInquiryComponentStatus.Extracting;
-                component.ReasonCode = null;
-                component.ReasonDetail = null;
+                // THE AUDIT LIVES ON THE PART, and it has to.
+                //
+                // The assembly's StatusReason is not a place to record anything: the barrier
+                // rewrites it from the component rows on every evaluation, and its verdict here
+                // is Extracting, whose reason is null. Two separate calls erase it within
+                // microseconds — the coordinator's own reevaluation and the one at the end of
+                // ScheduleAsync — which is why the "durably bound to a processing job" sentence
+                // that used to be written here has never once been visible to anybody.
+                //
+                // The component's reason is owned by whoever last decided something about the
+                // part, and nothing recomputes it. A governed reopen is exactly such a decision,
+                // so it says who made it and why, and it stays there until the part finishes.
+                component.ReasonCode = grant is null ? null : ReopenedReasonCode;
+                component.ReasonDetail = grant is null ? null : Truncate(grant.Describe(), 1000);
                 component.Assembly.Status = EmailInquiryAssemblyStatus.Extracting;
                 component.Assembly.StatusReason =
                     "A previously unscheduled component was durably bound to a processing job.";
@@ -178,6 +217,16 @@ public sealed class EmailInquiryAssemblyCoordinator : IEmailInquiryAssemblyCoord
             // assembled — a total stall that looked, in the data, like a state machine working.
             await _context.SaveChangesAsync(ct);
             await ReevaluateCoreAsync(component.AssemblyId, businessUnitId, ct);
+
+            if (grant is not null && resumingUnscheduled)
+            {
+                _logger.LogWarning(
+                    "Assembly {AssemblyId} (business unit {BusinessUnitId}) was reopened for "
+                    + "scheduling by {ActorId}: {Reason}. Component '{ComponentKey}' held no "
+                    + "processing job and is now bound to job {ExtractionJobId}.",
+                    component.AssemblyId, businessUnitId, grant.ActorId, grant.Reason,
+                    componentKey, extractionJobId);
+            }
         }, ct);
     }
 
