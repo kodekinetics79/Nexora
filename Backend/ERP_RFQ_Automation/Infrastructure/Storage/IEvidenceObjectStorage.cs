@@ -134,6 +134,10 @@ public readonly record struct EvidenceObjectPurgeResult(bool Deleted, long Bytes
     public static readonly EvidenceObjectPurgeResult Absent = new(false, 0);
 }
 
+/// <summary>One stored object belonging to a tenant, addressed the way
+/// <see cref="IEvidenceObjectStorage.TryDeletePurgedObjectAsync"/> needs it.</summary>
+public sealed record TenantStoredObject(string Bucket, string Key, string Version, long ByteSize);
+
 public interface IEvidenceObjectStorage
 {
     bool IsDurable { get; }
@@ -178,6 +182,36 @@ public interface IEvidenceObjectStorage
         CancellationToken ct = default)
         => throw new NotSupportedException(
             $"{GetType().Name} does not support purging stored evidence bytes.");
+
+    /// <summary>
+    /// Every object this store holds under one tenant's prefix.
+    ///
+    /// <para>Exists because a tenant purge issued SQL and nothing else. Deleting the rows that
+    /// NAME the bytes is not deleting the bytes, and it destroys the only map back to them: after
+    /// a purge the 273 objects under <c>Evidence/tenants/{bu}/</c> were unreachable, unattributable
+    /// and still being paid for, and the customer had been told their data was gone.</para>
+    ///
+    /// <para>Enumerated by PREFIX rather than from the rows, deliberately. A row-driven sweep can
+    /// only delete what the rows still point at, so an object whose row was already deleted — by
+    /// the retention purge, by a failed earlier attempt, by any of the fifteen production
+    /// documents whose rows outlived their bytes — is invisible to it forever. The prefix is the
+    /// tenant, so the prefix is the truth.</para>
+    ///
+    /// <para>ALL versions, not just the current one. Evidence buckets are versioned
+    /// (<see cref="ProbeAsync"/> refuses to be ready otherwise) and deleting the current version
+    /// of a versioned object writes a delete marker while every prior version stays — billed,
+    /// restorable, and still the customer's data.</para>
+    ///
+    /// <para>Default implementation refuses rather than returning empty: "this store cannot tell
+    /// you what it holds" and "this store holds nothing" must never be the same answer on a
+    /// destruction path.</para>
+    /// </summary>
+    Task<IReadOnlyList<TenantStoredObject>> ListTenantObjectsAsync(
+        long businessUnitId,
+        CancellationToken ct = default)
+        => throw new NotSupportedException(
+            $"{GetType().Name} cannot enumerate a tenant's stored objects, so a purge using it "
+            + "could not prove the tenant's bytes are gone.");
 
     /// <summary>
     /// Size of a stored object, or null when it is not there. Exists so a dry run can quote
@@ -289,6 +323,34 @@ public sealed class LocalEvidenceObjectStorage : IEvidenceObjectStorage
         var path = _files.ResolvePath(key);
         var bytes = File.Exists(path) ? new FileInfo(path).Length : 0L;
         return DeleteAsync(key, bytes, ct);
+    }
+
+    /// <summary>
+    /// Walks the tenant's directory under the storage root. The key returned is the same relative,
+    /// forward-slashed path <see cref="WriteImmutableAsync"/> recorded, so
+    /// <see cref="TryDeletePurgedObjectAsync"/> can take it back unchanged and
+    /// <see cref="IFileStorage.ResolvePath"/> applies its containment checks to it as usual.
+    /// </summary>
+    public Task<IReadOnlyList<TenantStoredObject>> ListTenantObjectsAsync(
+        long businessUnitId, CancellationToken ct = default)
+    {
+        if (businessUnitId <= 0) throw new ArgumentOutOfRangeException(nameof(businessUnitId));
+        ct.ThrowIfCancellationRequested();
+
+        var prefix = Path.Combine("Evidence", "tenants", businessUnitId.ToString());
+        var root = _files.ResolvePath(prefix);
+        if (!Directory.Exists(root))
+            return Task.FromResult<IReadOnlyList<TenantStoredObject>>([]);
+
+        var found = new List<TenantStoredObject>();
+        foreach (var file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
+        {
+            ct.ThrowIfCancellationRequested();
+            var relative = Path.Combine(prefix, Path.GetRelativePath(root, file)).Replace('\\', '/');
+            found.Add(new TenantStoredObject("local", relative, string.Empty, new FileInfo(file).Length));
+        }
+
+        return Task.FromResult<IReadOnlyList<TenantStoredObject>>(found);
     }
 
     private async Task<EvidenceObjectPurgeResult> DeleteAsync(string key, long bytes, CancellationToken ct)
@@ -663,6 +725,71 @@ public sealed class S3EvidenceObjectStorage : IEvidenceObjectStorage, IDisposabl
         return new EvidenceObjectPurgeResult(true, existing.ContentLength);
     }
 
+    /// <summary>
+    /// Every VERSION of every object under the tenant's prefix, paged to the end.
+    ///
+    /// <para><c>ListObjectVersions</c> rather than <c>ListObjectsV2</c>: the second returns only
+    /// current versions, and on a versioned bucket that is a subset of what the tenant actually
+    /// has stored. Delete markers are skipped — they are not bytes and there is nothing to
+    /// reclaim — but the versions BEHIND them are returned, because those are exactly the objects
+    /// a previous half-finished delete left paid for and restorable.</para>
+    ///
+    /// <para>Paging is not optional at this size: one production tenant holds 273 objects and the
+    /// API caps a page at 1000 keys, so a single unpaged call is a sweep that silently stops.</para>
+    /// </summary>
+    public async Task<IReadOnlyList<TenantStoredObject>> ListTenantObjectsAsync(
+        long businessUnitId, CancellationToken ct = default)
+    {
+        if (businessUnitId <= 0) throw new ArgumentOutOfRangeException(nameof(businessUnitId));
+
+        var prefix = $"Evidence/tenants/{businessUnitId}/";
+        var found = new List<TenantStoredObject>();
+        string? keyMarker = null;
+        string? versionMarker = null;
+
+        try
+        {
+            do
+            {
+                var page = await _client.ListVersionsAsync(new ListVersionsRequest
+                {
+                    BucketName = _options.Bucket,
+                    Prefix = prefix,
+                    KeyMarker = keyMarker,
+                    VersionIdMarker = versionMarker
+                }, ct);
+
+                foreach (var version in page.Versions ?? [])
+                {
+                    if (version.IsDeleteMarker == true) continue;
+
+                    // The version id is passed through EXACTLY as the store gave it, deliberately
+                    // NOT through NormalizeVersionId. That helper exists to spot a content hash
+                    // recorded where a version id belongs — a local-storage artefact — and it
+                    // recognises one by being 64 hex characters. An id that came back from
+                    // ListObjectVersions is a version id whatever it looks like, and discarding it
+                    // would turn the later delete into a delete marker: bytes retained, storage
+                    // still billed, and the tenant told their space was reclaimed.
+                    found.Add(new TenantStoredObject(
+                        _options.Bucket!, version.Key, version.VersionId ?? string.Empty,
+                        version.Size ?? 0L));
+                }
+
+                keyMarker = page.IsTruncated == true ? page.NextKeyMarker : null;
+                versionMarker = page.IsTruncated == true ? page.NextVersionIdMarker : null;
+            }
+            while (keyMarker is not null || versionMarker is not null);
+        }
+        catch (Exception exception) when (EvidenceStorageFaults.IsStoreUnavailable(exception, ct))
+        {
+            // Refuse rather than return what was gathered so far. A partial listing presented as
+            // a complete one is a purge that reports every byte deleted having enumerated half.
+            throw EvidenceStorageFaults.Unavailable(exception);
+        }
+
+        return found;
+    }
+
     public async Task<long?> TryMeasureObjectAsync(
         string bucket,
         string key,
@@ -912,6 +1039,11 @@ public sealed class UnconfiguredEvidenceObjectStorage : IEvidenceObjectStorage
         string storageUri,
         string expectedSha256,
         CancellationToken ct = default) => throw Refuse();
+
+    /// <summary>Refuses, like everything else here. A purge must not read "this deployment never
+    /// configured its store" as "this tenant has no files".</summary>
+    public Task<IReadOnlyList<TenantStoredObject>> ListTenantObjectsAsync(
+        long businessUnitId, CancellationToken ct = default) => throw Refuse();
 
     private EvidenceStorageUnavailableException Refuse() => new(true, _configurationFault);
 }

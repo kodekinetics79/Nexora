@@ -18666,6 +18666,18 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasMaxLength(32)
                         .HasColumnType("character varying(32)");
 
+                    b.Property<DateTime?>("StoragePurgeCompletedOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("StoragePurgeDetail")
+                        .HasColumnType("jsonb");
+
+                    b.Property<string>("StoragePurgeInventory")
+                        .HasColumnType("jsonb");
+
+                    b.Property<int?>("StoragePurgeOutstandingCount")
+                        .HasColumnType("integer");
+
                     b.Property<long>("TenantId")
                         .HasColumnType("bigint");
 

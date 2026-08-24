@@ -244,7 +244,29 @@ public sealed record TenantPurgeResultDto(
     int SupportTicketsRedacted,
     int SupportNotesErased,
     string Summary,
-    IReadOnlyList<string> Disclosures);
+    IReadOnlyList<string> Disclosures)
+{
+    /// <summary>
+    /// Stored objects destroyed, and bytes reclaimed by destroying them.
+    ///
+    /// <para>Reported beside the row count rather than folded into it, because they are two
+    /// different promises and the purge used to make the second on the strength of the first. A
+    /// result carrying a row count alone is exactly what an offboarding looked like while 273
+    /// evidence objects and a 5 GB disk sat untouched.</para>
+    ///
+    /// <para>Reaching this record at all means the byte sweep completed: an incomplete one refuses
+    /// rather than returning, so there is no shape of this DTO that reports success over files
+    /// that are still stored.</para>
+    /// </summary>
+    public int StoredObjectsDeleted { get; init; }
+
+    /// <summary>Objects that were already gone — a re-run, or bytes lost to ephemeral storage
+    /// before the persistent disk existed. Counted separately so "we deleted nothing because there
+    /// was nothing" cannot read as "we deleted nothing".</summary>
+    public int StoredObjectsAlreadyAbsent { get; init; }
+
+    public long StorageBytesFreed { get; init; }
+}
 
 public sealed record TenantErasureResultDto(
     long TenantId,
