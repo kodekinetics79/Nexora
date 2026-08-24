@@ -191,7 +191,31 @@ public interface IEvidenceObjectStorage
         string version,
         CancellationToken ct = default)
         => Task.FromResult<long?>(null);
+
+    /// <summary>
+    /// Every object currently stored under <paramref name="keyPrefix"/>, with its size.
+    ///
+    /// <para>Exists for one job: finding stored objects that NO database row points at. 170 of
+    /// this deployment's 273 evidence objects have no pointer — quarantine siblings nothing ever
+    /// deleted, and raw <c>.eml</c> in a zone the row-driven purge cannot address — so a purge
+    /// driven only by rows can never reach them however long it runs.</para>
+    ///
+    /// <para>The default REFUSES rather than returning an empty list. An empty list from a
+    /// provider that simply cannot enumerate would read as "there is nothing unreferenced here",
+    /// which is the one answer a sweep must never invent: it would silently report a clean store
+    /// while the bytes stayed.</para>
+    /// </summary>
+    Task<IReadOnlyList<StoredEvidenceObject>> ListObjectsUnderPrefixAsync(
+        string keyPrefix,
+        CancellationToken ct = default)
+        => throw new NotSupportedException(
+            $"{GetType().Name} cannot list stored evidence objects.");
 }
+
+/// <summary>One object found in the store, addressed the same way a purge addresses it.
+/// <paramref name="Version"/> is whatever the provider records — a version id on S3, the
+/// content hash on local storage — so a sweep deletes exactly the object it listed.</summary>
+public sealed record StoredEvidenceObject(string Bucket, string Key, string Version, long ByteSize);
 
 public sealed class LocalEvidenceObjectStorage : IEvidenceObjectStorage
 {
@@ -290,6 +314,31 @@ public sealed class LocalEvidenceObjectStorage : IEvidenceObjectStorage
         // ResolvePath still applies: a dry run must not be a way to stat arbitrary files.
         var path = _files.ResolvePath(key);
         return Task.FromResult<long?>(File.Exists(path) ? new FileInfo(path).Length : null);
+    }
+
+    public Task<IReadOnlyList<StoredEvidenceObject>> ListObjectsUnderPrefixAsync(
+        string keyPrefix, CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        if (string.IsNullOrWhiteSpace(keyPrefix))
+            throw new ArgumentException("A key prefix is required.", nameof(keyPrefix));
+
+        // ResolvePath applies its full containment check (root-prefix comparison plus
+        // per-segment symlink rejection), so a crafted prefix cannot enumerate outside
+        // evidence storage.
+        var directory = _files.ResolvePath(keyPrefix);
+        if (!Directory.Exists(directory))
+            return Task.FromResult<IReadOnlyList<StoredEvidenceObject>>([]);
+
+        var root = _files.RootPath;
+        var found = new List<StoredEvidenceObject>();
+        foreach (var path in Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories))
+        {
+            ct.ThrowIfCancellationRequested();
+            var key = Path.GetRelativePath(root, path).Replace('\\', '/');
+            found.Add(new StoredEvidenceObject("local", key, string.Empty, new FileInfo(path).Length));
+        }
+        return Task.FromResult<IReadOnlyList<StoredEvidenceObject>>(found);
     }
 
     internal static string BuildKey(long businessUnitId, string zone, string sha256, string extension)
@@ -625,6 +674,36 @@ public sealed class S3EvidenceObjectStorage : IEvidenceObjectStorage, IDisposabl
         EnsureConfiguredBucket(bucket, _options.Bucket!);
         var metadata = await TryHeadAsync(key, NormalizeVersionId(version), ct);
         return metadata?.ContentLength;
+    }
+
+    /// <summary>
+    /// Lists every CURRENT object under the prefix, following the continuation token to the
+    /// end. A truncated page silently dropped would understate what is stored, and a sweep
+    /// that under-reports is a sweep that leaves bytes behind while claiming it did not.
+    /// </summary>
+    public async Task<IReadOnlyList<StoredEvidenceObject>> ListObjectsUnderPrefixAsync(
+        string keyPrefix, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(keyPrefix))
+            throw new ArgumentException("A key prefix is required.", nameof(keyPrefix));
+
+        var found = new List<StoredEvidenceObject>();
+        string? continuation = null;
+        do
+        {
+            var page = await _client.ListObjectsV2Async(new ListObjectsV2Request
+            {
+                BucketName = _options.Bucket,
+                Prefix = keyPrefix,
+                ContinuationToken = continuation
+            }, ct);
+            foreach (var entry in page.S3Objects ?? [])
+                found.Add(new StoredEvidenceObject(
+                    _options.Bucket!, entry.Key, string.Empty, entry.Size ?? 0));
+            continuation = page.IsTruncated == true ? page.NextContinuationToken : null;
+        }
+        while (continuation is not null);
+        return found;
     }
 
     /// <summary>

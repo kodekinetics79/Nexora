@@ -81,8 +81,11 @@ public static class EvidenceRetentionEligibility
             "A bound extraction job has not succeeded and can still be retried from these bytes.";
         public const string OpenInquiry = "A linked inquiry is still in draft or awaiting review.";
         public const string LegalHold = "The document is under legal hold.";
-        public const string DeletionNotApproved =
-            "Deletion was requested for this document but has not been approved.";
+        // DeletionNotApproved is deliberately gone. It described a review nothing could ever
+        // approve, and the purge used it to EXCLUDE the document — so the sentence a tenant read
+        // was "we are waiting for a decision" when the truth was "this will never be deleted".
+        // Deleting the constant is what stops it coming back: an unused reason string is one
+        // copy-paste away from being wired up again.
         public const string OpenHumanAction = "An open human action item points at this document.";
         public const string OpenCommercialCase = "A linked lead is still an open commercial case.";
     }

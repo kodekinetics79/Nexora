@@ -302,7 +302,7 @@ public sealed class EvidenceRetentionPurgeTests(PostgreSqlTestDatabase database)
 
     public static TheoryData<string> ExclusionCases() =>
     [
-        "legal-hold", "deletion-requested", "statutory-classification", "open-intake",
+        "legal-hold", "statutory-classification", "open-intake",
         "extraction-not-succeeded", "open-inquiry", "open-lead", "open-human-action",
         "too-recent", "quarantined", "not-completed"
     ];
@@ -364,6 +364,109 @@ public sealed class EvidenceRetentionPurgeTests(PostgreSqlTestDatabase database)
             Assert.Equal(held.Id, skip.DocumentId);
             Assert.Equal("rfq-held.pdf", skip.FileName);
             Assert.Equal(EvidenceRetentionEligibility.Skip.LegalHold, skip.Reason);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    /// <summary>
+    /// The inverse of the exclusion theory, and the whole point of removing the trap.
+    ///
+    /// <para>"Request deletion review" had no approver anywhere in the product, and the purge read
+    /// its flag as an EXCLUSION — so pressing the only button that mentioned deletion was the one
+    /// reliable way to guarantee the document was never deleted. This asserts the document that
+    /// was stuck behind such a request is now purged like any other, which honours what the tenant
+    /// asked for instead of freezing it forever.</para>
+    /// </summary>
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task A_document_stuck_behind_an_unapprovable_deletion_request_is_purged()
+    {
+        var tenantId = NewTenantId();
+        var root = NewRoot();
+        try
+        {
+            await using var db = database.ContextFor(null);
+            await SeedAsync(db, tenantId, enabled: true);
+            var files = new LocalFileStorage(root, root);
+            var document = await SeedPurgeableDocumentAsync(db, tenantId, files,
+                "rfq-stuck-request.pdf", exclusion: "deletion-requested");
+
+            // The stuck request really is in the log — this is not a test that forgot to seed.
+            Assert.True(await db.TenantGovernanceAuditEvents.AsNoTracking().AnyAsync(x =>
+                x.BusinessUnitId == tenantId && x.Action == "DELETION_REQUESTED"));
+
+            var result = await NewService(db, files).RunPurgeAsync(tenantId, 9, "purge-stuck",
+                new EvidenceRetentionPurgeCommand(false, "Clearing a document a tenant asked us to delete."),
+                default);
+
+            Assert.Equal(1, result.Eligible);
+            Assert.Equal(1, result.Purged);
+            Assert.False(File.Exists(files.ResolvePath(document.ClearedKey)));
+            Assert.False(File.Exists(files.ResolvePath(document.QuarantineKey)));
+
+            db.ChangeTracker.Clear();
+            var stored = await db.Set<SourceDocument>()
+                .SingleAsync(x => x.BusinessUnitId == tenantId && x.Id == document.Id);
+            Assert.Equal(EvidencePurgeState.Purged, stored.PurgeState);
+
+            // And the reason it used to be skipped is gone from the vocabulary entirely.
+            Assert.DoesNotContain(result.Skipped, x =>
+                x.Reason.Contains("approved", StringComparison.OrdinalIgnoreCase));
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    /// <summary>
+    /// The other half of the tombstone, at run level: the audit answers "what did you decide to
+    /// KEEP, and why", not only "what did you delete".
+    /// </summary>
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task A_run_records_what_it_kept_and_why_grouped_by_reason()
+    {
+        var tenantId = NewTenantId();
+        var root = NewRoot();
+        try
+        {
+            await using var db = database.ContextFor(null);
+            await SeedAsync(db, tenantId, enabled: true);
+            var files = new LocalFileStorage(root, root);
+            await SeedPurgeableDocumentAsync(db, tenantId, files, "rfq-kept-a.pdf",
+                exclusion: "legal-hold");
+            await SeedPurgeableDocumentAsync(db, tenantId, files, "rfq-kept-b.pdf",
+                exclusion: "statutory-classification");
+
+            var result = await NewService(db, files).RunPurgeAsync(tenantId, 9, "purge-kept",
+                new EvidenceRetentionPurgeCommand(false, "Reclaiming space."), default);
+            Assert.Equal(0, result.Purged);
+
+            var kept = await db.TenantGovernanceAuditEvents.AsNoTracking()
+                .SingleAsync(x => x.BusinessUnitId == tenantId
+                    && x.Action == EvidenceRetentionService.ActionRunKept);
+            Assert.Equal("purge-kept:kept", kept.IdempotencyKey);
+            Assert.Equal(9, kept.ActorUserId);
+
+            using var evidence = JsonDocument.Parse(kept.EvidenceJson);
+            var root_ = evidence.RootElement;
+            Assert.Equal(2, root_.GetProperty("keptCount").GetInt32());
+            Assert.True(root_.GetProperty("statutoryOverridesTenantPreference").GetBoolean());
+
+            // Grouped by the rule that refused, with a count each. A tenant asked to account for
+            // his own data has to be able to answer this without re-deriving it per document.
+            var byReason = root_.GetProperty("kept").EnumerateArray()
+                .ToDictionary(x => x.GetProperty("reason").GetString()!,
+                    x => x.GetProperty("count").GetInt32());
+            Assert.Equal(1, byReason[EvidenceRetentionEligibility.Skip.LegalHold]);
+            Assert.Equal(1, byReason[EvidenceRetentionEligibility.Skip.StatutoryDocumentType]);
+
+            // The whole run, including the kept event, replays rather than doubling.
+            db.ChangeTracker.Clear();
+            await NewService(db, files).RunPurgeAsync(tenantId, 9, "purge-kept",
+                new EvidenceRetentionPurgeCommand(false, "Reclaiming space."), default);
+            Assert.Single(await db.TenantGovernanceAuditEvents.AsNoTracking()
+                .Where(x => x.BusinessUnitId == tenantId
+                    && x.Action == EvidenceRetentionService.ActionRunKept)
+                .ToListAsync());
         }
         finally { Directory.Delete(root, recursive: true); }
     }
@@ -942,9 +1045,24 @@ public sealed class EvidenceRetentionPurgeTests(PostgreSqlTestDatabase database)
                     "hold-" + occurrence.Id, new(0, "HOLD_APPLIED", "Litigation hold."), default);
                 break;
             case "deletion-requested":
-                await new CommercialDocumentArchiveService(db).GovernAsync(tenantId, 9, occurrence.Id,
-                    "deletion-" + occurrence.Id, new(0, "DELETION_REQUESTED", "Awaiting DSAR decision."),
-                    default);
+                // Written straight into the append-only log rather than through GovernAsync,
+                // which no longer accepts the action. This is exactly the shape of the record
+                // stuck on business unit 7 occurrence 299 since 2026-08-12: a request nothing
+                // could ever approve, sitting in a log that cannot be edited.
+                db.TenantGovernanceAuditEvents.Add(new TenantGovernanceAuditEvent
+                {
+                    BusinessUnitId = tenantId,
+                    Area = "CommercialDocumentArchive",
+                    AggregateType = "SourceDocumentOccurrence",
+                    AggregateReference = $"occurrence:{occurrence.Id}",
+                    Action = "DELETION_REQUESTED",
+                    Reason = "Awaiting a decision that had no decider.",
+                    EvidenceJson = "{}",
+                    IdempotencyKey = "deletion-" + occurrence.Id,
+                    ActorUserId = 9,
+                    OccurredOn = DateTime.UtcNow.AddDays(-12)
+                });
+                await db.SaveChangesAsync();
                 break;
             case "statutory-classification":
                 db.CommercialDocumentClassifications.Add(CommercialDocumentClassification.Create(
