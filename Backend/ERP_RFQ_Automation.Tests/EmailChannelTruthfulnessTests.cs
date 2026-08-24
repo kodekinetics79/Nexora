@@ -28,9 +28,15 @@ namespace ERP_RFQ_Automation.Tests;
 /// customer RFQs went to a mailbox nobody was reading, and the system's own opinion was that
 /// everything was fine.
 ///
-/// These tests pin the four properties that make that impossible to repeat:
-/// a failed cycle does not log success, does not beat the success heartbeat, records a durable
-/// reason with the last successful poll, and turns the readiness surface red.
+/// These tests pin the properties that make that impossible to repeat: a failed cycle does not
+/// log success, records a durable reason with the last successful poll, and turns the CHANNEL
+/// readiness surface red.
+///
+/// <para>ING-08b, 2026-08-24: the original fix also withheld the poll LOOP's liveness beat on a
+/// failed cycle, and that turned out to be the wrong signal to spend — see
+/// <see cref="EmailPollerLivenessSeparationTests"/>. Mailbox truth belongs to
+/// <c>email-poll-channel</c>; loop truth belongs to <c>background-workers</c>; neither may
+/// silence the other.</para>
 /// </summary>
 public sealed class EmailChannelTruthfulnessTests
 {
@@ -39,7 +45,7 @@ public sealed class EmailChannelTruthfulnessTests
     // ------------------------------------------------------ the loop: log + heartbeat truth
 
     [Fact]
-    public async Task AFailedPollDoesNotLogSuccessAndDoesNotBeatTheSuccessHeartbeat()
+    public async Task AFailedPollDoesNotLogSuccessAndDoesNotStopTheLoopFromBeating()
     {
         using var db = new TestDb();
         var heartbeats = new BackgroundWorkerHeartbeats();
@@ -59,10 +65,20 @@ public sealed class EmailChannelTruthfulnessTests
         Assert.Contains("authentication failed", failure.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("2026-07-30", failure.Message);
 
-        // (b) the success heartbeat did not beat. This is the exact line that used to run
-        // unconditionally and keep every liveness surface green over a dead channel.
+        // (b) ING-08b, 2026-08-24. This assertion used to be `Assert.Null(beat.LastBeatUtc)` — a
+        // failed mailbox withheld the LOOP's liveness beat. In production that reported
+        // "Background worker(s) stopped beating: email-poller" about a loop that was polling a
+        // second mailbox successfully every seventy seconds, for 11,782 consecutive cycles, and
+        // a genuine poller death would have looked identical. The loop turned, so it beats; the
+        // mailbox failed, so the CHANNEL check is the one that goes red, by name.
+        // (The mailbox's own red light is asserted against the REAL EmailService in
+        // EmailPollerLivenessSeparationTests; this harness stubs IEmailService, which is where
+        // the per-mailbox channel verdict is published from.)
         var beat = Assert.Single(heartbeats.Snapshot(), s => s.Worker == BackgroundWorkerNames.EmailPoller);
-        Assert.Null(beat.LastBeatUtc);
+        Assert.NotNull(beat.LastBeatUtc);
+        Assert.Equal(HealthStatus.Healthy,
+            new BackgroundWorkerHealthCheck(heartbeats)
+                .CheckHealthAsync(new HealthCheckContext(), default).GetAwaiter().GetResult().Status);
     }
 
     [Fact]
