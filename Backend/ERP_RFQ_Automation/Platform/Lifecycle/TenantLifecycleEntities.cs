@@ -73,6 +73,39 @@ public sealed class TenantOffboarding
     /// <summary>JSON snapshot of table-level delete counts from the fenced attempt.</summary>
     public string? PurgeExecutionDetail { get; set; }
 
+    // ==== stored bytes — a separate fact from the rows ======================================
+    // "The tenant's rows are gone" and "the tenant's files are gone" are two claims, and the
+    // purge used to make the second by only ever checking the first. It issued SQL and nothing
+    // else, so 273 evidence objects and a 5 GB disk survived every completed offboarding —
+    // including the raw .eml of every message the tenant ever received.
+    //
+    // Object deletion cannot join the destructive transaction: a bucket has no rollback, so a
+    // deletion inside the transaction would be permanent even when the transaction was not.
+    // The INVENTORY is therefore committed BEFORE anything is destroyed, while the rows that
+    // name the bytes still exist, and the outcome is written after. That ordering is what makes
+    // the step resumable instead of fire-and-forget, and what makes a partly-emptied bucket a
+    // state somebody can find rather than one nobody can see.
+
+    /// <summary>
+    /// What the tenant had stored, captured before the destructive transaction. JSON, and durable:
+    /// once <see cref="PurgeExecutedOn"/> is set, the rows naming these objects no longer exist
+    /// and this is the only record of what still has to be deleted.
+    /// </summary>
+    public string? StoragePurgeInventory { get; set; }
+
+    /// <summary>When every object in the inventory was proved gone. Null while any remains.</summary>
+    public DateTime? StoragePurgeCompletedOn { get; set; }
+
+    /// <summary>Per-object outcome — deleted, already absent, or refused with the reason.</summary>
+    public string? StoragePurgeDetail { get; set; }
+
+    /// <summary>
+    /// How many objects are still there. Zero is the only value that permits the purge to report
+    /// success; anything else is reported to the operator as an incomplete purge with the residue
+    /// named, and the step is re-runnable.
+    /// </summary>
+    public int? StoragePurgeOutstandingCount { get; set; }
+
     public DateTime? PurgedOn { get; set; }
 
     public string? PurgedBy { get; set; }
@@ -271,6 +304,8 @@ public static class TenantLifecycleModelBuilderExtensions
             entity.Property(x => x.PurgedBy).HasMaxLength(256);
             entity.Property(x => x.PurgeReason).HasMaxLength(1000);
             entity.Property(x => x.PurgeExecutionDetail).HasColumnType("jsonb");
+            entity.Property(x => x.StoragePurgeInventory).HasColumnType("jsonb");
+            entity.Property(x => x.StoragePurgeDetail).HasColumnType("jsonb");
             entity.Property(x => x.PersonalDataErasedBy).HasMaxLength(256);
             entity.Property(x => x.PersonalDataErasureReason).HasMaxLength(1000);
             entity.Property(x => x.LastExportedBy).HasMaxLength(256);
