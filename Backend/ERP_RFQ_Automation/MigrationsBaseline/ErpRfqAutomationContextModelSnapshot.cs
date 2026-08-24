@@ -12805,6 +12805,15 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("timestamp without time zone")
                         .HasDefaultValueSql("now()");
 
+                    b.Property<long?>("DefaultLeadOwnerSetByUserId")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTime?>("DefaultLeadOwnerSetOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<long?>("DefaultLeadOwnerUserId")
+                        .HasColumnType("bigint");
+
                     b.Property<string>("Description")
                         .HasMaxLength(500)
                         .HasColumnType("character varying(500)");

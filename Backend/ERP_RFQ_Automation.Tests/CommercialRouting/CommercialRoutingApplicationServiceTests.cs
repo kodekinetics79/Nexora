@@ -233,7 +233,7 @@ public sealed class CommercialRoutingApplicationServiceTests
         var originalLifecycle = (await context.Leads.AsNoTracking().SingleAsync(l => l.Id == 701)).LeadStatusId;
 
         var assigned = await service.ChangeLeadOwnershipAsync(71, new ChangeLeadOwnershipCommand(
-            701, LeadOwnershipAction.Assign, 7101, 7101, 1,
+            701, LeadOwnershipAction.Assign, 7101, 7101, ActorIsManager: false, 1,
             "owner-command-1", "owner-correlation-1"), CancellationToken.None);
 
         Assert.Equal(7101, assigned.AssignedToUserId);
@@ -241,7 +241,7 @@ public sealed class CommercialRoutingApplicationServiceTests
         Assert.True(assigned.ManualOverride);
         Assert.Equal(originalLifecycle, (await context.Leads.AsNoTracking().SingleAsync(l => l.Id == 701)).LeadStatusId);
         await Assert.ThrowsAsync<RoutingConflictException>(() => service.ChangeLeadOwnershipAsync(71,
-            new ChangeLeadOwnershipCommand(701, LeadOwnershipAction.Unassign, null, 7102, 1,
+            new ChangeLeadOwnershipCommand(701, LeadOwnershipAction.Unassign, null, 7102, ActorIsManager: true, 1,
                 "owner-command-stale", "owner-correlation-stale"), CancellationToken.None));
     }
 
@@ -256,10 +256,10 @@ public sealed class CommercialRoutingApplicationServiceTests
         var service = Service(context);
 
         await service.ChangeLeadOwnershipAsync(71, new ChangeLeadOwnershipCommand(
-            701, LeadOwnershipAction.Assign, 7102, 7102, 1,
+            701, LeadOwnershipAction.Assign, 7102, 7102, ActorIsManager: false, 1,
             "owner-self-assign", "owner-self-assign-correlation"), CancellationToken.None);
         var rerouted = await service.ChangeLeadOwnershipAsync(71, new ChangeLeadOwnershipCommand(
-            701, LeadOwnershipAction.ReturnToAutomatic, null, 7102, 2,
+            701, LeadOwnershipAction.ReturnToAutomatic, null, 7102, ActorIsManager: false, 2,
             "owner-return-auto", "owner-return-auto-correlation"), CancellationToken.None);
 
         Assert.Equal(7101, rerouted.AssignedToUserId);
@@ -277,7 +277,7 @@ public sealed class CommercialRoutingApplicationServiceTests
         await AddEligibleProfileAsync(context, 7102);
         var service = Service(context);
         await service.ChangeLeadOwnershipAsync(71, new ChangeLeadOwnershipCommand(
-            701, LeadOwnershipAction.Assign, 7102, 7101, 1,
+            701, LeadOwnershipAction.Assign, 7102, 7101, ActorIsManager: true, 1,
             "owner-manual-fence", "owner-manual-fence-correlation"), CancellationToken.None);
 
         await Assert.ThrowsAsync<RoutingConflictException>(() => service.RouteLeadAsync(71,
@@ -303,7 +303,7 @@ public sealed class CommercialRoutingApplicationServiceTests
         await using var context = db.ContextFor(71);
 
         await Assert.ThrowsAsync<RoutingConflictException>(() => Service(context).ChangeLeadOwnershipAsync(71,
-            new ChangeLeadOwnershipCommand(701, LeadOwnershipAction.Assign, 7201, 7102, 1,
+            new ChangeLeadOwnershipCommand(701, LeadOwnershipAction.Assign, 7201, 7102, ActorIsManager: true, 1,
                 "cross-tenant-owner", "cross-tenant-owner-correlation"), CancellationToken.None));
     }
 

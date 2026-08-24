@@ -569,6 +569,8 @@ public sealed class TenantWorkGateSuspensionTests
         public Task<CustomerIdentifier> UpsertIdentifierAsync(long businessUnitId, UpsertCustomerIdentifierCommand command, CancellationToken ct) => throw new NotSupportedException();
         public Task<CustomerOwnership> CreateOwnershipAsync(long businessUnitId, CreateCustomerOwnershipCommand command, CancellationToken ct) => throw new NotSupportedException();
         public Task<CustomerRoutingProfileResponse?> GetCustomerProfileAsync(long businessUnitId, long customerId, CancellationToken ct) => throw new NotSupportedException();
+        public Task<DefaultLeadOwnerResponse> GetDefaultOwnerAsync(long businessUnitId, CancellationToken ct) => throw new NotSupportedException();
+        public Task<DefaultLeadOwnerResponse> SetDefaultOwnerAsync(long businessUnitId, SetDefaultLeadOwnerCommand command, CancellationToken ct) => throw new NotSupportedException();
     }
 
     private sealed class StaticOptionsMonitor<T>(T value) : IOptionsMonitor<T>

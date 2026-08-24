@@ -318,6 +318,8 @@ public sealed class GoldenJourneySeederConfigurationTests : IDisposable
         public Task<CustomerIdentifier> UpsertIdentifierAsync(long businessUnitId, UpsertCustomerIdentifierCommand command, CancellationToken ct) => throw Stop();
         public Task<CustomerOwnership> CreateOwnershipAsync(long businessUnitId, CreateCustomerOwnershipCommand command, CancellationToken ct) => throw Stop();
         public Task<CustomerRoutingProfileResponse?> GetCustomerProfileAsync(long businessUnitId, long customerId, CancellationToken ct) => throw Stop();
+        public Task<DefaultLeadOwnerResponse> GetDefaultOwnerAsync(long businessUnitId, CancellationToken ct) => throw Stop();
+        public Task<DefaultLeadOwnerResponse> SetDefaultOwnerAsync(long businessUnitId, SetDefaultLeadOwnerCommand command, CancellationToken ct) => throw Stop();
 
         // ILeadIdentityApplicationService
         public Task<LeadReconciliationResult> ReconcileAsync(Lead candidate, LeadIntakeDescriptor intake, CancellationToken ct = default) => throw Stop();

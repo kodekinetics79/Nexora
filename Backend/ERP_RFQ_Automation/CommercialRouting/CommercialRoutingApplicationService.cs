@@ -23,6 +23,8 @@ public interface ICommercialRoutingApplicationService
     Task<CustomerIdentifier> UpsertIdentifierAsync(long businessUnitId, UpsertCustomerIdentifierCommand command, CancellationToken ct);
     Task<CustomerOwnership> CreateOwnershipAsync(long businessUnitId, CreateCustomerOwnershipCommand command, CancellationToken ct);
     Task<CustomerRoutingProfileResponse?> GetCustomerProfileAsync(long businessUnitId, long customerId, CancellationToken ct);
+    Task<DefaultLeadOwnerResponse> GetDefaultOwnerAsync(long businessUnitId, CancellationToken ct);
+    Task<DefaultLeadOwnerResponse> SetDefaultOwnerAsync(long businessUnitId, SetDefaultLeadOwnerCommand command, CancellationToken ct);
 }
 
 public sealed class CommercialRoutingApplicationService : ICommercialRoutingApplicationService
@@ -98,7 +100,18 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
                     .Where(o => o.BusinessUnitId == businessUnitId && customerIds.Contains(o.CustomerId))
                     .AsNoTracking()
                     .ToListAsync(ct);
+                // The tenant's one customer-set fallback owner. Read HERE, in the application
+                // service, and handed to the engine as data — the engine stays pure and never
+                // learns that a BusinessUnits table exists. Its availability is loaded in the same
+                // batch as the ownership candidates', because the engine tests the fallback with
+                // exactly the same IsAvailable predicate and a missing availability row would
+                // silently make an eligible fallback owner look unavailable.
+                var defaultOwnerUserId = await _db.BusinessUnits.AsNoTracking()
+                    .Where(unit => unit.Id == businessUnitId)
+                    .Select(unit => unit.DefaultLeadOwnerUserId)
+                    .SingleOrDefaultAsync(ct);
                 var userIds = ownerships.SelectMany(o => new long?[] { o.PrimaryUserId, o.BackupUserId })
+                    .Concat([defaultOwnerUserId])
                     .Where(id => id.HasValue).Select(id => id!.Value).Distinct().ToArray();
                 var occurredOn = DateTime.UtcNow;
                 var availability = await LoadUserAvailabilityAsync(businessUnitId, userIds, occurredOn, ct);
@@ -129,7 +142,8 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
                     availability,
                     scopeKeys,
                     RequestHash: requestHash,
-                    ScopeKeyDerivations: derivations);
+                    ScopeKeyDerivations: derivations,
+                    DefaultOwnerUserId: defaultOwnerUserId);
                 var result = _engine.Route(request, _policy);
 
                 // The engine has always proven customer matches and persisted them onto
@@ -198,6 +212,14 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
         {
             if (!command.AssignedToUserId.HasValue)
                 throw new ArgumentException("An owner is required for assignment.");
+            // Read-only authority check before the write path. The release actions below repeat it
+            // INSIDE their transaction; Assign cannot, because its write path is AssignLeadAsync,
+            // which opens its own. The gap that leaves is closed by the version fence rather than
+            // by a lock: ExpectedAssignmentVersion travels into AssignLeadAsync, and any ownership
+            // change between this read and that write bumps AssignmentVersion, so the assignment is
+            // refused as a conflict instead of proceeding on an authority decision made about an
+            // owner who has since changed.
+            EnsureOwnershipChangeIsPermitted(await LoadLeadAsync(businessUnitId, command.LeadId, ct), command);
             var assigned = await AssignLeadAsync(businessUnitId, new ManualAssignLeadCommand(
                 command.LeadId, command.AssignedToUserId.Value, command.AssignedByUserId,
                 command.IdempotencyKey, command.CorrelationId, AssignmentScope.LeadOnly,
@@ -212,6 +234,7 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
             var lead = await _db.Leads.SingleOrDefaultAsync(
                 x => x.BusinessUnitId == businessUnitId && x.Id == command.LeadId, ct)
                 ?? throw new RoutingNotFoundException($"Lead {command.LeadId} was not found.");
+            EnsureOwnershipChangeIsPermitted(lead, command);
             if (lead.AssignmentVersion != command.ExpectedAssignmentVersion)
                 throw new RoutingConflictException("Lead assignment changed since it was loaded. Refresh and retry.");
 
@@ -219,8 +242,9 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
             var active = await _db.Set<LeadAssignment>().SingleOrDefaultAsync(x =>
                 x.BusinessUnitId == businessUnitId && x.LeadId == lead.Id && x.EffectiveTo == null, ct);
             if (active != null) active.EffectiveTo = now;
-            var code = command.Action == LeadOwnershipAction.ReturnToAutomatic
-                ? "RETURNED_TO_AUTOMATIC_ROUTING" : "MANUALLY_UNASSIGNED";
+            var returnsToAutomatic = command.Action == LeadOwnershipAction.ReturnToAutomatic;
+            var code = returnsToAutomatic
+                ? "RETURNED_TO_AUTOMATIC_ROUTING" : DeterministicRoutingEngine.ManuallyUnassignedCode;
             var routingDecision = new LeadRoutingDecision
             {
                 BusinessUnitId = businessUnitId,
@@ -231,7 +255,7 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
                 DecisionCode = code,
                 Explanation = JsonSerializer.Serialize(new
                 {
-                    source = command.Action == LeadOwnershipAction.ReturnToAutomatic ? "automatic" : "manual",
+                    source = returnsToAutomatic ? "automatic" : "manual",
                     action = command.Action.ToString(),
                     requestHash = $"ownership:{businessUnitId}:{command.LeadId}:{command.Action}:{command.ExpectedAssignmentVersion}"
                 }),
@@ -244,12 +268,52 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
             lead.AssignOn = now;
             lead.AssignComment = command.Comment?.Trim();
             lead.AssignedByUserId = command.AssignedByUserId;
-            lead.AssignmentMethod = command.Action == LeadOwnershipAction.ReturnToAutomatic
+            lead.AssignmentMethod = returnsToAutomatic
                 ? LeadAssignmentMethods.Automatic : LeadAssignmentMethods.Manual;
-            lead.ManualAssignmentOverride = command.Action != LeadOwnershipAction.ReturnToAutomatic;
+
+            // MANUAL OVERRIDE IS CLEARED BY BOTH RELEASE ACTIONS, and that is a deliberate change.
+            //
+            // ManualAssignmentOverride has exactly one behaviour: RouteLeadAsync refuses to run
+            // while it is set. It exists to stop the router overwriting an owner a human chose. An
+            // unassign destroys the assignment — after it there is no human choice left to protect,
+            // so leaving the fence up protected nothing and cost everything: the lead had no owner,
+            // no queue row, was invisible to the reconciliation worker (which only reconsiders
+            // leads with NO routing decision at all), and could not even be re-routed by hand
+            // because the fence threw. "Return this to the pool" quietly meant "delete this from
+            // the business".
+            //
+            // Clearing it does NOT make Unassign the same action as ReturnToAutomatic. Unassign
+            // still does not run the router: it parks the lead on the queue for a human, and only
+            // stops BLOCKING the router should someone later ask for it. ReturnToAutomatic hands
+            // it straight back to the engine in the same call. One waits for a person; the other
+            // does not.
+            //
+            // AssignmentMethod stays MANUAL for an unassign, because it is a different fact: it
+            // records that the last ownership decision on this lead was a human's, which is true
+            // and is what the lead record and its history should say.
+            lead.ManualAssignmentOverride = false;
             lead.AssignmentVersion++;
             lead.ModifiedDate = now;
             _db.Add(routingDecision);
+
+            // A released lead lands on the queue a human can actually see. Built by the engine's
+            // own factory rather than a second hand-written copy, so a manually released lead is
+            // indistinguishable in shape from any other unplaced one and every screen, sweeper and
+            // SLA that already reads that table picks it up for free.
+            //
+            // ReturnToAutomatic is excluded: it re-routes immediately below, and RouteLeadAsync
+            // writes whatever queue row that decision calls for. Queuing here as well would create
+            // a row and cancel it microseconds later.
+            if (!returnsToAutomatic)
+            {
+                await SupersedeActiveQueueItemsAsync(businessUnitId, lead.Id, now, ct);
+                var workItem = DeterministicRoutingEngine.WorkItemFor(routingDecision, _policy);
+                workItem.Version = 1;
+                _db.Add(workItem);
+                await _db.SaveChangesAsync(ct);
+                return ToResponse(routingDecision, null, workItem.Id);
+            }
+
             await _db.SaveChangesAsync(ct);
             return ToResponse(routingDecision, null, null);
         }, ct);
@@ -263,6 +327,75 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
         var refreshed = await _db.Leads.AsNoTracking().SingleAsync(
             x => x.BusinessUnitId == businessUnitId && x.Id == command.LeadId, ct);
         return Ownership(refreshed, decision);
+    }
+
+    private async Task<Lead> LoadLeadAsync(long businessUnitId, long leadId, CancellationToken ct) =>
+        await _db.Leads.AsNoTracking().SingleOrDefaultAsync(
+            x => x.BusinessUnitId == businessUnitId && x.Id == leadId, ct)
+        ?? throw new RoutingNotFoundException($"Lead {leadId} was not found.");
+
+    /// <summary>
+    /// Who may change a lead's owner from the lead-detail screen.
+    ///
+    /// <para>THE RULE: a person can take work that is nobody's, and can put down work that is
+    /// theirs. Moving somebody else's work is a manager's decision.</para>
+    ///
+    /// <para>It lives in the application service, not on the endpoint, because the authority
+    /// depends on the LEAD — on who currently owns it — and an <c>[Authorize]</c> attribute cannot
+    /// see a database row. That is exactly how the hole opened: the four assignment endpoints that
+    /// could be expressed as "managers only" carried <c>[RequireManagerRole]</c>, while
+    /// <c>PUT leads/{id}/owner</c> — the one the lead detail screen actually calls — could not be,
+    /// so it carried nothing at all, and a rep who was refused at the manager-only routing queue
+    /// could reassign any lead in the tenant from the detail page instead.</para>
+    ///
+    /// <para>The queue endpoints are deliberately NOT relaxed to match. Claim and release already
+    /// give a rep the pull lane there, and a queue assignment is a manager confirming a routing
+    /// recommendation, which is a different act from a rep picking up an unowned inquiry.</para>
+    /// </summary>
+    private static void EnsureOwnershipChangeIsPermitted(Lead lead, ChangeLeadOwnershipCommand command)
+    {
+        if (command.ActorIsManager) return;
+
+        // Fail closed. Without a resolved caller there is no "own work" to compare against, so the
+        // rule cannot be evaluated and must not be assumed to pass.
+        if (command.AssignedByUserId is not long actorId)
+            throw new RoutingForbiddenException(
+                "Nexora could not tell who is making this change, so it cannot check whether you are "
+                + "allowed to make it. Sign in again and retry.");
+
+        if (lead.AssignTo.HasValue && lead.AssignTo.Value != actorId)
+            throw new RoutingForbiddenException(
+                "This lead belongs to someone else. Only a manager can move it. You can take a lead "
+                + "that has no owner, or hand back one of your own.");
+
+        if (command.Action == LeadOwnershipAction.Assign && command.AssignedToUserId != actorId)
+            throw new RoutingForbiddenException(
+                "Only a manager can hand a lead to someone else. You can take this lead yourself, or "
+                + "ask a manager to assign it.");
+    }
+
+    /// <summary>
+    /// Cancels any open or claimed queue row for a lead that is about to get a NEW one, so the
+    /// single-active-row-per-lead index can never be violated and no reader is left choosing
+    /// between two live rows. Same shape and same resolution code the routing path uses when a
+    /// re-evaluation replaces an earlier queue row.
+    /// </summary>
+    private async Task SupersedeActiveQueueItemsAsync(
+        long businessUnitId, long leadId, DateTime now, CancellationToken ct)
+    {
+        var active = await _db.Set<UnassignedWorkItem>().Where(w =>
+                w.BusinessUnitId == businessUnitId && w.LeadId == leadId &&
+                (w.Status == WorkItemStatus.Open || w.Status == WorkItemStatus.Claimed))
+            .ToListAsync(ct);
+        foreach (var item in active)
+        {
+            item.Status = WorkItemStatus.Cancelled;
+            item.ResolvedOn = now;
+            item.ResolutionCode = "SUPERSEDED_BY_REEVALUATION";
+            item.ClaimedByUserId = null;
+            item.ClaimedUntil = null;
+            item.Version++;
+        }
     }
 
     public async Task<QueuePageResponse> GetQueueAsync(
@@ -572,6 +705,91 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
         return new CustomerRoutingProfileResponse(customerId, identifiers, ownerships);
     }
 
+    /// <summary>
+    /// Reads the tenant's fallback lead owner, with the verdict on whether routing will actually
+    /// use them. The setting and its usefulness are two different facts and the setup screen needs
+    /// both: a name can be saved and still be inert, and the only honest way to say so is in the
+    /// routing engine's own words.
+    /// </summary>
+    public async Task<DefaultLeadOwnerResponse> GetDefaultOwnerAsync(
+        long businessUnitId, CancellationToken ct)
+    {
+        var unit = await _db.BusinessUnits.AsNoTracking()
+            .Where(x => x.Id == businessUnitId)
+            .Select(x => new
+            {
+                x.DefaultLeadOwnerUserId,
+                x.DefaultLeadOwnerSetByUserId,
+                x.DefaultLeadOwnerSetOn
+            })
+            .SingleOrDefaultAsync(ct)
+            ?? throw new RoutingNotFoundException($"Business unit {businessUnitId} was not found.");
+
+        if (unit.DefaultLeadOwnerUserId is not long ownerId)
+            return new DefaultLeadOwnerResponse(null, null, null, false, NoDefaultOwnerReason,
+                unit.DefaultLeadOwnerSetByUserId, unit.DefaultLeadOwnerSetOn);
+
+        var user = await _db.Users.AsNoTracking()
+            .Where(x => x.Id == ownerId && x.Buid == businessUnitId)
+            .Select(x => new { Name = (x.FirstName + " " + x.LastName).Trim(), x.Email })
+            .SingleOrDefaultAsync(ct);
+        // A saved id whose user has since left the tenant reads exactly as an ineligible one, in
+        // the same sentence the routing engine would use, because the routing outcome is the same:
+        // the inquiry goes to the queue.
+        if (user is null)
+            return new DefaultLeadOwnerResponse(ownerId, null, null, false,
+                RoutingEligibilityReasons.UserInactive,
+                unit.DefaultLeadOwnerSetByUserId, unit.DefaultLeadOwnerSetOn);
+
+        var availability = (await LoadUserAvailabilityAsync(
+            businessUnitId, [ownerId], DateTime.UtcNow, ct)).SingleOrDefault();
+        return new DefaultLeadOwnerResponse(
+            ownerId, user.Name, user.Email,
+            availability?.IsAvailable ?? false,
+            availability?.EligibilityReason ?? RoutingEligibilityReasons.UserInactive,
+            unit.DefaultLeadOwnerSetByUserId, unit.DefaultLeadOwnerSetOn);
+    }
+
+    /// <summary>
+    /// Sets or clears the tenant's fallback lead owner. Null clears it, which restores the
+    /// behaviour of parking every unplaceable inquiry on the routing queue.
+    ///
+    /// <para>Accepts any ACTIVE user in the tenant, including one who is not currently routing
+    /// eligible. Refusing an ineligible name would block a tenant from configuring routing in the
+    /// order it actually configures it — the fallback owner is usually chosen before anybody has
+    /// written a governed Sales Rep profile — and the setting is already fail-safe at routing time.
+    /// The verdict is returned instead, so the screen can say what will happen rather than
+    /// pretending the choice was impossible.</para>
+    /// </summary>
+    public async Task<DefaultLeadOwnerResponse> SetDefaultOwnerAsync(
+        long businessUnitId, SetDefaultLeadOwnerCommand command, CancellationToken ct)
+    {
+        var unit = await _db.BusinessUnits.SingleOrDefaultAsync(x => x.Id == businessUnitId, ct)
+            ?? throw new RoutingNotFoundException($"Business unit {businessUnitId} was not found.");
+
+        if (command.DefaultOwnerUserId is long ownerId)
+        {
+            if (ownerId <= 0) throw new ArgumentException("Choose a person to receive unmatched inquiries.");
+            var exists = await _db.Users.AnyAsync(
+                x => x.Id == ownerId && x.Buid == businessUnitId && x.IsActive == true, ct);
+            if (!exists)
+                throw new RoutingConflictException(
+                    "The person you chose is not an active user in this business unit.");
+        }
+
+        unit.DefaultLeadOwnerUserId = command.DefaultOwnerUserId;
+        unit.DefaultLeadOwnerSetByUserId = command.SetByUserId;
+        unit.DefaultLeadOwnerSetOn = DateTime.UtcNow;
+        await _db.SaveChangesAsync(ct);
+        return await GetDefaultOwnerAsync(businessUnitId, ct);
+    }
+
+    /// <summary>What the setup screen shows when no fallback owner has been chosen. Plain English,
+    /// because it is read by a person deciding whether to choose one.</summary>
+    private const string NoDefaultOwnerReason =
+        "No fallback owner is set. Inquiries Nexora cannot match are held on the routing queue "
+        + "until someone assigns them.";
+
     private async Task<RoutingDecisionResponse> AssignCoreAsync(
         long businessUnitId, Lead lead, ManualAssignLeadCommand command,
         UnassignedWorkItem? queueItem, string requestHash, CancellationToken ct)
@@ -581,6 +799,29 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
         if (command.ExpectedAssignmentVersion.HasValue
             && lead.AssignmentVersion != command.ExpectedAssignmentVersion.Value)
             throw new RoutingConflictException("Lead assignment changed since it was loaded. Refresh and retry.");
+
+        // TAKING A LEAD OFF ITS CURRENT OWNER NEEDS A REASON.
+        //
+        // Every assignment already appends a LeadAssignment row with a Comment column, and the
+        // routing queue already refuses a manager's override without one. The lead-detail screen
+        // sends no comment at all, so every reassignment made from the screen reps actually use
+        // stored Comment = null — the assignment history existed and was empty exactly where it
+        // mattered, on the moves that took work away from a named person.
+        //
+        // The rule is deliberately narrow: it fires only when a DIFFERENT person already holds the
+        // lead. Picking up an unowned inquiry, or re-confirming the owner it already has, demands
+        // nothing, because there is no conflict to explain and friction there would only teach
+        // people to type "x" five times.
+        //
+        // Guarded here rather than at the endpoints: this method is the single write path for
+        // every manual assignment — lead detail, the unassigned-lead dialog, the routing queue and
+        // bulk assign all funnel through it — so no caller can be added later that forgets.
+        if (lead.AssignTo.HasValue && lead.AssignTo.Value != command.AssignedToUserId
+            && (command.Comment?.Trim().Length ?? 0) < MinimumReassignmentReasonLength)
+            throw new ArgumentException(
+                "Moving this lead away from its current owner needs a reason of at least "
+                + $"{MinimumReassignmentReasonLength} characters. Say why it is changing hands.");
+
         var assigneeExists = await _db.Users.AnyAsync(u =>
             u.Id == command.AssignedToUserId && u.Buid == businessUnitId && u.IsActive == true, ct);
         if (!assigneeExists) throw new RoutingConflictException("Assignee must be an active user in the same tenant.");
@@ -1165,6 +1406,12 @@ public sealed class CommercialRoutingApplicationService : ICommercialRoutingAppl
 
         return exception.InnerException != null && IsQueueAssignmentConflict(exception.InnerException);
     }
+
+    /// <summary>
+    /// The shortest reassignment reason that is worth storing. Matches the routing queue's existing
+    /// override rule so the two surfaces cannot disagree about what counts as an explanation.
+    /// </summary>
+    public const int MinimumReassignmentReasonLength = 5;
 
     private static void ValidateKey(string value, string name)
     {
