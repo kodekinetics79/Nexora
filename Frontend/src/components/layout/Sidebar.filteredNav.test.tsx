@@ -115,6 +115,14 @@ describe('where the rail says you are', () => {
     expect(row('RFQs')).toHaveAttribute('aria-current', 'page');
   });
 
+  it('marks the All screens door current on a screen that moved behind it', () => {
+    // Collapsing 17 rows to 5 relocated 64 destinations. If only /advanced itself matched, every
+    // one of those screens rendered a rail with NO current row — nothing for a screen reader to
+    // announce, and nothing visual either. Regression caught by the a11y e2e on /dashboard.
+    renderRail('/dashboard');
+    expect(row('All screens')).toHaveAttribute('aria-current', 'page');
+  });
+
   it('lights Setup on the addresses Setup governs outside its own URL space', () => {
     // `/security/users` and `/admin/platform/*` are Setup screens that kept their old addresses.
     renderRail('/security/users');

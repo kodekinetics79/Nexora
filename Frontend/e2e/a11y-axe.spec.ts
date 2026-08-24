@@ -166,6 +166,8 @@ test.describe('login form error handling', () => {
     const credentials = credentialsFor('manager');
     expect(credentials, 'fixture credentials are required for this spec').not.toBeNull();
     await loginThroughUi(page, credentials!);
-    await expect(page).toHaveTitle('Dashboard | NEXORA');
+    // Landing is the work queue, not a dashboard — see landingRoute.test.ts, which pins /inbox
+    // for every role including one with no modules at all.
+    await expect(page).toHaveTitle('Inbox | NEXORA');
   });
 });

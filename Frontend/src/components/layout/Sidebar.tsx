@@ -22,6 +22,7 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import { SETUP_ENTRIES } from '../../pages/Setup/setupCatalog';
 import {
+  ADVANCED_ENTRIES,
   ADVANCED_GROUPS,
   ALL_SCREENS_ENTRY,
   PRIMARY_NAV,
@@ -348,7 +349,12 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
     );
   };
 
-  const allScreensSelected = location.pathname.startsWith(ALL_SCREENS_ENTRY.path);
+  // Selected on /advanced itself AND on every screen that moved behind it. Collapsing the rail to
+  // five rows relocated 64 destinations; matching only the door's own path left every one of them
+  // with NO row marked current, so a screen-reader user on any relocated screen was told nothing
+  // about where they were (SC 4.1.2). Caught by the a11y e2e, not by unit tests.
+  const allScreensSelected = location.pathname.startsWith(ALL_SCREENS_ENTRY.path)
+    || ADVANCED_ENTRIES.some((entry) => isPathMatched(entry.path, location));
 
   return (
     <Box sx={{ overflowY: 'auto', overflowX: 'hidden', height: '100%', pt: 2, pb: 4, px: 1.5 }}>
