@@ -49,6 +49,20 @@ public sealed record TenantPurgeOutcome(
     /// than returning.
     /// </summary>
     public int TablesVerifiedEmpty { get; init; }
+
+    /// <summary>
+    /// How many tenant-scoped tables an INDEPENDENT check — derived from the catalogue and from
+    /// the schema's own <c>nexora_tenant_isolation</c> declarations, never from the sweep's target
+    /// list — confirmed were both visited and empty.
+    ///
+    /// <para>Reported separately from <see cref="TablesSwept"/> because the two numbers answering
+    /// differently is the whole point. The old post-condition re-counted the tables the sweep had
+    /// chosen, so it could only confirm that the sweep did what the sweep did: eleven snake_case
+    /// tables were missing from the sweep, therefore missing from the check, therefore never
+    /// reported. A reader can now tell "swept 220 and independently accounted for 229" from
+    /// "swept 220 and checked the same 220".</para>
+    /// </summary>
+    public int TablesIndependentlyVerified { get; init; }
 }
 
 /// <summary>
@@ -238,8 +252,9 @@ public sealed class TenantPurgeExecutor(IConfiguration configuration, ILogger<Te
         // role can already reach — the tables it CANNOT reach, which is the entire point of the
         // assertion below, would silently not be targets at all.
         var targets = await TargetsAsync(connection, transaction, cancellationToken);
+        var mustBeEmpty = await TenantScopedTablesAsync(connection, transaction, cancellationToken);
         var keyColumn = await BusinessUnitKeyColumnAsync(connection, transaction, cancellationToken);
-        await AssertPurgeReachAsync(connection, transaction, targets, cancellationToken);
+        await AssertPurgeReachAsync(connection, transaction, targets, mustBeEmpty, cancellationToken);
         await EnterPurgeScopeAsync(connection, transaction, businessUnitId, cancellationToken);
 
         var counts = new List<TenantPurgeTableCount>();
@@ -265,6 +280,75 @@ public sealed class TenantPurgeExecutor(IConfiguration configuration, ILogger<Te
             PreservedTables.OrderBy(x => x, StringComparer.Ordinal).ToList(),
             PreservedWithReasons);
     }
+
+    /// <summary>
+    /// Every storage path this tenant's rows still point at, read BEFORE anything is destroyed.
+    ///
+    /// <para><b>The ordering is the point.</b> Deleting a tenant's rows destroys the only index
+    /// back to their bytes. Ask afterwards and the answer is nothing — which is precisely how 273
+    /// objects and the raw <c>.eml</c> of every message survived a purge that reported success:
+    /// not because anybody decided to keep them, but because after the transaction nothing could
+    /// name them any more.</para>
+    ///
+    /// <para>Three columns hold paths, and they are read from three different shapes.
+    /// <c>source_documents</c> carries a proper (bucket, key, version) triple and is scoped
+    /// directly. <c>public."EmailIngests"</c> and <c>public."Attachments"</c> carry a bare path and
+    /// are scoped only through a parent — the same tables defect P0-2 is about, which is not a
+    /// coincidence: a table the sweep could not see is a table whose bytes nothing was tracking
+    /// either.</para>
+    ///
+    /// <para>Read through the purge role and the purge scope, like everything else, so this cannot
+    /// return another tenant's paths even if a predicate here were wrong. Writes nothing and always
+    /// rolls back.</para>
+    /// </summary>
+    public async Task<IReadOnlyList<string>> CaptureStoragePathsAsync(
+        long businessUnitId, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenOwnerConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        var targets = await TargetsAsync(connection, transaction, cancellationToken);
+        var mustBeEmpty = await TenantScopedTablesAsync(connection, transaction, cancellationToken);
+        await AssertPurgeReachAsync(connection, transaction, targets, mustBeEmpty, cancellationToken);
+        await EnterPurgeScopeAsync(connection, transaction, businessUnitId, cancellationToken);
+
+        var paths = new List<string>();
+        foreach (var target in targets)
+        {
+            if (!StoragePathColumns.TryGetValue(target.Qualified, out var column)) continue;
+
+            await using var command = new NpgsqlCommand(
+                $"""
+                 SELECT DISTINCT t."{column}"
+                 FROM {target.Qualified} t
+                 WHERE ({target.Predicate}) AND t."{column}" IS NOT NULL AND t."{column}" <> '';
+                 """, connection, transaction);
+            command.Parameters.AddWithValue("scope", businessUnitId);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+                paths.Add(reader.GetString(0));
+        }
+
+        await transaction.RollbackAsync(cancellationToken);
+        return paths;
+    }
+
+    /// <summary>
+    /// The columns that hold a path into byte storage, as <c>qualified table -&gt; column</c>.
+    ///
+    /// <para>Deliberately a short, named list rather than a catalogue sweep for "columns that look
+    /// like a path". A wrong entry here means deleting a file the tenant does not own, and
+    /// <c>public."Images".FilePath</c> — which matches any such heuristic — has no writer anywhere
+    /// in the application and no tenant linkage at all. <c>TenantStoragePathCoverageTests</c> is
+    /// what keeps this list honest against the schema.</para>
+    /// </summary>
+    private static readonly IReadOnlyDictionary<string, string> StoragePathColumns =
+        new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["\"public\".\"source_documents\""] = "object_key",
+            ["\"public\".\"EmailIngests\""] = "RawEmailPath",
+            ["\"public\".\"Attachments\""] = "FilePath"
+        };
 
     /// <summary>
     /// Destroys the tenant. One transaction: either every row of theirs is gone, or none is.
@@ -320,13 +404,19 @@ public sealed class TenantPurgeExecutor(IConfiguration configuration, ILogger<Te
         // switch: information_schema hides tables the caller holds no privilege on, so the
         // catalogue sweep would quietly shrink to whatever the purge role could already reach.
         var targets = await TargetsAsync(connection, transaction, cancellationToken);
+        var mustBeEmpty = await TenantScopedTablesAsync(connection, transaction, cancellationToken);
         var keyColumn = await BusinessUnitKeyColumnAsync(connection, transaction, cancellationToken);
 
-        await AssertPurgeReachAsync(connection, transaction, targets, cancellationToken);
+        await AssertPurgeReachAsync(connection, transaction, targets, mustBeEmpty, cancellationToken);
         await EnterPurgeScopeAsync(connection, transaction, businessUnitId, cancellationToken);
+
+        // Taken before a single DELETE, so "orphans this purge created" is answerable afterwards.
+        var orphanBaseline = await OrphanBaselineAsync(
+            connection, transaction, mustBeEmpty, cancellationToken);
 
         var deleted = new List<TenantPurgeTableCount>();
         var survivors = new List<string>();
+        var swept = new HashSet<string>(StringComparer.Ordinal);
         var verified = 0;
         foreach (var target in targets)
         {
@@ -350,6 +440,7 @@ public sealed class TenantPurgeExecutor(IConfiguration configuration, ILogger<Te
             }
 
             if (rows > 0) deleted.Add(new TenantPurgeTableCount(target.Qualified, target.Column, rows));
+            swept.Add(target.Qualified);
 
             // THE POST-CONDITION, and it is taken HERE rather than after the sweep. A table
             // reached through a parent is selected by a subquery on that parent, and the parent is
@@ -391,6 +482,16 @@ public sealed class TenantPurgeExecutor(IConfiguration configuration, ILogger<Te
                 + $"nothing has been committed. {string.Join("; ", survivors)}. A purge that cannot "
                 + "prove the rows are gone must not report that they are.");
 
+        // AND THEN THE INDEPENDENT ONE. Everything above re-counts the tables the sweep chose,
+        // which can only ever confirm that the sweep did what the sweep did — the check that let
+        // eleven snake_case tables and fourteen indirect ones pass unnoticed. This asks a set of
+        // tables derived from the schema, and its first question is not "how many rows are left"
+        // but "was this table visited at all".
+        swept.Add(BusinessUnitTable);
+        await AssertNoTenantRowsRemainAsync(
+            connection, transaction, mustBeEmpty, swept, orphanBaseline,
+            businessUnitId, tenantId, cancellationToken);
+
         // Back to the owner for the bookkeeping below: platform."TenantOffboardings" carries no
         // row-level security and no grant to the purge role, deliberately. The record that a
         // purge happened is the operator's, and the identity that performs destruction should not
@@ -428,15 +529,17 @@ public sealed class TenantPurgeExecutor(IConfiguration configuration, ILogger<Te
 
         logger.LogWarning(
             "TENANT PURGE complete for tenant {TenantId} (business unit {BusinessUnitId}): "
-            + "{Rows} row(s) destroyed across {Tables} table(s); {Swept} table(s) swept and "
-            + "verified to hold none of this tenant's rows before commit.",
-            tenantId, businessUnitId, total, deleted.Count, verified);
+            + "{Rows} row(s) destroyed across {Tables} table(s); {Swept} table(s) swept, and "
+            + "{Independent} tenant-scoped table(s) derived from the schema independently of that "
+            + "sweep proved to hold none of this tenant's rows before commit.",
+            tenantId, businessUnitId, total, deleted.Count, verified, mustBeEmpty.Count);
 
         return new TenantPurgeOutcome(
             tenantId, businessUnitId, total, deleted.OrderByDescending(d => d.Rows).ToList())
         {
             TablesSwept = verified,
-            TablesVerifiedEmpty = verified
+            TablesVerifiedEmpty = verified,
+            TablesIndependentlyVerified = mustBeEmpty.Count
         };
     }
 
@@ -506,7 +609,8 @@ public sealed class TenantPurgeExecutor(IConfiguration configuration, ILogger<Te
     /// </summary>
     private static async Task AssertPurgeReachAsync(
         NpgsqlConnection connection, NpgsqlTransaction transaction,
-        IReadOnlyList<PurgeTarget> targets, CancellationToken cancellationToken)
+        IReadOnlyList<PurgeTarget> targets, IReadOnlyList<PurgeTarget> mustBeEmpty,
+        CancellationToken cancellationToken)
     {
         await using (var roleExists = new NpgsqlCommand(
             "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = @role);", connection, transaction))
@@ -522,7 +626,15 @@ public sealed class TenantPurgeExecutor(IConfiguration configuration, ILogger<Te
                     + "data still present.");
         }
 
-        var qualified = targets.Select(t => t.Qualified).Append(BusinessUnitTable).ToArray();
+        // Both lists, because the post-condition looks at tables the sweep does not. A count taken
+        // through an identity that row-level security is filtering returns zero for the same
+        // reason a DELETE would have affected zero rows, so a verification target the purge role
+        // cannot reach is a verification that CANNOT FAIL — the original defect one level up.
+        var qualified = targets.Select(t => t.Qualified)
+            .Concat(mustBeEmpty.Select(t => t.Qualified))
+            .Append(BusinessUnitTable)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
         var unreachable = new List<string>();
 
         await using var command = new NpgsqlCommand(
@@ -548,7 +660,7 @@ public sealed class TenantPurgeExecutor(IConfiguration configuration, ILogger<Te
                    || CASE WHEN (SELECT count(*) FROM pg_attribute a
                                  WHERE a.attrelid = resolved.oid AND a.attnum > 0
                                    AND NOT a.attisdropped
-                                   AND lower(a.attname) IN ('businessunitid', 'buid')) > 1
+                                   AND lower(replace(a.attname, '_', '')) IN ('businessunitid', 'buid')) > 1
                            THEN ' (carries both BusinessUnitId and BUID; the sweep and the policy '
                                 || 'would disagree about which one scopes it)'
                            ELSE '' END AS problem
@@ -563,7 +675,7 @@ public sealed class TenantPurgeExecutor(IConfiguration configuration, ILogger<Te
                          AND @role::regrole = ANY (p.polroles)))
                OR (SELECT count(*) FROM pg_attribute a
                    WHERE a.attrelid = resolved.oid AND a.attnum > 0 AND NOT a.attisdropped
-                     AND lower(a.attname) IN ('businessunitid', 'buid')) > 1
+                     AND lower(replace(a.attname, '_', '')) IN ('businessunitid', 'buid')) > 1
             ORDER BY qualified;
             """, connection, transaction);
         command.Parameters.AddWithValue("targets", qualified);
@@ -598,8 +710,21 @@ public sealed class TenantPurgeExecutor(IConfiguration configuration, ILogger<Te
     /// <param name="Predicate">A WHERE clause over alias <c>t</c>, parameterised on <c>@scope</c>.
     /// For a table with its own tenant column this is a comparison; for one reached through a
     /// parent it is a subquery chain.</param>
+    /// <param name="OrphanProbe">
+    /// For a table reached through a parent, a <c>count(*)</c> over rows whose parent no longer
+    /// exists — null for a table with a tenant column of its own.
+    ///
+    /// <para>This exists because the obvious post-condition for such a table CANNOT FAIL. Asking
+    /// "how many rows still hang off a parent belonging to this tenant" once that parent has been
+    /// deleted answers zero whatever happened to the child, which is the original defect rebuilt
+    /// inside its own verification. An orphan count is the same question asked in a way the
+    /// destruction cannot make vacuous — and it is the exact signature the production defect left
+    /// behind: 103 <c>EmailIngests</c> rows pointing at an <c>Email_Configurations</c> row that no
+    /// longer existed, with replica mode suspending the foreign key that would have objected.</para>
+    /// </param>
     private readonly record struct PurgeTarget(
-        string Qualified, string Column, string Predicate, TenantScope Scope);
+        string Qualified, string Column, string Predicate, TenantScope Scope,
+        string? OrphanProbe = null);
 
     /// <summary>
     /// Every table a purge must clear, from TWO authorities, because the two planes are different
@@ -619,18 +744,40 @@ public sealed class TenantPurgeExecutor(IConfiguration configuration, ILogger<Te
         NpgsqlConnection connection, NpgsqlTransaction? transaction, CancellationToken cancellationToken)
     {
         await EnsureEveryTenantLinkedPlatformTableIsClassifiedAsync(connection, transaction, cancellationToken);
+        await EnsureEveryTenantPlaneTableIsClassifiedAsync(connection, transaction, cancellationToken);
 
         var found = new List<PurgeTarget>();
 
+        // Reached through a parent, and FIRST — see TenantPlaneDataMap for why this ordering is
+        // load-bearing rather than tidy. Replica mode suspends ON DELETE CASCADE along with the
+        // append-only guards, so a child selected by a subquery on its parent has to be deleted
+        // while that parent still exists. Every one of these is deleted before the sweep below
+        // reaches the tables they hang off.
+        var parentColumns = await TenantPlaneParentColumnsAsync(connection, transaction, cancellationToken);
+        foreach (var declared in TenantPlaneDataMap.Destroyed)
+        {
+            if (!await TableExistsAsync(
+                    connection, transaction, TenantPlaneDataMap.Schema, declared.Table, cancellationToken))
+                continue;
+
+            var qualified = $"\"{TenantPlaneDataMap.Schema}\".\"{declared.Table}\"";
+            found.Add(new PurgeTarget(
+                qualified,
+                string.Join(" + ", declared.ReachedThrough!.Select(p => p.ForeignKeyColumn).Distinct()),
+                TenantPlanePredicate(declared, "t", parentColumns),
+                TenantScope.BusinessUnit,
+                OrphanProbe: TenantPlaneOrphanProbe(declared, "t")));
+        }
+
         await using (var command = new NpgsqlCommand(
-            """
+            $"""
             SELECT c.table_schema, c.table_name, c.column_name
             FROM information_schema.columns c
             JOIN information_schema.tables t
               ON t.table_schema = c.table_schema AND t.table_name = c.table_name
              AND t.table_type = 'BASE TABLE'
             WHERE c.table_schema NOT IN ('pg_catalog', 'information_schema')
-              AND lower(c.column_name) IN ('businessunitid', 'buid')
+              AND {TenantColumnMatch("c.column_name")}
             ORDER BY c.table_schema, c.table_name, c.column_name;
             """, connection, transaction))
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
@@ -660,7 +807,8 @@ public sealed class TenantPurgeExecutor(IConfiguration configuration, ILogger<Te
             // A module whose migration has not landed yet is absent rather than fatal: the purge
             // must not refuse to destroy a customer's data because an unrelated feature is
             // half-deployed.
-            if (!await TableExistsAsync(connection, transaction, declared.Table, cancellationToken))
+            if (!await TableExistsAsync(
+                    connection, transaction, PlatformTenantDataMap.Schema, declared.Table, cancellationToken))
                 continue;
 
             found.Add(new PurgeTarget(
@@ -749,15 +897,454 @@ public sealed class TenantPurgeExecutor(IConfiguration configuration, ILogger<Te
             + "leaves their data behind after they were told it was gone.");
     }
 
+    /// <summary>
+    /// Refuses to run if the tenant plane holds a table that carries no business unit column and
+    /// that nobody has classified.
+    ///
+    /// <para>The catalogue answers "does this table carry a business unit" and that is enough for
+    /// the 205 tables that do. It is silent about the fifteen that do not, and fourteen of those
+    /// turned out to be the customer's data reached through a parent — every RFQ line, every
+    /// quote line, every lead line, every inbound message. They were not skipped by a decision;
+    /// they were skipped because nothing ever asked. This is the question.</para>
+    ///
+    /// <para>Fail closed, for the same reason the platform plane fails closed: a table with no
+    /// tenant column offers nothing to infer from, and both wrong answers are damaging. Deleting
+    /// shared reference data breaks every other tenant; skipping the customer's rows is the defect
+    /// this class exists to end.</para>
+    /// </summary>
+    private static async Task EnsureEveryTenantPlaneTableIsClassifiedAsync(
+        NpgsqlConnection connection, NpgsqlTransaction? transaction, CancellationToken cancellationToken)
+    {
+        var unclassified = new List<string>();
+
+        await using var command = new NpgsqlCommand(
+            $"""
+            SELECT t.table_name
+            FROM information_schema.tables t
+            WHERE t.table_schema = @schema
+              AND t.table_type = 'BASE TABLE'
+              AND NOT EXISTS (
+                  SELECT 1 FROM information_schema.columns c
+                  WHERE c.table_schema = t.table_schema
+                    AND c.table_name = t.table_name
+                    AND {TenantColumnMatch("c.column_name")})
+            ORDER BY t.table_name;
+            """, connection, transaction);
+        command.Parameters.AddWithValue("schema", TenantPlaneDataMap.Schema);
+
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var table = reader.GetString(0);
+                if (TenantPlaneDataMap.Find(table) is null) unclassified.Add(table);
+            }
+
+        if (unclassified.Count == 0) return;
+
+        throw new InvalidOperationException(
+            $"Purge refused: {string.Join(", ", unclassified.Select(t => $"public.\"{t}\""))} "
+            + "carr" + (unclassified.Count == 1 ? "ies" : "y") + " no business unit column and "
+            + (unclassified.Count == 1 ? "is" : "are") + " not classified in TenantPlaneDataMap, "
+            + "so the sweep cannot see " + (unclassified.Count == 1 ? "it" : "them") + " and has no "
+            + "way to tell whether " + (unclassified.Count == 1 ? "it holds" : "they hold") + " the "
+            + "customer's rows. Declare the parent that scopes it, or declare why it is not tenant "
+            + "data. A purge must not report success over a table nobody has looked at.");
+    }
+
+    /// <summary>
+    /// Every table that MUST be empty of this tenant when the purge commits, derived from the
+    /// schema and NOT from the list the sweep happened to build.
+    ///
+    /// <para><b>This is the answer to defect P0-1's second half, and it matters more than the
+    /// first.</b> The post-condition used to re-count the tables the sweep had just visited, which
+    /// means it could only ever confirm that the sweep did what the sweep did. Eleven snake_case
+    /// tables were absent from the sweep list, so they were absent from the check, so the check
+    /// passed — the verification was structurally incapable of catching the omission it existed to
+    /// catch. A verification that can only see what the actor already touched is not a
+    /// verification.</para>
+    ///
+    /// <para>So this reads THREE independent authorities and unions them:</para>
+    /// <list type="number">
+    /// <item>the catalogue, for any column that names a business unit under any spelling;</item>
+    /// <item><c>pg_policy</c>, for every table the schema itself declares tenant-scoped by giving
+    /// it a <c>nexora_tenant_isolation</c> policy — the same declaration the request path has
+    /// always honoured, and the one that already knew <c>EmailIngests</c> belonged to a
+    /// tenant;</item>
+    /// <item><see cref="TenantPlaneDataMap"/>, for the polymorphic links no catalogue can
+    /// derive.</item>
+    /// </list>
+    ///
+    /// <para>A table that any of the three calls tenant-scoped must be swept and must be empty.
+    /// Adding a tenant table and forgetting the sweep now stops the purge by name instead of
+    /// producing a success report with the customer's rows still in place.</para>
+    /// </summary>
+    private static async Task<IReadOnlyList<PurgeTarget>> TenantScopedTablesAsync(
+        NpgsqlConnection connection, NpgsqlTransaction? transaction, CancellationToken cancellationToken)
+    {
+        var found = new List<PurgeTarget>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        await using (var command = new NpgsqlCommand(
+            $"""
+            SELECT n.nspname, c.relname, a.attname
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+            WHERE c.relkind = 'r'
+              AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+              AND {TenantColumnMatch("a.attname")}
+            ORDER BY n.nspname, c.relname, a.attname;
+            """, connection, transaction))
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var schema = reader.GetString(0);
+                var table = reader.GetString(1);
+                var column = reader.GetString(2);
+                if (PreservedTables.Contains($"{schema}.{table}")) continue;
+                if (schema.Contains('"') || table.Contains('"') || column.Contains('"')) continue;
+                var qualified = $"\"{schema}\".\"{table}\"";
+                if (!seen.Add(qualified)) continue;
+                found.Add(new PurgeTarget(
+                    qualified, column, $"t.\"{column}\" = @scope", TenantScope.BusinessUnit));
+            }
+        }
+
+        var parentColumns = await TenantPlaneParentColumnsAsync(connection, transaction, cancellationToken);
+        foreach (var declared in TenantPlaneDataMap.Destroyed)
+        {
+            var qualified = $"\"{TenantPlaneDataMap.Schema}\".\"{declared.Table}\"";
+            if (PreservedTables.Contains($"{TenantPlaneDataMap.Schema}.{declared.Table}")) continue;
+            if (!seen.Add(qualified)) continue;
+            if (!await TableExistsAsync(
+                    connection, transaction, TenantPlaneDataMap.Schema, declared.Table, cancellationToken))
+                continue;
+
+            found.Add(new PurgeTarget(
+                qualified,
+                string.Join(" + ", declared.ReachedThrough!.Select(p => p.ForeignKeyColumn).Distinct()),
+                TenantPlanePredicate(declared, "t", parentColumns),
+                TenantScope.BusinessUnit,
+                OrphanProbe: TenantPlaneOrphanProbe(declared, "t")));
+        }
+
+        // The schema's own declaration, read last so it can only ADD. Anything it names that the
+        // two authorities above did not produce is a tenant table nobody has taught the purge
+        // about, and there is no predicate to count it with — so it is reported as unclassified
+        // rather than silently dropped, which is precisely how the eleven snake_case tables and
+        // the fourteen indirect ones went missing in the first place.
+        var undeclared = new List<string>();
+        await using (var command = new NpgsqlCommand(
+            """
+            SELECT n.nspname, c.relname
+            FROM pg_policy p
+            JOIN pg_class c ON c.oid = p.polrelid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE p.polname = @policy
+            ORDER BY n.nspname, c.relname;
+            """, connection, transaction))
+        {
+            command.Parameters.AddWithValue("policy", TenantIsolationPolicyName);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var schema = reader.GetString(0);
+                var table = reader.GetString(1);
+                if (PreservedTables.Contains($"{schema}.{table}")) continue;
+                if (seen.Contains($"\"{schema}\".\"{table}\"")) continue;
+
+                // Already classified, just not by a rule that produces a sweep predicate.
+                // public."BusinessUnits" is the whole of this case: its tenant column IS its
+                // primary key, so it is destroyed last and by key rather than through a target.
+                if (schema == TenantPlaneDataMap.Schema && TenantPlaneDataMap.Find(table) is not null) continue;
+                if (schema == PlatformTenantDataMap.Schema && PlatformTenantDataMap.Find(table) is not null) continue;
+
+                undeclared.Add($"{schema}.{table}");
+            }
+        }
+
+        if (undeclared.Count > 0)
+            throw new InvalidOperationException(
+                $"Purge refused: {string.Join(", ", undeclared)} carr"
+                + (undeclared.Count == 1 ? "ies" : "y") + $" a {TenantIsolationPolicyName} policy, so "
+                + "the database itself says " + (undeclared.Count == 1 ? "it holds" : "they hold")
+                + " one tenant's rows — but the purge has no way to select them. Declare the parent "
+                + "that scopes " + (undeclared.Count == 1 ? "it" : "them")
+                + " in TenantPlaneDataMap. Until then a purge would report success with the "
+                + "customer's rows still in place, which is the one outcome this path must never "
+                + "produce.");
+
+        foreach (var declared in PlatformTenantDataMap.Destroyed
+                     .OrderByDescending(PlatformTenantDataMap.Depth)
+                     .ThenBy(t => t.Table, StringComparer.Ordinal))
+        {
+            if (!await TableExistsAsync(
+                    connection, transaction, PlatformTenantDataMap.Schema, declared.Table, cancellationToken))
+                continue;
+
+            var qualified = $"\"{PlatformTenantDataMap.Schema}\".\"{declared.Table}\"";
+            if (!seen.Add(qualified)) continue;
+
+            found.Add(new PurgeTarget(
+                qualified,
+                declared.TenantColumn ?? declared.ReachedThrough!.ForeignKeyColumn,
+                TenantPredicate(declared, "t", 0),
+                TenantScope.Tenant,
+                OrphanProbe: declared.IsIndirect ? PlatformOrphanProbe(declared, "t") : null));
+        }
+
+        return found;
+    }
+
+    /// <summary>A <c>count(*)</c> of platform rows whose parent no longer exists. Same reasoning as
+    /// <see cref="TenantPlaneOrphanProbe"/>: after the parent is gone the subquery predicate is
+    /// vacuous and only an orphan count still means anything.</summary>
+    private static string PlatformOrphanProbe(PlatformTenantTable table, string alias)
+    {
+        var parent = table.ReachedThrough!;
+        return $"NOT EXISTS (SELECT 1 FROM \"{PlatformTenantDataMap.Schema}\".\"{parent.ParentTable}\" o "
+               + $"WHERE o.\"{parent.ParentKeyColumn}\" = {alias}.\"{parent.ForeignKeyColumn}\")";
+    }
+
+    /// <summary>
+    /// The post-condition, taken against a set of tables the sweep did not choose.
+    ///
+    /// <para>Two failures are reported and they are different failures. A table the schema calls
+    /// tenant-scoped that the sweep never visited is a COVERAGE gap — the purge did not even try,
+    /// and no count would have revealed it. A table that was visited and still holds rows is a
+    /// RESIDUE failure. Both abort the transaction, because a purge that cannot prove the rows are
+    /// gone must not report that they are.</para>
+    /// </summary>
+    private static async Task AssertNoTenantRowsRemainAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction,
+        IReadOnlyList<PurgeTarget> mustBeEmpty, IReadOnlySet<string> swept,
+        IReadOnlyDictionary<string, long> orphanBaseline,
+        long businessUnitId, long tenantId, CancellationToken cancellationToken)
+    {
+        var failures = new List<string>();
+
+        foreach (var target in mustBeEmpty)
+        {
+            if (!swept.Contains(target.Qualified))
+            {
+                failures.Add(
+                    $"{target.Qualified} is tenant-scoped by \"{target.Column}\" and the sweep "
+                    + "never visited it, so whether it still holds this tenant's rows was never "
+                    + "established");
+                continue;
+            }
+
+            if (target.OrphanProbe is string probe)
+            {
+                // An indirect table is checked for ORPHANS APPEARING, not for tenant rows. Two
+                // reasons, and both are the same trap seen from different sides. Its parent has
+                // just been deleted, so the tenant predicate would answer zero however many of the
+                // child's rows survived. And a bare orphan count would fire on an orphan that was
+                // already there — public."Attachments" carries no foreign key at all, so one is
+                // possible — refusing a purge for somebody else's inconsistency. Comparing against
+                // a baseline taken before the sweep asks only "did THIS purge strand rows", which
+                // is the question, and it is the exact signature the production defect left: 103
+                // EmailIngests rows pointing at an Email_Configurations row that no longer existed.
+                //
+                // Under row-level security this count can still be filtered to nothing, because the
+                // purge policy on such a table is itself parent-derived. That is why the sweep's
+                // in-loop check — taken while the parent is still alive, and therefore not vacuous
+                // — is the load-bearing residue proof for these tables, and this is corroboration.
+                var stranded = await ScalarNoScopeAsync(
+                    connection, transaction,
+                    $"""SELECT count(*)::bigint FROM {target.Qualified} t WHERE {probe};""",
+                    cancellationToken);
+                var before = orphanBaseline.TryGetValue(target.Qualified, out var baseline) ? baseline : 0;
+                if (stranded > before)
+                    failures.Add(
+                        $"{target.Qualified} gained {stranded - before} row(s) orphaned against a "
+                        + $"parent this purge deleted (reached by \"{target.Column}\")");
+                continue;
+            }
+
+            var remaining = await ScalarAsync(
+                connection, transaction,
+                $"""SELECT count(*)::bigint FROM {target.Qualified} t WHERE {target.Predicate};""",
+                target.Scope == TenantScope.Tenant ? tenantId : businessUnitId,
+                cancellationToken);
+
+            if (remaining > 0)
+                failures.Add($"{target.Qualified} still holds {remaining} row(s) matching \"{target.Column}\"");
+        }
+
+        if (failures.Count == 0) return;
+
+        throw new InvalidOperationException(
+            $"Purge ABORTED for business unit {businessUnitId}: the destructive transaction ran to "
+            + $"completion but an independent check of {mustBeEmpty.Count} tenant-scoped table(s) — "
+            + "derived from the schema rather than from the sweep's own list — found "
+            + $"{failures.Count} still accounted for. Nothing has been committed. "
+            + $"{string.Join("; ", failures)}. A purge that cannot prove the rows are gone must not "
+            + "report that they are.");
+    }
+
+    /// <summary>
+    /// Orphan counts taken BEFORE anything is deleted, so the post-condition can tell rows this
+    /// purge stranded from rows that were already stranded when it started.
+    /// </summary>
+    private static async Task<IReadOnlyDictionary<string, long>> OrphanBaselineAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction,
+        IReadOnlyList<PurgeTarget> targets, CancellationToken cancellationToken)
+    {
+        var baseline = new Dictionary<string, long>(StringComparer.Ordinal);
+        foreach (var target in targets)
+        {
+            if (target.OrphanProbe is not string probe) continue;
+            baseline[target.Qualified] = await ScalarNoScopeAsync(
+                connection, transaction,
+                $"""SELECT count(*)::bigint FROM {target.Qualified} t WHERE {probe};""",
+                cancellationToken);
+        }
+
+        return baseline;
+    }
+
+    /// <summary>The row-level-security policy the request path is scoped by. Read here as an
+    /// INDEPENDENT declaration of which tables hold one tenant's rows.</summary>
+    private const string TenantIsolationPolicyName = "nexora_tenant_isolation";
+
     private static async Task<bool> TableExistsAsync(
-        NpgsqlConnection connection, NpgsqlTransaction? transaction, string table,
+        NpgsqlConnection connection, NpgsqlTransaction? transaction, string schema, string table,
         CancellationToken cancellationToken)
     {
         await using var command = new NpgsqlCommand(
             "SELECT to_regclass(@qualified) IS NOT NULL;", connection, transaction);
-        command.Parameters.AddWithValue("qualified", $"{PlatformTenantDataMap.Schema}.\"{table}\"");
+        command.Parameters.AddWithValue("qualified", $"{schema}.\"{table}\"");
         return await command.ExecuteScalarAsync(cancellationToken) is true;
     }
+
+    /// <summary>
+    /// The SQL fragment that recognises a business unit column, whatever the naming convention of
+    /// the migration that created it.
+    ///
+    /// <para><b>This is the whole of defect P0-1.</b> The predicate used to be
+    /// <c>lower(name) IN ('businessunitid', 'buid')</c>, and this schema contains both
+    /// <c>"BusinessUnitId"</c> and <c>business_unit_id</c> because the evidence and extraction
+    /// tables were written snake_case. Eleven tables — <c>source_documents</c>,
+    /// <c>canonical_inquiries</c>, <c>field_evidence</c> and eight more — matched neither spelling
+    /// and were never targets of the sweep, never counted in the preview, and never named in the
+    /// report. Stripping underscores before comparing makes the rule about the IDENTIFIER rather
+    /// than about one team's casing habit.</para>
+    /// </summary>
+    private static string TenantColumnMatch(string columnExpression) =>
+        $"lower(replace({columnExpression}, '_', '')) IN ('businessunitid', 'buid')";
+
+    /// <summary>
+    /// The WHERE clause selecting one tenant's rows in a table that has no business unit column,
+    /// as the OR of one subquery per declared parent kind.
+    /// </summary>
+    private static string TenantPlanePredicate(
+        TenantPlaneTable table, string alias, IReadOnlyDictionary<string, string> parentColumns)
+        => string.Join(" OR ", table.ReachedThrough!.Select((parent, index) =>
+            $"({ParentMatch(parent, alias, index, parentColumns)})"));
+
+    /// <summary>
+    /// A <c>count(*)</c> of rows in an indirect table whose parent is gone, across every declared
+    /// parent kind. See <see cref="PurgeTarget.OrphanProbe"/> for why the post-condition needs
+    /// this and cannot use the delete predicate.
+    /// </summary>
+    private static string TenantPlaneOrphanProbe(TenantPlaneTable table, string alias)
+    {
+        var arms = table.ReachedThrough!.Select((parent, index) =>
+        {
+            var parentAlias = $"o{index}";
+            var discriminator = parent.DiscriminatorColumn is null
+                ? string.Empty
+                : $"{alias}.\"{parent.DiscriminatorColumn}\" = '{Literal(parent.DiscriminatorValue!)}' AND ";
+            return $"({discriminator}NOT EXISTS ("
+                   + $"SELECT 1 FROM \"{TenantPlaneDataMap.Schema}\".\"{parent.ParentTable}\" {parentAlias} "
+                   + $"WHERE {parentAlias}.\"{parent.ParentKeyColumn}\" = {alias}.\"{parent.ForeignKeyColumn}\"))";
+        });
+
+        return string.Join(" OR ", arms);
+    }
+
+    private static string ParentMatch(
+        TenantPlaneParent parent, string alias, int index,
+        IReadOnlyDictionary<string, string> parentColumns)
+    {
+        var parentAlias = $"q{index}";
+        var discriminator = parent.DiscriminatorColumn is null
+            ? string.Empty
+            : $"{alias}.\"{parent.DiscriminatorColumn}\" = '{Literal(parent.DiscriminatorValue!)}' AND ";
+
+        // A parent that is itself reached through a parent (custom_field_options ->
+        // custom_field_versions -> custom_field_definitions) recurses; one that carries a business
+        // unit column ends the chain with a comparison.
+        string parentScope;
+        if (TenantPlaneDataMap.Find(parent.ParentTable) is { ReachedThrough.Count: > 0 } declaredParent)
+        {
+            parentScope = TenantPlanePredicate(declaredParent, parentAlias, parentColumns);
+        }
+        else
+        {
+            // READ from the catalogue, never written out here. This schema spells the same
+            // concept three ways — "BusinessUnitID" on Leads, "BUID" on Products, and
+            // "BusinessUnitId" on material_lots — so a hardcoded name is a 42703 mid-sweep on a
+            // transaction that has already deleted rows, and it is right for every portable test
+            // while being wrong against the real database.
+            if (!parentColumns.TryGetValue(parent.ParentTable, out var column))
+                throw new InvalidOperationException(
+                    $"public.\"{parent.ParentTable}\" is declared in TenantPlaneDataMap as the "
+                    + $"parent that scopes another table, but it carries no business unit column, "
+                    + "so the chain does not end at a tenant and the child's rows cannot be "
+                    + "attributed. Classify the parent, or re-point the child at one that is "
+                    + "scoped.");
+            parentScope = $"{parentAlias}.\"{column}\" = @scope";
+        }
+
+        return $"{discriminator}{alias}.\"{parent.ForeignKeyColumn}\" IN ("
+               + $"SELECT {parentAlias}.\"{parent.ParentKeyColumn}\" "
+               + $"FROM \"{TenantPlaneDataMap.Schema}\".\"{parent.ParentTable}\" {parentAlias} "
+               + $"WHERE {parentScope})";
+    }
+
+    /// <summary>
+    /// The business unit column of every table <see cref="TenantPlaneDataMap"/> names as a parent,
+    /// read from the live catalogue for the reason the class comment gives at length: the mapped
+    /// column and the property name diverge across this schema, and three different spellings are
+    /// in use.
+    /// </summary>
+    private static async Task<IReadOnlyDictionary<string, string>> TenantPlaneParentColumnsAsync(
+        NpgsqlConnection connection, NpgsqlTransaction? transaction, CancellationToken cancellationToken)
+    {
+        var parents = TenantPlaneDataMap.Tables
+            .SelectMany(t => t.ReachedThrough ?? [])
+            .Select(p => p.ParentTable)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+
+        var columns = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (parents.Length == 0) return columns;
+
+        await using var command = new NpgsqlCommand(
+            $"""
+            SELECT c.table_name, c.column_name
+            FROM information_schema.columns c
+            WHERE c.table_schema = @schema
+              AND c.table_name = ANY (@parents)
+              AND {TenantColumnMatch("c.column_name")}
+            ORDER BY c.table_name, c.column_name;
+            """, connection, transaction);
+        command.Parameters.AddWithValue("schema", TenantPlaneDataMap.Schema);
+        command.Parameters.AddWithValue("parents", parents);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+            columns.TryAdd(reader.GetString(0), reader.GetString(1));
+
+        return columns;
+    }
+
+    /// <summary>Doubles single quotes in a declared discriminator value. The values are compile-time
+    /// constants today; the escape is here so that stays safe if one ever is not.</summary>
+    private static string Literal(string value) => value.Replace("'", "''");
 
     private static async Task<long> CountAsync(
         NpgsqlConnection connection, NpgsqlTransaction? transaction, PurgeTarget target,
@@ -767,6 +1354,26 @@ public sealed class TenantPurgeExecutor(IConfiguration configuration, ILogger<Te
             $"""SELECT count(*)::bigint FROM {target.Qualified} t WHERE {target.Predicate};""",
             target.Scope == TenantScope.Tenant ? tenantId : businessUnitId,
             cancellationToken);
+
+    /// <summary>A count whose predicate names no tenant — the orphan probes. Separate from
+    /// <see cref="ScalarAsync"/> rather than passing an unused parameter, so a probe that
+    /// accidentally DID reference <c>@scope</c> fails loudly instead of binding silently.</summary>
+    private static async Task<long> ScalarNoScopeAsync(
+        NpgsqlConnection connection, NpgsqlTransaction? transaction, string sql,
+        CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(sql, connection, transaction);
+        try
+        {
+            return (long)(await command.ExecuteScalarAsync(cancellationToken))!;
+        }
+        catch (PostgresException exception)
+        {
+            throw new InvalidOperationException(
+                $"Could not count rows stranded by the purge: {exception.SqlState} {exception.MessageText}",
+                exception);
+        }
+    }
 
     private static async Task<long> ScalarAsync(
         NpgsqlConnection connection, NpgsqlTransaction? transaction, string sql, long scope,

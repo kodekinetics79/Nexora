@@ -12805,6 +12805,15 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("timestamp without time zone")
                         .HasDefaultValueSql("now()");
 
+                    b.Property<long?>("DefaultLeadOwnerSetByUserId")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTime?>("DefaultLeadOwnerSetOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<long?>("DefaultLeadOwnerUserId")
+                        .HasColumnType("bigint");
+
                     b.Property<string>("Description")
                         .HasMaxLength(500)
                         .HasColumnType("character varying(500)");
@@ -13327,6 +13336,10 @@ namespace ERP_RFQ_Automation.Migrations
 
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
 
+                    b.Property<DateTime?>("BytesPurgedOn")
+                        .HasColumnType("timestamp without time zone")
+                        .HasColumnName("bytes_purged_on");
+
                     b.Property<DateTime>("CreatedOn")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("timestamp without time zone")
@@ -13362,6 +13375,15 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<DateTime?>("ParsedAt")
                         .HasColumnType("timestamp without time zone");
 
+                    b.Property<string>("PurgeReason")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)")
+                        .HasColumnName("purge_reason");
+
+                    b.Property<long?>("PurgedByUserId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("purged_by_user_id");
+
                     b.Property<string>("RawEmailPath")
                         .HasMaxLength(500)
                         .HasColumnType("character varying(500)");
@@ -13395,7 +13417,10 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasIndex(new[] { "EmailConfigurationId", "MessageId" }, "UQ_EmailIngests_EmailConfigurationID_MessageID")
                         .IsUnique();
 
-                    b.ToTable("EmailIngests");
+                    b.ToTable("EmailIngests", t =>
+                        {
+                            t.HasCheckConstraint("CK_EmailIngests_purge_tombstone_complete", "(\"bytes_purged_on\" IS NULL AND \"purged_by_user_id\" IS NULL AND \"purge_reason\" IS NULL) OR (\"bytes_purged_on\" IS NOT NULL AND \"purged_by_user_id\" IS NOT NULL AND length(trim(\"purge_reason\")) > 0)");
+                        });
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.Models.ExtractionCorpusEntry", b =>
@@ -18640,6 +18665,18 @@ namespace ERP_RFQ_Automation.Migrations
                         .IsRequired()
                         .HasMaxLength(32)
                         .HasColumnType("character varying(32)");
+
+                    b.Property<DateTime?>("StoragePurgeCompletedOn")
+                        .HasColumnType("timestamp without time zone");
+
+                    b.Property<string>("StoragePurgeDetail")
+                        .HasColumnType("jsonb");
+
+                    b.Property<string>("StoragePurgeInventory")
+                        .HasColumnType("jsonb");
+
+                    b.Property<int?>("StoragePurgeOutstandingCount")
+                        .HasColumnType("integer");
 
                     b.Property<long>("TenantId")
                         .HasColumnType("bigint");

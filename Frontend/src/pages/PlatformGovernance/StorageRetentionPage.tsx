@@ -1,18 +1,20 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
-  Alert, AlertTitle, Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogContentText,
-  DialogTitle, Divider, FormControlLabel, Paper, Stack, Switch, Table, TableBody, TableCell,
-  TableContainer, TableHead, TableRow, TextField, Typography,
+  Alert, AlertTitle, Box, Button, Checkbox, Chip, Dialog, DialogActions, DialogContent,
+  DialogContentText, DialogTitle, Divider, FormControlLabel, Paper, Stack, Switch, Table,
+  TableBody, TableCell, TableContainer, TableHead, TableRow, TextField, Typography,
 } from '@mui/material';
 import {
   DeleteForeverOutlined, FactCheckOutlined, HistoryToggleOffOutlined, InventoryOutlined,
-  SaveOutlined, ShieldOutlined,
+  SaveOutlined, ShieldOutlined, VerifiedUserOutlined,
 } from '@mui/icons-material';
 import {
   EVIDENCE_RETENTION_DEFAULT_DAYS, EVIDENCE_RETENTION_MAX_DAYS, EVIDENCE_RETENTION_MIN_DAYS,
+  TENANT_DATA_CONFIRM_PHRASE,
   isEvidenceRetentionUnavailable, newIdempotencyKey, platformGovernanceService,
   type EvidenceRetentionExclusion, type EvidenceRetentionRunResult, type EvidenceRetentionSummary,
+  type TenantDataCleanupResult, type TenantDataControlSummary,
 } from '../../api/services/platformGovernanceService';
 import { EmptyState, ErrorState, LoadingState } from '../../platform/components/States';
 import { looksLikeTechnicalNoise, toPresentableError } from '../../utils/apiErrors';
@@ -60,8 +62,8 @@ const formatCount = (count: number | null | undefined): string =>
  */
 const EXCLUSION_COPY: Readonly<Record<string, string>> = {
   LEGAL_HOLD: 'Under legal hold. Release the hold before its file can be deleted.',
-  DELETION_REVIEW_PENDING: 'A deletion review is open and has not been decided.',
-  DELETION_REQUESTED: 'A deletion review is open and has not been decided.',
+  // No DELETION_REVIEW_PENDING / DELETION_REQUESTED entries: that review had no approver
+  // anywhere, and the copy told the reader a decision was coming that never could.
   WITHIN_RETENTION_WINDOW: 'Still inside the retention window you set.',
   NOT_YET_ELIGIBLE: 'Still inside the retention window you set.',
   PROCESSING_INCOMPLETE: 'Extraction has not finished, so the file is still needed.',
@@ -102,7 +104,7 @@ export const describeExclusionReason = (reason: string | null | undefined): stri
   return raw;
 };
 
-const CONFIRM_PHRASE = 'DELETE';
+const CONFIRM_PHRASE = TENANT_DATA_CONFIRM_PHRASE;
 
 interface TileProps { label: string; value: string; caption: string; icon: React.ReactNode }
 
@@ -155,6 +157,140 @@ function ExclusionTable({ rows }: { rows: EvidenceRetentionExclusion[] }) {
   );
 }
 
+/* ────────────────────────────────────────────────────────────────────────────
+ * "Clear out what produced nothing" — the selection surface.
+ *
+ * Three rows, a count, a size. That is deliberately the whole thing. Date range is the wrong
+ * granularity for this data (the four "Nexora outbound email test" messages arrived the same
+ * afternoon as forty real ones, so no cutoff separates them) and per-record ticking across two
+ * hundred records is a screen nobody finishes. OUTCOME is the axis a business owner can judge at
+ * a glance — and, not coincidentally, the only axis whose deletion cannot break a link, because a
+ * record with no downstream artefact has nothing pointing at it.
+ *
+ * Every word on these rows comes from the server as finished copy. No code, enum, table name or
+ * state value is rendered here, and the fallbacks in the service layer are words too: the person
+ * reading this owns the business, and must never have to learn our vocabulary to understand his
+ * own mail.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+interface BucketRowProps {
+  bucket: TenantDataControlSummary['buckets'][number];
+  checked: boolean;
+  onToggle: (code: string, checked: boolean) => void;
+}
+
+function BucketRow({ bucket, checked, onToggle }: BucketRowProps) {
+  const empty = bucket.count === 0;
+  return (
+    <Paper
+      variant="outlined"
+      sx={{ p: 2, opacity: bucket.canClear ? 1 : 0.85 }}
+    >
+      <Stack direction="row" sx={{ gap: 1.5, alignItems: 'flex-start' }}>
+        <Checkbox
+          checked={checked}
+          disabled={!bucket.canClear}
+          onChange={(event) => onToggle(bucket.code, event.target.checked)}
+          slotProps={{ input: { 'aria-label': `Include: ${bucket.title}` } }}
+          sx={{ mt: -0.5 }}
+        />
+        <Box sx={{ flex: 1, minWidth: 0 }}>
+          <Stack
+            direction={{ xs: 'column', sm: 'row' }}
+            sx={{ gap: 1, alignItems: { sm: 'baseline' }, justifyContent: 'space-between' }}
+          >
+            <Typography variant="subtitle1" component="h3" sx={{ fontWeight: 750 }}>
+              {bucket.title}
+            </Typography>
+            <Typography variant="body2" sx={{ fontWeight: 800, whiteSpace: 'nowrap' }}>
+              {formatCount(bucket.count)} · {formatBytes(bucket.bytes)}
+            </Typography>
+          </Stack>
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+            {bucket.detail}
+          </Typography>
+          {/* A control that cannot work says why, in words, right where it is disabled — never a
+              greyed-out box the owner has to raise a ticket to understand. */}
+          {!bucket.canClear && bucket.blockedReason && (
+            <Typography
+              variant="caption"
+              color={empty ? 'text.secondary' : 'warning.main'}
+              sx={{ display: 'block', mt: 0.75, fontWeight: 600 }}
+            >
+              {bucket.blockedReason}
+            </Typography>
+          )}
+        </Box>
+      </Stack>
+    </Paper>
+  );
+}
+
+/* The reassurance panel. Not an error list — the answer to "what will you never touch?", asked
+   before the button is pressed rather than reported after it. */
+function KeptPanel({ lines, summary }: { lines: TenantDataControlSummary['kept']; summary: string | null }) {
+  const shown = lines.filter((line) => line.count === null || line.count > 0);
+  return (
+    <Paper variant="outlined" sx={{ p: 2.5 }}>
+      <Stack direction="row" sx={{ gap: 1, alignItems: 'center', mb: 1 }}>
+        <VerifiedUserOutlined fontSize="small" color="success" />
+        <Typography variant="subtitle1" component="h3" sx={{ fontWeight: 750 }}>
+          Never deleted, whatever you choose
+        </Typography>
+      </Stack>
+      {summary && (
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>{summary}</Typography>
+      )}
+      {shown.length === 0 ? (
+        <Typography variant="body2" color="text.secondary">
+          Nothing is being held back right now. When something must be kept, it is listed here with
+          the reason.
+        </Typography>
+      ) : (
+        <Box component="ul" sx={{ pl: 0, m: 0, listStyle: 'none' }}>
+          {shown.map((line) => (
+            <Box
+              component="li"
+              key={line.title}
+              sx={{ display: 'flex', gap: 2, alignItems: 'baseline', py: 0.75,
+                borderTop: '1px solid', borderColor: 'divider', '&:first-of-type': { borderTop: 'none' } }}
+            >
+              <Box sx={{ flex: 1, minWidth: 0 }}>
+                <Typography variant="body2" sx={{ fontWeight: 700 }}>{line.title}</Typography>
+                {line.detail && (
+                  <Typography variant="caption" color="text.secondary">{line.detail}</Typography>
+                )}
+              </Box>
+              <Typography variant="body2" sx={{ fontWeight: 800, whiteSpace: 'nowrap' }}>
+                {formatCount(line.count)}
+              </Typography>
+            </Box>
+          ))}
+        </Box>
+      )}
+    </Paper>
+  );
+}
+
+/* What the sweep found and deliberately left alone. Reported rather than dropped: a sweep that
+   quietly skips what it cannot prove safe is indistinguishable from one that had nothing to do,
+   and those bytes are still on the bill. */
+function RefusalList({ rows }: { rows: TenantDataCleanupResult['refused'] }) {
+  return (
+    <Alert severity="warning">
+      <AlertTitle sx={{ fontWeight: 800 }}>Left alone on purpose</AlertTitle>
+      <Box component="ul" sx={{ pl: 2.5, m: 0, '& li': { mb: 0.5 } }}>
+        {rows.map((row, index) => (
+          <Typography component="li" variant="body2" key={`${row.what ?? 'item'}-${index}`}>
+            <strong>{row.what ?? 'One item'}</strong>
+            {row.why ? ` — ${row.why}` : ''}
+          </Typography>
+        ))}
+      </Box>
+    </Alert>
+  );
+}
+
 export default function StorageRetentionPage() {
   const client = useQueryClient();
 
@@ -181,6 +317,24 @@ export default function StorageRetentionPage() {
   const [confirmText, setConfirmText] = useState('');
   const [purgeReason, setPurgeReason] = useState('');
   const [purgeKey, setPurgeKey] = useState<string | null>(null);
+
+  /* ── "Clear out what produced nothing" ─────────────────────────────────── */
+  const tenantData = useQuery<TenantDataControlSummary>({
+    queryKey: ['tenant-data-control'],
+    queryFn: platformGovernanceService.getTenantDataControl,
+    retry: false,
+  });
+  const [chosen, setChosen] = useState<string[]>([]);
+  const [cleanupReason, setCleanupReason] = useState('');
+  const [cleanupPreview, setCleanupPreview] = useState<TenantDataCleanupResult | null>(null);
+  const [cleanupReceipt, setCleanupReceipt] = useState<TenantDataCleanupResult | null>(null);
+  const [cleanupConfirmOpen, setCleanupConfirmOpen] = useState(false);
+  const [cleanupConfirmText, setCleanupConfirmText] = useState('');
+  const [cleanupKey, setCleanupKey] = useState<string | null>(null);
+  /** Frozen when the dialog opens: the figures in an irreversible dialog must not move. */
+  const [cleanupTarget, setCleanupTarget] = useState<
+    { messages: number | null; files: number | null; bytes: number | null } | null
+  >(null);
 
   // The saved policy is the source of truth for the draft; a concurrent save elsewhere reloads it.
   useEffect(() => {
@@ -241,6 +395,77 @@ export default function StorageRetentionPage() {
       await client.invalidateQueries({ queryKey: ['evidence-retention'] });
     },
   });
+
+  const toggleBucket = (code: string, include: boolean) => {
+    setChosen((current) => (include
+      ? current.includes(code) ? current : [...current, code]
+      : current.filter((x) => x !== code)));
+    // A preview taken over a different selection is not this selection's preview.
+    setCleanupPreview(null);
+  };
+
+  const cleanupDryRun = useMutation({
+    mutationFn: () => platformGovernanceService.runTenantDataCleanup({
+      buckets: chosen,
+      dryRun: true,
+      reason: cleanupReason.trim() || 'Preview of what would be cleared.',
+      idempotencyKey: newIdempotencyKey(),
+    }),
+    onSuccess: (result) => {
+      setCleanupPreview(result);
+      setCleanupReceipt(null);
+    },
+  });
+
+  const runCleanup = useMutation({
+    mutationFn: () => platformGovernanceService.runTenantDataCleanup({
+      buckets: chosen,
+      dryRun: false,
+      reason: cleanupReason.trim(),
+      confirmation: CONFIRM_PHRASE,
+      // Reused across retries of THIS confirmed run so a lost response cannot delete twice.
+      idempotencyKey: cleanupKey ?? newIdempotencyKey(),
+    }),
+    onSuccess: async (result) => {
+      setCleanupReceipt(result);
+      setCleanupPreview(null);
+      setCleanupConfirmOpen(false);
+      setCleanupConfirmText('');
+      setCleanupKey(null);
+      setCleanupReason('');
+      setChosen([]);
+      await Promise.all([
+        client.invalidateQueries({ queryKey: ['tenant-data-control'] }),
+        client.invalidateQueries({ queryKey: ['evidence-retention'] }),
+      ]);
+    },
+  });
+
+  const buckets = tenantData.data?.buckets ?? [];
+  const cleanupReasonGiven = cleanupReason.trim().length > 0;
+  const cleanupPreviewShown = cleanupPreview !== null;
+  const cleanupWouldRemove = (cleanupPreview?.messagesCleared ?? 0) + (cleanupPreview?.filesDeleted ?? 0);
+  const canRunCleanup = cleanupPreviewShown && cleanupWouldRemove > 0
+    && cleanupReasonGiven && chosen.length > 0;
+  const cleanupPhraseTyped = cleanupConfirmText.trim() === CONFIRM_PHRASE;
+
+  const openCleanupConfirm = () => {
+    setCleanupTarget({
+      messages: cleanupPreview?.messagesCleared ?? null,
+      files: cleanupPreview?.filesDeleted ?? null,
+      bytes: cleanupPreview?.bytesReclaimed ?? null,
+    });
+    setCleanupKey(newIdempotencyKey());
+    setCleanupConfirmText('');
+    setCleanupConfirmOpen(true);
+  };
+  const closeCleanupConfirm = () => {
+    if (runCleanup.isPending) return;
+    setCleanupConfirmOpen(false);
+    setCleanupConfirmText('');
+    setCleanupKey(null);
+    runCleanup.reset();
+  };
 
   const eligible = preview?.eligible ?? null;
   const previewShown = preview !== null;
@@ -365,6 +590,169 @@ export default function StorageRetentionPage() {
         )}
       </Box>
 
+      {/* ── Clear out what produced nothing ─────────────────────────────────── */}
+      <Box component="section" aria-labelledby="clear-nothing-heading" sx={{ mb: 3 }}>
+        <Typography id="clear-nothing-heading" variant="h6" component="h2" sx={{ fontWeight: 750, mb: 0.5 }}>
+          Clear out what produced nothing
+        </Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 760, mb: 1.5 }}>
+          Mail and files that never turned into anything — no inquiry, no lead, no document. Tick
+          what you want gone, preview it, then decide. Nothing here touches your invoices, orders
+          or live deals.
+        </Typography>
+
+        {tenantData.isLoading && <LoadingState label="Working out what can be cleared…" />}
+
+        {tenantData.isError && (
+          isEvidenceRetentionUnavailable(tenantData.error) ? (
+            <Alert severity="info">
+              This part of the screen needs a newer server release. Nothing is being deleted and
+              nothing is at risk — the retention policy below still works.
+            </Alert>
+          ) : (
+            <ErrorState
+              message={toPresentableError(tenantData.error, {
+                fallbackMessage: 'We could not work out what can be cleared. Nothing was changed or deleted.',
+              }).message}
+              onRetry={() => void tenantData.refetch()}
+            />
+          )
+        )}
+
+        {tenantData.isSuccess && !tenantData.data.bucketsReported && (
+          <Alert severity="warning">
+            This deployment did not report what can be cleared, so nothing is offered here. That is
+            not the same as "you have nothing to clear".
+          </Alert>
+        )}
+
+        {tenantData.isSuccess && tenantData.data.bucketsReported && (
+          <Stack sx={{ gap: 2 }}>
+            <Stack sx={{ gap: 1.5 }}>
+              {buckets.map((bucket) => (
+                <BucketRow
+                  key={bucket.code}
+                  bucket={bucket}
+                  checked={chosen.includes(bucket.code)}
+                  onToggle={toggleBucket}
+                />
+              ))}
+              {buckets.length === 0 && (
+                <Paper variant="outlined" sx={{ p: 3, textAlign: 'center' }}>
+                  <Typography variant="body2" sx={{ fontWeight: 700 }}>
+                    There is nothing to clear right now
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    Every message and file you hold is attached to something. Check back later.
+                  </Typography>
+                </Paper>
+              )}
+            </Stack>
+
+            <KeptPanel lines={tenantData.data.kept} summary={tenantData.data.keptSummary} />
+
+            <TextField
+              label="Reason for clearing this"
+              value={cleanupReason}
+              onChange={(event) => setCleanupReason(event.target.value)}
+              multiline
+              minRows={2}
+              required
+              helperText="Required before anything is deleted. Recorded permanently in your audit trail."
+              sx={{ maxWidth: 560 }}
+            />
+
+            <Stack direction={{ xs: 'column', sm: 'row' }} sx={{ gap: 1.5 }}>
+              <Button
+                variant="contained"
+                startIcon={<FactCheckOutlined />}
+                disabled={chosen.length === 0 || cleanupDryRun.isPending}
+                onClick={() => cleanupDryRun.mutate()}
+              >
+                {cleanupDryRun.isPending ? 'Checking…' : 'Preview what would be removed'}
+              </Button>
+              <Button
+                variant="outlined"
+                color="error"
+                startIcon={<DeleteForeverOutlined />}
+                disabled={!canRunCleanup}
+                onClick={openCleanupConfirm}
+              >
+                Remove them permanently
+              </Button>
+            </Stack>
+            {chosen.length === 0 && (
+              <Typography variant="caption" color="text.secondary">
+                Tick at least one group above to preview it.
+              </Typography>
+            )}
+            {chosen.length > 0 && !cleanupPreviewShown && (
+              <Typography variant="caption" color="text.secondary">
+                Removing stays switched off until you have previewed it.
+              </Typography>
+            )}
+            {cleanupPreviewShown && cleanupWouldRemove > 0 && !cleanupReasonGiven && (
+              <Typography variant="caption" color="text.secondary">
+                Enter a reason to switch on permanent removal.
+              </Typography>
+            )}
+
+            {cleanupDryRun.isError && (
+              <Alert severity="error">
+                {toPresentableError(cleanupDryRun.error, {
+                  fallbackMessage: 'The preview could not be produced. Nothing was deleted.',
+                }).message}
+              </Alert>
+            )}
+
+            {/* Numbers first, detail on demand. */}
+            {cleanupPreview && (
+              <Box role="status" aria-live="polite">
+                <Divider sx={{ mb: 2 }} />
+                <Typography variant="subtitle1" component="h3" sx={{ fontWeight: 750, mb: 1 }}>
+                  Preview — nothing has been deleted
+                </Typography>
+                <Stack direction="row" sx={{ gap: 1, flexWrap: 'wrap', mb: 1.5 }}>
+                  <Chip color="error" variant="outlined"
+                    label={`${formatCount(cleanupPreview.messagesCleared)} messages would be cleared`} />
+                  <Chip color="error" variant="outlined"
+                    label={`${formatCount(cleanupPreview.filesDeleted)} leftover files would be deleted`} />
+                  <Chip variant="outlined"
+                    label={`${formatBytes(cleanupPreview.bytesReclaimed)} would be freed`} />
+                </Stack>
+                {cleanupWouldRemove === 0 && (
+                  <Alert severity="info" sx={{ mb: 1.5 }}>
+                    Nothing in what you ticked can be removed right now.
+                  </Alert>
+                )}
+                {cleanupPreview.refused.length > 0 && <RefusalList rows={cleanupPreview.refused} />}
+              </Box>
+            )}
+
+            {cleanupReceipt && (
+              <Box role="status" aria-live="polite">
+                <Alert severity="success">
+                  <AlertTitle sx={{ fontWeight: 800 }}>
+                    {cleanupReceipt.idempotentReplay ? 'Already done' : 'Cleared'}
+                  </AlertTitle>
+                  {cleanupReceipt.idempotentReplay
+                    ? 'This exact request had already been carried out, so nothing further was deleted.'
+                    : 'The records that these arrived — who sent them and when — are kept in full.'}
+                  <Typography variant="body2" sx={{ mt: 1, fontWeight: 700 }}>
+                    {formatCount(cleanupReceipt.messagesCleared)} messages ·{' '}
+                    {formatCount(cleanupReceipt.filesDeleted)} files ·{' '}
+                    {formatBytes(cleanupReceipt.bytesReclaimed)} freed
+                  </Typography>
+                </Alert>
+                {cleanupReceipt.refused.length > 0 && (
+                  <Box sx={{ mt: 1.5 }}><RefusalList rows={cleanupReceipt.refused} /></Box>
+                )}
+              </Box>
+            )}
+          </Stack>
+        )}
+      </Box>
+
       {/* ── What a purge does / does not do ─────────────────────────────────── */}
       <Box component="section" aria-labelledby="what-purging-heading" sx={{ mb: 3 }}>
         <Typography id="what-purging-heading" variant="h6" component="h2" sx={{ fontWeight: 750, mb: 1.5 }}>
@@ -413,8 +801,8 @@ export default function StorageRetentionPage() {
           <AlertTitle sx={{ fontWeight: 800 }}>This does not erase personal data</AlertTitle>
           Buyer names and email addresses read out of these documents were copied into your leads
           and extraction records during processing. Deleting the original files leaves those copies
-          in place. To erase personal data, raise a Data Subject Request instead — this control is
-          about storage, not erasure.
+          in place. To remove a specific person's details, edit or delete the lead that holds them —
+          this control is about storage, not erasure.
         </Alert>
       </Box>
 
@@ -505,8 +893,13 @@ export default function StorageRetentionPage() {
 
       {/* ── Reclaim space ───────────────────────────────────────────────────── */}
       <Box component="section" aria-labelledby="reclaim-heading" sx={{ mb: 2 }}>
-        <Typography id="reclaim-heading" variant="h6" component="h2" sx={{ fontWeight: 750, mb: 1.5 }}>
-          Reclaim space now
+        <Typography id="reclaim-heading" variant="h6" component="h2" sx={{ fontWeight: 750, mb: 0.5 }}>
+          Delete older documents you no longer need to keep
+        </Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 760, mb: 1.5 }}>
+          This one is about age: it deletes the original files of documents that have passed the
+          retention period you set above. Use the section further up instead if you just want to
+          clear out mail and files that never turned into anything.
         </Typography>
         <Paper variant="outlined" sx={{ p: 2.5 }}>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2, maxWidth: 760 }}>
@@ -651,6 +1044,66 @@ export default function StorageRetentionPage() {
         </Paper>
       </Box>
 
+      {/* ── Clear-out confirmation ──────────────────────────────────────────── */}
+      <Dialog
+        open={cleanupConfirmOpen}
+        onClose={closeCleanupConfirm}
+        fullWidth
+        maxWidth="sm"
+        aria-labelledby="confirm-cleanup-title"
+        aria-describedby="confirm-cleanup-description"
+      >
+        <DialogTitle id="confirm-cleanup-title" sx={{ fontWeight: 800 }}>
+          Remove {formatCount(cleanupTarget?.messages)} messages and {formatCount(cleanupTarget?.files)} files
+        </DialogTitle>
+        <DialogContent>
+          <DialogContentText id="confirm-cleanup-description" component="div">
+            <Typography variant="body2" sx={{ fontWeight: 700, mb: 1.5 }}>
+              This frees {formatBytes(cleanupTarget?.bytes)}. It cannot be undone — Nexora keeps no
+              backup of these.
+            </Typography>
+            <Typography variant="body2" sx={{ mb: 1.5 }}>
+              <strong>What goes:</strong> the stored copy of each message, and leftover files
+              nothing points to. You will no longer be able to open or re-read the original message.
+            </Typography>
+            <Typography variant="body2" sx={{ mb: 1.5 }}>
+              <strong>What stays:</strong> the record that each message arrived — who sent it, when,
+              what the subject was, and what we decided about it. Nothing on an invoice, order,
+              live deal or legal hold is included.
+            </Typography>
+          </DialogContentText>
+
+          {runCleanup.isError && (
+            <Alert severity="error" sx={{ mb: 2 }}>
+              {toPresentableError(runCleanup.error, {
+                fallbackMessage: 'The removal did not complete. Preview again to see where things stand before retrying.',
+              }).message}
+            </Alert>
+          )}
+
+          <TextField
+            label={`Type ${CONFIRM_PHRASE} to confirm`}
+            value={cleanupConfirmText}
+            onChange={(event) => setCleanupConfirmText(event.target.value)}
+            fullWidth
+            autoComplete="off"
+            helperText={`Type ${CONFIRM_PHRASE} in capitals. This is the last step.`}
+          />
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2 }}>
+          <Button onClick={closeCleanupConfirm} disabled={runCleanup.isPending}>Keep everything</Button>
+          <Button
+            variant="contained"
+            color="error"
+            startIcon={<DeleteForeverOutlined />}
+            disabled={!cleanupPhraseTyped || !canRunCleanup || runCleanup.isPending}
+            onClick={() => runCleanup.mutate()}
+          >
+            {runCleanup.isPending ? 'Removing…' : 'Remove them'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
       {/* ── Irreversible-action confirmation ────────────────────────────────── */}
       <Dialog
         open={confirmOpen}
@@ -691,7 +1144,8 @@ export default function StorageRetentionPage() {
           <Alert severity="warning" sx={{ mb: 2 }}>
             <AlertTitle sx={{ fontWeight: 800 }}>This does not erase personal data</AlertTitle>
             Buyer names and email addresses extracted from these documents remain in your leads and
-            evidence records. To erase those, use a Data Subject Request.
+            evidence records. To remove a specific person's details, edit or delete the lead that
+            holds them.
           </Alert>
 
           {executePurge.isError && (

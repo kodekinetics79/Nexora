@@ -25,6 +25,11 @@ public static class TenantLifecycleServiceCollectionExtensions
         // rule — it opens its own OWNER connection because it has to suspend the append-only
         // guards, and TenantOffboardingService is built around that being a separate transaction.
         services.AddScoped<TenantPurgeExecutor>();
+
+        // The byte half of a purge. Separate from the executor because it is not transactional
+        // and must not pretend to be: object storage has no rollback, so its work is a recorded,
+        // resumable follow-up step against an inventory committed before the rows are destroyed.
+        services.AddScoped<TenantStoragePurger>();
         services.AddScoped<TenantPersonalDataEraser>();
         services.AddScoped<TenantDataExportService>();
         services.AddScoped<ITenantOffboardingReadinessService, TenantOffboardingReadinessService>();

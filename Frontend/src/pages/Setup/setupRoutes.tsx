@@ -47,22 +47,50 @@ export interface SetupRoute {
  * `SETUP_ADOPTED_ROUTES` below.
  */
 export const SETUP_ROUTES: SetupRoute[] = [
-  { path: 'master', moduleName: 'UOM', component: SetupMaster },
-  { path: 'currency', moduleName: 'Currency', component: CurrencyPage },
-  { path: 'warehouse', moduleName: 'Warehouse', component: WarehousePage },
-  { path: 'uom', moduleName: 'UOM', component: UomPage },
-  { path: 'locations', moduleName: 'Locations', component: LocationMaster },
+  // Lists, picklists AND role rows (deep-linked as ?type=role). Guarded by "Business Units" —
+  // business-unit configuration is what these rows are — rather than by the phantom "UOM".
+  // The server's real rule is finer than any single route gate can be: SetupMasterController
+  // requires a manager role for every write (:130, :216, :349), and for a ROLE row additionally
+  // requires "Roles & Permissions" at runtime (RoleAdministrationDenialAsync :432). The Roles
+  // entry in the catalogue therefore carries that tighter module for its card, and this route
+  // stays at the looser one so the picklist half is not over-gated.
+  { path: 'master', moduleName: 'Business Units', component: SetupMaster },
+  // "Currencies", not "Currency": the catalogue module is plural and the singular form is not a
+  // module at all, so this route denied every non-super-admin. CurrencyController is genuinely
+  // gated — Sec-D4 split it into Currencies / Exchange Rates / Exchange Rate Approval — and this
+  // is the module its list endpoints require.
+  { path: 'currency', moduleName: 'Currencies', component: CurrencyPage },
+  // Warehouses are where stock sits, so they are guarded by "Products". "Warehouse" is not a
+  // permission module and never was; nothing in the backend enforces it.
+  { path: 'warehouse', moduleName: 'Products', component: WarehousePage },
+  // Units of measure are catalogue reference data — the units product lines are quoted in — so
+  // they are guarded by "Products". NOTE: UomController carries no [RequireModulePermission] at
+  // all; its writes are [RequireManagerRole] (:62, :83, :110). This gate is therefore the module
+  // governing the DATA, following the same convention as routing-rules and scheduled-reports
+  // below, and the server's manager check remains the binding authority on writes.
+  { path: 'uom', moduleName: 'Products', component: UomPage },
+  // Countries, states and cities are business-unit reference data, so they follow /setup/master
+  // onto "Business Units". "Locations" is not a permission module and nothing enforces it.
+  { path: 'locations', moduleName: 'Business Units', component: LocationMaster },
   { path: 'quote-format', moduleName: 'Quote Configuration', component: QuoteFormatPage },
   { path: 'business-unit', moduleName: 'Business Units', component: BusinessUnitPage },
-  { path: 'price-structure', moduleName: 'UOM', component: PriceStructurePage },
-  // SLA & alert policy (WP-A2). Guarded by the generic setup module ("UOM"), matching
-  // /setup/master and /setup/price-structure.
-  { path: 'sla', moduleName: 'UOM', component: SlaSettingsPage },
+  // Margin and mark-up structures a quote line is priced against — guarded by "Quotations",
+  // the module that owns quote pricing. Stored as Setup_Master rows, so the server rule is
+  // SetupMasterController's [RequireManagerRole]; no module attribute exists to mirror.
+  { path: 'price-structure', moduleName: 'Quotations', component: PriceStructurePage },
+  // SLA & alert policy (WP-A2). Guarded by "Dashboard", matching scheduled-reports below: both
+  // configure how work is monitored and chased rather than what it contains. SlaController's PUT
+  // is [RequireManagerRole] (:76) with no module attribute.
+  { path: 'sla', moduleName: 'Dashboard', component: SlaSettingsPage },
   // FR-DSH-06 scheduled report delivery. Guarded by "Dashboard" because that is the module the
   // reporting endpoints check, and because the reports carry dashboard content — the write side
   // additionally requires a manager role at the API.
   { path: 'scheduled-reports', moduleName: 'Dashboard', component: ScheduledReportsPage },
-  { path: 'commercial-policy', moduleName: 'UOM', component: CommercialPolicyPage },
+  // Tax rate, rounding and tolerance (which set quote totals) plus supplier scoring weights.
+  // Guarded by "Quotations" because the figures it decides are printed on a quote. Both PUTs are
+  // [RequireManagerRole] with no module attribute (CommercialPolicyController :37,
+  // SupplierComparisonWeightsController :40).
+  { path: 'commercial-policy', moduleName: 'Quotations', component: CommercialPolicyPage },
   // Mailbox administration. Guarded by "Email & SMTP" — the module the supplier-email screen
   // already uses — rather than the generic setup module, because these rows hold stored
   // credentials and decide where customer-facing mail is sent from.
@@ -71,10 +99,11 @@ export const SETUP_ROUTES: SetupRoute[] = [
   // underlying commercial-routing endpoints check for both reading a customer's routing profile
   // and creating ownership/identifier rows.
   { path: 'routing-rules', moduleName: 'Customers', component: RoutingRulesPage },
-  // AA-01 · tenant-defined custom fields. Guarded by the generic setup module ("UOM"), matching
-  // /setup/master and /setup/sla; the API additionally requires a manager role and edit permission
-  // on the module the field attaches to.
-  { path: 'custom-fields', moduleName: 'UOM', component: CustomFieldsPage },
+  // AA-01 · tenant-defined custom fields. Guarded by "Customers" — verified, not assumed:
+  // CustomFieldsController checks the module IN THE BODY (:186) using ModuleFor (:209-220), which
+  // resolves to "Customers", "Suppliers" or "Leads" depending on the entity the field attaches to.
+  // "Customers" is the entry point of the three and the one the screen opens on.
+  { path: 'custom-fields', moduleName: 'Customers', component: CustomFieldsPage },
 ];
 
 /**

@@ -163,6 +163,19 @@ describe('UsersPage', () => {
     expect(sent.get('ModifiedBy')).toBeNull();
   });
 
+  it('explainsThatTheTeamFieldIsWhatAManagerSees', async () => {
+    // Users.TeamID is the ONE authority on team membership — the account-team scope resolver reads
+    // it and nothing else. Left as None, this person's pipeline is visible to them alone and their
+    // manager sees an empty dashboard with nothing on screen explaining why. The field that causes
+    // that has to say so where the decision is made.
+    renderPage();
+    const dialog = await openCreateDialog();
+
+    const team = within(dialog).getByRole('combobox', { name: /team/i });
+    expect(team).toBeInTheDocument();
+    expect(dialog.textContent).toMatch(/manager of this team can see/i);
+  });
+
   it('changePasswordButtonHidden_forOtherUsers', async () => {
     renderPage();
     await screen.findByRole('columnheader', { name: /role/i });

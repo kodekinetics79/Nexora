@@ -128,6 +128,19 @@ public sealed class DeterministicRoutingEngine
     private static int WorkloadPoints(RoutingUserAvailability? availability) =>
         availability?.Workload?.WorkloadPoints ?? 0;
 
+    /// <summary>
+    /// The decision code written when the tenant's configured fallback owner takes an inquiry the
+    /// engine could not place by any ownership rule.
+    /// </summary>
+    public const string DefaultOwnerAssignedCode = "DEFAULT_OWNER_ASSIGNED";
+
+    /// <summary>
+    /// The decision code written when a human deliberately releases a lead back to the pool.
+    /// Declared here rather than in the application service because the queue-item shape it
+    /// produces is this engine's, and <see cref="PriorityFor"/> has to recognise it.
+    /// </summary>
+    public const string ManuallyUnassignedCode = "MANUALLY_UNASSIGNED";
+
     private static RoutingResult Unassigned(
         RoutingRequest request,
         RoutingPolicy policy,
@@ -137,26 +150,83 @@ public sealed class DeterministicRoutingEngine
         decimal confidence,
         CustomerOwnership? ownership = null)
     {
+        // FALLBACK OWNER — the one customer-set answer to "when Nexora cannot work out who owns an
+        // inquiry, give it to ___". It is consulted HERE, at the single point where every
+        // un-placeable path converges, so it cannot be reached without every ownership rule,
+        // threshold and ambiguity check having already been evaluated and lost.
+        //
+        // The named person must clear the SAME IsAvailable bar as any other candidate — active,
+        // available, capacity above zero, governed profile — because a fallback that hands work to
+        // someone who cannot act on it is worse than a queue nobody has looked at yet. Unset or
+        // ineligible falls through to the queue, which is the behaviour that existed before.
+        //
+        // The original code ("why could you not place it?") is preserved in the explanation and the
+        // ownership that was considered is still recorded, so "why did this person get it?" stays
+        // answerable: they got it because nothing else could be determined, not because a rule
+        // named them.
+        if (request.DefaultOwnerUserId is long fallbackUserId &&
+            IsAvailable(Availability(request, fallbackUserId)))
+        {
+            var fallbackDecision = CreateDecision(request, policy, status,
+                RoutingOutcome.AssignedPrimary, DefaultOwnerAssignedCode,
+                candidate, confidence, ownership, fallbackUserId, fallbackFor: code);
+            return new RoutingResult(fallbackDecision, new LeadAssignment
+            {
+                BusinessUnitId = request.BusinessUnitId,
+                LeadId = request.LeadId,
+                ToUserId = fallbackUserId,
+                AssignmentScope = request.AssignmentScope,
+                // No OwnershipId: this assignment is NOT derived from an ownership row. The row
+                // that was considered and lost is on the decision, where it belongs.
+                OwnershipId = null,
+                RoutingDecision = fallbackDecision,
+                ReasonCode = fallbackDecision.DecisionCode,
+                EffectiveFrom = request.OccurredOn,
+                CorrelationId = request.CorrelationId,
+                IdempotencyKey = request.IdempotencyKey
+            }, null);
+        }
+
         var decision = CreateDecision(request, policy, status, RoutingOutcome.Unassigned, code,
             candidate, confidence, ownership, ownership?.PrimaryUserId);
-        var workItem = new UnassignedWorkItem
+        return new RoutingResult(decision, null, WorkItemFor(decision, policy));
+    }
+
+    /// <summary>
+    /// The ONE place an <see cref="UnassignedWorkItem"/> is built, for any reason.
+    ///
+    /// <para>Every field is derived from the decision that caused it, so a queue row can never
+    /// disagree with the decision it points at. That is why this takes the decision rather than the
+    /// request: the application service's manual-unassign path has a decision and no
+    /// <see cref="RoutingRequest"/>, and it must not hand-roll a second copy of this shape —
+    /// "Unassign" previously wrote a decision and NO queue row at all, which is precisely how a
+    /// released lead became invisible to every screen and every sweeper.</para>
+    /// </summary>
+    public static UnassignedWorkItem WorkItemFor(LeadRoutingDecision decision, RoutingPolicy policy)
+    {
+        ArgumentNullException.ThrowIfNull(decision);
+        ArgumentNullException.ThrowIfNull(policy);
+        return new UnassignedWorkItem
         {
-            BusinessUnitId = request.BusinessUnitId,
-            LeadId = request.LeadId,
+            BusinessUnitId = decision.BusinessUnitId,
+            LeadId = decision.LeadId,
             RoutingDecision = decision,
-            ReasonCode = code,
-            Priority = PriorityFor(status, code, confidence),
-            EnteredOn = request.OccurredOn,
-            SlaDueOn = request.OccurredOn.Add(policy.UnassignedSla),
-            SuggestedCustomerId = candidate?.CustomerId,
-            SuggestedUserId = ownership?.PrimaryUserId,
-            MatchConfidence = confidence,
-            RequiredAction = status is CustomerMatchStatus.Ambiguous or CustomerMatchStatus.BelowThreshold
+            ReasonCode = decision.DecisionCode,
+            Priority = PriorityFor(decision.MatchStatus, decision.DecisionCode, decision.MatchConfidence),
+            EnteredOn = decision.CreatedOn,
+            SlaDueOn = decision.CreatedOn.Add(policy.UnassignedSla),
+            SuggestedCustomerId = decision.CustomerId,
+            SuggestedUserId = decision.SuggestedUserId,
+            MatchConfidence = decision.MatchConfidence,
+            // The line a human actually reads on the queue. It is plain English on purpose: the
+            // decision code beside it is an audit key, not a sentence, and must never be the only
+            // thing a user is given to act on.
+            RequiredAction = decision.MatchStatus is CustomerMatchStatus.Ambiguous
+                or CustomerMatchStatus.BelowThreshold
                 ? "Confirm customer and owner"
                 : "Assign an eligible owner",
-            IdempotencyKey = request.IdempotencyKey
+            IdempotencyKey = decision.IdempotencyKey
         };
-        return new RoutingResult(decision, null, workItem);
     }
 
     private static int PriorityFor(CustomerMatchStatus status, string code, decimal confidence) => code switch
@@ -164,6 +234,10 @@ public sealed class DeterministicRoutingEngine
         "AMBIGUOUS_CUSTOMER" => 90,
         "OWNER_UNAVAILABLE" => 80,
         "MATCH_BELOW_THRESHOLD" => confidence >= 0.70m ? 75 : 70,
+        // A lead a human deliberately handed back is triaged, real work that somebody already
+        // decided was worth someone's time. It ranks above the two codes that mean "this tenant
+        // has not finished configuring routing yet", and below anything needing a customer decision.
+        ManuallyUnassignedCode => 65,
         "NO_EFFECTIVE_OWNERSHIP" => 60,
         "NO_MATCH_EVIDENCE" => 50,
         _ when status == CustomerMatchStatus.Ambiguous => 90,
@@ -179,7 +253,8 @@ public sealed class DeterministicRoutingEngine
         CustomerMatchCandidate? candidate,
         decimal confidence,
         CustomerOwnership? ownership,
-        long? selectedUserId) => new()
+        long? selectedUserId,
+        string? fallbackFor = null) => new()
         {
             BusinessUnitId = request.BusinessUnitId,
             LeadId = request.LeadId,
@@ -201,6 +276,11 @@ public sealed class DeterministicRoutingEngine
                 matchStatus = status.ToString(),
                 outcome = outcome.ToString(),
                 decisionCode = code,
+                // The code this decision REPLACED. Null on every ordinary decision; set only when
+                // the tenant's fallback owner took an inquiry the engine could not place, and it
+                // carries the reason it could not — without it, "DEFAULT_OWNER_ASSIGNED" would
+                // record that the fallback fired while erasing what it was standing in for.
+                fallbackForDecisionCode = fallbackFor,
                 requestHash = request.RequestHash,
                 // Why each scope did or did not have a key to match on. An underived scope is
                 // recorded with its reason rather than omitted, so "no Territory rule was

@@ -68,10 +68,14 @@ public static class EvidenceRetentionDisclosure
     /// extraction, and they survive this operation. Telling a tenant their personal data
     /// is gone because the PDF is gone would be a false compliance claim, so the claim is
     /// made here, once, next to the thing that would otherwise imply it.
+    ///
+    /// <para>It used to end "raise a Data Subject Request". There is no such process anywhere in
+    /// this product — no screen, no endpoint, no queue and no approver — so the one sentence
+    /// written specifically to stop a false compliance claim was closing with one: it sent a
+    /// tenant to a door that does not exist, and a tenant who tried would conclude the erasure had
+    /// been handled. It now names only what he can actually do.</para>
     /// </summary>
-    public const string NotErasure =
-        "This does not erase personal data. Buyer names and email addresses extracted from these "
-        + "documents remain in your leads and evidence records. To erase those, raise a Data Subject Request.";
+    public const string NotErasure = TenantDataControlCopy.NotErasure;
 
     public const string Irreversible =
         "This cannot be undone. Nexora keeps no backup of these files: once purged you cannot open, "

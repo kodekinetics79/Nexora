@@ -22,6 +22,13 @@ const ROUTING_DECISION_SENTENCES: Record<string, string> = {
   NO_EFFECTIVE_OWNERSHIP: 'Left unassigned: the customer was identified but nobody owns this account.',
   OWNER_UNAVAILABLE: 'Left unassigned: the account owner is not eligible for routing or is out of capacity.',
   MANUAL_ASSIGNMENT: 'Assigned by hand.',
+  // The two codes `ChangeLeadOwnershipAsync` writes when an owner is taken OFF a lead, plus the
+  // fallback-owner outcome. Unassigning no longer strands an enquiry — it goes back on the
+  // routing queue and automatic routing may pick it up again — so the sentence says "pool",
+  // not "removed".
+  MANUALLY_UNASSIGNED: 'A person handed this lead back to the pool.',
+  RETURNED_TO_AUTOMATIC_ROUTING: 'A person handed this lead back to automatic routing.',
+  DEFAULT_OWNER_ASSIGNED: 'Nexora could not work out an owner, so it went to the fallback owner.',
 };
 
 export const routingDecisionSentence = (code?: string | null): string =>
