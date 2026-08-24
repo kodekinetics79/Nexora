@@ -172,6 +172,86 @@ public class EmailInquiryStrandingInvariantTests
             EmailInquiryAssemblyStatus.FailedRecoverable, EmailInquiryAssemblyStatus.Extracting));
     }
 
+    /// <summary>
+    /// A message ALREADY IN A PERSON'S TRAY can still be holding a part that is not terminal, and
+    /// the transition table deliberately refuses to move it back — NeedsReview leads only to
+    /// Assembled or NoInquiry, because an automatic recompute must not pull a message out of a
+    /// human's queue.
+    ///
+    /// <para>That refusal is only safe if the PART has a mover of its own. It did not: assembly
+    /// NeedsReview + component FailedRecoverable + no job was the shape every recovery door was
+    /// shut on at once, and the sweep that did claim the component threw when it tried to
+    /// reschedule, forever. The governed scheduling reopen is that mover, and this test pins the
+    /// authority rather than the incident.</para>
+    /// </summary>
+    [Fact]
+    public void A_message_in_review_can_still_have_its_unscheduled_part_reopened()
+    {
+        // The automatic authority must NOT reach into a review tray — that is the property the
+        // governed one exists to provide safely.
+        Assert.False(EmailInquiryAssemblyStateMachine.CanAutomaticSchedulingRecoveryTransition(
+            EmailInquiryAssemblyStatus.NeedsReview));
+
+        // The governed one must, or the shape has no mover at all.
+        Assert.True(EmailInquiryAssemblyStateMachine.CanGovernedSchedulingRecoveryTransition(
+            EmailInquiryAssemblyStatus.NeedsReview));
+
+        // And it must reach every other state a part can be stranded in without a job.
+        foreach (var from in new[]
+                 {
+                     EmailInquiryAssemblyStatus.Captured,
+                     EmailInquiryAssemblyStatus.Inspecting,
+                     EmailInquiryAssemblyStatus.Extracting,
+                     EmailInquiryAssemblyStatus.FailedRecoverable,
+                     EmailInquiryAssemblyStatus.NeedsReview
+                 })
+        {
+            Assert.True(EmailInquiryAssemblyStateMachine.CanGovernedSchedulingRecoveryTransition(from),
+                $"A part of a message at {from} could hold no job and would have no way back.");
+        }
+    }
+
+    /// <summary>
+    /// The reopen is wide, so its limits matter as much as its reach. A decision that was made
+    /// ON PURPOSE is not reopened by a scheduling retry.
+    /// </summary>
+    [Fact]
+    public void The_governed_reopen_does_not_reach_a_decision_that_was_made_deliberately()
+    {
+        // Malware is not "retry later". RejectedSecurity is absorbing, and a reopen that could
+        // reach it would walk a refused message back into processing.
+        Assert.False(EmailInquiryAssemblyStateMachine.CanGovernedSchedulingRecoveryTransition(
+            EmailInquiryAssemblyStatus.RejectedSecurity));
+
+        // "This was never an inquiry" belongs to the audited triage reopen, which carries a
+        // human's judgement. A scheduling retry has none to offer.
+        Assert.False(EmailInquiryAssemblyStateMachine.CanGovernedSchedulingRecoveryTransition(
+            EmailInquiryAssemblyStatus.NoInquiry));
+
+        // And a message that already produced its Lead is finished.
+        Assert.False(EmailInquiryAssemblyStateMachine.CanGovernedSchedulingRecoveryTransition(
+            EmailInquiryAssemblyStatus.Assembled));
+    }
+
+    /// <summary>
+    /// The grant is the whole governance: without an actor and a reason there is no wider
+    /// authority to acquire. A future call site cannot get it by forgetting to pass something.
+    /// </summary>
+    [Fact]
+    public void A_reopen_cannot_be_performed_by_nobody_for_no_reason()
+    {
+        Assert.Throws<ArgumentException>(() => new EmailInquirySchedulingGrant("  ", "because"));
+        Assert.Throws<ArgumentException>(() => new EmailInquirySchedulingGrant("someone", "   "));
+
+        var sweep = EmailInquirySchedulingGrant.RecoverySweep;
+        Assert.Equal(EmailInquirySchedulingGrant.RecoverySweepActor, sweep.ActorId);
+        Assert.Contains(sweep.ActorId, sweep.Describe(), StringComparison.Ordinal);
+
+        // It is rendered on the Inbound Mail screen, which REJECTS rather than truncates
+        // anything over 300 characters — a reopen nobody can read is not a record.
+        Assert.True(sweep.Describe().Length <= 300, $"{sweep.Describe().Length} characters");
+    }
+
     // =====================================================================================
     // 2. EVERY NON-TERMINAL COMPONENT STATE HAS SOMETHING THAT MOVES IT
     // =====================================================================================
@@ -389,6 +469,31 @@ public class EmailInquiryStrandingInvariantTests
             "These reasons would render as a blank explanation:\n  " + string.Join("\n  ", oversize));
     }
 
+    /// <summary>
+    /// The capture grace is the one threshold here that may NOT be switched off. Zero would mean
+    /// "sweep a message the scheduler committed a millisecond ago", which is not an operator
+    /// intent — it is a race with the live scheduling pass, and every other knob in this options
+    /// class can legitimately be zeroed, so the floor has to live in the type rather than in a
+    /// convention nobody reads.
+    /// </summary>
+    [Fact]
+    public void The_capture_grace_cannot_be_switched_off()
+    {
+        Assert.True(new EmailInquiryAssemblyRecoveryOptions { CaptureGraceSeconds = 0 }
+            .ValidatedCaptureGrace >= TimeSpan.FromSeconds(30));
+        Assert.True(new EmailInquiryAssemblyRecoveryOptions { CaptureGraceSeconds = -5000 }
+            .ValidatedCaptureGrace >= TimeSpan.FromSeconds(30));
+
+        // And it is still a knob: a deployment that wants to wait longer can.
+        Assert.Equal(TimeSpan.FromSeconds(600),
+            new EmailInquiryAssemblyRecoveryOptions { CaptureGraceSeconds = 600 }.ValidatedCaptureGrace);
+
+        // The thresholds that MAY be zero still may be — the floor is deliberately narrow.
+        Assert.Equal(TimeSpan.Zero,
+            new EmailInquiryAssemblyRecoveryOptions { StrandedComponentSweepMinutes = 0 }
+                .ValidatedStrandedComponentAge);
+    }
+
     /// <summary>The ledger vocabulary is a varchar(50); an overflow would throw on write.</summary>
     [Fact]
     public void Every_ledger_status_fits_its_column()
@@ -408,6 +513,21 @@ public class EmailInquiryStrandingInvariantTests
     // =====================================================================================
     // Harness
     // =====================================================================================
+
+    /// <summary>
+    /// The one instruction the product used to give an operator about this shape — "reprocess the
+    /// message to rebuild it as one inquiry" — was guaranteed to fail: the reprocess command
+    /// throws on a message whose part holds no job. Telling somebody to take an action that
+    /// cannot work is worse than telling them nothing, because they conclude the data is at
+    /// fault. Pinned so the sentence cannot drift back.
+    /// </summary>
+    [Fact]
+    public void The_ownership_hold_does_not_tell_a_person_to_do_something_that_will_fail()
+    {
+        Assert.DoesNotContain("reprocess the message",
+            EmailInquiryHoldReasons.OwnershipUnresolvedDetail, StringComparison.OrdinalIgnoreCase);
+        Assert.True(EmailInquiryHoldReasons.OwnershipUnresolvedDetail.Length <= 300);
+    }
 
     /// <summary>Every non-empty combination WITH repetition, up to <paramref name="maxSize"/>.</summary>
     private static IEnumerable<IReadOnlyCollection<EmailInquiryComponentStatus>> CombinationsUpTo(

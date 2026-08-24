@@ -126,7 +126,11 @@ public static class EmailIngestEnqueuer
         EmailTriageDecision triage,
         IEmailInquiryAssemblyCoordinator coordinator,
         ILogger logger,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        // Present only on a GOVERNED reopen — a resume that may take a message out of a person's
+        // review tray, and therefore may only happen with an actor and a reason on the record.
+        // The ordinary poll and the ordinary reprocess both leave it null.
+        EmailInquirySchedulingGrant? grant = null)
     {
         ArgumentNullException.ThrowIfNull(assembly);
         ArgumentNullException.ThrowIfNull(components);
@@ -240,7 +244,7 @@ public static class EmailIngestEnqueuer
 
                 await coordinator.RecordComponentQueuedAsync(
                     assembly.BusinessUnitId, assembly.Id, component.ComponentKey, result.JobId, ct,
-                    result.StoragePath, result.SourceDocumentOccurrenceId);
+                    result.StoragePath, result.SourceDocumentOccurrenceId, grant);
                 scheduled++;
 
                 logger.LogInformation(

@@ -97,8 +97,13 @@ public interface IEmailInquiryIntakeService
     /// this may be attempted belongs to the caller, not here: this method reports what happened
     /// and never decides that a message has run out of chances.</para>
     /// </summary>
+    /// <param name="grant">
+    /// Supplied when the message may already have reached a person — a governed reopen, which
+    /// records who is doing it and why. Null resumes only a message still inside the pipeline.
+    /// </param>
     Task<EmailInquiryResumeResult> ResumeSchedulingAsync(
-        long businessUnitId, long assemblyId, CancellationToken ct = default);
+        long businessUnitId, long assemblyId, CancellationToken ct = default,
+        EmailInquirySchedulingGrant? grant = null);
 }
 
 /// <summary>
@@ -246,7 +251,8 @@ public sealed class EmailInquiryIntakeService : IEmailInquiryIntakeService
     }
 
     public async Task<EmailInquiryResumeResult> ResumeSchedulingAsync(
-        long businessUnitId, long assemblyId, CancellationToken ct = default)
+        long businessUnitId, long assemblyId, CancellationToken ct = default,
+        EmailInquirySchedulingGrant? grant = null)
     {
         var assembly = await _context.EmailInquiryAssemblies
             .FirstOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.Id == assemblyId, ct)
@@ -309,7 +315,7 @@ public sealed class EmailInquiryIntakeService : IEmailInquiryIntakeService
 
         var schedule = await EmailIngestEnqueuer.ScheduleAsync(
             assembly, components, plan, ingest, assembly.SenderAddress, _ingestion, triage,
-            _coordinator, _log, ct);
+            _coordinator, _log, ct, grant);
 
         if (schedule.Verdict != EmailManifestVerdict.Compatible)
         {

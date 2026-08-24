@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
@@ -202,7 +202,10 @@ const LeadsPage: React.FC = () => {
   // did not type: arriving from a dashboard tile can empty the grid with nothing on screen
   // explaining it, which is exactly the "no data" / "filtered to zero" confusion below.
   const filtersActive = search.trim().length > 0 || leadSource !== 'all' || Boolean(view);
-  const clearFilters = () => {
+  // useCallback, not a bare closure: the no-rows overlay below is memoised because DataGrid
+  // takes a component TYPE, and a fresh function identity each render would rebuild that type
+  // and remount the overlay under the user.
+  const clearFilters = useCallback(() => {
     setSearch('');
     setLeadSource('all');
     setPaginationModel((current) => ({ ...current, page: 0 }));
@@ -213,7 +216,7 @@ const LeadsPage: React.FC = () => {
       next.delete('state');
       setSearchParams(next, { replace: true });
     }
-  };
+  }, [view, searchParams, setSearchParams]);
 
   const syncEmailsMutation = useMutation({
     mutationFn: () => leadService.fetchEmails(),
@@ -268,23 +271,32 @@ const LeadsPage: React.FC = () => {
     title: 'No inquiries yet',
     message: 'Enquiries arrive on their own once a mailbox is connected — or you can read documents in from your machine right now.',
     action: (
-      <Button variant="contained" onClick={() => navigate('/procurement/leads/manual-upload')} sx={{ fontWeight: 700 }}>
-        Upload a document
-      </Button>
+      <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', justifyContent: 'center' }}>
+        <Button variant="contained" onClick={() => navigate('/procurement/leads/manual-upload')} sx={{ fontWeight: 700 }}>
+          Upload a document
+        </Button>
+        {/* An empty grid is also what a BROKEN intake looks like. Inbound Mail is the only screen
+            that can tell the user which of the two they are looking at, so it must be reachable
+            from here rather than only from the sidebar. */}
+        <Button variant="outlined" startIcon={<InboxIcon />} onClick={() => navigate('/procurement/leads/inbound-mail')} sx={{ fontWeight: 700 }}>
+          Open Inbound Mail
+        </Button>
+      </Box>
     ),
-    filtered: Boolean(search) || leadSource !== 'all' || Boolean(view),
+    filtered: filtersActive,
     filteredTitle: 'No inquiry matches this view',
     filteredMessage: 'Clear the search, the source filter and the tab to see every enquiry.',
     filteredAction: (
       <Button
         variant="outlined"
-        onClick={() => { setSearch(''); setLeadSource('all'); navigate('/procurement/leads/all'); }}
+        startIcon={<ClearFiltersIcon />}
+        onClick={clearFilters}
         sx={{ fontWeight: 700 }}
       >
         Show all inquiries
       </Button>
     ),
-  }), [search, leadSource, view, navigate]);
+  }), [filtersActive, clearFilters, navigate]);
 
   // Decision Brief summaries: one batched call for the current page's ids,
   // fired only after the leads query resolves. This never blocks the grid —
@@ -774,52 +786,6 @@ const LeadsPage: React.FC = () => {
             density={density}
             columnVisibilityModel={columnPreferences.columnVisibilityModel}
             onColumnVisibilityModelChange={columnPreferences.onColumnVisibilityModelChange}
-            slots={{
-              // "Filtered to zero" and "nothing has ever arrived" are completely different
-              // situations with completely different next actions, and the grid's default
-              // overlay — a bare "No rows" — makes them look identical. The first needs the
-              // filters cleared; the second means no inquiry has reached the system at all,
-              // and the place to find out why is Inbound Mail.
-              noRowsOverlay: () => (
-                <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 1.5, p: 3, textAlign: 'center' }}>
-                  {filtersActive ? (
-                    <>
-                      <ClearFiltersIcon sx={{ fontSize: 56, color: 'text.disabled' }} />
-                      <Typography sx={{ fontWeight: 800 }}>No inquiries match these filters</Typography>
-                      <Typography variant="body2" color="text.secondary">
-                        Nothing matches the search and filters currently applied. Clearing them
-                        shows every inquiry this business unit has.
-                      </Typography>
-                      <Button
-                        variant="outlined"
-                        startIcon={<ClearFiltersIcon />}
-                        onClick={clearFilters}
-                        sx={{ fontWeight: 700, borderRadius: 2 }}
-                      >
-                        Clear filters
-                      </Button>
-                    </>
-                  ) : (
-                    <>
-                      <InboxIcon sx={{ fontSize: 56, color: 'text.disabled' }} />
-                      <Typography sx={{ fontWeight: 800 }}>No inquiries yet</Typography>
-                      <Typography variant="body2" color="text.secondary">
-                        Nothing has become an inquiry yet. Inbound Mail shows every message that
-                        reached the mailbox and what the system decided about each one.
-                      </Typography>
-                      <Button
-                        variant="outlined"
-                        startIcon={<InboxIcon />}
-                        onClick={() => navigate('/procurement/leads/inbound-mail')}
-                        sx={{ fontWeight: 700, borderRadius: 2 }}
-                      >
-                        Open Inbound Mail
-                      </Button>
-                    </>
-                  )}
-                </Box>
-              ),
-            }}
           />
         )}
       </Paper>

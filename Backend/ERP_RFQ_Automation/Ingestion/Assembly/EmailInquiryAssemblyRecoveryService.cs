@@ -76,6 +76,28 @@ public sealed class EmailInquiryAssemblyRecoveryOptions
     /// </summary>
     public int LedgerReconciliationMinutes { get; set; } = 60;
 
+    /// <summary>
+    /// How long a message that is still <see cref="EmailInquiryAssemblyStatus.Captured"/> is
+    /// treated as OWNED BY THE SCHEDULING PASS that captured it, and therefore off limits to this
+    /// sweep.
+    ///
+    /// <para><b>Why this needs its own knob with a floor.</b> Capture and scheduling are one
+    /// operation from the caller's point of view but two steps in the database: the assembly and
+    /// its component rows are committed first, and the extraction jobs are bound afterwards, one
+    /// component at a time. In between, every part of a perfectly healthy message looks exactly
+    /// like a part that will never be scheduled — Pending, with no job. The only thing that tells
+    /// the two apart is time.</para>
+    ///
+    /// <para>The stranded-component threshold cannot serve here, because it is legitimately set
+    /// to zero in tests: what happens to a component is decided by the durable state of its job,
+    /// so age was never load bearing. That stopped being true for a component with NO job, and it
+    /// stopped being safe when the barrier learned to move a Captured message to NeedsReview —
+    /// before that, the sweep's verdict on a mid-capture message was an illegal transition and was
+    /// discarded, which hid the race. It is a real one: the sweep would close the parts of a
+    /// message the live scheduler was still binding, and the two would fight over it.</para>
+    /// </summary>
+    public int CaptureGraceSeconds { get; set; } = 120;
+
     public bool Enabled { get; set; } = true;
 
     public TimeSpan ValidatedInterval =>
@@ -112,6 +134,16 @@ public sealed class EmailInquiryAssemblyRecoveryOptions
 
     public TimeSpan ValidatedLedgerReconciliationAge =>
         TimeSpan.FromMinutes(Math.Clamp(LedgerReconciliationMinutes, 0, 7 * 24 * 60));
+
+    /// <summary>
+    /// FLOORED AT THIRTY SECONDS, and unlike every other threshold here it may NOT be set to
+    /// zero. Zero would mean "sweep a message the scheduler committed a millisecond ago", and
+    /// there is no operator intent that value could express: a genuinely stranded message is
+    /// minutes to days old, so nothing is lost by waiting, and a test that wants to prove the
+    /// sweep works ages its rows rather than disabling the guard.
+    /// </summary>
+    public TimeSpan ValidatedCaptureGrace =>
+        TimeSpan.FromSeconds(Math.Clamp(CaptureGraceSeconds, 30, 7 * 24 * 60 * 60));
 }
 
 /// <summary>
@@ -460,6 +492,7 @@ public sealed class EmailInquiryAssemblyRecoveryService : IEmailInquiryAssemblyR
 
         var cutoff = _time.GetUtcNow() - _options.ValidatedMinimumAge;
         var componentCutoff = _time.GetUtcNow() - _options.ValidatedStrandedComponentAge;
+        var captureCutoff = _time.GetUtcNow() - _options.ValidatedCaptureGrace;
 
         // No IgnoreQueryFilters. With no tenant pushed the filter
         // (`CurrentTenantId == null || ...`) is already a no-op, so the call bought nothing and
@@ -493,7 +526,10 @@ public sealed class EmailInquiryAssemblyRecoveryService : IEmailInquiryAssemblyR
                          // is no queue row to dead-letter), and invisible to the query above
                          // because its message can never reach ReadyForAssembly on its own.
                          || (c.Status == SweptOnlyWithoutJob && c.ExtractionJobId == null))
-                        && c.UpdatedAtUtc <= componentCutoff)
+                        && c.UpdatedAtUtc <= componentCutoff
+                        && !(c.ExtractionJobId == null
+                             && c.Assembly.Status == EmailInquiryAssemblyStatus.Captured
+                             && c.Assembly.UpdatedAtUtc > captureCutoff))
             .Select(c => c.BusinessUnitId)
             .Distinct()
             .ToListAsync(ct);
@@ -554,6 +590,7 @@ public sealed class EmailInquiryAssemblyRecoveryService : IEmailInquiryAssemblyR
         var intake = scope.ServiceProvider.GetRequiredService<IEmailInquiryIntakeService>();
         var cutoff = _time.GetUtcNow() - _options.ValidatedStrandedComponentAge;
         var resumeDeadline = _time.GetUtcNow() - _options.ValidatedSchedulingResumeWindow;
+        var captureCutoff = _time.GetUtcNow() - _options.ValidatedCaptureGrace;
 
         // Oldest first, bounded per cycle. One tenant's backlog of stranded parts cannot hold the
         // sweep for every other tenant on the platform.
@@ -562,7 +599,16 @@ public sealed class EmailInquiryAssemblyRecoveryService : IEmailInquiryAssemblyR
             .Where(c => c.BusinessUnitId == businessUnitId
                         && (SweptRegardlessOfJob.Contains(c.Status)
                             || (c.Status == SweptOnlyWithoutJob && c.ExtractionJobId == null))
-                        && c.UpdatedAtUtc <= cutoff)
+                        && c.UpdatedAtUtc <= cutoff
+                        // THE MESSAGE IS STILL BEING SCHEDULED. Capture commits the assembly and
+                        // its parts, then binds a job to each part in turn; in between, a healthy
+                        // part is indistinguishable from one that will never be scheduled. Only
+                        // time separates them, so a Captured message is left to the pass that owns
+                        // it. Nothing is lost by waiting: real stranded work is minutes old at the
+                        // very least, and this window is seconds.
+                        && !(c.ExtractionJobId == null
+                             && c.Assembly.Status == EmailInquiryAssemblyStatus.Captured
+                             && c.Assembly.UpdatedAtUtc > captureCutoff))
             .OrderBy(c => c.UpdatedAtUtc).ThenBy(c => c.Id)
             .Take(_options.ValidatedBatchSize)
             .Select(c => new
@@ -836,7 +882,14 @@ public sealed class EmailInquiryAssemblyRecoveryService : IEmailInquiryAssemblyR
                 heldReason ?? EmailIngestEnqueuer.SchedulingFailedReason,
                 EmailInquiryHoldReasons.SchedulingNotRecoveredDetail, false);
 
-        var resume = await intake.ResumeSchedulingAsync(businessUnitId, assemblyId, ct);
+        // GOVERNED, always — including when the assembly is still inside the pipeline and the
+        // narrower automatic authority would have done. The sweep can reopen a message that has
+        // already reached a person's tray, so it signs every reopen it makes with the same named
+        // actor rather than only the ones that strictly need it. A rescue nobody can attribute is
+        // the thing this grant exists to prevent, and "only sometimes attributable" is not a
+        // property worth having.
+        var resume = await intake.ResumeSchedulingAsync(
+            businessUnitId, assemblyId, ct, EmailInquirySchedulingGrant.RecoverySweep);
         return resume.Outcome switch
         {
             EmailInquiryResumeOutcome.Resumed =>
