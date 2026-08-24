@@ -356,7 +356,7 @@ jobs:
   # trigger that reads "not failed" as "passed" would ship a commit nothing ever tested.
   # ---------------------------------------------------------------------------------------------
   frontend-unit:
-    name: Frontend unit suite
+    name: Frontend unit suite (shard ${{ matrix.shard }}/3)
     needs: changes
     if: ${{ needs.changes.outputs.frontend == 'true' }}
     runs-on: ubuntu-latest
@@ -369,20 +369,30 @@ jobs:
     #  2. LEGIBILITY. "Frontend unit suite failed" and "Frontend build/e2e failed" are different
     #     problems with different owners. One red box that could mean either is worth less.
     #
-    # 60 minutes, and no sharding or pool tuning. The suite is import-bound — ~925 tests across 94
-    # files, roughly 18 minutes on a developer machine and over 35 on a 2-core runner — and the
-    # obvious reflexes here are to shard it or switch vitest to the threads pool. Both were
-    # measured and both work. Neither is worth doing yet.
+    # SHARDED, 2026-08-24. The note that used to sit here chose 60 minutes with no sharding and
+    # no pool tuning, and named its own revisit trigger: "when people are waiting on it, or when
+    # the suite grows enough that 60 minutes stops being generous." Both fired at once.
     #
-    # Nothing is waiting on this number. There are no customers, nobody is queuing behind CI, and
-    # a slow-but-correct gate that nobody is blocked by is not a problem. Sharding adds moving
-    # parts to a pipeline whose whole failing was that nobody understood what it ran, and the
-    # threads pool changes test isolation semantics — a real risk taken for a speed benefit that
-    # currently buys nothing.
+    # The suite grew 925 -> 1022 tests (94 -> 101 files) and straddled the limit: the SAME commit
+    # passed in 43m31s on one runner and was cancelled at 60m on two others, still emitting
+    # passing tests five seconds before the kill. Not a hang — genuinely out of budget. That made
+    # a green PR indistinguishable from a broken one, which is the failure this pipeline exists
+    # to avoid, and it blocked a real merge.
     #
-    # Revisit when CI time actually costs something: when people are waiting on it, or when the
-    # suite grows enough that 60 minutes stops being generous.
-    timeout-minutes: 60
+    # Sharding over pool tuning, deliberately: --shard splits by FILE and each shard is a separate
+    # process, so test isolation semantics are exactly what they were. Switching to the threads
+    # pool would have been faster still and changed what "isolated" means — the wrong risk to take
+    # on a suite that is the only gate on this project.
+    #
+    # ci-green needs no change: a matrix job's aggregate result is success only if every leg
+    # succeeds, so `needs['frontend-unit'].result` still means what it meant.
+    #
+    # Revisit when a single shard approaches 30 minutes: raise the shard count, not the timeout.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: Frontend
@@ -403,7 +413,9 @@ jobs:
         run: npm ci
 
       - name: Unit suite (vitest)
-        run: npm test
+        # fail-fast:false above so one failing shard does not cancel the others — you want the
+        # whole picture from one run, not the first failure and three cancellations.
+        run: npm test -- --shard=${{ matrix.shard }}/3
 
   ci-green:
     name: CI green
