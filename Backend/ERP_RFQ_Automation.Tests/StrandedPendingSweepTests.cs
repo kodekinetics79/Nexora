@@ -118,8 +118,76 @@ public sealed class StrandedPendingSweepTests : IDisposable
 
         Assert.Equal(1, recovered);
         Assert.Empty(ingestion.Calls); // nothing re-enqueued — the work already exists
+
+        // "Queued" IS the right answer here, and the reason is the job, not the occurrence: the
+        // seeded job is Pending with every attempt left, so a worker will genuinely claim it.
         Assert.Equal("Queued",
             (await ctx.EmailIngests.AsNoTracking().SingleAsync(e => e.Id == ingestId)).ParseStatus);
+        Assert.True(await HasClaimableJobAsync("email:flip-1@sender.example"),
+            "A row restored to Queued must have work a worker will actually claim.");
+    }
+
+    /// <summary>
+    /// THE INVARIANT, stated directly: a record this sweep calls recovered must be in a state
+    /// something consumes.
+    ///
+    /// <para>It was not. The sweep asked only whether an extraction occurrence existed and flipped
+    /// the row to "Queued" on that alone. "Queued" has exactly two writers that ever clear it —
+    /// the persist path and the worker's dead-letter annotation — and NEITHER runs for a job the
+    /// extraction queue's own claim statement dead-lettered, because no worker is in that loop.
+    /// So a message whose every job had stopped at 5/5 attempts was returned to a state nothing
+    /// consumes, counted as a recovery, logged as a success, and left exactly where it was. On the
+    /// live system this had happened to real customer RFQs for up to ten days, and the sweep had
+    /// run over them twenty hours earlier reporting that it had fixed them.</para>
+    /// </summary>
+    [Fact]
+    public async Task ARowWhoseExtractionWorkIsAllDeadIsNotReturnedToAStateNothingConsumes()
+    {
+        await SeedMailboxAsync();
+        var ingestId = await SeedStrandedIngestAsync(
+            "dead-1@sender.example", age: OlderThanThreshold,
+            rawEmailPath: WriteRawEmail("dead-1@sender.example", "Please quote the attached BOQ."));
+        // The production shape exactly: DeadLetter at MaxAttempts, which is what the queue's
+        // exhausted-lease CTE writes with no worker anywhere near it.
+        await SeedExtractionOccurrenceAsync(
+            "email:dead-1@sender.example", ExtractionStatus.DeadLetter, attempts: 5);
+        var ingestion = new RecordingIntake();
+        var service = CreateService();
+
+        await using var ctx = _db.ContextFor(null);
+        await service.SweepStrandedPendingIngestsAsync(
+            ctx, ingestion, new StubLlm(), Tenant, DateTime.UtcNow);
+
+        var parseStatus = (await ctx.EmailIngests.AsNoTracking()
+            .SingleAsync(e => e.Id == ingestId)).ParseStatus;
+
+        // NOT Queued. The state may be any terminal one the ledger vocabulary allows, but it must
+        // not claim progress: that claim is what stopped anyone looking for ten days.
+        Assert.False(await HasClaimableJobAsync("email:dead-1@sender.example"),
+            "Precondition: the seeded work is dead.");
+        Assert.NotEqual("Queued", parseStatus);
+        Assert.NotEqual("Pending", parseStatus);
+        Assert.Equal(ExtractionWorker.DeadLetterParseStatus, parseStatus);
+
+        // And it never surfaces an internal name at the person reading it.
+        Assert.DoesNotContain("DeadLetter", parseStatus, StringComparison.Ordinal);
+    }
+
+    /// <summary>Whether any job under this message's group key is one a worker would claim.</summary>
+    private async Task<bool> HasClaimableJobAsync(string logicalGroupKey)
+    {
+        await using var ctx = _db.ContextFor(null);
+        var states = await (
+            from occurrence in ctx.Set<SourceDocumentOccurrence>().AsNoTracking()
+            join job in ctx.Set<ExtractionJob>().AsNoTracking()
+                on occurrence.ExtractionJobId equals job.Id
+            where occurrence.BusinessUnitId == Tenant && occurrence.LogicalGroupKey == logicalGroupKey
+            select new { job.Status, job.Attempts, job.MaxAttempts }).ToListAsync();
+
+        return states.Any(j =>
+            j.Status is ExtractionStatus.Pending or ExtractionStatus.Leased
+                or ExtractionStatus.Extracting or ExtractionStatus.Persisting
+            && j.Attempts < j.MaxAttempts);
     }
 
     [Fact]
@@ -234,23 +302,65 @@ public sealed class StrandedPendingSweepTests : IDisposable
         return ingest.Id;
     }
 
-    private async Task SeedExtractionOccurrenceAsync(string logicalGroupKey)
+    /// <summary>
+    /// Seeds the shape PRODUCTION actually leaves behind: an occurrence AND the extraction job it
+    /// was created with.
+    ///
+    /// <para>The occurrence used to be seeded on its own, with <c>ExtractionJobId</c> null.
+    /// <c>DocumentIngestionService.IngestAsync</c> never produces that — it writes the job and
+    /// binds it in the same operation — so the sweep was being asked "does an occurrence exist"
+    /// on a fixture that could not answer the question that matters: is anything still going to
+    /// RUN it.</para>
+    /// </summary>
+    private async Task<long> SeedExtractionOccurrenceAsync(
+        string logicalGroupKey,
+        ExtractionStatus jobStatus = ExtractionStatus.Pending,
+        int attempts = 0,
+        bool withJob = true)
     {
         await using var ctx = _db.ContextFor(null);
         var batchId = Guid.NewGuid();
         var corpus = DocumentCorpus.Create(Tenant, batchId, CorpusSourceType.Email);
         ctx.Add(corpus);
         await ctx.SaveChangesAsync();
-        var source = SourceDocument.Create(Tenant, corpus.Id, new string('c', 64),
+        var contentHash = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
+        var source = SourceDocument.Create(Tenant, corpus.Id, contentHash,
             "boq.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             "test-evidence", "quarantine/boq.xlsx", "v1", 10);
         ctx.Add(source);
-        await ctx.SaveChangesAsync();
+
+        long? jobId = null;
+        if (withJob)
+        {
+            var job = new ExtractionJob
+            {
+                BusinessUnitId = Tenant,
+                BatchId = batchId,
+                SourceType = ExtractionSourceType.Email,
+                Status = jobStatus,
+                Attempts = attempts,
+                MaxAttempts = 5,
+                ContentHash = contentHash,
+                StoragePath = "objects/boq.xlsx",
+                CreatedOn = DateTime.UtcNow,
+                UpdatedOn = DateTime.UtcNow,
+                NextAttemptAt = DateTime.UtcNow
+            };
+            ctx.Add(job);
+            await ctx.SaveChangesAsync();
+            jobId = job.Id;
+        }
+        else
+        {
+            await ctx.SaveChangesAsync();
+        }
+
         var occurrence = SourceDocumentOccurrence.Create(
-            Tenant, source.Id, corpus.Id, $"sweep-test:{logicalGroupKey}", "{}");
+            Tenant, source.Id, corpus.Id, $"sweep-test:{logicalGroupKey}:{batchId}", "{}", jobId);
         occurrence.SetLogicalGroup(logicalGroupKey);
         ctx.Add(occurrence);
         await ctx.SaveChangesAsync();
+        return jobId ?? 0;
     }
 
     private string WriteRawEmail(string messageId, string body)
@@ -307,6 +417,14 @@ public sealed class StrandedPendingSweepTests : IDisposable
                 Held: 0, ExpectedComponents: 1,
                 AlreadyCaptured: _alreadyCaptured, SafeToAcknowledge: true, FailureReason: null));
         }
+        /// <summary>
+        /// Not this stub's subject. The resume path is proved against the real intake service on
+        /// PostgreSQL; a stand-in here would only assert its own return value.
+        /// </summary>
+        public Task<ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryResumeResult> ResumeSchedulingAsync(
+            long businessUnitId, long assemblyId, CancellationToken ct = default)
+            => Task.FromResult(new ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryResumeResult(
+                ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryResumeOutcome.NothingToResume, 0, 0));
     }
 
     private sealed class UnusedScopeFactory : IServiceScopeFactory

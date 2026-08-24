@@ -1,4 +1,5 @@
 using ERP_RFQ_Automation.Extraction;
+using System.Text.Json;
 using ERP_RFQ_Automation.Ingestion.Triage;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
@@ -27,6 +28,40 @@ public sealed record EmailInquiryIntakeResult(
         new(null, Guid.Empty, 0, 0, 0, 0, false, false, reason);
 }
 
+/// <summary>What a resume attempt did. Counts and a typed verdict — never message content.</summary>
+public enum EmailInquiryResumeOutcome
+{
+    /// <summary>No component of this message is held without a job. Nothing to do.</summary>
+    NothingToResume,
+
+    /// <summary>Scheduling ran again and at least one held component now holds a durable job.</summary>
+    Resumed,
+
+    /// <summary>The stored original is gone, so scheduling can never be re-driven from it.</summary>
+    EvidenceLost,
+
+    /// <summary>
+    /// The stored original no longer agrees with what was captured, so scheduling refuses. A
+    /// re-drive cannot fix this and repeating it forever is how a message is never decided.
+    /// </summary>
+    ManifestRefused,
+
+    /// <summary>
+    /// The message was classified as a supplier document rather than a request to quote. Its
+    /// parts are not owed extraction jobs at all, so resuming would be scheduling work that
+    /// nothing wants.
+    /// </summary>
+    NotAnInquiry,
+
+    /// <summary>Scheduling ran and every held component is still held.</summary>
+    StillHeld
+}
+
+/// <param name="Scheduled">Held components that now hold a durable job.</param>
+/// <param name="StillHeld">Held components that could not be scheduled on this pass.</param>
+public sealed record EmailInquiryResumeResult(
+    EmailInquiryResumeOutcome Outcome, int Scheduled, int StillHeld);
+
 public interface IEmailInquiryIntakeService
 {
     /// <summary>
@@ -41,6 +76,29 @@ public interface IEmailInquiryIntakeService
         EmailTriageDecision triage,
         string? clientEmail,
         CancellationToken ct = default);
+
+    /// <summary>
+    /// Re-drives scheduling for a message whose parts were HELD without ever reaching the queue,
+    /// from the durable original rather than from the mailbox.
+    ///
+    /// <para><b>Why this had to exist.</b> Four scheduling failures record
+    /// <see cref="EmailInquiryComponentStatus.FailedRecoverable"/> with no
+    /// <c>ExtractionJobId</c> — a manifest refusal, an evidence-storage outage, an inspection
+    /// fault and the catch-all. Nothing could move any of them afterwards. The recovery sweep
+    /// looked only at Pending/Inspecting/Extracting components; the operator dead-letter queue
+    /// needs a job that was never created; and the mailbox re-poll window is
+    /// <c>max(lastSuccessfulPoll, now - MinLookbackDays)</c>, one day by default, so within
+    /// 24-48 hours the message left the search window for good. The customer's request was
+    /// captured, durable, and unreachable.</para>
+    ///
+    /// <para>It runs the SAME door a fresh message takes —
+    /// <c>EmailIngestEnqueuer.ScheduleAsync</c> — against a manifest re-planned from the stored
+    /// bytes, so a replay cannot take a different path from the original. The bound on how long
+    /// this may be attempted belongs to the caller, not here: this method reports what happened
+    /// and never decides that a message has run out of chances.</para>
+    /// </summary>
+    Task<EmailInquiryResumeResult> ResumeSchedulingAsync(
+        long businessUnitId, long assemblyId, CancellationToken ct = default);
 }
 
 /// <summary>
@@ -64,6 +122,7 @@ public sealed class EmailInquiryIntakeService : IEmailInquiryIntakeService
     private readonly IEmailInquiryCaptureService _capture;
     private readonly IEmailInquiryAssemblyCoordinator _coordinator;
     private readonly IDocumentIngestion _ingestion;
+    private readonly IRawEmailEvidenceReader _rawEmail;
     private readonly ILogger<EmailInquiryIntakeService> _log;
 
     public EmailInquiryIntakeService(
@@ -71,12 +130,14 @@ public sealed class EmailInquiryIntakeService : IEmailInquiryIntakeService
         IEmailInquiryCaptureService capture,
         IEmailInquiryAssemblyCoordinator coordinator,
         IDocumentIngestion ingestion,
+        IRawEmailEvidenceReader rawEmail,
         ILogger<EmailInquiryIntakeService> log)
     {
         _context = context;
         _capture = capture;
         _coordinator = coordinator;
         _ingestion = ingestion;
+        _rawEmail = rawEmail;
         _log = log;
     }
 
@@ -182,5 +243,147 @@ public sealed class EmailInquiryIntakeService : IEmailInquiryIntakeService
             schedule.Held > 0 && schedule.Verdict == EmailManifestVerdict.Compatible
                 ? "component_scheduling_incomplete"
                 : null);
+    }
+
+    public async Task<EmailInquiryResumeResult> ResumeSchedulingAsync(
+        long businessUnitId, long assemblyId, CancellationToken ct = default)
+    {
+        var assembly = await _context.EmailInquiryAssemblies
+            .FirstOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.Id == assemblyId, ct)
+            ?? throw new InvalidOperationException(
+                $"Email inquiry assembly {assemblyId} was not found for this tenant.");
+
+        var components = await _context.EmailInquiryComponents
+            .Where(c => c.BusinessUnitId == businessUnitId && c.AssemblyId == assemblyId)
+            .OrderBy(c => c.Ordinal)
+            .ToListAsync(ct);
+
+        // The exact population this method exists for, and nothing else. A hold that DOES name a
+        // job belongs to audited dead-letter recovery: re-submitting the same content returns
+        // that same exhausted job and merely makes the component look active while nothing can
+        // claim it.
+        var heldWithoutJob = components
+            .Count(c => c.Status == EmailInquiryComponentStatus.FailedRecoverable
+                        && c.ExtractionJobId is null);
+        if (heldWithoutJob == 0)
+            return new EmailInquiryResumeResult(EmailInquiryResumeOutcome.NothingToResume, 0, 0);
+
+        var ingest = await _context.EmailIngests
+            .Include(e => e.EmailConfiguration)
+            .FirstOrDefaultAsync(e => e.Id == assembly.EmailIngestId, ct);
+        if (ingest is null)
+            return new EmailInquiryResumeResult(
+                EmailInquiryResumeOutcome.EvidenceLost, 0, heldWithoutJob);
+
+        // A supplier quote or invoice is not owed extraction jobs at all — the worker completes
+        // such a job without creating a Lead. Scheduling one here would queue work whose only
+        // possible outcome is to be routed away again.
+        var triage = ReconstructTriage(ingest);
+        if (triage.Outcome == EmailTriageOutcome.CommercialNonInquiry
+            || triage.Outcome == EmailTriageOutcome.Noise)
+            return new EmailInquiryResumeResult(
+                EmailInquiryResumeOutcome.NotAnInquiry, 0, heldWithoutJob);
+
+        var message = await _rawEmail.TryLoadAsync(businessUnitId, ingest, ct);
+        if (message is null)
+        {
+            _log.LogError(
+                "Assembly {AssemblyId} (business unit {BusinessUnitId}) has {Held} part(s) held "
+                + "without a processing job, and no copy of the original message survives, so "
+                + "scheduling cannot be re-driven.",
+                assemblyId, businessUnitId, heldWithoutJob);
+            return new EmailInquiryResumeResult(
+                EmailInquiryResumeOutcome.EvidenceLost, 0, heldWithoutJob);
+        }
+
+        // Recomputed from the stored bytes, exactly as the poller computes it from the live
+        // ones — the fresh body is a deterministic function of the message and is not stored
+        // separately. DRIFT IS SELF-DETECTING rather than silent: the body component's hash was
+        // recorded from this same derivation at capture, so a divergence makes the manifest
+        // verifier refuse and this message finalizes into a human's hands instead of being
+        // rescheduled against content nobody recorded.
+        var freshBodyText = EmailBodyNormalizer.Normalize(ExtractBodyText(message)).Fresh;
+
+        var plan = await EmailInquiryManifestPlanner.PlanAsync(
+            message, assembly.MessageKey, freshBodyText, ct: ct);
+
+        var schedule = await EmailIngestEnqueuer.ScheduleAsync(
+            assembly, components, plan, ingest, assembly.SenderAddress, _ingestion, triage,
+            _coordinator, _log, ct);
+
+        if (schedule.Verdict != EmailManifestVerdict.Compatible)
+        {
+            _log.LogError(
+                "Scheduling could not be resumed for assembly {AssemblyId} (business unit "
+                + "{BusinessUnitId}): the stored original and the recorded parts no longer agree "
+                + "({Verdict}). Retrying cannot change that.",
+                assemblyId, businessUnitId, schedule.Verdict);
+            return new EmailInquiryResumeResult(
+                EmailInquiryResumeOutcome.ManifestRefused, 0, heldWithoutJob);
+        }
+
+        _log.LogInformation(
+            "Scheduling resumed for assembly {AssemblyId} (business unit {BusinessUnitId}) from "
+            + "durable evidence: {Scheduled} of {Held} previously unscheduled part(s) now hold a "
+            + "processing job, {StillHeld} remain held.",
+            assemblyId, businessUnitId, schedule.Scheduled, heldWithoutJob, schedule.Held);
+
+        return new EmailInquiryResumeResult(
+            schedule.Scheduled > 0
+                ? EmailInquiryResumeOutcome.Resumed
+                : EmailInquiryResumeOutcome.StillHeld,
+            schedule.Scheduled, schedule.Held);
+    }
+
+    /// <summary>
+    /// The triage verdict as the ledger recorded it, so a replay carries the decision the gate
+    /// actually reached rather than re-deciding it from a message whose context has moved on.
+    ///
+    /// <para><c>CommercialDocumentTypeHint</c> is deliberately absent: it is not persisted, and
+    /// inventing one would route a supplier quote into lead creation. The caller refuses to
+    /// resume a <c>CommercialNonInquiry</c> message for exactly that reason, so the hint can
+    /// never be needed on this path.</para>
+    /// </summary>
+    private static EmailTriageDecision ReconstructTriage(EmailIngest ingest)
+    {
+        var outcome = Enum.TryParse<EmailTriageOutcome>(ingest.TriageOutcome, out var parsed)
+            ? parsed
+            // Null for every message ingested before the gate existed. Uncertain, not Inquiry:
+            // it is the outcome that carries no claim either way.
+            : EmailTriageOutcome.Uncertain;
+
+        string[] reasons;
+        try
+        {
+            reasons = string.IsNullOrWhiteSpace(ingest.TriageReasonJson)
+                ? []
+                : JsonSerializer.Deserialize<string[]>(ingest.TriageReasonJson) ?? [];
+        }
+        catch (JsonException)
+        {
+            reasons = [];
+        }
+
+        return new EmailTriageDecision(
+            outcome, reasons, CommercialDocumentTypeHint: null,
+            ThreadContinuation: !string.IsNullOrWhiteSpace(ingest.InReplyToMessageId)
+                                || !string.IsNullOrWhiteSpace(ingest.ReferencesJson));
+    }
+
+    /// <summary>
+    /// DRIFT GUARD: mirrors <c>EmailService.GetEmailBody</c>. Both derive the same text from the
+    /// same message, and a divergence is caught by the manifest verifier rather than producing a
+    /// second, different body for one email.
+    /// </summary>
+    private static string ExtractBodyText(MimeMessage message)
+    {
+        var plain = message.GetTextBody(MimeKit.Text.TextFormat.Plain);
+        if (!string.IsNullOrWhiteSpace(plain)) return plain;
+        var html = message.GetTextBody(MimeKit.Text.TextFormat.Html);
+        return html is null
+            ? string.Empty
+            : System.Text.RegularExpressions.Regex.Replace(html, "<.*?>", " ")
+                .Replace("&nbsp;", " ")
+                .Replace("\r\n", "\n");
     }
 }

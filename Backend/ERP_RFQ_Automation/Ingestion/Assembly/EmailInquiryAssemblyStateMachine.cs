@@ -42,6 +42,16 @@ public static class EmailInquiryAssemblyStateMachine
                 // every real message at Captured: scheduling could not advance it, so the
                 // barrier's later verdict was always an illegal transition and was discarded.
                 EmailInquiryAssemblyStatus.Extracting,
+                // A message every one of whose parts was ALREADY terminal at capture never
+                // enters Inspecting or Extracting — there is nothing to schedule, so no worker
+                // ever reports and the message's first evaluation happens while it is still
+                // Captured. A reply with a quoted-only body and a single .zip is exactly that
+                // shape: nothing to read, one part nobody could read, and the state machine's
+                // honest verdict is NeedsReview. Omitting it here made that verdict illegal, so
+                // the coordinator logged an error and left the message at Captured with no
+                // component in flight and nothing that would ever look at it again — a message
+                // acknowledged to the mailbox and then silently discarded.
+                EmailInquiryAssemblyStatus.NeedsReview,
                 // A message that carried nothing to capture is NOT ready — it has no inquiry.
                 // ReadyForAssembly is still deliberately absent from this row: reaching it
                 // requires a component to have completed, which means the message must have

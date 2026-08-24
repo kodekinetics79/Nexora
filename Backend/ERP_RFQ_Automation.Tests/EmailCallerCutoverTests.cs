@@ -394,6 +394,14 @@ public sealed class EmailCallerCutoverTests : IDisposable
             Calls.Add(new Call(message, ingest, configuration, freshBodyText, triage, clientEmail));
             return Task.FromResult(Result);
         }
+        /// <summary>
+        /// Not this stub's subject. The resume path is proved against the real intake service on
+        /// PostgreSQL; a stand-in here would only assert its own return value.
+        /// </summary>
+        public Task<ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryResumeResult> ResumeSchedulingAsync(
+            long businessUnitId, long assemblyId, CancellationToken ct = default)
+            => Task.FromResult(new ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryResumeResult(
+                ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryResumeOutcome.NothingToResume, 0, 0));
     }
 
     private static EmailInquiryIntakeResult Captured(

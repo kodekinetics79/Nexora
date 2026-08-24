@@ -182,4 +182,61 @@ public static class EmailInquiryHoldReasons
     /// <summary>The job stopped trying because a dependency was unavailable. The message is HELD
     /// rather than finalized, because the content is still readable once the fault is fixed.</summary>
     public const string StrandedInfrastructureFault = "stranded_infrastructure_fault";
+
+    // =====================================================================================
+    // Parts held WITHOUT a processing job. There is no queue row to exhaust its attempts and
+    // no dead letter to recover, so the sweep re-drives scheduling from the stored original
+    // and, when that cannot work, DECIDES the message rather than holding it again.
+    //
+    // The comment on AssemblyResultStorePendingDetail above used to be literally true of this
+    // build — "nothing sweeps held components — there is no recovery service". It no longer is
+    // for a hold with no job, which is the population that had no path out at all.
+    // =====================================================================================
+
+    /// <summary>
+    /// The recorded parts of the message and the stored original no longer agree, so scheduling
+    /// refuses. Terminal by construction: the disagreement is a fact about two durable records,
+    /// and no number of retries changes it.
+    ///
+    /// <para>This is the shape a manifest CONTRACT bump leaves behind. A message captured under
+    /// planner contract v2 or v3 is re-planned by a v4 build, the versions differ, every
+    /// non-terminal component is held, and — because the verdict is not Compatible — the message
+    /// is judged safe to acknowledge and released by the mailbox. Held with no job, no dead
+    /// letter, and no copy left to re-fetch.</para>
+    /// </summary>
+    public const string SchedulingRefusedByManifest = "scheduling_manifest_refused";
+
+    /// <summary>A part held with no job that could not be scheduled inside its recovery window.</summary>
+    public const string SchedulingNotRecovered = "scheduling_not_recovered";
+
+    /// <summary>A part held with no job whose stored original no longer survives.</summary>
+    public const string SchedulingEvidenceLost = "scheduling_evidence_lost";
+
+    /// <summary>A part of a message the intake gate classified as a supplier document.</summary>
+    public const string SchedulingNotAnInquiry = "commercial_non_inquiry";
+
+    /// <summary>
+    /// What a person is told when a part could not be handed to processing and the message is
+    /// being given to them instead.
+    ///
+    /// <para>Under the 300-character ceiling <c>presentableServerText</c> imposes, like every
+    /// sentence in this file — the coordinator stores these as <c>"{code}: {detail}"</c> and the
+    /// Inbound Mail screen REJECTS rather than truncates anything longer, which would render the
+    /// message with no reason at all.</para>
+    /// </summary>
+    public const string SchedulingNotRecoveredDetail =
+        "This part of the message could not be handed to processing, and retrying has not helped, "
+        + "so the message is being kept for review rather than left waiting. Nothing is lost — "
+        + "the original email and every part of it are retained.";
+
+    /// <summary>What a person is told when the stored copy of the message is gone.</summary>
+    public const string SchedulingEvidenceLostDetail =
+        "This part of the message could not be processed and no stored copy of the original "
+        + "remains, so it cannot be retried. The message is kept for review with everything that "
+        + "was read.";
+
+    /// <summary>What a person is told about a part of a supplier document that needed no inquiry.</summary>
+    public const string SchedulingNotAnInquiryDetail =
+        "This message was identified as a supplier document rather than a request to quote, so "
+        + "this part was not processed into an inquiry. Nothing has been lost.";
 }
