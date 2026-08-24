@@ -238,6 +238,25 @@ jobs:
       - name: List browser acceptance suite
         run: npm run e2e:list
 
+      # THE ONE BROWSER SUITE THAT CAN ACTUALLY RUN HERE.
+      #
+      # Everything below is gated on E2E_ACCEPTANCE_ENABLED and has therefore never executed, so
+      # this repository has had ZERO browser coverage. The a11y config does not need that gate:
+      # it starts its own fixture API and dev server, needs no secrets, no deployed environment
+      # and no credentials, and finishes in about a minute.
+      #
+      # It is not a substitute for the authenticated journey. It is the part that can be turned on
+      # today. It earns its place: collapsing the rail from 17 rows to 5 moved 64 destinations
+      # behind one door and stopped every one of them marking the current page (WCAG SC 4.1.2).
+      # Backend, vitest and tsc were all green on that change. This suite caught it, because it is
+      # the only thing here that renders a route a unit test never renders.
+      - name: Install Playwright Chromium (a11y)
+        run: npm run e2e:install
+
+      - name: Accessibility browser suite
+        run: npm run e2e:a11y
+
+
       # SAY OUT LOUD WHETHER THE ACCEPTANCE SUITE IS ACTUALLY GUARDING ANYTHING.
       #
       # Everything below this point is gated on `vars.E2E_ACCEPTANCE_ENABLED == 'true'`. When the
