@@ -55,6 +55,17 @@ public sealed class EvidenceRetentionService(
     public const string ActionBytesAbsent = "EVIDENCE_BYTES_ABSENT";
     public const string ActionLegacyUnresolved = "LEGACY_COPY_UNRESOLVED";
 
+    /// <summary>
+    /// What the run decided to KEEP, and why, rolled up by reason.
+    ///
+    /// <para>Its own event rather than a field on the run event, because it answers a different
+    /// question and gets asked on its own. Until now the audit trail answered "what did you
+    /// delete"; a tenant asked to account for his own data has to answer "what did you decide to
+    /// keep, and on whose authority" — and the reasons were already computed, then thrown away
+    /// into a purge-time footnote nobody re-reads.</para>
+    /// </summary>
+    public const string ActionRunKept = "EVIDENCE_BYTES_PURGE_KEPT";
+
     // ---------------------------------------------------------------- read
 
     public async Task<EvidenceRetentionView> GetAsync(long tenantId, CancellationToken ct)
@@ -254,7 +265,10 @@ public sealed class EvidenceRetentionService(
             EvidenceRetentionDisclosure.For(command.IsDryRun, purged, bytesReclaimed), false);
 
         if (!command.IsDryRun)
+        {
             await RecordRunAsync(tenantId, actorUserId, idempotencyKey, reason, policy, result, ct);
+            await RecordKeptAsync(tenantId, actorUserId, idempotencyKey, reason, policy, result, ct);
+        }
         return result;
     }
 
@@ -615,15 +629,23 @@ public sealed class EvidenceRetentionService(
     }
 
     /// <summary>
-    /// Documents frozen by the archive governance log — legal hold, or a deletion request
-    /// that has not been approved. Hold lives on the occurrence, but bytes are shared
-    /// content-addressed per document, so a hold on ANY occurrence blocks the underlying
-    /// document. There is deliberately no hold column: a second source of truth for whether
-    /// evidence is frozen is itself an audit finding.
+    /// Documents frozen by the archive governance log. Hold lives on the occurrence, but bytes
+    /// are shared content-addressed per document, so a hold on ANY occurrence blocks the
+    /// underlying document. There is deliberately no hold column: a second source of truth for
+    /// whether evidence is frozen is itself an audit finding.
+    ///
+    /// <para><b>A deletion request is no longer a block.</b> It used to be: a document with an
+    /// open DELETION_REQUESTED event was excluded from the purge until the request was approved —
+    /// and nothing anywhere could approve one. Clicking "request deletion review" therefore
+    /// removed the document from the only deletion a tenant could actually perform, which is the
+    /// exact inverse of what the button said. The action has been removed from
+    /// <see cref="CommercialDocumentArchiveService"/>, and the documents already stuck behind an
+    /// unapprovable request return to ordinary eligibility here — which honours what the tenant
+    /// asked for in the first place, rather than leaving it frozen forever.</para>
     /// </summary>
     private sealed record GovernanceBlocks(List<long> LegalHold, List<long> DeletionRequested)
     {
-        public IEnumerable<long> All => LegalHold.Concat(DeletionRequested);
+        public IEnumerable<long> All => LegalHold;
     }
 
     private async Task<GovernanceBlocks> GovernanceBlocksAsync(long tenantId, CancellationToken ct)
@@ -699,7 +721,6 @@ public sealed class EvidenceRetentionService(
         var tenantHoldActive = await TenantHoldBlocksAsync(tenantId, ct);
         var governance = await GovernanceBlocksAsync(tenantId, ct);
         var held = governance.LegalHold.ToHashSet();
-        var pendingDeletion = governance.DeletionRequested.ToHashSet();
         var blockedActions = (await OpenHumanActionDocumentIdsAsync(tenantId, ct)).ToHashSet();
         var statutoryTypes = EvidenceRetentionEligibility.StatutoryDocumentTypes.ToArray();
         var statutory = (await db.CommercialDocumentClassifications.AsNoTracking()
@@ -728,7 +749,6 @@ public sealed class EvidenceRetentionService(
             document.Id,
             document.OriginalFileName,
             tenantHoldActive || held.Contains(document.Id) ? EvidenceRetentionEligibility.Skip.LegalHold
-            : pendingDeletion.Contains(document.Id) ? EvidenceRetentionEligibility.Skip.DeletionNotApproved
             : statutory.Contains(document.Id) ? EvidenceRetentionEligibility.Skip.StatutoryDocumentType
             : openIntake.Contains(document.Id) ? EvidenceRetentionEligibility.Skip.OpenIntake
             : blockedActions.Contains(document.Id) ? EvidenceRetentionEligibility.Skip.OpenHumanAction
@@ -777,6 +797,57 @@ public sealed class EvidenceRetentionService(
                 actor = new { userId = actorUserId, mode = "TENANT_INITIATED" }
             }),
             IdempotencyKey = idempotencyKey,
+            ActorUserId = actorUserId,
+            OccurredOn = DateTime.UtcNow
+        });
+        await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// The other half of the tombstone, at run level: every document this run refused to touch,
+    /// grouped by the rule that refused it, with a count.
+    ///
+    /// <para>Written as a separate append-only event under a derived Idempotency-Key so a replayed
+    /// run cannot double it, and so "what was kept on 12 August, and why" is one query rather than
+    /// a reconstruction from per-document rows.</para>
+    /// </summary>
+    private async Task RecordKeptAsync(long tenantId, long actorUserId, string idempotencyKey,
+        string reason, EvidenceRetentionPolicy policy, EvidenceRetentionPurgeResult result,
+        CancellationToken ct)
+    {
+        var keptKey = $"{idempotencyKey}:kept";
+        if (keptKey.Length > 160)
+            keptKey = keptKey[..160];
+        if (await ReplayAsync(tenantId, keptKey, ct) is not null)
+            return;
+
+        var byReason = result.Skipped
+            .GroupBy(x => x.Reason, StringComparer.Ordinal)
+            .Select(group => new { reason = group.Key, count = group.Count() })
+            .OrderByDescending(x => x.count).ThenBy(x => x.reason, StringComparer.Ordinal)
+            .ToList();
+
+        db.ChangeTracker.Clear();
+        db.TenantGovernanceAuditEvents.Add(new TenantGovernanceAuditEvent
+        {
+            BusinessUnitId = tenantId,
+            Area = Area,
+            AggregateType = "EvidenceRetentionRun",
+            AggregateReference = $"tenant:{tenantId}",
+            Action = ActionRunKept,
+            Reason = reason,
+            EvidenceJson = JsonSerializer.Serialize(new
+            {
+                scanned = result.Scanned,
+                eligible = result.Eligible,
+                purged = result.Purged,
+                keptCount = result.Skipped.Count,
+                kept = byReason,
+                policy = PolicyEvidence(policy),
+                actor = new { userId = actorUserId, mode = "TENANT_INITIATED" },
+                statutoryOverridesTenantPreference = true
+            }),
+            IdempotencyKey = keptKey,
             ActorUserId = actorUserId,
             OccurredOn = DateTime.UtcNow
         });

@@ -19,6 +19,7 @@ public sealed class PlatformGovernanceController(
     AiExtractionReadinessService aiReadiness,
     CommercialDocumentArchiveService archive,
     EvidenceRetentionService retention,
+    TenantDataControlService tenantData,
     QualityAnalyticsService quality) : ControllerBase
 {
     [HttpGet("artifacts")]
@@ -170,6 +171,45 @@ public sealed class PlatformGovernanceController(
         [FromBody] EvidenceRetentionPurgeCommand? command, CancellationToken ct) =>
         Execute(() => retention.RunPurgeAsync(TenantId(), ActorUserId(), IdempotencyKey(),
             command ?? new EvidenceRetentionPurgeCommand(true, "Dry run."), ct));
+
+    /// <summary>
+    /// What the tenant can choose to clear, and what will never be touched.
+    ///
+    /// <para>Read-only and safe: nothing here deletes anything. It returns three buckets with a
+    /// count and a byte total, plus the standing "kept, and why" panel. The bucket copy is
+    /// finished product text written on the server, not codes for the client to decorate — the
+    /// person reading this screen is a business owner, and he must never have to know what an
+    /// "assembly" is to understand his own mail.</para>
+    /// </summary>
+    [HttpGet("tenant-data")]
+    [RequireModulePermission("Users", PermissionAction.View)]
+    public Task<TenantDataControlView> GetTenantData(CancellationToken ct) =>
+        tenantData.GetAsync(TenantId(), ct);
+
+    /// <summary>
+    /// Clears — or simulates clearing — the buckets the tenant chose.
+    ///
+    /// <para>The same gate shape as the byte purge, for the same reasons. <c>dryRun</c> is
+    /// defaulted to true by the binder below, so a malformed or truncated body can never be read
+    /// as "delete everything"; the destructive path additionally needs a written reason, an
+    /// Idempotency-Key, and the confirmation phrase — which is verified on the SERVER, because a
+    /// phrase checked only in the browser is a decoration on a request anyone can send
+    /// directly.</para>
+    ///
+    /// <para>Unlike the age-based purge this does NOT require the automatic-deletion policy to be
+    /// switched on. That switch is consent to a STANDING rule that deletes on a schedule; this is
+    /// a one-off, per-run, explicitly confirmed decision about records that produced nothing.
+    /// Requiring a tenant to turn on automatic deletion of everything in order to delete four
+    /// test emails the system sent to itself is the imposition this feature exists to remove.</para>
+    /// </summary>
+    [HttpPost("tenant-data/cleanup")]
+    [RequireModulePermission("Users", PermissionAction.Edit)]
+    public Task<ActionResult<TenantDataCleanupResult>> RunTenantDataCleanup(
+        [FromBody] TenantDataCleanupCommand? command, CancellationToken ct) =>
+        Execute(() => tenantData.RunCleanupAsync(TenantId(), ActorUserId(), IdempotencyKey(),
+            command is null
+                ? new TenantDataCleanupCommand(null, true, "Dry run.", null)
+                : command with { DryRun = command.DryRun is false ? false : true }, ct));
 
     [HttpGet("quality")]
     [RequireModulePermission("Users", PermissionAction.View)]
