@@ -19,6 +19,8 @@ import {
   Email as EmailIcon,
   AutoAwesome as SparkleIcon,
   MoreVert as MoreIcon,
+  FilterAltOff as ClearFiltersIcon,
+  MarkEmailRead as InboxIcon,
 } from '@mui/icons-material';
 import useColumnPreferences from '../../hooks/useColumnPreferences';
 import ColumnPreferences from '../../components/common/ColumnPreferences';
@@ -160,7 +162,7 @@ const decisionFacts = (s: LeadDecisionSummary): string[] => {
 const LeadsPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const view = searchParams.get('view') || searchParams.get('state') || undefined;
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
@@ -194,6 +196,23 @@ const LeadsPage: React.FC = () => {
   const closeRowMenu = () => {
     setRowMenuAnchor(null);
     setRowMenuLeadId(null);
+  };
+
+  // Everything that can narrow this list. `view` is included because it is a filter the reader
+  // did not type: arriving from a dashboard tile can empty the grid with nothing on screen
+  // explaining it, which is exactly the "no data" / "filtered to zero" confusion below.
+  const filtersActive = search.trim().length > 0 || leadSource !== 'all' || Boolean(view);
+  const clearFilters = () => {
+    setSearch('');
+    setLeadSource('all');
+    setPaginationModel((current) => ({ ...current, page: 0 }));
+    if (view) {
+      // Drop only the view/state keys; anything else on the URL belongs to someone else.
+      const next = new URLSearchParams(searchParams);
+      next.delete('view');
+      next.delete('state');
+      setSearchParams(next, { replace: true });
+    }
   };
 
   const syncEmailsMutation = useMutation({
@@ -755,6 +774,52 @@ const LeadsPage: React.FC = () => {
             density={density}
             columnVisibilityModel={columnPreferences.columnVisibilityModel}
             onColumnVisibilityModelChange={columnPreferences.onColumnVisibilityModelChange}
+            slots={{
+              // "Filtered to zero" and "nothing has ever arrived" are completely different
+              // situations with completely different next actions, and the grid's default
+              // overlay — a bare "No rows" — makes them look identical. The first needs the
+              // filters cleared; the second means no inquiry has reached the system at all,
+              // and the place to find out why is Inbound Mail.
+              noRowsOverlay: () => (
+                <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 1.5, p: 3, textAlign: 'center' }}>
+                  {filtersActive ? (
+                    <>
+                      <ClearFiltersIcon sx={{ fontSize: 56, color: 'text.disabled' }} />
+                      <Typography sx={{ fontWeight: 800 }}>No inquiries match these filters</Typography>
+                      <Typography variant="body2" color="text.secondary">
+                        Nothing matches the search and filters currently applied. Clearing them
+                        shows every inquiry this business unit has.
+                      </Typography>
+                      <Button
+                        variant="outlined"
+                        startIcon={<ClearFiltersIcon />}
+                        onClick={clearFilters}
+                        sx={{ fontWeight: 700, borderRadius: 2 }}
+                      >
+                        Clear filters
+                      </Button>
+                    </>
+                  ) : (
+                    <>
+                      <InboxIcon sx={{ fontSize: 56, color: 'text.disabled' }} />
+                      <Typography sx={{ fontWeight: 800 }}>No inquiries yet</Typography>
+                      <Typography variant="body2" color="text.secondary">
+                        Nothing has become an inquiry yet. Inbound Mail shows every message that
+                        reached the mailbox and what the system decided about each one.
+                      </Typography>
+                      <Button
+                        variant="outlined"
+                        startIcon={<InboxIcon />}
+                        onClick={() => navigate('/procurement/leads/inbound-mail')}
+                        sx={{ fontWeight: 700, borderRadius: 2 }}
+                      >
+                        Open Inbound Mail
+                      </Button>
+                    </>
+                  )}
+                </Box>
+              ),
+            }}
           />
         )}
       </Paper>

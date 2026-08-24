@@ -1,5 +1,5 @@
 import { Fragment, useMemo, useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link as RouterLink, useNavigate } from 'react-router-dom';
 import {
   Alert,
@@ -46,6 +46,8 @@ import emailTriageService, {
   describeAssemblyState,
   describeComponentKind,
   describeComponentState,
+  describeMessageProgress,
+  describeReopenAbility,
   describeTriageOutcome,
   describeTriageReason,
   isTriageUnavailable,
@@ -55,6 +57,7 @@ import emailTriageService, {
   type EmailTriageRow,
   type MailPollReport,
 } from '../../api/services/emailTriageService';
+import mailboxService, { type Mailbox } from '../../api/services/mailboxService';
 
 /**
  * Inbound Mail — the Email Intake screen. What the system decided about every message that reached
@@ -75,6 +78,12 @@ import emailTriageService, {
  *  - "Open lead" appears only where a lead id actually exists. A message that needs review, was
  *    rejected, or is still being assembled has no lead, and offering the action anyway would send
  *    a rep to a dead route and teach them the screen lies;
+ *  - the same rule now governs every other action. "Reprocess as inquiry" is rendered only where
+ *    the endpoint can actually accept it, and a row that has neither a lead nor a usable reprocess
+ *    carries the action it DOES have — its ingestion batch, and for an administrator the
+ *    dead-letter replay — so no row is a dead end;
+ *  - an empty list never says "nothing is being hidden from you" without checking the mailboxes
+ *    first. With no active inbox, or one that has been failing to sign in, everything IS hidden;
  *  - a poll reports what it DID (mailboxes checked, messages found, captured, scheduled, flagged,
  *    rejected, failures) rather than a green tick. A 200 from /api/Email/fetch is not uniformly a
  *    success — with no active IMAP mailbox nothing was polled and nothing ever will be (ING-08).
@@ -92,7 +101,10 @@ const PAGE_SIZE = 25;
 const ASSEMBLY_REFRESH_MS = 15_000;
 
 interface TriageTab {
-  outcome: EmailTriageOutcome;
+  /** Stable identity for the tab. Not the outcome, because "All" sends no outcome at all. */
+  key: string;
+  /** Null sends no `outcome` parameter, which the endpoint reads as "every decision". */
+  outcome: EmailTriageOutcome | null;
   label: string;
   blurb: string;
   emptyTitle: string;
@@ -101,6 +113,23 @@ interface TriageTab {
 
 const TABS: TriageTab[] = [
   {
+    // EVERY message, including the ones no other tab can show.
+    //
+    // A row whose TriageOutcome is null — written today by manual upload, watched folders, the
+    // lead uploader and lead identity reconciliation — matches no outcome filter, so it appeared
+    // on none of the four decision tabs. Mail the system holds and cannot show is the one failure
+    // this screen exists to make impossible, and the fix is a tab that filters nothing.
+    key: 'All',
+    outcome: null,
+    label: 'All messages',
+    blurb:
+      'Every message this mailbox has taken, whatever the system decided about it — including mail that arrived before the triage gate existed and documents brought in from an upload or a watched folder, which carry no decision at all.',
+    emptyTitle: 'No message has reached this screen',
+    emptyMessage:
+      'Nothing has been ingested for this business unit yet. If you are expecting mail, check that an inbox is connected and polling.',
+  },
+  {
+    key: 'Noise',
     outcome: 'Noise',
     label: 'Rejected as noise',
     blurb:
@@ -109,6 +138,7 @@ const TABS: TriageTab[] = [
     emptyMessage: 'Nothing that reached the mailbox was classed as noise. Nothing is being hidden from you.',
   },
   {
+    key: 'CommercialNonInquiry',
     outcome: 'CommercialNonInquiry',
     label: 'Routed as supplier document',
     blurb:
@@ -117,6 +147,7 @@ const TABS: TriageTab[] = [
     emptyMessage: 'No inbound message has been recognised as a supplier quotation or invoice yet.',
   },
   {
+    key: 'Uncertain',
     outcome: 'Uncertain',
     label: 'Uncertain',
     blurb:
@@ -125,6 +156,7 @@ const TABS: TriageTab[] = [
     emptyMessage: 'Every message so far carried enough evidence for a definite decision.',
   },
   {
+    key: 'Inquiry',
     outcome: 'Inquiry',
     label: 'Extracted',
     blurb:
@@ -254,6 +286,70 @@ const pollHeadline = (report: MailPollReport): string => {
 };
 
 /**
+ * Why an empty Inbound Mail list is empty — read from the mailboxes, not assumed.
+ *
+ * "Nothing is being hidden from you" was printed without ever asking whether a mailbox exists.
+ * The overwhelmingly common cause of an empty list is that no inbox is connected, or that the
+ * connected one has been failing to sign in for days, and reassuring a tenant that nothing is
+ * hidden is exactly wrong there: everything is hidden, in their mailbox, unread.
+ *
+ * Returns null when the mailboxes are healthy enough that the empty list really is an empty list.
+ */
+const describeMailboxObstacle = (
+  mailboxes: Mailbox[],
+): { title: string; message: string } | null => {
+  const inbound = mailboxes.filter((mailbox) => mailbox.protocol === 'IMAP');
+  const active = inbound.filter((mailbox) => mailbox.isActive);
+  if (inbound.length === 0)
+    return {
+      title: 'No inbox is connected, so no mail can arrive',
+      message:
+        'This list is empty because nothing is being collected — not because nothing was sent. '
+        + 'Connect the mailbox enquiries are sent to, and this screen will show what the system '
+        + 'decides about each message.',
+    };
+  if (active.length === 0)
+    return {
+      title: 'Every connected inbox is switched off',
+      message:
+        'The mailboxes are set up but none of them is active, so nothing is being collected. '
+        + 'Mail sent to them is still sitting in the mailbox, unread by this system.',
+    };
+  const failing = active.filter((mailbox) => mailbox.healthState === 'Failing');
+  if (failing.length === active.length)
+    return {
+      title:
+        active.length === 1
+          ? 'The connected inbox cannot be read'
+          : 'None of the connected inboxes can be read',
+      message:
+        `${failing.map((mailbox) => mailbox.emailAddress).join(', ')} — the last attempts to sign `
+        + 'in failed, so nothing new has been collected. Mail sent since then is still in the '
+        + 'mailbox. Check the credentials and the host settings.',
+    };
+  const neverPolled = active.filter((mailbox) => mailbox.healthState === 'Never polled');
+  if (neverPolled.length === active.length)
+    return {
+      title: 'The inbox has never been read',
+      message:
+        `${neverPolled.map((mailbox) => mailbox.emailAddress).join(', ')} — this inbox has been `
+        + 'saved but never successfully polled, so nothing has been collected from it yet. Use '
+        + '"Poll now" above, or check the connection settings if it keeps failing.',
+    };
+  return null;
+};
+
+/**
+ * One override, one key. `crypto.randomUUID` is not available on every browser this product
+ * supports over plain HTTP, and a thrown ReferenceError here would take the whole screen down,
+ * so the fallback is deliberate — uniqueness within a session is all the key has to provide.
+ */
+const newIdempotencyKey = (): string =>
+  typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `reprocess-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+/**
  * The counts, stated one by one. Only what the server actually reported appears: "0 rejected" and
  * "rejections not reported" are different claims, and a poll summary that invents the first is
  * exactly the bare-toast problem this panel replaces.
@@ -275,14 +371,27 @@ export default function InboundMailTriagePage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { hasPermission } = useAuth();
-  const canReprocess = hasPermission('Leads', 'create') || hasPermission('Leads', 'edit');
+  // EXACTLY the gate the endpoint enforces: EmailTriageController.Reprocess requires
+  // Leads:Edit. It used to be checked as create OR edit, so a role with create-but-not-edit was
+  // shown a control that could only ever 403 — which reads as "the system is broken", not as
+  // "you are not allowed".
+  const canReprocess = hasPermission('Leads', 'edit');
   // Same gate the endpoint enforces (EmailController.ManualFetchAndSaveLeads requires
   // Leads:Create) and the same one Watched folders uses for its on-demand sweep. Offering a
   // control that can only ever 403 is its own defect — the operator cannot tell "not allowed"
   // from "broken".
   const canPoll = hasPermission('Leads', 'create');
+  /** /setup/mailboxes and /api/Mailbox are both behind the "Email & SMTP" module. */
+  const canSeeMailboxes = hasPermission('Email & SMTP', 'view');
+  /** /admin/operations, where a dead-lettered extraction job can be replayed. */
+  const canReplayDeadLetters = hasPermission('Users', 'view');
 
-  const [tabIndex, setTabIndex] = useState(0);
+  // The landing tab is deliberately "Rejected as noise" and NOT the first tab. A rejection is the
+  // only outcome that produces nothing downstream, so it is the only one that can hide a lost
+  // deal; "All messages" sits first because that is where a reader looks for everything, but it
+  // is not what this screen is for.
+  const defaultTabIndex = Math.max(0, TABS.findIndex((tab) => tab.key === 'Noise'));
+  const [tabIndex, setTabIndex] = useState(defaultTabIndex);
   const [page, setPage] = useState(1);
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [target, setTarget] = useState<EmailTriageRow | null>(null);
@@ -290,12 +399,19 @@ export default function InboundMailTriagePage() {
   const [reasonError, setReasonError] = useState<string | null>(null);
   const [confirmation, setConfirmation] = useState<string | null>(null);
   const [pollReport, setPollReport] = useState<MailPollReport | null>(null);
+  /** Minted once per opened dialog — see the reprocess mutation for why it is not per send. */
+  const [idempotencyKey, setIdempotencyKey] = useState(() => newIdempotencyKey());
 
   const activeTab = TABS[tabIndex] ?? TABS[0];
 
   const query = useQuery({
-    queryKey: ['email-triage', activeTab.outcome, page],
-    queryFn: () => emailTriageService.listTriage({ outcome: activeTab.outcome, page, pageSize: PAGE_SIZE }),
+    queryKey: ['email-triage', activeTab.key, page],
+    queryFn: () =>
+      emailTriageService.listTriage({
+        outcome: activeTab.outcome ?? undefined,
+        page,
+        pageSize: PAGE_SIZE,
+      }),
     // The assembler finishes on its own clock. While anything is in flight the list re-reads
     // itself, so "still assembling" resolves without the rep having to guess and press Refresh.
     refetchInterval: (activeQuery) =>
@@ -303,6 +419,46 @@ export default function InboundMailTriagePage() {
         ? ASSEMBLY_REFRESH_MS
         : false,
   });
+
+  /**
+   * How many messages sit behind each tab.
+   *
+   * Nothing counted stranded mail before this, so thirteen messages held on one tab looked
+   * identical to none: the reader had to open every tab to find out whether anything was waiting.
+   * The endpoint already returns the total for the filter it was given, so one one-row read per
+   * tab is the whole cost, and a tab whose count could not be read shows no number rather than a
+   * zero it cannot support.
+   */
+  const countQueries = useQueries({
+    queries: TABS.map((tab) => ({
+      queryKey: ['email-triage-count', tab.key],
+      queryFn: () =>
+        emailTriageService.listTriage({ outcome: tab.outcome ?? undefined, page: 1, pageSize: 1 }),
+      select: (result: { totalCount: number | null }) => result.totalCount,
+      staleTime: 30_000,
+    })),
+  });
+  // Five numbers off an already-resolved array — cheaper to recompute than to memoise, and a
+  // memo keyed on a rebuilt-every-render array would be a lie about what it depends on.
+  const tabCounts: (number | null)[] = TABS.map(
+    (_tab, index) => countQueries[index]?.data ?? null,
+  );
+
+  /**
+   * The mailboxes, read on mount — the only way to tell "nothing was sent" from "nothing is
+   * being collected". Skipped entirely for a role that cannot see them, because a 403 here would
+   * be indistinguishable from "no mailbox exists" and would produce a warning that is false.
+   */
+  const mailboxQuery = useQuery({
+    queryKey: ['inbound-mail-mailboxes'],
+    queryFn: () => mailboxService.getAll(),
+    enabled: canSeeMailboxes,
+    staleTime: 60_000,
+    retry: false,
+  });
+  const mailboxObstacle = mailboxQuery.isSuccess
+    ? describeMailboxObstacle(mailboxQuery.data)
+    : null;
 
   /**
    * The parts of the ONE open message. The list endpoint returns no components on purpose, and
@@ -321,10 +477,11 @@ export default function InboundMailTriagePage() {
         : false,
   });
 
-  /** Both reads of the same message. A change to one is a change to the other. */
+  /** Both reads of the same message, and the tab totals. A change to one is a change to all. */
   const refreshTriage = () => {
     void queryClient.invalidateQueries({ queryKey: ['email-triage'] });
     void queryClient.invalidateQueries({ queryKey: ['email-triage-message'] });
+    void queryClient.invalidateQueries({ queryKey: ['email-triage-count'] });
   };
 
   const pollMutation = useMutation({
@@ -344,7 +501,12 @@ export default function InboundMailTriagePage() {
   });
 
   const reprocessMutation = useMutation({
-    mutationFn: ({ id, why }: { id: number; why: string }) => emailTriageService.reprocess(id, why),
+    // The key is minted once when the dialog opens and reused for every send from it, so a
+    // double-click is ONE command the server can recognise as a replay. Minting it per call —
+    // which is what the service default does — turns a double-click into two distinct overrides,
+    // and the second one lands on a message the first has already moved.
+    mutationFn: ({ id, why, key }: { id: number; why: string; key: string }) =>
+      emailTriageService.reprocess(id, why, key),
     onSuccess: (result, variables) => {
       setTarget(null);
       setReason('');
@@ -382,6 +544,7 @@ export default function InboundMailTriagePage() {
     setTarget(row);
     setReason('');
     setReasonError(null);
+    setIdempotencyKey(newIdempotencyKey());
     reprocessMutation.reset();
   };
 
@@ -395,7 +558,7 @@ export default function InboundMailTriagePage() {
       return;
     }
     setReasonError(null);
-    reprocessMutation.mutate({ id: target.id, why: trimmed });
+    reprocessMutation.mutate({ id: target.id, why: trimmed, key: idempotencyKey });
   };
 
   const unavailable = query.isError && isTriageUnavailable(query.error);
@@ -555,12 +718,19 @@ export default function InboundMailTriagePage() {
         allowScrollButtonsMobile
         sx={{ borderBottom: 1, borderColor: 'divider', mb: 2 }}
       >
-        {TABS.map((tab) => (
-          <Tab key={tab.outcome} id={`triage-tab-${tab.outcome}`} aria-controls="triage-panel" label={tab.label} />
+        {TABS.map((tab, index) => (
+          <Tab
+            key={tab.key}
+            id={`triage-tab-${tab.key}`}
+            aria-controls="triage-panel"
+            // The number is part of the accessible name, not a decoration beside it: a count
+            // announced separately from its tab is a number with nothing attached to it.
+            label={tabCounts[index] === null ? tab.label : `${tab.label} (${tabCounts[index]})`}
+          />
         ))}
       </Tabs>
 
-      <Box role="tabpanel" id="triage-panel" aria-labelledby={`triage-tab-${activeTab.outcome}`}>
+      <Box role="tabpanel" id="triage-panel" aria-labelledby={`triage-tab-${activeTab.key}`}>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 2, maxWidth: 900 }}>
           {activeTab.blurb}
         </Typography>
@@ -581,7 +751,8 @@ export default function InboundMailTriagePage() {
 
         {!canReprocess && (
           <Alert severity="info" sx={{ mb: 2 }}>
-            You can review these decisions. Sending a message back through extraction needs the Leads permission.
+            You can review these decisions. Sending a message back through extraction needs the
+            &quot;edit leads&quot; permission.
           </Alert>
         )}
 
@@ -599,8 +770,8 @@ export default function InboundMailTriagePage() {
 
         {unavailable && (
           <EmptyState
-            title="Inbound mail triage is not available in this deployment yet"
-            message="This screen lists what the mailbox decided about each message. The service behind it has not been enabled here, so there is nothing to show — no message has been hidden."
+            title="Email intake is not switched on for this account"
+            message="This screen lists what the mailbox decided about each message. Email intake is not part of this account's plan, or has not been enabled on this deployment — so there is nothing to show, and no message has been hidden. This is not a permission your administrator can grant; it is a change to what the account includes."
             icon={<InboxIcon sx={{ fontSize: 44 }} />}
           />
         )}
@@ -613,7 +784,28 @@ export default function InboundMailTriagePage() {
           />
         )}
 
-        {!query.isLoading && !query.isError && rows.length === 0 && (
+        {/* An empty list has two very different causes, and only one of them is reassuring.
+            The mailboxes are read before anything comforting is said: when nothing is being
+            COLLECTED, "nothing is being hidden from you" is precisely backwards — everything is
+            hidden, sitting unread in a mailbox nobody is polling. */}
+        {!query.isLoading && !query.isError && rows.length === 0 && mailboxObstacle && (
+          <Alert severity="warning" sx={{ mb: 2 }}>
+            <AlertTitle sx={{ fontWeight: 800 }}>{mailboxObstacle.title}</AlertTitle>
+            <Typography variant="body2">{mailboxObstacle.message}</Typography>
+            <Button
+              size="small"
+              variant="outlined"
+              color="inherit"
+              startIcon={<OpenIcon />}
+              onClick={() => navigate('/setup/mailboxes')}
+              sx={{ mt: 1 }}
+            >
+              Open Email Inboxes
+            </Button>
+          </Alert>
+        )}
+
+        {!query.isLoading && !query.isError && rows.length === 0 && !mailboxObstacle && (
           <EmptyState title={activeTab.emptyTitle} message={activeTab.emptyMessage} icon={<InboxIcon sx={{ fontSize: 44 }} />} />
         )}
 
@@ -634,7 +826,7 @@ export default function InboundMailTriagePage() {
                     <TableCell>Subject</TableCell>
                     <TableCell>Decision</TableCell>
                     <TableCell>Why</TableCell>
-                    <TableCell>Assembly</TableCell>
+                    <TableCell>What became of it</TableCell>
                     <TableCell align="right">Action</TableCell>
                   </TableRow>
                 </TableHead>
@@ -645,6 +837,17 @@ export default function InboundMailTriagePage() {
                     const assemblyReason = presentableReason(row.assemblyReason);
                     const progress = describeComponentProgress(row);
                     const missingLead = describeMissingLead(row);
+                    // Whether the ONE override on this screen can possibly work for this row.
+                    const reopen = describeReopenAbility(row.assemblyState);
+                    // THE status a reader acts on, derived from the assembly and whether a lead
+                    // exists — never from the per-ingest checkpoint, which on live data reads
+                    // backwards (a closed, lead-less message carries "Queued"; a message that DID
+                    // produce a lead carries "NeedsReview"). See describeMessageProgress.
+                    const progressStatus = describeMessageProgress(row.assemblyState, row.leadId !== null);
+                    // A message stopped for a person, with no lead to open. Without a route out
+                    // of here these rows were a dead end: no "Open lead" (there is none), and a
+                    // "Reprocess" that could only answer 422.
+                    const strandedForHuman = assembly.needsHuman && row.leadId === null;
                     // Read off the row itself rather than the per-message query: the loss is
                     // stated the moment the panel opens, and it survives the parts read failing.
                     const skipped = row.skippedAttachments;
@@ -719,9 +922,9 @@ export default function InboundMailTriagePage() {
                             <>
                               <Chip
                                 size="small"
-                                color={assembly.chipColor}
+                                color={progressStatus.chipColor}
                                 variant="outlined"
-                                label={assembly.label}
+                                label={progressStatus.label}
                               />
                               {progress && (
                                 <Typography variant="caption" sx={{ display: 'block', mt: 0.5 }}>
@@ -751,7 +954,11 @@ export default function InboundMailTriagePage() {
                                 Open lead
                               </Button>
                             )}
-                            {canReprocess && (
+                            {/* Rendered only where it can work. It used to appear on every row,
+                                including the many where the endpoint can only refuse — and the
+                                refusal named the internal state, so pressing the only control on
+                                the screen answered "this message is already NeedsReview". */}
+                            {canReprocess && reopen.canReopen && (
                               <Button
                                 size="small"
                                 startIcon={<ReprocessIcon />}
@@ -761,11 +968,39 @@ export default function InboundMailTriagePage() {
                                 Reprocess as inquiry
                               </Button>
                             )}
+                            {/* The real next action for a message stopped for a person. The batch
+                                is where its files, their security verdicts and the retry live. */}
+                            {strandedForHuman && row.linkedBatchId && (
+                              <Button
+                                size="small"
+                                variant="outlined"
+                                startIcon={<OpenIcon />}
+                                onClick={() => navigate(`/procurement/leads/ingestion/${row.linkedBatchId}`)}
+                              >
+                                Open ingestion batch
+                              </Button>
+                            )}
                           </Stack>
                           {missingLead && (
                             <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
                               {missingLead}
                             </Typography>
+                          )}
+                          {canReprocess && !reopen.canReopen && reopen.disabledReason && (
+                            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
+                              {reopen.disabledReason}
+                            </Typography>
+                          )}
+                          {/* Only for the rows that are genuinely stuck, and only for a role that
+                              can reach the screen. A link a reader cannot open is another dead end. */}
+                          {strandedForHuman && canReplayDeadLetters && (
+                            <Button
+                              size="small"
+                              sx={{ mt: 0.5 }}
+                              onClick={() => navigate('/admin/operations')}
+                            >
+                              Retry failed processing
+                            </Button>
                           )}
                         </TableCell>
                       </TableRow>
@@ -866,9 +1101,9 @@ export default function InboundMailTriagePage() {
 
                                 <Box sx={{ mt: 1.5 }}>
                                   <Typography variant="body2" sx={{ fontWeight: 700 }}>
-                                    Assembly — {assembly.label}
+                                    What became of it — {progressStatus.label}
                                   </Typography>
-                                  <Typography variant="body2">{assembly.meaning}</Typography>
+                                  <Typography variant="body2">{progressStatus.meaning}</Typography>
                                   {progress && <Typography variant="body2">{progress}.</Typography>}
                                   {assemblyReason && (
                                     <Typography variant="body2" sx={{ mt: 0.5 }}>

@@ -392,4 +392,51 @@ public class EmailInquiryAssemblyStateMachineTests
         foreach (EmailInquiryAssemblyStatus status in Enum.GetValues<EmailInquiryAssemblyStatus>())
             Assert.True(EmailInquiryAssemblyStateMachine.CanTransition(status, status));
     }
+
+    // ---- the manual override -----------------------------------------------------------
+
+    /// <summary>
+    /// A message HELD by an infrastructure fault must be reopenable by a human.
+    ///
+    /// <para>It was not. The authority admitted <c>NoInquiry</c> alone, so the one control the
+    /// inbound-mail screen offers for a held message answered 422 — and nothing else in the
+    /// system touches one: the recovery sweep claims only ReadyForAssembly assemblies with
+    /// Pending/Inspecting/Extracting components, and <c>EmailInquiryComponentClosure</c> says in
+    /// as many words that nothing sweeps a held component back into flight. The customer's
+    /// enquiry was therefore stranded permanently, in plain sight, with a button on it.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(EmailInquiryAssemblyStatus.NoInquiry, true)]
+    [InlineData(EmailInquiryAssemblyStatus.FailedRecoverable, true)]
+    // Still refused, and each for its own reason: a security refusal is absorbing, and a message
+    // that is in flight, waiting for a person, or already an inquiry has not been stopped at all.
+    [InlineData(EmailInquiryAssemblyStatus.RejectedSecurity, false)]
+    [InlineData(EmailInquiryAssemblyStatus.Assembled, false)]
+    [InlineData(EmailInquiryAssemblyStatus.NeedsReview, false)]
+    [InlineData(EmailInquiryAssemblyStatus.ReadyForAssembly, false)]
+    [InlineData(EmailInquiryAssemblyStatus.Captured, false)]
+    [InlineData(EmailInquiryAssemblyStatus.Inspecting, false)]
+    [InlineData(EmailInquiryAssemblyStatus.Extracting, false)]
+    public void A_governed_manual_reopen_covers_both_shapes_of_stranded_message(
+        EmailInquiryAssemblyStatus status, bool expected)
+    {
+        Assert.Equal(expected,
+            EmailInquiryAssemblyStateMachine.CanGovernedTriageReopenTransition(status));
+    }
+
+    /// <summary>
+    /// The refusal has to be sayable to a salesperson. Every state gets a sentence, and no
+    /// sentence contains the member name — printing "FailedRecoverable" at a user is the defect,
+    /// not the refusal itself.
+    /// </summary>
+    [Fact]
+    public void Every_state_has_wording_that_never_prints_its_own_member_name()
+    {
+        foreach (EmailInquiryAssemblyStatus status in Enum.GetValues<EmailInquiryAssemblyStatus>())
+        {
+            var described = EmailInquiryAssemblyStateMachine.DescribeForReader(status);
+            Assert.False(string.IsNullOrWhiteSpace(described));
+            Assert.DoesNotContain(status.ToString(), described, StringComparison.OrdinalIgnoreCase);
+        }
+    }
 }

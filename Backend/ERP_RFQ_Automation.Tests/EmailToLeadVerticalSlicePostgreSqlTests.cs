@@ -671,6 +671,117 @@ public sealed class EmailToLeadVerticalSlicePostgreSqlTests(PostgreSqlTestDataba
         Assert.Contains("requestHash", audit.AfterJson);
     }
 
+    /// <summary>
+    /// THE stranded-hold defect, stated end to end.
+    ///
+    /// <para>A message held by an infrastructure fault had exactly one control offered for it —
+    /// "Reprocess as inquiry" — and the endpoint refused it with a 422, because the governed
+    /// reopen authority admitted <c>NoInquiry</c> only. Nothing else touches a held message:
+    /// the recovery sweep claims only ReadyForAssembly assemblies with
+    /// Pending/Inspecting/Extracting components, so the customer's enquiry stayed on the screen
+    /// forever with no way out. This drives the REAL graph — the same
+    /// <see cref="EmailTriageService"/> the controller calls, the real queue, the real worker,
+    /// the real barrier — and requires the message to reach a Lead.</para>
+    /// </summary>
+    [Fact]
+    public async Task Governed_manual_reprocess_releases_an_infrastructure_hold_and_creates_exactly_one_Lead()
+    {
+        var businessUnitId = UniqueBusinessUnitId();
+        var messageId = $"vertical-hold-reprocess-{Guid.NewGuid():N}@buyer.example";
+        await using (var connection = await _database.OpenConnectionAsync())
+            await EmailToLeadHarness.SeedTenantAsync(connection, businessUnitId, messageId);
+        var message = EmailToLeadHarness.BuildMessage(messageId);
+        long ingestId;
+        long assemblyId;
+
+        // 1. The outage. Every component is held with no durable job, and the message as a whole
+        //    is FailedRecoverable — the exact row the screen renders as "Held — service unavailable".
+        await using (var failing = EmailToLeadHarness.BuildGraph(
+            _database.ConnectionString, _storageRoot, new EmailToLeadHarness.RefusingLlm(),
+            registrations =>
+            {
+                registrations.RemoveAll<IDocumentIngestion>();
+                registrations.AddScoped<IDocumentIngestion, RefusingDocumentIngestion>();
+            }))
+        using (var scope = failing.CreateScope())
+        using (scope.ServiceProvider.GetRequiredService<ITenantScopeAccessor>().Push(businessUnitId))
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+            var ingest = await db.EmailIngests.SingleAsync(x => x.MessageId == messageId);
+            ingestId = ingest.Id;
+            var result = await scope.ServiceProvider.GetRequiredService<IEmailInquiryIntakeService>()
+                .CaptureAndScheduleAsync(
+                    message, ingest,
+                    await db.EmailConfigurations.SingleAsync(x => x.Id == businessUnitId),
+                    EmailToLeadHarness.BodyText,
+                    new EmailTriageDecision(EmailTriageOutcome.Inquiry, [], null, false),
+                    "buyer@customer.example");
+            assemblyId = result.AssemblyId!.Value;
+            Assert.Equal(3, result.Held);
+        }
+
+        await using var services = EmailToLeadHarness.BuildGraph(
+            _database.ConnectionString, _storageRoot, new EmailToLeadHarness.RefusingLlm());
+        using (var scope = services.CreateScope())
+        using (scope.ServiceProvider.GetRequiredService<ITenantScopeAccessor>().Push(businessUnitId))
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+            var held = await db.EmailInquiryAssemblies.AsNoTracking()
+                .Include(x => x.Components).SingleAsync(x => x.Id == assemblyId);
+            Assert.Equal(EmailInquiryAssemblyStatus.FailedRecoverable, held.Status);
+            Assert.All(held.Components, component =>
+                Assert.Equal(EmailInquiryComponentStatus.FailedRecoverable, component.Status));
+        }
+
+        // 2. The one control the screen offers. This is what used to 422.
+        using (var scope = services.CreateScope())
+        using (scope.ServiceProvider.GetRequiredService<ITenantScopeAccessor>().Push(businessUnitId))
+        {
+            var service = new EmailTriageService(
+                scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>(),
+                scope.ServiceProvider.GetRequiredService<IEmailInquiryIntakeService>(),
+                scope.ServiceProvider.GetRequiredService<IRawEmailEvidenceReader>(),
+                new NoopLogger<EmailTriageService>());
+            var result = await service.ReprocessAsync(
+                businessUnitId, ingestId, "operator@tenant.example",
+                "Storage came back; put the buyer's enquiry through again.", "hold-reopen-1");
+            Assert.Equal(3, result.Enqueued);
+            Assert.False(result.Replayed);
+        }
+
+        // 3. A double-click. The SAME command, twice: one audit row, nothing queued twice.
+        using (var scope = services.CreateScope())
+        using (scope.ServiceProvider.GetRequiredService<ITenantScopeAccessor>().Push(businessUnitId))
+        {
+            var service = new EmailTriageService(
+                scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>(),
+                scope.ServiceProvider.GetRequiredService<IEmailInquiryIntakeService>(),
+                scope.ServiceProvider.GetRequiredService<IRawEmailEvidenceReader>(),
+                new NoopLogger<EmailTriageService>());
+            var again = await service.ReprocessAsync(
+                businessUnitId, ingestId, "operator@tenant.example",
+                "Storage came back; put the buyer's enquiry through again.", "hold-reopen-1");
+            // Replayed, not re-queued: every job it reports is one the first command created.
+            Assert.True(again.Replayed);
+            Assert.Equal(3, again.Enqueued);
+            Assert.Equal(3, await scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>()
+                .Set<ExtractionJob>().CountAsync(x => x.BusinessUnitId == businessUnitId));
+        }
+
+        await EmailToLeadHarness.DrainQueueAsync(services, businessUnitId);
+        using var verify = services.CreateScope();
+        using var tenant = verify.ServiceProvider.GetRequiredService<ITenantScopeAccessor>().Push(businessUnitId);
+        var context = verify.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+        var assembly = await context.EmailInquiryAssemblies.AsNoTracking().SingleAsync(x => x.Id == assemblyId);
+        Assert.Equal(EmailInquiryAssemblyStatus.Assembled, assembly.Status);
+        Assert.NotNull(assembly.AssembledLeadId);
+        Assert.Equal(1, await context.Leads.CountAsync(x => x.BusinessUnitId == businessUnitId));
+        Assert.Single(await context.IamAuditEvents.AsNoTracking().Where(x =>
+            x.BusinessUnitId == businessUnitId
+            && x.Action == "EmailTriageReprocessed"
+            && x.TargetId == ingestId).ToListAsync());
+    }
+
     private sealed class BodyOnlyExtractor : IConversationalExtractionService
     {
         public Task<ChunkedExtractionOutcome> ExtractAsync(

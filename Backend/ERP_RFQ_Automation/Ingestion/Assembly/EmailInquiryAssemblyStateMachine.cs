@@ -160,9 +160,51 @@ public static class EmailInquiryAssemblyStateMachine
         => from is EmailInquiryAssemblyStatus.FailedRecoverable
             or EmailInquiryAssemblyStatus.Extracting;
 
-    /// <summary>Only the audited manual-triage command may reverse a NoInquiry decision.</summary>
+    /// <summary>
+    /// The two shapes of stranded message the audited manual-triage command may put back.
+    ///
+    /// <para><see cref="EmailInquiryAssemblyStatus.NoInquiry"/> is a DECISION the machine made —
+    /// "this carried nothing to quote" — and reversing it is the whole point of the inbound-mail
+    /// screen.</para>
+    ///
+    /// <para><see cref="EmailInquiryAssemblyStatus.FailedRecoverable"/> is not a decision at all:
+    /// it is a message parked because something this deployment depends on was down at the time.
+    /// It was excluded here on the reasoning that recovery would sweep it up, and nothing does —
+    /// <see cref="EmailInquiryAssemblyRecoveryService"/> claims only ReadyForAssembly assemblies
+    /// and only Pending/Inspecting/Extracting components, and
+    /// <see cref="EmailInquiryComponentClosure"/> says so in as many words. So the one control the
+    /// screen offered refused with a 422 and the customer's enquiry stayed stranded forever. A
+    /// held message is exactly the case a human override exists for, and the reopen re-enters the
+    /// pipeline rather than the finish line, so the barrier still decides what the message is.</para>
+    ///
+    /// <para>Terminal-and-absorbing <see cref="EmailInquiryAssemblyStatus.RejectedSecurity"/> is
+    /// still excluded, deliberately: malware is not "retry when storage returns".</para>
+    /// </summary>
     public static bool CanGovernedTriageReopenTransition(EmailInquiryAssemblyStatus from)
-        => from == EmailInquiryAssemblyStatus.NoInquiry;
+        => from is EmailInquiryAssemblyStatus.NoInquiry
+            or EmailInquiryAssemblyStatus.FailedRecoverable;
+
+    /// <summary>
+    /// The state, in the words a salesperson reads.
+    ///
+    /// <para>Exists so a refusal returned to a browser can name what is wrong without printing
+    /// <c>Assembled</c>, <c>NeedsReview</c> or <c>FailedRecoverable</c> at someone who has never
+    /// seen this enum. The member names are this system's private vocabulary; they belong in logs
+    /// and in the audit record, never in a message a user reads.</para>
+    /// </summary>
+    public static string DescribeForReader(EmailInquiryAssemblyStatus status) => status switch
+    {
+        EmailInquiryAssemblyStatus.Captured => "stored and waiting to be read",
+        EmailInquiryAssemblyStatus.Inspecting => "being scanned",
+        EmailInquiryAssemblyStatus.Extracting => "being read",
+        EmailInquiryAssemblyStatus.ReadyForAssembly => "read, and waiting to be turned into an inquiry",
+        EmailInquiryAssemblyStatus.Assembled => "already an inquiry",
+        EmailInquiryAssemblyStatus.NeedsReview => "waiting for a person to look at it",
+        EmailInquiryAssemblyStatus.FailedRecoverable => "held because a service it needs was unavailable",
+        EmailInquiryAssemblyStatus.NoInquiry => "closed because it carried nothing to quote",
+        EmailInquiryAssemblyStatus.RejectedSecurity => "refused on security grounds",
+        _ => "in a state this system cannot describe"
+    };
 
     /// <summary>
     /// THE commercial gate.

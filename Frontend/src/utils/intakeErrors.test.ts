@@ -3,6 +3,8 @@ import {
   RECOVERABLE_INTAKE_ERROR_CODES,
   explainIntakeError,
   explainIntakeItem,
+  explainSecurityRetryOutcome,
+  summariseSecurityRetryHolds,
   explainStoragePause,
   hasIntakeErrorExplanation,
   isInfrastructureHold,
@@ -460,5 +462,146 @@ describe('extraction-phase failures', () => {
     for (const code of ['extraction_dead_letter', 'extraction_retryable', 'EXTRACTION_AI_NOT_AUTHORIZED']) {
       expect(hasIntakeErrorExplanation(code)).toBe(true);
     }
+  });
+});
+
+/**
+ * The batch screen used to describe EVERY still-held retry outcome with one sentence:
+ * "they stay queued and retry automatically". Both clauses are false for the email-component
+ * refusals, and the second clause is false for every held file in this deployment — nothing calls
+ * ISecurityScanRecoveryService except LeadIngestionController, which runs when a person presses
+ * Retry. These pin each code so a future backend addition cannot inherit the false promise.
+ */
+describe('explainSecurityRetryOutcome', () => {
+  const BENIGN = ['email_component_already_scheduled', 'email_component_already_settled'];
+  const NEEDS_A_PERSON = [
+    'email_component_recovery_unavailable',
+    'email_component_ownership_unrecorded',
+    'email_component_ownership_unresolved',
+    'email_message_not_recoverable',
+  ];
+
+  it('tellsAReaderToRelaxWhenTheWorkIsAlreadyInHand', () => {
+    for (const errorCode of BENIGN) {
+      const copy = explainSecurityRetryOutcome({ status: 'StillAwaiting', errorCode });
+      expect(copy.resumesWithoutYou).toBe(true);
+      expect(copy.benign).toBe(true);
+      expect(copy.sentence).toMatch(/nothing to do/i);
+    }
+  });
+
+  it('tellsAReaderToActWhenNothingWillMoveTheFile', () => {
+    for (const errorCode of NEEDS_A_PERSON) {
+      const copy = explainSecurityRetryOutcome({ status: 'StillAwaiting', errorCode });
+      expect(copy.resumesWithoutYou).toBe(false);
+      expect(copy.benign).toBe(false);
+      // The specific defect: never imply a retry that never comes.
+      expect(copy.sentence).not.toMatch(/automatic/i);
+      expect(copy.sentence).not.toMatch(/stay(s)? queued/i);
+    }
+  });
+
+  it('namesAnAdministratorWhereTheReaderTrulyCannotAct', () => {
+    for (const errorCode of [
+      'email_component_ownership_unrecorded',
+      'email_component_ownership_unresolved',
+      'email_message_not_recoverable',
+    ]) {
+      expect(explainSecurityRetryOutcome({ status: 'StillAwaiting', errorCode }).sentence)
+        .toMatch(/administrator/i);
+    }
+  });
+
+  it('doesNotFlattenTheSixCodesIntoOneSentence', () => {
+    const sentences = new Set(
+      [...BENIGN, ...NEEDS_A_PERSON].map(
+        (errorCode) => explainSecurityRetryOutcome({ status: 'StillAwaiting', errorCode }).sentence,
+      ),
+    );
+    expect(sentences.size).toBe(6);
+  });
+
+  it('neverPrintsTheCodeItself', () => {
+    for (const errorCode of [...BENIGN, ...NEEDS_A_PERSON]) {
+      expect(explainSecurityRetryOutcome({ status: 'StillAwaiting', errorCode }).sentence)
+        .not.toContain(errorCode);
+    }
+  });
+
+  it('stopsPromisingAnAutomaticSweepForAnOrdinaryScannerHold', () => {
+    // Nothing sweeps a held file back into processing here, so the plain StillAwaiting outcome
+    // must name the button rather than a background job that does not exist.
+    const copy = explainSecurityRetryOutcome({ status: 'StillAwaiting' });
+    expect(copy.resumesWithoutYou).toBe(false);
+    expect(copy.sentence).toMatch(/nothing releases it on its own/i);
+    expect(copy.sentence).not.toMatch(/automatic/i);
+  });
+
+  it('treatsACodeThisBuildHasNeverSeenAsNeedingAPerson', () => {
+    // The whole point: a backend code added tomorrow must not inherit a reassurance nobody wrote.
+    const copy = explainSecurityRetryOutcome({ status: 'StillAwaiting', errorCode: 'email_component_something_new' });
+    expect(copy.resumesWithoutYou).toBe(false);
+    expect(copy.benign).toBe(false);
+  });
+
+  it('stillReportsTheOrdinaryOutcomes', () => {
+    expect(explainSecurityRetryOutcome({ status: 'Queued' }).resumesWithoutYou).toBe(true);
+    expect(explainSecurityRetryOutcome({ status: 'Rejected' }).resumesWithoutYou).toBe(false);
+    expect(explainSecurityRetryOutcome({ status: 'SourceObjectUnavailable' }).sentence)
+      .toMatch(/contact support/i);
+  });
+});
+
+describe('held-file copy promises only what this deployment does', () => {
+  it('doesNotTellAReaderToWaitForASweepThatDoesNotExist', () => {
+    // ISecurityScanRecoveryService has exactly one caller — LeadIngestionController — and no
+    // hosted service invokes it. "Processes automatically when scanning recovers" was therefore
+    // a promise nothing keeps, and it is the reason held enquiries sat untouched.
+    for (const code of RECOVERABLE_INTAKE_ERROR_CODES) {
+      const explanation = explainIntakeError(code);
+      expect(explanation.nextAction).not.toMatch(/automatic/i);
+      expect(explanation.nextAction).toMatch(/retry now/i);
+    }
+  });
+});
+
+describe('summariseSecurityRetryHolds', () => {
+  it('separatesTheFilesNobodyNeedsToTouchFromTheOnesThatNeedAPerson', () => {
+    const summary = summariseSecurityRetryHolds({
+      stillAwaiting: 3,
+      items: [
+        { status: 'StillAwaiting', errorCode: 'email_component_already_scheduled' },
+        { status: 'StillAwaiting', errorCode: 'email_component_ownership_unresolved' },
+        { status: 'StillAwaiting', errorCode: 'email_message_not_recoverable' },
+        { status: 'Queued', errorCode: null },
+      ],
+    });
+    expect(summary).toEqual({ resuming: 1, needsAPerson: 2 });
+  });
+
+  it('attributesFilesTheItemListDidNotAccountForToTheSideThatAsksForAction', () => {
+    // An older build, or a capped sweep, returns the counter without the detail. Silence must
+    // never be read as "these are fine".
+    expect(summariseSecurityRetryHolds({ stillAwaiting: 4, items: [] }))
+      .toEqual({ resuming: 0, needsAPerson: 4 });
+    expect(summariseSecurityRetryHolds({ stillAwaiting: 4 }))
+      .toEqual({ resuming: 0, needsAPerson: 4 });
+  });
+
+  it('countsNothingWhenNothingWasLeftHeld', () => {
+    expect(summariseSecurityRetryHolds({ stillAwaiting: 0, items: [{ status: 'Queued' }] }))
+      .toEqual({ resuming: 0, needsAPerson: 0 });
+  });
+
+  it('doesNotInventHoldsWhenTheItemsExceedTheCounter', () => {
+    // The counter is authoritative for the unaccounted top-up only; it never subtracts.
+    const summary = summariseSecurityRetryHolds({
+      stillAwaiting: 1,
+      items: [
+        { status: 'StillAwaiting', errorCode: 'email_component_already_settled' },
+        { status: 'StillAwaiting', errorCode: 'email_component_recovery_unavailable' },
+      ],
+    });
+    expect(summary).toEqual({ resuming: 1, needsAPerson: 1 });
   });
 });

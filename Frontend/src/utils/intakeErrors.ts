@@ -109,8 +109,12 @@ const INTAKE_ERRORS: Record<string, IntakeErrorEntry> = {
     title: 'Held — malware scanning is offline',
     whatHappened:
       'Our malware scanner did not respond, so this file was never given a verdict. Nothing is wrong with your document, and the original is stored exactly as you sent it.',
+    // NOT "it processes automatically when scanning recovers". Nothing sweeps a held file back
+    // into processing in this deployment — ISecurityScanRecoveryService is reachable only from
+    // LeadIngestionController, which runs when a PERSON presses Retry. Promising a sweep that
+    // does not exist is how a held enquiry sits untouched while everyone waits for it.
     nextAction:
-      'No re-upload is needed. This file processes automatically when scanning recovers, or you can retry it now.',
+      'No re-upload is needed. Press "Retry now" on this batch once scanning is back — nothing releases this file on its own.',
     category: 'infrastructure',
     isRetryable: true,
     // The code IS the cause, and the reassurance here is the part the user needs; the scanner's own
@@ -122,7 +126,7 @@ const INTAKE_ERRORS: Record<string, IntakeErrorEntry> = {
     whatHappened:
       'This file was set aside before inspection finished, so it has no scan result yet. The original is stored safely and unchanged.',
     nextAction:
-      'No re-upload is needed. Retry it once scanning is available, or leave it to process automatically.',
+      'No re-upload is needed. Press "Retry now" on this batch once scanning is available; nothing releases it on its own.',
     category: 'infrastructure',
     isRetryable: true,
     // A status, not a cause: several different verdicts land here, so a recorded reason wins.
@@ -437,4 +441,169 @@ export const isInfrastructureHold = (item: {
   // is what the backend read model itself keys off.
   if (item.intakeStatus === 'AwaitingSecurityScan') return true;
   return isRecoverableIntakeErrorCode(item.errorCode);
+};
+
+// ---------------------------------------------------------------------------------------------
+// What a security-scan RETRY did to one file.
+//
+// This is a different question from "why did this file stop", which is what INTAKE_ERRORS above
+// answers, and it is kept separate for that reason: the codes below are produced by the retry
+// attempt itself and describe its outcome, not the document.
+//
+// It exists because the batch screen used to answer that question with one sentence for every
+// outcome — "they stay queued and retry automatically" — and for several of these codes BOTH
+// clauses are false. Nothing in this deployment retries a held file on its own: the whole of
+// ISecurityScanRecoveryService is reachable only from LeadIngestionController, which runs when a
+// PERSON presses Retry. Telling a user to wait for a sweep that does not exist is the same defect
+// as offering a button that can only refuse.
+// ---------------------------------------------------------------------------------------------
+
+export interface SecurityRetryOutcomeCopy {
+  /** What happened to this file, and what the reader should do — in one sentence. */
+  sentence: string;
+  /**
+   * True ONLY when something other than this reader will still move the file: it is already in
+   * the processing queue, or it has already finished. False means a person must act — pressing
+   * Retry again, or escalating. It is never true merely because the file is "held".
+   */
+  resumesWithoutYou: boolean;
+  /** True when the outcome is benign and should not be presented as a problem. */
+  benign: boolean;
+}
+
+const SECURITY_RETRY_OUTCOMES: Record<string, SecurityRetryOutcomeCopy> = {
+  // ---- benign: the work is in hand, or already done -----------------------------------------
+  email_component_already_scheduled: {
+    sentence:
+      'this part of the email is already queued for processing, so the retry left it alone. '
+      + 'It finishes on its own — nothing to do.',
+    resumesWithoutYou: true,
+    benign: true,
+  },
+  email_component_already_settled: {
+    sentence:
+      'this part of the email had already finished, so there was nothing to retry. Nothing to do.',
+    resumesWithoutYou: true,
+    benign: true,
+  },
+
+  // ---- a person has to act ------------------------------------------------------------------
+  email_component_recovery_unavailable: {
+    sentence:
+      'the service that puts a held email part back was not available, so this file was not '
+      + 'released. Nothing releases it on its own — press Retry again shortly, and raise it with '
+      + 'an administrator if it keeps failing.',
+    resumesWithoutYou: false,
+    benign: false,
+  },
+  email_component_ownership_unrecorded: {
+    sentence:
+      'this file arrived as part of an email, but the record tying it to that message was never '
+      + 'written, so it cannot be put back on its own. An administrator has to recover it from '
+      + 'Operations.',
+    resumesWithoutYou: false,
+    benign: false,
+  },
+  email_component_ownership_unresolved: {
+    sentence:
+      'this file could not be matched back to the email it arrived with, so it cannot be put back '
+      + 'on its own. An administrator has to recover it from Operations.',
+    resumesWithoutYou: false,
+    benign: false,
+  },
+  email_message_not_recoverable: {
+    sentence:
+      'the email this file came from can no longer be sent back through processing. Nothing '
+      + 'further happens on its own — an administrator has to recover it from Operations.',
+    resumesWithoutYou: false,
+    benign: false,
+  },
+};
+
+/**
+ * The sentence shown after "Last retry:", and whether that outcome is one a reader can walk away
+ * from.
+ *
+ * <p>An UNKNOWN code is deliberately treated as needing a person. A future backend code that lands
+ * in this bucket must not inherit a promise nobody checked — silence about a next action is
+ * recoverable, a false reassurance is not.</p>
+ */
+export const explainSecurityRetryOutcome = (outcome: {
+  status?: string | null;
+  errorCode?: string | null;
+}): SecurityRetryOutcomeCopy => {
+  const code = normalizeCode(outcome.errorCode);
+  if (code !== null && SECURITY_RETRY_OUTCOMES[code]) return SECURITY_RETRY_OUTCOMES[code];
+
+  const status = typeof outcome.status === 'string' ? outcome.status.trim().toLowerCase() : '';
+  if (status === 'queued')
+    return { sentence: 'released for processing.', resumesWithoutYou: true, benign: true };
+  if (status === 'rejected')
+    return {
+      sentence:
+        'this file did not pass inspection on that attempt, so it was not released. Retrying it '
+        + 'again will not change that verdict.',
+      resumesWithoutYou: false,
+      benign: false,
+    };
+  if (status === 'sourceobjectunavailable')
+    return {
+      sentence:
+        'the stored original could not be read, so nothing was retried. Contact support with this '
+        + 'batch reference.',
+      resumesWithoutYou: false,
+      benign: false,
+    };
+  if (status === 'stillawaiting')
+    return {
+      // The honest version of the sentence this whole block replaces. Nothing in this deployment
+      // sweeps a held file back into processing, so "it retries automatically" was never true.
+      sentence:
+        'scanning had still not recovered, so this file stays held. Nothing releases it on its '
+        + 'own — press Retry again once scanning is back.',
+      resumesWithoutYou: false,
+      benign: false,
+    };
+  return {
+    sentence:
+      'the retry did not release this file. Press Retry again, and raise it with an administrator '
+      + 'if it keeps failing.',
+    resumesWithoutYou: false,
+    benign: false,
+  };
+};
+
+/**
+ * Splits the files a retry left held into the two groups that need DIFFERENT things from a reader.
+ *
+ * <p>"Still awaiting" is not one situation. A part already in the processing queue needs nobody;
+ * a part whose link to its email could not be resolved needs an administrator. One sentence
+ * covering both is guaranteed to be wrong for one of them, and the sentence that was there
+ * ("they stay queued and retry automatically") was wrong for both.</p>
+ *
+ * <p>The counter is authoritative and the item list can be capped or absent on an older build, so
+ * any still-held file the items do not account for is attributed to the side that asks for
+ * action. Under-promising costs a click; over-promising costs the enquiry.</p>
+ */
+export const summariseSecurityRetryHolds = (result: {
+  stillAwaiting?: number | null;
+  items?: Array<{ status?: string | null; errorCode?: string | null }> | null;
+}): { resuming: number; needsAPerson: number } => {
+  const items = Array.isArray(result.items) ? result.items : [];
+  const totals = items
+    .filter((entry) => (entry.status ?? '').trim().toLowerCase() === 'stillawaiting')
+    .reduce(
+      (running, entry) => {
+        if (explainSecurityRetryOutcome(entry).resumesWithoutYou) running.resuming += 1;
+        else running.needsAPerson += 1;
+        return running;
+      },
+      { resuming: 0, needsAPerson: 0 },
+    );
+
+  const reported = typeof result.stillAwaiting === 'number' && result.stillAwaiting > 0
+    ? result.stillAwaiting
+    : 0;
+  totals.needsAPerson += Math.max(reported - totals.resuming - totals.needsAPerson, 0);
+  return totals;
 };

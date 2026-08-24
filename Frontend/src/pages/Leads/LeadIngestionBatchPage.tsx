@@ -41,7 +41,12 @@ import { clientStatusLabel } from './ClientCell';
 import { useAuth } from '../../context/AuthContext';
 import ApiErrorNotice from '../../components/common/ApiErrorNotice';
 import { presentableServerText } from '../../utils/apiErrors';
-import { explainIntakeItem, isInfrastructureHold } from '../../utils/intakeErrors';
+import {
+  explainIntakeItem,
+  explainSecurityRetryOutcome,
+  isInfrastructureHold,
+  summariseSecurityRetryHolds,
+} from '../../utils/intakeErrors';
 
 type ChipColor = 'default' | 'primary' | 'success' | 'warning' | 'error' | 'info';
 
@@ -315,11 +320,12 @@ const ReconciliationRow = ({ item, onRetryHold, retrying, retryOutcome }: Reconc
               )}
               {retryOutcome && (
                 <Typography variant="caption" sx={{ display: 'block', mt: 0.75, fontWeight: 700 }}>
-                  Last retry: {retryOutcome.status === 'Queued'
-                    ? 'released for processing.'
-                    : retryOutcome.status === 'StillAwaiting'
-                      ? 'scanning is still offline; this file stays held.'
-                      : readable(retryOutcome.status)}
+                  {/* One vocabulary for every outcome the sweep can report, including the
+                      email-component refusals. The old branch said "scanning is still offline"
+                      for ALL of them, which is wrong for a part that is already queued (benign)
+                      and wrong again for one whose ownership could not be resolved (a person has
+                      to act). The raw code is never shown. */}
+                  Last retry: {explainSecurityRetryOutcome(retryOutcome).sentence}
                 </Typography>
               )}
             </Alert>
@@ -468,6 +474,7 @@ export default function LeadIngestionBatchPage() {
   const retryOutcomes = new Map(
     (retryMutation.data?.items ?? []).map((entry) => [entry.sourceDocumentOccurrenceId, entry]),
   );
+  const retryStillAwaiting = summariseSecurityRetryHolds(retryMutation.data ?? {});
   const metrics = [
     { label: 'Files received', value: batch.filesReceived, classification: null, icon: <FilesIcon color="action" /> },
     { label: 'Logical inquiries', value: batch.logicalInquiries, classification: null, icon: <ReviewIcon color="action" /> },
@@ -551,9 +558,13 @@ export default function LeadIngestionBatchPage() {
           ) : undefined}
         >
           <AlertTitle sx={{ fontWeight: 800 }}>Malware scanning is offline</AlertTitle>
-          {heldCount} file{heldCount === 1 ? ' is' : 's are'} held safely and will process automatically when it
-          recovers. Nothing is wrong with {heldCount === 1 ? 'this document' : 'these documents'}, and no re-upload
-          is needed — the originals are stored exactly as you sent them.
+          {/* NOT "will process automatically". Nothing in this deployment sweeps a held file back
+              into processing — the recovery service runs only when someone presses Retry — so the
+              banner names the action instead of promising one that never comes. */}
+          {heldCount} file{heldCount === 1 ? ' is' : 's are'} held safely, and {heldCount === 1 ? 'it stays' : 'they stay'} held
+          until someone releases {heldCount === 1 ? 'it' : 'them'}. Nothing is wrong with {heldCount === 1 ? 'this document' : 'these documents'},
+          and no re-upload is needed — the originals are stored exactly as you sent them. Use
+          &quot;Retry now&quot; once scanning is back.
         </Alert>
       )}
 
@@ -565,8 +576,15 @@ export default function LeadIngestionBatchPage() {
                 ? `${retryMutation.data.queued} file${retryMutation.data.queued === 1 ? '' : 's'} released for processing`
                 : 'No files could be released yet'}
             </AlertTitle>
-            {retryMutation.data.stillAwaiting > 0 && (
-              <>{retryMutation.data.stillAwaiting} still held because scanning has not recovered. They stay queued and retry automatically. </>
+            {/* Split by what each outcome actually MEANS, because "still awaiting" is not one
+                situation. A part already in the queue needs nobody; a part whose link to its
+                email could not be resolved needs an administrator. One sentence covering both
+                is guaranteed to be wrong for one of them. */}
+            {retryStillAwaiting.resuming > 0 && (
+              <>{retryStillAwaiting.resuming} already in the processing queue — {retryStillAwaiting.resuming === 1 ? 'it finishes' : 'they finish'} without you. </>
+            )}
+            {retryStillAwaiting.needsAPerson > 0 && (
+              <>{retryStillAwaiting.needsAPerson} still held, and {retryStillAwaiting.needsAPerson === 1 ? 'it will not' : 'they will not'} be released on their own — see each file below for what it needs. </>
             )}
             {retryMutation.data.rejected > 0 && (
               <>{retryMutation.data.rejected} did not pass inspection on this attempt. </>

@@ -158,7 +158,7 @@ export interface AssemblyStateCopy {
  */
 const ASSEMBLY_STATE_COPY: Record<string, AssemblyStateCopy> = {
   captured: {
-    label: 'Captured',
+    label: 'Stored — not read yet',
     meaning:
       'The message and its original are durably recorded. Nothing has been inspected yet, so no lead exists.',
     chipColor: 'default',
@@ -167,7 +167,7 @@ const ASSEMBLY_STATE_COPY: Record<string, AssemblyStateCopy> = {
     recognised: true,
   },
   inspecting: {
-    label: 'Inspecting',
+    label: 'Being scanned',
     meaning: 'The parts of this message are being scanned and checked. No lead exists yet.',
     chipColor: 'info',
     inProgress: true,
@@ -191,7 +191,7 @@ const ASSEMBLY_STATE_COPY: Record<string, AssemblyStateCopy> = {
     recognised: true,
   },
   assembled: {
-    label: 'Assembled',
+    label: 'Inquiry created',
     meaning: 'Every part of this message was merged into one lead — one inquiry, not one per file.',
     chipColor: 'success',
     inProgress: false,
@@ -307,6 +307,98 @@ export const describeAssemblyState = (state: string | null): AssemblyStateCopy =
       recognised: false,
     }
   );
+};
+
+/**
+ * WHAT ACTUALLY BECAME OF THIS MESSAGE — the one status a reader should be able to act on.
+ *
+ * <p><b>Why this exists.</b> The per-ingest checkpoint (`ParseStatus`) and the message-level
+ * assembly state disagree, and on live data they disagree in the direction that reads BACKWARDS.
+ * Measured on the live tenant: ingests whose assembly is closed at NeedsReview carry
+ * `ParseStatus = Queued`, which reads as "still being worked on" for a message that is finished
+ * and produced nothing; and ingests that DID produce a lead carry `ParseStatus = NeedsReview`,
+ * which reads as a problem for what is actually a success waiting for approval. A reader
+ * scanning that column would walk past every loss and investigate every win.</p>
+ *
+ * <p>The checkpoint is not wrong and is not changed — `LeadPersister` writes NeedsReview
+ * deliberately because AI-derived figures always need human approval, and the review queue keys
+ * on that exact string. It is simply not a description of the MESSAGE. So the screen derives its
+ * status from the assembly, plus the one fact that separates a success from a loss: whether a
+ * lead exists. Where the two disagree, the assembly wins.</p>
+ *
+ * <p>Three answers, and a reader must be able to tell them apart at a glance:</p>
+ * <ul>
+ *   <li><b>in-flight</b> — something is still going to move this message.</li>
+ *   <li><b>inquiry-created</b> — finished, and it produced an inquiry. A SUCCESS, even when the
+ *       inquiry still needs approving.</li>
+ *   <li><b>no-inquiry</b> — finished, and it produced nothing. A LOSS, whatever the checkpoint
+ *       says.</li>
+ * </ul>
+ */
+export type MessageProgressKind = 'in-flight' | 'inquiry-created' | 'no-inquiry' | 'unknown';
+
+export interface MessageProgressCopy {
+  label: string;
+  meaning: string;
+  chipColor: 'default' | 'error' | 'info' | 'warning' | 'success';
+  kind: MessageProgressKind;
+}
+
+export const describeMessageProgress = (
+  assemblyState: string | null,
+  hasLead: boolean,
+): MessageProgressCopy => {
+  const assembly = describeAssemblyState(assemblyState);
+
+  // A lead is proof of the outcome, and it outranks a state this build cannot read. Mail that
+  // predates the assembly aggregate reports no state at all and is judged on the lead alone.
+  if (assemblyState === null || !assembly.recognised) {
+    if (hasLead)
+      return {
+        label: 'Inquiry created',
+        meaning: 'This message produced an inquiry. Open it to see what was extracted.',
+        chipColor: 'success',
+        kind: 'inquiry-created',
+      };
+    return {
+      label: assemblyState === null ? 'Not reported' : assembly.label,
+      meaning: assembly.meaning,
+      chipColor: 'default',
+      kind: 'unknown',
+    };
+  }
+
+  if (assembly.inProgress)
+    return {
+      label: assembly.label,
+      meaning: assembly.meaning,
+      chipColor: assembly.chipColor,
+      kind: 'in-flight',
+    };
+
+  // Finished WITH a lead. Including from NeedsReview: a reviewer can pull an assembled message
+  // back for attention and the lead it already produced stays. That is a success awaiting a
+  // person, not a failure, and colouring it like one is what taught readers to ignore the column.
+  if (hasLead)
+    return {
+      label:
+        stateToken(assemblyState) === 'needsreview'
+          ? 'Inquiry created — needs your review'
+          : 'Inquiry created',
+      meaning:
+        'This message produced an inquiry. It is finished; anything still outstanding is a '
+        + 'decision for you, not work the system is doing.',
+      chipColor: 'success',
+      kind: 'inquiry-created',
+    };
+
+  // Finished WITHOUT a lead. The loss case, and the one the checkpoint dressed up as progress.
+  return {
+    label: `No inquiry — ${assembly.label.toLowerCase()}`,
+    meaning: assembly.meaning,
+    chipColor: assembly.chipColor === 'success' ? 'warning' : assembly.chipColor,
+    kind: 'no-inquiry',
+  };
 };
 
 export interface ComponentStateCopy {
@@ -847,15 +939,89 @@ export const readPollFailureReport = (error: unknown): MailPollReport | null => 
   return readPollReport(data);
 };
 
+/** The RFC 7807 `type` the entitlement filter stamps on a feature refusal. */
+const FEATURE_NOT_ENTITLED = 'feature-not-entitled';
+
 /**
- * True when the deployment simply does not expose triage yet (backend lock not shipped). Rendered
- * as an explanation rather than as a failure — nothing is broken, the feature is just not there.
+ * True when the deployment simply does not expose triage here (backend lock not shipped, or the
+ * tenant's plan does not include Email Intake). Rendered as an explanation rather than as a
+ * failure — nothing is broken, the feature is just not switched on.
+ *
+ * The 403 branch matters as much as the 404 one. An unentitled tenant got the generic
+ * permission-denied copy — "ask an administrator if you need it" — which sends the reader to a
+ * person who cannot grant it: an entitlement is a plan-level switch, not a role. Matching on the
+ * problem TYPE and not on the bare 403 is deliberate, so an ordinary role denial keeps its own
+ * (correct) wording.
  */
 export const isTriageUnavailable = (error: unknown): boolean => {
   if (!isRecord(error)) return false;
   const response = isRecord(error.response) ? error.response : undefined;
   const status = typeof response?.status === 'number' ? response.status : undefined;
-  return status === 404 || status === 501;
+  if (status === 404 || status === 501) return true;
+  if (status !== 403) return false;
+  const data = isRecord(response?.data) ? response.data : undefined;
+  return typeof data?.type === 'string' && data.type.includes(FEATURE_NOT_ENTITLED);
+};
+
+/**
+ * Whether "Reprocess as inquiry" can possibly succeed for this message, and — when it cannot —
+ * the sentence that says why in the reader's own words.
+ *
+ * <p>The button used to be rendered on every row. On most of them the endpoint answers 422, and
+ * it answered with the raw state name, so a salesperson pressing the only control on the screen
+ * was told the message "is already NeedsReview". This is the same shape as the
+ * `isInfrastructureHold` gate on the ingestion-batch screen: decide once, render the control only
+ * where it works, and say plainly what to do instead.</p>
+ *
+ * <p>The server remains the authority — this predicate mirrors its rule, it does not replace it.
+ * An assembly state this build does not recognise is treated as reopenable rather than hidden:
+ * refusing a real recovery because the wording drifted is the more expensive mistake.</p>
+ */
+export interface ReopenAbility {
+  canReopen: boolean;
+  /** Null exactly when {@link canReopen} is true. */
+  disabledReason: string | null;
+}
+
+export const describeReopenAbility = (state: string | null): ReopenAbility => {
+  // Mail that predates the assembly aggregate carries no state at all. Its reopen path is the
+  // legacy "rejected as noise" one, which is still live, so the control stays.
+  if (state === null) return { canReopen: true, disabledReason: null };
+  // Through the SAME alias table describeAssemblyState uses. Reading `completed` as an unknown
+  // state here would put the button back on a message that already became an inquiry.
+  const token = stateToken(state);
+  switch (ASSEMBLY_STATE_ALIASES[token] ?? token) {
+    case 'noinquiry':
+    case 'failedrecoverable':
+      return { canReopen: true, disabledReason: null };
+    case 'assembled':
+      return {
+        canReopen: false,
+        disabledReason: 'This message already became an inquiry. Open the lead instead.',
+      };
+    case 'rejectedsecurity':
+      return {
+        canReopen: false,
+        disabledReason:
+          'This message was refused on security grounds, so it cannot be sent back through '
+          + 'extraction. Contact support if you believe the refusal is wrong.',
+      };
+    case 'needsreview':
+      return {
+        canReopen: false,
+        disabledReason: 'This message is already waiting for a person to look at it.',
+      };
+    case 'captured':
+    case 'inspecting':
+    case 'extracting':
+    case 'readyforassembly':
+      return {
+        canReopen: false,
+        disabledReason: 'This message is still being processed, so there is nothing to send back yet.',
+      };
+    default:
+      return { canReopen: true, disabledReason: null };
+  }
 };
 
 const emailTriageService = {
