@@ -1,5 +1,5 @@
 import React from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, Link as RouterLink } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
   Box, Typography, Paper, Button, Stack, Chip, TextField,
@@ -13,6 +13,7 @@ import {
   ExpandLess as CollapseIcon,
   ErrorOutlined as AttentionIcon,
 } from '@mui/icons-material';
+import { useAuth } from '../../context/AuthContext';
 import intelligenceService from '../../api/services/intelligenceService';
 import type { PriceSignal, PriceSignalSource } from '../../api/services/intelligenceService';
 import { ConfidenceChip, formatMoney, parseUserNumber } from './common';
@@ -46,6 +47,7 @@ const SignalRow: React.FC<{ signal: PriceSignal; currency: string | null }> = ({
 const RfqPricingPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const { hasPermission } = useAuth();
   const rfqId = Number(id);
 
   const { data: preview, isLoading, isError, refetch } = useQuery({
@@ -116,6 +118,35 @@ const RfqPricingPage: React.FC = () => {
     );
   }
 
+  // ── Where pricing is ACTUALLY done ─────────────────────────────────────────
+  // This page is shadow-only by design: the server refuses POST apply-pricing outright
+  // (PricingIntelligenceController returns 409, PricingEngine.ApplyPricingAsync throws), so the one
+  // thing this screen owes the reader is the next click. Authoritative pricing happens in the RFQ's
+  // Sourcing workspace — approve a supplier's quote, then "Price customer quote" writes the customer
+  // line from that supplier's approved landed cost.
+  //
+  // Both conditions below MIRROR the destination rather than guessing at it, so the link can never
+  // promise a control the user will not find when they arrive:
+  //   • permission — SourcingWorkbenchPage gates its "Price customer quote" button on
+  //     Supplier History:edit AND Quotations:edit, the same pair
+  //     SupplierQuoteInboxController.ApplyCustomerPricing requires. Without both it is a dead end,
+  //     so we state what is missing instead of linking.
+  //   • award — a line's floorUnitPrice is READ from CustomerQuoteSourcingDecision, so a non-null
+  //     floor anywhere on this RFQ is proof an award has been recorded. No floor on any line means
+  //     nothing has been awarded yet and there is no approved cost to price against.
+  const canSetPrices = hasPermission('Supplier History', 'edit') && hasPermission('Quotations', 'edit');
+  const hasAwardedCost = preview.lines.some((line) => line.floorUnitPrice != null);
+  const sourcingPath = `/procurement/rfqs/${rfqId}/sourcing`;
+  const pricingDestination = !canSetPrices
+    ? 'You cannot set prices yourself: that needs "Can Edit" on both Quotations and Supplier History. '
+      + 'Ask an administrator to add them, then price this RFQ from its Sourcing workspace.'
+    : hasAwardedCost
+      ? 'Real prices are set in this RFQ\'s Sourcing workspace: open the awarded supplier line, choose '
+        + '"Price customer quote", and enter your margin over the supplier\'s approved cost.'
+      : 'No supplier has been awarded on this RFQ yet, so there is no approved cost to price against. '
+        + 'Approve a supplier quote in this RFQ\'s Sourcing workspace first — you can set the customer '
+        + 'price there straight afterwards.';
+
   const liveTotals = preview.lines.reduce<Record<string, number>>((totals, line) => {
     const price = parseUserNumber(prices[line.rfqItemId] ?? '');
     if (price == null || price <= 0 || line.quantity == null || line.quantity <= 0 || !line.currency) return totals;
@@ -163,6 +194,23 @@ const RfqPricingPage: React.FC = () => {
 
       <Alert severity="info" sx={{ mb: 2 }}>
         {preview.applyBlocker} What-if edits are temporary and are discarded when you leave this page.
+        <Box sx={{ mt: 1.5 }}>
+          <Typography variant="body2" sx={{ fontWeight: 700 }}>
+            {pricingDestination}
+          </Typography>
+          {canSetPrices && (
+            <Button
+              component={RouterLink}
+              to={sourcingPath}
+              size="small"
+              variant="outlined"
+              endIcon={<NextIcon />}
+              sx={{ mt: 1, fontWeight: 800, borderRadius: 2, textTransform: 'none' }}
+            >
+              {hasAwardedCost ? 'Go to Sourcing to set prices' : 'Go to Sourcing to award a supplier'}
+            </Button>
+          )}
+        </Box>
       </Alert>
 
       <Stack spacing={2}>
