@@ -61,23 +61,100 @@ public sealed class Gate8AccountTeamScopeTests
     }
 
     /// <summary>
-    /// A membership that has expired grants nothing. Team membership is effective-dated and the
-    /// predicate reads both ends of the window — an authorization filter that ignores
-    /// <c>EffectiveToUtc</c> would keep granting a rep access to a book they were moved off.
+    /// Clearing the Team field on the Users screen revokes the scope on the next request. This is
+    /// the honest replacement for an effective-dated expiry test: membership is current state in
+    /// <c>Users.TeamID</c>, so "moved off the book" is a write to that column and not a window that
+    /// closes on a date nobody was ever asked for.
     /// </summary>
     [Fact]
-    public async Task An_expired_membership_grants_no_account_scope()
+    public async Task Moving_a_rep_off_their_team_revokes_the_account_scope()
     {
         using var db = new TestDb();
         await using var context = db.ContextFor(Bu);
         await SeedOrganisationAsync(context);
-        var membership = await context.SalesTeamMemberships.SingleAsync(m => m.UserId == Rep);
-        membership.EffectiveToUtc = Now.AddDays(-1);
+
+        var before = await Resolve(context, RoleRanks.Member).ResolveAsync(Rep, 1, Bu, Now);
+        Assert.Equal([NorthTeam], before.TeamIds);
+
+        await AssignTeamAsync(context, (Rep, null));
+
+        var after = await Resolve(context, RoleRanks.Member).ResolveAsync(Rep, 1, Bu, Now);
+        Assert.Empty(after.TeamIds);
+    }
+
+    /// <summary>
+    /// P0 — THE defect this branch exists for, stated as the product owner would: a Sales Manager
+    /// sees their team's work and a Sales Rep does not.
+    ///
+    /// <para>Before the fix both sides of this assertion were the same list. The resolver read
+    /// <c>SalesTeamMembership</c>, which has no writer in the entire product and zero rows in
+    /// production, while the Users screen wrote <c>Users.TeamID</c> — so a manager resolved to
+    /// <c>teamIds=[], userIds=[self]</c>, byte-for-byte a rep's scope, and the middle tier granted
+    /// nothing at all.</para>
+    ///
+    /// <para>The rep half is the control. It fails if the fix over-corrects and hands every caller
+    /// their team-mates' work, which would be a worse defect than the one being repaired.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_sales_manager_sees_their_teams_work_and_a_sales_rep_does_not()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(Bu);
+        await SeedOrganisationAsync(context);
+
+        // The manager runs North and is not personally on any team — the ordinary shape, and the
+        // one that used to resolve to nothing.
+        var manager = await Resolve(context, RoleRanks.Manager).ResolveAsync(Supervisor, 1, Bu, Now);
+        var rep = await Resolve(context, RoleRanks.Member).ResolveAsync(Rep, 1, Bu, Now);
+
+        // The manager reaches the people on the team they run, and down into its sub-team.
+        Assert.Equal(AccountScopeTier.ManagedScope, manager.Tier);
+        Assert.Contains(Rep, manager.UserIds);
+        Assert.Contains(SubTeamRep, manager.UserIds);
+        Assert.Equal([NorthTeam, NorthSubTeam], manager.TeamIds);
+
+        // ...and still not the neighbouring desk, nor the tenant.
+        Assert.DoesNotContain(SouthRep, manager.UserIds);
+        Assert.False(manager.IsTenantWide);
+
+        // The rep reaches nobody but themselves, including nobody on their own team.
+        Assert.Equal(AccountScopeTier.AssignedAccounts, rep.Tier);
+        Assert.Equal([Rep], rep.UserIds);
+        Assert.DoesNotContain(SubTeamRep, rep.UserIds);
+
+        // The two tiers are genuinely different sets. This is the single assertion that was false
+        // before the fix.
+        Assert.True(manager.UserIds.Count > rep.UserIds.Count);
+    }
+
+    /// <summary>
+    /// The resolver reads the column the Users screen writes, and ONLY that column. A
+    /// <c>SalesTeamMembership</c> row — the table the resolver used to consult, which no screen can
+    /// produce — must not widen anybody's scope, or the two sources of truth are back and the
+    /// quieter one wins again.
+    /// </summary>
+    [Fact]
+    public async Task A_legacy_membership_row_grants_no_scope_on_its_own()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(Bu);
+        await SeedOrganisationAsync(context);
+
+        // SouthRep is on South via Users.TeamID. Hand them a membership row for North as well —
+        // the shape a hand-written INSERT or an abandoned import would leave behind.
+        context.SalesTeamMemberships.Add(new SalesTeamMembership
+        {
+            Id = 1, BusinessUnitId = Bu, UserId = SouthRep, TeamId = NorthTeam,
+            IsPrimary = true, EffectiveFromUtc = Now.AddDays(-90)
+        });
         await context.SaveChangesAsync();
 
-        var scope = await Resolve(context, RoleRanks.Member).ResolveAsync(Rep, 1, Bu, Now);
+        var scope = await Resolve(context, RoleRanks.Member).ResolveAsync(SouthRep, 1, Bu, Now);
+        Assert.Equal([SouthTeam], scope.TeamIds);
 
-        Assert.Empty(scope.TeamIds);
+        // ...and it does not smuggle them into the North manager's roll-up either.
+        var manager = await Resolve(context, RoleRanks.Manager).ResolveAsync(Supervisor, 1, Bu, Now);
+        Assert.DoesNotContain(SouthRep, manager.UserIds);
     }
 
     /// <summary>
@@ -399,10 +476,25 @@ public sealed class Gate8AccountTeamScopeTests
         });
         await context.SaveChangesAsync();
 
-        context.SalesTeamMemberships.AddRange(
-            Membership(1, Rep, NorthTeam),
-            Membership(2, SouthRep, SouthTeam),
-            Membership(3, SubTeamRep, NorthSubTeam));
+        // Membership is Users.TeamID — the column the Users screen writes and the ONLY one the
+        // resolver reads. It is set after the teams exist because it carries a foreign key onto
+        // them, which is the same two-step the customers below use for Customer.AccountTeamId.
+        //
+        // This seed deliberately writes NO SalesTeamMembership rows. Production has none and has
+        // no writer that could produce one, so a fixture that seeded them would be green on a
+        // shape the product never emits — which is exactly how the dead middle tier survived.
+        await AssignTeamAsync(context, (Rep, NorthTeam), (SouthRep, SouthTeam), (SubTeamRep, NorthSubTeam));
+    }
+
+    /// <summary>Puts users on teams the way the Users screen does, and nothing else.</summary>
+    private static async Task AssignTeamAsync(
+        ErpRfqAutomationContext context, params (long UserId, long? TeamId)[] assignments)
+    {
+        foreach (var (id, team) in assignments)
+        {
+            var user = await context.Users.SingleAsync(u => u.Id == id);
+            user.TeamId = team;
+        }
         await context.SaveChangesAsync();
     }
 
@@ -411,12 +503,6 @@ public sealed class Gate8AccountTeamScopeTests
         Id = id, FirstName = "Synthetic", LastName = $"User {id}",
         Email = $"user{id}@example.test", PasswordHash = "x", ImageUrl = "n/a",
         Buid = Bu, IsActive = true, CreatedBy = "seed", CreatedOn = Now
-    };
-
-    private static SalesTeamMembership Membership(long id, long userId, long teamId) => new()
-    {
-        Id = id, BusinessUnitId = Bu, UserId = userId, TeamId = teamId,
-        IsPrimary = true, EffectiveFromUtc = Now.AddDays(-90)
     };
 
     private static async Task SeedCustomersAsync(ErpRfqAutomationContext context)

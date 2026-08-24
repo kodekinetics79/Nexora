@@ -514,9 +514,26 @@ const UsersPage: React.FC = () => {
               </TextField>
             </Grid>
             <Grid size={{ xs: 12, sm: 6, md: 4 }}>
-              <TextField select fullWidth label={t('team') || 'Team'} value={formData.teamId || ''} onChange={(e) => setFormData({ ...formData, teamId: Number(e.target.value) })}>
+              <TextField
+                select
+                fullWidth
+                label={t('team') || 'Team'}
+                value={formData.teamId || ''}
+                onChange={(e) => setFormData({ ...formData, teamId: Number(e.target.value) })}
+                // This field is the ONLY thing that puts a person inside a manager's view: the
+                // account-team scope resolver reads Users.TeamID and nothing else. Left as None,
+                // this person's leads, quotes and customers are visible to them alone, and their
+                // manager sees an empty pipeline with nothing on screen explaining why. That was
+                // worth one sentence at the point of the decision.
+                //
+                // Deliberately NOT `t('some_key') || 'fallback'`: i18next answers a missing key
+                // with the KEY ITSELF, which is truthy, so that idiom renders "some_key" at the
+                // user instead of the English. There is no translation for this sentence yet, so
+                // it is written as English rather than as a key that would print raw.
+                helperText={'The manager of this team can see this person’s leads, quotes and customers. Leave it as None and only they can.'}
+              >
                 <MenuItem value="">{t('none') || 'None'}</MenuItem>
-                {teams?.map((t: any) => <MenuItem key={t.id} value={t.id}>{t.teamName}</MenuItem>)}
+                {teams?.map((team: any) => <MenuItem key={team.id} value={team.id}>{team.teamName}</MenuItem>)}
               </TextField>
             </Grid>
             <Grid size={{ xs: 12, sm: 6, md: 4 }}>

@@ -1,4 +1,3 @@
-using ERP_RFQ_Automation.CommercialIntelligence.Sales;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
 
@@ -61,8 +60,14 @@ public sealed record AccountTeamScope(
 public interface IAccountTeamScopeResolver
 {
     /// <summary>
-    /// Resolves the caller's account scope in their own tenant, as at <paramref name="asOfUtc"/>
-    /// (team membership is effective-dated, so "which teams am I on" has no answer without a date).
+    /// Resolves the caller's account scope in their own tenant.
+    ///
+    /// <para><paramref name="asOfUtc"/> dates the OWNERSHIP overlay that
+    /// <c>AccountTeamReadFilter</c> applies (<c>CustomerOwnership</c> is effective-dated and is
+    /// still read through both ends of its window). It no longer dates team membership: since the
+    /// resolver reads <c>Users.TeamID</c>, which is current state rather than a history, "which
+    /// team is this person on" has exactly one answer and it is today's. See
+    /// <see cref="AccountTeamScopeResolver"/> for why that column is the authority.</para>
     /// </summary>
     Task<AccountTeamScope> ResolveAsync(
         long userId, long roleId, long businessUnitId, DateTime asOfUtc, CancellationToken ct = default);
@@ -83,6 +88,33 @@ public interface IAccountTeamScopeResolver
 /// <para><b>Fail-closed.</b> A caller whose role does not resolve is <see cref="RoleRanks.Member"/>,
 /// which is the narrowest tier — never the widest. A member on no team resolves to an EMPTY team
 /// list, and the query predicate treats that as "no team-owned accounts", not as "no filter".</para>
+///
+/// <para><b>Why <c>Users.TeamID</c> is the one authority on team membership.</b> Two columns
+/// answered "who is on this team" and they could never agree, because only one of them was ever
+/// written. <c>SalesTeamMembership</c> — effective-dated, richer, and what this resolver used to
+/// read — has a <c>DbSet</c>, a migration and an index, but NO writer anywhere in the product: no
+/// controller, no service, no screen. Production carries zero rows in it. <c>Users.TeamID</c> is
+/// written by <c>UserController</c> on create and update, is validated against a team in the
+/// caller's own business unit (<c>UserRepository</c>), is what the Users screen's Team dropdown
+/// sets, and is what <c>TeamRepository</c> consults before letting a team be deleted.
+///
+/// So the tier that was supposed to sit between a rep and an executive granted nothing: every
+/// manager resolved to <c>teamIds=[], userIds=[self]</c> — byte-for-byte a rep's scope — while an
+/// administrator filled in the Team field on the Users screen and reasonably believed they had
+/// built a team. The visible authority was not the consulted one.
+///
+/// The fix is to consult the visible one. That is the cheaper direction for three reasons beyond
+/// the obvious: the column is already populated, so existing users are in scope immediately rather
+/// than only after somebody re-saves each of them; membership needs no effective-dating UI, because
+/// moving a rep between teams is one dropdown and the product has no screen that asks "on which
+/// date"; and it removes a table from the authorization path rather than adding a second writer to
+/// it, which is what pairing the two would have required.
+///
+/// <c>SalesTeamMembership</c> is deliberately NOT deleted — <c>CommercialRoutingApplicationService
+/// .GetOwnerOptionsAsync</c> still unions it into a candidate-owner list, where it answers a
+/// different question ("who might be offered this lead") alongside three other sources and grants
+/// no access to anything. It is simply no longer consulted for authorization, so it can no longer
+/// disagree with the screen about who a manager manages.</para>
 /// </summary>
 public sealed class AccountTeamScopeResolver : IAccountTeamScopeResolver
 {
@@ -119,7 +151,7 @@ public sealed class AccountTeamScopeResolver : IAccountTeamScopeResolver
         // put two different answers to "what may this caller read" in the codebase.
         if (rank >= RoleRanks.Admin) return AccountTeamScope.TenantWide(userId);
 
-        var myTeams = await EffectiveMembershipTeamsAsync(userId, businessUnitId, asOfUtc, ct);
+        var myTeams = await MembershipTeamsAsync(userId, businessUnitId, ct);
 
         if (rank < RoleRanks.Manager)
         {
@@ -141,17 +173,20 @@ public sealed class AccountTeamScopeResolver : IAccountTeamScopeResolver
 
         var teamIds = teams.Order().ToArray();
 
-        // Everyone whose work rolls up to this supervisor: the members of those teams, and the
+        // Everyone whose work rolls up to this supervisor: the people on those teams, and the
         // supervisor themselves (a manager who is on no team still owns their own leads).
+        //
+        // Deactivated users are included on purpose. Their leads, quotes and follow-ups do not
+        // disappear when their sign-in is revoked, and the manager who inherits that pipeline is
+        // precisely the person who must still be able to see it.
         var userIds = new HashSet<long> { userId };
         if (teamIds.Length > 0)
         {
-            userIds.UnionWith(await _db.SalesTeamMemberships.AsNoTracking()
-                .Where(m => m.BusinessUnitId == businessUnitId
-                            && teamIds.Contains(m.TeamId)
-                            && m.EffectiveFromUtc <= asOfUtc
-                            && (m.EffectiveToUtc == null || m.EffectiveToUtc > asOfUtc))
-                .Select(m => m.UserId)
+            userIds.UnionWith(await _db.Users.AsNoTracking()
+                .Where(u => u.Buid == businessUnitId
+                            && u.TeamId != null
+                            && teamIds.Contains(u.TeamId.Value))
+                .Select(u => u.Id)
                 .ToListAsync(ct));
         }
 
@@ -159,14 +194,23 @@ public sealed class AccountTeamScopeResolver : IAccountTeamScopeResolver
             AccountScopeTier.ManagedScope, userId, teamIds, userIds.Order().ToArray());
     }
 
-    private async Task<long[]> EffectiveMembershipTeamsAsync(
-        long userId, long businessUnitId, DateTime asOfUtc, CancellationToken ct) =>
-        await _db.SalesTeamMemberships.AsNoTracking()
-            .Where(m => m.BusinessUnitId == businessUnitId
-                        && m.UserId == userId
-                        && m.EffectiveFromUtc <= asOfUtc
-                        && (m.EffectiveToUtc == null || m.EffectiveToUtc > asOfUtc))
-            .Select(m => m.TeamId)
+    /// <summary>
+    /// The team this caller is on, as the Users screen set it — at most one, because
+    /// <c>Users.TeamID</c> is a single nullable column. The result stays an array so the tier
+    /// arithmetic above (union with managed teams, ordering, de-duplication) is unchanged, and so
+    /// that a later move to multiple teams is a change of this method rather than of its callers.
+    ///
+    /// <para>The business-unit predicate is not redundant with the tenant filter: it stops a user
+    /// row that has been moved between business units from carrying its old team id into a scope
+    /// decision in the new one.</para>
+    /// </summary>
+    private async Task<long[]> MembershipTeamsAsync(
+        long userId, long businessUnitId, CancellationToken ct) =>
+        await _db.Users.AsNoTracking()
+            .Where(u => u.Id == userId
+                        && u.Buid == businessUnitId
+                        && u.TeamId != null)
+            .Select(u => u.TeamId!.Value)
             .Distinct()
             .OrderBy(id => id)
             .ToArrayAsync(ct);

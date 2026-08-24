@@ -53,6 +53,37 @@ public sealed class ConversationalExtractionService : IConversationalExtractionS
     /// pasted document, and the overflow is reported rather than silently dropped.</summary>
     private const int MaxProseChars = 24_000;
 
+    /// <summary>
+    /// THE ONE SENTENCE THAT MEANS "the whole message was read and it asks for nothing".
+    ///
+    /// <para>A named constant rather than a literal because a DOWNSTREAM DECISION now keys on
+    /// it: <c>EmailInquiryLeadAssembler</c> may only tell an operator "read in full, asked for
+    /// nothing" about a part whose extractor said exactly this. Left as a literal in two
+    /// places, the two would drift, and the drift would be silent and in the dangerous
+    /// direction — a message we failed to read being reported as a message that asked for
+    /// nothing.</para>
+    ///
+    /// <para>It is emitted ONLY when the entire submitted body reached the model. A truncated
+    /// body gets <see cref="TruncatedBodyFoundNothingReviewReason"/> instead, because "we read
+    /// all of it and found nothing" and "we read the first 24,000 characters and found nothing"
+    /// are different facts and only one of them justifies closing the subject.</para>
+    /// </summary>
+    public const string NoRequestableItemsReviewReason =
+        "No requestable items found in message body.";
+
+    /// <summary>
+    /// The same empty result, reached on a body that did NOT reach the model in full.
+    ///
+    /// <para>This case used to be invisible. The review-reason chain below is an if/else, the
+    /// zero-item branch is first, and the truncation branch is last — so a 30,000-character
+    /// enquiry clipped to 24,000 and returning no items reported the clean sentence, and the
+    /// fact that 6,000 characters were never looked at was dropped on the floor. The clipped
+    /// tail is exactly where a long covering letter puts its schedule.</para>
+    /// </summary>
+    public const string TruncatedBodyFoundNothingReviewReason =
+        "The message body was too long to submit in full, and the part that was read names no "
+        + "requestable item. The omitted content requires review.";
+
     /// <param name="externalProviderTrust">
     /// Per-tenant external-provider allow-list. Optional, and its ABSENCE IS A REFUSAL —
     /// identical to the unstructured document path. An email body is untruncated customer
@@ -173,7 +204,16 @@ public sealed class ConversationalExtractionService : IConversationalExtractionS
         {
             // Deliberately NOT Failed: "this message contains no request" is a complete,
             // correct answer that a human must be able to see and overturn.
-            reviewReason = "No requestable items found in message body.";
+            //
+            // TRUNCATION OUTRANKS THE EMPTY VERDICT, and the order is the whole point. These
+            // two sentences look like the same outcome and are not: one is a fact about the
+            // SENDER (they asked for nothing), the other is a fact about US (we only read part
+            // of it). Downstream, the first is allowed to dispose of the message and the second
+            // is not, so emitting the first for a clipped body would let a real enquiry be
+            // closed on evidence nobody ever looked at.
+            reviewReason = truncatedInput
+                ? TruncatedBodyFoundNothingReviewReason
+                : NoRequestableItemsReviewReason;
         }
         else if (!verification.Clean)
         {

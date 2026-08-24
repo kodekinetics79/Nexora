@@ -1,3 +1,4 @@
+using ERP_RFQ_Automation.Infrastructure.Storage;
 using System.Security.Claims;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.MultiTenancy;
@@ -102,13 +103,31 @@ public static class TenantLifecycleHarness
             ["ConnectionStrings:MigrationConnection"] = ownerConnectionString
         }).Build(), NullLogger<TenantPurgeExecutor>.Instance);
 
+    /// <summary>
+    /// A storage root that exists and holds nothing, so a purge's byte sweep runs for real and
+    /// finds the tenant's prefix empty.
+    ///
+    /// <para>Deliberately NOT a stub that reports success. The byte half of a purge was missing
+    /// entirely, and a harness that fakes it away would let it go missing again while every test
+    /// stayed green — which is exactly how it went missing the first time.</para>
+    /// </summary>
+    public static TenantStoragePurger StoragePurger(string? root = null)
+    {
+        var path = root ?? Path.Combine(Path.GetTempPath(), "nexora-purge-tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(path);
+        var files = new LocalFileStorage(path, path);
+        return new TenantStoragePurger(
+            new LocalEvidenceObjectStorage(files), files, NullLogger<TenantStoragePurger>.Instance);
+    }
+
     public static TenantOffboardingService Service(
         ErpRfqAutomationContext context,
         string? ownerConnectionString = null,
         TenantLifecycleOptions? options = null,
         ITenantAccessService? tenantAccess = null,
         TimeProvider? timeProvider = null,
-        ITenantOffboardingReadinessService? readiness = null)
+        ITenantOffboardingReadinessService? readiness = null,
+        TenantStoragePurger? storagePurger = null)
     {
         var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
         {
@@ -120,6 +139,7 @@ public static class TenantLifecycleHarness
             context,
             new PlatformAuditService(context, NullLogger<PlatformAuditService>.Instance),
             new TenantPurgeExecutor(configuration, NullLogger<TenantPurgeExecutor>.Instance),
+            storagePurger ?? StoragePurger(),
             new TenantPersonalDataEraser(context, NullLogger<TenantPersonalDataEraser>.Instance),
             new TenantDataExportService(context, configuration, NullLogger<TenantDataExportService>.Instance),
             Options.Create(options ?? new TenantLifecycleOptions()),

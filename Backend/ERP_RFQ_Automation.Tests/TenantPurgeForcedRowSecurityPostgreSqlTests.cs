@@ -250,6 +250,220 @@ public sealed class TenantPurgeForcedRowSecurityPostgreSqlTests : IAsyncLifetime
         }
     }
 
+    /// <summary>
+    /// DEFECT P0-1. The tables whose business unit column is spelled snake_case.
+    ///
+    /// <para>The sweep discovered its targets with <c>lower(column_name) IN ('businessunitid',
+    /// 'buid')</c>, and eleven evidence and extraction tables carry <c>business_unit_id</c> —
+    /// <c>source_documents</c>, <c>document_corpora</c>, <c>canonical_inquiries</c>,
+    /// <c>field_evidence</c> and seven more. They matched neither spelling, so they were never
+    /// targets, never counted in the operator's preview, and never named in the report. Against
+    /// production that left 380 rows for one business unit and 515 for another, under an
+    /// offboarding that had already reported success.</para>
+    ///
+    /// <para>Counted through the SUPERUSER, as everything in this class is: asking the purge's own
+    /// identity whether the purge worked is the failure mode the class exists to close.</para>
+    /// </summary>
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task Purge_destroys_rows_in_snake_case_business_unit_tables()
+    {
+        await SeedAsync();
+        await SeedSnakeCaseEvidenceAsync();
+
+        var executor = TenantLifecycleHarness.PurgeExecutor(_ownerConnectionString);
+        var preview = await executor.PreviewAsync(TenantAId, TenantABusinessUnit, CancellationToken.None);
+
+        // The confirmation screen counts them too. A preview that under-reports is not a cosmetic
+        // fault: it is the operator authorising destruction against a floor presented as a total.
+        Assert.Contains(preview.Tables, t => t.Table.Contains("source_documents"));
+        Assert.Contains(preview.Tables, t => t.Table.Contains("document_corpora"));
+
+        var attempt = await ClaimPurgeAsync();
+        var outcome = await executor.ExecuteAsync(
+            TenantAId, TenantABusinessUnit, attempt, CancellationToken.None);
+
+        Assert.Equal(0, await CountAsSuperuserAsync("public.source_documents", "business_unit_id", TenantABusinessUnit));
+        Assert.Equal(0, await CountAsSuperuserAsync("public.document_corpora", "business_unit_id", TenantABusinessUnit));
+
+        // Tenant B keeps everything.
+        Assert.Equal(1, await CountAsSuperuserAsync("public.source_documents", "business_unit_id", TenantBBusinessUnit));
+        Assert.Equal(1, await CountAsSuperuserAsync("public.document_corpora", "business_unit_id", TenantBBusinessUnit));
+
+        Assert.Contains(outcome.Deleted, d => d.Table.Contains("source_documents"));
+        Assert.Contains(outcome.Deleted, d => d.Table.Contains("document_corpora"));
+    }
+
+    /// <summary>
+    /// DEFECT P0-2. <c>public."EmailIngests"</c> has no business unit column at all — it reaches a
+    /// tenant only through <c>Email_Configurations</c>.
+    ///
+    /// <para>103 rows survived a completed purge in production, and survived it ORPHANED: the
+    /// parent <c>Email_Configurations</c> row was destroyed in the same transaction, and because
+    /// the purge runs under <c>session_replication_role = 'replica'</c> the foreign key that would
+    /// have objected was suspended. The rows held the raw-message pointer, the sender address and
+    /// the subject line of every message the tenant ever received.</para>
+    ///
+    /// <para>The orphan assertion is the one that matters and is asserted separately from the
+    /// count. "No rows left" and "no rows left pointing at a parent that no longer exists" are the
+    /// same fact only when the sweep worked; when it did not, the second is the one that shows
+    /// it.</para>
+    /// </summary>
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task Purge_destroys_rows_reached_only_through_a_parent()
+    {
+        await SeedAsync();
+        await SeedIndirectMailAsync();
+        await SeedPolymorphicAttachmentsAsync();
+
+        var executor = TenantLifecycleHarness.PurgeExecutor(_ownerConnectionString);
+        var attempt = await ClaimPurgeAsync();
+        var outcome = await executor.ExecuteAsync(
+            TenantAId, TenantABusinessUnit, attempt, CancellationToken.None);
+
+        Assert.Equal(0, await ScalarAsSuperuserAsync(
+            $"""
+             SELECT count(*)::bigint FROM public."EmailIngests"
+             WHERE "MessageID" = 'purge-a@tests';
+             """));
+
+        // And nothing was left dangling. This is the production signature, asserted directly.
+        Assert.Equal(0, await ScalarAsSuperuserAsync(
+            """
+            SELECT count(*)::bigint FROM public."EmailIngests" i
+            WHERE NOT EXISTS (
+                SELECT 1 FROM public."Email_Configurations" c WHERE c."ID" = i."EmailConfigurationID");
+            """));
+
+        // Tenant B's mailbox and its message are untouched.
+        Assert.Equal(1, await ScalarAsSuperuserAsync(
+            $"""
+             SELECT count(*)::bigint FROM public."EmailIngests"
+             WHERE "MessageID" = 'purge-b@tests';
+             """));
+        Assert.Equal(1, await CountAsSuperuserAsync(
+            "public.\"Email_Configurations\"", "BusinessUnitID", TenantBBusinessUnit));
+
+        Assert.Contains(outcome.Deleted, d => d.Table.Contains("EmailIngests"));
+
+        // The polymorphic case, where the predicate has to read (ParentType, ParentID) together.
+        Assert.Equal(0, await ScalarAsSuperuserAsync(
+            """SELECT count(*)::bigint FROM public."Attachments" WHERE "FileName" = 'purge-a.pdf';"""));
+        Assert.Equal(1, await ScalarAsSuperuserAsync(
+            """SELECT count(*)::bigint FROM public."Attachments" WHERE "FileName" = 'purge-b.pdf';"""));
+        Assert.Contains(outcome.Deleted, d => d.Table.Contains("Attachments"));
+    }
+
+    /// <summary>
+    /// THE POST-CONDITION, proved against a tenant-scoped table the sweep never visits.
+    ///
+    /// <para>This is the half of P0-1 that matters more than the eleven tables. The old check
+    /// re-counted the tables the sweep had just swept, so it could only ever confirm that the
+    /// sweep did what the sweep did — a verification structurally incapable of catching the
+    /// omission it existed to catch. The probe here is invisible to the sweep for a reason the
+    /// executor's own comment names: target discovery reads <c>information_schema</c>, which is
+    /// filtered by the caller's privileges, so a table the schema owner holds no privilege on is
+    /// simply not there. The independent check reads <c>pg_class</c>, which is not filtered, and
+    /// sees it.</para>
+    ///
+    /// <para>Note what is asserted about the outcome: not merely that it threw, but that NOTHING
+    /// was committed. A purge that discovers it is incomplete must leave the tenant intact and
+    /// re-runnable, not half-destroyed.</para>
+    /// </summary>
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task Purge_refuses_when_a_tenant_scoped_table_was_never_swept()
+    {
+        await SeedAsync();
+
+        // Created and owned by the SUPERUSER, granted to the purge role and to nobody else. The
+        // schema owner therefore cannot see it in information_schema, which is exactly how a
+        // table added out of band — or by a migration run under a different role — would look.
+        await ExecuteAsync(_superuserConnectionString, $"""
+            DROP TABLE IF EXISTS public.purge_probe_unswept;
+            CREATE TABLE public.purge_probe_unswept (
+                id bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+                business_unit_id bigint NOT NULL);
+            ALTER TABLE public.purge_probe_unswept ENABLE ROW LEVEL SECURITY;
+            CREATE POLICY nexora_tenant_purge ON public.purge_probe_unswept
+                AS PERMISSIVE FOR ALL TO nexora_purge_app
+                USING (business_unit_id = NULLIF(current_setting('nexora.purge_business_unit_id', true), '')::bigint);
+            GRANT SELECT, DELETE ON public.purge_probe_unswept TO nexora_purge_app;
+            INSERT INTO public.purge_probe_unswept (business_unit_id) VALUES ({TenantABusinessUnit});
+            """);
+        try
+        {
+            var executor = TenantLifecycleHarness.PurgeExecutor(_ownerConnectionString);
+            var attempt = await ClaimPurgeAsync();
+
+            var failure = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => executor.ExecuteAsync(TenantAId, TenantABusinessUnit, attempt, CancellationToken.None));
+
+            Assert.Contains("purge_probe_unswept", failure.Message);
+            Assert.Contains("never visited it", failure.Message);
+            Assert.Contains("derived from the schema rather than from the sweep's own list", failure.Message);
+
+            // Nothing committed. Not the probe's row, and not the rows the sweep DID reach.
+            Assert.Equal(1, await ScalarAsSuperuserAsync(
+                $"SELECT count(*)::bigint FROM public.purge_probe_unswept WHERE business_unit_id = {TenantABusinessUnit};"));
+            Assert.Equal(1, await CountAsSuperuserAsync(ForcedTable, "BusinessUnitId", TenantABusinessUnit));
+            Assert.Equal(1, await CountAsSuperuserAsync("public.\"BusinessUnits\"", "ID", TenantABusinessUnit));
+            Assert.Equal(0, await ScalarAsSuperuserAsync(
+                $"""
+                 SELECT count(*)::bigint FROM platform."TenantOffboardings"
+                 WHERE "TenantId" = {TenantAId} AND "PurgeExecutedOn" IS NOT NULL;
+                 """));
+        }
+        finally
+        {
+            await ExecuteAsync(_superuserConnectionString, "DROP TABLE IF EXISTS public.purge_probe_unswept;");
+        }
+    }
+
+    /// <summary>
+    /// The other half of the same guard: a table the DATABASE says holds one tenant's rows, that
+    /// nobody has taught the purge how to select.
+    ///
+    /// <para>Every tenant table in this schema carries a <c>nexora_tenant_isolation</c> policy —
+    /// the request path has always known <c>EmailIngests</c> belongs to a tenant, and only the
+    /// purge did not. Reading that policy catalogue is what turns "add a table and forget the
+    /// sweep" from a silent data-retention failure into a refusal that names the table.</para>
+    /// </summary>
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task Purge_refuses_when_the_schema_declares_a_tenant_table_the_map_does_not()
+    {
+        await SeedAsync();
+
+        // No business unit column, so no column rule can find it; a tenant-isolation policy, so
+        // the database says it is one tenant's data. That is EmailIngests, exactly.
+        await ExecuteAsync(_superuserConnectionString, """
+            DROP TABLE IF EXISTS public.purge_probe_unclassified;
+            CREATE TABLE public.purge_probe_unclassified (
+                id bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+                owner_ref bigint NOT NULL);
+            ALTER TABLE public.purge_probe_unclassified ENABLE ROW LEVEL SECURITY;
+            CREATE POLICY nexora_tenant_isolation ON public.purge_probe_unclassified
+                TO nexora_tenant_app USING (true);
+            """);
+        try
+        {
+            var failure = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => TenantLifecycleHarness.PurgeExecutor(_ownerConnectionString)
+                    .PreviewAsync(TenantAId, TenantABusinessUnit, CancellationToken.None));
+
+            Assert.Contains("purge_probe_unclassified", failure.Message);
+            Assert.Contains("nexora_tenant_isolation", failure.Message);
+            Assert.Contains("TenantPlaneDataMap", failure.Message);
+        }
+        finally
+        {
+            await ExecuteAsync(_superuserConnectionString,
+                "DROP TABLE IF EXISTS public.purge_probe_unclassified;");
+        }
+    }
+
     // ------------------------------------------------------------------------------- assertions
 
     /// <summary>
@@ -335,6 +549,102 @@ public sealed class TenantPurgeForcedRowSecurityPostgreSqlTests : IAsyncLifetime
             INSERT INTO {EnableOnlyTable} ("BusinessUnitId", "CompanyEmail")
             VALUES ({TenantABusinessUnit}, 'a@tenant-a.test'),
                    ({TenantBBusinessUnit}, 'b@tenant-b.test');
+
+            SET session_replication_role = origin;
+            """);
+    }
+
+    /// <summary>
+    /// One corpus and one document per tenant, in the two snake_case tables. Both carry
+    /// <c>business_unit_id</c>, which is the whole point: nothing else about them differs from the
+    /// PascalCase tables the sweep always found.
+    /// </summary>
+    private async Task SeedSnakeCaseEvidenceAsync()
+    {
+        await ExecuteAsync(_superuserConnectionString, $"""
+            SET session_replication_role = replica;
+
+            DELETE FROM public.source_documents WHERE business_unit_id IN ({TenantABusinessUnit}, {TenantBBusinessUnit});
+            DELETE FROM public.document_corpora  WHERE business_unit_id IN ({TenantABusinessUnit}, {TenantBBusinessUnit});
+
+            INSERT INTO public.document_corpora
+                (id, business_unit_id, batch_id, source_type, status, created_on, updated_on)
+            VALUES (900001, {TenantABusinessUnit}, gen_random_uuid(), 'Upload', 'Complete', now(), now()),
+                   (900002, {TenantBBusinessUnit}, gen_random_uuid(), 'Upload', 'Complete', now(), now());
+
+            INSERT INTO public.source_documents
+                (id, business_unit_id, corpus_id, content_hash, original_file_name,
+                 detected_mime_type, object_bucket, object_key, object_version, byte_size,
+                 page_count, security_status, processing_status, created_on, updated_on)
+            VALUES (900001, {TenantABusinessUnit}, 900001, repeat('a', 64), 'a.pdf', 'application/pdf',
+                    'NexoraBucket', 'Evidence/tenants/{TenantABusinessUnit}/cleared/sha256/aa/a.pdf',
+                    'v1', 10, 1, 'Cleared', 'Complete', now(), now()),
+                   (900002, {TenantBBusinessUnit}, 900002, repeat('b', 64), 'b.pdf', 'application/pdf',
+                    'NexoraBucket', 'Evidence/tenants/{TenantBBusinessUnit}/cleared/sha256/bb/b.pdf',
+                    'v1', 10, 1, 'Cleared', 'Complete', now(), now());
+
+            SET session_replication_role = origin;
+            """);
+    }
+
+    /// <summary>
+    /// A mailbox per tenant and one accepted message under each. <c>public."EmailIngests"</c>
+    /// carries no business unit column; the message is the tenant's only through its mailbox.
+    /// </summary>
+    private async Task SeedIndirectMailAsync()
+    {
+        await ExecuteAsync(_superuserConnectionString, $"""
+            SET session_replication_role = replica;
+
+            DELETE FROM public."EmailIngests" WHERE "MessageID" IN ('purge-a@tests', 'purge-b@tests');
+            DELETE FROM public."Email_Configurations" WHERE "ID" IN (900001, 900002);
+
+            INSERT INTO public."Email_Configurations"
+                ("ID", "BusinessUnitID", "ConfigurationName", "EmailAddress", "Protocol", "Host",
+                 "Port", "Username", "Password")
+            VALUES (900001, {TenantABusinessUnit}, 'A', 'a@tenant-a.test', 'IMAP', 'imap.test', 993, 'a', 'x'),
+                   (900002, {TenantBBusinessUnit}, 'B', 'b@tenant-b.test', 'IMAP', 'imap.test', 993, 'b', 'x');
+
+            INSERT INTO public."EmailIngests"
+                ("MessageID", "EmailSubject", "FromEmail", "EmailConfigurationID", "RawEmailPath")
+            VALUES ('purge-a@tests', 'RFQ for tenant A', 'buyer@customer.test', 900001,
+                    'Evidence/tenants/{TenantABusinessUnit}/raw-mail/sha256/aa/a.eml'),
+                   ('purge-b@tests', 'RFQ for tenant B', 'buyer@customer.test', 900002,
+                    'Evidence/tenants/{TenantBBusinessUnit}/raw-mail/sha256/bb/b.eml');
+
+            SET session_replication_role = origin;
+            """);
+    }
+
+    /// <summary>
+    /// A lead per tenant with an attachment filed against it.
+    ///
+    /// <para><c>public."Attachments"</c> is the hardest predicate in the map and the only one with
+    /// no foreign key at all: it is polymorphic on <c>(ParentType, ParentID)</c>, so a wrong
+    /// predicate deletes nothing and says nothing, and a careless one deletes another tenant's
+    /// file because a lead somewhere shares an id with a material lot. Both tenants get a lead so
+    /// the boundary is asserted rather than assumed.</para>
+    /// </summary>
+    private async Task SeedPolymorphicAttachmentsAsync()
+    {
+        await ExecuteAsync(_superuserConnectionString, $"""
+            SET session_replication_role = replica;
+
+            DELETE FROM public."Attachments" WHERE "FileName" IN ('purge-a.pdf', 'purge-b.pdf');
+            DELETE FROM public."Leads" WHERE "ID" IN (900001, 900002);
+
+            INSERT INTO public."Leads"
+                ("ID", "RecDate", "LeadSource", "CreatedBy", "BusinessUnitID",
+                 "CommercialCaseId", "CommercialCaseReference")
+            VALUES (900001, now(), 'tests', 'tests', {TenantABusinessUnit}, 900001, 'CASE-A'),
+                   (900002, now(), 'tests', 'tests', {TenantBBusinessUnit}, 900002, 'CASE-B');
+
+            INSERT INTO public."Attachments"
+                ("ParentType", "ParentID", "FileName", "FilePath", "CreatedOn")
+            VALUES ('Lead', 900001, 'purge-a.pdf',
+                    'Evidence/tenants/{TenantABusinessUnit}/cleared/sha256/aa/a.pdf', now()),
+                   ('Lead', 900002, 'purge-b.pdf',
+                    'Evidence/tenants/{TenantBBusinessUnit}/cleared/sha256/bb/b.pdf', now());
 
             SET session_replication_role = origin;
             """);

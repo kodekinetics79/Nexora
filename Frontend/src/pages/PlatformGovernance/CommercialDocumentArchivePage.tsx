@@ -5,7 +5,7 @@ import {
   DialogTitle, FormControl, InputLabel, MenuItem, Paper, Select, Stack, Tab, Tabs,
   Table, TableBody, TableCell, TableContainer, TableHead, TableRow, TextField, Typography,
 } from '@mui/material';
-import { DeleteOutlined, FileOpen, Gavel, LockOpen, Search } from '@mui/icons-material';
+import { FileOpen, Gavel, LockOpen, Search } from '@mui/icons-material';
 import ArtifactStudioPage from './ArtifactStudioPage';
 import {
   platformGovernanceService, type ArchiveDocumentItem,
@@ -122,9 +122,9 @@ export default function CommercialDocumentArchivePage() {
                     <TableCell><Typography variant="body2" sx={{ fontWeight: 700 }}>{row.nexoraSerial ?? 'Not linked'}</Typography>
                       <Typography variant="caption" color="text.secondary">{row.customerRfq ?? (row.commercialLinks.join(' · ') || 'No downstream record')}</Typography></TableCell>
                     <TableCell><Stack direction="row" sx={{ gap: .5, flexWrap: 'wrap' }}>
-                      {row.legalHold && <Chip size="small" color="warning" label="Legal hold" />}
-                      {row.deletionRequested && <Chip size="small" color="error" label="Deletion requested" />}
-                      {!row.legalHold && !row.deletionRequested && <Chip size="small" label="Standard retention" />}
+                      {row.legalHold
+                        ? <Chip size="small" color="warning" label="Legal hold" />
+                        : <Chip size="small" label="Standard retention" />}
                     </Stack></TableCell>
                     <TableCell align="right"><Button size="small" startIcon={<FileOpen />} onClick={() => openEvidence(row)}>Open evidence</Button></TableCell>
                   </TableRow>)}
@@ -164,12 +164,18 @@ export default function CommercialDocumentArchivePage() {
               {selected.legalHold ? 'Release legal hold' : 'Apply legal hold'}
             </Button>
             <Button variant="outlined" onClick={() => govern.mutate({ item: selected, action: 'EXPORT_REQUESTED' })}>Request metadata export</Button>
-            <Button variant="outlined" color="error" startIcon={<DeleteOutlined />} disabled={selected.legalHold}
-              onClick={() => govern.mutate({ item: selected, action: selected.deletionRequested ? 'DELETION_CANCELLED' : 'DELETION_REQUESTED' })}>
-              {selected.deletionRequested ? 'Cancel deletion request' : 'Request deletion review'}
-            </Button>
+            {/*
+              "Request deletion review" used to live here. It had no approver anywhere in the
+              product, so every request was permanent — and the retention purge read the resulting
+              flag as an EXCLUSION, which meant clicking it removed the document from the only
+              deletion a tenant could actually perform. A button whose sole effect is to block the
+              thing it offers is worse than no button, so it is gone rather than reworded.
+            */}
           </Stack>
-          <Alert severity="info">These controls create immutable audit events. Evidence deletion is never performed directly from this screen.</Alert>
+          <Alert severity="info">
+            These controls create a permanent record. Nothing is deleted from this screen — to free
+            up space, use Storage &amp; Retention.
+          </Alert>
         </Stack>}</DialogContent>
         <DialogActions><Button onClick={() => setSelected(null)}>Close</Button></DialogActions>
       </Dialog>

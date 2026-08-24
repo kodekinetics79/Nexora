@@ -115,12 +115,66 @@ namespace ERP_RFQ_Automation.Repositories
                 .ToList();
         }
 
+        /// <summary>Which owner the leads list was narrowed to. See <see cref="ParseLeadListView"/>.</summary>
+        private enum LeadListOwnerFilter { None, Unassigned, Mine }
+
+        /// <summary>
+        /// Splits the list's <c>view</c> parameter into the QUEUE view and the OWNER filter.
+        ///
+        /// <para>They compose rather than replace each other: "Unassigned" and "Mine" narrow
+        /// whichever queue the reader is already looking at, so they travel as a second
+        /// comma-separated token on the one parameter this repository is handed
+        /// (<c>view=revisions,unassigned</c>). A single bare token — every value that has ever
+        /// been sent — parses exactly as it did before.</para>
+        ///
+        /// <para><c>mine</c> carries the reader's own user id (<c>mine:42</c>) because
+        /// <c>LeadController</c> forwards no identity to this method. That is safe to accept from
+        /// the caller: the business-unit predicate is applied first and unconditionally, so this
+        /// token can only ever NARROW the rows the caller is already authorised to read, exactly
+        /// as <c>GetAcceptedLeadsAsync(assignedToId:)</c> already does for the outstanding queue.
+        /// A <c>mine</c> with no readable id matches nothing — "we cannot name the reader" must
+        /// never render as somebody else's leads under a "Mine" label.</para>
+        /// </summary>
+        private static (string? QueueView, LeadListOwnerFilter Owner, long? OwnerUserId) ParseLeadListView(string? view)
+        {
+            if (string.IsNullOrWhiteSpace(view)) return (null, LeadListOwnerFilter.None, null);
+
+            string? queueView = null;
+            var owner = LeadListOwnerFilter.None;
+            long? ownerUserId = null;
+
+            foreach (var token in view.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                if (string.Equals(token, "unassigned", StringComparison.OrdinalIgnoreCase))
+                {
+                    owner = LeadListOwnerFilter.Unassigned;
+                }
+                else if (token.StartsWith("mine", StringComparison.OrdinalIgnoreCase)
+                    && (token.Length == 4 || token[4] == ':'))
+                {
+                    owner = LeadListOwnerFilter.Mine;
+                    if (token.Length > 5 && long.TryParse(token[5..], out var parsed)) ownerUserId = parsed;
+                }
+                else
+                {
+                    queueView ??= token;
+                }
+            }
+
+            return (queueView, owner, ownerUserId);
+        }
+
         public async Task<(IEnumerable<LeadResponseDTO>, int TotalCount)> GetLeadListAsync(int pageNumber, int pageSize, long? id, string? rfqno, string? buyersName, string? leadSource, long businessUnitId, DateTime? startDate = null, DateTime? endDate = null, string? emailSource = null, string? clientemail = null, string? view = null)
         {
+            var (queueView, ownerFilter, ownerUserId) = ParseLeadListView(view);
+
             var query = _context.Leads
                 .AsNoTracking()
                 .Include(l => l.BusinessUnit)
                 .Include(l => l.EmailIngests)
+                // The owner is projected onto every list row now (see below), so the navigation
+                // has to travel with the page or each row costs a lazy round trip.
+                .Include(l => l.AssignToNavigation)
                 .Where(l => l.BusinessUnitId == businessUnitId);
 
             // The default list is the untriaged inbox — RfqRepository spells LeadStatusId == null
@@ -128,8 +182,8 @@ namespace ERP_RFQ_Automation.Repositories
             // lifecycle transition stamps a status, so a queue that keeps this filter is a queue
             // that empties itself the moment a rep starts working, which is precisely how the
             // deadline board lost every tender the day after it was advanced.
-            var openWorkView = string.Equals(view, "open", StringComparison.OrdinalIgnoreCase);
-            if (!openWorkView && !string.Equals(view, "revisions", StringComparison.OrdinalIgnoreCase))
+            var openWorkView = string.Equals(queueView, "open", StringComparison.OrdinalIgnoreCase);
+            if (!openWorkView && !string.Equals(queueView, "revisions", StringComparison.OrdinalIgnoreCase))
                 query = query.Where(l => l.LeadStatusId == null);
 
             // Apply filters
@@ -149,9 +203,9 @@ namespace ERP_RFQ_Automation.Repositories
                 query = query.Where(l => l.RecDate >= startDate.Value);
             if (endDate.HasValue)
                 query = query.Where(l => l.RecDate <= endDate.Value);
-            if (string.Equals(view, "duplicates", StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(queueView, "duplicates", StringComparison.OrdinalIgnoreCase))
                 query = query.Where(l => l.DuplicateStatus == "suspected" || l.DuplicateStatus == "confirmed");
-            else if (string.Equals(view, "revisions", StringComparison.OrdinalIgnoreCase))
+            else if (string.Equals(queueView, "revisions", StringComparison.OrdinalIgnoreCase))
                 query = query.Where(l => l.CurrentRevisionNumber > 1);
             else if (openWorkView)
             {
@@ -162,7 +216,7 @@ namespace ERP_RFQ_Automation.Repositories
                 var finished = await FinishedLeadStatusIdsAsync(businessUnitId);
                 query = query.Where(l => l.LeadStatusId == null || !finished.Contains(l.LeadStatusId.Value));
             }
-            else if (string.Equals(view, "ready-for-rfq", StringComparison.OrdinalIgnoreCase))
+            else if (string.Equals(queueView, "ready-for-rfq", StringComparison.OrdinalIgnoreCase))
                 // Mirrors LeadConversionIntelligence.FindConversionBlockers exactly. A closing
                 // date is deliberately NOT required in either place: an enquiry that states no
                 // deadline is still convertible, and a queue that hid those from the user while
@@ -170,6 +224,17 @@ namespace ERP_RFQ_Automation.Repositories
                 query = query.Where(l => l.CommercialFactsVerified && !l.RequiresCommercialReview
                     && l.CustomerId != null && l.LeadItems.Any()
                     && !l.Rfqs.Any());
+
+            // The owner filter narrows whichever queue the reader is on — it is applied AFTER the
+            // queue view, never instead of it, so "Revisions" plus "Unassigned" means both.
+            if (ownerFilter == LeadListOwnerFilter.Unassigned)
+                query = query.Where(l => l.AssignTo == null);
+            else if (ownerFilter == LeadListOwnerFilter.Mine)
+            {
+                // No readable reader id matches nothing rather than everything: see ParseLeadListView.
+                var mineUserId = ownerUserId ?? -1;
+                query = query.Where(l => l.AssignTo == mineUserId);
+            }
 
             // Get total count before pagination
             var totalCount = await query.CountAsync();
@@ -358,6 +423,23 @@ namespace ERP_RFQ_Automation.Repositories
                     // revision 0 because this projection never set the column. A view whose whole
                     // purpose is revised leads could not say which revision any of them was.
                     CurrentRevisionNumber = l.CurrentRevisionNumber,
+                    // WHO OWNS THIS ENQUIRY. The DTO has carried these four properties since
+                    // governed assignment shipped and this projection — the one behind
+                    // /api/Lead, the first screen a rep opens — never set any of them, so every
+                    // row on the leads list reported itself unowned no matter who it belonged to.
+                    // AssignmentVersion travels with them because it is the optimistic-concurrency
+                    // token PUT /api/commercial-routing/leads/{id}/owner demands, and without it
+                    // no list row can offer an assign action at all.
+                    AssignedToId = l.AssignTo,
+                    AssignedToFullName = l.AssignToNavigation != null
+                        ? $"{l.AssignToNavigation.FirstName} {l.AssignToNavigation.LastName}".Trim()
+                        : null,
+                    AssignedOn = l.AssignOn,
+                    AssignComment = l.AssignComment,
+                    AssignedByUserId = l.AssignedByUserId,
+                    AssignmentMethod = l.AssignmentMethod,
+                    ManualAssignmentOverride = l.ManualAssignmentOverride,
+                    AssignmentVersion = l.AssignmentVersion,
                     ItemCount = itemCounts.TryGetValue(l.Id, out var count) ? count : 0,
                     LeadItems = new List<LeadItemResponseDTO>(), // Empty list for list view
                     Attachments = attachmentsGrouped.TryGetValue(l.Id, out var atts) ? atts : new List<AttachmentResponseDTO>()

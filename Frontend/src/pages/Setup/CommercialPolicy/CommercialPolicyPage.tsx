@@ -84,14 +84,20 @@ class PartialPolicySaveError extends Error {
  */
 const CommercialPolicyPage: React.FC = () => {
   const queryClient = useQueryClient();
-  const { userData, hasPermission } = useAuth();
+  const { userData } = useAuth();
   const [form, setForm] = React.useState<FormState | null>(null);
   const [weights, setWeights] = React.useState<SupplierWeightsForm | null>(null);
   const [reason, setReason] = React.useState('');
 
   // The API mirrors SlaController: reading is open to the tenant, writing is manager/admin.
-  const canConfigure =
-    (userData.isManager === true || userData.isSuperAdmin === true) && hasPermission('UOM', 'edit');
+  //
+  // That is the WHOLE server rule, and this now states exactly it. There used to be a second
+  // conjunct, `hasPermission('UOM', 'edit')`, which could never be satisfied: "UOM" is not a
+  // permission module — it appears in no [RequireModulePermission] anywhere in the backend and is
+  // absent from ModuleCatalog — so hasPermission returned false for everyone except a super admin.
+  // The screen therefore rendered a complete, populated form whose Save button was permanently
+  // disabled for every genuine administrator, with nothing on it explaining why.
+  const canConfigure = userData.isManager === true || userData.isSuperAdmin === true;
 
   const { data: policy, isLoading } = useQuery({
     queryKey: ['commercial-policy'],

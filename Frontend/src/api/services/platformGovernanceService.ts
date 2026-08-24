@@ -349,6 +349,140 @@ export const readEvidenceRetentionRun = (
   };
 };
 
+/* ── Tenant data control: the three buckets, and what is never touched ──────────────────────── */
+
+/** Stable bucket identifiers. Sent in the request; NEVER rendered to a human. */
+export const TENANT_DATA_BUCKETS = {
+  mailProducedNothing: 'MAIL_PRODUCED_NOTHING',
+  mailNoise: 'MAIL_TRIAGED_AS_NOISE',
+  orphanedFiles: 'ORPHANED_STORED_FILES',
+} as const;
+
+/** The word the server verifies before it deletes anything. */
+export const TENANT_DATA_CONFIRM_PHRASE = 'DELETE';
+
+export interface TenantDataBucket {
+  code: string;
+  /** Finished product copy from the server. Rendered as-is. */
+  title: string;
+  detail: string;
+  count: number | null;
+  bytes: number | null;
+  canClear: boolean;
+  /** Why this row cannot be cleared, in words. Shown next to the disabled control. */
+  blockedReason: string | null;
+}
+
+export interface TenantDataKeptLine {
+  title: string;
+  detail: string;
+  count: number | null;
+}
+
+export interface TenantDataControlSummary {
+  buckets: TenantDataBucket[];
+  kept: TenantDataKeptLine[];
+  keptSummary: string | null;
+  /** False when the deployment returned no buckets at all — "not reported", not "nothing to do". */
+  bucketsReported: boolean;
+}
+
+export interface TenantDataRefusal {
+  what: string | null;
+  why: string | null;
+  bytes: number | null;
+}
+
+export interface TenantDataCleanupResult {
+  dryRun: boolean;
+  messagesCleared: number | null;
+  filesDeleted: number | null;
+  bytesReclaimed: number | null;
+  refused: TenantDataRefusal[];
+  summary: string | null;
+  disclosure: string | null;
+  idempotentReplay: boolean;
+}
+
+/**
+ * Last-resort copy for a bucket the server described with a code but no words — an older or newer
+ * server than this build. Never shows the code itself: a business owner reading
+ * "MAIL_TRIAGED_AS_NOISE" learns nothing except that we leaked our own vocabulary at him.
+ */
+const BUCKET_FALLBACK_COPY: Readonly<Record<string, { title: string; detail: string }>> = {
+  [TENANT_DATA_BUCKETS.mailProducedNothing]: {
+    title: 'Mail that never became an inquiry',
+    detail: 'Messages we received and filed, where no inquiry was raised and no lead was created.',
+  },
+  [TENANT_DATA_BUCKETS.mailNoise]: {
+    title: 'Mail we identified as not being business',
+    detail: 'Out-of-office replies, mailing lists and no-reply senders. Part of the group above, not extra to it.',
+  },
+  [TENANT_DATA_BUCKETS.orphanedFiles]: {
+    title: 'Stored files nothing points to any more',
+    detail: 'Leftover copies in your storage that no document or record refers to.',
+  },
+};
+
+const readBucket = (entry: unknown): TenantDataBucket | null => {
+  if (!isRecord(entry)) return null;
+  const code = asText(entry.code);
+  if (!code) return null;
+  const fallback = BUCKET_FALLBACK_COPY[code];
+  const title = asText(entry.title) ?? fallback?.title;
+  // A row we cannot name is a row we cannot ask anyone to make a decision about, so it is dropped
+  // rather than rendered as a mystery with a delete control attached.
+  if (!title) return null;
+  return {
+    code,
+    title,
+    detail: asText(entry.detail) ?? fallback?.detail ?? '',
+    count: asCount(entry.count),
+    bytes: asCount(entry.bytes),
+    canClear: asFlag(entry.canClear) ?? false,
+    blockedReason: asText(entry.blockedReason),
+  };
+};
+
+export const readTenantDataControl = (payload: unknown): TenantDataControlSummary => {
+  const root = isRecord(payload) ? payload : {};
+  const bucketsReported = Array.isArray(root.buckets);
+  const buckets = bucketsReported
+    ? (root.buckets as unknown[]).map(readBucket).filter((x): x is TenantDataBucket => x !== null)
+    : [];
+  const kept = Array.isArray(root.kept)
+    ? (root.kept as unknown[]).flatMap((entry) => {
+      if (!isRecord(entry)) return [];
+      const title = asText(entry.title);
+      return title ? [{ title, detail: asText(entry.detail) ?? '', count: asCount(entry.count) }] : [];
+    })
+    : [];
+  return { buckets, kept, keptSummary: asText(root.keptSummary), bucketsReported };
+};
+
+export const readTenantDataCleanup = (
+  payload: unknown,
+  requestedDryRun: boolean,
+): TenantDataCleanupResult => {
+  const root = isRecord(payload) ? payload : {};
+  return {
+    // Trust the server's echo of the mode: a server that says it executed must never be shown
+    // as a preview.
+    dryRun: asFlag(root.dryRun) ?? requestedDryRun,
+    messagesCleared: asCount(root.messagesCleared),
+    filesDeleted: asCount(root.filesDeleted),
+    bytesReclaimed: asCount(root.bytesReclaimed),
+    refused: Array.isArray(root.refused)
+      ? (root.refused as unknown[]).flatMap((entry) => (isRecord(entry)
+        ? [{ what: asText(entry.what), why: asText(entry.why), bytes: asCount(entry.bytes) }]
+        : []))
+      : [],
+    summary: asText(root.summary),
+    disclosure: asText(root.disclosure),
+    idempotentReplay: asFlag(root.idempotentReplay) ?? false,
+  };
+};
+
 /**
  * True when the deployment does not expose the retention endpoints at all (backend not shipped to
  * this environment yet). The page degrades to an explanatory panel instead of an error.
@@ -477,6 +611,30 @@ export const platformGovernanceService = {
       command,
       { headers: { 'Idempotency-Key': key() } });
     return readEvidenceRetentionSummary(data);
+  },
+  getTenantDataControl: async (): Promise<TenantDataControlSummary> => {
+    const { data } = await axiosInstance.get<unknown>('/api/platform-governance/tenant-data');
+    return readTenantDataControl(data);
+  },
+  runTenantDataCleanup: async (command: {
+    buckets: string[];
+    dryRun: boolean;
+    reason: string;
+    /** Only sent on the destructive call. The server verifies it — the browser check is a courtesy. */
+    confirmation?: string;
+    /** Caller-owned so a retry of the SAME confirmed cleanup cannot delete twice. */
+    idempotencyKey: string;
+  }): Promise<TenantDataCleanupResult> => {
+    const { data } = await axiosInstance.post<unknown>(
+      '/api/platform-governance/tenant-data/cleanup',
+      {
+        buckets: command.buckets,
+        dryRun: command.dryRun,
+        reason: command.reason,
+        confirmation: command.confirmation ?? null,
+      },
+      { headers: { 'Idempotency-Key': command.idempotencyKey } });
+    return readTenantDataCleanup(data, command.dryRun);
   },
   runEvidenceRetentionPurge: async (command: {
     dryRun: boolean;

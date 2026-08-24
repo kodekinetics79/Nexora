@@ -153,9 +153,15 @@ public sealed class Wave1PlatformGovernancePostgreSqlTests(PostgreSqlTestDatabas
                 new(0, "HOLD_APPLIED", "Legal review requested"), default);
             Assert.True(hold.LegalHold);
             Assert.True(replay.IdempotentReplay);
-            await Assert.ThrowsAsync<PlatformGovernanceConflictException>(() => service.GovernAsync(
-                tenantA, 91, occurrenceId, "archive-delete", new(hold.GovernanceVersion,
-                    "DELETION_REQUESTED", "Retention review"), default));
+            // DELETION_REQUESTED no longer exists as an action. It never had an approver, so
+            // every request was permanent — and the retention purge read the resulting flag as an
+            // EXCLUSION, which made "request deletion review" the one reliable way to stop a
+            // document ever being deleted. The archive now refuses to record it at all.
+            var refused = await Assert.ThrowsAsync<PlatformGovernanceValidationException>(() =>
+                service.GovernAsync(tenantA, 91, occurrenceId, "archive-delete",
+                    new(hold.GovernanceVersion, "DELETION_REQUESTED", "Retention review"), default));
+            Assert.Contains("Storage & Retention", refused.Message);
+            Assert.DoesNotContain("DELETION", refused.Message, StringComparison.Ordinal);
         }
         await using var tenantBContext = database.ContextFor(tenantB);
         var tenantBResult = await new CommercialDocumentArchiveService(tenantBContext).SearchAsync(tenantB,
