@@ -392,7 +392,20 @@ public sealed class DocumentIngestionService : IDocumentIngestion
         //  * the duplicate is still recorded as a duplicate on the occurrence — with
         //    ProcessingReused false, because the processing genuinely is not reused. Claiming a
         //    saving that did not happen would be an untruth in the cost ledger.
-        if (emailInquiryComponentId is null && source.ExtractionJobId is { } existingJobId)
+        //
+        // THE TEST IS THE OCCURRENCE, NOT THE ARGUMENT. This used to read
+        // `emailInquiryComponentId is null`, which made the bypass depend on every caller
+        // remembering to pass the id — and the security-scan recovery sweep did not. It replayed
+        // a blocked ATTACHMENT with the parameter omitted, took this branch, and bound a second
+        // message's component to a finished job. A durable fact decides instead: the logical
+        // group key, which the canonical email door
+        // (EmailIngestEnqueuer, the only writer of the `email:` prefix) stamps on the occurrence
+        // at first ingest. A caller that forgets the id now loses the saving, which costs one
+        // extraction; it can no longer strand a customer's message, which costs the inquiry.
+        var occurrenceIsEmailOwned = emailInquiryComponentId is not null
+            || SourceOccurrenceIdentity.IsEmailOwned(occurrence.LogicalGroupKey)
+            || SourceOccurrenceIdentity.IsEmailOwned(metadata?.LogicalGroupKey);
+        if (!occurrenceIsEmailOwned && source.ExtractionJobId is { } existingJobId)
         {
             var existingStatus = await _context.Set<ExtractionJob>().AsNoTracking()
                 .Where(x => x.BusinessUnitId == businessUnitId && x.Id == existingJobId)
@@ -670,6 +683,22 @@ public sealed class DocumentIngestionService : IDocumentIngestion
 
 public static class SourceOccurrenceIdentity
 {
+    /// <summary>
+    /// The <see cref="SourceDocumentOccurrence.LogicalGroupKey"/> prefix that marks an intake
+    /// occurrence as belonging to an email message assembly.
+    ///
+    /// <para><c>EmailIngestEnqueuer</c> — the single canonical email scheduler — is the only
+    /// writer of this prefix, so an occurrence carrying it is owned by an
+    /// <c>EmailInquiryComponent</c> whatever a later caller remembers to pass. That is why the
+    /// content-level job-reuse bypass keys off this rather than off the caller's argument.</para>
+    /// </summary>
+    public const string EmailLogicalGroupPrefix = "email:";
+
+    /// <summary>True when the logical group key names an email message assembly.</summary>
+    public static bool IsEmailOwned(string? logicalGroupKey) =>
+        logicalGroupKey is not null
+        && logicalGroupKey.StartsWith(EmailLogicalGroupPrefix, StringComparison.Ordinal);
+
     public static string BuildKey(
         Guid batchId,
         ExtractionSourceType sourceType,

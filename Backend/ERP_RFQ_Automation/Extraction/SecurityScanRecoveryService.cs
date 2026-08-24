@@ -2,6 +2,8 @@ using System.Text.Json;
 using Amazon.S3;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.Infrastructure.Storage;
+using ERP_RFQ_Automation.Ingestion.Assembly;
+using ERP_RFQ_Automation.Ingestion.Triage;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
 
@@ -69,17 +71,20 @@ public sealed class SecurityScanRecoveryService : ISecurityScanRecoveryService
     private readonly IEvidenceObjectStorage _storage;
     private readonly IDocumentIngestion _ingestion;
     private readonly ILogger<SecurityScanRecoveryService>? _log;
+    private readonly IEmailInquiryAssemblyCoordinator? _assemblies;
 
     public SecurityScanRecoveryService(
         ErpRfqAutomationContext db,
         IEvidenceObjectStorage storage,
         IDocumentIngestion ingestion,
-        ILogger<SecurityScanRecoveryService>? log = null)
+        ILogger<SecurityScanRecoveryService>? log = null,
+        IEmailInquiryAssemblyCoordinator? assemblies = null)
     {
         _db = db;
         _storage = storage;
         _ingestion = ingestion;
         _log = log;
+        _assemblies = assemblies;
     }
 
     public Task<SecurityScanRetryResult> RetryBatchAsync(
@@ -186,6 +191,28 @@ public sealed class SecurityScanRecoveryService : ISecurityScanRecoveryService
                 continue;
             }
 
+            // WHO OWNS THIS FILE, resolved BEFORE a byte is read.
+            //
+            // A blocked email attachment is not a loose document: it is one part of a message
+            // that is waiting at the barrier for it. Replaying it as a loose document — which is
+            // what omitting the component id did — produces a job that owns nothing, and the
+            // worker's cutover fence then holds the whole message at NeedsReview and throws the
+            // extraction away. So the ownership question is answered first, and a file whose
+            // owner cannot be established is left held rather than replayed into that wall.
+            var ownership = await ResolveEmailOwnershipAsync(
+                businessUnitId, candidate.Occurrence, metadata, batchIdForCandidate, ct);
+            if (ownership.Refusal is { } refusalCode)
+            {
+                _log?.LogWarning(
+                    "Occurrence {OccurrenceId} in batch {BatchId} belongs to an email message whose "
+                    + "component could not be resolved ({ReasonCode}); it is left held rather than "
+                    + "replayed without its owner.",
+                    candidate.Occurrence.Id, batchIdForCandidate, refusalCode);
+                items.Add(new(candidate.Occurrence.Id, metadata.FileName,
+                    "AwaitingSecurityScan", refusalCode, null));
+                continue;
+            }
+
             byte[] bytes;
             try
             {
@@ -239,7 +266,13 @@ public sealed class SecurityScanRecoveryService : ISecurityScanRecoveryService
                     metadata.SourceType,
                     batchIdForCandidate,
                     metadata: metadata.Metadata,
+                    // THE ownership authority, carried through the replay exactly as the email
+                    // door carries it on the first pass. Omitting it here is what made the one
+                    // control an operator has destroy the extraction it was meant to rescue.
+                    emailInquiryComponentId: ownership.Owner?.ComponentId,
                     ct: ct);
+                if (ownership.Owner is { } owner)
+                    await BindRecoveredComponentAsync(businessUnitId, owner, ingested, ct);
                 items.Add(new(candidate.Occurrence.Id, metadata.FileName,
                     "Queued", null, ingested.JobId));
             }
@@ -299,6 +332,125 @@ public sealed class SecurityScanRecoveryService : ISecurityScanRecoveryService
             occurrence.IntakeStatus,
             occurrence.LastErrorCode,
             occurrence.SourceMetadataJson);
+
+    /// <summary>
+    /// Establishes which <see cref="EmailInquiryComponent"/>, if any, owns a held occurrence.
+    ///
+    /// <para><b>The persisted component row is the authority; the recorded ids only say where to
+    /// look.</b> The occurrence's stored metadata names a component, but that metadata came from
+    /// the caller that wrote it, so it is verified against the full tuple the coordinator itself
+    /// checks: the component exists for THIS tenant, its persisted <c>ComponentKey</c> is the
+    /// occurrence identity the intake key was built from, and its assembly derives THIS batch. A
+    /// job from another message therefore cannot be claimed by a mistyped id, and the composite
+    /// foreign key on <c>ExtractionJobs</c> stands behind the answer.</para>
+    ///
+    /// <para>Ownership that cannot be established for an occurrence the email door plainly wrote
+    /// is a REFUSAL, never a fallback to "replay it loose". Replaying it loose is the defect.</para>
+    /// </summary>
+    private async Task<EmailOwnership> ResolveEmailOwnershipAsync(
+        long businessUnitId,
+        SourceDocumentOccurrence occurrence,
+        RecoveryMetadata metadata,
+        Guid batchId,
+        CancellationToken ct)
+    {
+        var sidecar = metadata.Metadata;
+        var isEmailOwned = SourceOccurrenceIdentity.IsEmailOwned(occurrence.LogicalGroupKey)
+                           || SourceOccurrenceIdentity.IsEmailOwned(sidecar?.LogicalGroupKey);
+        if (!isEmailOwned)
+            return EmailOwnership.NotEmailOwned;
+
+        // A container without the assembly capability cannot rebind a component, and a replay it
+        // cannot rebind is a burned extraction and a message left where it was. Refuse instead.
+        if (_assemblies is null)
+            return EmailOwnership.Refuse("email_component_recovery_unavailable");
+
+        if (sidecar?.EmailInquiryComponentId is not { } recordedComponentId
+            || string.IsNullOrWhiteSpace(sidecar.SourceOccurrenceId))
+            return EmailOwnership.Refuse("email_component_ownership_unrecorded");
+
+        var component = await _db.Set<EmailInquiryComponent>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId && x.Id == recordedComponentId)
+            .Select(x => new
+            {
+                x.Id,
+                x.AssemblyId,
+                x.ComponentKey,
+                x.ExtractionJobId,
+                x.Status,
+                AssemblyStatus = x.Assembly.Status,
+                x.Assembly.MessageKey
+            })
+            .FirstOrDefaultAsync(ct);
+
+        if (component is null
+            || !string.Equals(component.ComponentKey, sidecar.SourceOccurrenceId.Trim(), StringComparison.Ordinal)
+            || EmailIngestEnqueuer.DeriveBatchId(component.AssemblyId, component.MessageKey) != batchId)
+            return EmailOwnership.Refuse("email_component_ownership_unresolved");
+
+        // A component that already holds a durable job belongs to governed dead-letter recovery,
+        // not to this sweep: re-submitting the same content would make it look active while the
+        // exhausted job it is bound to is the thing that actually has to be retried.
+        if (component.ExtractionJobId is not null)
+            return EmailOwnership.Refuse("email_component_already_scheduled");
+
+        if (component.Status is EmailInquiryComponentStatus.Completed
+            or EmailInquiryComponentStatus.Skipped
+            or EmailInquiryComponentStatus.RefusedSecurity
+            or EmailInquiryComponentStatus.Ignored
+            or EmailInquiryComponentStatus.StructuralOnly)
+            return EmailOwnership.Refuse("email_component_already_settled");
+
+        // Checked BEFORE the replay, not after. The coordinator refuses to resume a component
+        // whose message cannot legally re-enter scheduling, and discovering that after the
+        // ingest would leave a job running toward a barrier that can never open.
+        if (!EmailInquiryAssemblyStateMachine.CanAutomaticSchedulingRecoveryTransition(
+                component.AssemblyStatus))
+            return EmailOwnership.Refuse("email_message_not_recoverable");
+
+        return EmailOwnership.Owned(
+            new EmailComponentOwner(component.Id, component.AssemblyId, component.ComponentKey));
+    }
+
+    /// <summary>
+    /// Binds the replayed job to its component and lets the message re-enter extraction.
+    ///
+    /// <para>Passing the component id to the queue is necessary but NOT sufficient. The component
+    /// is still <c>FailedRecoverable</c> and its message still <c>FailedRecoverable</c>, and the
+    /// state machine deliberately has no <c>FailedRecoverable → ReadyForAssembly</c> transition —
+    /// so the result would arrive, the barrier would evaluate "ready", and the transition would be
+    /// refused and logged while the message stayed exactly where it was. The coordinator's
+    /// automatic-scheduling-recovery path is what walks both rows back into <c>Extracting</c>,
+    /// and it is the same path the mailbox re-poll uses.</para>
+    /// </summary>
+    private async Task BindRecoveredComponentAsync(
+        long businessUnitId,
+        EmailComponentOwner owner,
+        IngestedDocument ingested,
+        CancellationToken ct)
+    {
+        try
+        {
+            await _assemblies!.RecordComponentQueuedAsync(
+                businessUnitId, owner.AssemblyId, owner.ComponentKey, ingested.JobId, ct,
+                ingested.StoragePath, ingested.SourceDocumentOccurrenceId);
+            _log?.LogInformation(
+                "Security-scan recovery rebound component {ComponentKey} of assembly {AssemblyId} "
+                + "to job {JobId} for business unit {BusinessUnitId}; the message re-enters extraction.",
+                owner.ComponentKey, owner.AssemblyId, ingested.JobId, businessUnitId);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            // The job exists and carries its owner, so the extraction is not lost — but the
+            // message did not move, and that must be visible rather than inferred from a Lead
+            // that never appears.
+            _log?.LogError(exception,
+                "Security-scan recovery queued job {JobId} for component {ComponentKey} of assembly "
+                + "{AssemblyId} (business unit {BusinessUnitId}) but could not rebind the component; "
+                + "the message remains held.",
+                ingested.JobId, owner.ComponentKey, owner.AssemblyId, businessUnitId);
+        }
+    }
 
     private static RecoveryMetadata? ParseMetadata(string sourceMetadataJson)
     {
@@ -374,4 +526,20 @@ public sealed class SecurityScanRecoveryService : ISecurityScanRecoveryService
         ExtractionSourceType SourceType,
         string StorageUri,
         ExtractionJobMetadata? Metadata);
+
+    /// <summary>The verified message part a held occurrence belongs to.</summary>
+    private sealed record EmailComponentOwner(long ComponentId, long AssemblyId, string ComponentKey);
+
+    /// <summary>
+    /// Three outcomes, deliberately distinct: the file is a loose document (replay it as before),
+    /// the file is a message part whose owner is proven (replay it as that part), or the file is a
+    /// message part whose owner is not proven (leave it held and say why). There is no fourth
+    /// outcome in which an email part is replayed as a loose document — that is the defect.
+    /// </summary>
+    private readonly record struct EmailOwnership(EmailComponentOwner? Owner, string? Refusal)
+    {
+        public static readonly EmailOwnership NotEmailOwned = new(null, null);
+        public static EmailOwnership Owned(EmailComponentOwner owner) => new(owner, null);
+        public static EmailOwnership Refuse(string reasonCode) => new(null, reasonCode);
+    }
 }
