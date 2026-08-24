@@ -33,6 +33,7 @@ import {
 } from "@mui/material";
 import {
   ArrowBack,
+  OpenInNew,
   AssignmentTurnedIn,
   HowToReg,
   Inventory2,
@@ -602,10 +603,19 @@ function SourcingWorkbenchPage() {
         sx={{ justifyContent: "space-between", mb: 2 }}
       >
         <Stack direction="row" spacing={1.5} sx={{ alignItems: "center" }}>
-          <Tooltip title="Back to RFQs">
+          {/*
+            This went to the RFQ LIST, which threw away the identity of the RFQ the reader was
+            standing on: leaving the workbench for the RFQ that sent you here cost two clicks and a
+            scan of a paginated grid. The whole 3,000-line screen contained two `navigate` calls and
+            neither of them went back to its own RFQ.
+          */}
+          <Tooltip title={rfqId ? "Back to this RFQ" : "Back to RFQs"}>
             <Button
               variant="outlined"
-              onClick={() => navigate("/procurement/rfqs/all")}
+              aria-label={rfqId ? "Back to this RFQ" : "Back to RFQs"}
+              onClick={() =>
+                navigate(rfqId ? `/procurement/rfqs/view/${rfqId}` : "/procurement/rfqs/all")
+              }
               sx={{ minWidth: 40, px: 1 }}
             >
               <ArrowBack />
@@ -639,6 +649,21 @@ function SourcingWorkbenchPage() {
           </Box>
         </Stack>
         <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+          {/*
+            The workbench already HELD the customer quote — it reads `customerQuoteDraft.lines`, and
+            its "Price customer quote" dialog writes onto those lines — while offering no way to
+            open the quote it had just priced. Sourcing and quoting were a closed trap on the normal
+            path: the only exits were the RFQ list and a sourcing case. This is the door out.
+          */}
+          {workbench.customerQuoteDraft && (
+            <Button
+              startIcon={<OpenInNew />}
+              onClick={() => navigate(`/sales/quotes/view/${workbench.customerQuoteDraft!.quoteId}`)}
+              sx={{ fontWeight: 700 }}
+            >
+              {`Open quote ${workbench.customerQuoteDraft.quoteNumber}`}
+            </Button>
+          )}
           <Button
             startIcon={<Refresh />}
             onClick={refresh}

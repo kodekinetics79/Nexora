@@ -21,6 +21,7 @@ import leadService, {
   type GovernedUploadJobDTO,
 } from '../../api/services/leadService';
 import { useAuth } from '../../context/AuthContext';
+import ViewTabs from '../../components/layout/ViewTabs';
 import { useSnackbar } from 'notistack';
 import { presentableErrorMessage } from '../../utils/apiErrors';
 import {
@@ -208,6 +209,10 @@ const ManualUploadLeadsPage: React.FC = () => {
           {t('manual_upload') || 'Manual Lead Upload'}
         </Typography>
       </Stack>
+
+      {/* This is one of the four intake doors, not a place of its own — the tab strip says so and
+          gets the reader back to the queue without a trip through the sidebar. */}
+      <ViewTabs primaryKey="inbox" ariaLabel="Inbox views" />
 
       <Paper sx={{ p: 0, borderRadius: 3, border: '1px solid', borderColor: 'divider', overflow: 'hidden' }}>
         {/* Banner Section */}

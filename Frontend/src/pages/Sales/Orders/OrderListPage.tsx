@@ -125,7 +125,24 @@ const OrderListPage: React.FC = () => {
           </TableHead>
           <TableBody>
             {orders.length === 0 ? (
-              <TableRow><TableCell colSpan={8} align="center" sx={{ py: 5 }}>No orders found.</TableCell></TableRow>
+              // Was the four words "No orders found." in a table cell — identical whether the
+              // business has never taken an order or a search matched nothing, and with no way
+              // forward from either.
+              <TableRow>
+                <TableCell colSpan={8} align="center" sx={{ py: 5 }}>
+                  <Typography sx={{ fontWeight: 800 }}>
+                    {searchTerm ? 'No order matches this search' : 'No customer orders yet'}
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, maxWidth: 460, mx: 'auto' }}>
+                    {searchTerm
+                      ? 'Clear the search to see every order.'
+                      : 'An order is created when a customer purchase order is matched against a quote you sent.'}
+                  </Typography>
+                  {searchTerm
+                    ? <Button variant="outlined" sx={{ mt: 2, fontWeight: 700 }} onClick={() => setSearchTerm('')}>Clear the search</Button>
+                    : <Button variant="contained" sx={{ mt: 2, fontWeight: 700 }} onClick={() => navigate('/sales/client-pos')}>Open the client PO inbox</Button>}
+                </TableCell>
+              </TableRow>
             ) : (
               orders.map((order) => (
                 <TableRow key={order.id} hover>

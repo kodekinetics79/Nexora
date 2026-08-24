@@ -43,10 +43,14 @@ test.describe.serial('Visible Lead Intelligence to Quote Draft journey', () => {
     await expect(page.getByText('Commercial Attention')).toBeVisible();
     await expect(page.getByRole('button', { name: /Leads ready for RFQ/ })).toBeVisible();
     await expect(page.getByRole('button', { name: /RFQs ready for Quote/ })).toBeVisible();
-    const leadGroup = page.getByRole('button', { name: 'Lead Management' }).first();
-    await expect(leadGroup).toBeVisible();
-    await leadGroup.click();
-    await expect(page.getByText('Lead Intelligence', { exact: true }).first()).toBeVisible();
+    // The rail is five flat rows now — "Lead Management" was a collapsible group that had to be
+    // expanded before its children existed in the DOM. "Leads" is a link, so there is nothing to
+    // open; what this step is really asserting is that the lead surface is one click from the
+    // landing screen, and it now is.
+    const leadsRow = page.getByRole('button', { name: 'Leads' }).first();
+    await expect(leadsRow).toBeVisible();
+    await leadsRow.click();
+    await expect(page).toHaveURL(/\/procurement\/leads\/all/);
     await page.screenshot({ path: path.join(evidenceDir, '01-dashboard-navigation.png'), fullPage: true });
   });
 
