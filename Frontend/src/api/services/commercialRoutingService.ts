@@ -11,6 +11,10 @@ import axiosInstance from '../axiosInstance';
  *   POST /api/commercial-routing/queue/{id}/release       → Leads: Edit
  *   POST /api/commercial-routing/leads/{id}/route         → Leads: Edit + manager role
  *
+ * One exception, at the bottom of the file: `getLeadAssignmentHistory` binds
+ * `GET /api/commercial-intelligence/leads/{id}/assignment-history`. It is the audit trail of
+ * `changeLeadOwner`'s own write, so it belongs beside it rather than a module away.
+ *
  * Note the permission split on the queue verbs, because it is the whole design of the pull lane:
  * claim and release are the only routing verbs a plain sales rep can reach. Assignment — on both
  * this controller and `CommercialIntelligenceController` — is manager-only. A claim is therefore
@@ -148,7 +152,46 @@ export interface ChangeLeadOwnerRequest {
   expectedAssignmentVersion: number;
   idempotencyKey: string;
   correlationId: string;
+  /**
+   * Why the owner changed. Persisted verbatim onto `LeadAssignment.Comment` and read back by
+   * the owner history panel, so this is the sentence a manager sees months later next to
+   * "Aisha → Tariq".
+   *
+   * REQUIRED — at least 5 characters after trimming — when, and only when, the lead already has
+   * an owner AND the new assignee is a different person. Not for a self-assign, not for an
+   * unowned lead, not for re-confirming the current owner. The server answers 400 with a
+   * plain-English sentence when it is missing or too short, and `apiErrors.ts` lets a 400's
+   * server text through verbatim, so that sentence is what the user reads.
+   *
+   * The client-side half of the same rule is `LeadOwnerPicker.assignmentNeedsReason`, which is
+   * what decides whether the field is even shown. A form that asks for a justification it does
+   * not need is the difference between considerate and bureaucratic.
+   */
   comment?: string | null;
+}
+
+/**
+ * One recorded change of a lead's owner, as returned by
+ * `GET /api/commercial-intelligence/leads/{leadId}/assignment-history` (Leads: View).
+ *
+ * `scope` and `reasonCode` cross the wire as raw enum / decision codes
+ * (`LeadOnly`, `MANUAL_ASSIGNMENT`, `PRIMARY_OWNER_ASSIGNED`, …). Neither is ever rendered as
+ * itself — see `utils/routingDecisionReasons.ts` and `assignmentScopeLabel`.
+ */
+export interface LeadAssignmentHistoryEntry {
+  id: number;
+  leadId: number;
+  previousOwnerUserId?: number | null;
+  ownerUserId: number;
+  previousOwnerName?: string | null;
+  ownerName?: string | null;
+  scope: string;
+  reasonCode?: string | null;
+  comment?: string | null;
+  effectiveFrom: string;
+  effectiveTo?: string | null;
+  correlationId?: string | null;
+  idempotencyKey?: string | null;
 }
 
 export interface LeadOwnershipResponse {
@@ -188,6 +231,19 @@ const commercialRoutingService = {
 
   changeLeadOwner: async (leadId: number, body: ChangeLeadOwnerRequest): Promise<LeadOwnershipResponse> =>
     (await axiosInstance.put<LeadOwnershipResponse>(`${root}/leads/${leadId}/owner`, body)).data,
+
+  /**
+   * Every recorded owner change on one lead, newest first.
+   *
+   * The one read bound here that does NOT live on `CommercialRoutingController`: it is the audit
+   * trail of `changeLeadOwner` above, it answers for that write, and splitting it into the
+   * intelligence service would put a lead's ownership history a module away from the control
+   * that writes it. The endpoint had zero callers until this panel — a complete reassignment
+   * trail was being recorded for nobody to read.
+   */
+  getLeadAssignmentHistory: async (leadId: number): Promise<LeadAssignmentHistoryEntry[]> =>
+    (await axiosInstance.get<LeadAssignmentHistoryEntry[]>(
+      `/api/commercial-intelligence/leads/${leadId}/assignment-history`)).data,
 
   /**
    * Takes a lease on a queue item so two reps cannot work the same inquiry.

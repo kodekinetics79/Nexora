@@ -9,6 +9,7 @@ describe('routingDecisionSentence', () => {
       'PRIMARY_OWNER_ASSIGNED', 'BACKUP_OWNER_ASSIGNED', 'BACKUP_OWNER_ASSIGNED_FOR_WORKLOAD',
       'NO_MATCH_EVIDENCE', 'MATCH_BELOW_THRESHOLD', 'AMBIGUOUS_CUSTOMER',
       'NO_EFFECTIVE_OWNERSHIP', 'OWNER_UNAVAILABLE', 'MANUAL_ASSIGNMENT',
+      'MANUALLY_UNASSIGNED', 'RETURNED_TO_AUTOMATIC_ROUTING', 'DEFAULT_OWNER_ASSIGNED',
     ];
     for (const code of codes) {
       const sentence = routingDecisionSentence(code);
