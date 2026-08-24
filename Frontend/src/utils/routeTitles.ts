@@ -17,6 +17,10 @@ const STATIC_ROUTE_TITLES: Readonly<Record<string, string>> = {
   '/login': 'Sign In',
   '/forgot-password': 'Forgot Your Password',
 
+  // The five-row rail: the landing work queue and the directory of everything relocated off it.
+  '/inbox': 'Inbox',
+  '/advanced': 'All Screens',
+
   // Dashboards & intelligence
   '/dashboard': 'Dashboard',
   '/dashboard/team': 'Team Workload',

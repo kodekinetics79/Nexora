@@ -108,6 +108,10 @@ test.describe('WCAG 2.1 AA — axe scan', () => {
       ['/procurement/rfqs/outstanding', 'Outstanding RFQs | NEXORA'],
       ['/sales/quotes', 'Quotes | NEXORA'],
       ['/analytics/deadlines', 'Deadline Board | NEXORA'],
+      // The landing screen and the directory that replaced the 69-row rail. The first screen after
+      // sign-in is the one that can least afford an accessibility regression.
+      ['/inbox', 'Inbox | NEXORA'],
+      ['/advanced', 'All Screens | NEXORA'],
     ] as const) {
       test(`${route} has no critical accessibility violations`, async ({ page }) => {
         await page.goto(route);

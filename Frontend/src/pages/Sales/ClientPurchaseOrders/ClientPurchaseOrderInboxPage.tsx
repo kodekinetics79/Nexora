@@ -59,9 +59,23 @@ export default function ClientPurchaseOrderInboxPage() {
     {query.isError && <Alert severity="error" action={<Button color="inherit" onClick={() => query.refetch()}>Retry</Button>}>
       Client POs could not be loaded. No empty result has been assumed.
     </Alert>}
+    {/*
+      Was a five-word heading with no body and no button: the reader learned the list was empty and
+      nothing else — not whether their search caused it, not what would put a PO here.
+    */}
     {query.data?.length === 0 && <Paper variant="outlined" sx={{ p: 5, textAlign: 'center' }}>
       <FindInPage color="disabled" sx={{ fontSize: 42 }} />
-      <Typography sx={{ fontWeight: 700, mt: 1 }}>No Client POs match this view</Typography>
+      <Typography sx={{ fontWeight: 700, mt: 1 }}>
+        {search ? 'No client PO matches this search' : 'No customer purchase order has arrived'}
+      </Typography>
+      <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, maxWidth: 460, mx: 'auto' }}>
+        {search
+          ? 'Clear the search to see every purchase order that has been received.'
+          : 'A PO lands here when a customer accepts a quote you sent. Chase the quotes already out to bring one in.'}
+      </Typography>
+      {search
+        ? <Button variant="outlined" sx={{ mt: 2, fontWeight: 700 }} onClick={() => setSearch('')}>Clear the search</Button>
+        : <Button variant="contained" sx={{ mt: 2, fontWeight: 700 }} onClick={() => navigate('/sales/quotes?state=follow-up')}>Quotes due a follow-up</Button>}
     </Paper>}
     {query.data && query.data.length > 0 && <TableContainer component={Paper} variant="outlined">
       <Table size="small">

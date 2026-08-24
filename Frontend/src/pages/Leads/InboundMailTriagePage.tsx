@@ -1,6 +1,6 @@
 import { Fragment, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useNavigate } from 'react-router-dom';
+import { Link as RouterLink, useNavigate } from 'react-router-dom';
 import {
   Alert,
   AlertTitle,
@@ -14,6 +14,7 @@ import {
   DialogContentText,
   DialogTitle,
   IconButton,
+  Link,
   Paper,
   Stack,
   Tab,
@@ -39,6 +40,7 @@ import {
 import ApiErrorNotice from '../../components/common/ApiErrorNotice';
 import { EmptyState, LoadingState } from '../../platform/components/States';
 import { useAuth } from '../../context/AuthContext';
+import { INBOX_ROOT } from '../../components/layout/navCatalog';
 import { presentableServerText } from '../../utils/apiErrors';
 import emailTriageService, {
   describeAssemblyState,
@@ -406,6 +408,21 @@ export default function InboundMailTriagePage() {
         sx={{ mb: 2, justifyContent: 'space-between', alignItems: { sm: 'flex-start' } }}
       >
         <Box>
+          {/*
+            This screen already spends its one level of tabs on the triage outcome (Extracted /
+            Uncertain / Supplier / Noise), so it does NOT also carry the Inbox tab strip its three
+            sibling intake screens do — two stacked strips of the same shape is precisely the
+            tab-within-tab confusion this navigation pass exists to remove. A plain link back to the
+            queue does the same job without a second row of tabs.
+          */}
+          <Link
+            component={RouterLink}
+            to={INBOX_ROOT}
+            variant="body2"
+            sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5, fontWeight: 700, mb: 0.5 }}
+          >
+            ← Inbox
+          </Link>
           <Typography variant="h5" component="h1">
             Inbound Mail
           </Typography>

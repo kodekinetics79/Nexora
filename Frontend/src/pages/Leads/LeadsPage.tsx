@@ -28,6 +28,8 @@ import LateIngestedBadge from './LateIngestedBadge';
 import ClientCell from './ClientCell';
 import ResolveClientDialog from './ResolveClientDialog';
 import SearchField from '../../components/common/SearchField';
+import gridEmptyOverlay from '../../components/common/gridOverlays';
+import ViewTabs from '../../components/layout/ViewTabs';
 import { useSnackbar } from 'notistack';
 import { formatDateSafe, parseDateSafe } from '../../utils/dates';
 import { useAuth } from '../../context/AuthContext';
@@ -236,6 +238,34 @@ const LeadsPage: React.FC = () => {
       view,
     }),
   });
+
+  /**
+   * The top-of-funnel grid shipped MUI's bare "No rows" — the string a rep reads on day one when
+   * the mailbox has not yet been configured, and the same string they read when a search matched
+   * nothing. Neither reading tells them what to do, and one of the two is a setup problem they can
+   * fix themselves. Memoised because DataGrid takes a component TYPE here.
+   */
+  const noRowsOverlay = useMemo(() => gridEmptyOverlay({
+    title: 'No inquiries yet',
+    message: 'Enquiries arrive on their own once a mailbox is connected — or you can read documents in from your machine right now.',
+    action: (
+      <Button variant="contained" onClick={() => navigate('/procurement/leads/manual-upload')} sx={{ fontWeight: 700 }}>
+        Upload a document
+      </Button>
+    ),
+    filtered: Boolean(search) || leadSource !== 'all' || Boolean(view),
+    filteredTitle: 'No inquiry matches this view',
+    filteredMessage: 'Clear the search, the source filter and the tab to see every enquiry.',
+    filteredAction: (
+      <Button
+        variant="outlined"
+        onClick={() => { setSearch(''); setLeadSource('all'); navigate('/procurement/leads/all'); }}
+        sx={{ fontWeight: 700 }}
+      >
+        Show all inquiries
+      </Button>
+    ),
+  }), [search, leadSource, view, navigate]);
 
   // Decision Brief summaries: one batched call for the current page's ids,
   // fired only after the leads query resolves. This never blocks the grid —
@@ -662,6 +692,10 @@ const LeadsPage: React.FC = () => {
         </Stack>
       </Stack>
 
+      {/* The lead queues, as one level of tabs on the screen they filter. "Unassigned", "Assigned"
+          and "Revisions" were separate rail destinations over what a rep reads as one list. */}
+      <ViewTabs primaryKey="leads" ariaLabel="Inquiry views" />
+
       {/* Filters + view controls */}
       <Paper sx={{ p: 1.5, mb: 1.5, display: 'flex', flexWrap: 'wrap', gap: 1.5, alignItems: 'center', borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
         <Box sx={{ width: { xs: '100%', sm: 360 }, maxWidth: '100%' }}>
@@ -711,6 +745,7 @@ const LeadsPage: React.FC = () => {
             columns={orderedColumns}
             rowCount={totalCount}
             loading={isLoading}
+            slots={{ noRowsOverlay }}
             pageSizeOptions={[10, 25, 50]}
             paginationModel={paginationModel}
             paginationMode="server"

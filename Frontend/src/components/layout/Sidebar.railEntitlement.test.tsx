@@ -4,14 +4,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
  * Which rail a tenant sees is a PLATFORM decision — the `capability.full-navigation` entitlement
- * granted on the tenant's Modules screen — not a deployment env var. These tests pin the three
- * states the client can be in: granted (full rail), not granted (pilot rail), and the fail-closed
- * default when the bootstrap has not answered or an older server never reports entitlements.
+ * granted on the tenant's Modules screen — not a deployment env var and not a hard-coded list.
  *
- * "Follow-up Due" is the canary row: it exists in the full quote group and is absent from the
- * pilot allow-list, so its presence tells the two rails apart with a single query. "Draft Quotes"
- * is the control — on both rails, so a regression that empties the rail entirely cannot pass as
- * "trimmed".
+ * The default is the five-row rail. The grant restores the relocated groups inline, for a customer
+ * who asks for the surface they had before. These tests pin the three states the client can be in:
+ * granted, not granted, and the fail-closed default when the bootstrap has not answered or an
+ * older server never reports entitlements at all.
+ *
+ * "Stock ageing" is the canary: it is in the relocated catalogue and never on the five-row rail, so
+ * its presence tells the two rails apart with one query. "Inbox" is the control — on both rails, so
+ * a regression that empties the rail entirely cannot pass as "trimmed".
  */
 
 const auth = {
@@ -32,11 +34,9 @@ vi.mock('react-i18next', () => ({
 
 import Sidebar, { FULL_NAVIGATION_ENTITLEMENT } from './Sidebar';
 
-// A URL inside Quote Management, so the group renders expanded: rows only exist in the DOM once
-// their group is open, and an assertion against a closed group would pass for the wrong reason.
 const renderRail = () =>
   render(
-    <MemoryRouter initialEntries={['/sales/quotes?state=sent']}>
+    <MemoryRouter initialEntries={['/inbox']}>
       <Sidebar collapsed={false} />
     </MemoryRouter>,
   );
@@ -46,19 +46,23 @@ describe('the rail obeys the tenant full-navigation entitlement', () => {
     auth.entitlements = [];
   });
 
-  it('shows the pilot rail when the entitlement is not granted', () => {
+  it('shows the five-row rail when the entitlement is not granted', () => {
     renderRail();
 
-    expect(screen.getAllByRole('button', { name: 'Sent Quotes' }).length).toBeGreaterThan(0);
-    expect(screen.queryByRole('button', { name: 'Follow-up Due' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Inbox' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Catalogue & stock' })).toBeNull();
+    expect(screen.queryByText('Advanced')).toBeNull();
   });
 
-  it('shows the full rail when the platform grants the entitlement', () => {
+  it('restores the relocated groups when the platform grants the entitlement', () => {
     auth.entitlements = [FULL_NAVIGATION_ENTITLEMENT];
 
     renderRail();
 
-    expect(screen.getAllByRole('button', { name: 'Follow-up Due' }).length).toBeGreaterThan(0);
+    expect(screen.getByText('Advanced')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Catalogue & stock' })).toBeInTheDocument();
+    // The five stay first. The grant adds surface; it never reorders the job.
+    expect(screen.getByRole('button', { name: 'Inbox' })).toBeInTheDocument();
   });
 
   it('an unrelated entitlement grants nothing', () => {
@@ -67,7 +71,19 @@ describe('the rail obeys the tenant full-navigation entitlement', () => {
 
     renderRail();
 
-    expect(screen.getAllByRole('button', { name: 'Sent Quotes' }).length).toBeGreaterThan(0);
-    expect(screen.queryByRole('button', { name: 'Follow-up Due' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Inbox' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Catalogue & stock' })).toBeNull();
+  });
+
+  it('keeps All screens on BOTH rails, so nothing is ever unreachable', () => {
+    const trimmed = renderRail();
+    expect(screen.getByRole('button', { name: 'All screens' })).toBeInTheDocument();
+    trimmed.unmount();
+
+    auth.entitlements = [FULL_NAVIGATION_ENTITLEMENT];
+    const granted = renderRail();
+    expect(
+      granted.getAllByRole('button').some((button) => button.textContent === 'All screens'),
+    ).toBe(true);
   });
 });

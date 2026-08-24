@@ -3,28 +3,26 @@ import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it, vi } from 'vitest';
 
 /**
- * Seven rail entries address a filtered list through a query string — the four quote states,
- * "Ready for Quote", "Sourcing Cases" and lead "Revisions". `isPathMatched` compared
- * `location.pathname`, which NEVER carries a query, so not one of them could ever highlight; group
- * selection is `children.some(...)`, so the parent row went dark with them.
+ * What the rail shows, and where it says you are.
  *
- * The cost was not a cosmetic one. A rep clicked "Quote Management > Sent Quotes" at 4pm to chase
- * offers, landed on three rows with nothing lit in a 69-row rail and no filter stated anywhere,
- * and reported to their manager that the pipeline was nearly empty. The rail is one of the two
- * places that has to say which slice of the data is on screen.
+ * The rail is five rows. The test that used to live here pinned a much harder problem: seven rail
+ * entries addressed a FILTERED list through a query string ("Sent Quotes", "Ready for Quote",
+ * "Sourcing Cases", lead "Revisions") and `location.pathname` never carries a query, so none of
+ * them could ever highlight. The cost was not cosmetic — a rep clicked "Quote Management > Sent
+ * Quotes" at 4pm to chase offers, landed on three rows with nothing lit anywhere in a 69-row rail
+ * and no filter stated on the page, and told their manager the pipeline was nearly empty.
+ *
+ * Those seven entries are now TABS on the screens they filter, so the highlight problem moved with
+ * them (see `ViewTabs.test.tsx`, which pins the same matching rules). What the rail must still get
+ * right is the case below: a filtered address is still INSIDE its primary destination, so the row
+ * stays lit rather than going dark while the tab strip says which slice is on screen.
  */
 
-// These tests pin how the rail MATCHES an address that carries a query string. That behaviour is
-// independent of which entries the pilot rail happens to show, and three of the entries it needs
-// ("Follow-up Due", "Ready for Quote", "Duplicates") are hidden from the pilot. Exercise the full
-// rail — the fixture is a tenant granted the full-navigation entitlement — so the matcher is
-// tested on every shape it must handle, not only the pilot subset. The rail decision itself is
-// covered by Sidebar.railEntitlement.test.tsx.
 vi.mock('../../context/AuthContext', () => ({
   useAuth: () => ({
     userData: { isManager: false, businessUnitId: 1 },
     hasPermission: () => true,
-    hasEntitlement: () => true,
+    hasEntitlement: () => false,
   }),
 }));
 
@@ -44,48 +42,91 @@ function renderRail(url: string) {
 
 const row = (name: string | RegExp) => screen.getByRole('button', { name });
 
-describe('a rail entry whose address carries a filter', () => {
-  it('highlights on the matching URL', () => {
+describe('the rail is five rows and a door', () => {
+  it('shows exactly the five primary destinations plus All screens', () => {
+    renderRail('/inbox');
+
+    expect(screen.getAllByRole('button').map((button) => button.textContent)).toEqual([
+      'Inbox',
+      'Leads',
+      'RFQs',
+      'Quotes',
+      'Setup',
+      'All screens',
+    ]);
+  });
+
+  it('does not carry a single expandable group', () => {
+    // A group row that must be opened before its children exist is a second navigation level, and
+    // the second level is what made the old rail unscannable.
+    renderRail('/inbox');
+
+    expect(screen.queryAllByRole('button', { expanded: false })).toEqual([]);
+    expect(screen.queryAllByRole('button', { expanded: true })).toEqual([]);
+  });
+});
+
+describe('where the rail says you are', () => {
+  it('lights the row you are on', () => {
+    renderRail('/inbox');
+
+    expect(row('Inbox')).toHaveAttribute('aria-current', 'page');
+  });
+
+  it('stays lit on a FILTERED address inside the destination', () => {
+    // The old rail went dark here, because the filter lived in a query string on a child row.
     renderRail('/sales/quotes?state=sent');
 
-    expect(row('Sent Quotes')).toHaveAttribute('aria-current', 'page');
+    expect(row('Quotes')).toHaveAttribute('aria-current', 'page');
   });
 
-  it('lights only the state the rep actually opened', () => {
+  it('lights only one row at a time', () => {
     renderRail('/sales/quotes?state=sent');
 
-    expect(row('Draft Quotes')).not.toHaveAttribute('aria-current');
-    expect(row('Follow-up Due')).not.toHaveAttribute('aria-current');
-    expect(row('Won / Lost')).not.toHaveAttribute('aria-current');
+    expect(row('Leads')).not.toHaveAttribute('aria-current');
+    expect(row('RFQs')).not.toHaveAttribute('aria-current');
+    expect(row('Setup')).not.toHaveAttribute('aria-current');
   });
 
-  it('carries the highlight up to the group row', () => {
-    renderRail('/sales/quotes?state=follow-up');
+  it('lights the owning row on a DETAIL page, not just on the list', () => {
+    // A rep reading one quote has not left Quotes. The old rail lit nothing here.
+    renderRail('/sales/quotes/view/42');
 
-    // Groups expose expand state rather than aria-current, so selection is the MUI class.
-    expect(row(/^Quote Management/).className).toContain('Mui-selected');
+    expect(row('Quotes')).toHaveAttribute('aria-current', 'page');
   });
 
-  it('stands the unfiltered sibling down when a filter is on the address', () => {
-    // "All RFQs" and "Ready for Quote" are the same pathname. A lit "All RFQs" over a narrowed
-    // grid is the same lie the constant page heading was.
-    renderRail('/procurement/rfqs/all?state=ready-for-quote');
-
-    expect(row('Ready for Quote')).toHaveAttribute('aria-current', 'page');
-    expect(row('all_rfqs')).not.toHaveAttribute('aria-current');
+  it('lights Inbox on each of the intake screens it owns', () => {
+    // These were four separate rail rows under "Lead Management"; they are views of Inbox now, and
+    // the rail has to agree with the tab strip about that.
+    for (const url of [
+      '/procurement/extraction/review',
+      '/procurement/leads/inbound-mail',
+      '/procurement/leads/manual-upload',
+    ]) {
+      const view = renderRail(url);
+      expect(screen.getByRole('button', { name: 'Inbox' })).toHaveAttribute('aria-current', 'page');
+      view.unmount();
+    }
   });
 
-  it('leaves the unfiltered entry lit for a param that is not a filter', () => {
-    renderRail('/procurement/rfqs/all?page=2');
+  it('lights RFQs on the legacy /rfqs alias, which is still a live route', () => {
+    renderRail('/rfqs/view/7');
 
-    expect(row('all_rfqs')).toHaveAttribute('aria-current', 'page');
+    expect(row('RFQs')).toHaveAttribute('aria-current', 'page');
   });
 
-  it('still highlights an entry that carries no query at all', () => {
-    // CONTROL: this passed before the fix too. It is here so a regression in the plain path
-    // comparison — the case that always worked — cannot hide behind the new query handling.
-    renderRail('/procurement/leads/duplicates');
+  it('lights Setup on the addresses Setup governs outside its own URL space', () => {
+    // `/security/users` and `/admin/platform/*` are Setup screens that kept their old addresses.
+    renderRail('/security/users');
 
-    expect(row('Duplicates')).toHaveAttribute('aria-current', 'page');
+    expect(row('Setup')).toHaveAttribute('aria-current', 'page');
+  });
+
+  it('lights nothing when the address belongs to no primary destination', () => {
+    renderRail('/inventory/ageing');
+
+    for (const name of ['Inbox', 'Leads', 'RFQs', 'Quotes', 'Setup']) {
+      expect(row(name)).not.toHaveAttribute('aria-current');
+    }
   });
 });

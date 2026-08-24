@@ -2,6 +2,7 @@ import React, { useState, useMemo, useId } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import {
   Box,
+  Divider,
   List,
   ListItem,
   ListItemButton,
@@ -9,107 +10,123 @@ import {
   ListItemText,
   Collapse,
   Tooltip,
+  Typography,
 } from '@mui/material';
 import { alpha } from '@mui/material/styles';
 import { useTranslation } from 'react-i18next';
 import {
-  Dashboard as DashboardIcon,
-  ReceiptLong as QuotationIcon,
-  Assignment as OrderIcon,
-  LocalShipping as ShipmentIcon,
-  Settings as SetupIcon,
-  Inventory2 as InventoryIcon,
-  Handshake as SupplierIcon,
-  People as CustomerIcon,
   ExpandLess,
   ExpandMore,
   FiberManualRecord as BulletIcon,
-  TrendingUp as LeadIcon,
-  AutoAwesome as CopilotIcon,
-  FactCheck as BoqIcon,
-  AccountBalance as FinanceIcon,
-  WarningAmber as ExceptionIcon,
 } from '@mui/icons-material';
 import { useAuth } from '../../context/AuthContext';
-import { SETUP_ENTRIES, SETUP_ROOT } from '../../pages/Setup/setupCatalog';
+import { SETUP_ENTRIES } from '../../pages/Setup/setupCatalog';
+import {
+  ADVANCED_GROUPS,
+  ALL_SCREENS_ENTRY,
+  PRIMARY_NAV,
+  navEntryLabel,
+  type NavEntry,
+  type PrimaryNavItem,
+} from './navCatalog';
 
 interface SidebarProps {
   collapsed: boolean;
   onNavigate?: () => void;
 }
 
-interface MenuItem {
-  key: string;
-  label: string;
-  icon: React.ReactNode;
-  path?: string;
-  moduleName?: string;
-  activePrefixes?: string[];
-  children?: { key: string; label: string; path: string; moduleName?: string; icon?: React.ReactNode; activePrefixes?: string[] }[];
-}
-
 /**
- * The pilot rail.
+ * The rail.
  *
- * The full navigation is 17 top-level rows and 68 leaf destinations. On a 1440x900 laptop that is
- * roughly 1,095px of rail against 836px of viewport, so Customers, Inventory and Setup sit below
- * the fold — and the first three rows are Today, Dashboard and Copilot, with the word "RFQ" first
- * appearing at row six. A rep opening this on their first Monday, in their second language, with a
- * tender closing Thursday, is solving a scanning problem before they can start work.
+ * It used to be 17 top-level rows over 69 destinations — roughly 1,095px of rail against 836px of
+ * laptop viewport, so Customers, Inventory and Setup sat below the fold, and the word "RFQ" first
+ * appeared at row six behind Today, Dashboard and Copilot. The pilot answered that with a second
+ * hard-coded allow-list that hid 50 of the 69, which left two lists disagreeing about one rail.
  *
- * This is an ALLOW-LIST, not a deletion. Every hidden screen keeps its route, its permissions, its
- * page title and its tests; it is reachable by URL, by deep link from another screen, and by
- * global search — which matches RFQ, quote, order, shipment, CR and VAT numbers server-side. The
- * rule the product operates under is preserve-but-hide: out-of-scope surface is concealed from the
- * pilot, never removed.
+ * It is now FIVE rows, read from `navCatalog.tsx` and nothing else:
  *
- * `true` keeps a single-destination row whole. An array keeps a group and names the children that
- * survive. Anything absent is hidden.
+ *     Inbox · Leads · RFQs · Quotes · Setup
  *
- * Kept because the BRD v3.0 spine runs through it:
- *   RFQ -> Quote -> Customer PO -> Sales Order -> Supplier PO -> Shipment
- * plus the two screens a rep starts the day on, the catalogue they quote against, the customer
- * record, and Setup.
+ * Those are the five nouns a rep uses to describe their own job, in the order the work moves
+ * through them. Nothing was deleted to get there. Every other screen keeps its route, its
+ * permissions, its title and its deep links, and is listed with a description on **All screens**
+ * (`/advanced`) — the last row here, kept visually apart because it is a door, not a job. Filters
+ * that used to be rail rows ("Sent Quotes", "Draft RFQs") are now tabs on the screen they filter,
+ * so the rail names places and the screen names views.
+ *
+ * The rail has no expand/collapse for the five: a group row that must be opened before its
+ * children exist is a second navigation level, and the second level is what made the old rail
+ * unscannable.
  */
-const PILOT_RAIL: Readonly<Record<string, true | readonly string[]>> = {
-  'role-today': ['today-sales'],
-  dashboard: ['analytics-deadlines'],
-  lead_mgmt: ['leads-all', 'leads-review', 'leads-bulk', 'leads-inbound-mail'],
-  rfq_mgmt: ['rfqs-all', 'rfqs-draft'],
-  quote_mgmt: ['quotes-draft', 'quotes-sent'],
-  'client-po-inbox': true,
-  orders: true,
-  supplier_mgmt: ['suppliers', 'supplier-quote-inbox', 'purchase-orders'],
-  shipments: true,
-  inventory: ['products'],
-  customers: true,
-  setup: true,
-};
 
 /**
- * Off per tenant by granting this entitlement on the tenant's Modules screen in the platform
- * console, which restores all 17 rows for that customer — audited, reason-required, no deploy.
+ * Restores the pre-2026-08 rail for one tenant, granted on that tenant's Modules screen in the
+ * platform console — audited, reason-required, no deploy.
  *
- * This REPLACED the VITE_PILOT_RAIL environment switch rather than joining it: two switches over
- * the same rail can disagree, and the one an operator can see must be the one the product obeys.
- * Absence — grant not made, bootstrap still loading, platform plane unreadable, or an older
- * server that never reports entitlements — always lands on the trimmed rail: the floor, from
- * which every screen stays reachable by URL, deep link and global search.
+ * When granted, the nine relocated groups are rendered inline beneath the five as collapsible
+ * rows: the same surface the tenant had before, for a customer who asks for it back. Absence — not
+ * granted, bootstrap still loading, platform plane unreadable, or an older server that never
+ * reports entitlements — always lands on the five-row rail: the floor, from which every screen
+ * stays reachable through All screens, by URL, by deep link and by global search.
  */
 export const FULL_NAVIGATION_ENTITLEMENT = 'capability.full-navigation';
 
-/** Applies the allow-list. Groups left with no surviving child disappear with them. */
-export const applyPilotRail = <T extends { key: string; children?: { key: string }[] }>(
-  items: T[],
-): T[] =>
-  items
-    .filter((item) => PILOT_RAIL[item.key] !== undefined)
-    .map((item) => {
-      const allowed = PILOT_RAIL[item.key];
-      if (!item.children || allowed === true) return item;
-      return { ...item, children: item.children.filter((child) => allowed.includes(child.key)) };
-    })
-    .filter((item) => !item.children || item.children.length > 0);
+interface RailGroup {
+  key: string;
+  title: string;
+  entries: NavEntry[];
+}
+
+/** Splits an entry's own query off so it can be compared against the address bar. */
+const splitNavPath = (path: string): { pathname: string; params: [string, string][] } => {
+  const cut = path.indexOf('?');
+  if (cut < 0) return { pathname: path, params: [] };
+  return {
+    pathname: path.slice(0, cut),
+    params: Array.from(new URLSearchParams(path.slice(cut + 1)).entries()),
+  };
+};
+
+/**
+ * Whether an address counts as "on" a rail destination.
+ *
+ * Query strings matter: seven of the relocated entries address a FILTERED view through one
+ * (`?state=requires-sourcing`, `?view=revisions`), and `location.pathname` never carries a query,
+ * so a plain path comparison could never light them.
+ */
+const isPathMatched = (
+  path: string,
+  location: { pathname: string; search: string },
+  prefixes?: string[],
+): boolean => {
+  const { pathname, params } = splitNavPath(path);
+  const pathnameMatches =
+    location.pathname === pathname ||
+    // The legacy `/procurement`-less aliases are still live routes and still in bookmarks.
+    (pathname.startsWith('/procurement') && location.pathname === pathname.replace('/procurement', ''));
+  if (pathnameMatches) {
+    const current = new URLSearchParams(location.search);
+    if (params.length === 0) return true;
+    if (params.every(([key, value]) => current.get(key) === value)) return true;
+  }
+  return prefixes?.some((prefix) => location.pathname.startsWith(prefix)) ?? false;
+};
+
+/**
+ * Whether a primary row is "here".
+ *
+ * A primary row owns its own path, every one of its views' paths, and any extra prefixes it
+ * declares (a quote detail belongs to Quotes). Unlike the old rail, a filtered view does NOT stand
+ * its parent down — the parent is the place and the tab strip on the page says which slice is
+ * showing, so there is nowhere for the highlight to go missing.
+ */
+export const isPrimaryActive = (
+  item: PrimaryNavItem,
+  location: { pathname: string; search: string },
+): boolean => {
+  if (isPathMatched(item.path, location, item.activePrefixes)) return true;
+  return (item.views ?? []).some((view) => isPathMatched(view.path, location, view.activePrefixes));
+};
 
 const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
   const navigate = useNavigate();
@@ -117,24 +134,11 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
   const { t } = useTranslation();
   const { userData, hasPermission, hasEntitlement } = useAuth();
   const isManager = userData.isManager === true;
-  // Two Sidebars are mounted at once (mobile drawer + permanent drawer), so
-  // aria-controls targets must be unique per instance.
+  // Two Sidebars are mounted at once (mobile drawer + permanent drawer), so aria-controls targets
+  // must be unique per instance.
   const instanceId = useId();
 
-  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({
-    'dashboard': location.pathname.startsWith('/dashboard') || location.pathname.startsWith('/analytics/'),
-    'rfq_mgmt': location.pathname.includes('/rfqs'),
-    'quote_mgmt': location.pathname.includes('/quotes'),
-    'inventory': location.pathname.includes('/inventory'),
-    'supplier_mgmt': location.pathname.includes('/suppliers') || location.pathname.includes('/supplier-quotes') || location.pathname.includes('/commercial-inbox') || location.pathname.includes('/quoted-items') || location.pathname.includes('/purchase-orders') || location.pathname.includes('/sourcing-cases'),
-    'lead_mgmt': location.pathname.includes('/leads') || location.pathname.includes('/commercial-cases'),
-    'copilot': location.pathname.includes('/copilot'),
-    'sales-management': location.pathname.startsWith('/sales/'),
-  });
-
-  const handleGroupClick = (key: string) => {
-    setOpenGroups(prev => ({ ...prev, [key]: !prev[key] }));
-  };
+  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
 
   const navigateTo = (path: string) => {
     navigate(path);
@@ -142,334 +146,127 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
   };
 
   /**
-   * Setup keeps its rail entry when the user can open at least one screen inside it. The old group
-   * derived this from its children; the children now live in the catalogue, so the rule reads from
-   * there — one register, no second list of setup screens to forget to update.
+   * Setup keeps its rail row when the user can open at least one screen inside it. The rule reads
+   * from the setup catalogue — one register, no second list of setup screens to forget to update.
    */
   const setupIsReachable = useMemo(
     () => SETUP_ENTRIES.some((entry) => !entry.moduleName || hasPermission(entry.moduleName)),
     [hasPermission],
   );
 
-  const menuItems: MenuItem[] = useMemo(() => {
-    const rawItems: MenuItem[] = [
-      {
-        key: 'role-today',
-        label: 'Today',
-        icon: <DashboardIcon />,
-        activePrefixes: ['/sales/today', '/sales/team', '/sourcing/today', '/inventory/today', '/executive/today', '/admin/operations'],
-        children: [
-          { key: 'today-sales', label: 'Sales Rep Today', path: '/sales/today', moduleName: 'Leads' },
-          ...(isManager ? [{ key: 'today-sales-manager', label: 'Sales Manager Control Tower', path: '/sales/team', moduleName: 'Dashboard' }] : []),
-          { key: 'today-sourcing', label: 'Sourcing Today', path: '/sourcing/today', moduleName: 'Supplier History' },
-          { key: 'today-inventory', label: 'Inventory Today', path: '/inventory/today', moduleName: 'Products' },
-          { key: 'today-executive', label: 'Executive RFQ-to-Revenue', path: '/executive/today', moduleName: 'Dashboard' },
-          { key: 'today-admin', label: 'Tenant Admin Operations', path: '/admin/operations', moduleName: 'Users' },
-        ],
-      },
-      // Managers get a Dashboard group with the WP-B1 Team Workload view;
-      // everyone else keeps the familiar one-click Dashboard item.
-      // The deadline board leads: it is the only analytics surface that computes
-      // from data every tenant has on day one. /dashboard sits below it until
-      // its KPIs stop reporting insufficient data.
-      {
-        key: 'dashboard',
-        label: t('dashboard'),
-        icon: <DashboardIcon />,
-        moduleName: 'Dashboard',
-        activePrefixes: ['/analytics/'],
-        children: [
-          { key: 'analytics-deadlines', label: 'Deadline Board', path: '/analytics/deadlines', moduleName: 'Leads' },
-          { key: 'analytics-brand-demand', label: 'Brand Demand', path: '/analytics/brand-demand', moduleName: 'Leads' },
-          { key: 'dashboard-overview', label: t('dashboard'), path: '/dashboard', moduleName: 'Dashboard' },
-          ...(isManager ? [{ key: 'dashboard-team', label: t('team_workload', 'Team Workload'), path: '/dashboard/team', moduleName: 'Dashboard' }] : []),
-        ],
-      },
-      {
-        key: 'copilot',
-        // NOTE: these keys are missing from i18n resources, so t('copilot')
-        // resolves to the raw key ("copilot") — a truthy string — and the
-        // `|| 'Fallback'` pattern never fires. Passing the fallback as
-        // i18next's defaultValue renders proper Title Case labels instead.
-        label: t('copilot', 'Copilot'),
-        icon: <CopilotIcon />,
-        moduleName: 'Dashboard',
-        activePrefixes: ['/copilot'],
-        children: [
-          { key: 'copilot-chat', label: t('copilot', 'Copilot'), path: '/copilot', moduleName: 'Dashboard' },
-          { key: 'copilot-approvals', label: t('approvals', 'Approvals'), path: '/copilot/approvals', moduleName: 'Dashboard' },
-          { key: 'copilot-activity', label: t('activity', 'Activity'), path: '/copilot/activity', moduleName: 'Dashboard' },
-        ],
-      },
-      {
-        key: 'sales-management',
-        label: 'Sales Management',
-        icon: <CustomerIcon />,
-        moduleName: 'Leads',
-        activePrefixes: ['/sales/today', '/sales/team', '/sales/reps', '/sales/accounts', '/sales/routing', '/sales/follow-ups', '/sales/performance', '/sales/exceptions', '/sales/actions'],
-        children: [
-          { key: 'sales-today', label: 'Sales Today', path: '/sales/today', moduleName: 'Leads' },
-          ...(isManager ? [{ key: 'sales-team', label: 'Team Overview', path: '/sales/team', moduleName: 'Leads' }] : []),
-          { key: 'sales-reps', label: 'Sales Reps', path: '/sales/reps', moduleName: 'Users' },
-          { key: 'sales-accounts', label: 'Account Ownership', path: '/sales/accounts', moduleName: 'Customers' },
-          { key: 'sales-routing', label: 'Routing Queue', path: '/sales/routing', moduleName: 'Leads' },
-          { key: 'sales-follow-ups', label: 'Follow-ups', path: '/sales/follow-ups', moduleName: 'Quotations' },
-          { key: 'sales-performance', label: 'Performance', path: '/sales/performance', moduleName: 'Dashboard' },
-          { key: 'sales-exceptions', label: 'Commercial Exceptions', path: '/sales/exceptions', moduleName: 'Leads', icon: <ExceptionIcon fontSize="small" /> },
-          { key: 'human-actions', label: 'Human Actions', path: '/sales/actions', moduleName: 'Leads', icon: <BoqIcon fontSize="small" /> },
-          { key: 'commercial-memory', label: 'Commercial Memory', path: '/intelligence/commercial-memory', moduleName: 'Dashboard' },
-        ],
-      },
-      {
-        key: 'lead_mgmt',
-        label: t('lead_management'),
-        icon: <LeadIcon />,
-        moduleName: 'Leads',
-        children: [
-          { key: 'leads-all', label: 'All Inquiries', path: '/procurement/leads/all', moduleName: 'Leads', activePrefixes: ['/procurement/leads/view', '/leads/view'] },
-          { key: 'leads-review', label: 'Needs Review', path: '/procurement/extraction/review', moduleName: 'Leads', activePrefixes: ['/procurement/extraction/review'] },
-          // ONE entry for the document door. "Lead Intelligence" pointed at this same
-          // ManualUploadLeadsPage component — two menu items, two URLs, one screen — and the
-          // name promised analysis while delivering an upload form. The route it used is kept
-          // alive below for bookmarks and e2e, but it no longer earns a second place in the nav.
-          // "Upload Documents" over "Bulk Uploads": this door READS documents (PDF/Word/Excel,
-          // up to 50 per batch) through the same extraction the mailbox uses. The genuinely
-          // bulk thing — importing a spreadsheet whose ROWS ARE leads — is a different door
-          // with a different trust model, and it has no screen at all yet.
-          { key: 'leads-bulk', label: 'Upload Documents', path: '/procurement/leads/manual-upload', moduleName: 'Leads', activePrefixes: ['/procurement/leads/ingestion', '/procurement/leads/intelligence'] },
-          { key: 'leads-inbound-mail', label: 'Inbound Mail', path: '/procurement/leads/inbound-mail', moduleName: 'Leads' },
-          { key: 'leads-watched-folders', label: 'Watched Folders', path: '/procurement/leads/watched-folders', moduleName: 'Leads' },
-          { key: 'leads-duplicates', label: 'Duplicates', path: '/procurement/leads/duplicates', moduleName: 'Leads' },
-          { key: 'leads-revisions', label: 'Revisions', path: '/procurement/leads/all?view=revisions', moduleName: 'Leads' },
-          { key: 'leads-matches', label: 'Possible Matches', path: '/procurement/leads/possible-matches', moduleName: 'Leads' },
-        ]
-      },
-      {
-        key: 'rfq_mgmt',
-        label: t('rfq_management'),
-        icon: <QuotationIcon />,
-        moduleName: 'RFQ Management',
-        children: [
-          { key: 'rfqs-all', label: t('all_rfqs'), path: '/procurement/rfqs/all', moduleName: 'RFQ Management', activePrefixes: ['/procurement/rfqs/process', '/procurement/rfqs/view', '/rfqs/view', '/rfqs/process'] },
-          { key: 'rfqs-draft', label: 'Draft / Needs Review', path: '/procurement/rfqs/draft', moduleName: 'RFQ Management' },
-          { key: 'rfqs-ready', label: 'Ready for Quote', path: '/procurement/rfqs/all?state=ready-for-quote', moduleName: 'RFQ Management' },
-        ]
-      },
-      {
-        key: 'quote_mgmt',
-        label: 'Quote Management',
-        icon: <QuotationIcon />,
-        moduleName: 'Quotations',
-        children: [
-          { key: 'quotes-draft', label: 'Draft Quotes', path: '/sales/quotes?state=draft', moduleName: 'Quotations', activePrefixes: ['/sales/quotes/view', '/sales/quotes/edit'] },
-          { key: 'quotes-sent', label: 'Sent Quotes', path: '/sales/quotes?state=sent', moduleName: 'Quotations' },
-          { key: 'quotes-follow-up', label: 'Follow-up Due', path: '/sales/quotes?state=follow-up', moduleName: 'Quotations' },
-          { key: 'quotes-outcomes', label: 'Won / Lost', path: '/sales/quotes?state=outcomes', moduleName: 'Quotations' },
-        ],
-      },
-      // Service BOQs live next to Quotations — a BOQ is priced quote material for
-      // service work, so it shares the Quotations module permission.
-      { key: 'service-boqs', label: t('service_boqs', 'Service BOQs'), icon: <BoqIcon />, path: '/services/boq', moduleName: 'Quotations', activePrefixes: ['/services/boq'] },
-      { key: 'client-po-inbox', label: 'Client PO Inbox', icon: <QuotationIcon />, path: '/sales/client-pos', moduleName: 'Customer Awards', activePrefixes: ['/sales/client-pos/'] },
-      { key: 'orders', label: 'Customer Orders', icon: <OrderIcon />, path: '/sales/orders', moduleName: 'Orders', activePrefixes: ['/sales/orders'] },
-      { key: 'procurement-handoffs', label: 'Procurement Handoffs', icon: <OrderIcon />, path: '/procurement/handoffs', moduleName: 'Orders' },
-      { key: 'accounts-receivable', label: 'Accounts Receivable', icon: <FinanceIcon />, path: '/sales/finance', moduleName: 'Accounts Receivable', activePrefixes: ['/sales/finance'] },
-      { key: 'shipments', label: t('shipments'), icon: <ShipmentIcon />, path: '/sales/shipments', moduleName: 'Shipments', activePrefixes: ['/sales/shipments'] },
-      {
-        key: 'supplier_mgmt',
-        label: t('supplier_management'),
-        icon: <SupplierIcon />,
-        moduleName: 'Suppliers',
-        children: [
-          { key: 'suppliers', label: t('suppliers'), path: '/suppliers', moduleName: 'Suppliers', activePrefixes: ['/suppliers/'] },
-          { key: 'sourcing-cases', label: 'Sourcing Cases', path: '/procurement/rfqs/all?state=requires-sourcing', moduleName: 'RFQ Management', activePrefixes: ['/procurement/sourcing-cases'] },
-          { key: 'supplier-quote-inbox', label: 'Supplier Quote Inbox', path: '/procurement/supplier-quotes', moduleName: 'Supplier History', activePrefixes: ['/procurement/supplier-quotes/'] },
-          { key: 'commercial-inbox', label: 'Commercial Inbox', path: '/procurement/commercial-inbox', moduleName: 'Supplier History' },
-          { key: 'quoted-items', label: t('quoted_items'), path: '/suppliers/quoted-items', moduleName: 'Supplier History' },
-          { key: 'purchase-orders', label: t('purchase_orders'), path: '/suppliers/purchase-orders', moduleName: 'Orders' },
-        ]
-      },
-      { key: 'customers', label: t('customers'), icon: <CustomerIcon />, path: '/customers', moduleName: 'Customers', activePrefixes: ['/customers/'] },
-      {
-        key: 'inventory',
-        label: t('inventory'),
-        icon: <InventoryIcon />,
-        moduleName: 'Products',
-        activePrefixes: ['/inventory'],
-        children: [
-          { key: 'inventory-overview', label: 'Overview', path: '/inventory/overview', moduleName: 'Products' },
-          { key: 'inventory-availability', label: 'Availability', path: '/inventory/availability', moduleName: 'Products' },
-          { key: 'inventory-warehouses', label: 'Warehouses', path: '/inventory/warehouses', moduleName: 'Products' },
-          { key: 'inventory-reservations', label: 'Reservations', path: '/inventory/reservations', moduleName: 'Products' },
-          { key: 'inventory-incoming', label: 'Incoming', path: '/inventory/incoming', moduleName: 'Products' },
-          { key: 'inventory-movements', label: 'Movements', path: '/inventory/movements', moduleName: 'Products' },
-          { key: 'inventory-demand', label: 'Demand', path: '/inventory/demand', moduleName: 'Products' },
-          { key: 'inventory-levels', label: 'Stock Levels', path: '/inventory/levels', moduleName: 'Products' },
-          { key: 'inventory-reorder-alerts', label: 'Reorder Alerts', path: '/inventory/reorder-alerts', moduleName: 'Products' },
-          { key: 'inventory-count-variance', label: 'Count Variance', path: '/inventory/count-variance', moduleName: 'Products' },
-          { key: 'inventory-ageing', label: 'Stock Ageing', path: '/inventory/ageing', moduleName: 'Products' },
-          { key: 'inventory-resources', label: 'Related Resources', path: '/inventory/resources', moduleName: 'Products' },
-          { key: 'inventory-lots', label: 'Lots & Traceability', path: '/inventory/lots', moduleName: 'Products', activePrefixes: ['/inventory/lots/'] },
-          { key: 'inventory-order-trace', label: 'Where-Used Trace', path: '/inventory/order-trace', moduleName: 'Products', activePrefixes: ['/inventory/order-trace/'] },
-          { key: 'products', label: t('products'), path: '/inventory/products', moduleName: 'Products', activePrefixes: ['/inventory/products/'] },
-          { key: 'categories', label: t('categories'), path: '/inventory/categories', moduleName: 'Product Categories' },
-          { key: 'sub-categories', label: t('sub_categories'), path: '/inventory/sub-categories', moduleName: 'Product Categories' },
-        ]
-      },
-      // Setup is one rail entry for the whole administrative surface — the fourteen setup screens
-      // plus the ten that were railed separately as "Platform Governance" and "User & Access".
-      // Those two rails put Users, Roles & Permissions, Integration Hub and Storage & Retention in
-      // the navigation twice, once as a row and once as a card in the hub. The hub at /setup groups
-      // and describes all of them, and every one of them carries Setup's breadcrumb and jump field,
-      // so nothing is further away for having one door instead of three.
-      ...(setupIsReachable
-        ? [{
-            key: 'setup',
-            label: t('setup_master'),
-            icon: <SetupIcon />,
-            path: SETUP_ROOT,
-            // Setup is 'here' on every address it governs, not only its own URL space.
-            activePrefixes: ['/setup', '/security', '/admin/platform'],
-          } satisfies MenuItem]
-        : []),
-    ];
-
-    // Filter items based on permissions
-    const permitted = rawItems.filter(item => {
-      if (item.children) {
-        // Filter children
-        item.children = item.children.filter(child => !child.moduleName || hasPermission(child.moduleName));
-        // Only show group if it has at least one visible child
-        return item.children.length > 0;
-      }
-      return !item.moduleName || hasPermission(item.moduleName);
-    });
-
-    // Permissions decide what a user MAY open; the pilot rail decides what the pilot SHOWS. Order
-    // matters: hiding first would let a row survive here that its owner has no permission for.
-    return hasEntitlement(FULL_NAVIGATION_ENTITLEMENT) ? permitted : applyPilotRail(permitted);
-  }, [t, hasPermission, hasEntitlement, isManager, setupIsReachable]);
+  const primaryRows = useMemo(
+    () =>
+      PRIMARY_NAV.filter((item) => {
+        if (item.key === 'setup') return setupIsReachable;
+        return !item.moduleName || hasPermission(item.moduleName);
+      }),
+    [hasPermission, setupIsReachable],
+  );
 
   /**
-   * Seven rail entries address a FILTERED view through a query string — the four quote states,
-   * "Ready for Quote", "Sourcing Cases" and lead "Revisions". `location.pathname` never carries a
-   * query, so the old path comparison could never match one of them: a rep who clicked
-   * "Sent Quotes" landed on three rows with nothing lit anywhere in the rail and no filter
-   * indicator on the page, and read that as an empty pipeline. Splitting the entry's own query off
-   * and comparing it against the address bar is what makes those seven entries reachable-looking.
+   * Only rendered for a tenant granted the full-navigation entitlement. Permission filtering runs
+   * first and decides what a user MAY open; the entitlement only decides what the rail SHOWS.
    */
-  const splitNavPath = (path: string): { pathname: string; params: [string, string][] } => {
-    const cut = path.indexOf('?');
-    if (cut < 0) return { pathname: path, params: [] };
-    return {
-      pathname: path.slice(0, cut),
-      params: Array.from(new URLSearchParams(path.slice(cut + 1)).entries()),
-    };
-  };
+  const advancedRows: RailGroup[] = useMemo(() => {
+    if (!hasEntitlement(FULL_NAVIGATION_ENTITLEMENT)) return [];
+    return ADVANCED_GROUPS.map((group) => ({
+      key: group.key,
+      title: group.title,
+      entries: group.entries.filter(
+        (entry) =>
+          (!entry.managerOnly || isManager) && (!entry.moduleName || hasPermission(entry.moduleName)),
+      ),
+    })).filter((group) => group.entries.length > 0);
+  }, [hasEntitlement, hasPermission, isManager]);
 
-  /**
-   * A bare entry and a filtered entry can share one pathname: "All RFQs" and "Ready for Quote" are
-   * both /procurement/rfqs/all. Lighting the bare entry on the filtered address is the same
-   * data-trust lie in the rail that the constant page heading was on the page — it tells the rep
-   * they are looking at everything while the grid shows a subset. So a bare entry stands down when
-   * the address carries one of the filter keys its own siblings claim. Only those keys count:
-   * an unrelated param (?page=2) must not blank the rail.
-   */
-  const filterKeysByPathname = useMemo(() => {
-    const keys = new Map<string, Set<string>>();
-    const record = (path?: string) => {
-      if (!path || !path.includes('?')) return;
-      const { pathname, params } = splitNavPath(path);
-      const set = keys.get(pathname) ?? new Set<string>();
-      params.forEach(([key]) => set.add(key));
-      keys.set(pathname, set);
-    };
-    menuItems.forEach((item) => {
-      record(item.path);
-      item.children?.forEach((child) => record(child.path));
-    });
-    return keys;
-  }, [menuItems]);
+  const rowSx = (isSelected: boolean) => ({
+    minHeight: 44,
+    justifyContent: collapsed ? 'center' : 'initial',
+    px: 2,
+    borderRadius: '10px',
+    color: 'text.primary',
+    '&:hover': { backgroundColor: 'action.hover', transform: 'translateX(4px)' },
+    // `&.Mui-selected` keeps our colours ahead of MUI's default selected styling in the cascade.
+    '&.Mui-selected': {
+      backgroundColor: 'primary.main',
+      color: 'primary.contrastText',
+      boxShadow: (theme: any) => `0 10px 15px -3px ${alpha(theme.palette.primary.main, 0.3)}`,
+    },
+    '&.Mui-selected:hover': {
+      backgroundColor: 'primary.dark',
+      color: 'primary.contrastText',
+      transform: 'translateX(4px)',
+    },
+    '&.Mui-focusVisible': {
+      outline: (theme: any) => `3px solid ${theme.palette.primary.main}`,
+      outlineOffset: 2,
+    },
+    transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
+    opacity: isSelected ? 1 : undefined,
+  });
 
-  const renderMenuItem = (item: MenuItem) => {
-    const hasChildren = !!item.children;
-    const isOpen = openGroups[item.key];
+  const renderLeafRow = (
+    key: string,
+    label: string,
+    icon: React.ReactNode,
+    path: string,
+    isSelected: boolean,
+    description?: string,
+  ) => (
+    <ListItem key={key} disablePadding sx={{ display: 'block', mb: 0.5 }}>
+      {/* Collapsed, the label is not rendered — the tooltip carries the name. Expanded, it carries
+          the one-line description, which is the only place the rail can say what a row is for. */}
+      <Tooltip title={collapsed ? label : (description ?? '')} placement="right">
+        <ListItemButton
+          onClick={() => navigateTo(path)}
+          selected={isSelected}
+          // Selected state was previously conveyed by background colour alone (SC 1.4.1 / 4.1.2).
+          aria-current={isSelected ? 'page' : undefined}
+          // Collapsed leaves an icon-only control — give it an explicit name (SC 4.1.2).
+          aria-label={collapsed ? label : undefined}
+          sx={rowSx(isSelected)}
+        >
+          <ListItemIcon
+            sx={{
+              minWidth: 0,
+              mr: collapsed ? 0 : 1.5,
+              justifyContent: 'center',
+              color: 'inherit',
+              opacity: isSelected ? 1 : 0.7,
+            }}
+          >
+            {React.cloneElement(icon as React.ReactElement<any>, { sx: { fontSize: 20 } })}
+          </ListItemIcon>
+          {!collapsed && (
+            <ListItemText
+              primary={label}
+              slotProps={{ primary: { sx: { fontSize: '0.9rem', fontWeight: isSelected ? 700 : 600 } } }}
+            />
+          )}
+        </ListItemButton>
+      </Tooltip>
+    </ListItem>
+  );
 
-    const isPathMatched = (path: string, prefixes?: string[]) => {
-      const { pathname, params } = splitNavPath(path);
-      // The legacy alias strip has to happen on the pathname alone: `path.replace` used to run
-      // over the whole entry, so '/procurement/rfqs/all?state=ready-for-quote' became
-      // '/rfqs/all?state=ready-for-quote' and matched no address that exists.
-      const pathnameMatches = location.pathname === pathname
-        || (pathname.startsWith('/procurement') && location.pathname === pathname.replace('/procurement', ''));
-      if (pathnameMatches) {
-        const current = new URLSearchParams(location.search);
-        if (params.length > 0) {
-          if (params.every(([key, value]) => current.get(key) === value)) return true;
-        } else {
-          const claimed = filterKeysByPathname.get(pathname);
-          const showingASubset = claimed ? Array.from(claimed).some(key => !!current.get(key)) : false;
-          if (!showingASubset) return true;
-        }
-      }
-      if (prefixes && prefixes.some(p => location.pathname.startsWith(p))) return true;
-      return false;
-    };
-
-    const isSelected = hasChildren
-      ? item.children!.some(child => isPathMatched(child.path, child.activePrefixes))
-      : item.path ? isPathMatched(item.path, item.activePrefixes) : false;
-
-    // The child list only exists in the DOM while expanded (unmountOnExit) and
-    // is never rendered while the rail is collapsed — only advertise
-    // aria-expanded/aria-controls when there is a real region to point at.
-    const hasCollapsibleGroup = hasChildren && !collapsed;
-    const groupListId = `${instanceId}-group-${item.key}`;
+  const renderAdvancedGroup = (group: RailGroup) => {
+    const isOpen = openGroups[group.key] === true;
+    const isSelected = group.entries.some((entry) => isPathMatched(entry.path, location));
+    // The child list only exists in the DOM while expanded (unmountOnExit) and is never rendered
+    // while the rail is collapsed — only advertise aria-expanded/aria-controls for a real region.
+    const hasCollapsibleGroup = !collapsed;
+    const groupListId = `${instanceId}-group-${group.key}`;
 
     return (
-      <React.Fragment key={item.key}>
+      <React.Fragment key={group.key}>
         <ListItem disablePadding sx={{ display: 'block', mb: 0.5 }}>
-          <Tooltip title={collapsed ? item.label : ""} placement="right">
+          <Tooltip title={collapsed ? group.title : ''} placement="right">
             <ListItemButton
-              onClick={() => hasChildren ? handleGroupClick(item.key) : navigateTo(item.path!)}
+              onClick={() => setOpenGroups((prev) => ({ ...prev, [group.key]: !prev[group.key] }))}
               selected={isSelected}
-              // Selected state was previously conveyed by background colour
-              // alone (SC 1.4.1 / SC 4.1.2). aria-current="page" marks the
-              // actual current page; groups expose expand state instead.
-              aria-current={!hasChildren && isSelected ? 'page' : undefined}
               aria-expanded={hasCollapsibleGroup ? isOpen : undefined}
               aria-controls={hasCollapsibleGroup && isOpen ? groupListId : undefined}
-              // When collapsed the text label is not rendered, leaving an
-              // icon-only control — give it an explicit name (SC 4.1.2).
-              aria-label={collapsed ? item.label : undefined}
-              sx={{
-                minHeight: 44,
-                justifyContent: collapsed ? 'center' : 'initial',
-                px: 2,
-                borderRadius: '10px',
-                color: 'text.primary',
-                '&:hover': {
-                  backgroundColor: 'action.hover',
-                  transform: 'translateX(4px)',
-                },
-                // `&.Mui-selected` keeps our colours ahead of MUI's default
-                // selected styling in the cascade.
-                '&.Mui-selected': {
-                  backgroundColor: 'primary.main',
-                  color: 'primary.contrastText',
-                  boxShadow: (theme) => `0 10px 15px -3px ${alpha(theme.palette.primary.main, 0.3)}`,
-                },
-                '&.Mui-selected:hover': {
-                  backgroundColor: 'primary.dark',
-                  color: 'primary.contrastText',
-                  transform: 'translateX(4px)',
-                },
-                '&.Mui-focusVisible': {
-                  outline: (theme) => `3px solid ${theme.palette.primary.main}`,
-                  outlineOffset: 2,
-                },
-                transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
-              }}
+              aria-label={collapsed ? group.title : undefined}
+              sx={rowSx(isSelected)}
             >
               <ListItemIcon
                 sx={{
@@ -480,17 +277,17 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
                   opacity: isSelected ? 1 : 0.7,
                 }}
               >
-                {React.cloneElement(item.icon as React.ReactElement<any>, { sx: { fontSize: 20 } })}
+                {React.cloneElement(group.entries[0].icon as React.ReactElement<any>, {
+                  sx: { fontSize: 20 },
+                })}
               </ListItemIcon>
               {!collapsed && (
                 <>
                   <ListItemText
-                    primary={item.label}
-                    slotProps={{
-                      primary: { sx: { fontSize: '0.875rem', fontWeight: isSelected ? 600 : 500 } }
-                    }}
+                    primary={group.title}
+                    slotProps={{ primary: { sx: { fontSize: '0.875rem', fontWeight: isSelected ? 600 : 500 } } }}
                   />
-                  {hasChildren ? (isOpen ? <ExpandLess /> : <ExpandMore />) : null}
+                  {isOpen ? <ExpandLess /> : <ExpandMore />}
                 </>
               )}
             </ListItemButton>
@@ -499,13 +296,13 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
 
         {hasCollapsibleGroup && (
           <Collapse in={isOpen} timeout="auto" unmountOnExit>
-            <List component="div" disablePadding id={groupListId} aria-label={item.label}>
-              {item.children?.map((child) => {
-                const isChildSelected = isPathMatched(child.path, child.activePrefixes);
+            <List component="div" disablePadding id={groupListId} aria-label={group.title}>
+              {group.entries.map((entry) => {
+                const isChildSelected = isPathMatched(entry.path, location);
                 return (
                   <ListItemButton
-                    key={child.key}
-                    onClick={() => navigateTo(child.path)}
+                    key={entry.key}
+                    onClick={() => navigateTo(entry.path)}
                     selected={isChildSelected}
                     aria-current={isChildSelected ? 'page' : undefined}
                     sx={{
@@ -516,14 +313,10 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
                       mb: 0.2,
                       borderRadius: 1.5,
                       color: 'text.secondary',
-                      '&:hover': {
-                        // Was a hardcoded rgba(0,0,0,.03) — invisible in dark mode.
-                        backgroundColor: 'action.hover',
-                      },
-                      // Selected child used primary.main as small (0.8rem) text,
-                      // which drops under 4.5:1 for the lighter brand colours
-                      // (SC 1.4.3). Use body text colour plus weight, a tinted
-                      // background and a primary accent bar instead.
+                      '&:hover': { backgroundColor: 'action.hover' },
+                      // A selected child used primary.main as 0.8rem text, which drops under 4.5:1
+                      // for the lighter brand colours (SC 1.4.3). Body colour plus weight, a tinted
+                      // background and an accent bar instead.
                       '&.Mui-selected': {
                         color: 'text.primary',
                         backgroundColor: (theme) => alpha(theme.palette.primary.main, 0.14),
@@ -542,10 +335,8 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
                       <BulletIcon sx={{ fontSize: 6 }} />
                     </ListItemIcon>
                     <ListItemText
-                      primary={child.label}
-                      slotProps={{
-                        primary: { sx: { fontSize: '0.8rem', fontWeight: isChildSelected ? 600 : 400 } }
-                      }}
+                      primary={navEntryLabel(entry, t)}
+                      slotProps={{ primary: { sx: { fontSize: '0.8rem', fontWeight: isChildSelected ? 600 : 400 } } }}
                     />
                   </ListItemButton>
                 );
@@ -557,17 +348,56 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
     );
   };
 
+  const allScreensSelected = location.pathname.startsWith(ALL_SCREENS_ENTRY.path);
+
   return (
-    <Box sx={{
-      overflowY: 'auto',
-      overflowX: 'hidden',
-      height: '100%',
-      pt: 2,
-      pb: 4,
-      px: 1.5,
-    }}>
+    <Box sx={{ overflowY: 'auto', overflowX: 'hidden', height: '100%', pt: 2, pb: 4, px: 1.5 }}>
       <List sx={{ px: 0 }}>
-        {menuItems.map(renderMenuItem)}
+        {primaryRows.map((item) =>
+          renderLeafRow(
+            item.key,
+            navEntryLabel(item, t),
+            item.icon,
+            item.path,
+            isPrimaryActive(item, location),
+            item.description,
+          ),
+        )}
+      </List>
+
+      {advancedRows.length > 0 && (
+        <>
+          <Divider sx={{ my: 1.5 }} />
+          {!collapsed && (
+            <Typography
+              variant="caption"
+              sx={{
+                px: 2,
+                pb: 0.5,
+                display: 'block',
+                fontWeight: 800,
+                letterSpacing: '0.06em',
+                textTransform: 'uppercase',
+                color: 'text.disabled',
+              }}
+            >
+              Advanced
+            </Typography>
+          )}
+          <List sx={{ px: 0 }}>{advancedRows.map(renderAdvancedGroup)}</List>
+        </>
+      )}
+
+      <Divider sx={{ my: 1.5 }} />
+      <List sx={{ px: 0 }}>
+        {renderLeafRow(
+          ALL_SCREENS_ENTRY.key,
+          ALL_SCREENS_ENTRY.label,
+          ALL_SCREENS_ENTRY.icon,
+          ALL_SCREENS_ENTRY.path,
+          allScreensSelected,
+          ALL_SCREENS_ENTRY.description,
+        )}
       </List>
     </Box>
   );

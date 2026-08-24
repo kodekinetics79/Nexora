@@ -22,6 +22,7 @@ import {
   Close as CloseIcon,
   Inventory2 as InventoryIcon,
   PriceCheck as PricingIcon,
+  Handshake as WorkbenchIcon,
   WarningAmber as BlockerIcon,
   Description as EvidenceIcon,
   ErrorOutlined as UnavailableIcon,
@@ -314,6 +315,22 @@ const ViewRFQPage: React.FC = () => {
                 sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
               >
                 Workspace
+              </Button>
+            )}
+            {/*
+              The sourcing workbench for THIS RFQ had no door on this page. It was reachable only
+              by creating a sourcing case from one line, or through a server-supplied
+              "Open recommended action" whose label never said where it went — so the sourcing step
+              of the journey was, in navigation terms, undiscoverable from the RFQ it belongs to.
+            */}
+            {hasPermission('Supplier History') && (
+              <Button
+                variant="outlined"
+                startIcon={<WorkbenchIcon />}
+                onClick={() => navigate(`/procurement/rfqs/${rfq.id}/sourcing`)}
+                sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
+              >
+                Sourcing
               </Button>
             )}
             {hasPermission('Quotations') && (

@@ -23,6 +23,8 @@ import QuoteOutcomeDialog from './QuoteOutcomeDialog';
 import PriceConfirmationDialog from './PriceConfirmationDialog';
 import EmailPromptDialog from '../../../components/common/EmailPromptDialog';
 import SearchField from '../../../components/common/SearchField';
+import gridEmptyOverlay from '../../../components/common/gridOverlays';
+import ViewTabs from '../../../components/layout/ViewTabs';
 import { useAuth } from '../../../context/AuthContext';
 import { presentableErrorMessage } from '../../../utils/apiErrors';
 import dayjs from 'dayjs';
@@ -147,6 +149,35 @@ const QuotesPage: React.FC = () => {
       businessUnitId: userData?.businessUnitId || undefined,
     }),
   });
+
+  /**
+   * The four quote states used to be four rail rows pointing at this one screen. They are tabs on
+   * the screen now, so each of them needs its own empty state: "no draft quotes" and "no quotes at
+   * all" are different facts and lead to different next actions.
+   */
+  const noRowsOverlay = React.useMemo(() => gridEmptyOverlay({
+    title: 'No quotes yet',
+    message: 'A quote is drafted from an RFQ. Open an RFQ that is ready to price and prepare a draft from it.',
+    action: (
+      <Button variant="contained" onClick={() => navigate('/procurement/rfqs/all?state=ready-for-quote')} sx={{ fontWeight: 700 }}>
+        RFQs ready to quote
+      </Button>
+    ),
+    filtered: Boolean(search) || Boolean(state),
+    filteredTitle: search ? 'No quote matches this search' : `Nothing in "${activeFilter?.label ?? state}"`,
+    filteredMessage: search
+      ? 'Clear the search to see every quote in this view.'
+      : 'This view is genuinely empty. Other quotes may exist under a different tab.',
+    filteredAction: (
+      <Button
+        variant="outlined"
+        onClick={() => { setSearch(''); navigate('/sales/quotes'); }}
+        sx={{ fontWeight: 700 }}
+      >
+        Show all quotes
+      </Button>
+    ),
+  }), [search, state, activeFilter, navigate]);
 
   // WP-B4 revisions-lite: clone a non-draft quote as a new DRAFT revision and
   // jump straight into editing it. 409 = draft / superseded / outcome-locked chain.
@@ -435,6 +466,10 @@ const QuotesPage: React.FC = () => {
         </Stack>
       </Stack>
 
+      {/* The state filter, as one level of tabs on the screen it filters — it used to be four rail
+          rows over one page, which is how a rail grows to sixty-nine destinations. */}
+      <ViewTabs primaryKey="quotes" ariaLabel="Quote views" />
+
       <Paper sx={{ p: 1.5, mb: 1.5, display: 'flex', gap: 2, alignItems: 'center', borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
         <SearchField width="400px" value={search} onChange={setSearch} placeholder="Search Nexora Serial, quote, customer or RFQ" />
       </Paper>
@@ -452,6 +487,7 @@ const QuotesPage: React.FC = () => {
           columns={columns}
           rowCount={data?.totalItems ?? 0}
           loading={isLoading}
+          slots={{ noRowsOverlay }}
           pageSizeOptions={[10, 25, 50]}
           paginationModel={paginationModel}
           paginationMode="server"

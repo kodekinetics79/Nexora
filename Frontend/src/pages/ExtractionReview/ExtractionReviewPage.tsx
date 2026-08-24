@@ -20,6 +20,7 @@ import relativeTime from 'dayjs/plugin/relativeTime';
 import extractionReviewService from '../../api/services/extractionReviewService';
 import type { NeedsReviewItem } from '../../api/services/extractionReviewService';
 import SearchField from '../../components/common/SearchField';
+import ViewTabs from '../../components/layout/ViewTabs';
 import { formatDateSafe } from '../../utils/dates';
 
 dayjs.extend(relativeTime);
@@ -232,6 +233,10 @@ const ExtractionReviewPage: React.FC = () => {
           </span>
         </Tooltip>
       </Stack>
+
+      {/* The four intake doors — the work queue, this review queue, inbound mail and upload — as
+          one level of tabs. They were four separate rail rows under "Lead Management". */}
+      <ViewTabs primaryKey="inbox" ariaLabel="Inbox views" />
 
       {/* Filters */}
       <Paper sx={{ p: 1.5, mb: 1.5, display: 'flex', gap: 2, alignItems: 'center', borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>

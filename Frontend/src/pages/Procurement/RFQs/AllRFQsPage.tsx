@@ -17,6 +17,8 @@ import {
 } from '@mui/icons-material';
 import rfqService from '../../../api/services/rfqService';
 import SearchField from '../../../components/common/SearchField';
+import gridEmptyOverlay from '../../../components/common/gridOverlays';
+import ViewTabs from '../../../components/layout/ViewTabs';
 import { useAuth } from '../../../context/AuthContext';
 import { formatDateSafe } from '../../../utils/dates';
 
@@ -57,6 +59,37 @@ const AllRFQsPage: React.FC = () => {
       readiness,
     }),
   });
+
+  /**
+   * The three highest-traffic grids in the product — this one, Leads and Quotes — shipped MUI's
+   * bare "No rows". That string cannot say which of the three nothings the reader is looking at,
+   * and it offers no way out of any of them. Memoised because DataGrid takes a component TYPE
+   * here: rebuilding the factory each render would remount the overlay for nothing.
+   */
+  const noRowsOverlay = React.useMemo(() => gridEmptyOverlay({
+    title: 'No RFQs yet',
+    message: 'An RFQ is created when you qualify an enquiry. Qualify one and it lands here, ready to price.',
+    icon: <ItemsIcon sx={{ fontSize: 48 }} />,
+    action: (
+      <Button variant="contained" onClick={() => navigate('/procurement/leads/all')} sx={{ fontWeight: 700 }}>
+        See all inquiries
+      </Button>
+    ),
+    filtered: Boolean(search) || Boolean(readiness),
+    filteredTitle: 'No RFQ matches this view',
+    filteredMessage: readiness
+      ? 'Nothing in the list matches this filter. Clear it to see every RFQ.'
+      : 'No RFQ matches this search. Clear it to see every RFQ.',
+    filteredAction: (
+      <Button
+        variant="outlined"
+        onClick={() => { setSearch(''); navigate('/procurement/rfqs/all'); }}
+        sx={{ fontWeight: 700 }}
+      >
+        Show all RFQs
+      </Button>
+    ),
+  }), [search, readiness, navigate]);
 
   const getUrgencyColor = (dateStr: string | null) => {
     if (!dateStr) return 'text.secondary';
@@ -233,6 +266,10 @@ const AllRFQsPage: React.FC = () => {
         </Stack>
       </Stack>
 
+      {/* All / Drafts / Outstanding / Ready for quote — three routes and a query filter that a rep
+          reads as one list, so they are tabs here instead of four rail rows. */}
+      <ViewTabs primaryKey="rfqs" ariaLabel="RFQ views" />
+
       {/* Filters */}
       <Paper sx={{ p: 1.5, mb: 1.5, display: 'flex', gap: 2, alignItems: 'center', borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
         <SearchField width="400px" value={search} onChange={setSearch} placeholder="Search Nexora Serial, RFQ, customer or buyer" />
@@ -252,6 +289,7 @@ const AllRFQsPage: React.FC = () => {
           columns={columns}
           rowCount={data?.totalItems ?? 0}
           loading={isLoading}
+          slots={{ noRowsOverlay }}
           pageSizeOptions={[10, 25, 50]}
           paginationModel={paginationModel}
           paginationMode="server"

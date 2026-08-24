@@ -37,6 +37,7 @@ import { useNavigate } from 'react-router-dom';
 import userService, { type MePermissionsResponse } from '../../api/services/userService';
 import { presentableErrorMessage } from '../../utils/apiErrors';
 import { MAIN_CONTENT_ID } from '../../components/layout/SkipLink';
+import { INBOX_ROOT } from '../../components/layout/navCatalog';
 
 /** Ties the failure Alert to the fields it describes (SC 3.3.1 / SC 3.3.3). */
 const LOGIN_ERROR_ID = 'login-error';
@@ -374,39 +375,34 @@ interface LoginResponse {
 /**
  * Where a user lands after signing in.
  *
- * This used to be an unconditional `navigate('/analytics/deadlines')`. The reasoning was sound and
- * is kept below — a new tenant's KPIs all read "insufficient data" on day one, so a wall of empty
- * tiles is a worse first screen than the work actually waiting. It was simply never checked
- * against the roles the platform seeds: /analytics/deadlines is gated on Leads, and of the four
- * starter roles only SALES_MANAGER and SALES_REP are granted it. PROCUREMENT_OFFICER and
- * FINANCE_OFFICER signed in successfully and landed on "Access Denied" as their first screen —
- * while both hold Read on Dashboard, so a working destination existed all along.
+ * Everyone lands on the Inbox — the one screen that answers "what do I do next" instead of asking
+ * the reader to choose a module.
  *
- * Ordered by what is most useful to arrive at, not by module name. The last entry is reached only
- * by a user with no view grant anywhere; landing them on the deadline board means PermissionGuard
- * names the exact grant to ask an administrator for, which is the right answer to "I have no
- * access at all".
+ * The history is worth keeping, because it is the reason this is a constant now. Login first called
+ * `navigate('/analytics/deadlines')` unconditionally; that route is gated on Leads, and of the four
+ * seeded starter roles only SALES_MANAGER and SALES_REP hold it, so a Procurement Officer signed in
+ * successfully and landed on "Access Denied" as their first screen. The fix at the time was a
+ * per-permission fallback table — seven candidate destinations, each with its own module gate. That
+ * worked, but it meant four roles saw four different first screens, and none of the seven could show
+ * work that had not yet become a lead.
+ *
+ * `/inbox` is deliberately UNGUARDED at the route and asks for each queue separately, so the
+ * permission problem cannot recur: a user with no grants at all gets a page that names what is
+ * missing and points at Setup, which is the correct answer to "I have no access", and a user with
+ * some grants gets exactly the queues they can work. One first screen, for everybody.
  */
-const LANDING_ROUTES: ReadonlyArray<{ path: string; moduleName: string }> = [
-  { path: '/analytics/deadlines', moduleName: 'Leads' },
-  { path: '/dashboard', moduleName: 'Dashboard' },
-  { path: '/procurement/rfqs/all', moduleName: 'RFQ Management' },
-  { path: '/sales/quotes', moduleName: 'Quotations' },
-  { path: '/sales/orders', moduleName: 'Orders' },
-  { path: '/suppliers', moduleName: 'Suppliers' },
-  { path: '/customers', moduleName: 'Customers' },
-];
+export const LANDING_ROUTE = INBOX_ROOT;
 
+/**
+ * Kept as a function, and still exported, because the sign-in flow and its tests both call it and
+ * because the shape leaves room for a future per-role landing without moving the call site. It
+ * ignores its arguments by design — see above: branching on permissions here is what produced the
+ * Access Denied first screen.
+ */
 export const landingRouteFor = (
-  isSuperAdmin: boolean,
-  permissions: ReadonlyArray<{ moduleName: string; canView?: boolean }>,
-): string => {
-  if (isSuperAdmin) return LANDING_ROUTES[0].path;
-  const canView = (moduleName: string) => permissions.some(
-    (p) => p.moduleName?.trim().toLowerCase() === moduleName.toLowerCase() && p.canView === true,
-  );
-  return (LANDING_ROUTES.find((route) => canView(route.moduleName)) ?? LANDING_ROUTES[0]).path;
-};
+  _isSuperAdmin: boolean,
+  _permissions: ReadonlyArray<{ moduleName: string; canView?: boolean }>,
+): string => LANDING_ROUTE;
 
 const LoginPage: React.FC = () => {
   const theme = useTheme();
