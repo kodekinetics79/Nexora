@@ -284,8 +284,8 @@ const LeadsPage: React.FC = () => {
       </Box>
     ),
     filtered: filtersActive,
-    filteredTitle: 'No inquiry matches this view',
-    filteredMessage: 'Clear the search, the source filter and the tab to see every enquiry.',
+    filteredTitle: 'No inquiries match these filters',
+    filteredMessage: 'Nothing matches the search and filters currently applied. Clearing them shows every inquiry this business unit has.',
     filteredAction: (
       <Button
         variant="outlined"
@@ -293,7 +293,7 @@ const LeadsPage: React.FC = () => {
         onClick={clearFilters}
         sx={{ fontWeight: 700 }}
       >
-        Show all inquiries
+        Clear filters
       </Button>
     ),
   }), [filtersActive, clearFilters, navigate]);
