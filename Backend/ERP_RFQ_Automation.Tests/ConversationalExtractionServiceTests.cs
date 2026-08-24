@@ -260,6 +260,52 @@ public class ConversationalExtractionServiceTests
         Assert.NotNull(outcome.Result);
         Assert.Empty(outcome.Result!.Items);
         Assert.Contains("No requestable items", outcome.ReviewReason!, StringComparison.OrdinalIgnoreCase);
+
+        // The sentence is now a CONTRACT, not prose. EmailInquiryLeadAssembler is allowed to
+        // tell an operator "this message was read in full and asked for nothing" only when a
+        // part reports exactly this string, so an edit here silently changes what a customer is
+        // told about their mail. Pinned by identity, not by substring.
+        Assert.Equal(
+            ConversationalExtractionService.NoRequestableItemsReviewReason, outcome.ReviewReason);
+    }
+
+    /// <summary>
+    /// A BODY WE ONLY PARTLY READ MUST NEVER REPORT THE SENTENCE THAT MEANS "read in full".
+    ///
+    /// <para>The review-reason chain is an if/else with the zero-item branch first and the
+    /// truncation branch last, so a body clipped at the 24,000-character input ceiling that came
+    /// back with no items used to report the clean "No requestable items found in message body."
+    /// and drop the truncation on the floor. Downstream that is not a wording problem: the
+    /// assembler keys the operator's sentence on that exact string, so a long enquiry whose
+    /// schedule sat in the clipped tail would be presented as a sender who asked for
+    /// nothing.</para>
+    ///
+    /// <para>The one thing this test must not do is assert the words. It asserts that the clean
+    /// verdict is NOT claimed and that the truncation is named — the two properties a downstream
+    /// decision actually depends on.</para>
+    /// </summary>
+    [Fact]
+    public async Task ABodyTruncatedAtTheInputCeilingNeverClaimsItWasReadInFull()
+    {
+        var llm = new ProseLlm(Result(new List<LeadItemData>()));
+
+        // Comfortably past MaxProseChars (24,000), so the service really clips it. The tail is
+        // where the requirement would have been, and the model never sees it.
+        var body = "Dear Sir,\n\n" + new string('x', 30_000)
+            + "\n\nPlease quote 40 nos cable tray 300mm.\n\nAl Noor Trading LLC";
+
+        var outcome = await NewService(llm).ExtractAsync(Input(body));
+
+        Assert.Equal(ExtractionOutcomeStatus.NeedsReview, outcome.Status);
+        Assert.NotNull(outcome.Result);
+        Assert.Empty(outcome.Result!.Items);
+
+        // THE ASSERTION. Whatever else it says, it does not say the message was read in full.
+        Assert.NotEqual(
+            ConversationalExtractionService.NoRequestableItemsReviewReason, outcome.ReviewReason);
+        Assert.Equal(
+            ConversationalExtractionService.TruncatedBodyFoundNothingReviewReason,
+            outcome.ReviewReason);
     }
 
     [Fact]

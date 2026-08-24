@@ -341,6 +341,170 @@ public sealed class MarketingMailDoesNotBecomeLeadPostgreSqlTests(PostgreSqlTest
             assembly.StatusReason!, StringComparison.Ordinal);
     }
 
+    // =====================================================================================
+    // 5. THE SAME UNREADABLE DOCUMENT, IN THE OTHER SHAPE PRODUCTION EMITS — AND THE ONE THE
+    //    ORIGINAL DISCRIMINATOR GOT BACKWARDS.
+    //
+    // Test 4 above pins a partial-OCR scan whose parser still found text regions, so the outcome
+    // carries a POSITIVE ExpectedItemCount and the old `expected > 0` test happened to classify
+    // it correctly. That is only one of the two shapes ChunkedExtractionService produces, and it
+    // is the kinder one.
+    //
+    // When OCR degrades far enough that NO line-item region is parsed — the normal outcome for a
+    // bad scan, not an exotic one — the service takes its whole-document branch
+    // (`if (expected == 0)`) and sets `ExpectedItemCount = items0.Count`: the MODEL'S OWN item
+    // count. For a page it could not read, that is zero. The outcome is therefore NeedsReview,
+    // non-null result, zero items, zero expected, "OCR was incomplete" — indistinguishable from
+    // marketing mail to any test that only looks at the count.
+    //
+    // So the customer's scanned RFQ was held with the marketing sentence: "read in full and
+    // names no product, quantity or specification anywhere". It was not read in full. The whole
+    // point of splitting the two sentences is what the operator does next, and that one sends
+    // them to chase a buyer who did their part.
+    // =====================================================================================
+
+    [Fact]
+    public async Task A_scan_whose_OCR_recovered_no_regions_is_not_held_with_the_asked_for_nothing_sentence()
+    {
+        var businessUnitId = UniqueBusinessUnitId();
+        var messageId = $"whole-doc-ocr-{Guid.NewGuid():N}@newbuyer.example";
+        await using (var connection = await _database.OpenConnectionAsync())
+            await EmailToLeadHarness.SeedTenantAsync(connection, businessUnitId, messageId);
+
+        await using var services = EmailToLeadHarness.BuildGraph(
+            _database.ConnectionString, _storageRoot, new EmailToLeadHarness.RefusingLlm(),
+            registrations => registrations
+                .AddScoped<IConversationalExtractionService, NoRequestableItemsExtractor>()
+                .AddScoped<IChunkedExtractionService, UnreadableScanExtractor>());
+
+        const string note = "Hi,\n\nOur requirement is attached, scanned from the signed original."
+            + "\n\nRegards,\nProcurement";
+        var message = BuildProseMessage(
+            messageId, "hello@newbuyer.example", "Our requirement (scanned)", note);
+        message.Body = new Multipart("mixed")
+        {
+            message.Body,
+            EmailToLeadHarness.Attachment("scanned-requirement.pdf", "application/pdf", ScannedPdf())
+        };
+
+        var (_, assemblyId, schedule) = await EmailToLeadHarness.CaptureAndScheduleAsync(
+            services, businessUnitId, message, expectedComponentCount: 2,
+            triage: TriageOf(message, note), clientEmail: "hello@newbuyer.example");
+        Assert.Equal(2, schedule.Scheduled);
+
+        await EmailToLeadHarness.DrainQueueAsync(services, businessUnitId);
+
+        using var scope = services.CreateScope();
+        using var tenant = scope.ServiceProvider
+            .GetRequiredService<ITenantScopeAccessor>().Push(businessUnitId);
+        var context = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+
+        // Still no Lead — the bar for minting one is untouched.
+        Assert.Empty(await context.Leads.AsNoTracking()
+            .Where(l => l.BusinessUnitId == businessUnitId).ToListAsync());
+        var assembly = await context.EmailInquiryAssemblies.AsNoTracking()
+            .SingleAsync(a => a.Id == assemblyId);
+        Assert.Equal(EmailInquiryAssemblyStatus.NeedsReview, assembly.Status);
+        Assert.Null(assembly.AssembledLeadId);
+
+        // THE FIXTURE'S HONESTY, ASSERTED. Both stored results carry a ZERO expected count, so
+        // the old discriminator saw exactly what marketing mail looks like. If a future change
+        // makes this fixture carry a positive count, this test stops proving anything and this
+        // assertion is what will say so.
+        var stored = await context.Set<EmailInquiryComponentResult>().AsNoTracking()
+            .Where(r => r.AssemblyId == assemblyId).ToListAsync();
+        Assert.Equal(2, stored.Count);
+        Assert.All(stored, r => Assert.Equal(0, r.ExpectedItemCount));
+        Assert.All(stored, r => Assert.Equal(0, r.ExtractedItemCount));
+
+        // THE ASSERTION THIS TEST EXISTS FOR.
+        Assert.NotNull(assembly.StatusReason);
+        Assert.StartsWith(EmailInquiryHoldReasons.ContentNotRecovered, assembly.StatusReason!,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(EmailInquiryHoldReasons.NoRequestableContentDetail,
+            assembly.StatusReason!, StringComparison.Ordinal);
+    }
+
+    // =====================================================================================
+    // 6. THE DANGEROUS DIRECTION, PROVED EXPLICITLY: AN EXTRACTION THAT FAILED IS NOT AN
+    //    EXTRACTION THAT FOUND NOTHING.
+    //
+    // "Zero lines" is only allowed to mean "the reader ran and the message asks for nothing".
+    // If a refusal, a timeout or a dead letter could reach the same branch, today's visible-but-
+    // wrong outcome would become an invisible lost RFQ — strictly worse, and the exact class of
+    // defect this integration branch exists to remove.
+    //
+    // The guarantee is structural rather than a rule: ExtractionWorker diverts on
+    // `Status == Failed || Result is null` BEFORE any component result is written
+    // (ExtractionWorker.cs, the failure branch), so a failed read leaves no row for the
+    // assembler's zero-line gate to read. That is asserted here directly — no result rows, no
+    // Lead, and above all NOT the sentence that tells a customer their message asked for
+    // nothing.
+    // =====================================================================================
+
+    [Fact]
+    public async Task An_extraction_that_failed_is_never_disposed_of_as_a_message_that_asked_for_nothing()
+    {
+        var businessUnitId = UniqueBusinessUnitId();
+        var messageId = $"failed-read-{Guid.NewGuid():N}@newbuyer.example";
+        await using (var connection = await _database.OpenConnectionAsync())
+            await EmailToLeadHarness.SeedTenantAsync(connection, businessUnitId, messageId);
+
+        // A body that is unmistakably a real enquiry. The point of the test is that the SYSTEM
+        // could not read it, so the message must never be closed against the sender.
+        await using var services = EmailToLeadHarness.BuildGraph(
+            _database.ConnectionString, _storageRoot, new EmailToLeadHarness.RefusingLlm(),
+            registrations => registrations
+                .AddScoped<IConversationalExtractionService, FailedReadExtractor>());
+
+        var message = BuildProseMessage(
+            messageId, "hello@newbuyer.example", BuyerSubject, BuyerBody);
+
+        var (_, assemblyId, schedule) = await EmailToLeadHarness.CaptureAndScheduleAsync(
+            services, businessUnitId, message, expectedComponentCount: 1,
+            triage: TriageOf(message, BuyerBody), clientEmail: "hello@newbuyer.example");
+        Assert.Equal(1, schedule.Scheduled);
+
+        // The job dead-letters by design, so the harness's "no failed jobs" guard is off. That is
+        // the condition under test, not an accident of the fixture.
+        await EmailToLeadHarness.DrainQueueAsync(services, businessUnitId, assertNoFailures: false);
+
+        using var scope = services.CreateScope();
+        using var tenant = scope.ServiceProvider
+            .GetRequiredService<ITenantScopeAccessor>().Push(businessUnitId);
+        var context = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+
+        // The read really did fail: the job is dead-lettered.
+        Assert.Contains(
+            await context.Set<ExtractionJob>().AsNoTracking()
+                .Where(j => j.BusinessUnitId == businessUnitId).Select(j => j.Status).ToListAsync(),
+            status => status == ExtractionStatus.DeadLetter);
+
+        // No result row exists, so the zero-line gate is structurally unreachable for this
+        // message. This is the assertion that makes the guarantee a property rather than a hope.
+        Assert.Empty(await context.Set<EmailInquiryComponentResult>().AsNoTracking()
+            .Where(r => r.AssemblyId == assemblyId).ToListAsync());
+
+        // No Lead was invented from a failed read either.
+        Assert.Empty(await context.Leads.AsNoTracking()
+            .Where(l => l.BusinessUnitId == businessUnitId).ToListAsync());
+
+        // And the message is held for a person WITHOUT being told the sender asked for nothing,
+        // and without being closed. NoInquiry here would be the invisible lost RFQ.
+        var assembly = await context.EmailInquiryAssemblies.AsNoTracking()
+            .SingleAsync(a => a.Id == assemblyId);
+        Assert.NotEqual(EmailInquiryAssemblyStatus.NoInquiry, assembly.Status);
+        Assert.Equal(EmailInquiryAssemblyStatus.NeedsReview, assembly.Status);
+        Assert.Null(assembly.AssembledLeadId);
+        Assert.DoesNotContain(EmailInquiryHoldReasons.NoRequestableContent,
+            assembly.StatusReason ?? string.Empty, StringComparison.Ordinal);
+        Assert.DoesNotContain(EmailInquiryHoldReasons.NoRequestableContentDetail,
+            assembly.StatusReason ?? string.Empty, StringComparison.Ordinal);
+
+        // Nothing was thrown away: the original message is still in durable evidence storage.
+        Assert.NotNull(assembly.RawEvidenceUri);
+    }
+
     // ---- helpers ---------------------------------------------------------------------------
 
     /// <summary>
@@ -404,7 +568,11 @@ public sealed class MarketingMailDoesNotBecomeLeadPostgreSqlTests(PostgreSqlTest
                 Result = Ext.Result([], 0.9),
                 ExpectedItemCount = 0,
                 ExtractedItemCount = 0,
-                ReviewReason = "No requestable items found in message body.",
+                // THE CONSTANT, not a copy of it. The assembler's "read in full" sentence is
+                // gated on this exact string, so a fixture holding its own copy would keep
+                // passing after the two drifted apart — which is the only way this gate can
+                // silently start telling customers the wrong thing.
+                ReviewReason = ConversationalExtractionService.NoRequestableItemsReviewReason,
                 ProcessingPath = ExtractionProcessingPath.NativeParser
             });
     }
@@ -455,6 +623,65 @@ public sealed class MarketingMailDoesNotBecomeLeadPostgreSqlTests(PostgreSqlTest
             IReadOnlyList<RfqSpreadsheetRow> rows, long businessUnitId, string sourceName,
             CancellationToken ct = default, string? documentNarrative = null)
             => Task.FromResult(PartialOcr());
+    }
+
+    /// <summary>
+    /// The OTHER production shape of a scan that could not be read, and the one the count-based
+    /// discriminator could not see.
+    ///
+    /// <para>Copied from <c>ChunkedExtractionService</c>'s whole-document branch, which is taken
+    /// when the parser recovers NO line-item regions: <c>ExpectedItemCount</c> is set to the
+    /// model's own item count, so a document the model could not read reports ZERO — the same
+    /// number marketing mail reports. The only thing separating the two is the review reason,
+    /// which is why the reason is what the gate now reads.</para>
+    /// </summary>
+    private sealed class UnreadableScanExtractor : IChunkedExtractionService
+    {
+        private static ChunkedExtractionOutcome WholeDocumentPartialOcr() => new()
+        {
+            Status = ExtractionOutcomeStatus.NeedsReview,
+            Result = Ext.Result([], 0.4),
+            ExpectedItemCount = 0,
+            ExtractedItemCount = 0,
+            ReviewReason = "OCR was incomplete; omitted content requires review.",
+            OcrStatus = ExtractionOcrStatus.Partial,
+            ProcessingPath = ExtractionProcessingPath.LocalOcr
+        };
+
+        public Task<ChunkedExtractionOutcome> ExtractAsync(
+            DocumentExtractionInput input, CancellationToken ct = default)
+            => Task.FromResult(WholeDocumentPartialOcr());
+
+        public Task<ChunkedExtractionOutcome> ExtractUnstructuredAsync(
+            DocumentExtractionInput input, CancellationToken ct = default)
+            => Task.FromResult(WholeDocumentPartialOcr());
+
+        public Task<ChunkedExtractionOutcome> ExtractStructuredAsync(
+            IReadOnlyList<RfqSpreadsheetRow> rows, long businessUnitId, string sourceName,
+            CancellationToken ct = default, string? documentNarrative = null)
+            => Task.FromResult(WholeDocumentPartialOcr());
+    }
+
+    /// <summary>
+    /// A read that FAILED, in the shape every failing path produces: <c>Failed</c> with a NULL
+    /// result. Permanent so the job dead-letters on its first attempt instead of spending the
+    /// test's liveness window on backoff — the disposition under test is identical either way,
+    /// because ExtractionWorker diverts on the status, not on the retry budget.
+    /// </summary>
+    private sealed class FailedReadExtractor : IConversationalExtractionService
+    {
+        public Task<ChunkedExtractionOutcome> ExtractAsync(
+            DocumentExtractionInput input, bool threadContinuation, CancellationToken ct = default)
+            => Task.FromResult(new ChunkedExtractionOutcome
+            {
+                Status = ExtractionOutcomeStatus.Failed,
+                PermanentFailure = true,
+                Result = null,
+                ExpectedItemCount = 0,
+                ExtractedItemCount = 0,
+                ReviewReason = "The model returned no usable result for this message body.",
+                ProcessingPath = ExtractionProcessingPath.NativeParser
+            });
     }
 
     /// <summary>A real PDF, so the reader, the storage path and the queue all do real work; its
