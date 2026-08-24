@@ -47,11 +47,5 @@ internal static class TestWaits
     /// How long to wait for a background worker to reach an observable point before declaring it
     /// hung. Deliberately generous; see the remarks on <see cref="TestWaits"/>.
     /// </summary>
-    // 120, not 60. 60 was itself a raise from 10, and it ALSO timed out on the runner
-    // (2026-08-24) while the identical commit passed 5561/5561 on the other trigger. The real
-    // remedy is <see cref="TestThreadPool"/>, which removes the starvation rather than waiting
-    // it out; this bound is the backstop behind it. Per the remarks above, a real hang never
-    // completes, so a larger bound costs a genuine failure nothing and costs a contended runner
-    // a false red.
-    public static readonly TimeSpan Liveness = TimeSpan.FromSeconds(120);
+    public static readonly TimeSpan Liveness = TimeSpan.FromSeconds(60);
 }
