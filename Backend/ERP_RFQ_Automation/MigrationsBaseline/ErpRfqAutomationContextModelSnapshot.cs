@@ -7727,6 +7727,13 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<long?>("AssignedByUserId")
                         .HasColumnType("bigint");
 
+                    b.Property<string>("AssignmentMethod")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasDefaultValue("AUTOMATIC");
+
                     b.Property<string>("AssignmentScope")
                         .IsRequired()
                         .HasMaxLength(32)
@@ -7757,6 +7764,11 @@ namespace ERP_RFQ_Automation.Migrations
                         .IsRequired()
                         .HasMaxLength(160)
                         .HasColumnType("character varying(160)");
+
+                    b.Property<bool>("IsManualOverride")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false);
 
                     b.Property<long>("LeadId")
                         .HasColumnType("bigint");
@@ -13777,6 +13789,22 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<long?>("AssignTo")
                         .HasColumnType("bigint");
 
+                    b.Property<long?>("AssignedByUserId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("AssignmentMethod")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasDefaultValue("AUTOMATIC");
+
+                    b.Property<long>("AssignmentVersion")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(1L);
+
                     b.Property<DateTime?>("BidClosingDate")
                         .HasColumnType("timestamp without time zone");
 
@@ -13949,6 +13977,11 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("integer")
                         .HasDefaultValue(1);
 
+                    b.Property<bool>("ManualAssignmentOverride")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false);
+
                     b.Property<DateTime?>("ModifiedDate")
                         .HasColumnType("timestamp without time zone");
 
@@ -14043,6 +14076,9 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasIndex("BusinessUnitId", "DuplicateStatus")
                         .HasDatabaseName("IX_Lead_BU_DuplicateStatus");
 
+                    b.HasIndex("BusinessUnitId", "AssignTo", "AssignmentMethod")
+                        .HasDatabaseName("IX_Leads_BusinessUnitID_AssignTo_AssignmentMethod");
+
                     b.HasIndex(new[] { "BusinessUnitId", "ContactId" }, "IX_Leads_BusinessUnitID_ContactID");
 
                     b.HasIndex(new[] { "BusinessUnitId", "CustomerId" }, "IX_Leads_BusinessUnitID_CustomerID");
@@ -14055,6 +14091,8 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.ToTable("Leads", t =>
                         {
+                            t.HasCheckConstraint("CK_Leads_AssignmentMethod", "\"AssignmentMethod\" IN ('AUTOMATIC','MANUAL')");
+
                             t.HasCheckConstraint("CK_Leads_CustomerIdentityStatus", "CASE WHEN \"CustomerMatchStatus\" IN ('UNRESOLVED','SUGGESTED','AMBIGUOUS') THEN \"CustomerID\" IS NULL ELSE \"CustomerID\" IS NOT NULL END");
                         });
                 });
@@ -15656,10 +15694,6 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.HasIndex("CustomerId");
 
-                    b.HasIndex("LeadId")
-                        .IsUnique()
-                        .HasFilter("\"LeadID\" IS NOT NULL");
-
                     b.HasIndex("RfqstatusId");
 
                     b.HasIndex("RfqtypeId");
@@ -15667,6 +15701,10 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasIndex(new[] { "BusinessUnitId", "CommercialCaseId" }, "IX_RFQ_BusinessUnitID_CommercialCaseID");
 
                     b.HasIndex(new[] { "BusinessUnitId", "NexoraSerial" }, "IX_RFQ_BusinessUnitID_NexoraSerial");
+
+                    b.HasIndex("LeadId")
+                        .IsUnique()
+                        .HasFilter("\"LeadID\" IS NOT NULL");
 
                     b.ToTable("RFQ", (string)null);
                 });
@@ -15813,7 +15851,7 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<string>("ProductShortName")
                         .HasColumnType("text");
 
-                    b.Property<int>("Quantity")
+                    b.Property<int?>("Quantity")
                         .HasColumnType("integer");
 
                     b.Property<DateTime?>("ReceivedDate")
@@ -15874,7 +15912,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                             t.HasCheckConstraint("CK_RFQItems_Participation_Decision", "\"ParticipationDecision\" IN ('Pending','Quote','NoQuote')");
 
-                            t.HasCheckConstraint("CK_RFQItems_Quantity_Positive", "\"Quantity\" > 0");
+                            t.HasCheckConstraint("CK_RFQItems_Quantity_Positive", "\"Quantity\" IS NULL OR \"Quantity\" > 0");
 
                             t.HasCheckConstraint("CK_Rfqitems_ProductResolution", "(\"ProductResolvedBy\" IS NULL AND \"ProductResolvedOn\" IS NULL) OR (\"ProductResolvedBy\" IS NOT NULL AND trim(\"ProductResolvedBy\") <> '' AND \"ProductResolvedOn\" IS NOT NULL)");
                         });

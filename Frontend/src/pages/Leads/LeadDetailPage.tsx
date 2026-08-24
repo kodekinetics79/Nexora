@@ -21,12 +21,12 @@ import LateIngestedBadge from './LateIngestedBadge';
 import ClientIdentityPanel from './ClientIdentityPanel';
 import ResolveClientDialog from './ResolveClientDialog';
 import { clientDisplayName } from './ClientCell';
-import LifecycleActions from '../../components/common/LifecycleActions';
-import CommercialLineIntelligence from '../../components/common/CommercialLineIntelligence';
 import { parseDateSafe, formatDateSafe } from '../../utils/dates';
 import { downloadAuthenticatedFile } from '../../utils/authenticatedFile';
 import { useAuth } from '../../context/AuthContext';
 import LeadRevisionTimeline from './LeadRevisionTimeline';
+import LeadOwnerControl from './LeadOwnerControl';
+import LeadDecisionActions from './LeadDecisionActions';
 
 import { toast } from 'react-hot-toast';
 import { presentableErrorMessage } from '../../utils/apiErrors';
@@ -191,8 +191,23 @@ const LeadDetailPage: React.FC = () => {
             canEdit={hasPermission('Leads', 'edit')}
             onChanged={() => queryClient.invalidateQueries({ queryKey: ['lead-detail', Number(id)] })}
           />
+          <Box sx={{ mt: 1.5 }}>
+            <LeadOwnerControl
+              leadId={lead.id}
+              assignedToId={lead.assignedToId}
+              assignedToName={lead.assignedToFullName}
+              assignmentMethod={lead.assignmentMethod}
+              assignmentVersion={lead.assignmentVersion ?? 1}
+              canEdit={hasPermission('Leads', 'edit')}
+            />
+          </Box>
         </Box>
         <Stack direction="row" spacing={1.5} sx={{ flexWrap: 'wrap', gap: 1, justifyContent: { xs: 'flex-start', md: 'flex-end' } }}>
+          <LeadDecisionActions
+            leadId={lead.id}
+            reviewVersion={lead.reviewVersion ?? 1}
+            canEdit={hasPermission('Leads', 'edit')}
+          />
           {lead.commercialCaseId && (
             <Button
               variant="outlined"
@@ -211,9 +226,8 @@ const LeadDetailPage: React.FC = () => {
             onClick={() => navigate(`/procurement/leads/${lead.id}/convert`)}
             sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
           >
-            Review & Create RFQ
+            Qualify & Create RFQ
           </Button>}
-        {hasPermission('Leads', 'edit') && <LifecycleActions aggregate="leads" id={lead.id} onChanged={() => queryClient.invalidateQueries({ queryKey: ['lead-detail', Number(id)] })} />}
         </Stack>
       </Box>
 
@@ -455,10 +469,6 @@ const LeadDetailPage: React.FC = () => {
           </Paper>
         </Grid>
 
-        <Grid size={{ xs: 12 }} component="div">
-          <CommercialLineIntelligence stage="lead" recordId={lead.id} />
-        </Grid>
-
         {/* Full Width Bottom: Line Items */}
         <Grid size={{ xs: 12 }} component="div">
           <Box sx={{ mt: 2 }}>
@@ -491,7 +501,9 @@ const LeadDetailPage: React.FC = () => {
                         {/* A quantity the document never stated is shown as a gap, like the
                             price beside it. Rendering null gave a blank cell that read as a
                             loading state; rendering 0 would read as a demand for nothing. */}
-                        <Typography sx={{ fontWeight: 800, fontSize: '0.85rem' }}>{item.quantity ?? 'Not stated'}</Typography>
+                        <Typography sx={{ fontWeight: 800, fontSize: '0.85rem' }}>
+                          {item.quantity && item.quantity > 0 ? item.quantity : 'Not stated'}
+                        </Typography>
                         <Typography variant="caption" color="text.disabled" sx={{ fontSize: '0.65rem' }}>{item.unitOfMeasure}</Typography>
                       </TableCell>
                       <TableCell align="right" sx={{ width: '10%', py: 2 }}>

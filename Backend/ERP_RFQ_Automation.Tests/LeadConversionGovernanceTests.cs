@@ -9,6 +9,75 @@ namespace ERP_RFQ_Automation.Tests;
 public sealed class LeadConversionGovernanceTests
 {
     [Fact]
+    public async Task IntelligenceConversion_ConvertsAnAlreadyQualifiedLeadExactlyOnce()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(92);
+        var lead = Seed.Lead(context, 9201, 92,
+            items: new[] { Seed.LeadItem(9202, "10", 5, "Pump") });
+        lead.LeadItems.Single().UnitOfMeasure = "EA";
+        lead.LeadItems.Single().Currency = "USD";
+        lead.ResolveCommercialIdentity(9210, null, LeadCustomerMatchStatuses.Confirmed);
+        Seed.Customer(context, 9210, 92, "Acme Buyer");
+        var statuses = LifecycleStatusCatalog.CreateFor(
+            context.BusinessUnits.Local.Single(unit => unit.Id == 92), "test");
+        context.SetupMasters.AddRange(statuses);
+        lead.LeadStatus = statuses.Single(status =>
+            status.SetupType == "LeadStatus" && status.SetupCode == "QUALIFIED");
+        await context.SaveChangesAsync();
+        var service = new LeadConversionIntelligence(context);
+        var request = new ConvertRequest
+        {
+            ActingUser = "reviewer@example.com",
+            AcknowledgeAllWarnings = true,
+            WarningAcknowledgementReason = "Catalog choice reviewed"
+        };
+
+        var first = await service.ConvertAsync(lead.Id, 92, request, default);
+        var replay = await service.ConvertAsync(lead.Id, 92, request, default);
+
+        Assert.Equal(first, replay);
+        Assert.Single(await context.Rfqs.Where(rfq => rfq.LeadId == lead.Id).ToListAsync());
+        var events = await context.CommercialLifecycleEvents
+            .Where(entry => entry.AggregateId == lead.Id).OrderBy(entry => entry.OccurredOn).ToListAsync();
+        Assert.Equal(2, events.Count);
+        Assert.Single(events, entry => entry.EventType == "StatusTransitioned"
+            && entry.NewStatusCode == "CONVERTED_TO_RFQ");
+        Assert.Single(events, entry => entry.EventType == "PromotedToRfq");
+    }
+
+    [Fact]
+    public async Task IntelligenceConversion_PreservesMissingQuantityAsNeedsReview()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(93);
+        var lead = Seed.Lead(context, 9301, 93,
+            items: new[] { Seed.LeadItem(9302, "20", 1, "Valve") });
+        lead.LeadItems.Single().Quantity = null;
+        lead.LeadItems.Single().UnitOfMeasure = null;
+        lead.ResolveCommercialIdentity(9310, null, LeadCustomerMatchStatuses.Confirmed);
+        Seed.Customer(context, 9310, 93, "Acme Buyer");
+        var statuses = LifecycleStatusCatalog.CreateFor(
+            context.BusinessUnits.Local.Single(unit => unit.Id == 93), "test");
+        context.SetupMasters.AddRange(statuses);
+        lead.LeadStatus = statuses.Single(status =>
+            status.SetupType == "LeadStatus" && status.SetupCode == "QUALIFIED");
+        await context.SaveChangesAsync();
+
+        var rfqId = await new LeadConversionIntelligence(context).ConvertAsync(lead.Id, 93,
+            new ConvertRequest
+            {
+                ActingUser = "reviewer@example.com",
+                CreateNeedsClarification = true
+            }, default);
+
+        var rfq = await context.Rfqs.Include(row => row.Rfqitems).Include(row => row.Rfqstatus)
+            .SingleAsync(row => row.Id == rfqId);
+        Assert.Equal("NEEDS_REVIEW", rfq.Rfqstatus?.SetupCode);
+        Assert.Null(Assert.Single(rfq.Rfqitems).Quantity);
+    }
+
+    [Fact]
     public async Task IntelligenceConversion_BlocksUnverifiedAiCommercialFacts()
     {
         using var db = new TestDb();

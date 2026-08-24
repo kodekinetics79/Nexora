@@ -50,6 +50,8 @@ namespace ERP_RFQ_Automation.Interfaces
         Task<(IEnumerable<LeadNeedsReviewItemDTO>, int TotalCount)> GetNeedsReviewLeadsAsync(int pageNumber, int pageSize, long businessUnitId, string? search = null);
         Task<LeadResponseDTO?> SubmitLeadReviewAsync(
             long id, long businessUnitId, LeadReviewSubmitDTO review, string reviewedBy = "system");
+        Task<LeadResponseDTO?> RequestClarificationAsync(
+            long id, long businessUnitId, LeadClarificationRequestDTO request, string requestedBy);
 
         /// <summary>
         /// Links a lead to the client organisation a human picked, at any point in the lead's

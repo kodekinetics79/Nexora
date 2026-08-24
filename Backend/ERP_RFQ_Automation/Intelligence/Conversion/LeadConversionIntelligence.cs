@@ -5,6 +5,7 @@ using Microsoft.EntityFrameworkCore;
 using ERP_RFQ_Automation.Inventory.Commercial;
 using ERP_RFQ_Automation.ProductIntelligence;
 using ERP_RFQ_Automation.Services.Uom;
+using ERP_RFQ_Automation.LeadIdentity;
 
 namespace ERP_RFQ_Automation.Intelligence.Conversion;
 
@@ -43,12 +44,15 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
 
     private readonly ErpRfqAutomationContext _db;
     private readonly ICommercialLineResolutionApplicationService? _lineResolution;
+    private readonly IProductItemResolver? _productResolver;
 
     public LeadConversionIntelligence(ErpRfqAutomationContext db,
-        ICommercialLineResolutionApplicationService? lineResolution = null)
+        ICommercialLineResolutionApplicationService? lineResolution = null,
+        IProductItemResolver? productResolver = null)
     {
         _db = db;
         _lineResolution = lineResolution;
+        _productResolver = productResolver;
     }
 
     // ================================================================ Preview
@@ -212,6 +216,40 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
         // leaves no partial RFQ.
         var acknowledgedLines = EnforceLineWarningGovernance(included, resolved, choices, request);
 
+        // Persist the operator's explicit corrections on the canonical lead lines. Downstream
+        // RFQ creation then copies those same values; preview and conversion cannot disagree.
+        foreach (var li in included)
+        {
+            if (!choices.TryGetValue(li.Id, out var choice)) continue;
+            if (choice.Quantity.HasValue)
+            {
+                if (choice.Quantity <= 0)
+                    throw new ArgumentException($"Quantity for line {li.Id} must be greater than zero.");
+                li.Quantity = choice.Quantity;
+            }
+            if (!string.IsNullOrWhiteSpace(choice.UnitOfMeasure))
+                li.UnitOfMeasure = choice.UnitOfMeasure.Trim();
+        }
+
+        // Qualification and RFQ creation are one serializable command. If any later write fails,
+        // the lifecycle transition rolls back with it; there is no stranded "qualified" lead.
+        var currentLeadStatus = LifecyclePolicy.Canonicalize("Lead", lead.LeadStatus?.SetupCode, lead.LeadStatus?.SetupValue);
+        if (currentLeadStatus != "QUALIFIED")
+        {
+            if (request.ExpectedLifecycleVersion.HasValue
+                && request.ExpectedLifecycleVersion.Value != lead.LifecycleVersion)
+                throw new DbUpdateConcurrencyException(
+                    $"Lead {lead.Id} changed while qualification was being submitted. Refresh and try again.");
+
+            var actor = string.IsNullOrWhiteSpace(request.ActingUser) ? "System" : request.ActingUser!.Trim();
+            await new LifecycleApplicationService(_db).TransitionLeadInCurrentTransactionAsync(
+                businessUnitId, lead.Id, new LifecycleActor(actor, "LeadConversion"),
+                new LifecycleTransitionCommand("QUALIFIED", lead.LifecycleVersion, "QUALIFIED_FOR_RFQ", request.Notes,
+                    "Api", $"qualification-{lead.Id}", $"lead-{lead.Id}",
+                    $"lead-qualification:{businessUnitId}:{lead.Id}:{lead.LifecycleVersion}"),
+                false, ct);
+        }
+
         var createdBy = string.IsNullOrWhiteSpace(request.ActingUser) ? "System" : request.ActingUser!;
         var now = DateTime.UtcNow;
 
@@ -245,7 +283,8 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
             DurationAgreement = lead.DurationAgreement,
             LeadId = lead.Id,
             BusinessUnitId = businessUnitId,
-            RfqstatusId = await LifecycleStatusCatalog.ResolveIdAsync(_db, businessUnitId, "Rfq", "DRAFT", ct),
+            RfqstatusId = await LifecycleStatusCatalog.ResolveIdAsync(_db, businessUnitId, "Rfq",
+                request.CreateNeedsClarification ? "NEEDS_REVIEW" : "DRAFT", ct),
             CreatedBy = createdBy,
             CreatedDate = now,
             Rfqitems = included.Select(li =>
@@ -253,19 +292,15 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
                 choices.TryGetValue(li.Id, out var choice);
                 var r = resolved[li.Id];
 
-                // Product: explicit choice wins; otherwise auto-assign the best
-                // match only when it clears the confidence floor.
+                // Product: explicit choice wins. Automatic linking is permitted only when the
+                // authoritative ProductItemResolver returned AutoLinked; advisory preview scores
+                // can never silently become a confirmed RFQ product.
                 var productId = choice?.ProductId
-                    ?? (r.Confidence >= ConfidenceFloor && r.Matches.Count > 0
-                        ? r.Matches[0].ProductId
-                        : (long?)null);
+                    ?? r.AutoLinkedProductId;
 
-                // Quantity: corrected value wins; else the raw lead quantity WHEN THE DOCUMENT
-                // STATED ONE; else the normalized (parsed-from-text) quantity. A lead line whose
-                // quantity is null states none, so it falls through to recovery exactly as a
-                // dirty 0 did — and if recovery finds nothing the conversion is refused rather
-                // than writing a demand for zero units into an RFQ.
-                int quantity;
+                // Quantity comes only from the canonical field or an explicit correction. Text
+                // fragments are evidence, never permission to invent quote-critical demand.
+                int? quantity;
                 if (choice?.Quantity is int cq)
                 {
                     if (cq <= 0) throw new ArgumentException($"Quantity for line {li.Id} must be greater than zero.");
@@ -273,10 +308,8 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
                 }
                 else
                 {
-                    quantity = li.Quantity is > 0
-                        ? li.Quantity.Value
-                        : (int)Math.Ceiling(r.NormalizedQuantity ?? 0m);
-                    if (quantity <= 0)
+                    quantity = li.Quantity is > 0 ? li.Quantity.Value : null;
+                    if (!request.CreateNeedsClarification && quantity is null)
                         throw new ArgumentException(
                             $"Quantity for line {li.Id} is not stated in the source document. Enter it before converting.");
                 }
@@ -368,7 +401,16 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
     private async Task CompleteConversionLifecycleInCurrentTransactionAsync(
         Lead lead, long rfqId, string? createdBy, string? acknowledgedWarnings, CancellationToken ct)
     {
-        if (LifecyclePolicy.Canonicalize("Lead", lead.LeadStatus?.SetupCode, lead.LeadStatus?.SetupValue) != "QUALIFIED") return;
+        var statusCode = LifecyclePolicy.Canonicalize("Lead", lead.LeadStatus?.SetupCode, lead.LeadStatus?.SetupValue);
+        if (statusCode != "QUALIFIED" && lead.LeadStatusId.HasValue)
+        {
+            var persistedStatus = await _db.SetupMasters.AsNoTracking()
+                .Where(status => status.SetupId == lead.LeadStatusId.Value)
+                .Select(status => new { status.SetupCode, status.SetupValue })
+                .SingleOrDefaultAsync(ct);
+            statusCode = LifecyclePolicy.Canonicalize("Lead", persistedStatus?.SetupCode, persistedStatus?.SetupValue);
+        }
+        if (statusCode != "QUALIFIED") return;
         var actor = string.IsNullOrWhiteSpace(createdBy) ? "System" : createdBy.Trim();
         var reasonCode = acknowledgedWarnings is null ? null : "CONVERTED_WITH_ACKNOWLEDGED_WARNINGS";
         var lifecycle = new LifecycleApplicationService(_db);
@@ -447,21 +489,22 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
             var label = string.IsNullOrWhiteSpace(line.LineItemNo) ? $"line {line.Id}" : $"line {line.LineItemNo}";
             if (string.IsNullOrWhiteSpace(line.ItemMaterialCode)
                 && string.IsNullOrWhiteSpace(line.ManufacturerPartNumber)
+                && string.IsNullOrWhiteSpace(line.ProductShortName)
                 && string.IsNullOrWhiteSpace(line.ProductShortDescription))
                 blockers.Add($"{label} part number or description");
             // `is null or <= 0`, not `<= 0`. With a nullable quantity the bare comparison is
             // FALSE for null, so an unstated quantity would have stopped being a blocker and the
             // line would have converted with nothing in it.
-            if (quantity is null or <= 0) blockers.Add($"{label} quantity");
-            if (string.IsNullOrWhiteSpace(unitOfMeasure)) blockers.Add($"{label} unit");
-            // Currency read the STORED line only, while quantity and unit both honoured the
-            // caller's correction. That asymmetry was a dead end: the sole writer of a line's
-            // currency is the extraction-review path, which closes once the figures are
-            // approved — and approving is what makes the lead QUALIFIED, which conversion
-            // requires. An approved bid that never stated a currency, which is every Aramco
-            // materials list, could therefore never be converted and never be corrected.
-            if (string.IsNullOrWhiteSpace(EffectiveCurrency(line, choice, request)))
-                blockers.Add($"{label} currency");
+            if (!request.CreateNeedsClarification)
+            {
+                if (quantity is null or <= 0) blockers.Add($"{label} quantity");
+                if (string.IsNullOrWhiteSpace(unitOfMeasure)) blockers.Add($"{label} unit");
+                // Currency honours the same request correction as quantity and unit. This keeps
+                // ordinary conversion strict while the explicit clarification path may preserve
+                // unknown quote-critical facts as unknown.
+                if (string.IsNullOrWhiteSpace(EffectiveCurrency(line, choice, request)))
+                    blockers.Add($"{label} currency");
+            }
         }
 
         return blockers;
@@ -473,6 +516,7 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
     internal sealed class ResolvedLine
     {
         public IReadOnlyList<ProductMatch> Matches { get; init; } = Array.Empty<ProductMatch>();
+        public long? AutoLinkedProductId { get; init; }
         public decimal Confidence { get; init; }
         public decimal? NormalizedQuantity { get; init; }
         public string? NormalizedUom { get; init; }
@@ -545,7 +589,7 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
             // that silently answers false.
             var stillBlocked = r.IsBlocked
                 && (effectiveQuantity is null or <= 0 || string.IsNullOrWhiteSpace(effectiveUom));
-            if (stillBlocked)
+            if (stillBlocked && !request.CreateNeedsClarification)
             {
                 blocked.Add($"{Label(li)}: {r.BlockingReason}");
                 continue;
@@ -657,7 +701,9 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
     private async Task<Dictionary<long, ResolvedLine>> ResolveLinesAsync(
         IEnumerable<LeadItem> leadItems, long businessUnitId, CancellationToken ct)
     {
-        var items = leadItems.ToList();
+        // Navigation collections have no database ordering guarantee. Keep fallback revision-line
+        // alignment deterministic for historical lines that do not carry a parseable line number.
+        var items = leadItems.OrderBy(item => item.Id).ToList();
         var result = new Dictionary<long, ResolvedLine>();
         if (items.Count == 0) return result;
 
@@ -669,6 +715,11 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
             .Where(u => u.BusinessUnitId == businessUnitId && u.IsActive)
             .ToListAsync(ct);
         var uomVocabulary = SetUomVocabulary.From(uoms);
+        var authoritative = await AuthoritativeMatchesAsync(items, businessUnitId, ct);
+        // Legacy leads without immutable revision lines retain the bounded fallback matcher.
+        // Current leads never run two matchers: every mapped canonical line is resolved only by
+        // IProductItemResolver, which is also the commercial-intelligence authority.
+        var fallbackItems = items.Where(item => !authoritative.ContainsKey(item.Id)).ToList();
 
         // ---- Candidate fetch 1: every catalogue number any line offers, in one IN query.
         // Each identifier contributes BOTH its literal spelling and its punctuation-free fold, so
@@ -678,7 +729,7 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
         // exactly the wholesale scan this resolver exists to avoid, so it is not done here; see
         // BestCodeHit, which still recognises a catalogue-side spelling difference on any product
         // the name query happens to have pulled in.
-        var spellings = items
+        var spellings = fallbackItems
             .SelectMany(CodeIdentifiers)
             .SelectMany(id => new[] { id.Value, ProductIdentityNormalizer.FoldIdentifier(id.Value) })
             .Where(s => !string.IsNullOrEmpty(s))
@@ -700,7 +751,7 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
         // ---- Candidate fetch 2: one bounded ILIKE query per distinct name, using
         // the two most significant tokens. Leads carry few lines, so this stays cheap.
         var nameQueriesDone = new HashSet<string>();
-        foreach (var item in items)
+        foreach (var item in fallbackItems)
         {
             var normName = NormalizeName(item.ProductShortName ?? item.ProductShortDescription);
             if (normName is null || !nameQueriesDone.Add(normName)) continue;
@@ -708,14 +759,14 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
             var tokens = Tokenize(normName).OrderByDescending(t => t.Length).Take(2).ToList();
             if (tokens.Count == 0) continue;
 
-            var pat1 = $"%{EscapeLike(tokens[0])}%";
-            var pat2 = tokens.Count > 1 ? $"%{EscapeLike(tokens[1])}%" : pat1;
+            var token1 = tokens[0];
+            var token2 = tokens.Count > 1 ? tokens[1] : token1;
 
             var nameRows = await ActiveProducts()
-                .Where(p => (p.ProductName != null && (EF.Functions.ILike(p.ProductName, pat1, "\\")
-                                                       || EF.Functions.ILike(p.ProductName, pat2, "\\")))
-                            || (p.Description != null && (EF.Functions.ILike(p.Description, pat1, "\\")
-                                                          || EF.Functions.ILike(p.Description, pat2, "\\"))))
+                .Where(p => (p.ProductName != null && (p.ProductName.ToLower().Contains(token1)
+                                                       || p.ProductName.ToLower().Contains(token2)))
+                            || (p.Description != null && (p.Description.ToLower().Contains(token1)
+                                                          || p.Description.ToLower().Contains(token2))))
                 .OrderBy(p => p.Id)
                 .Take(MaxNameCandidatesPerLine)
                 .Select(p => new Candidate(p.Id, p.ProductName, p.PartNo, p.ModelNo, p.Description))
@@ -726,7 +777,8 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
         // ---- Score every line against the pooled candidate set, in memory.
         foreach (var item in items)
         {
-            var matches = ScoreItem(item, candidates.Values)
+            authoritative.TryGetValue(item.Id, out var authoritativeMatch);
+            var matches = authoritativeMatch?.Matches ?? ScoreItem(item, candidates.Values)
                 .OrderByDescending(m => m.Score)
                 .ThenBy(m => m.ProductId)
                 .Take(MaxMatchesPerLine)
@@ -758,6 +810,9 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
             result[item.Id] = new ResolvedLine
             {
                 Matches = matches,
+                AutoLinkedProductId = authoritativeMatch?.AutoLinkedProductId
+                    ?? (_productResolver is null && confidence >= ConfidenceFloor && matches.Count > 0
+                        ? matches[0].ProductId : null),
                 Confidence = confidence,
                 NormalizedQuantity = normalizedQty,
                 NormalizedUom = uom.Value,
@@ -771,6 +826,56 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
 
         return result;
     }
+
+    private async Task<Dictionary<long, AuthoritativeMatch>> AuthoritativeMatchesAsync(
+        IReadOnlyList<LeadItem> items, long businessUnitId, CancellationToken ct)
+    {
+        var result = new Dictionary<long, AuthoritativeMatch>();
+        if (_productResolver is null || items.Count == 0) return result;
+        var leadId = items[0].LeadId;
+        var revisionId = await _db.Leads.AsNoTracking()
+            .Where(lead => lead.BusinessUnitId == businessUnitId && lead.Id == leadId)
+            .Select(lead => lead.CurrentRevisionId)
+            .SingleOrDefaultAsync(ct);
+        if (!revisionId.HasValue) return result;
+        var revisionLines = await _db.Set<LeadItemRevision>().AsNoTracking()
+            .Where(line => line.BusinessUnitId == businessUnitId && line.LeadRevisionId == revisionId.Value)
+            .OrderBy(line => line.LineNumber)
+            .ToListAsync(ct);
+
+        for (var index = 0; index < items.Count; index++)
+        {
+            var item = items[index];
+            var revisionLine = int.TryParse(item.LineItemNo, out var lineNumber)
+                ? revisionLines.FirstOrDefault(line => line.LineNumber == lineNumber)
+                : null;
+            revisionLine ??= revisionLines.ElementAtOrDefault(index);
+            if (revisionLine is null) continue;
+            var part = FirstValue(item.ManufacturerPartNumber, item.ItemMaterialCode);
+            var description = FirstValue(item.ProductShortDescription, item.ProductShortName, item.ItemText);
+            var resolution = await _productResolver.ResolveAsync(new ProductResolutionRequest(
+                businessUnitId, revisionId.Value, revisionLine.Id, part, item.ManufacturerName, description,
+                [new ProductResolutionEvidence("canonical-lead-line", $"lead:{leadId}:item:{item.Id}", part)]), ct);
+            var matches = resolution.RankedCandidates.Take(MaxMatchesPerLine).Select(candidate => new ProductMatch
+            {
+                ProductId = candidate.ProductId,
+                ProductName = candidate.ProductName,
+                MaterialCode = candidate.PartNumber,
+                ManufacturerPartNumber = candidate.InternalCode,
+                Score = candidate.Confidence,
+                Reason = candidate.Reason
+            }).ToList();
+            result[item.Id] = new AuthoritativeMatch(matches,
+                resolution.DecisionState == ProductResolutionDecisionState.AutoLinked
+                    ? resolution.ResolvedProductId : null);
+        }
+        return result;
+    }
+
+    private sealed record AuthoritativeMatch(IReadOnlyList<ProductMatch> Matches, long? AutoLinkedProductId);
+
+    private static string? FirstValue(params string?[] values)
+        => values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))?.Trim();
 
     private IQueryable<Product> ActiveProducts() =>
         _db.Products.AsNoTracking().Where(p => p.IsActive == null || p.IsActive == true);
@@ -968,28 +1073,13 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
             .Where(t => t.Length >= 3 && !StopWords.Contains(t))
             .ToHashSet(StringComparer.Ordinal);
 
-    private static string EscapeLike(string s) =>
-        s.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
-
     /// <summary>
-    /// The line's usable quantity. NULL on LeadItem means the document stated none we could
-    /// read; 0 or a dirty value means the same thing in practice. In either case try to recover
-    /// a number from the raw UoM ("10 EA") or the item text fields, and return null — never a
-    /// substituted zero — when there is nothing to recover.
+    /// The line's canonical quantity. Raw description/UoM text is not a quantity field and is
+    /// never parsed into one; an absent value remains absent until a human corrects it.
     /// </summary>
     private static decimal? NormalizeQuantity(LeadItem item)
     {
-        if (item.Quantity is > 0) return item.Quantity.Value;
-        foreach (var source in new[] { item.UnitOfMeasure, item.ItemText, item.MaterialPotext })
-        {
-            if (string.IsNullOrWhiteSpace(source)) continue;
-            var m = FirstNumber.Match(source);
-            if (m.Success && decimal.TryParse(m.Value.Replace(',', '.'),
-                    System.Globalization.NumberStyles.Number,
-                    System.Globalization.CultureInfo.InvariantCulture, out var q) && q > 0)
-                return q;
-        }
-        return null;
+        return item.Quantity is > 0 ? item.Quantity.Value : null;
     }
 
     /// <summary>

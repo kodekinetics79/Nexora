@@ -31,7 +31,8 @@ internal static class RoutingRequestFingerprint
             assignmentScope = command.AssignmentScope.ToString(),
             comment = Normalize(command.Comment),
             command.EnforceExpectedAssignee,
-            command.ExpectedAssigneeId
+            command.ExpectedAssigneeId,
+            command.ExpectedAssignmentVersion
         });
 
     public static string ForQueueAssignment(

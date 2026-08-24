@@ -15,7 +15,27 @@ public sealed record ManualAssignLeadCommand(
     AssignmentScope AssignmentScope,
     string? Comment,
     bool EnforceExpectedAssignee,
-    long? ExpectedAssigneeId);
+    long? ExpectedAssigneeId,
+    long? ExpectedAssignmentVersion = null);
+
+public sealed record ChangeLeadOwnershipCommand(
+    long LeadId,
+    LeadOwnershipAction Action,
+    long? AssignedToUserId,
+    long? AssignedByUserId,
+    long ExpectedAssignmentVersion,
+    string IdempotencyKey,
+    string CorrelationId,
+    string? Comment = null);
+
+public sealed record LeadOwnershipResponse(
+    long LeadId,
+    long? AssignedToUserId,
+    string AssignmentMethod,
+    bool ManualOverride,
+    long AssignmentVersion,
+    DateTime? AssignedAt,
+    RoutingDecisionResponse Decision);
 
 public sealed record RoutingDecisionResponse(
     long DecisionId,

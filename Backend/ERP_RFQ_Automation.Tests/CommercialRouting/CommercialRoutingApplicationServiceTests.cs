@@ -223,6 +223,91 @@ public sealed class CommercialRoutingApplicationServiceTests
     }
 
     [Fact]
+    public async Task Assign_to_me_is_manual_does_not_change_lifecycle_and_blocks_a_stale_version()
+    {
+        using var db = new TestDb();
+        await SeedRoutingGraphAsync(db, includeIdentifier: false, includeOwnership: false);
+        await using var context = db.ContextFor(71);
+        await AddEligibleProfileAsync(context, 7101);
+        var service = Service(context);
+        var originalLifecycle = (await context.Leads.AsNoTracking().SingleAsync(l => l.Id == 701)).LeadStatusId;
+
+        var assigned = await service.ChangeLeadOwnershipAsync(71, new ChangeLeadOwnershipCommand(
+            701, LeadOwnershipAction.Assign, 7101, 7101, 1,
+            "owner-command-1", "owner-correlation-1"), CancellationToken.None);
+
+        Assert.Equal(7101, assigned.AssignedToUserId);
+        Assert.Equal(LeadAssignmentMethods.Manual, assigned.AssignmentMethod);
+        Assert.True(assigned.ManualOverride);
+        Assert.Equal(originalLifecycle, (await context.Leads.AsNoTracking().SingleAsync(l => l.Id == 701)).LeadStatusId);
+        await Assert.ThrowsAsync<RoutingConflictException>(() => service.ChangeLeadOwnershipAsync(71,
+            new ChangeLeadOwnershipCommand(701, LeadOwnershipAction.Unassign, null, 7102, 1,
+                "owner-command-stale", "owner-correlation-stale"), CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Return_to_automatic_explicitly_releases_the_manual_fence_and_routes_again()
+    {
+        using var db = new TestDb();
+        await SeedRoutingGraphAsync(db, includeIdentifier: true, includeOwnership: true);
+        await using var context = db.ContextFor(71);
+        await AddEligibleProfileAsync(context, 7101);
+        await AddEligibleProfileAsync(context, 7102);
+        var service = Service(context);
+
+        await service.ChangeLeadOwnershipAsync(71, new ChangeLeadOwnershipCommand(
+            701, LeadOwnershipAction.Assign, 7102, 7102, 1,
+            "owner-self-assign", "owner-self-assign-correlation"), CancellationToken.None);
+        var rerouted = await service.ChangeLeadOwnershipAsync(71, new ChangeLeadOwnershipCommand(
+            701, LeadOwnershipAction.ReturnToAutomatic, null, 7102, 2,
+            "owner-return-auto", "owner-return-auto-correlation"), CancellationToken.None);
+
+        Assert.Equal(7101, rerouted.AssignedToUserId);
+        Assert.Equal(LeadAssignmentMethods.Automatic, rerouted.AssignmentMethod);
+        Assert.False(rerouted.ManualOverride);
+    }
+
+    [Fact]
+    public async Task Automatic_routing_does_not_overwrite_a_manual_owner()
+    {
+        using var db = new TestDb();
+        await SeedRoutingGraphAsync(db, includeIdentifier: true, includeOwnership: true);
+        await using var context = db.ContextFor(71);
+        await AddEligibleProfileAsync(context, 7101);
+        await AddEligibleProfileAsync(context, 7102);
+        var service = Service(context);
+        await service.ChangeLeadOwnershipAsync(71, new ChangeLeadOwnershipCommand(
+            701, LeadOwnershipAction.Assign, 7102, 7101, 1,
+            "owner-manual-fence", "owner-manual-fence-correlation"), CancellationToken.None);
+
+        await Assert.ThrowsAsync<RoutingConflictException>(() => service.RouteLeadAsync(71,
+            new RouteLeadCommand(701, "automatic-after-manual", "automatic-after-manual-correlation"),
+            CancellationToken.None));
+
+        var lead = await context.Leads.SingleAsync(candidate => candidate.Id == 701);
+        Assert.Equal(7102, lead.AssignTo);
+        Assert.True(lead.ManualAssignmentOverride);
+    }
+
+    [Fact]
+    public async Task Ownership_command_rejects_a_cross_tenant_assignee()
+    {
+        using var db = new TestDb();
+        await SeedRoutingGraphAsync(db, includeIdentifier: false, includeOwnership: false);
+        await using (var seed = db.ContextFor(null))
+        {
+            Seed.EnsureBusinessUnit(seed, 72);
+            seed.Users.Add(User(7201, 72, "other-tenant"));
+            await seed.SaveChangesAsync();
+        }
+        await using var context = db.ContextFor(71);
+
+        await Assert.ThrowsAsync<RoutingConflictException>(() => Service(context).ChangeLeadOwnershipAsync(71,
+            new ChangeLeadOwnershipCommand(701, LeadOwnershipAction.Assign, 7201, 7102, 1,
+                "cross-tenant-owner", "cross-tenant-owner-correlation"), CancellationToken.None));
+    }
+
+    [Fact]
     public async Task Queue_claim_uses_version_and_prevents_an_active_lease_takeover()
     {
         using var db = new TestDb();

@@ -720,6 +720,9 @@ namespace ERP_RFQ_Automation.Repositories
                     : "Unassigned",
                 AssignedOn = l.AssignOn,
                 AssignComment = l.AssignComment,
+                AssignmentMethod = l.AssignmentMethod,
+                ManualAssignmentOverride = l.ManualAssignmentOverride,
+                AssignmentVersion = l.AssignmentVersion,
 
                 // WP-A1 unassigned-aging (rule: accepted + unassigned + sitting
                 // longer than the tenant's unassigned-hours threshold).
@@ -847,6 +850,9 @@ namespace ERP_RFQ_Automation.Repositories
                     : "Unassigned",
                 AssignedOn = lead.AssignOn,
                 AssignComment = lead.AssignComment,
+                AssignmentMethod = lead.AssignmentMethod,
+                ManualAssignmentOverride = lead.ManualAssignmentOverride,
+                AssignmentVersion = lead.AssignmentVersion,
                 LeadItems = lead.LeadItems.Select(li => new AcceptedLeadItemDTO
                 {
                     Id = li.Id,
@@ -1037,6 +1043,10 @@ namespace ERP_RFQ_Automation.Repositories
                     : null,
                 AssignedOn = lead.AssignOn,
                 AssignComment = lead.AssignComment,
+                AssignmentMethod = lead.AssignmentMethod,
+                ManualAssignmentOverride = lead.ManualAssignmentOverride,
+                AssignmentVersion = lead.AssignmentVersion,
+                AssignedByUserId = lead.AssignedByUserId,
 
                 ItemCount = lead.LeadItems.Count,
                 LeadItems = lead.LeadItems.Select(li => new LeadItemResponseDTO
@@ -1221,6 +1231,69 @@ namespace ERP_RFQ_Automation.Repositories
                 _context.ChangeTracker.Clear();
                 return SubmitLeadReviewCoreAsync(id, businessUnitId, review, reviewedBy);
             });
+        }
+
+        /// <summary>
+        /// Records that sales requested missing commercial information without moving the lead
+        /// through a technical lifecycle state. The lead and immutable review audit share one
+        /// atomic flush; ReviewVersion is the optimistic-concurrency fence.
+        /// </summary>
+        public async Task<LeadResponseDTO?> RequestClarificationAsync(
+            long id, long businessUnitId, LeadClarificationRequestDTO request, string requestedBy)
+        {
+            if (string.IsNullOrWhiteSpace(requestedBy))
+                throw new LeadReviewValidationException("Requester identity is required.");
+            var note = request.Note?.Trim();
+            if (string.IsNullOrWhiteSpace(note) || note.Length < 3)
+                throw new LeadReviewValidationException("A clarification note is required.");
+
+            var lead = await _context.Leads
+                .Include(item => item.LeadItems)
+                .Include(item => item.EmailIngests)
+                .SingleOrDefaultAsync(item => item.Id == id && item.BusinessUnitId == businessUnitId);
+            if (lead == null) return null;
+            if (request.ExpectedReviewVersion != lead.ReviewVersion)
+                throw new LeadReviewConflictException(
+                    $"Review version {request.ExpectedReviewVersion} is stale; current version is {lead.ReviewVersion}.");
+
+            var beforeJson = SerializeReviewSnapshot(lead);
+            var fromVersion = lead.ReviewVersion;
+            var requestedOn = DateTime.UtcNow;
+            lead.RequiresCommercialReview = true;
+            lead.CommercialFactsVerified = false;
+            lead.ReviewApprovedBy = null;
+            lead.ReviewApprovedOn = null;
+            lead.ModifiedDate = requestedOn;
+            lead.ReviewVersion++;
+
+            _context.Set<LeadReviewAudit>().Add(new LeadReviewAudit
+            {
+                BusinessUnitId = businessUnitId,
+                LeadId = lead.Id,
+                FromVersion = fromVersion,
+                ToVersion = lead.ReviewVersion,
+                Action = "clarification",
+                ReviewedBy = requestedBy.Trim(),
+                Reason = note,
+                BeforeJson = beforeJson,
+                AfterJson = SerializeReviewSnapshot(lead),
+                ReviewedOn = requestedOn
+            });
+
+            try
+            {
+                await _context.SaveChangesAsync();
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+                throw new LeadReviewConflictException("The lead changed while clarification was requested. Refresh and retry.");
+            }
+            catch (DbUpdateException)
+            {
+                throw new LeadReviewConflictException("The clarification request conflicted with another review. Refresh and retry.");
+            }
+
+            return await GetLeadByIdAsync(id, businessUnitId);
         }
 
         private async Task<LeadResponseDTO?> SubmitLeadReviewCoreAsync(

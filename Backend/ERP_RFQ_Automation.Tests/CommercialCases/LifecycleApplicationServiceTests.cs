@@ -74,7 +74,7 @@ public sealed class LifecycleApplicationServiceTests
     }
 
     [Fact]
-    public async Task IllegalSkippedTransitionWritesNothing()
+    public async Task ReceivedLead_CanBeQualifiedWithoutIntermediateLifecycleDance()
     {
         using var db = new TestDb();
         await using var context = db.ContextFor(74);
@@ -82,11 +82,53 @@ public sealed class LifecycleApplicationServiceTests
         Status(context, 505, 74, "LeadStatus", "QUALIFIED", "Qualified");
         await context.SaveChangesAsync();
 
-        await Assert.ThrowsAsync<LifecycleValidationException>(() => Service(context).TransitionLeadAsync(
-            74, 104, Actor(), Command("QUALIFIED", 1, "lead-104-qualified"), false, default));
-        Assert.Empty(context.CommercialLifecycleEvents);
-        Assert.Empty(context.LifecycleOutboxMessages);
-        Assert.Equal(1, context.Leads.Single().LifecycleVersion);
+        await Service(context).TransitionLeadAsync(
+            74, 104, Actor(), Command("QUALIFIED", 1, "lead-104-qualified"), false, default);
+        Assert.Single(context.CommercialLifecycleEvents);
+        Assert.Single(context.LifecycleOutboxMessages);
+        Assert.Equal(2, context.Leads.Single().LifecycleVersion);
+    }
+
+    [Fact]
+    public async Task ReceivedLead_CanBePassedDirectlyWithGovernedOutcome()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(742);
+        Seed.Lead(context, 1042, 742);
+        Status(context, 5053, 742, "LeadStatus", "DISQUALIFIED", "Passed");
+        OutcomeReason(context, 5054, 742, "NO_STOCK", "Item unavailable");
+        await context.SaveChangesAsync();
+
+        var result = await Service(context).TransitionLeadAsync(
+            742, 1042, Actor(), Command("DISQUALIFIED", 1, "lead-1042-passed", "NO_STOCK"), false, default);
+
+        Assert.Equal("DISQUALIFIED", result.NewStatusCode);
+        Assert.False(LifecyclePolicy.RequiresElevatedAuthorization("DISQUALIFIED"));
+        Assert.Single(context.CommercialLifecycleEvents);
+        Assert.Equal(5054, context.Leads.Single().OutcomeReasonId);
+    }
+
+    [Fact]
+    public async Task QualifiedLead_CanBePassedWithGovernedOutcome()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(743);
+        Seed.Lead(context, 1043, 743);
+        Status(context, 5055, 743, "LeadStatus", "QUALIFIED", "Qualified");
+        Status(context, 5056, 743, "LeadStatus", "DISQUALIFIED", "Passed");
+        OutcomeReason(context, 5057, 743, "NO_STOCK", "Item unavailable");
+        await context.SaveChangesAsync();
+        var service = Service(context);
+        await service.TransitionLeadAsync(
+            743, 1043, Actor(), Command("QUALIFIED", 1, "lead-1043-qualified"), false, default);
+
+        var result = await service.TransitionLeadAsync(
+            743, 1043, Actor(), Command("DISQUALIFIED", 2, "lead-1043-passed", "NO_STOCK"), false, default);
+
+        Assert.Equal("DISQUALIFIED", result.NewStatusCode);
+        Assert.Equal(3, result.Version);
+        Assert.Equal(2, context.CommercialLifecycleEvents.Count());
+        Assert.Equal(5057, context.Leads.Single().OutcomeReasonId);
     }
 
     [Fact]
@@ -363,8 +405,7 @@ public sealed class LifecycleApplicationServiceTests
         var state = await Service(context).GetLeadStateAsync(83, 112, default);
 
         Assert.Equal("RECEIVED", state.CurrentStatusCode);
-        Assert.Equal(new[] { "CANCELLED", "PENDING_IDENTIFICATION" }, state.AllowedTransitions.Select(x => x.StatusCode));
-        Assert.DoesNotContain(state.AllowedTransitions, x => x.StatusCode == "QUALIFIED");
+        Assert.Equal(new[] { "CANCELLED", "PENDING_IDENTIFICATION", "QUALIFIED" }, state.AllowedTransitions.Select(x => x.StatusCode));
     }
 
     [Fact]

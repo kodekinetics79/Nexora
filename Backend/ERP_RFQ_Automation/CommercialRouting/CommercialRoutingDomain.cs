@@ -46,6 +46,13 @@ public enum AssignmentScope
     SharedBackup
 }
 
+public enum LeadOwnershipAction
+{
+    Assign,
+    Unassign,
+    ReturnToAutomatic
+}
+
 public enum CustomerMatchStatus
 {
     Matched,
@@ -155,6 +162,8 @@ public sealed class LeadAssignment
     public DateTime EffectiveFrom { get; set; }
     public DateTime? EffectiveTo { get; set; }
     public long? AssignedByUserId { get; set; }
+    public string AssignmentMethod { get; set; } = "AUTOMATIC";
+    public bool IsManualOverride { get; set; }
     public string CorrelationId { get; set; } = string.Empty;
     public string IdempotencyKey { get; set; } = string.Empty;
 }

@@ -279,6 +279,8 @@ public sealed class RequestDtoColumnWidthContractTests
         ["MailboxUpdateRequestDTO"] = "EmailConfiguration",
         // LeadRepository.LinkClientAsync writes request.Reason onto a LeadReviewAudit row.
         ["LeadClientLinkRequestDTO"] = "LeadReviewAudit",
+        // LeadRepository.RequestClarificationAsync writes request.Note onto LeadReviewAudit.Reason.
+        ["LeadClarificationRequestDTO"] = "LeadReviewAudit",
         // QuoteController.Transition hands the command to LifecycleApplicationService, which
         // persists CorrelationId and IdempotencyKey on CommercialLifecycleEvent.
         ["QuoteLifecycleTransitionRequestDTO"] = "CommercialLifecycleEvent",

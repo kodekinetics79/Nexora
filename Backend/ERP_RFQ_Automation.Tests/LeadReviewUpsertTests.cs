@@ -65,6 +65,82 @@ public class LeadReviewUpsertTests
     }
 
     [Fact]
+    public async Task RequestClarification_IsAuditedWithoutChangingLifecycle()
+    {
+        using var db = new TestDb();
+        using (var seed = db.ContextFor(null))
+        {
+            var seededLead = Seed.Lead(seed, 90, Bu, items: new[] { Seed.LeadItem(9, "Valve", 1) });
+            seededLead.LeadItems.Single().Quantity = null;
+            seed.SaveChanges();
+        }
+
+        using var context = db.ContextFor(Bu);
+        var result = await new LeadRepository(context).RequestClarificationAsync(
+            90, Bu, new LeadClarificationRequestDTO
+            {
+                ExpectedReviewVersion = 1,
+                Note = "Please confirm the requested quantity."
+            }, "sales@example.test");
+
+        Assert.NotNull(result);
+        context.ChangeTracker.Clear();
+        var lead = await context.Leads.SingleAsync(item => item.Id == 90);
+        var audit = await context.Set<LeadReviewAudit>().SingleAsync();
+        Assert.Null(lead.LeadStatusId);
+        Assert.True(lead.RequiresCommercialReview);
+        Assert.False(lead.CommercialFactsVerified);
+        Assert.Equal(2, lead.ReviewVersion);
+        Assert.Equal("clarification", audit.Action);
+        Assert.Equal("sales@example.test", audit.ReviewedBy);
+        Assert.Equal("Please confirm the requested quantity.", audit.Reason);
+        Assert.Equal(1, audit.FromVersion);
+        Assert.Equal(2, audit.ToVersion);
+    }
+
+    [Fact]
+    public async Task RequestClarification_RejectsStaleVersionWithoutAudit()
+    {
+        using var db = new TestDb();
+        using (var seed = db.ContextFor(null))
+        {
+            var lead = Seed.Lead(seed, 91, Bu);
+            lead.ReviewVersion = 2;
+            seed.SaveChanges();
+        }
+
+        using var context = db.ContextFor(Bu);
+        await Assert.ThrowsAsync<LeadReviewConflictException>(() => new LeadRepository(context)
+            .RequestClarificationAsync(91, Bu, new LeadClarificationRequestDTO
+            {
+                ExpectedReviewVersion = 1,
+                Note = "Please confirm delivery terms."
+            }, "sales@example.test"));
+        Assert.Empty(context.Set<LeadReviewAudit>());
+    }
+
+    [Fact]
+    public async Task RequestClarification_CrossTenantFailsClosed()
+    {
+        using var db = new TestDb();
+        using (var seed = db.ContextFor(null))
+        {
+            Seed.Lead(seed, 92, Bu);
+            seed.SaveChanges();
+        }
+
+        using var foreign = db.ContextFor(Bu + 1);
+        var result = await new LeadRepository(foreign).RequestClarificationAsync(
+            92, Bu + 1, new LeadClarificationRequestDTO
+            {
+                ExpectedReviewVersion = 1,
+                Note = "Please confirm currency."
+            }, "foreign@example.test");
+        Assert.Null(result);
+        Assert.Empty(foreign.Set<LeadReviewAudit>().IgnoreQueryFilters());
+    }
+
+    [Fact]
     public async Task ExistingItem_IsUpdatedInPlace()
     {
         using var db = new TestDb();

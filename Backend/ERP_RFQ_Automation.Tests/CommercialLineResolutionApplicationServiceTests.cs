@@ -113,7 +113,7 @@ public sealed class CommercialLineResolutionApplicationServiceTests
     }
 
     [Fact]
-    public async Task A_line_whose_quantity_the_document_did_not_state_still_resolves()
+    public async Task A_line_whose_quantity_the_document_did_not_state_stays_unresolved()
     {
         // PRODUCTION, LEAD 470. An Aramco bid line carried no quantity, so the extractor wrote
         // "quantity": null — exactly what it is instructed to do rather than invent a number.
@@ -133,12 +133,9 @@ public sealed class CommercialLineResolutionApplicationServiceTests
         await using var context = database.ContextFor(null);
         var service = Service(context, ProductResolutionDecisionState.Unresolved, 0);
 
-        var row = Assert.Single(await service.ResolveLeadAsync(1, 480, 10));
-
-        Assert.Equal("TUBING-METALLIC-316L", row.RequestedPartNumber);
-        // "Not stated" becomes one, never zero: a quantity of zero cannot be sourced, and the
-        // caller's `> 0m ? quantity : 1m` fallback is what makes the line reviewable.
-        Assert.Equal(1m, row.RequestedQuantity);
+        // Unknown demand is not silently turned into one unit. The lead remains reviewable, but
+        // fulfilment and shortage calculations wait for a canonical positive quantity.
+        Assert.Empty(await service.ResolveLeadAsync(1, 480, 10));
     }
 
     [Theory]
@@ -159,8 +156,7 @@ public sealed class CommercialLineResolutionApplicationServiceTests
         await using var context = database.ContextFor(null);
         var service = Service(context, ProductResolutionDecisionState.Unresolved, 0);
 
-        var row = Assert.Single(await service.ResolveLeadAsync(1, 481, 10));
-        Assert.Equal(1m, row.RequestedQuantity);
+        Assert.Empty(await service.ResolveLeadAsync(1, 481, 10));
     }
 
     [Fact]

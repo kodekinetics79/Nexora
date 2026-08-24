@@ -10,7 +10,11 @@ namespace ERP_RFQ_Automation.Intelligence.Conversion;
 //     bidClosingDate }, items:[...], overallConfidence }
 // ============================================================================
 
-/// <summary>Full dry-run of a lead conversion: per-line product resolution + confidence.</summary>
+/// <summary>
+/// Full dry-run of a lead conversion. Product candidates come from the same authoritative
+/// IProductItemResolver used by commercial resolution; only its AutoLinked decision may populate
+/// an RFQ automatically. ReviewRequired candidates remain advisory until a person selects one.
+/// </summary>
 public sealed class ConversionPreview
 {
     public long LeadId { get; init; }
@@ -70,12 +74,21 @@ public sealed class ConversionPreviewItem
 /// <summary>
 /// Caller choices for the actual conversion. Lead lines NOT referenced in
 /// <see cref="Items"/> are included with defaults (raw qty/uom; product
-/// auto-assigned only when resolution confidence &gt;= 0.70).
+/// auto-assigned only when the authoritative resolver returns AutoLinked).
 /// </summary>
 public sealed class ConvertRequest
 {
     public List<ConvertRequestItem>? Items { get; set; } = new();
     public string? Notes { get; set; }
+
+    /// <summary>
+    /// Creates a governed NEEDS_REVIEW RFQ when quote-critical values are genuinely absent.
+    /// Missing values remain null; this never authorizes inferred or default quantities.
+    /// </summary>
+    public bool CreateNeedsClarification { get; set; }
+
+    /// <summary>Optional lifecycle concurrency check supplied by the lead detail client.</summary>
+    public long? ExpectedLifecycleVersion { get; set; }
 
     /// <summary>
     /// One reason covering every line acknowledged in <see cref="ConvertRequestItem.AcknowledgeWarning"/>

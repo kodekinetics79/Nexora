@@ -666,14 +666,14 @@ namespace ERP_RFQ_Automation.Repositories
                     RfqitemId = i.Id,
                     ProductId = i.ProductId,
                     ItemDescription = i.ProductShortDescription ?? i.ProductShortName ?? i.ItemText,
-                    Quantity = i.Quantity,
+                    Quantity = i.Quantity!.Value,
                     // Carry the unit and the buyer's own line reference onto the quote line —
                     // the printed document must say what "Qty 500" is 500 OF, and must let the
                     // buyer match our line back to their RFQ line (SAP "00010", "OPT-29", …).
                     UnitOfMeasure = i.UnitOfMeasure,
                     CustomerLineRef = i.LineItemNo,
                     UnitPrice = i.UnitPrice ?? 0,
-                    TotalAmount = i.Quantity * (i.UnitPrice ?? 0),
+                    TotalAmount = i.Quantity!.Value * (i.UnitPrice ?? 0),
                     CreatedBy = approvedBy,
                     CreatedDate = DateTime.UtcNow
                 }).ToList()

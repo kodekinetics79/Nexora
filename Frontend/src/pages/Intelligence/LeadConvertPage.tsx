@@ -4,7 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Box, Typography, Paper, Button, Stack, Chip, Switch,
   TextField, MenuItem, CircularProgress, Alert, AlertTitle, Breadcrumbs, Link, Divider,
-  Checkbox, FormControlLabel,
+  Checkbox, FormControlLabel, Drawer, List, ListItem, ListItemText,
 } from '@mui/material';
 import {
   AutoAwesome as SparkleIcon,
@@ -17,8 +17,8 @@ import { presentableErrorMessage } from '../../utils/apiErrors';
 import intelligenceService from '../../api/services/intelligenceService';
 import type { ConversionPreviewItem } from '../../api/services/intelligenceService';
 import { ConfidenceChip, parseUserNumber } from './common';
-import CommercialLineIntelligence from '../../components/common/CommercialLineIntelligence';
 import leadService from '../../api/services/leadService';
+import ResolveClientDialog from '../Leads/ResolveClientDialog';
 import lifecycleService from '../../api/services/commercialLifecycleService';
 import type { LifecycleTransitionOption } from '../../api/services/commercialLifecycleService';
 import { useAuth } from '../../context/AuthContext';
@@ -63,14 +63,14 @@ const LeadConvertPage: React.FC = () => {
     queryFn: () => leadService.getById(leadId),
     enabled: !!id && Number.isFinite(leadId),
   });
-  // The canonical lifecycle state — not lead.status, which is a tenant-authored display string.
-  // Same query key as LifecycleActions so a transition made anywhere refreshes this page too.
+  // Canonical lifecycle state, shared with the lead action controls. The server's unified
+  // conversion gate accepts only QUALIFIED, so this page offers that governed transition in
+  // place instead of promising a one-click conversion that the API would correctly refuse.
   const lifecycleQuery = useQuery({
     queryKey: ['lifecycle', 'leads', leadId],
     queryFn: () => lifecycleService.getState('leads', leadId),
     enabled: !!id && Number.isFinite(leadId),
   });
-
   const [edits, setEdits] = React.useState<Record<number, LineEdit>>({});
   const [notes, setNotes] = React.useState('');
   // Warning governance. The server refuses a conversion that leaves a flagged line neither
@@ -78,6 +78,8 @@ const LeadConvertPage: React.FC = () => {
   // the line and leaving the button enabled — which is exactly what it used to do.
   const [acknowledgeAll, setAcknowledgeAll] = React.useState(false);
   const [acknowledgementReason, setAcknowledgementReason] = React.useState('');
+  const [missingInfoOpen, setMissingInfoOpen] = React.useState(false);
+  const [resolveClientOpen, setResolveClientOpen] = React.useState(false);
 
   // Pre-fill editable state once the preview arrives (normalized values win).
   React.useEffect(() => {
@@ -86,10 +88,13 @@ const LeadConvertPage: React.FC = () => {
       if (Object.keys(prev).length > 0) return prev;
       const next: Record<number, LineEdit> = {};
       for (const item of preview.items) {
-        const qty = item.normalizedQuantity ?? item.quantity;
+        const candidateQuantity = item.normalizedQuantity ?? item.quantity;
+        const qty = candidateQuantity != null && candidateQuantity > 0 ? candidateQuantity : null;
         next[item.leadItemId] = {
           include: true,
-          productId: item.needsAttention ? null : item.bestMatchProductId,
+          // The server's authoritative resolver is the only source of an automatic link. Keep
+          // preview candidates advisory in client state unless the operator explicitly selects one.
+          productId: null,
           quantity: qty != null ? String(qty) : '',
           unitOfMeasure: item.normalizedUom ?? item.unitOfMeasure ?? '',
         };
@@ -99,7 +104,7 @@ const LeadConvertPage: React.FC = () => {
   }, [preview]);
 
   const convertMutation = useMutation({
-    mutationFn: () => {
+    mutationFn: (createNeedsClarification: boolean) => {
       const items = (preview?.items ?? []).map((item) => {
         const edit = edits[item.leadItemId];
         const qty = edit ? parseUserNumber(edit.quantity) : null;
@@ -117,6 +122,8 @@ const LeadConvertPage: React.FC = () => {
         notes: notes.trim() || undefined,
         acknowledgeAllWarnings: acknowledgeAll || undefined,
         warningAcknowledgementReason: acknowledgementReason.trim() || undefined,
+        createNeedsClarification: createNeedsClarification || undefined,
+        expectedLifecycleVersion: lead?.lifecycleVersion,
       });
     },
     onSuccess: (result) => {
@@ -139,9 +146,6 @@ const LeadConvertPage: React.FC = () => {
     },
   });
 
-  // Qualifying is the one blocker a user can clear without leaving this page, so it is offered
-  // here rather than sending them to the lead and back. Everything the conversion depends on is
-  // re-read afterwards, so the page unblocks in place.
   const qualifyMutation = useMutation({
     mutationFn: (option: LifecycleTransitionOption) =>
       lifecycleService.transition('leads', leadId, lifecycleQuery.data!, option),
@@ -153,12 +157,10 @@ const LeadConvertPage: React.FC = () => {
         queryClient.invalidateQueries({ queryKey: ['lead-conversion-preview', leadId] }),
       ]);
     },
-    onError: (err: unknown) => {
-      enqueueSnackbar(
-        presentableErrorMessage(err, "Couldn't qualify this lead. Nothing was changed — please try again."),
-        { variant: 'error' },
-      );
-    },
+    onError: (err: unknown) => enqueueSnackbar(
+      presentableErrorMessage(err, "Couldn't qualify this lead. Nothing was changed — please try again."),
+      { variant: 'error' },
+    ),
   });
 
   const updateEdit = (leadItemId: number, patch: Partial<LineEdit>) => {
@@ -235,13 +237,24 @@ const LeadConvertPage: React.FC = () => {
   const includedAttentionCount = preview.items.filter(
     (i) => i.needsAttention && (edits[i.leadItemId]?.include ?? true)
   ).length;
+  const missingCriticalItems = preview.items.filter((item) => {
+    const edit = edits[item.leadItemId];
+    if (edit?.include === false) return false;
+    const quantity = edit ? parseUserNumber(edit.quantity) : null;
+    return quantity == null || quantity <= 0 || !edit?.unitOfMeasure.trim();
+  });
+  const hasSoftWarnings = preview.items.some((item) => {
+    if (edits[item.leadItemId]?.include === false) return false;
+    const reason = item.attentionReason ?? '';
+    return reason.includes('No catalog match') || reason.includes('Low-confidence') || reason.includes('needs review');
+  });
 
   // Mirrors the server rule (LeadConversionIntelligence.EnforceLineWarningGovernance) so the
   // operator is told BEFORE submitting, not by a 409 afterwards. The server remains the
   // authority — this is a courtesy, not the enforcement.
   const MIN_ACK_REASON = 5;
   const acknowledgementSatisfied =
-    includedAttentionCount === 0 ||
+    !hasSoftWarnings ||
     (acknowledgeAll && acknowledgementReason.trim().length >= MIN_ACK_REASON);
 
   // Lead-level gates the server will apply on submit (lifecycle, duplicate flag, unapproved
@@ -254,20 +267,16 @@ const LeadConvertPage: React.FC = () => {
     commercialFactsVerified: lead?.commercialFactsVerified,
   });
 
-  // The one blocker this page can clear itself: the lifecycle graph allows QUALIFIED from here
-  // and the user may edit leads. A transition that demands a reason code is left to the lead's
-  // own lifecycle control rather than re-implementing that prompt here.
   const qualifyOption = lifecycleQuery.data?.allowedTransitions.find(
-    (option) => option.statusCode === QUALIFIED_STATUS_CODE && !option.requiresReason,
+    option => option.statusCode === QUALIFIED_STATUS_CODE && !option.requiresReason,
   );
   const canQualifyHere = Boolean(qualifyOption) && hasPermission('Leads', 'edit');
-
-  // "Still checking" is not "blocked": the button waits rather than lying about the reason.
   const lifecycleUnknown = lifecycleQuery.isLoading;
 
   const disabledReason =
     blockers[0]?.shortReason
     ?? (lifecycleUnknown ? 'Checking this lead’s status…' : null)
+    ?? (!lead?.customerId ? 'Select the customer before creating the RFQ.' : null)
     ?? (includedCount === 0 ? 'Include at least one line to create the RFQ.' : null)
     ?? (hasInvalidQty ? 'One of the quantities isn’t a number yet.' : null)
     ?? (!acknowledgementSatisfied
@@ -288,7 +297,7 @@ const LeadConvertPage: React.FC = () => {
           {preview.header.rfqno || `Lead #${preview.leadId}`}
         </Link>
         <Typography variant="caption" sx={{ color: 'primary.main', fontWeight: 900, textTransform: 'uppercase' }}>
-          Review & Create RFQ
+          Qualify & Create RFQ
         </Typography>
       </Breadcrumbs>
 
@@ -296,10 +305,10 @@ const LeadConvertPage: React.FC = () => {
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', mb: 3, gap: 2, flexWrap: 'wrap' }}>
         <Box>
           <Typography variant="h5" sx={{ fontWeight: 950, letterSpacing: '-0.02em', mb: 0.5 }}>
-            Review inquiry and create RFQ
+            Qualify lead and create RFQ
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 600 }}>
-            Confirm the requested lines and required customer data, then create one traceable RFQ.
+            Confirm the requested lines once. Qualification and RFQ creation are saved together.
           </Typography>
         </Box>
         <ConfidenceChip score={preview.overallConfidence} />
@@ -318,6 +327,13 @@ const LeadConvertPage: React.FC = () => {
           <HeaderField label="Lines" value={String(preview.items.length)} />
         </Stack>
       </Paper>
+
+      {!lead?.customerId ? (
+        <Alert severity="warning" sx={{ borderRadius: 2, mb: 2 }}
+          action={<Button color="inherit" onClick={() => setResolveClientOpen(true)}>Select customer</Button>}>
+          Select the customer in this flow so the RFQ inherits the correct commercial identity.
+        </Alert>
+      ) : null}
 
       {/* Lead-level blockers, above the work. Each one names the reason in commercial language
           and carries its own next step, so the page never hands back a bare refusal. */}
@@ -427,14 +443,12 @@ const LeadConvertPage: React.FC = () => {
         </Alert>
       )}
 
-      <Box sx={{ mb: 2 }}><CommercialLineIntelligence stage="lead" recordId={leadId} /></Box>
-
       {/* Line cards */}
       <Stack spacing={2} sx={{ mb: 3 }}>
         {sortedItems.map((item, idx) => {
           const edit = edits[item.leadItemId] ?? {
             include: true,
-            productId: item.bestMatchProductId,
+            productId: null,
             quantity: '',
             unitOfMeasure: '',
           };
@@ -598,15 +612,54 @@ const LeadConvertPage: React.FC = () => {
             <Button
               variant="contained"
               startIcon={convertMutation.isPending ? <CircularProgress size={18} color="inherit" /> : <SparkleIcon />}
-              onClick={() => convertMutation.mutate()}
+              onClick={() => missingCriticalItems.length > 0
+                ? setMissingInfoOpen(true)
+                : convertMutation.mutate(false)}
               disabled={!canSubmit}
               sx={{ fontWeight: 800, borderRadius: 2, px: 4 }}
             >
-              {convertMutation.isPending ? 'Creating…' : 'Create RFQ'}
+              {convertMutation.isPending ? 'Creating…' : 'Qualify & Create RFQ'}
             </Button>
           </Stack>
         </Box>
       </Paper>
+      <Drawer anchor="right" open={missingInfoOpen} onClose={() => setMissingInfoOpen(false)}>
+        <Box sx={{ width: { xs: '100vw', sm: 440 }, p: 3 }}>
+          <Typography variant="h6" sx={{ fontWeight: 900 }}>Missing quote information</Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 1, mb: 2 }}>
+            These values were not stated. Nexora will keep them blank and mark the RFQ as Needs Review.
+          </Typography>
+          <List dense>
+            {missingCriticalItems.map((item) => {
+              const edit = edits[item.leadItemId];
+              const missing = [!edit?.quantity.trim() ? 'quantity' : '', !edit?.unitOfMeasure.trim() ? 'unit' : ''].filter(Boolean);
+              return (
+                <ListItem key={item.leadItemId} disableGutters>
+                  <ListItemText primary={item.sourceText || `Line ${item.leadItemId}`} secondary={`Missing ${missing.join(' and ')}`} />
+                </ListItem>
+              );
+            })}
+          </List>
+          <Stack spacing={1.5} sx={{ mt: 2 }}>
+            <Button variant="contained" onClick={() => convertMutation.mutate(true)} disabled={convertMutation.isPending}>
+              Create RFQ — Needs Clarification
+            </Button>
+            <Button variant="outlined" onClick={() => setMissingInfoOpen(false)}>Return and fill values</Button>
+          </Stack>
+        </Box>
+      </Drawer>
+      {lead ? (
+        <ResolveClientDialog
+          open={resolveClientOpen}
+          leadId={leadId}
+          lead={lead}
+          onClose={() => setResolveClientOpen(false)}
+          onResolved={async () => {
+            setResolveClientOpen(false);
+            await queryClient.invalidateQueries({ queryKey: ['lead-detail', leadId] });
+          }}
+        />
+      ) : null}
     </Box>
   );
 };
