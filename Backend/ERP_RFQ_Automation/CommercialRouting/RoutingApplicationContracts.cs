@@ -23,6 +23,11 @@ public sealed record ChangeLeadOwnershipCommand(
     LeadOwnershipAction Action,
     long? AssignedToUserId,
     long? AssignedByUserId,
+    // Whether the caller holds manager/admin authority in this tenant, resolved from the caller's
+    // role by the controller. Required rather than optional, and placed next to the actor it
+    // describes, so that a new caller cannot reach this command without deciding what authority it
+    // is exercising — the whole defect this closes was one surface that never asked.
+    bool ActorIsManager,
     long ExpectedAssignmentVersion,
     string IdempotencyKey,
     string CorrelationId,
@@ -176,5 +181,34 @@ public sealed record CustomerRoutingProfileResponse(
     IReadOnlyList<CustomerIdentifier> Identifiers,
     IReadOnlyList<CustomerOwnership> Ownerships);
 
+/// <summary>Sets or clears the tenant's fallback lead owner. Null clears it.</summary>
+public sealed record SetDefaultLeadOwnerCommand(long? DefaultOwnerUserId, long? SetByUserId);
+
+/// <summary>
+/// The tenant's answer to "when Nexora can't work out who owns an inquiry, give it to ___".
+///
+/// <para><see cref="IsEligible"/> and <see cref="EligibilityReason"/> answer the question the
+/// setup screen must not have to guess at: the setting accepts any active user in the tenant, but
+/// routing only USES the named person while they pass the ordinary availability test. A tenant
+/// that picks someone with no governed Sales Rep profile has configured a fallback that silently
+/// does nothing, and has to be told so in the same words the routing engine would use.</para>
+/// </summary>
+public sealed record DefaultLeadOwnerResponse(
+    long? DefaultOwnerUserId,
+    string? Name,
+    string? Email,
+    bool IsEligible,
+    string EligibilityReason,
+    long? SetByUserId,
+    DateTime? SetOn);
+
 public sealed class RoutingNotFoundException(string message) : Exception(message);
 public sealed class RoutingConflictException(string message) : Exception(message);
+
+/// <summary>
+/// The caller is authenticated and holds the module permission, but not the AUTHORITY for this
+/// particular lead — moving work that belongs to someone else. Distinct from
+/// <see cref="RoutingConflictException"/> on purpose: a conflict means "try again with fresh
+/// state", and retrying this would never help.
+/// </summary>
+public sealed class RoutingForbiddenException(string message) : Exception(message);
