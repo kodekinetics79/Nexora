@@ -100,7 +100,7 @@ export default function TenantDetailPage() {
               </Button>
             )}
             {permissions.isOwner && (
-              <Tooltip title="Open governed tenant offboarding, retention, and deletion controls">
+              <Tooltip describeChild title="Open governed tenant offboarding, retention, and deletion controls">
                 <Button size="small" variant="outlined" color="error" startIcon={<DeleteIcon />} onClick={() => openTab('lifecycle')}>
                   Offboard / delete tenant
                 </Button>
