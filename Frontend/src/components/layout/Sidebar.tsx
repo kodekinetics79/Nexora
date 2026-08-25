@@ -22,7 +22,6 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import { SETUP_ENTRIES } from '../../pages/Setup/setupCatalog';
 import {
-  ADVANCED_ENTRIES,
   ADVANCED_GROUPS,
   ALL_SCREENS_ENTRY,
   PRIMARY_NAV,
@@ -44,33 +43,14 @@ interface SidebarProps {
  * appeared at row six behind Today, Dashboard and Copilot. The pilot answered that with a second
  * hard-coded allow-list that hid 50 of the 69, which left two lists disagreeing about one rail.
  *
- * It is now FIVE rows, read from `navCatalog.tsx` and nothing else:
+ * The commercial spine stays first, read from `navCatalog.tsx` and nothing else:
  *
  *     Inbox · Leads · RFQs · Quotes · Setup
  *
- * Those are the five nouns a rep uses to describe their own job, in the order the work moves
- * through them. Nothing was deleted to get there. Every other screen keeps its route, its
- * permissions, its title and its deep links, and is listed with a description on **All screens**
- * (`/advanced`) — the last row here, kept visually apart because it is a door, not a job. Filters
- * that used to be rail rows ("Sent Quotes", "Draft RFQs") are now tabs on the screen they filter,
- * so the rail names places and the screen names views.
- *
- * The rail has no expand/collapse for the five: a group row that must be opened before its
- * children exist is a second navigation level, and the second level is what made the old rail
- * unscannable.
+ * Those are the five nouns a rep uses to describe the main commercial journey. Secondary business
+ * domains are permission-filtered expandable workspaces beneath them; the searchable directory is
+ * a fallback, not the place ordinary operations are hidden.
  */
-
-/**
- * Restores the pre-2026-08 rail for one tenant, granted on that tenant's Modules screen in the
- * platform console — audited, reason-required, no deploy.
- *
- * When granted, the nine relocated groups are rendered inline beneath the five as collapsible
- * rows: the same surface the tenant had before, for a customer who asks for it back. Absence — not
- * granted, bootstrap still loading, platform plane unreadable, or an older server that never
- * reports entitlements — always lands on the five-row rail: the floor, from which every screen
- * stays reachable through All screens, by URL, by deep link and by global search.
- */
-export const FULL_NAVIGATION_ENTITLEMENT = 'capability.full-navigation';
 
 interface RailGroup {
   key: string;
@@ -133,7 +113,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
   const navigate = useNavigate();
   const location = useLocation();
   const { t } = useTranslation();
-  const { userData, hasPermission, hasEntitlement } = useAuth();
+  const { userData, hasPermission } = useAuth();
   const isManager = userData.isManager === true;
   // Two Sidebars are mounted at once (mobile drawer + permanent drawer), so aria-controls targets
   // must be unique per instance.
@@ -164,12 +144,8 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
     [hasPermission, setupIsReachable],
   );
 
-  /**
-   * Only rendered for a tenant granted the full-navigation entitlement. Permission filtering runs
-   * first and decides what a user MAY open; the entitlement only decides what the rail SHOWS.
-   */
+  /** Operational workspaces belong in the navigation; permissions still decide what users see. */
   const advancedRows: RailGroup[] = useMemo(() => {
-    if (!hasEntitlement(FULL_NAVIGATION_ENTITLEMENT)) return [];
     return ADVANCED_GROUPS.map((group) => ({
       key: group.key,
       title: group.title,
@@ -178,7 +154,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
           (!entry.managerOnly || isManager) && (!entry.moduleName || hasPermission(entry.moduleName)),
       ),
     })).filter((group) => group.entries.length > 0);
-  }, [hasEntitlement, hasPermission, isManager]);
+  }, [hasPermission, isManager]);
 
   const rowSx = (isSelected: boolean) => ({
     minHeight: 44,
@@ -250,8 +226,9 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
   );
 
   const renderAdvancedGroup = (group: RailGroup) => {
-    const isOpen = openGroups[group.key] === true;
     const isSelected = group.entries.some((entry) => isPathMatched(entry.path, location));
+    // Reveal the current screen's home on first arrival. An explicit user collapse remains closed.
+    const isOpen = openGroups[group.key] ?? isSelected;
     // The child list only exists in the DOM while expanded (unmountOnExit) and is never rendered
     // while the rail is collapsed — only advertise aria-expanded/aria-controls for a real region.
     const hasCollapsibleGroup = !collapsed;
@@ -349,12 +326,9 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
     );
   };
 
-  // Selected on /advanced itself AND on every screen that moved behind it. Collapsing the rail to
-  // five rows relocated 64 destinations; matching only the door's own path left every one of them
-  // with NO row marked current, so a screen-reader user on any relocated screen was told nothing
-  // about where they were (SC 4.1.2). Caught by the a11y e2e, not by unit tests.
-  const allScreensSelected = location.pathname.startsWith(ALL_SCREENS_ENTRY.path)
-    || ADVANCED_ENTRIES.some((entry) => isPathMatched(entry.path, location));
+  // Operational screens now have a real group and child in the rail. The directory is current only
+  // while the user is actually in the directory, avoiding two simultaneous aria-current targets.
+  const allScreensSelected = location.pathname.startsWith(ALL_SCREENS_ENTRY.path);
 
   return (
     <Box sx={{ overflowY: 'auto', overflowX: 'hidden', height: '100%', pt: 2, pb: 4, px: 1.5 }}>
@@ -387,7 +361,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
                 color: 'text.disabled',
               }}
             >
-              Advanced
+              More workspaces
             </Typography>
           )}
           <List sx={{ px: 0 }}>{advancedRows.map(renderAdvancedGroup)}</List>
