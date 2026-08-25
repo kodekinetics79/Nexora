@@ -7,7 +7,6 @@ import {
   Table, TableHead, TableRow, TableCell, TableBody,
   CircularProgress, Divider, Breadcrumbs, Link, Alert, ButtonBase,
   Drawer, IconButton, LinearProgress, Tooltip,
-  Dialog, DialogTitle, DialogContent, DialogActions, TextField, ToggleButton, ToggleButtonGroup,
 } from '@mui/material';
 import {
   ArrowBack as BackIcon,
@@ -29,7 +28,7 @@ import {
   HelpOutlined as UndecidedIcon,
   HourglassEmpty as WaitingIcon,
 } from '@mui/icons-material';
-import rfqService, { type RfqitemResponseDTO } from '../../../api/services/rfqService';
+import rfqService from '../../../api/services/rfqService';
 import { useAuth } from '../../../context/AuthContext';
 import EmailPromptDialog from '../../../components/common/EmailPromptDialog';
 import { useSnackbar } from 'notistack';
@@ -132,24 +131,6 @@ const ViewRFQPage: React.FC = () => {
     ),
   });
 
-  const participationMutation = useMutation({
-    mutationFn: (input: { lineId: number; decision: 'Pending' | 'Quote' | 'NoQuote'; reason?: string }) =>
-      rfqService.setLineParticipation(Number(id), input.lineId, input.decision, input.reason),
-    onSuccess: (_data, input) => {
-      queryClient.invalidateQueries({ queryKey: ['rfq-detail', Number(id)] });
-      enqueueSnackbar(
-        input.decision === 'Quote' ? 'Line marked for quotation.'
-          : input.decision === 'NoQuote' ? 'Line declined, with your reason recorded.'
-          : 'Line decision cleared.',
-        { variant: 'success' },
-      );
-    },
-    onError: (error: any) => enqueueSnackbar(
-      error?.response?.data?.detail || error?.response?.data?.message || 'The line decision was not saved.',
-      { variant: 'error' },
-    ),
-  });
-
   const sourcingCaseMutation = useMutation({
     mutationFn: (rfqItemId: number) => procurementService.createOrOpenSourcingCase(Number(id), rfqItemId, 10),
     onSuccess: (sourcingCase) => navigate(`/procurement/sourcing-cases/${sourcingCase.id}`),
@@ -205,27 +186,11 @@ const ViewRFQPage: React.FC = () => {
     return true;
   };
   const visibleItems = rfq.rfqitems.filter((item) => lineMatches(item.id, lineFilter));
-  // Two populations feed this screen and they are BOTH right.
-  //
-  // The sourcing tiles come from the procurement workbench, which selects every line on the RFQ.
-  // The pricing and readiness figures come from commercial intelligence, which judges only the
-  // lines marked for quote — a partial bid is the normal case on an industrial bid list, and
-  // demanding stock coverage for lines we have declined is asking for work already decided
-  // against. So an RFQ can legitimately show "Total lines 21" beside a readiness score computed
-  // over 7, and the screen used to say nothing at all about that, which read as a contradiction.
-  //
-  // Everything needed to say it is already on the payload; no API change was required.
-  const quotedCount = rfq.rfqitems.filter((item) => item.participationDecision === 'Quote').length;
-  // Before anyone triages, no line is marked and the backend falls back to every non-declined
-  // line. Saying "of 0 marked" on an untriaged RFQ would be false, so the disclosure only
-  // appears once a partial bid actually exists.
-  const judgedCount = quotedCount > 0
-    ? quotedCount
-    : rfq.rfqitems.filter((item) => item.participationDecision !== 'NoQuote').length;
-  const partialBid = quotedCount > 0 && quotedCount < rfq.rfqitems.length;
-  const judgedScope = partialBid
-    ? `of ${quotedCount} marked for quote`
-    : `of ${judgedCount} line${judgedCount === 1 ? '' : 's'}`;
+  // Participation is governed on the immutable Lead revision. Every line on a promoted RFQ is
+  // already in the approved scope; RFQ-line participation flags are a legacy artifact and must
+  // not create a second, conflicting denominator on this screen.
+  const judgedCount = rfq.rfqitems.length;
+  const judgedScope = `of ${judgedCount} line${judgedCount === 1 ? '' : 's'}`;
   const summary = [
     { key: 'all', label: 'Total lines', value: rfq.rfqitems.length, icon: <EvidenceIcon fontSize="small" /> },
     { key: 'stock', label: 'Ready from stock', value: sourcingQuery.isError ? '—' : rfq.rfqitems.filter((x) => lineMatches(x.id, 'stock')).length, icon: <InventoryIcon fontSize="small" /> },
@@ -398,11 +363,6 @@ const ViewRFQPage: React.FC = () => {
                   and it is indistinguishable from an RFQ that genuinely scores zero. */}
               <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}><LinearProgress variant={intelligence ? 'determinate' : 'indeterminate'} value={readinessPercent} sx={{ flex: 1, height: 8, borderRadius: 1 }} /><Typography sx={{ fontWeight: 800, fontVariantNumeric: 'tabular-nums' }}>{intelligence ? `${readinessPercent}%` : '—'}</Typography></Stack>
               <Typography variant="caption" color={intelligence?.commercialDecision === 'VIABLE_READY' ? 'success.main' : 'warning.main'} sx={{ display: 'block' }}>{primaryBlocker}</Typography>
-              {intelligence && partialBid && (
-                <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
-                  Judged over the {quotedCount} of {rfq.rfqitems.length} lines marked for quote. The line tiles below count all {rfq.rfqitems.length}.
-                </Typography>
-              )}
             </Grid>
           </Grid>
         </Paper>
@@ -453,7 +413,7 @@ const ViewRFQPage: React.FC = () => {
               </Box>
               <Grid container spacing={2}>
                 <Grid size={{ xs: 12, md: 4 }}><DataField label="RFQ #" value={rfq.rfqno} /></Grid>
-                <Grid size={{ xs: 12, md: 4 }}><DataField label="Active Lead Revision" value={`Revision ${rfq.activeLeadRevision || 1}`} /></Grid>
+                <Grid size={{ xs: 12, md: 4 }}><DataField label="Current Lead revision" value={`Revision ${rfq.activeLeadRevision || 1}`} /></Grid>
                 <Grid size={{ xs: 12, md: 4 }}>
                   <Button size="small" variant="outlined" onClick={() => navigate(`/procurement/leads/view/${rfq.leadId}`)}>Open Canonical Lead</Button>
                 </Grid>
@@ -543,7 +503,7 @@ const ViewRFQPage: React.FC = () => {
                     <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }}>Resolution</TableCell>
                     <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }}>Inventory</TableCell>
                     <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }}>Supplier Quotes</TableCell>
-                    <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }}>Quote?</TableCell>
+                    <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }}>Source Lead line</TableCell>
                     <TableCell sx={{ fontWeight: 800, fontSize: '0.75rem' }}>Next Action</TableCell>
                   </TableRow>
                 </TableHead>
@@ -591,18 +551,14 @@ const ViewRFQPage: React.FC = () => {
                       </TableCell>
                       <TableCell><Stack spacing={0.5} sx={{ alignItems: 'flex-start' }}><Chip size="small" icon={(intelligenceLines.get(item.id)?.eligibleOfferCount ?? 0) > 0 ? <ApproveIcon /> : <UndecidedIcon />} label={`${intelligenceLines.get(item.id)?.eligibleOfferCount ?? 0}/${offersByLine.get(item.id) ?? 0} eligible`} color={(intelligenceLines.get(item.id)?.eligibleOfferCount ?? 0) > 0 ? 'success' : 'default'} />{(intelligenceLines.get(item.id)?.bidQualityFlags.length ?? 0) > 0 && <Typography variant="caption" color="warning.main">{intelligenceLines.get(item.id)?.bidQualityFlags.length} quality finding(s)</Typography>}</Stack></TableCell>
                       <TableCell>
-                        {/* Which lines Nexora will actually bid. A partial bid is the normal
-                            case on an industrial bid list, and only lines marked Quote reach a
-                            Customer Quote Draft. Pending is the default: a line nobody has
-                            decided must never read as an implicit commitment. */}
-                        <ParticipationCell
-                          item={item}
-                          canEdit={hasPermission('RFQ Management', 'edit')}
-                          pending={participationMutation.isPending}
-                          onDecide={(decision, reason) =>
-                            participationMutation.mutate({ lineId: item.id, decision, reason })
-                          }
-                        />
+                        {item.sourceLeadItemRevisionId ? (
+                          <Stack spacing={0.25}>
+                            <Typography variant="caption" sx={{ fontWeight: 800, fontFamily: 'monospace' }}>Immutable source record #{item.sourceLeadItemRevisionId}</Typography>
+                            <Typography variant="caption" color="text.secondary">Lead item revision database identity</Typography>
+                          </Stack>
+                        ) : (
+                          <Typography variant="caption" color="warning.main" sx={{ fontWeight: 700 }}>Trace unavailable</Typography>
+                        )}
                       </TableCell>
                       <TableCell>
                         {(() => {
@@ -661,10 +617,6 @@ const ViewRFQPage: React.FC = () => {
                       <Typography sx={{ fontWeight: 900, fontSize: '1.1rem', fontVariantNumeric: 'tabular-nums' }}>{rfq.rfqitems.length}</Typography>
                    </Box>
                    <Box sx={{ textAlign: 'right' }}>
-                      <Typography variant="caption" sx={{ fontWeight: 800, color: 'text.disabled', textTransform: 'uppercase' }}>Marked for quote</Typography>
-                      <Typography sx={{ fontWeight: 900, fontSize: '1.1rem', fontVariantNumeric: 'tabular-nums' }}>{quotedCount}</Typography>
-                   </Box>
-                   <Box sx={{ textAlign: 'right' }}>
                       <Typography variant="caption" sx={{ fontWeight: 800, color: 'text.disabled', textTransform: 'uppercase' }}>Total quantity</Typography>
                       <Typography sx={{ fontWeight: 900, fontSize: '1.1rem', fontVariantNumeric: 'tabular-nums' }}>{rfq.rfqitems.reduce((sum, item) => sum + (item.quantity ?? 0), 0).toLocaleString()}</Typography>
                    </Box>
@@ -677,24 +629,44 @@ const ViewRFQPage: React.FC = () => {
         {/* Sidebar */}
         <Grid size={{ xs: 12, lg: 3 }}>
           <Stack spacing={3}>
-            {/* Lead Connection */}
-            {rfq.leadId && (
-              <Paper sx={{ p: 2.5, borderRadius: 3, border: '1px solid', borderColor: 'divider', bgcolor: 'primary.lighter' }}>
+            {/* Immutable Lead-to-RFQ lineage; no participation is editable after promotion. */}
+            <Paper component="section" aria-labelledby="promotion-lineage-heading" sx={{ p: 2.5, borderRadius: 3, border: '1px solid', borderColor: 'divider', bgcolor: 'primary.lighter' }}>
                 <Typography variant="caption" sx={{ fontWeight: 900, color: 'primary.main', textTransform: 'uppercase', mb: 1, display: 'block' }}>
-                  Connected Lead
+                  RFQ promotion lineage
                 </Typography>
-                <Typography sx={{ fontWeight: 800, fontSize: '0.9rem', mb: 1.5 }}>
-                  This RFQ was generated from Lead #{rfq.leadId}
+                <Typography id="promotion-lineage-heading" sx={{ fontWeight: 900, fontSize: '0.95rem', mb: 1.5 }}>
+                  {rfq.promotionId ? 'Governed promotion receipt' : 'Promotion receipt unavailable'}
                 </Typography>
-                <Button 
-                  fullWidth variant="contained" size="small" 
-                  onClick={() => navigate(`/procurement/leads/view/${rfq.leadId}`)}
-                  sx={{ textTransform: 'none', fontWeight: 800, borderRadius: 2 }}
-                >
-                  View Original Lead
-                </Button>
-              </Paper>
-            )}
+                {rfq.promotionId ? (
+                  <>
+                    <DataField label="Lead" value={rfq.leadId ? `#${rfq.leadId}` : null} />
+                    <DataField
+                      label="Immutable Lead revision"
+                      value={rfq.sourceLeadRevisionNumber
+                        ? `Revision ${rfq.sourceLeadRevisionNumber}`
+                        : rfq.sourceLeadRevisionId ? `Revision record #${rfq.sourceLeadRevisionId}` : null}
+                    />
+                    <DataField label="Participation decision" value={rfq.participationDecisionId ? `#${rfq.participationDecisionId}` : null} />
+                    <DataField label="Participation version" value={rfq.participationVersion ? `Version ${rfq.participationVersion}` : null} />
+                    <DataField label="Promotion receipt" value={`#${rfq.promotionId}`} />
+                    <DataField label="Promoted by" value={rfq.promotedBy ?? null} />
+                    <DataField label="Promoted on" value={formatDateSafe(rfq.promotedAtUtc ?? null)} />
+                  </>
+                ) : (
+                  <Alert severity="warning" sx={{ mb: 1.5 }}>
+                    This RFQ has no governed promotion receipt in the response. It may be a legacy or manually created record; immutable source lineage cannot be claimed.
+                  </Alert>
+                )}
+                {rfq.leadId ? (
+                  <Button
+                    fullWidth variant="contained" size="small"
+                    onClick={() => navigate(`/procurement/leads/${rfq.leadId}/workbench`)}
+                    sx={{ textTransform: 'none', fontWeight: 800, borderRadius: 2 }}
+                  >
+                    Open Lead decision record
+                  </Button>
+                ) : null}
+            </Paper>
 
             {/* Audit / Timeline */}
             <Paper sx={{ p: 2.5, borderRadius: 3, border: '1px solid', borderColor: 'divider' }}>
@@ -765,121 +737,6 @@ const ViewRFQPage: React.FC = () => {
         {Boolean(rfq.leadId) && <Button variant="outlined" startIcon={<EvidenceIcon />} onClick={() => navigate(`/procurement/leads/view/${rfq.leadId}`)}>Open Canonical Lead evidence</Button>}
       </Drawer>
     </Box>
-  );
-};
-
-/**
- * Per-line bid participation.
- *
- * A No-Quote opens a dialog demanding a reason, because the backend domain refuses one without
- * it — and because a silent decline is indistinguishable from an oversight when the buyer asks
- * why a line is missing from our quote. Quote and Pending apply immediately.
- *
- * The decided-by/decided-on stamps are shown inline so the queue never displays a decision
- * nobody can be asked about.
- */
-const ParticipationCell: React.FC<{
-  item: RfqitemResponseDTO;
-  canEdit: boolean;
-  pending: boolean;
-  onDecide: (decision: 'Pending' | 'Quote' | 'NoQuote', reason?: string) => void;
-}> = ({ item, canEdit, pending, onDecide }) => {
-  const [declineOpen, setDeclineOpen] = React.useState(false);
-  const [reason, setReason] = React.useState('');
-  const decision = item.participationDecision ?? 'Pending';
-  const MIN_REASON = 5;
-
-  if (!canEdit) {
-    return (
-      <Stack spacing={0.5} sx={{ alignItems: 'flex-start' }}>
-        <Chip
-          size="small"
-          variant={decision === 'Pending' ? 'outlined' : 'filled'}
-          color={decision === 'Quote' ? 'success' : decision === 'NoQuote' ? 'default' : 'warning'}
-          label={decision === 'NoQuote' ? 'No-Quote' : decision}
-        />
-        {decision === 'NoQuote' && item.noQuoteReason && (
-          <Typography variant="caption" color="text.secondary">{item.noQuoteReason}</Typography>
-        )}
-      </Stack>
-    );
-  }
-
-  return (
-    <>
-      <Stack spacing={0.5} sx={{ alignItems: 'flex-start' }}>
-        <ToggleButtonGroup
-          size="small"
-          exclusive
-          value={decision}
-          disabled={pending}
-          onChange={(_e, next: string | null) => {
-            if (!next || next === decision) return;
-            if (next === 'NoQuote') { setReason(''); setDeclineOpen(true); return; }
-            onDecide(next as 'Pending' | 'Quote');
-          }}
-          aria-label={`Bid decision for line ${item.lineItemNo ?? item.id}`}
-        >
-          <ToggleButton value="Quote" aria-label="Quote this line" sx={{ px: 1, fontSize: '0.7rem', fontWeight: 800 }}>
-            Quote
-          </ToggleButton>
-          <ToggleButton value="NoQuote" aria-label="Decline this line" sx={{ px: 1, fontSize: '0.7rem', fontWeight: 800 }}>
-            No-Quote
-          </ToggleButton>
-        </ToggleButtonGroup>
-        {decision === 'Pending' && (
-          <Typography variant="caption" color="warning.main" sx={{ fontWeight: 700 }}>
-            Not decided
-          </Typography>
-        )}
-        {decision === 'NoQuote' && item.noQuoteReason && (
-          <Tooltip title={item.noQuoteReason}>
-            <Typography variant="caption" color="text.secondary" sx={{ maxWidth: 160 }} noWrap>
-              {item.noQuoteReason}
-            </Typography>
-          </Tooltip>
-        )}
-        {item.participationDecidedBy && (
-          <Typography variant="caption" color="text.disabled" sx={{ fontSize: '0.65rem' }}>
-            {item.participationDecidedBy}
-          </Typography>
-        )}
-      </Stack>
-
-      <Dialog open={declineOpen} onClose={() => setDeclineOpen(false)} fullWidth maxWidth="xs">
-        <DialogTitle sx={{ fontWeight: 800 }}>Decline line {item.lineItemNo ?? item.id}?</DialogTitle>
-        <Divider />
-        <DialogContent>
-          <Alert severity="info" sx={{ mb: 2 }}>
-            This line will be left out of the customer quote. The reason is recorded against the
-            RFQ so a colleague can see why it wasn’t bid.
-          </Alert>
-          <TextField
-            autoFocus
-            fullWidth
-            required
-            multiline
-            minRows={2}
-            label="Why are we not quoting this line?"
-            placeholder="e.g. Obsolete Alstom part — no supplier source"
-            value={reason}
-            onChange={(e) => setReason(e.target.value)}
-            slotProps={{ htmlInput: { maxLength: 500 } }}
-          />
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setDeclineOpen(false)}>Cancel</Button>
-          <Button
-            variant="contained"
-            color="warning"
-            disabled={reason.trim().length < MIN_REASON || pending}
-            onClick={() => { onDecide('NoQuote', reason.trim()); setDeclineOpen(false); }}
-          >
-            Decline line
-          </Button>
-        </DialogActions>
-      </Dialog>
-    </>
   );
 };
 

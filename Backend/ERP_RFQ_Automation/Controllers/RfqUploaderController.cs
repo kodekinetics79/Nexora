@@ -53,6 +53,13 @@ namespace ERP_RFQ_Automation.Controllers
         [RequireModulePermission("RFQ Management", PermissionAction.Create)]
         public async Task<IActionResult> UploadTemplate(IFormFile file, [FromForm] long? businessUnitId = null)
         {
+            await Task.CompletedTask;
+            return Conflict(new
+            {
+                code = "LEAD_WORKBENCH_REQUIRED",
+                message = "Direct spreadsheet-to-RFQ creation is retired. Upload the document through governed Lead intake, reconcile the canonical Lead Revision, commit participation, and promote approved lines."
+            });
+#pragma warning disable CS0162
             var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
             var targetBUId = claimBUId > 0 ? claimBUId : (businessUnitId ?? 0);
 
@@ -82,6 +89,7 @@ namespace ERP_RFQ_Automation.Controllers
                 _logger.LogError(ex, "Error uploading RFQ template.");
                 return StatusCode(500, new { success = false, message = "Internal server error." });
             }
+#pragma warning restore CS0162
         }
 
         private static async Task<string?> ValidateSpreadsheetUploadAsync(IFormFile file)

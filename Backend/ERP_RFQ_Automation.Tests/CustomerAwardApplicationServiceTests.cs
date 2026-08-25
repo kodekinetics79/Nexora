@@ -1,3 +1,6 @@
+using ERP_RFQ_Automation.CommercialCases.Participation;
+using ERP_RFQ_Automation.CommercialCases.Promotion;
+using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.OrderToCash;
 using ERP_RFQ_Automation.Repositories;
@@ -371,6 +374,63 @@ internal sealed class CustomerAwardTestFixture : IDisposable
         Seed.Customer(context, CustomerId, businessUnitId, "Customer Award Tests");
         context.SaveChanges();
         lead.ResolveCommercialIdentity(CustomerId, null, "VERIFIED");
+
+        var batch = new LeadIngestionBatch
+        {
+            Id = Guid.NewGuid(), BusinessUnitId = businessUnitId, SourceChannel = "AwardFixture",
+            CreatedBy = "tests", CreatedAtUtc = new DateTimeOffset(Now), UpdatedAtUtc = new DateTimeOffset(Now)
+        };
+        var occurrence = new LeadIngestionOccurrence
+        {
+            Id = 880_030, BusinessUnitId = businessUnitId, Batch = batch, Lead = lead,
+            SourceChannel = "AwardFixture", IdempotencyKey = $"award-occurrence:{businessUnitId}",
+            LogicalInquiryFingerprint = new string('a', 64), Classification = LeadOccurrenceClassification.New,
+            Confidence = 1m, ProcessingPath = LeadProcessingPath.Deterministic,
+            IngestedAtUtc = new DateTimeOffset(Now), CreatedAtUtc = new DateTimeOffset(Now),
+            ActorType = "TestFixture", ActorId = "tests", CorrelationId = $"award-fixture:{businessUnitId}"
+        };
+        context.Add(occurrence);
+        context.SaveChanges();
+        var revision = new LeadRevision
+        {
+            Id = 880_031, BusinessUnitId = businessUnitId, Lead = lead, RevisionNumber = 1,
+            EstablishedByOccurrence = occurrence, LogicalInquiryFingerprint = new string('b', 64),
+            SnapshotJson = "{}", CustomerIdSnapshot = CustomerId, CreatedAtUtc = new DateTimeOffset(Now),
+            CreatedBy = "tests", ProcessingPath = LeadProcessingPath.Deterministic
+        };
+        context.Add(revision);
+        context.SaveChanges();
+        lead.CurrentRevisionId = revision.Id;
+        lead.CurrentRevisionNumber = revision.RevisionNumber;
+        var fit = new LeadFitAssessment
+        {
+            Id = 880_032, BusinessUnitId = businessUnitId, LeadId = lead.Id,
+            LeadRevisionId = revision.Id, Sequence = 1, PolicyVersion = "award-fixture/v1",
+            Recommendation = "FIT", IsActionable = true, AssessmentJson = "{}",
+            IdempotencyKey = $"award-fit:{businessUnitId}", RequestHash = new string('c', 64),
+            AssessedBy = "tests", AssessedAtUtc = new DateTimeOffset(Now)
+        };
+        context.Add(fit);
+        context.SaveChanges();
+        var decision = new LeadParticipationDecision
+        {
+            Id = 880_033, BusinessUnitId = businessUnitId, LeadId = lead.Id,
+            LeadRevisionId = revision.Id, FitAssessmentId = fit.Id, Sequence = 1,
+            IsCommitted = true, Outcome = LeadParticipationOutcome.FullBid,
+            Notes = "Governed downstream award fixture.", IdempotencyKey = $"award-decision:{businessUnitId}",
+            RequestHash = new string('d', 64), DecidedBy = "tests", DecidedAtUtc = new DateTimeOffset(Now)
+        };
+        context.Add(decision);
+        context.SaveChanges();
+        var promotion = new RfqPromotion
+        {
+            Id = 880_034, BusinessUnitId = businessUnitId, LeadId = lead.Id,
+            LeadRevisionId = revision.Id, ParticipationDecisionId = decision.Id,
+            IdempotencyKey = $"award-promotion:{businessUnitId}", RequestHash = new string('e', 64),
+            PromotedBy = "tests", PromotedAtUtc = new DateTimeOffset(Now)
+        };
+        context.Add(promotion);
+        context.SaveChanges();
         context.Currencies.Add(new Currency
         {
             Id = CurrencyId, BusinessUnitId = businessUnitId, Code = "USD", CurrencyName = "US Dollar",
@@ -388,8 +448,10 @@ internal sealed class CustomerAwardTestFixture : IDisposable
             Setup(PaymentStatusId, businessUnitId, "PaymentStatus", "UNPAID"));
         var rfq = new Rfq
         {
-            Id = RfqId, Rfqno = $"RFQ-{RfqId}", RecDate = Now, LeadId = lead.Id,
-            CustomerId = CustomerId, BusinessUnitId = businessUnitId, CreatedBy = "tests", CreatedDate = Now
+            Id = RfqId, Rfqno = $"RFQ-{RfqId}", RecDate = Now, LeadId = LeadId,
+            CustomerId = CustomerId, BusinessUnitId = businessUnitId, CreatedBy = "tests", CreatedDate = Now,
+            PromotionId = promotion.Id, SourceLeadRevisionId = revision.Id,
+            ParticipationDecisionId = decision.Id
         };
         rfq.InheritCommercialIdentity(lead);
         context.Rfqs.Add(rfq);

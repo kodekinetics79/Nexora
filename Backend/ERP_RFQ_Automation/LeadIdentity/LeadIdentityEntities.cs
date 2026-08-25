@@ -147,11 +147,14 @@ public sealed class LeadItemRevision
 {
     public long Id { get; set; }
     public long BusinessUnitId { get; set; }
+    public long LeadId { get; set; }
     public long LeadRevisionId { get; set; }
+    public long? LeadItemId { get; set; }
     public int LineNumber { get; set; }
     public string LineFingerprint { get; set; } = null!;
     public string SnapshotJson { get; set; } = null!;
     public LeadRevision Revision { get; set; } = null!;
+    public Models.LeadItem? LeadItem { get; set; }
 }
 
 public sealed class LeadRevisionDifference

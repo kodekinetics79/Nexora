@@ -141,7 +141,7 @@ public class LeadReviewUpsertTests
     }
 
     [Fact]
-    public async Task ExistingItem_IsUpdatedInPlace()
+    public async Task ExistingItem_CreatesANewProjectionWithoutMutatingHistory()
     {
         using var db = new TestDb();
         using (var seed = db.ContextFor(null))
@@ -168,10 +168,16 @@ public class LeadReviewUpsertTests
         });
 
         using var verify = db.ContextFor(Bu);
-        var item1 = verify.LeadItems.Single(i => i.Id == 1);
-        Assert.Equal("Updated Name", item1.ProductShortName);
-        Assert.Equal(99, item1.Quantity);
+        var currentItem1 = verify.LeadItems.Single(i => i.ProductShortName == "Updated Name");
+        Assert.NotEqual(1, currentItem1.Id);
+        Assert.Equal(1, currentItem1.EvidenceSourceLeadItemId);
+        Assert.Equal("Updated Name", currentItem1.ProductShortName);
+        Assert.Equal(99, currentItem1.Quantity);
         Assert.Equal(2, verify.LeadItems.Count(i => i.LeadId == 100));
+        var historical = verify.LeadItems.IgnoreQueryFilters().Single(i => i.Id == 1);
+        Assert.False(historical.IsCurrentRevisionProjection);
+        Assert.Equal("orig-A", historical.ProductShortName);
+        Assert.Equal(2, historical.Quantity);
     }
 
     [Fact]
@@ -209,7 +215,7 @@ public class LeadReviewUpsertTests
     }
 
     [Fact]
-    public async Task OmittedItem_IsDeleted()
+    public async Task OmittedItem_IsAbsentFromCurrentProjectionButRetainedInHistory()
     {
         using var db = new TestDb();
         using (var seed = db.ContextFor(null))
@@ -233,9 +239,13 @@ public class LeadReviewUpsertTests
         });
 
         using var verify = db.ContextFor(Bu);
-        var ids = verify.LeadItems.Where(i => i.LeadId == 100).Select(i => i.Id).ToList();
-        Assert.Equal(new long[] { 1, 2 }, ids.OrderBy(x => x));
-        Assert.DoesNotContain(3L, ids);
+        var current = verify.LeadItems.Where(i => i.LeadId == 100).OrderBy(i => i.ProductShortName).ToList();
+        Assert.Equal(new[] { "L1", "L2" }, current.Select(x => x.ProductShortName));
+        Assert.All(current, item => Assert.True(item.IsCurrentRevisionProjection));
+        Assert.DoesNotContain(current, item => item.ProductShortName == "L3");
+        var historical = verify.LeadItems.IgnoreQueryFilters().Where(i => i.LeadId == 100).ToList();
+        Assert.Contains(historical, item => item.Id == 3 && !item.IsCurrentRevisionProjection);
+        Assert.Equal(5, historical.Count);
     }
 
     [Fact]

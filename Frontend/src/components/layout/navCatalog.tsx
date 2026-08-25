@@ -957,8 +957,8 @@ export const PRIMARY_VIEWS: NavView[] = PRIMARY_NAV.flatMap((item) => item.views
 /** The rail row that owns `/advanced`. Rendered apart from the five, because it is a door, not a job. */
 export const ALL_SCREENS_ENTRY = {
   key: 'all-screens',
-  label: 'All screens',
-  description: 'Every other screen in Nexora, grouped and searchable.',
+  label: 'Screen directory',
+  description: 'Find any Nexora workspace by name or business purpose.',
   icon: <AllScreensIcon />,
   path: ADVANCED_ROOT,
 };

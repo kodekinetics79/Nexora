@@ -1,3 +1,5 @@
+using ERP_RFQ_Automation.CommercialCases.Participation;
+using ERP_RFQ_Automation.CommercialCases.Promotion;
 using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Tests.Support;
@@ -54,6 +56,24 @@ public sealed class Module04ProductInventoryMigrationPostgreSqlTests(PostgreSqlT
             VALUES (98410, 98400, 'M04-PART', 'Authority part', true, 0, 0, 'tests', now()),
                    (98419, 98499, 'OTHER-TENANT', 'Other tenant part', true, 0, 0, 'tests', now());
             """);
+        var leadItem = new LeadItem
+        {
+            Id = 98_411, LeadId = lead.Id, ItemMaterialCode = "M04-PART",
+            ProductShortDescription = "Authority part", Quantity = 20,
+            UnitOfMeasure = "EA", Currency = "USD", IsCurrentRevisionProjection = true
+        };
+        context.LeadItems.Add(leadItem);
+        context.Currencies.Add(new Currency
+        {
+            Id = 98_412, BusinessUnitId = 98_400, Code = "USD", CurrencyName = "US Dollar",
+            ExchangeRate = 1m, IsActive = true, CreatedBy = "tests", CreatedOn = DateTime.UtcNow
+        });
+        context.SetUoms.Add(new SetUom
+        {
+            UomId = 98_413, BusinessUnitId = 98_400, UomCode = "EA", UomName = "Each",
+            IsActive = true, CreatedBy = "tests", CreatedDate = DateTime.UtcNow
+        });
+        await context.SaveChangesAsync();
 
         // A revision cannot exist without the occurrence that established it —
         // FK_LeadRevisions_LeadIngestionOccurrences_BusinessUnitId_Estab~ is NOT NULL and
@@ -72,24 +92,69 @@ public sealed class Module04ProductInventoryMigrationPostgreSqlTests(PostgreSqlT
         };
         var line = new LeadItemRevision
         {
-            BusinessUnitId = 98_400, LineNumber = 1, LineFingerprint = new string('c', 64),
+            BusinessUnitId = 98_400, LeadItemId = leadItem.Id,
+            LineNumber = 1, LineFingerprint = new string('c', 64),
             SnapshotJson = "{\"part\":\"M04-PART\",\"quantity\":20}",
         };
         revision.Items.Add(line);
+        context.Add(revision);
+        await context.SaveChangesAsync();
+        lead.CurrentRevisionId = revision.Id;
+        lead.CurrentRevisionNumber = 1;
+        var fit = new LeadFitAssessment
+        {
+            BusinessUnitId = 98_400, LeadId = lead.Id, LeadRevisionId = revision.Id,
+            Sequence = 1, PolicyVersion = "module04-authority/v1", Recommendation = "FIT",
+            IsActionable = true, AssessmentJson = "{}", IdempotencyKey = "module04-fit",
+            RequestHash = new string('f', 64), AssessedBy = "tests", AssessedAtUtc = DateTimeOffset.UtcNow
+        };
+        context.Add(fit);
+        await context.SaveChangesAsync();
+        var decision = new LeadParticipationDecision
+        {
+            BusinessUnitId = 98_400, LeadId = lead.Id, LeadRevisionId = revision.Id,
+            FitAssessmentId = fit.Id, Sequence = 1, IsCommitted = true,
+            Outcome = LeadParticipationOutcome.FullBid, IdempotencyKey = "module04-participation",
+            RequestHash = new string('d', 64), DecidedBy = "tests", DecidedAtUtc = DateTimeOffset.UtcNow
+        };
+        decision.Lines.Add(new LeadLineParticipationDecision
+        {
+            BusinessUnitId = 98_400, LeadId = lead.Id, LeadRevisionId = revision.Id,
+            ParticipationDecisionId = decision.Id, LeadItemRevisionId = line.Id,
+            Choice = LeadLineParticipationChoice.Bid, ReasonNotes = "Authority fixture approved.",
+            ProductId = 98_410, Quantity = 20, UnitOfMeasure = "EA", UomId = 98_413,
+            Currency = "USD", CurrencyId = 98_412, WarningSnapshotJson = "{}"
+        });
+        context.Add(decision);
+        await context.SaveChangesAsync();
+        var promotion = new RfqPromotion
+        {
+            BusinessUnitId = 98_400, LeadId = lead.Id, LeadRevisionId = revision.Id,
+            ParticipationDecisionId = decision.Id, IdempotencyKey = "module04-promotion",
+            RequestHash = new string('p', 64), PromotedBy = "tests", PromotedAtUtc = DateTimeOffset.UtcNow
+        };
+        context.Add(promotion);
+        await context.SaveChangesAsync();
         var rfq = new Rfq
         {
             Id = 98_420, BusinessUnitId = 98_400, Lead = lead, Rfqno = "M04-RFQ",
             RecDate = DateTime.UtcNow, CreatedBy = "tests", CreatedDate = DateTime.UtcNow,
+            PromotionId = promotion.Id, SourceLeadRevisionId = revision.Id,
+            ParticipationDecisionId = decision.Id
         };
         rfq.InheritCommercialIdentity(lead);
-        context.AddRange(revision, rfq);
+        context.Add(rfq);
         await context.SaveChangesAsync();
 
         await context.Database.ExecuteSqlRawAsync("""
             INSERT INTO public."RFQItems"
                 ("ID", "RFQID", "LineItemNo", "ProductID", "ManufacturerPartNumber",
-                 "Quantity", "CreatedBy", "CreatedDate")
-            VALUES (98421, 98420, '1', 98410, 'M04-PART', 20, 'tests', now())
+                 "Quantity", "SourceBusinessUnitId", "SourceLeadId", "SourceLeadRevisionId",
+                 "SourceLeadItemRevisionId", "CreatedBy", "CreatedDate")
+            VALUES (98421, 98420, '1', 98410, 'M04-PART', 20, 98400, 98401,
+                    (SELECT "Id" FROM "LeadRevisions" WHERE "BusinessUnitId" = 98400 AND "LeadId" = 98401),
+                    (SELECT "Id" FROM "LeadItemRevisions" WHERE "BusinessUnitId" = 98400
+                     AND "LeadId" = 98401 AND "LineNumber" = 1), 'tests', now())
             """);
 
         await context.Database.ExecuteSqlAsync($"""

@@ -53,65 +53,40 @@ public sealed class QuoteBackfillStoredTotalTests
     private const decimal PaperTotal = 105_000m;
 
     [Fact]
-    public async Task The_returned_total_is_the_one_that_was_persisted()
+    public async Task Quote_backfill_cannot_originate_an_rfq_to_compute_a_total()
     {
         using var database = new TestDb();
         await using var db = database.ContextFor(BusinessUnitId);
         SeedTenant(db);
 
-        var result = await Service(db).BackfillAsync(
-            Request(statedTotal: PaperTotal, Line(LineValue)), BusinessUnitId, Actor);
-
-        var quote = await db.Quotes.AsNoTracking().SingleAsync(q => q.Id == result.QuoteId);
-
-        // The assertion the defect fails on: the answer and the row must be the same number.
-        Assert.Equal(quote.TotalAmount, result.TotalAmount);
-        Assert.Equal(DerivedTotal, result.TotalAmount);
-
-        // And named explicitly, because this is the figure the old code reported while storing
-        // another. A back-fill that answers with the tenant's own number has proved nothing.
-        Assert.NotEqual(PaperTotal, result.TotalAmount);
+        await AssertOriginationRetired(db,
+            Request(statedTotal: PaperTotal, Line(LineValue)));
     }
 
     [Fact]
-    public async Task A_stated_total_that_disagrees_with_what_was_stored_warns_naming_BOTH_figures()
+    public async Task Quote_backfill_with_a_stated_total_cannot_bypass_lead_promotion()
     {
         using var database = new TestDb();
         await using var db = database.ContextFor(BusinessUnitId);
         SeedTenant(db);
 
-        var result = await Service(db).BackfillAsync(
-            Request(statedTotal: PaperTotal, Line(LineValue)), BusinessUnitId, Actor);
-
-        var warning = Assert.IsType<string>(result.TotalMismatchWarning);
-
-        // Both numbers, and which is which. The old warning could only ever name the tenant's
-        // figure and a sum of the request's lines — 105,000 against 100,000 — so it described a
-        // discrepancy that did not matter and stayed silent about the one that did.
-        Assert.Contains("Nexora recomputed this quote at 115000", warning);
-        Assert.Contains("the customer holds 105000", warning);
+        await AssertOriginationRetired(db,
+            Request(statedTotal: PaperTotal, Line(LineValue)));
     }
 
     [Fact]
-    public async Task A_stated_total_that_matches_what_was_stored_warns_about_nothing()
+    public async Task Quote_backfill_with_a_matching_total_still_requires_lead_promotion()
     {
         using var database = new TestDb();
         await using var db = database.ContextFor(BusinessUnitId);
         SeedTenant(db);
 
-        // The tenant's paper agrees with the tax-inclusive figure Nexora derives. Nothing is wrong,
-        // so nothing may be reported: the old comparison, run against the ex-tax sum of the lines,
-        // would have cried mismatch on a perfectly faithful import and taught the implementer to
-        // ignore the field.
-        var result = await Service(db).BackfillAsync(
-            Request(statedTotal: DerivedTotal, Line(LineValue)), BusinessUnitId, Actor);
-
-        Assert.Null(result.TotalMismatchWarning);
-        Assert.Equal(DerivedTotal, result.TotalAmount);
+        await AssertOriginationRetired(db,
+            Request(statedTotal: DerivedTotal, Line(LineValue)));
     }
 
     [Fact]
-    public async Task A_line_discount_round_trips_instead_of_being_dropped()
+    public async Task Quote_backfill_with_a_line_discount_still_requires_lead_promotion()
     {
         using var database = new TestDb();
         await using var db = database.ContextFor(BusinessUnitId);
@@ -123,17 +98,7 @@ public sealed class QuoteBackfillStoredTotalTests
         var line = Line(10_000m);
         line.Discount = 1_000m;
 
-        var result = await Service(db).BackfillAsync(
-            Request(statedTotal: null, line), BusinessUnitId, Actor);
-
-        var stored = await db.QuoteItems.AsNoTracking().SingleAsync();
-        Assert.Equal(1_000m, stored.Discount);
-        Assert.Equal(9_000m, stored.TaxableBase);
-        Assert.Equal(1_350m, stored.TaxAmount);
-        Assert.Equal(10_350m, result.TotalAmount);
-
-        // The re-grossed figure, named so a regression is unmistakable.
-        Assert.NotEqual(11_500m, result.TotalAmount);
+        await AssertOriginationRetired(db, Request(statedTotal: null, line));
     }
 
     [Fact]
@@ -190,7 +155,7 @@ public sealed class QuoteBackfillStoredTotalTests
     /// refusal above cannot be widened into a blanket block on importing anything.</para>
     /// </summary>
     [Fact]
-    public async Task CONTROL_A_historical_tax_matching_todays_rate_imports_unchanged()
+    public async Task Historical_tax_matching_todays_rate_still_requires_lead_promotion()
     {
         using var database = new TestDb();
         await using var db = database.ContextFor(BusinessUnitId);
@@ -199,12 +164,18 @@ public sealed class QuoteBackfillStoredTotalTests
         var line = Line(10_000m);
         line.TaxAmount = 1_500m;
 
-        var result = await Service(db).BackfillAsync(
-            Request(statedTotal: null, line), BusinessUnitId, Actor);
+        await AssertOriginationRetired(db, Request(statedTotal: null, line));
+    }
 
-        var quote = await db.Quotes.AsNoTracking().SingleAsync(q => q.Id == result.QuoteId);
-        Assert.Equal(11_500m, quote.TotalAmount);
-        Assert.Equal(11_500m, result.TotalAmount);
+    private static async Task AssertOriginationRetired(
+        ErpRfqAutomationContext db, QuoteBackfillRequest request)
+    {
+        var refusal = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            Service(db).BackfillAsync(request, BusinessUnitId, Actor));
+
+        Assert.Contains("Direct quote-backfill RFQ origination is retired", refusal.Message,
+            StringComparison.Ordinal);
+        await AssertNothingWasStranded(db);
     }
 
     /// <summary>

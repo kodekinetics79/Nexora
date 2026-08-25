@@ -792,7 +792,6 @@ builder.Services.AddScoped<ERP_RFQ_Automation.Agent.IAgentTool, ERP_RFQ_Automati
 // Email inquiry assembly - one capability, composed in one place so the resolution test
 // exercises the production composition instead of a copy of it.
 builder.Services.AddEmailInquiryAssembly();
-builder.Services.AddScoped<ERP_RFQ_Automation.Agent.IAgentTool, ERP_RFQ_Automation.Intelligence.Conversion.ConvertLeadToRfqTool>();
 builder.Services.AddScoped<ERP_RFQ_Automation.Agent.IAgentTool, ERP_RFQ_Automation.Intelligence.Pricing.PriceRfqTool>();
 builder.Services.AddScoped<ERP_RFQ_Automation.Agent.IAgentTool, ERP_RFQ_Automation.Intelligence.Pricing.ApplyRfqPricingTool>();
 // WP-B3: executor for below-floor holds — the approvals inbox approve endpoint
@@ -811,6 +810,12 @@ builder.Services.AddScoped<ERP_RFQ_Automation.Agent.IAgentTool, ERP_RFQ_Automati
 // Lead Decision Brief (Intelligence/Decision): value/coverage/history/urgency →
 // Bid/Review/Skip with plain-language reasons; feeds the leads grid + dashboard.
 builder.Services.AddLeadDecisionIntelligence();
+builder.Services.AddScoped<ERP_RFQ_Automation.CommercialCases.Participation.ILeadParticipationService,
+                           ERP_RFQ_Automation.CommercialCases.Participation.LeadParticipationService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.CommercialCases.Participation.ILeadDecisionWorkbenchService,
+                           ERP_RFQ_Automation.CommercialCases.Participation.LeadDecisionWorkbenchService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.CommercialCases.Promotion.IRfqPromotionService,
+                           ERP_RFQ_Automation.CommercialCases.Promotion.RfqPromotionService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.Agent.IAgentTool, ERP_RFQ_Automation.Intelligence.Decision.LeadDecisionBriefTool>();
 
 // WP-A1/A2: tenant-configurable SLA policy reader (SlaPolicy-backed; default 2h).

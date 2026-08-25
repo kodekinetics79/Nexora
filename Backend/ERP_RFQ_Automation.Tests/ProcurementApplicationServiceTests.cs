@@ -1047,6 +1047,7 @@ internal static class ProcurementTestData
     public const long Tenant = 96_001;
     public const long OtherTenant = 96_002;
     public const long Currency = 96_010;
+    public const long Uom = 96_011;
     public const long Warehouse = 96_020;
     public const long Product = 96_030;
     public const long Inventory = 96_040;
@@ -1064,6 +1065,11 @@ internal static class ProcurementTestData
         {
             Id = Currency + offset, BusinessUnitId = tenant, Code = $"Q{offset}", CurrencyName = "QA Currency",
             ExchangeRate = 1m, IsBaseCurrency = true, IsActive = true, CreatedBy = "qa", CreatedOn = Now
+        });
+        context.SetUoms.Add(new SetUom
+        {
+            UomId = checked((int)(Uom + offset)), BusinessUnitId = tenant, UomCode = "EA", UomName = "Each",
+            IsActive = true, CreatedBy = "qa", CreatedDate = Now
         });
         context.Warehouses.Add(new Warehouse
         {

@@ -137,7 +137,18 @@ public sealed class ExtractionDeadLetterService(
             .SingleOrDefaultAsync(x => x.BusinessUnitId == tenantId && x.Id == jobId, ct)
             ?? throw new KeyNotFoundException("Extraction job was not found.");
         if (job.Status != ExtractionStatus.DeadLetter)
+        {
+            // A same-key caller can lose the race after its first replay lookup: the winner
+            // commits the event and moves the job to Pending before this caller reads the job.
+            // Recheck the durable ledger before treating the new status as an unrelated change.
+            // The status update and event append commit atomically, so observing Pending also
+            // makes the replay visible under READ COMMITTED.
+            replay = await ReplayAsync(tenantId, jobId, idempotencyKey, ct);
+            if (replay is not null)
+                return replay with { IdempotentReplay = true };
+
             throw new InvalidOperationException("Only a dead-letter extraction job can be recovered.");
+        }
         var hasSecurityBlocker = await db.ExtractionDeadLetterEvents.AsNoTracking().AnyAsync(e =>
             e.BusinessUnitId == tenantId
             && e.ExtractionJobId == job.Id
@@ -145,8 +156,17 @@ public sealed class ExtractionDeadLetterService(
             && (e.Action == ExtractionDeadLetterAction.MalwareDetected
                 || e.Action == ExtractionDeadLetterAction.EvidenceIntegrityFailure), ct);
         if (hasSecurityBlocker)
+        {
+            // Security dispositions keep the job in DeadLetter, so status alone cannot reveal
+            // that a concurrent same-key request already committed the governed outcome.
+            // Honour only the exact durable receipt; a different key remains blocked.
+            replay = await ReplayAsync(tenantId, jobId, idempotencyKey, ct);
+            if (replay is not null)
+                return replay with { IdempotentReplay = true };
+
             throw new InvalidOperationException(
                 "This job has an unresolved malware or evidence-integrity disposition and cannot be retried.");
+        }
 
         if (IsLegacySourcePathUnavailable(evidenceStorage, job.StoragePath))
         {

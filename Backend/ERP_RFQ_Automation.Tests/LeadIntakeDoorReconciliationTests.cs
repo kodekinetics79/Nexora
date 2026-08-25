@@ -86,7 +86,7 @@ public sealed class LeadIntakeDoorReconciliationTests
         Assert.Contains("revision 2", second.Message, StringComparison.Ordinal);
         var lead = Assert.Single(await context.Leads.Include(x => x.LeadItems).ToListAsync());
         Assert.Equal(2, lead.CurrentRevisionNumber);
-        Assert.Equal(25, lead.LeadItems.Single().Quantity);
+        Assert.Equal(25, lead.LeadItems.Single(x => x.IsCurrentRevisionProjection).Quantity);
         Assert.Equal(2, await context.Set<LeadRevision>().CountAsync(x => x.LeadId == lead.Id));
         Assert.True(await context.Set<LeadIdentityAuditEvent>()
             .AnyAsync(x => x.LeadId == lead.Id && x.EventType == "LEAD_REVISION_CREATED"));
@@ -152,7 +152,7 @@ public sealed class LeadIntakeDoorReconciliationTests
         var canonical = Assert.Single(await context.Leads.Include(x => x.LeadItems).ToListAsync());
         Assert.Equal(lead.Id, canonical.Id);
         Assert.Equal(2, canonical.CurrentRevisionNumber);
-        Assert.Equal(40, canonical.LeadItems.Single().Quantity);
+        Assert.Equal(40, canonical.LeadItems.Single(x => x.IsCurrentRevisionProjection).Quantity);
     }
 
     [Fact]

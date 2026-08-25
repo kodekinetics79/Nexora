@@ -25,6 +25,13 @@ export interface RfqResponseDTO {
     durationAgreement?: string;
     leadId?: number;
     activeLeadRevision: number;
+    promotionId?: number | null;
+    sourceLeadRevisionId?: number | null;
+    sourceLeadRevisionNumber?: number | null;
+    participationDecisionId?: number | null;
+    participationVersion?: number | null;
+    promotedAtUtc?: string | null;
+    promotedBy?: string | null;
     createdBy: string;
     createdDate: string;
     modifiedBy?: string;
@@ -83,6 +90,7 @@ export interface RfqitemResponseDTO {
     modifiedDate?: string;
     aiconfidence?: number;
     supplierQuotedItemId?: number;
+    sourceLeadItemRevisionId?: number | null;
   /** 'Pending' | 'Quote' | 'NoQuote'. A line nobody has decided is Pending, never Quote. */
   participationDecision: string;
   /** Mandatory whenever participationDecision is 'NoQuote'. */
@@ -197,23 +205,6 @@ const rfqService = {
         const response = await axiosInstance.post<RfqResponseDTO>("/api/Rfq", data);
         return response.data;
     },
-    /**
-   * Records whether Nexora will quote one RFQ line. A No-Quote requires a reason — the rule is
-   * enforced in the backend domain, so this call will be refused without one.
-   */
-  setLineParticipation: async (
-    rfqId: number,
-    lineId: number,
-    decision: 'Pending' | 'Quote' | 'NoQuote',
-    reason?: string,
-  ) => {
-    const response = await axiosInstance.post(
-      `/api/Rfq/${rfqId}/lines/${lineId}/participation`,
-      { decision, reason },
-    );
-    return response.data;
-  },
-
   prepareQuoteDraft: async (id: number) => {
         const response = await axiosInstance.post(`/api/Rfq/${id}/prepare-quote-draft`);
         return response.data;

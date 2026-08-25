@@ -1,6 +1,9 @@
 ﻿using ERP_RFQ_Automation.DTOs.LookupDTOs;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
+using ERP_RFQ_Automation.CommercialCases.Participation;
+using ERP_RFQ_Automation.CommercialCases.Promotion;
 using ERP_RFQ_Automation.CommercialRouting;
+using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.DTOs.RfqDTOs;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
@@ -114,6 +117,9 @@ namespace ERP_RFQ_Automation.Repositories
                 RfqtypeId = r.RfqtypeId,
                 DurationAgreement = r.DurationAgreement,
                 LeadId = r.LeadId,
+                PromotionId = r.PromotionId,
+                SourceLeadRevisionId = r.SourceLeadRevisionId,
+                ParticipationDecisionId = r.ParticipationDecisionId,
                 ActiveLeadRevision = r.Lead?.CurrentRevisionNumber ?? 1,
                 CreatedBy = r.CreatedBy,
                 CreatedDate = r.CreatedDate,
@@ -176,6 +182,20 @@ namespace ERP_RFQ_Automation.Repositories
                     .Select(x => (x.FirstName + " " + x.LastName).Trim())
                     .SingleOrDefaultAsync()
                 : null;
+            var promotion = rfq.PromotionId.HasValue
+                ? await _context.Set<RfqPromotion>().AsNoTracking()
+                    .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.Id == rfq.PromotionId.Value)
+                : null;
+            var participationVersion = rfq.ParticipationDecisionId.HasValue
+                ? await _context.Set<LeadParticipationDecision>().AsNoTracking()
+                    .Where(x => x.BusinessUnitId == businessUnitId && x.Id == rfq.ParticipationDecisionId.Value)
+                    .Select(x => (int?)x.Sequence).SingleOrDefaultAsync()
+                : null;
+            var sourceLeadRevisionNumber = rfq.SourceLeadRevisionId.HasValue
+                ? await _context.Set<LeadRevision>().AsNoTracking()
+                    .Where(x => x.BusinessUnitId == businessUnitId && x.Id == rfq.SourceLeadRevisionId.Value)
+                    .Select(x => (int?)x.RevisionNumber).SingleOrDefaultAsync()
+                : null;
 
             return new RfqResponseDTO
             {
@@ -198,6 +218,13 @@ namespace ERP_RFQ_Automation.Repositories
                 RfqtypeId = rfq.RfqtypeId,
                 DurationAgreement = rfq.DurationAgreement,
                 LeadId = rfq.LeadId,
+                PromotionId = rfq.PromotionId,
+                SourceLeadRevisionId = rfq.SourceLeadRevisionId,
+                SourceLeadRevisionNumber = sourceLeadRevisionNumber,
+                ParticipationDecisionId = rfq.ParticipationDecisionId,
+                ParticipationVersion = participationVersion,
+                PromotedAtUtc = promotion?.PromotedAtUtc,
+                PromotedBy = promotion?.PromotedBy,
                 ActiveLeadRevision = rfq.Lead?.CurrentRevisionNumber ?? 1,
                 CreatedBy = rfq.CreatedBy,
                 CreatedDate = rfq.CreatedDate,
@@ -265,6 +292,7 @@ namespace ERP_RFQ_Automation.Repositories
                     ModifiedBy = i.ModifiedBy,
                     ModifiedDate = i.ModifiedDate,
                     Aiconfidence = i.Aiconfidence,
+                    SourceLeadItemRevisionId = i.SourceLeadItemRevisionId,
                     ParticipationDecision = i.ParticipationDecision,
                     NoQuoteReason = i.NoQuoteReason,
                     ParticipationDecidedBy = i.ParticipationDecidedBy,
@@ -275,6 +303,10 @@ namespace ERP_RFQ_Automation.Repositories
 
         public async Task AddAsync(Rfq rfq)
         {
+            await Task.CompletedTask;
+            throw new InvalidOperationException(
+                "Direct formal RFQ creation is retired. Create or reconcile a canonical Lead Revision, commit participation, and promote approved Bid lines through RFQ Promotion.");
+#pragma warning disable CS0162
             // Validate FKs
             var buExists = await _context.BusinessUnits.AnyAsync(b => b.Id == rfq.BusinessUnitId);
             if (!buExists)
@@ -289,17 +321,8 @@ namespace ERP_RFQ_Automation.Repositories
 
             if (rfq.LeadId.HasValue)
             {
-                // POST /api/Rfq with a LeadId IS a lead conversion and goes through the same
-                // door as the two conversion endpoints: the shared LeadConversionGate, the
-                // governed CONVERTED_TO_RFQ transition and the promotion event, all in one
-                // transaction. Before this, the raw door validated only "lead exists in-tenant
-                // and has a customer" — so it happily created a SECOND RFQ for a lead that
-                // already had one, from an unqualified lead, past the duplicate flag and past
-                // extraction review. The difference from ConvertLeadToRfqAsync is only WHERE
-                // the lines come from: here the caller supplies them; there they are copied
-                // from the lead.
-                await AddForLeadAsync(rfq, rfq.LeadId.Value);
-                return;
+                throw new InvalidOperationException(
+                    "A lead-linked RFQ can only be created by RFQ Promotion after a committed current-revision participation decision. Remove LeadId for a standalone manual RFQ, or use the Lead participation workflow.");
             }
 
             // Manual "Create RFQ" without a lead. The serial-lineage invariant — every RFQ
@@ -358,6 +381,7 @@ namespace ERP_RFQ_Automation.Repositories
 
                 await transaction.CommitAsync();
             });
+#pragma warning restore CS0162
         }
 
         /// <summary>
@@ -447,8 +471,8 @@ namespace ERP_RFQ_Automation.Repositories
 
             rfq.CreatedDate = DateTime.UtcNow;
 
-            _context.Rfqs.Add(rfq);
-            await _context.SaveChangesAsync();
+            throw new InvalidOperationException(
+                "Retired generic RFQ persistence path reached. Use the RFQ Promotion service.");
         }
 
         private async Task<long> NextRfqSequenceAsync()

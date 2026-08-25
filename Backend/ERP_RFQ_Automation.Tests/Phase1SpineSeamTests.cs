@@ -1,13 +1,23 @@
+using System.Security.Cryptography;
+using System.Text;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
+using ERP_RFQ_Automation.CommercialCases.Participation;
+using ERP_RFQ_Automation.CommercialCases.Promotion;
 using ERP_RFQ_Automation.CommercialFinance;
 using ERP_RFQ_Automation.Delivery;
+using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
+using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.InboundLogistics;
+using ERP_RFQ_Automation.Infrastructure.Storage;
+using ERP_RFQ_Automation.Intelligence.Decision;
 using ERP_RFQ_Automation.Inventory;
 using ERP_RFQ_Automation.Inventory.Commercial;
 using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Procurement;
+using ERP_RFQ_Automation.Reporting;
 using ERP_RFQ_Automation.Repositories;
+using ERP_RFQ_Automation.Sla;
 using ERP_RFQ_Automation.Tests.Support;
 using ERP_RFQ_Automation.Traceability;
 using Microsoft.EntityFrameworkCore;
@@ -256,6 +266,7 @@ internal sealed class UpstreamSpine : IDisposable
     public const long CustomerId = 97_110;
     public const long ProductId = 97_120;
     public const long CurrencyId = 97_130;
+    public const int UomId = 97_131;
     public const long WarehouseId = 97_140;
     public const int FirstLineQuantity = 40;
     public const string FirstLinePart = "SPINE-VALVE-0001";
@@ -276,6 +287,11 @@ internal sealed class UpstreamSpine : IDisposable
     /// cause. Any hard-coded date compared against a real-clock value is the same trap.</para>
     /// </summary>
     private static DateTime Now => DateTime.UtcNow;
+    private static readonly byte[] EvidenceBytes = Encoding.UTF8.GetBytes(
+        "SPINE-A-001|00010|SPINE-VALVE-0001|40|EA\nSPINE-A-001|00020|SPINE-GASKET-0002|12|EA");
+    private static readonly string EvidenceHash = Convert.ToHexString(SHA256.HashData(EvidenceBytes))
+        .ToLowerInvariant();
+    private const string EvidenceStorageUri = "memory://phase1-spine/SPINE-A-001.xlsx";
     private readonly TestDb _database = new();
 
     public UpstreamSpine()
@@ -293,6 +309,17 @@ internal sealed class UpstreamSpine : IDisposable
         {
             Id = CurrencyId, BusinessUnitId = Tenant, Code = "SAR", CurrencyName = "Saudi Riyal",
             ExchangeRate = 1m, IsBaseCurrency = true, IsActive = true, CreatedBy = "qa", CreatedOn = Now
+        });
+        seed.SetUoms.Add(new SetUom
+        {
+            UomId = UomId, BusinessUnitId = Tenant, UomCode = "EA", UomName = "Each",
+            IsActive = true, CreatedBy = "qa", CreatedDate = Now
+        });
+        seed.SetupMasters.Add(new SetupMaster
+        {
+            SetupId = 97_132, BusinessUnitId = Tenant, SetupType = LeadOutcomeReasons.SetupType,
+            SetupCode = "OUT_OF_SCOPE", SetupValue = "Out of scope", Description = "Out of scope",
+            IsActive = true, CreatedBy = "qa", CreatedOn = Now
         });
         seed.Warehouses.Add(new Warehouse
         {
@@ -398,8 +425,189 @@ internal sealed class UpstreamSpine : IDisposable
 
     public async Task<(long RfqId, string Rfqno)> ConvertAsync(long leadId)
     {
+        await EnsurePromotionEvidenceAsync(leadId);
+
         await using var context = Context();
-        return await new LeadRepository(context).ConvertLeadToRfqAsync(leadId, Tenant, "qa");
+        var lead = await context.Leads.AsNoTracking().SingleAsync(x => x.Id == leadId);
+        var revisionLines = await context.Set<LeadItemRevision>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == Tenant && x.LeadRevisionId == lead.CurrentRevisionId)
+            .OrderBy(x => x.LineNumber)
+            .ToListAsync();
+
+        var participation = new LeadParticipationService(
+            context,
+            new LeadDecisionService(context, new GrossMarginService(context)),
+            new LeadOutcomeReasons(context));
+        var fit = await participation.RecordFitAssessmentAsync(Tenant, leadId,
+            new RecordLeadFitAssessmentCommand(
+                lead.CurrentRevisionId!.Value,
+                lead.CurrentRevisionNumber,
+                ExpectedFitVersion: null,
+                OverallDecision: "FIT",
+                Rationale: "The fixture reviewer confirmed eligibility, capability, delivery, compliance and commercials.",
+                Criteria: LeadParticipationService.GovernedFitCriterionCodes
+                    .Select(code => new LeadFitCriterionCommand(code, "PASS", "Confirmed by the test reviewer."))
+                    .ToArray(),
+                IdempotencyKey: $"spine-fit:{Tenant}:{leadId}:{lead.CurrentRevisionId}",
+                Actor: "qa"));
+        var decision = await participation.CommitDecisionAsync(Tenant, leadId,
+            new CommitLeadParticipationCommand(
+                lead.CurrentRevisionId.Value,
+                lead.CurrentRevisionNumber,
+                ExpectedParticipationVersion: null,
+                Commit: true,
+                FitAssessmentId: fit.Id,
+                Lines: revisionLines.Select(line => line.LineNumber == 1
+                    ? new LeadLineParticipationCommand(line.Id, LeadLineParticipationChoice.Bid,
+                        ReasonNotes: "Reviewer confirmed the catalog and normalized commercial values.",
+                        ProductId: ProductId, Quantity: FirstLineQuantity,
+                        UnitOfMeasure: "EA", Currency: "SAR")
+                    : new LeadLineParticipationCommand(line.Id, LeadLineParticipationChoice.NoBid,
+                        ReasonCode: "OUT_OF_SCOPE",
+                        ReasonNotes: "The reviewer excluded this line from the formal RFQ.")).ToArray(),
+                IdempotencyKey: $"spine-participation:{Tenant}:{leadId}:{lead.CurrentRevisionId}",
+                Actor: "qa"));
+        var promoted = await new RfqPromotionService(
+                context, new DigestEvidenceStorage(EvidenceStorageUri, EvidenceHash, EvidenceBytes))
+            .PromoteAsync(Tenant, leadId,
+                new PromoteLeadToRfqCommand(
+                    lead.CurrentRevisionId.Value,
+                    lead.CurrentRevisionNumber,
+                    decision.Sequence,
+                    decision.Id,
+                    $"spine-promotion:{Tenant}:{leadId}:{lead.CurrentRevisionId}",
+                    "qa"));
+        return (promoted.RfqId, promoted.RfqNumber);
+    }
+
+    private async Task EnsurePromotionEvidenceAsync(long leadId)
+    {
+        await using var context = Context();
+        var lead = await context.Leads.Include(x => x.LeadItems).SingleAsync(x => x.Id == leadId);
+        var revision = await context.Set<LeadRevision>().AsNoTracking()
+            .SingleAsync(x => x.BusinessUnitId == Tenant && x.Id == lead.CurrentRevisionId);
+        if (await context.Set<LeadOccurrenceDocument>().AnyAsync(x =>
+                x.BusinessUnitId == Tenant && x.OccurrenceId == revision.EstablishedByOccurrenceId))
+            return;
+
+        var occurrence = await context.Set<LeadIngestionOccurrence>().AsNoTracking()
+            .SingleAsync(x => x.BusinessUnitId == Tenant && x.Id == revision.EstablishedByOccurrenceId);
+        var corpus = DocumentCorpus.Create(Tenant, occurrence.BatchId, CorpusSourceType.ManualUpload);
+        context.Add(corpus);
+        await context.SaveChangesAsync();
+
+        var job = new ExtractionJob
+        {
+            BatchId = occurrence.BatchId,
+            BusinessUnitId = Tenant,
+            SourceType = ExtractionSourceType.ManualUpload,
+            ContentHash = EvidenceHash,
+            StoragePath = EvidenceStorageUri,
+            FileName = "SPINE-A-001.xlsx",
+            FileType = "xlsx",
+            Status = ExtractionStatus.Succeeded,
+            Priority = 0,
+            SchedulerTag = 0,
+            Attempts = 1,
+            MaxAttempts = 5,
+            NextAttemptAt = Now,
+            ResultLeadId = leadId,
+            CreatedOn = Now,
+            UpdatedOn = Now
+        };
+        context.Add(job);
+        await context.SaveChangesAsync();
+
+        var document = SourceDocument.Create(
+            Tenant, corpus.Id, EvidenceHash, "SPINE-A-001.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "memory", "phase1-spine/SPINE-A-001.xlsx", EvidenceHash,
+            EvidenceBytes.Length);
+        document.ReleaseFromQuarantine("memory", "phase1-spine/SPINE-A-001.xlsx", EvidenceHash);
+        document.BindExtractionJob(job.Id);
+        context.Add(document);
+        await context.SaveChangesAsync();
+
+        context.Add(new LeadOccurrenceDocument
+        {
+            BusinessUnitId = Tenant,
+            OccurrenceId = revision.EstablishedByOccurrenceId,
+            SourceDocumentId = document.Id,
+            Role = "Primary",
+            Ordinal = 1,
+            LinkedAtUtc = DateTimeOffset.UtcNow
+        });
+        var runId = Guid.NewGuid();
+        var run = ExtractionRun.Create(Tenant, document.Id, runId, job.Id, 1,
+            "native-spreadsheet/spine-test", "lead-evidence/v1");
+        var page = DocumentPage.Create(Tenant, document.Id, 1, 100, 100);
+        var inquiry = CanonicalInquiry.Create(Tenant, corpus.Id, 1);
+        inquiry.PopulateHeader(lead.Rfqno, lead.BuyersName, lead.RecDate, lead.BidClosingDate);
+        inquiry.BindLead(leadId);
+        context.AddRange(run, page, inquiry);
+        await context.SaveChangesAsync();
+
+        var region = DocumentRegion.Create(Tenant, page.Id, DocumentRegionType.Table,
+            0, 0, 100, 100, Encoding.UTF8.GetString(EvidenceBytes), 1m);
+        context.Add(region);
+        await context.SaveChangesAsync();
+
+        var canonicalLines = lead.LeadItems.OrderBy(x => x.LineItemNo).Select((item, index) =>
+        {
+            var canonical = CanonicalLineItem.Create(Tenant, inquiry.Id, index + 1,
+                item.ProductShortDescription ?? item.ItemText ?? item.ItemMaterialCode ?? "Requested line",
+                item.Quantity, item.UnitOfMeasure);
+            canonical.Enrich(null, item.ManufacturerPartNumber, item.Currency, null, null, "{}",
+                CanonicalValidationStatus.Valid);
+            canonical.BindLeadItem(item.Id);
+            return (item, canonical);
+        }).ToArray();
+        context.AddRange(canonicalLines.Select(x => x.canonical));
+        await context.SaveChangesAsync();
+
+        Assert.True(await context.Set<ExtractionRun>().AnyAsync(x =>
+            x.BusinessUnitId == Tenant && x.RunId == runId));
+        Assert.True(await context.Set<DocumentRegion>().AnyAsync(x =>
+            x.BusinessUnitId == Tenant && x.Id == region.Id));
+        Assert.Equal(canonicalLines.Length, await context.Set<CanonicalLineItem>().CountAsync(x =>
+            x.BusinessUnitId == Tenant && canonicalLines.Select(line => line.canonical.Id).Contains(x.Id)));
+
+        foreach (var (item, canonical) in canonicalLines)
+        {
+            var evidence = FieldEvidence.ForLineItem(
+                Tenant, region.Id, canonical.Id, "requestedLine",
+                item.ProductShortDescription ?? item.ItemText,
+                item.ManufacturerPartNumber ?? item.ItemMaterialCode,
+                1m, "spine-test", runId,
+                validationStatus: FieldValidationStatus.Valid);
+            context.Add(evidence);
+            // SQLite does not execute the provider-specific evidence mapping and therefore
+            // exposes the conventional ExtractionRunId shadow FK. PostgreSQL uses (BU, RunId).
+            context.Entry(evidence).Property("ExtractionRunId").CurrentValue = run.Id;
+        }
+        await context.SaveChangesAsync();
+    }
+
+    private sealed class DigestEvidenceStorage(
+        string storageUri, string expectedHash, byte[] content) : IEvidenceObjectStorage
+    {
+        public bool IsDurable => true;
+
+        public Task ProbeAsync(CancellationToken ct = default) => Task.CompletedTask;
+
+        public Task<EvidenceObject> WriteImmutableAsync(long businessUnitId, string zone, string sha256,
+            string extension, ReadOnlyMemory<byte> bytes, CancellationToken ct = default) =>
+            Task.FromResult(new EvidenceObject(storageUri, "memory", storageUri, expectedHash, null, bytes.Length));
+
+        public Task<Stream> OpenVerifiedReadAsync(string requestedUri, string requestedHash,
+            CancellationToken ct = default)
+        {
+            Assert.Equal(storageUri, requestedUri);
+            Assert.Equal(expectedHash, requestedHash);
+            var actual = Convert.ToHexString(SHA256.HashData(content)).ToLowerInvariant();
+            Assert.Equal(expectedHash, actual);
+            return Task.FromResult<Stream>(new MemoryStream(content, writable: false));
+        }
     }
 
     public async Task<SourcingCaseView> OpenSourcingCaseAsync(long rfqId)

@@ -12223,6 +12223,12 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<long>("BusinessUnitId")
                         .HasColumnType("bigint");
 
+                    b.Property<long?>("LeadItemId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("LeadId")
+                        .HasColumnType("bigint");
+
                     b.Property<long>("LeadRevisionId")
                         .HasColumnType("bigint");
 
@@ -12240,6 +12246,12 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("jsonb");
 
                     b.HasKey("Id");
+
+                    b.HasAlternateKey("BusinessUnitId", "Id", "LeadRevisionId", "LeadId");
+
+                    b.HasIndex("LeadId", "LeadItemId");
+
+                    b.HasIndex("BusinessUnitId", "LeadRevisionId", "LeadId");
 
                     b.HasIndex("BusinessUnitId", "LeadRevisionId", "LineNumber")
                         .IsUnique();
@@ -12412,6 +12424,8 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("jsonb");
 
                     b.HasKey("Id");
+
+                    b.HasAlternateKey("BusinessUnitId", "Id", "LeadId");
 
                     b.HasIndex("BusinessUnitId", "EstablishedByOccurrenceId")
                         .IsUnique();
@@ -14183,6 +14197,14 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<string>("ExtraFields")
                         .HasColumnType("jsonb");
 
+                    b.Property<long?>("EvidenceSourceLeadItemId")
+                        .HasColumnType("bigint");
+
+                    b.Property<bool>("IsCurrentRevisionProjection")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true);
+
                     b.Property<string>("ItemMaterialCode")
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
@@ -14243,6 +14265,8 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasKey("Id")
                         .HasName("PK__LeadItem__3214EC2776894FBF");
 
+                    b.HasAlternateKey("LeadId", "Id");
+
                     b.HasIndex(new[] { "BidClosingDateLine" }, "IX_LeadItems_BidClosingDateLine");
 
                     b.HasIndex(new[] { "BuyerName" }, "IX_LeadItems_BuyerName");
@@ -14250,6 +14274,10 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasIndex(new[] { "CustomerRfqno" }, "IX_LeadItems_CustomerRFQNo");
 
                     b.HasIndex(new[] { "LeadId" }, "IX_LeadItems_LeadID");
+
+                    b.HasIndex("LeadId", "IsCurrentRevisionProjection");
+
+                    b.HasIndex("LeadId", "EvidenceSourceLeadItemId");
 
                     b.HasIndex(new[] { "CustomerRfqno" }, "IX_LeadItems_RFQ_Include");
 
@@ -15689,6 +15717,12 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasMaxLength(200)
                         .HasColumnType("character varying(200)");
 
+                    b.Property<long?>("ParticipationDecisionId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long?>("PromotionId")
+                        .HasColumnType("bigint");
+
                     b.Property<DateTime>("RecDate")
                         .HasColumnType("timestamp without time zone");
 
@@ -15711,6 +15745,9 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint")
                         .HasColumnName("RFQTypeID");
 
+                    b.Property<long?>("SourceLeadRevisionId")
+                        .HasColumnType("bigint");
+
                     b.Property<DateTime?>("SubDate")
                         .HasColumnType("timestamp without time zone");
 
@@ -15722,6 +15759,17 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasIndex("RfqstatusId");
 
                     b.HasIndex("RfqtypeId");
+
+                    b.HasIndex("BusinessUnitId", "ParticipationDecisionId");
+
+                    b.HasIndex("BusinessUnitId", "PromotionId")
+                        .IsUnique()
+                        .HasFilter("\"PromotionId\" IS NOT NULL");
+
+                    b.HasIndex("BusinessUnitId", "PromotionId", "LeadId", "SourceLeadRevisionId", "ParticipationDecisionId")
+                        .IsUnique();
+
+                    b.HasIndex("BusinessUnitId", "SourceLeadRevisionId");
 
                     b.HasIndex(new[] { "BusinessUnitId", "CommercialCaseId" }, "IX_RFQ_BusinessUnitID_CommercialCaseID");
 
@@ -15889,6 +15937,18 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint")
                         .HasColumnName("RFQID");
 
+                    b.Property<long?>("SourceBusinessUnitId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long?>("SourceLeadId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long?>("SourceLeadRevisionId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long?>("SourceLeadItemRevisionId")
+                        .HasColumnType("bigint");
+
                     b.Property<string>("StorageLocation")
                         .HasMaxLength(200)
                         .HasColumnType("character varying(200)");
@@ -15920,6 +15980,10 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasIndex("CurrencyId");
 
                     b.HasIndex("ProductId");
+
+                    b.HasIndex("SourceBusinessUnitId", "SourceLeadItemRevisionId");
+
+                    b.HasIndex("SourceBusinessUnitId", "SourceLeadItemRevisionId", "SourceLeadRevisionId", "SourceLeadId");
 
                     b.HasIndex("SupplierId");
 
@@ -23003,6 +23067,14 @@ namespace ERP_RFQ_Automation.Migrations
                         });
                 });
 
+            // These focused-migration entities were added after the legacy definition section.
+            // Register their CLR types before the relationship section so string-based generated
+            // relationship metadata cannot accidentally create shared dictionary entity types.
+            modelBuilder.Entity<ERP_RFQ_Automation.CommercialCases.Participation.LeadFitAssessment>();
+            modelBuilder.Entity<ERP_RFQ_Automation.CommercialCases.Participation.LeadLineParticipationDecision>();
+            modelBuilder.Entity<ERP_RFQ_Automation.CommercialCases.Participation.LeadParticipationDecision>();
+            modelBuilder.Entity<ERP_RFQ_Automation.CommercialCases.Promotion.RfqPromotion>();
+
             modelBuilder.Entity("ERP_RFQ_Automation.AI.AiBudgetPeriod", b =>
                 {
                     b.HasOne("ERP_RFQ_Automation.Models.BusinessUnit", null)
@@ -25283,12 +25355,20 @@ namespace ERP_RFQ_Automation.Migrations
 
             modelBuilder.Entity("ERP_RFQ_Automation.LeadIdentity.LeadItemRevision", b =>
                 {
+                    b.HasOne("ERP_RFQ_Automation.Models.LeadItem", "LeadItem")
+                        .WithMany()
+                        .HasForeignKey("LeadId", "LeadItemId")
+                        .HasPrincipalKey("LeadId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict);
+
                     b.HasOne("ERP_RFQ_Automation.LeadIdentity.LeadRevision", "Revision")
                         .WithMany("Items")
-                        .HasForeignKey("BusinessUnitId", "LeadRevisionId")
-                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .HasForeignKey("BusinessUnitId", "LeadRevisionId", "LeadId")
+                        .HasPrincipalKey("BusinessUnitId", "Id", "LeadId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
+
+                    b.Navigation("LeadItem");
 
                     b.Navigation("Revision");
                 });
@@ -25608,6 +25688,12 @@ namespace ERP_RFQ_Automation.Migrations
 
             modelBuilder.Entity("ERP_RFQ_Automation.Models.LeadItem", b =>
                 {
+                    b.HasOne("ERP_RFQ_Automation.Models.LeadItem", null)
+                        .WithMany()
+                        .HasForeignKey("LeadId", "EvidenceSourceLeadItemId")
+                        .HasPrincipalKey("LeadId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict);
+
                     b.HasOne("ERP_RFQ_Automation.Models.Lead", "Lead")
                         .WithMany("LeadItems")
                         .HasForeignKey("LeadId")
@@ -26005,6 +26091,24 @@ namespace ERP_RFQ_Automation.Migrations
 
             modelBuilder.Entity("ERP_RFQ_Automation.Models.Rfq", b =>
                 {
+                    b.HasOne("ERP_RFQ_Automation.CommercialCases.Participation.LeadParticipationDecision", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "ParticipationDecisionId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("ERP_RFQ_Automation.CommercialCases.Promotion.RfqPromotion", null)
+                        .WithOne()
+                        .HasForeignKey("ERP_RFQ_Automation.Models.Rfq", "BusinessUnitId", "PromotionId", "LeadId", "SourceLeadRevisionId", "ParticipationDecisionId")
+                        .HasPrincipalKey("ERP_RFQ_Automation.CommercialCases.Promotion.RfqPromotion", "BusinessUnitId", "Id", "LeadId", "LeadRevisionId", "ParticipationDecisionId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("ERP_RFQ_Automation.LeadIdentity.LeadRevision", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "SourceLeadRevisionId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict);
+
                     b.HasOne("ERP_RFQ_Automation.Models.BusinessUnit", "BusinessUnit")
                         .WithMany("Rfqs")
                         .HasForeignKey("BusinessUnitId")
@@ -26049,6 +26153,12 @@ namespace ERP_RFQ_Automation.Migrations
 
             modelBuilder.Entity("ERP_RFQ_Automation.Models.Rfqitem", b =>
                 {
+                    b.HasOne("ERP_RFQ_Automation.LeadIdentity.LeadItemRevision", null)
+                        .WithMany()
+                        .HasForeignKey("SourceBusinessUnitId", "SourceLeadItemRevisionId", "SourceLeadRevisionId", "SourceLeadId")
+                        .HasPrincipalKey("BusinessUnitId", "Id", "LeadRevisionId", "LeadId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
                     b.HasOne("ERP_RFQ_Automation.Models.Currency", "CurrencyNavigation")
                         .WithMany("Rfqitems")
                         .HasForeignKey("CurrencyId")
@@ -28193,6 +28303,408 @@ namespace ERP_RFQ_Automation.Migrations
             modelBuilder.Entity("ERP_RFQ_Automation.Traceability.MaterialLot", b =>
                 {
                     b.Navigation("Certificates");
+                });
+            modelBuilder.Entity("ERP_RFQ_Automation.CommercialCases.Participation.LeadFitAssessment", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTimeOffset>("AssessedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("AssessedBy")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("AssessmentJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.Property<long>("BusinessUnitId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("IdempotencyKey")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<bool>("IsActionable")
+                        .HasColumnType("boolean");
+
+                    b.Property<long>("LeadId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("LeadRevisionId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("PolicyVersion")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("Recommendation")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("RequestHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character(64)")
+                        .IsFixedLength();
+
+                    b.Property<int>("Sequence")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasAlternateKey("BusinessUnitId", "Id");
+
+                    b.HasAlternateKey("BusinessUnitId", "Id", "LeadId", "LeadRevisionId");
+
+                    b.HasIndex("BusinessUnitId", "IdempotencyKey")
+                        .IsUnique();
+
+                    b.HasIndex("BusinessUnitId", "LeadId");
+
+                    b.HasIndex("BusinessUnitId", "LeadRevisionId", "LeadId");
+
+                    b.HasIndex("BusinessUnitId", "LeadRevisionId", "Sequence")
+                        .IsUnique();
+
+                    b.ToTable("LeadFitAssessments", (string)null);
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.CommercialCases.Participation.LeadLineParticipationDecision", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<long>("BusinessUnitId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("CatalogPolicyVersion")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<ERP_RFQ_Automation.CommercialCases.Participation.LeadLineParticipationChoice>("Choice")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasConversion<string>();
+
+                    b.Property<string>("Currency")
+                        .HasMaxLength(8)
+                        .HasColumnType("character varying(8)");
+
+                    b.Property<long?>("CurrencyId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("LeadItemRevisionId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("LeadId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("LeadRevisionId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("ParticipationDecisionId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long?>("ProductId")
+                        .HasColumnType("bigint");
+
+                    b.Property<int?>("Quantity")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("ReasonCode")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("ReasonNotes")
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
+
+                    b.Property<string>("UnitOfMeasure")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<int?>("UomId")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("WarningSnapshotJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BusinessUnitId", "LeadItemRevisionId", "LeadRevisionId", "LeadId");
+
+                    b.HasIndex("BusinessUnitId", "CurrencyId");
+
+                    b.HasIndex("BusinessUnitId", "ParticipationDecisionId", "LeadId", "LeadRevisionId")
+                        .HasDatabaseName("IX_LeadLineParticipationDecisions_BusinessUnitId_Participatio~1");
+
+                    b.HasIndex("BusinessUnitId", "ParticipationDecisionId", "LeadItemRevisionId")
+                        .IsUnique();
+
+                    b.HasIndex("BusinessUnitId", "UomId");
+
+                    b.ToTable("LeadLineParticipationDecisions", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_LeadLineParticipationDecisions_Choice", "\"Choice\" IN ('Pending','Bid','NoBid','Clarify')");
+
+                            t.HasCheckConstraint("CK_LeadLineParticipationDecisions_NoBidReason", "\"Choice\" NOT IN ('NoBid','Clarify') OR ((\"ReasonCode\" IS NOT NULL AND trim(\"ReasonCode\") <> '') OR (\"ReasonNotes\" IS NOT NULL AND length(trim(\"ReasonNotes\")) >= 5))");
+
+                            t.HasCheckConstraint("CK_LeadLineParticipationDecisions_BidCommercialIdentity", "\"Choice\" <> 'Bid' OR (\"Quantity\" > 0 AND \"UomId\" IS NOT NULL AND \"CurrencyId\" IS NOT NULL AND \"UnitOfMeasure\" IS NOT NULL AND trim(\"UnitOfMeasure\") <> '' AND \"Currency\" IS NOT NULL AND trim(\"Currency\") <> '')");
+
+                            t.HasCheckConstraint("CK_LeadLineParticipationDecisions_Quantity", "\"Quantity\" IS NULL OR \"Quantity\" > 0");
+                        });
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.CommercialCases.Participation.LeadParticipationDecision", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<long>("BusinessUnitId")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTimeOffset>("DecidedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("DecidedBy")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<long>("FitAssessmentId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("IdempotencyKey")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<bool>("IsCommitted")
+                        .HasColumnType("boolean");
+
+                    b.Property<long>("LeadId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("LeadRevisionId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("Notes")
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
+
+                    b.Property<ERP_RFQ_Automation.CommercialCases.Participation.LeadParticipationOutcome>("Outcome")
+                        .IsRequired()
+                        .HasMaxLength(24)
+                        .HasColumnType("character varying(24)")
+                        .HasConversion<string>();
+
+                    b.Property<string>("ReasonCode")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("RequestHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character(64)")
+                        .IsFixedLength();
+
+                    b.Property<int>("Sequence")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasAlternateKey("BusinessUnitId", "Id", "LeadId", "LeadRevisionId");
+
+                    b.HasIndex("BusinessUnitId", "FitAssessmentId", "LeadId", "LeadRevisionId");
+
+                    b.HasIndex("BusinessUnitId", "IdempotencyKey")
+                        .IsUnique();
+
+                    b.HasIndex("BusinessUnitId", "LeadId");
+
+                    b.HasIndex("BusinessUnitId", "LeadRevisionId", "LeadId");
+
+                    b.HasIndex("BusinessUnitId", "LeadRevisionId", "Sequence")
+                        .IsUnique();
+
+                    b.ToTable("LeadParticipationDecisions", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_LeadParticipationDecisions_Outcome", "\"Outcome\" IN ('Pending','FullBid','PartialBid','NoBid')");
+                        });
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.CommercialCases.Promotion.RfqPromotion", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<long>("BusinessUnitId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("IdempotencyKey")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<long>("LeadId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("LeadRevisionId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("ParticipationDecisionId")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTimeOffset>("PromotedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("PromotedBy")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("RequestHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character(64)")
+                        .IsFixedLength();
+
+                    b.HasKey("Id");
+
+                    b.HasAlternateKey("BusinessUnitId", "Id");
+
+                    b.HasAlternateKey("BusinessUnitId", "Id", "LeadId", "LeadRevisionId", "ParticipationDecisionId");
+
+                    b.HasIndex("BusinessUnitId", "IdempotencyKey")
+                        .IsUnique();
+
+                    b.HasIndex("BusinessUnitId", "LeadId");
+
+                    b.HasIndex("BusinessUnitId", "LeadRevisionId", "LeadId");
+
+                    b.HasIndex("BusinessUnitId", "ParticipationDecisionId", "LeadId", "LeadRevisionId");
+
+                    b.HasIndex("BusinessUnitId", "ParticipationDecisionId")
+                        .IsUnique();
+
+                    b.ToTable("RfqPromotions", (string)null);
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.CommercialCases.Participation.LeadFitAssessment", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Models.Lead", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "LeadId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ERP_RFQ_Automation.LeadIdentity.LeadRevision", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "LeadRevisionId", "LeadId")
+                        .HasPrincipalKey("BusinessUnitId", "Id", "LeadId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.CommercialCases.Participation.LeadLineParticipationDecision", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Models.Currency", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "CurrencyId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("ERP_RFQ_Automation.LeadIdentity.LeadItemRevision", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "LeadItemRevisionId", "LeadRevisionId", "LeadId")
+                        .HasPrincipalKey("BusinessUnitId", "Id", "LeadRevisionId", "LeadId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ERP_RFQ_Automation.CommercialCases.Participation.LeadParticipationDecision", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "ParticipationDecisionId", "LeadId", "LeadRevisionId")
+                        .HasPrincipalKey("BusinessUnitId", "Id", "LeadId", "LeadRevisionId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ERP_RFQ_Automation.Models.SetUom", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "UomId")
+                        .HasPrincipalKey("BusinessUnitId", "UomId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.CommercialCases.Participation.LeadParticipationDecision", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.CommercialCases.Participation.LeadFitAssessment", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "FitAssessmentId", "LeadId", "LeadRevisionId")
+                        .HasPrincipalKey("BusinessUnitId", "Id", "LeadId", "LeadRevisionId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ERP_RFQ_Automation.Models.Lead", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "LeadId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ERP_RFQ_Automation.LeadIdentity.LeadRevision", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "LeadRevisionId", "LeadId")
+                        .HasPrincipalKey("BusinessUnitId", "Id", "LeadId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.CommercialCases.Promotion.RfqPromotion", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Models.Lead", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "LeadId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ERP_RFQ_Automation.LeadIdentity.LeadRevision", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "LeadRevisionId", "LeadId")
+                        .HasPrincipalKey("BusinessUnitId", "Id", "LeadId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ERP_RFQ_Automation.CommercialCases.Participation.LeadParticipationDecision", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "ParticipationDecisionId", "LeadId", "LeadRevisionId")
+                        .HasPrincipalKey("BusinessUnitId", "Id", "LeadId", "LeadRevisionId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
                 });
 #pragma warning restore 612, 618
         }

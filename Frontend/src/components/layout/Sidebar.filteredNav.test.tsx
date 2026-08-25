@@ -42,27 +42,35 @@ function renderRail(url: string) {
 
 const row = (name: string | RegExp) => screen.getByRole('button', { name });
 
-describe('the rail is five rows and a door', () => {
-  it('shows exactly the five primary destinations plus All screens', () => {
+describe('the rail presents the commercial spine and grouped workspaces', () => {
+  it('shows the primary destinations, grouped workspaces and searchable directory', () => {
     renderRail('/inbox');
 
-    expect(screen.getAllByRole('button').map((button) => button.textContent)).toEqual([
+    expect(screen.getAllByRole('button').map((button) => button.textContent)).toEqual(expect.arrayContaining([
       'Inbox',
       'Leads',
       'RFQs',
       'Quotes',
       'Setup',
-      'All screens',
-    ]);
+      'Customers & ownership',
+      'Suppliers & sourcing',
+      'Orders & fulfilment',
+      'Catalogue & stock',
+      'Screen directory',
+    ]));
   });
 
-  it('does not carry a single expandable group', () => {
-    // A group row that must be opened before its children exist is a second navigation level, and
-    // the second level is what made the old rail unscannable.
+  it('keeps secondary workspaces collapsed until needed', () => {
     renderRail('/inbox');
 
-    expect(screen.queryAllByRole('button', { expanded: false })).toEqual([]);
-    expect(screen.queryAllByRole('button', { expanded: true })).toEqual([]);
+    expect(screen.getAllByRole('button', { expanded: false }).length).toBeGreaterThan(0);
+  });
+
+  it('automatically opens the workspace containing the current screen', () => {
+    renderRail('/inventory/ageing');
+
+    expect(row('Catalogue & stock')).toHaveAttribute('aria-expanded', 'true');
+    expect(row('Stock ageing')).toHaveAttribute('aria-current', 'page');
   });
 });
 
@@ -115,12 +123,11 @@ describe('where the rail says you are', () => {
     expect(row('RFQs')).toHaveAttribute('aria-current', 'page');
   });
 
-  it('marks the All screens door current on a screen that moved behind it', () => {
-    // Collapsing 17 rows to 5 relocated 64 destinations. If only /advanced itself matched, every
-    // one of those screens rendered a rail with NO current row — nothing for a screen reader to
-    // announce, and nothing visual either. Regression caught by the a11y e2e on /dashboard.
+  it('marks the owning workspace rather than the Screen directory on an operational screen', () => {
     renderRail('/dashboard');
-    expect(row('All screens')).toHaveAttribute('aria-current', 'page');
+    expect(row('Dashboards & analytics')).toHaveAttribute('aria-expanded', 'true');
+    expect(row('Dashboard')).toHaveAttribute('aria-current', 'page');
+    expect(row('Screen directory')).not.toHaveAttribute('aria-current');
   });
 
   it('lights Setup on the addresses Setup governs outside its own URL space', () => {

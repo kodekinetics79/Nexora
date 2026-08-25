@@ -20,7 +20,7 @@ import { ADVANCED_GROUPS, PRIMARY_NAV, navEntryMatches, type NavEntry } from '..
  */
 const AllScreensPage: React.FC = () => (
   <CatalogHub
-    title="All screens"
+    title="Screen directory"
     intro="Everything Nexora can do that is not part of the daily quote-building path. Each screen here is a full destination with its own address — this page is a directory, not a copy."
     idPrefix="advanced"
     groups={ADVANCED_GROUPS as { key: string; title: string; caption: string; entries: NavEntry[] }[]}

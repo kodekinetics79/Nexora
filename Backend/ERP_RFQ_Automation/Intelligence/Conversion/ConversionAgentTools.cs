@@ -103,56 +103,12 @@ public sealed class ConvertLeadToRfqTool : IAgentTool
 
     public bool IsMutation => true;
 
-    public async Task<AgentToolResult> ExecuteAsync(JsonElement input, AgentToolContext ctx, CancellationToken ct)
+    public Task<AgentToolResult> ExecuteAsync(JsonElement input, AgentToolContext ctx, CancellationToken ct)
     {
         var leadId = input.GetInt64OrNull("leadId");
-        if (leadId is null) return AgentToolResult.Fail("leadId is required.");
+        if (leadId is null) return Task.FromResult(AgentToolResult.Fail("leadId is required."));
 
-        try
-        {
-            var preview = await _intelligence.PreviewAsync(leadId.Value, ctx.BusinessUnitId, ct);
-
-            var request = new ConvertRequest
-            {
-                Notes = input.GetStringOrNull("notes"),
-                ActingUser = ctx.UserName ?? "Agent",
-                Items = preview.Items.Select(i => new ConvertRequestItem
-                {
-                    LeadItemId = i.LeadItemId,
-                    Include = true,
-                    ProductId = i.BestMatchProductId
-                }).ToList()
-            };
-
-            var rfqId = await _intelligence.ConvertAsync(leadId.Value, ctx.BusinessUnitId, request, ct);
-
-            var lowConfidence = preview.Items
-                .Where(i => i.BestMatchProductId.HasValue && i.Confidence < 0.7m)
-                .Select(i => new { leadItemId = i.LeadItemId, text = i.SourceText, confidence = i.Confidence })
-                .ToList();
-
-            return AgentToolResult.Ok(new
-            {
-                rfqId,
-                leadId = leadId.Value,
-                lineCount = preview.Items.Count,
-                linkedProductCount = preview.Items.Count(i => i.BestMatchProductId.HasValue),
-                overallConfidence = preview.OverallConfidence,
-                lowConfidenceLines = lowConfidence,
-                message = $"Lead {leadId.Value} converted to RFQ {rfqId}."
-            });
-        }
-        catch (KeyNotFoundException ex)
-        {
-            return AgentToolResult.Fail(ex.Message);
-        }
-        catch (InvalidOperationException ex)
-        {
-            return AgentToolResult.Fail(ex.Message);
-        }
-        catch (ArgumentException ex)
-        {
-            return AgentToolResult.Fail(ex.Message);
-        }
+        return Task.FromResult(AgentToolResult.Fail(
+            $"Lead {leadId.Value} was not converted. Commit the current Lead Revision participation decision and invoke RFQ Promotion."));
     }
 }

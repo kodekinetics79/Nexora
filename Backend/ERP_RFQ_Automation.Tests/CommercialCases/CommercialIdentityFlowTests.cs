@@ -65,7 +65,7 @@ public sealed class CommercialIdentityFlowTests
     }
 
     [Fact]
-    public async Task LeadConversion_PersistsIdentityRfqLifecycleEventAndOutboxAtomically()
+    public async Task DirectLeadRepositoryConversion_IsRetiredWithoutWrites()
     {
         using var db = new TestDb();
         await using var context = db.ContextFor(831);
@@ -81,54 +81,17 @@ public sealed class CommercialIdentityFlowTests
         await context.SaveChangesAsync();
 
         var repository = new LeadRepository(context);
-        var result = await repository.ConvertLeadToRfqAsync(lead.Id, 831, "user@example.com");
-        var retry = await repository.ConvertLeadToRfqAsync(lead.Id, 831, "user@example.com");
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            repository.ConvertLeadToRfqAsync(lead.Id, 831, "user@example.com"));
 
-        context.ChangeTracker.Clear();
-        var rfq = await context.Rfqs.SingleAsync(item => item.Id == result.RfqId);
-        var converted = await context.Leads.SingleAsync(item => item.Id == lead.Id);
-        var lifecycleEvent = await context.CommercialLifecycleEvents
-            .SingleAsync(item => item.EventType == "StatusTransitioned");
-        Assert.Equal(lead.CommercialCaseId, rfq.CommercialCaseId);
-        Assert.Equal(result.RfqId, retry.RfqId);
-        Assert.Equal(lead.CommercialCaseReference, rfq.NexoraSerial);
-        Assert.Equal(7101, rfq.CustomerId);
-        Assert.Equal(7102, rfq.ContactId);
-        // 1 (created) -> 2 (CONVERTED_TO_RFQ transition) -> 3 (PromotedToRfq event, appended
-        // in the same transaction — every appended event advances the aggregate version).
-        Assert.Equal(3, converted.LifecycleVersion);
-        Assert.Equal("CONVERTED_TO_RFQ", lifecycleEvent.NewStatusCode);
-        Assert.Equal("user@example.com", lifecycleEvent.ActorId);
-
-        // The dedicated promotion event rides ALONGSIDE the generic transition (same
-        // transaction, own outbox message) and carries the promotion facts by name.
-        var promotion = await context.CommercialLifecycleEvents
-            .SingleAsync(item => item.EventType == "PromotedToRfq");
-        Assert.Equal(lead.Id, promotion.AggregateId);
-        Assert.Equal("user@example.com", promotion.ActorId);
-        Assert.Equal($"rfq-{result.RfqId}", promotion.RequestReference);
-        var outbox = await context.LifecycleOutboxMessages.OrderBy(m => m.Id).ToListAsync();
-        Assert.Equal(2, outbox.Count);
-        Assert.Equal("commercial-case.lead.statustransitioned", outbox[0].EventType);
-        var promoted = outbox[1];
-        Assert.Equal("commercial-case.lead.promoted-to-rfq", promoted.EventType);
-        Assert.Equal(promotion.Id, promoted.LifecycleEventId);
-        // Parsed, not substring-matched: PostgreSQL's jsonb column re-serialises payloads
-        // with its own spacing, so both lanes assert the same way.
-        using (var payload = System.Text.Json.JsonDocument.Parse(promoted.Payload))
-        {
-            Assert.Equal(lead.Id, payload.RootElement.GetProperty("LeadId").GetInt64());
-            Assert.Equal(result.RfqId, payload.RootElement.GetProperty("RfqId").GetInt64());
-            Assert.True(payload.RootElement.TryGetProperty("LeadRevisionId", out _),
-                "The payload must state the lead revision evaluated (null on legacy leads).");
-            Assert.Equal("user@example.com", payload.RootElement.GetProperty("ActorId").GetString());
-            Assert.Equal($"conversion-{lead.Id}", payload.RootElement.GetProperty("CorrelationId").GetString());
-        }
-        Assert.Single(await context.Rfqs.ToListAsync());
+        Assert.Contains("Direct LeadRepository RFQ creation is retired", error.Message, StringComparison.Ordinal);
+        Assert.Empty(await context.Rfqs.ToListAsync());
+        Assert.Empty(await context.CommercialLifecycleEvents.ToListAsync());
+        Assert.Empty(await context.LifecycleOutboxMessages.ToListAsync());
     }
 
     [Fact]
-    public async Task LeadConversion_RollsBackRfqWhenLifecycleCannotComplete()
+    public async Task DirectLeadRepositoryConversion_FailsClosedBeforeLifecycleWork()
     {
         using var db = new TestDb();
         await using var context = db.ContextFor(832);
@@ -141,10 +104,11 @@ public sealed class CommercialIdentityFlowTests
         lead.ResolveCommercialIdentity(7201, null, "CUSTOMER_CONFIRMED_CONTACT_UNRESOLVED");
         await context.SaveChangesAsync();
 
-        await Assert.ThrowsAsync<LifecycleValidationException>(() =>
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             new LeadRepository(context).ConvertLeadToRfqAsync(lead.Id, 832, "user@example.com"));
 
         context.ChangeTracker.Clear();
+        Assert.Contains("Direct LeadRepository RFQ creation is retired", error.Message, StringComparison.Ordinal);
         Assert.Empty(await context.Rfqs.ToListAsync());
         Assert.Empty(await context.CommercialLifecycleEvents.ToListAsync());
         Assert.Equal(1, (await context.Leads.SingleAsync(item => item.Id == lead.Id)).LifecycleVersion);

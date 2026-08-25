@@ -1090,6 +1090,10 @@ namespace ERP_RFQ_Automation.Services
         /// </summary>
         public async Task<ServiceResult<long>> ProcessCustomerRfqExcelAsync(Microsoft.AspNetCore.Http.IFormFile file, long businessUnitId, string createdBy)
         {
+            await Task.CompletedTask;
+            return ServiceResult<long>.CreateFailure(
+                "Direct spreadsheet-to-RFQ creation is retired. Use governed Lead intake and RFQ Promotion.");
+#pragma warning disable CS0162
             if (file == null || file.Length == 0)
             {
                 return ServiceResult<long>.CreateFailure("No file uploaded.");
@@ -1187,8 +1191,8 @@ namespace ERP_RFQ_Automation.Services
                     Rfqitems = rfqItems
                 };
 
-                _context.Rfqs.Add(rfq);
-                await _context.SaveChangesAsync();
+                throw new InvalidOperationException(
+                    "Retired direct RFQ persistence path reached. Use governed Lead intake and RFQ Promotion.");
 
                 return ServiceResult<long>.CreateSuccess(rfq.Id, "RFQ created successfully from Excel.");
             }
@@ -1197,6 +1201,7 @@ namespace ERP_RFQ_Automation.Services
                 _logger.LogError(ex, "Error processing customer RFQ Excel.");
                 return ServiceResult<long>.CreateFailure($"Error: {ex.Message}");
             }
+#pragma warning restore CS0162
         }
 
         private string GetCellValue(WorkbookPart workbookPart, List<Cell> cells, string columnLetter, SharedStringTable sst)

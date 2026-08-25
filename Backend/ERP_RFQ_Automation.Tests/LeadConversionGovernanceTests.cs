@@ -9,7 +9,7 @@ namespace ERP_RFQ_Automation.Tests;
 public sealed class LeadConversionGovernanceTests
 {
     [Fact]
-    public async Task IntelligenceConversion_ConvertsAnAlreadyQualifiedLeadExactlyOnce()
+    public async Task IntelligenceConversion_IsRetiredAndCreatesNoRfq()
     {
         using var db = new TestDb();
         await using var context = db.ContextFor(92);
@@ -33,21 +33,16 @@ public sealed class LeadConversionGovernanceTests
             WarningAcknowledgementReason = "Catalog choice reviewed"
         };
 
-        var first = await service.ConvertAsync(lead.Id, 92, request, default);
-        var replay = await service.ConvertAsync(lead.Id, 92, request, default);
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            service.ConvertAsync(lead.Id, 92, request, default));
 
-        Assert.Equal(first, replay);
-        Assert.Single(await context.Rfqs.Where(rfq => rfq.LeadId == lead.Id).ToListAsync());
-        var events = await context.CommercialLifecycleEvents
-            .Where(entry => entry.AggregateId == lead.Id).OrderBy(entry => entry.OccurredOn).ToListAsync();
-        Assert.Equal(2, events.Count);
-        Assert.Single(events, entry => entry.EventType == "StatusTransitioned"
-            && entry.NewStatusCode == "CONVERTED_TO_RFQ");
-        Assert.Single(events, entry => entry.EventType == "PromotedToRfq");
+        Assert.Contains("Direct intelligence conversion is retired", error.Message, StringComparison.Ordinal);
+        Assert.Empty(await context.Rfqs.ToListAsync());
+        Assert.Empty(await context.Set<ERP_RFQ_Automation.CommercialCases.Promotion.RfqPromotion>().ToListAsync());
     }
 
     [Fact]
-    public async Task IntelligenceConversion_PreservesMissingQuantityAsNeedsReview()
+    public async Task IntelligenceConversion_CannotBypassParticipationForMissingQuantity()
     {
         using var db = new TestDb();
         await using var context = db.ContextFor(93);
@@ -64,21 +59,20 @@ public sealed class LeadConversionGovernanceTests
             status.SetupType == "LeadStatus" && status.SetupCode == "QUALIFIED");
         await context.SaveChangesAsync();
 
-        var rfqId = await new LeadConversionIntelligence(context).ConvertAsync(lead.Id, 93,
-            new ConvertRequest
-            {
-                ActingUser = "reviewer@example.com",
-                CreateNeedsClarification = true
-            }, default);
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            new LeadConversionIntelligence(context).ConvertAsync(lead.Id, 93,
+                new ConvertRequest
+                {
+                    ActingUser = "reviewer@example.com",
+                    CreateNeedsClarification = true
+                }, default));
 
-        var rfq = await context.Rfqs.Include(row => row.Rfqitems).Include(row => row.Rfqstatus)
-            .SingleAsync(row => row.Id == rfqId);
-        Assert.Equal("NEEDS_REVIEW", rfq.Rfqstatus?.SetupCode);
-        Assert.Null(Assert.Single(rfq.Rfqitems).Quantity);
+        Assert.Contains("participation decision", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(await context.Rfqs.ToListAsync());
     }
 
     [Fact]
-    public async Task IntelligenceConversion_BlocksUnverifiedAiCommercialFacts()
+    public async Task IntelligenceConversion_IsRetiredBeforeAnyLegacyCommercialGate()
     {
         using var db = new TestDb();
         await using var context = db.ContextFor(91);
@@ -94,7 +88,7 @@ public sealed class LeadConversionGovernanceTests
         var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             service.ConvertAsync(lead.Id, 91, new ConvertRequest { ActingUser = "reviewer@example.com" }, default));
 
-        Assert.Contains("commercial facts", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Direct intelligence conversion is retired", error.Message, StringComparison.Ordinal);
         Assert.Empty(await context.Rfqs.ToListAsync());
     }
 
@@ -104,7 +98,7 @@ public sealed class LeadConversionGovernanceTests
     /// retry idempotency is pinned by CommercialIdentityFlowTests).
     /// </summary>
     [Fact]
-    public async Task IntelligenceConversion_SecondAttemptReturnsTheExistingRfq()
+    public async Task IntelligenceConversion_RepeatedAttemptsRemainRetiredAndCreateNothing()
     {
         using var db = new TestDb();
         await using var context = db.ContextFor(92);
@@ -121,14 +115,14 @@ public sealed class LeadConversionGovernanceTests
             AcknowledgeAllWarnings = true,
             WarningAcknowledgementReason = "Catalog not seeded in this fixture"
         };
-        var first = await service.ConvertAsync(9101, 92, request, default);
-        var second = await service.ConvertAsync(9101, 92, request, default);
+        var first = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            service.ConvertAsync(9101, 92, request, default));
+        var second = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            service.ConvertAsync(9101, 92, request, default));
 
-        Assert.Equal(first, second);
-        Assert.Single(await context.Rfqs.AsNoTracking().ToListAsync());
-        // The promotion is a fact about the lead, recorded once — the replayed conversion
-        // appended nothing.
-        Assert.Single(await context.CommercialLifecycleEvents.AsNoTracking()
+        Assert.Equal(first.Message, second.Message);
+        Assert.Empty(await context.Rfqs.AsNoTracking().ToListAsync());
+        Assert.Empty(await context.CommercialLifecycleEvents.AsNoTracking()
             .Where(e => e.EventType == "PromotedToRfq").ToListAsync());
     }
 
@@ -139,23 +133,14 @@ public sealed class LeadConversionGovernanceTests
     /// so callers can resolve it to the existing RFQ instead of a 500.
     /// </summary>
     [Fact]
-    public async Task A_second_rfq_for_the_same_lead_is_refused_by_the_unique_index()
+    public void A_lead_linked_rfq_without_promotion_lineage_is_incomplete()
     {
-        using var db = new TestDb();
-        await using var context = db.ContextFor(93);
-        var lead = Seed.Lead(context, 9201, 93);
-        await context.SaveChangesAsync();
+        var rfq = NewRfq(93, leadId: 9201);
 
-        context.Rfqs.Add(NewRfq(93, leadId: 9201));
-        await context.SaveChangesAsync();
-
-        context.Rfqs.Add(NewRfq(93, leadId: 9201));
-        var error = await Assert.ThrowsAsync<DbUpdateException>(() => context.SaveChangesAsync());
-
-        Assert.True(LeadConversionGate.IsDuplicateKey(error),
-            $"The unique-index violation must be recognised as a duplicate key, got: {error.InnerException?.Message}");
-        context.ChangeTracker.Clear();
-        Assert.Single(await context.Rfqs.AsNoTracking().Where(r => r.LeadId == 9201).ToListAsync());
+        Assert.NotNull(rfq.LeadId);
+        Assert.Null(rfq.PromotionId);
+        Assert.Null(rfq.SourceLeadRevisionId);
+        Assert.Null(rfq.ParticipationDecisionId);
     }
 
     /// <summary>

@@ -19,7 +19,7 @@ public sealed class StructuredEvidenceLedgerPersister
         "^'(?<sheet>(?:''|[^'])+)'!(?<column>[A-Z]+)(?<row>[1-9][0-9]*)$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
     private static readonly Regex LegacyAddress = new(
-        "^row (?<row>[1-9][0-9]*)(?:, column (?<column>[A-Z]+))?$",
+        "^row (?<row>[1-9][0-9]*)(?:, column (?<column>[A-Z]+[0-9]*))?$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
 
     private readonly ErpRfqAutomationContext _context;
@@ -131,7 +131,8 @@ public sealed class StructuredEvidenceLedgerPersister
                 if (string.IsNullOrWhiteSpace(description))
                     description = canonical.ProductName.OriginalValue ?? "[missing product description]";
                 var line = CanonicalLineItem.Create(job.BusinessUnitId, inquiry.Id, lineIndex + 1,
-                    description, canonical.Quantity.Value > 0 ? canonical.Quantity.Value : null);
+                    description, canonical.Quantity.Value > 0 ? canonical.Quantity.Value : null,
+                    canonical.UnitOfMeasure.Value);
                 line.Enrich(canonical.ManufacturerName.Value, canonical.ManufacturerPartNumber.Value,
                     canonical.Currency.Value, ValueOrNull(canonical.UnitPrice), ValueOrNull(canonical.LeadTimeDays),
                     JsonSerializer.Serialize(canonical), MapLineStatus(canonical.ValidationStatus));
@@ -145,11 +146,13 @@ public sealed class StructuredEvidenceLedgerPersister
                 AddField(pendingFields, null, line, "LineItemNo", canonical.LineItemNo);
                 AddField(pendingFields, null, line, "ProductName", canonical.ProductName);
                 AddField(pendingFields, null, line, "Quantity", canonical.Quantity);
+                AddField(pendingFields, null, line, "UnitOfMeasure", canonical.UnitOfMeasure);
                 AddField(pendingFields, null, line, "UnitPrice", canonical.UnitPrice);
                 AddField(pendingFields, null, line, "Currency", canonical.Currency);
                 AddField(pendingFields, null, line, "ManufacturerName", canonical.ManufacturerName);
                 AddField(pendingFields, null, line, "ManufacturerPartNumber", canonical.ManufacturerPartNumber);
                 AddField(pendingFields, null, line, "LeadTimeDays", canonical.LeadTimeDays);
+                AddField(pendingFields, null, line, "ItemText", canonical.ItemText);
             }
             leadItemOffsets[lead.Id] += document.LineItems.Count;
         }
@@ -347,7 +350,7 @@ public sealed class StructuredEvidenceLedgerPersister
     private static int ColumnNumber(string letters)
     {
         var result = 0;
-        foreach (var letter in letters.ToUpperInvariant())
+        foreach (var letter in letters.TakeWhile(char.IsLetter).Select(char.ToUpperInvariant))
             result = checked(result * 26 + letter - 'A' + 1);
         return result;
     }

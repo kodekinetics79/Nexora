@@ -11,6 +11,7 @@ using System.Data;
 using System.Text.Json;
 using ERP_RFQ_Automation.Inventory.Commercial;
 using ERP_RFQ_Automation.CommercialRouting;
+using ERP_RFQ_Automation.LeadIdentity;
 
 namespace ERP_RFQ_Automation.Repositories
 {
@@ -476,88 +477,10 @@ namespace ERP_RFQ_Automation.Repositories
         // end-to-end chain Lead -> RFQ -> Quote -> Order -> Shipment is continuous.
         // Status literals (24 = Lead Accepted, 34 = RFQ Draft) follow existing code
         // convention; resolving these via SetupMaster codes is tracked as ARCH-03.
-        public async Task<(long RfqId, string Rfqno)> ConvertLeadToRfqAsync(long id, long businessUnitId, string createdBy)
+        public Task<(long RfqId, string Rfqno)> ConvertLeadToRfqAsync(long id, long businessUnitId, string createdBy)
         {
-            if (businessUnitId <= 0) throw new ArgumentOutOfRangeException(nameof(businessUnitId));
-            if (string.IsNullOrWhiteSpace(createdBy)) throw new ArgumentException("Authenticated actor is required.", nameof(createdBy));
-
-            var strategy = _context.Database.CreateExecutionStrategy();
-            try
-            {
-            return await strategy.ExecuteAsync(async () =>
-            {
-                _context.ChangeTracker.Clear();
-                await using var transaction = await _context.Database.BeginTransactionAsync(IsolationLevel.Serializable);
-                var lead = await _context.Leads
-                    .Include(l => l.LeadItems)
-                    .Include(l => l.LeadStatus)
-                    .FirstOrDefaultAsync(l => l.Id == id && l.BusinessUnitId == businessUnitId)
-                    ?? throw new KeyNotFoundException($"Lead with ID {id} not found in Business Unit {businessUnitId}.");
-
-                var lifecycleCode = LifecyclePolicy.Canonicalize("Lead", lead.LeadStatus?.SetupCode, lead.LeadStatus?.SetupValue);
-                var already = await _context.Rfqs
-                    .FirstOrDefaultAsync(r => r.LeadId == id && r.BusinessUnitId == businessUnitId);
-                if (already != null && lifecycleCode == "CONVERTED_TO_RFQ")
-                {
-                    already.InheritCommercialIdentity(lead);
-                    await _context.SaveChangesAsync();
-                    if (_lineResolution is not null)
-                    {
-                        await _lineResolution.ResolveLeadAsync(businessUnitId, lead.Id, 10);
-                        await _lineResolution.LinkRfqAsync(businessUnitId, lead.Id, already.Id);
-                    }
-                    await transaction.CommitAsync();
-                    return (already.Id, already.Rfqno);
-                }
-                // The shared gate every RFQ-creating door runs (this door, the intelligence
-                // conversion, and POST /api/Rfq with a LeadId) — one set of checks, one wording.
-                LeadConversionGate.EnsureEligible(lead);
-
-                if (_lineResolution is not null)
-                    await _lineResolution.ResolveLeadAsync(businessUnitId, lead.Id, 10);
-
-                var rfq = already ?? await CreateRfqFromLeadAsync(lead, businessUnitId, createdBy);
-                if (already == null)
-                {
-                    _context.Rfqs.Add(rfq);
-                    await _context.SaveChangesAsync();
-                }
-                else
-                {
-                    rfq.InheritCommercialIdentity(lead);
-                    await _context.SaveChangesAsync();
-                }
-
-                if (_lineResolution is not null)
-                    await _lineResolution.LinkRfqAsync(businessUnitId, lead.Id, rfq.Id);
-
-                var lifecycle = new LifecycleApplicationService(_context);
-                var actor = new LifecycleActor(createdBy.Trim(), "AuthenticatedUser");
-                await lifecycle.TransitionLeadInCurrentTransactionAsync(
-                    lead.BusinessUnitId, lead.Id, actor,
-                    new LifecycleTransitionCommand("CONVERTED_TO_RFQ", lead.LifecycleVersion, null, null,
-                        "Api", $"conversion-{lead.Id}", $"rfq-{rfq.Id}",
-                        $"lead-conversion:{lead.BusinessUnitId}:{lead.Id}"), false, default);
-                // Dedicated promotion event ALONGSIDE the generic transition, same transaction:
-                // consumers get the lead/RFQ/revision facts by name instead of parsing a
-                // status-transition payload.
-                await lifecycle.RecordLeadPromotedToRfqInCurrentTransactionAsync(
-                    lead.BusinessUnitId, lead.Id, rfq.Id, actor, $"conversion-{lead.Id}", default);
-                await transaction.CommitAsync();
-                return (rfq.Id, rfq.Rfqno);
-            });
-            }
-            catch (DbUpdateException ex) when (LeadConversionGate.IsDuplicateKey(ex))
-            {
-                // Lost the race against the RFQ."LeadID" partial unique index: another caller
-                // converted this lead between our existence check and our insert. The lead HAS
-                // its RFQ — resolve to it exactly as the read-then-return idempotent path would.
-                _context.ChangeTracker.Clear();
-                var winner = await _context.Rfqs.AsNoTracking()
-                    .FirstOrDefaultAsync(r => r.LeadId == id && r.BusinessUnitId == businessUnitId);
-                if (winner == null) throw; // Not our index after all — surface the truth.
-                return (winner.Id, winner.Rfqno);
-            }
+            return Task.FromException<(long RfqId, string Rfqno)>(new InvalidOperationException(
+                "Direct LeadRepository RFQ creation is retired. Commit the current Lead Revision participation decision and invoke RFQ Promotion."));
         }
 
         private async Task<Rfq> CreateRfqFromLeadAsync(Lead lead, long businessUnitId, string createdBy)
@@ -1520,20 +1443,23 @@ namespace ERP_RFQ_Automation.Repositories
                 ? StripNeedsReviewPrefix(lead.HeaderRemarks)
                 : lead.HeaderRemarks);
 
-            // Upsert items: match existing by Id, insert new (Id null/0), delete the rest.
+            // A review never mutates or deletes a canonical line already referenced by an
+            // immutable LeadRevision. Build a fresh current projection, archive the previous
+            // projection, then append a human revision below.
             var keptIds = items.Where(i => i.Id.HasValue && i.Id.Value > 0)
                                .Select(i => i.Id!.Value)
                                .ToHashSet();
-
-            var toRemove = lead.LeadItems.Where(li => !keptIds.Contains(li.Id)).ToList();
-            if (toRemove.Count > 0)
-                _context.LeadItems.RemoveRange(toRemove);
+            var previousProjection = lead.LeadItems.Where(li => li.IsCurrentRevisionProjection).ToList();
+            var toRemove = previousProjection.Where(li => !keptIds.Contains(li.Id)).ToList();
+            foreach (var previous in previousProjection) previous.IsCurrentRevisionProjection = false;
+            var replacementItems = new List<LeadItem>();
 
             foreach (var dto in items)
             {
+                LeadItem created;
                 if (dto.Id.HasValue && dto.Id.Value > 0)
                 {
-                    var existing = lead.LeadItems.FirstOrDefault(li => li.Id == dto.Id.Value);
+                    var existing = previousProjection.FirstOrDefault(li => li.Id == dto.Id.Value);
                     if (existing == null)
                         throw new LeadReviewConflictException($"Line item {dto.Id.Value} changed during review.");
 
@@ -1546,20 +1472,23 @@ namespace ERP_RFQ_Automation.Repositories
                             itemFieldChanges[field] = itemFieldChanges.TryGetValue(field, out var n) ? n + 1 : 1;
                     }
 
-                    ApplyItemFields(existing, dto);
+                    created = new LeadItem();
+                    _context.Entry(created).CurrentValues.SetValues(existing);
+                    created.Id = 0;
+                    created.EvidenceSourceLeadItemId = existing.EvidenceSourceLeadItemId ?? existing.Id;
                 }
                 else
                 {
-                    var created = new LeadItem { LeadId = lead.Id };
-                    ApplyItemFields(created, dto);
-                    lead.LeadItems.Add(created);
+                    created = new LeadItem { LeadId = lead.Id };
                     itemsAdded++;
                 }
+                created.IsCurrentRevisionProjection = true;
+                ApplyItemFields(created, dto);
+                replacementItems.Add(created);
+                lead.LeadItems.Add(created);
             }
 
-            // RemoveRange marks items Deleted but leaves them on the nav collection until save,
-            // so exclude them when recomputing the resulting line-item count.
-            lead.NoOfLineItems = lead.LeadItems.Count(li => !toRemove.Contains(li));
+            lead.NoOfLineItems = replacementItems.Count;
 
             if (lead.EmailIngests != null)
                 lead.EmailIngests.ParseStatus = action == "approve" ? "Success" : "NeedsReview";
@@ -1604,6 +1533,10 @@ namespace ERP_RFQ_Automation.Repositories
                 // AfterJson placeholder could reach the database: the row has never
                 // existed without its real after image.
                 await _context.SaveChangesAsync();
+                await new LeadIdentityApplicationService(_context).AppendHumanRevisionAsync(
+                    businessUnitId, lead.Id, reviewedBy.Trim(),
+                    string.IsNullOrWhiteSpace(review.Reason) ? $"Human extraction review: {action}." : review.Reason.Trim(),
+                    $"lead-review-revision:{businessUnitId}:{lead.Id}:{lead.ReviewVersion}");
                 var afterJson = SerializeReviewSnapshot(lead);
                 var audit = new LeadReviewAudit
                 {
@@ -1820,6 +1753,10 @@ namespace ERP_RFQ_Automation.Repositories
             try
             {
                 await _context.SaveChangesAsync();
+                await new LeadIdentityApplicationService(_context).AppendHumanRevisionAsync(
+                    businessUnitId, lead.Id, linkedBy.Trim(),
+                    string.IsNullOrWhiteSpace(request.Reason) ? "Human client identity link." : request.Reason.Trim(),
+                    $"lead-client-link-revision:{businessUnitId}:{lead.Id}:{lead.ReviewVersion}");
 
                 var audit = new LeadReviewAudit
                 {
@@ -2093,11 +2030,15 @@ namespace ERP_RFQ_Automation.Repositories
                 lead.ReviewApprovedOn,
                 ParseStatus = lead.EmailIngests?.ParseStatus,
                 Items = lead.LeadItems
-                    .Where(item => !removedIds.Contains(item.Id))
+                    .Where(item => item.IsCurrentRevisionProjection && !removedIds.Contains(item.Id))
                     .OrderBy(item => item.Id)
                     .Select(item => new
                     {
-                        item.Id,
+                        // A correction creates a new immutable projection row. Accuracy and
+                        // audit diffs must follow the logical evidence-bearing line, otherwise
+                        // every unchanged field is falsely counted as a deletion plus insertion.
+                        Id = item.EvidenceSourceLeadItemId ?? item.Id,
+                        ProjectionId = item.Id,
                         item.LineItemNo,
                         item.ProductShortName,
                         item.ProductShortDescription,

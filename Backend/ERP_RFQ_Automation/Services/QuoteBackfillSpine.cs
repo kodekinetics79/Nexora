@@ -49,6 +49,10 @@ public sealed class QuoteBackfillSpine
         string? externalQuoteReference,
         CancellationToken ct = default)
     {
+        await Task.CompletedTask;
+        throw new InvalidOperationException(
+            "Direct quote-backfill RFQ origination is retired. Import the historical inquiry as a canonical Lead Revision, record participation, and promote it before attaching the historical quote.");
+#pragma warning disable CS0162
         if (businessUnitId <= 0) throw new ArgumentOutOfRangeException(nameof(businessUnitId));
         if (customerId <= 0) throw new ArgumentOutOfRangeException(nameof(customerId));
         if (string.IsNullOrWhiteSpace(actor)) throw new ArgumentException("An actor is required.", nameof(actor));
@@ -100,11 +104,12 @@ public sealed class QuoteBackfillSpine
         };
         rfq.InheritCommercialIdentity(lead);
 
-        _db.Rfqs.Add(rfq);
-        await _db.SaveChangesAsync(ct);
+        throw new InvalidOperationException(
+            "Retired quote-backfill RFQ persistence path reached. Use RFQ Promotion.");
 
         // The quote inherits from the RFQ, which needs the lead reachable for SourceLeadRevision.
         rfq.Lead = lead;
         return rfq;
+#pragma warning restore CS0162
     }
 }

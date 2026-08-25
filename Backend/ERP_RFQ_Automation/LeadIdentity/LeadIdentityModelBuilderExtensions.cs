@@ -1,3 +1,4 @@
+using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.LeadIdentity;
@@ -54,6 +55,7 @@ public static class LeadIdentityModelBuilderExtensions
         modelBuilder.Entity<LeadRevision>(e =>
         {
             e.ToTable("LeadRevisions"); e.HasKey(x => x.Id); e.HasAlternateKey(x => new { x.BusinessUnitId, x.Id });
+            e.HasAlternateKey(x => new { x.BusinessUnitId, x.Id, x.LeadId });
             e.Property(x => x.LogicalInquiryFingerprint).HasMaxLength(64).IsFixedLength(); e.Property(x => x.SnapshotJson).HasColumnType("jsonb");
             e.Property(x => x.CustomerRfqReference).HasMaxLength(256); e.Property(x => x.NormalizedCustomerRfqReference).HasMaxLength(256);
             e.Property(x => x.CreatedBy).HasMaxLength(256); e.Property(x => x.ProcessingPath).HasConversion<string>().HasMaxLength(32);
@@ -65,9 +67,24 @@ public static class LeadIdentityModelBuilderExtensions
         modelBuilder.Entity<LeadItemRevision>(e =>
         {
             e.ToTable("LeadItemRevisions"); e.HasKey(x => x.Id); e.HasAlternateKey(x => new { x.BusinessUnitId, x.Id });
+            e.HasAlternateKey(x => new { x.BusinessUnitId, x.Id, x.LeadRevisionId, x.LeadId });
             e.Property(x => x.LineFingerprint).HasMaxLength(64).IsFixedLength(); e.Property(x => x.SnapshotJson).HasColumnType("jsonb");
             e.HasIndex(x => new { x.BusinessUnitId, x.LeadRevisionId, x.LineNumber }).IsUnique();
-            e.HasOne(x => x.Revision).WithMany(x => x.Items).HasForeignKey(x => new { x.BusinessUnitId, x.LeadRevisionId }).HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+            e.HasOne(x => x.Revision).WithMany(x => x.Items)
+                .HasForeignKey(x => new { x.BusinessUnitId, x.LeadRevisionId, x.LeadId })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id, x.LeadId }).OnDelete(DeleteBehavior.Restrict);
+            e.HasOne(x => x.LeadItem).WithMany()
+                .HasForeignKey(x => new { x.LeadId, x.LeadItemId })
+                .HasPrincipalKey(x => new { x.LeadId, x.Id }).OnDelete(DeleteBehavior.Restrict);
+        });
+        modelBuilder.Entity<LeadItem>(e =>
+        {
+            e.Property(x => x.IsCurrentRevisionProjection).HasDefaultValue(true);
+            e.HasIndex(x => new { x.LeadId, x.IsCurrentRevisionProjection });
+            e.HasIndex(x => new { x.LeadId, x.EvidenceSourceLeadItemId });
+            e.HasOne<LeadItem>().WithMany()
+                .HasForeignKey(x => new { x.LeadId, x.EvidenceSourceLeadItemId })
+                .HasPrincipalKey(x => new { x.LeadId, x.Id }).OnDelete(DeleteBehavior.Restrict);
         });
         modelBuilder.Entity<LeadRevisionDifference>(e =>
         {
