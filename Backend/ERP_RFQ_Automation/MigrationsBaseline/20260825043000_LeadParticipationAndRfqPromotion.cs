@@ -37,6 +37,14 @@ public partial class LeadParticipationAndRfqPromotion : Migration
             ALTER TABLE "LeadItems" ADD COLUMN IF NOT EXISTS "IsCurrentRevisionProjection" boolean NOT NULL DEFAULT TRUE;
             ALTER TABLE "LeadItems" ADD COLUMN IF NOT EXISTS "EvidenceSourceLeadItemId" bigint NULL;
 
+            -- Release 01A already protects this ledger with an append-only trigger. This
+            -- migration must backfill the new lineage columns on existing rows, so suspend
+            -- that one guard only for the controlled, transactional backfill. PostgreSQL
+            -- rolls the trigger state back automatically if any later migration statement
+            -- fails; we also restore it immediately after the backfill succeeds.
+            ALTER TABLE public."LeadItemRevisions"
+                DISABLE TRIGGER trg_lead_item_revisions_append_only;
+
             UPDATE "LeadItemRevisions" line
             SET "LeadId" = revision."LeadId"
             FROM "LeadRevisions" revision
@@ -64,6 +72,9 @@ public partial class LeadParticipationAndRfqPromotion : Migration
             FROM exact_candidates candidate
             WHERE candidate.line_id = line."Id" AND candidate.candidate_count = 1
               AND line."LeadItemId" IS NULL;
+
+            ALTER TABLE public."LeadItemRevisions"
+                ENABLE TRIGGER trg_lead_item_revisions_append_only;
 
             ALTER TABLE "LeadItemRevisions" ALTER COLUMN "LeadId" SET NOT NULL;
 
