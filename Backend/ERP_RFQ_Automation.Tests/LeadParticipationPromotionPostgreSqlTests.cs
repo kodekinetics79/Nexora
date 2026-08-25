@@ -112,12 +112,99 @@ public sealed class LeadParticipationPromotionMigrationRollbackPostgreSqlTests
         await using var context = new ErpRfqAutomationContext(options, new StubTenant(null));
         var migrator = context.GetService<IMigrator>();
 
+        // Reproduce the production upgrade shape at the supported squashed baseline: an
+        // immutable LeadItemRevision already exists when the focused migration starts. An
+        // empty database cannot exercise the backfill that failed on Render because UPDATE
+        // touches no rows there.
+        await migrator.MigrateAsync(PriorMigration);
+        await SeedHistoricalLeadWithLineAsync(container.GetConnectionString());
         await migrator.MigrateAsync(TargetMigration);
         Assert.True(await TableExistsAsync(container.GetConnectionString(), "RfqPromotions"));
+        await AssertHistoricalLineageWasBackfilledAndResealedAsync(container.GetConnectionString());
         await migrator.MigrateAsync(PriorMigration);
         Assert.False(await TableExistsAsync(container.GetConnectionString(), "RfqPromotions"));
         await migrator.MigrateAsync(TargetMigration);
         Assert.True(await TableExistsAsync(container.GetConnectionString(), "RfqPromotions"));
+        await AssertHistoricalLineageWasBackfilledAndResealedAsync(container.GetConnectionString());
+    }
+
+    private static async Task SeedHistoricalLeadWithLineAsync(string connectionString)
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand("""
+            INSERT INTO "BusinessUnits"
+                ("ID", "BusinessUnitCode", "BusinessUnitName", "CreatedBy", "CreatedOn")
+            VALUES (99201, 'RENDER-UPGRADE', 'Render upgrade regression', 'tests', now());
+
+            INSERT INTO "Leads"
+                ("ID", "BusinessUnitID", "RFQNo", "BuyersName", "RecDate", "LeadSource", "CreatedBy")
+            VALUES (99201, 99201, 'RENDER-UPGRADE-RFQ', 'Migration Buyer', now(), 'Email', 'tests');
+
+            INSERT INTO "LeadItems"
+                ("ID", "LeadID", "LineItemNo", "ManufacturerPartNumber", "ProductShortDescription",
+                 "Quantity", "UnitOfMeasure")
+            VALUES (99202, 99201, '10', 'PART-99201', 'Migration regression line', 2, 'EA');
+
+            INSERT INTO "LeadIngestionBatches"
+                ("Id", "BusinessUnitId", "SourceChannel", "CreatedBy", "CreatedAtUtc", "UpdatedAtUtc", "Version")
+            VALUES ('00000000-0000-0000-0000-000000099201'::uuid, 99201, 'MigrationTest',
+                    'tests', now(), now(), 1);
+
+            INSERT INTO "LeadIngestionOccurrences"
+                ("Id", "RecordKind", "BusinessUnitId", "BatchId", "LeadId", "SourceChannel",
+                 "IdempotencyKey", "LogicalInquiryFingerprint", "Classification", "Confidence",
+                 "DecisionReasonsJson", "PolicyVersion", "ProcessingPath", "ExternalAiUsed",
+                 "IngestedAtUtc", "CreatedAtUtc", "ActorType", "ActorId", "CorrelationId", "Version")
+            VALUES (99203, 'Ingestion', 99201, '00000000-0000-0000-0000-000000099201'::uuid,
+                    99201, 'MigrationTest', 'render-upgrade-occurrence', repeat('a', 64), 'New', 1,
+                    '[]'::jsonb, 'render-upgrade/v1', 'Deterministic', false, now(), now(),
+                    'TestFixture', 'tests', 'render-upgrade', 1);
+
+            INSERT INTO "LeadRevisions"
+                ("Id", "BusinessUnitId", "LeadId", "RevisionNumber", "EstablishedByOccurrenceId",
+                 "LogicalInquiryFingerprint", "SnapshotJson", "CreatedAtUtc", "CreatedBy",
+                 "ProcessingPath", "ExternalAiUsed")
+            VALUES (99204, 99201, 99201, 1, 99203, repeat('b', 64), '{}'::jsonb,
+                    now(), 'tests', 'Deterministic', false);
+
+            INSERT INTO "LeadItemRevisions"
+                ("Id", "BusinessUnitId", "LeadRevisionId", "LineNumber", "LineFingerprint", "SnapshotJson")
+            VALUES (99205, 99201, 99204, 1, repeat('c', 64), jsonb_build_object(
+                    'line', '10', 'part', 'part99201', 'description', 'migrationregressionline',
+                    'quantity', 2, 'uom', 'EA'));
+            """, connection);
+        await command.ExecuteNonQueryAsync();
+    }
+
+    private static async Task AssertHistoricalLineageWasBackfilledAndResealedAsync(string connectionString)
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+
+        await using (var lineage = new NpgsqlCommand("""
+            SELECT line."LeadId", trigger.tgenabled
+            FROM "LeadItemRevisions" line
+            JOIN pg_trigger trigger
+              ON trigger.tgrelid = 'public."LeadItemRevisions"'::regclass
+             AND trigger.tgname = 'trg_lead_item_revisions_append_only'
+            WHERE line."BusinessUnitId" = 99201;
+            """, connection))
+        await using (var reader = await lineage.ExecuteReaderAsync())
+        {
+            Assert.True(await reader.ReadAsync());
+            Assert.Equal(99201L, reader.GetInt64(0));
+            Assert.Equal('O', reader.GetChar(1));
+            Assert.False(await reader.ReadAsync());
+        }
+
+        await using var forbiddenUpdate = new NpgsqlCommand("""
+            UPDATE "LeadItemRevisions"
+            SET "SnapshotJson" = "SnapshotJson"
+            WHERE "BusinessUnitId" = 99201;
+            """, connection);
+        var error = await Assert.ThrowsAsync<PostgresException>(() => forbiddenUpdate.ExecuteNonQueryAsync());
+        Assert.Contains("append-only", error.MessageText, StringComparison.OrdinalIgnoreCase);
     }
 
     private static async Task<bool> TableExistsAsync(string connectionString, string table)
