@@ -396,10 +396,10 @@ export async function loadQueue(key: QueueKey, businessUnitId?: number): Promise
       return (page.items ?? [])
         .map((row) => ({
           id: row.id,
-          reference: row.rfqno || `Enquiry ${row.leadId}`,
+          reference: row.rfqno || `Enquiry ${row.id}`,
           party: row.customerName || row.buyersName || 'Customer not resolved',
           detail: ageInHoursPhrase(row.unassignedHours) ?? formatDateSafe(row.acceptedDate),
-          path: `/procurement/leads/view/${row.leadId}`,
+          path: `/procurement/leads/view/${row.id}`,
           actionLabel: 'Open it',
           sortKey: row.acceptedDate,
         }))

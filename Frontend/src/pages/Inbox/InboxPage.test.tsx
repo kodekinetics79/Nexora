@@ -60,7 +60,7 @@ vi.mock('../../api/services/customerAwardService', () => ({
   default: { searchPurchaseOrders: (...args: unknown[]) => api.clientPos(...args) },
 }));
 
-import InboxPage from './InboxPage';
+import InboxPage, { loadQueue } from './InboxPage';
 
 const empty = { items: [], totalCount: 0, pageNumber: 1, pageSize: 25 };
 
@@ -99,6 +99,32 @@ afterEach(() => {
 });
 
 describe('what is waiting on you', () => {
+  it('opens an unassigned inquiry with the authoritative Lead id returned by the API', async () => {
+    api.outstandingLeads.mockResolvedValue({
+      ...empty,
+      items: [
+        {
+          id: 412,
+          rfqno: 'P34086',
+          buyersName: 'Zahid Khan',
+          acceptedDate: '2026-08-23T12:00:00Z',
+          unassignedHours: 48,
+        },
+      ],
+    });
+
+    const items = await loadQueue('leads-to-own');
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      id: 412,
+      reference: 'P34086',
+      path: '/procurement/leads/view/412',
+      actionLabel: 'Open it',
+    });
+    expect(items[0].path).not.toContain('undefined');
+  });
+
   it('counts the work and says so in a sentence, not in a chart', async () => {
     api.needsReview.mockResolvedValue({
       ...empty,
