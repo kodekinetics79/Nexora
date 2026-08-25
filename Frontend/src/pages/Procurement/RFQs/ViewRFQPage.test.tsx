@@ -21,7 +21,6 @@ vi.mock('../../../api/services/rfqService', () => ({
     getById: (...args: unknown[]) => getRfq(...args),
     approve: vi.fn(),
     prepareQuoteDraft: vi.fn(),
-    setLineParticipation: vi.fn(),
   },
 }));
 vi.mock('../../../api/services/procurementService', () => ({
@@ -196,27 +195,35 @@ describe('ViewRFQPage — line identity', () => {
   });
 });
 
-/**
- * Two populations feed this screen and they are both right: the tiles count every line, the
- * readiness score judges only the lines marked for quote. Saying neither is what made them look
- * like a contradiction.
- */
-describe('ViewRFQPage — the two denominators are stated', () => {
-  it('discloses the marked-for-quote scope on a partial bid', async () => {
+describe('ViewRFQPage — immutable promotion lineage', () => {
+  it('shows the receipt, Lead revision, participation version, and source-line trace supplied by the API', async () => {
     getRfq.mockResolvedValue(rfq({
-      rfqitems: [line(1, { participationDecision: 'Quote' }), line(2), line(3)],
+      promotionId: 901,
+      sourceLeadRevisionId: 5502,
+      sourceLeadRevisionNumber: 2,
+      participationDecisionId: 333,
+      participationVersion: 4,
+      promotedAtUtc: '2026-08-24T12:00:00Z',
+      promotedBy: 'Bid Manager',
+      rfqitems: [line(1, { sourceLeadItemRevisionId: 55101 })],
     }));
     render(<ViewRFQPage />, { wrapper });
 
-    expect(await screen.findByText(/Judged over the 1 of 3 lines marked for quote/)).toBeInTheDocument();
-    expect(screen.getByText('Ready for quote of 1 marked for quote')).toBeInTheDocument();
+    expect(await screen.findByText('Governed promotion receipt')).toBeInTheDocument();
+    expect(screen.getByText('Revision 2')).toBeInTheDocument();
+    expect(screen.getByText('Version 4')).toBeInTheDocument();
+    expect(screen.getByText('#901')).toBeInTheDocument();
+    expect(screen.getByText('Immutable source record #55101')).toBeInTheDocument();
+    expect(screen.queryByText('Revision line #55101')).not.toBeInTheDocument();
+    expect(screen.queryByText('Quote?')).not.toBeInTheDocument();
   });
 
-  it('claims no marked-for-quote scope on an RFQ nobody has triaged', async () => {
+  it('states that lineage is unavailable instead of inferring it for a legacy RFQ', async () => {
     render(<ViewRFQPage />, { wrapper });
 
-    await screen.findAllByText('RFQ-9001');
-    expect(screen.queryByText(/marked for quote/)).not.toBeInTheDocument();
+    expect(await screen.findByText('Promotion receipt unavailable')).toBeInTheDocument();
+    expect(screen.getByText(/immutable source lineage cannot be claimed/i)).toBeInTheDocument();
+    expect(screen.getAllByText('Trace unavailable')).toHaveLength(3);
     expect(screen.getByText('Ready for quote of 3 lines')).toBeInTheDocument();
   });
 });

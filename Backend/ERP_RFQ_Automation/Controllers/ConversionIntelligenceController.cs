@@ -51,43 +51,16 @@ public class ConversionIntelligenceController : ControllerBase
         }
     }
 
-    /// <summary>Convert the lead into an RFQ applying the request's per-line choices.</summary>
+    /// <summary>Compatibility route. Decisions and promotion now use the governed participation API.</summary>
     [HttpPost("{id}/convert")]
     [RequireModulePermission("Leads", PermissionAction.Create)]
     [RequireModulePermission("RFQ Management", PermissionAction.Create)]
-    public async Task<ActionResult> Convert(long id, [FromBody] ConvertRequest request, CancellationToken ct)
+    public ActionResult Convert(long id, [FromBody] ConvertRequest request, CancellationToken ct)
     {
-        try
-        {
-            if (!TryGetAuthenticatedBusinessUnitId(out var businessUnitId))
-                return BadRequest(Problem(StatusCodes.Status400BadRequest, "Invalid request",
-                    "Business Unit ID is required."));
-
-            request ??= new ConvertRequest();
-            request.ActingUser = User.Identity?.Name ?? "System";
-
-            var rfqId = await _intelligence.ConvertAsync(id, businessUnitId, request, ct);
-            return Ok(new { rfqId });
-        }
-        catch (KeyNotFoundException ex)
-        {
-            return NotFound(Problem(StatusCodes.Status404NotFound, "Lead not found", ex.Message));
-        }
-        catch (InvalidOperationException ex)
-        {
-            // Conversion gates (lifecycle, duplicate flag, unreviewed AI facts, missing
-            // inquiry fields). The messages are written for the user and safe to render.
-            return Conflict(Problem(StatusCodes.Status409Conflict, "Lead not converted", ex.Message));
-        }
-        catch (ArgumentException ex)
-        {
-            return BadRequest(Problem(StatusCodes.Status400BadRequest, "Lead not converted", ex.Message));
-        }
-        catch (Exception ex)
-        {
-            return InternalError(ex, "Lead conversion failed.",
-                "The lead could not be converted to an RFQ.");
-        }
+        return Conflict(Problem(
+            StatusCodes.Status409Conflict,
+            "Participation decision required",
+            $"Direct intelligence-to-RFQ conversion is retired. Use /api/leads/{id}/participation to commit the current revision decision and promote approved Bid lines."));
     }
 
     private bool TryGetAuthenticatedBusinessUnitId(out long businessUnitId) =>

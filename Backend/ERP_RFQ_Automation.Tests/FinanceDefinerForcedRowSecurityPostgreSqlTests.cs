@@ -495,7 +495,11 @@ public sealed class FinanceDefinerForcedRowSecurityPostgreSqlTests(ForcedRowSecu
         // extracted customer content — the single worst table in the schema to leave readable
         // across tenants, and the one a migration is most likely to add without a policy because
         // the tables it hangs off already have theirs.
-        Assert.Equal(224L, await CountAsync("pg_policy", "polname = 'nexora_tenant_isolation'"));
+        //
+        // 224 -> 228 with fit assessments, participation decisions, participation line decisions
+        // and RFQ promotions. These four commercial-decision ledgers are tenant-owned and each
+        // receives the same forced tenant-isolation policy in the focused promotion migration.
+        Assert.Equal(228L, await CountAsync("pg_policy", "polname = 'nexora_tenant_isolation'"));
         Assert.Equal(300L, await CountAsync("pg_policy",
             "polname IN ('nexora_definer_tenant_read','nexora_definer_tenant_insert','nexora_definer_tenant_update')"));
 

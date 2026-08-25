@@ -25,6 +25,8 @@ using ERP_RFQ_Automation.Platform.Notifications;
 using ERP_RFQ_Automation.Platform.DataAssets;
 using ERP_RFQ_Automation.Platform.Auth;
 using ERP_RFQ_Automation.Security.PasswordReset;
+using ERP_RFQ_Automation.CommercialCases.Participation;
+using ERP_RFQ_Automation.CommercialCases.Promotion;
 using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.Models;
@@ -89,6 +91,8 @@ public partial class ErpRfqAutomationContext
         modelBuilder.ConfigureBankReconciliation();
         modelBuilder.ConfigureOrderToCash();
         modelBuilder.ConfigureLeadIdentity();
+        modelBuilder.ConfigureLeadParticipation();
+        modelBuilder.ConfigureRfqPromotion();
         // The message-level aggregate that makes one email one coherent Lead. Configured
         // alongside LeadIdentity because it is the gate in front of it: nothing reconciles a
         // Lead for an emailed message until the assembly says every expected part is terminal.
@@ -175,6 +179,10 @@ public partial class ErpRfqAutomationContext
         modelBuilder.Entity<LeadMatchCandidate>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<LeadIdentityAuditEvent>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<LeadRevisionImpact>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<LeadFitAssessment>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<LeadParticipationDecision>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<LeadLineParticipationDecision>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<RfqPromotion>().HasQueryFilter(e => CurrentTenantId == null || e.BusinessUnitId == CurrentTenantId);
 
         // Foreign-exchange authority (Fx/). These two tables decide what rate a customer's quote
         // is converted at, so a tenant-crossing read is a commercial data leak, not a schema nit.
@@ -188,7 +196,8 @@ public partial class ErpRfqAutomationContext
         // Dependent commercial rows inherit the tenant boundary from their required
         // aggregate root. Keep these filters aligned with the PostgreSQL parent-derived
         // RLS policies so non-PostgreSQL test/provider paths retain the same isolation.
-        modelBuilder.Entity<LeadItem>().HasQueryFilter(e => CurrentTenantId == null || e.Lead.BusinessUnitId == CurrentTenantId);
+        modelBuilder.Entity<LeadItem>().HasQueryFilter(e => e.IsCurrentRevisionProjection
+            && (CurrentTenantId == null || e.Lead.BusinessUnitId == CurrentTenantId));
         modelBuilder.Entity<Rfqitem>().HasQueryFilter(e => CurrentTenantId == null || e.Rfq != null && e.Rfq.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<QuoteItem>().HasQueryFilter(e => CurrentTenantId == null || e.Quote.BusinessUnitId == CurrentTenantId);
         modelBuilder.Entity<OrderItem>().HasQueryFilter(e => CurrentTenantId == null || e.Order.BusinessUnitId == CurrentTenantId);

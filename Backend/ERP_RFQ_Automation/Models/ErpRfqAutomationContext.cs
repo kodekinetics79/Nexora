@@ -551,6 +551,7 @@ public partial class ErpRfqAutomationContext : DbContext
         modelBuilder.Entity<LeadItem>(entity =>
         {
             entity.HasKey(e => e.Id).HasName("PK__LeadItem__3214EC2776894FBF");
+            entity.HasAlternateKey(e => new { e.LeadId, e.Id });
 
             entity.HasIndex(e => e.BidClosingDateLine, "IX_LeadItems_BidClosingDateLine");
 

@@ -58,6 +58,8 @@ const PossibleMatchesPage = lazy(() => import('./pages/Leads/PossibleMatchesPage
 const DuplicateUploadsPage = lazy(() => import('./pages/Leads/DuplicateUploadsPage'));
 const InboundMailTriagePage = lazy(() => import('./pages/Leads/InboundMailTriagePage'));
 const LeadDetailPage = lazy(() => import('./pages/Leads/LeadDetailPage'));
+const LeadDecisionWorkbenchPage = lazy(() => import('./pages/Leads/Workbench/LeadDecisionWorkbenchPage'));
+const LeadConvertRedirectPage = lazy(() => import('./pages/Leads/Workbench/LeadConvertRedirectPage'));
 const CommercialCaseWorkspacePage = lazy(() => import('./pages/CommercialCases/CommercialCaseWorkspacePage'));
 const ExtractionReviewPage = lazy(() => import('./pages/ExtractionReview/ExtractionReviewPage'));
 const ExtractionReviewDetailPage = lazy(() => import('./pages/ExtractionReview/ExtractionReviewDetailPage'));
@@ -103,7 +105,6 @@ const SourcingTodayPage = lazy(() => import('./pages/Today/SourcingTodayPage'));
 const TenantAdminOperationsPage = lazy(() => import('./pages/Today/TenantAdminOperationsPage'));
 
 // Intelligence surfaces — AI-assisted Lead→RFQ conversion and RFQ smart pricing.
-const LeadConvertPage = lazy(() => import('./pages/Intelligence/LeadConvertPage'));
 const RfqPricingPage = lazy(() => import('./pages/Intelligence/RfqPricingPage'));
 const CommercialMemoryPage = lazy(() => import('./pages/Intelligence/CommercialMemoryPage'));
 const HumanActionCenterPage = lazy(() => import('./pages/PlatformGovernance/HumanActionCenterPage'));
@@ -351,7 +352,8 @@ function App() {
       <Route path="/procurement/leads/watched-folders" element={<MainLayout><PermissionGuard moduleName="Leads"><WatchedFoldersPage /></PermissionGuard></MainLayout>} />
       <Route path="/procurement/leads/folder-upload" element={<Navigate to="/procurement/leads/watched-folders" replace />} />
       <Route path="/procurement/leads/view/:id" element={<MainLayout><PermissionGuard moduleName="Leads"><LeadDetailPage /></PermissionGuard></MainLayout>} />
-      <Route path="/procurement/leads/:id/convert" element={<MainLayout><PermissionGuard moduleName="Leads"><LeadConvertPage /></PermissionGuard></MainLayout>} />
+      <Route path="/procurement/leads/:id/workbench" element={<MainLayout><PermissionGuard moduleName="Leads"><LeadDecisionWorkbenchPage /></PermissionGuard></MainLayout>} />
+      <Route path="/procurement/leads/:id/convert" element={<MainLayout><PermissionGuard moduleName="Leads"><LeadConvertRedirectPage /></PermissionGuard></MainLayout>} />
       <Route path="/commercial-cases/:id?" element={<MainLayout><PermissionGuard moduleName="Leads"><CommercialCaseWorkspacePage /></PermissionGuard></MainLayout>} />
       
       {/* Short Lead Routes */}

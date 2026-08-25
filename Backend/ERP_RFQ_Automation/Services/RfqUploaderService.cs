@@ -74,8 +74,8 @@ namespace ERP_RFQ_Automation.Services
         /// defect this closes (every upload returned 500 against PostgreSQL).
         /// </summary>
         public Task<ServiceResult<string>> UploadTemplateAsync(Stream fileStream, long businessUnitId, string createdBy) =>
-            ERP_RFQ_Automation.Infrastructure.RetriableUploadTransaction.ExecuteAsync(
-                _context, fileStream, () => UploadTemplateCoreAsync(fileStream, businessUnitId, createdBy));
+            Task.FromResult(ServiceResult<string>.CreateFailure(
+                "Direct spreadsheet-to-RFQ creation is retired. Use governed Lead intake and RFQ Promotion."));
 
         private async Task<ServiceResult<string>> UploadTemplateCoreAsync(Stream fileStream, long businessUnitId, string createdBy)
         {
@@ -152,8 +152,8 @@ namespace ERP_RFQ_Automation.Services
                         NoOfLineItems = document.LineItems.Count
                     };
 
-                    _context.Rfqs.Add(rfq);
-                    await _context.SaveChangesAsync();
+                    throw new InvalidOperationException(
+                        "Retired direct RFQ persistence path reached. Use governed Lead intake and RFQ Promotion.");
 
                     foreach (var canonicalItem in document.LineItems)
                     {

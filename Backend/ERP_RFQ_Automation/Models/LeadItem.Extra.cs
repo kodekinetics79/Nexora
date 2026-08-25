@@ -9,6 +9,20 @@ namespace ERP_RFQ_Automation.Models;
 public partial class LeadItem
 {
     /// <summary>
+    /// True only for the Lead's current mutable projection. Superseded rows remain retained so
+    /// immutable LeadItemRevision records never lose their exact canonical-line foreign key.
+    /// </summary>
+    public bool IsCurrentRevisionProjection { get; set; } = true;
+
+    /// <summary>
+    /// The immutable canonical LeadItem whose extraction evidence supports this projection.
+    /// Null means this row is itself the evidence-bearing item. Human corrections clone a row
+    /// rather than mutating it and carry this pointer forward, so the new revision keeps exact
+    /// source lineage without rebinding append-only FieldEvidence.
+    /// </summary>
+    public long? EvidenceSourceLeadItemId { get; set; }
+
+    /// <summary>
     /// Verbatim capture of unrecognized customer-document columns for this line item,
     /// stored as a jsonb object of {"original column header": "cell value"}. Null when
     /// the source document had no unmapped columns. Column type is configured in

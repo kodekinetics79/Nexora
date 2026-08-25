@@ -119,36 +119,18 @@ public class LeadController : ControllerBase
         }
     }
 
-    // ARCH-01: convert an accepted lead into a real RFQ (closes the Lead -> RFQ gap).
+    // Compatibility route retained so older clients receive an actionable response instead
+    // of silently bypassing the revision-bound participation decision.
     [HttpPost("{id}/convert-to-rfq")]
     [RequireModulePermission("Leads", PermissionAction.Create)]
-    public async Task<ActionResult> ConvertLeadToRfq(long id)
+    public ActionResult ConvertLeadToRfq(long id)
     {
-        try
+        return Conflict(new
         {
-            var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
-            if (businessUnitId == 0) return BadRequest("Business Unit ID is required.");
-
-            var createdBy = User.FindFirstValue(ClaimTypes.NameIdentifier)
-                ?? User.FindFirstValue(ClaimTypes.Email)
-                ?? User.Identity?.Name
-                ?? string.Empty;
-            if (string.IsNullOrWhiteSpace(createdBy)) return Unauthorized();
-            var (rfqId, rfqno) = await _repository.ConvertLeadToRfqAsync(id, businessUnitId, createdBy);
-            return Ok(new { rfqId, rfqno, message = $"Lead converted to RFQ {rfqno}." });
-        }
-        catch (KeyNotFoundException ex)
-        {
-            return NotFound(ex.Message);
-        }
-        catch (InvalidOperationException ex)
-        {
-            return Conflict(ex.Message);
-        }
-        catch (Exception ex)
-        {
-            return Unexpected(ex, "convert");
-        }
+            code = "PARTICIPATION_REQUIRED",
+            message = "Direct lead-to-RFQ conversion is retired. Commit the current Lead Revision participation decision, then promote its approved Bid lines.",
+            participationUrl = $"/api/leads/{id}/participation"
+        });
     }
 
     [HttpGet("rejection-reasons")]

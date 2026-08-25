@@ -137,6 +137,16 @@ public sealed class AuthoritativeEvidencePostgreSqlTests
                 fieldEvidenceId = evidence.Id;
                 Assert.StartsWith("'CSV'!E", evidence.Region.SourceAddress);
                 Assert.True(evidence.Region.RowNumber >= 2);
+                var quoteCriticalEvidence = await context.Set<FieldEvidence>()
+                    .Include(x => x.Region)
+                    .Where(x => x.BusinessUnitId == tenantId
+                        && (x.FieldName == "Quantity" || x.FieldName == "UnitOfMeasure"))
+                    .ToListAsync();
+                Assert.Equal(4, quoteCriticalEvidence.Count);
+                Assert.All(quoteCriticalEvidence,
+                    field => Assert.False(string.IsNullOrWhiteSpace(field.Region.SourceAddress)));
+                Assert.All(quoteCriticalEvidence.Where(x => x.FieldName == "Quantity"),
+                    field => Assert.False(string.IsNullOrWhiteSpace(field.RawValue)));
 
                 var job = await context.Set<ExtractionJob>().SingleAsync(x => x.Id == jobId);
                 Assert.Equal(ExtractionStatus.Succeeded, job.Status);

@@ -80,15 +80,16 @@ public sealed class CommercialLineResolutionApplicationService(
 
         var batchId = Guid.NewGuid();
 
-        var canonicalLines = lead.LeadItems.OrderBy(item => item.Id).ToArray();
+        var canonicalLines = lead.LeadItems.ToDictionary(item => item.Id);
         foreach (var line in revision.Items.OrderBy(x => x.LineNumber))
         {
             var prior = latest.FirstOrDefault(x => x.LeadLineId == line.Id);
             if (!forceRefresh && prior is not null && prior.ResourceLimit >= resourceLimit) continue;
             var storedSnapshot = ParseSnapshot(line.SnapshotJson);
-            var canonical = canonicalLines.FirstOrDefault(item =>
-                    int.TryParse(item.LineItemNo, out var number) && number == line.LineNumber)
-                ?? canonicalLines.ElementAtOrDefault(Math.Max(0, line.LineNumber - 1));
+            var canonical = line.LeadItemId.HasValue
+                && canonicalLines.TryGetValue(line.LeadItemId.Value, out var linkedItem)
+                    ? linkedItem
+                    : null;
             var snapshot = canonical is null
                 ? storedSnapshot
                 : new LineSnapshot(

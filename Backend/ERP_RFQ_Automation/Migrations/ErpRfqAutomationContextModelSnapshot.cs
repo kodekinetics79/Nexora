@@ -31,7 +31,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("PeriodStartUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("HardTokenLimit")
                         .HasColumnType("bigint");
@@ -46,7 +46,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("UpdatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("Version")
                         .IsConcurrencyToken()
@@ -74,7 +74,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("CompletedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("ErrorCode")
                         .HasMaxLength(100)
@@ -118,7 +118,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .IsFixedLength();
 
                     b.Property<DateTime>("StartedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Status")
                         .IsRequired()
@@ -166,7 +166,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("AuthorizedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("BusinessUnitId")
                         .HasColumnType("bigint");
@@ -177,7 +177,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ExpiresOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Justification")
                         .IsRequired()
@@ -206,13 +206,13 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime?>("RevokedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<bool>("UnstructuredDocumentsAllowed")
                         .HasColumnType("boolean");
 
                     b.Property<DateTime>("UpdatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("Version")
                         .IsConcurrencyToken()
@@ -330,7 +330,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("UpdatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("Version")
                         .IsConcurrencyToken()
@@ -356,7 +356,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime?>("CompletedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("CostCurrency")
                         .HasMaxLength(3)
@@ -372,7 +372,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(32)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("ErrorCode")
                         .HasMaxLength(100)
@@ -463,7 +463,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime?>("StartedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Status")
                         .IsRequired()
@@ -515,7 +515,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<long?>("CurrencyId")
@@ -541,7 +541,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("UpdatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.HasKey("Id");
@@ -566,7 +566,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<string>("DecidedBy")
@@ -577,7 +577,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime?>("DecidedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("InputJson")
                         .IsRequired()
@@ -612,7 +612,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("UpdatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.HasKey("Id");
@@ -641,7 +641,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<string>("Decision")
@@ -685,7 +685,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<string>("Role")
@@ -735,7 +735,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<string>("Title")
@@ -745,7 +745,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("UpdatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.HasKey("Id");
@@ -775,7 +775,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<long?>("CurrencyId")
@@ -874,11 +874,11 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<DateTime?>("DueOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("IdempotencyKey")
                         .IsRequired()
@@ -905,13 +905,13 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasDefaultValue("[]");
 
                     b.Property<DateTime?>("RespondedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("RfqId")
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("SentOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("SourcingCaseId")
                         .HasColumnType("bigint");
@@ -930,7 +930,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("UpdatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<long>("Version")
@@ -989,7 +989,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("CurrencyId")
                         .HasColumnType("bigint");
@@ -1018,7 +1018,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(160)");
 
                     b.Property<DateTime>("OpeningDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("RequestHash")
                         .IsRequired()
@@ -1035,7 +1035,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("StatusChangedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("StatusReason")
                         .HasMaxLength(500)
@@ -1074,7 +1074,7 @@ namespace ERP_RFQ_Automation.Migrations
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
 
                     b.Property<DateTime>("AccountingDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("AccountingPeriodId")
                         .HasColumnType("bigint");
@@ -1093,7 +1093,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ApprovedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("BankAccountId")
                         .HasColumnType("bigint");
@@ -1116,7 +1116,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("CancelledOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Description")
                         .IsRequired()
@@ -1142,14 +1142,14 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("PreparedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("RejectedBy")
                         .HasMaxLength(255)
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("RejectedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("RejectionReason")
                         .HasMaxLength(500)
@@ -1179,7 +1179,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ReversedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Status")
                         .IsRequired()
@@ -1191,7 +1191,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("SubmittedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("Version")
                         .IsConcurrencyToken()
@@ -1282,7 +1282,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ActivatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<decimal>("AmountTolerance")
                         .HasPrecision(18, 2)
@@ -1293,7 +1293,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ApprovedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("BankAccountId")
                         .HasColumnType("bigint");
@@ -1315,7 +1315,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("DefinitionHash")
                         .IsRequired()
@@ -1370,7 +1370,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("RetiredOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<int>("RuleVersion")
                         .HasColumnType("integer");
@@ -1448,10 +1448,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("numeric(18,2)");
 
                     b.Property<DateTime>("PeriodEnd")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime>("PeriodStart")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("StatementReference")
                         .IsRequired()
@@ -1509,7 +1509,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("ImportedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("OriginalFileName")
                         .IsRequired()
@@ -1586,7 +1586,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("BookingDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("BusinessUnitId")
                         .HasColumnType("bigint");
@@ -1634,7 +1634,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(80)");
 
                     b.Property<DateTime>("ValueDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.HasKey("Id");
 
@@ -1728,7 +1728,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ConfirmedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("CreatedBy")
                         .IsRequired()
@@ -1736,7 +1736,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("EvidenceReference")
                         .HasMaxLength(500)
@@ -1794,7 +1794,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("VoidedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.HasKey("Id");
 
@@ -1829,7 +1829,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ApprovedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("BankAccountId")
                         .HasColumnType("bigint");
@@ -1877,10 +1877,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("PreparedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime>("ReconciliationThrough")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("ReopenEvidenceReference")
                         .HasMaxLength(500)
@@ -1895,7 +1895,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ReopenedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("RequestHash")
                         .IsRequired()
@@ -1908,7 +1908,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(64)");
 
                     b.Property<DateTime>("RuleSetSnapshotOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Status")
                         .IsRequired()
@@ -1920,7 +1920,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("SubmittedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<decimal>("UnexplainedDifference")
                         .HasPrecision(18, 2)
@@ -2124,7 +2124,7 @@ namespace ERP_RFQ_Automation.Migrations
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
 
                     b.Property<DateTime>("ComputedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("ComputedBy")
                         .IsRequired()
@@ -2137,17 +2137,17 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(3)");
 
                     b.Property<DateTime?>("FinalizedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("FinalizedBy")
                         .HasMaxLength(256)
                         .HasColumnType("character varying(256)");
 
                     b.Property<DateTime>("PeriodEndUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime>("PeriodStartUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("RateCardId")
                         .HasColumnType("bigint");
@@ -2733,7 +2733,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(256)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Currency")
                         .IsRequired()
@@ -2741,10 +2741,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(3)");
 
                     b.Property<DateTime>("EffectiveFromUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime?>("EffectiveToUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<bool>("IsActive")
                         .HasColumnType("boolean");
@@ -2822,7 +2822,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("numeric(14,2)");
 
                     b.Property<DateTime>("CreatedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("CreatedBy")
                         .IsRequired()
@@ -2876,7 +2876,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("jsonb");
 
                     b.Property<DateTime>("CreatedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("CreatedBy")
                         .IsRequired()
@@ -2893,10 +2893,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(3)");
 
                     b.Property<DateTime>("DueAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime?>("FinalizedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("FinalizedBy")
                         .HasMaxLength(256)
@@ -2908,7 +2908,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(64)");
 
                     b.Property<DateTime>("IssuedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<decimal>("PaidAmount")
                         .HasPrecision(14, 2)
@@ -3029,10 +3029,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(128)");
 
                     b.Property<DateTime>("ReceivedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime>("RecordedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("RecordedBy")
                         .IsRequired()
@@ -3238,7 +3238,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<string>("Description")
@@ -3265,7 +3265,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("UpdatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.HasKey("Id");
@@ -3336,7 +3336,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(256)");
 
                     b.Property<DateTime?>("ApprovedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("AssumptionsJson")
                         .HasColumnType("jsonb");
@@ -3350,7 +3350,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<long?>("LeadId")
@@ -3386,7 +3386,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("UpdatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.HasKey("Id");
@@ -3569,7 +3569,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("OccurredOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("PolicyVersion")
                         .IsRequired()
@@ -3638,13 +3638,13 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("integer");
 
                     b.Property<DateTime>("AvailableOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("BusinessUnitId")
                         .HasColumnType("bigint");
 
                     b.Property<DateTime?>("DeadLetteredOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("EventType")
                         .IsRequired()
@@ -3663,17 +3663,17 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(200)");
 
                     b.Property<DateTime?>("LockedUntil")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime>("OccurredOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Payload")
                         .IsRequired()
                         .HasColumnType("jsonb");
 
                     b.Property<DateTime?>("ProcessedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<int>("SchemaVersion")
                         .ValueGeneratedOnAdd()
@@ -3692,6 +3692,306 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasFilter("\"ProcessedOn\" IS NULL AND \"DeadLetteredOn\" IS NULL");
 
                     b.ToTable("lifecycle_outbox_messages", (string)null);
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.CommercialCases.Participation.LeadFitAssessment", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTimeOffset>("AssessedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("AssessedBy")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("AssessmentJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.Property<long>("BusinessUnitId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("IdempotencyKey")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<bool>("IsActionable")
+                        .HasColumnType("boolean");
+
+                    b.Property<long>("LeadId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("LeadRevisionId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("PolicyVersion")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("Recommendation")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("RequestHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character(64)")
+                        .IsFixedLength();
+
+                    b.Property<int>("Sequence")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasAlternateKey("BusinessUnitId", "Id");
+
+                    b.HasIndex("BusinessUnitId", "IdempotencyKey")
+                        .IsUnique();
+
+                    b.HasIndex("BusinessUnitId", "LeadId");
+
+                    b.HasIndex("BusinessUnitId", "LeadRevisionId", "LeadId");
+
+                    b.HasIndex("BusinessUnitId", "LeadRevisionId", "Sequence")
+                        .IsUnique();
+
+                    b.ToTable("LeadFitAssessments", (string)null);
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.CommercialCases.Participation.LeadLineParticipationDecision", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<long>("BusinessUnitId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("CatalogPolicyVersion")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("Choice")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<string>("Currency")
+                        .HasMaxLength(8)
+                        .HasColumnType("character varying(8)");
+
+                    b.Property<long?>("CurrencyId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("LeadId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("LeadItemRevisionId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("LeadRevisionId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("ParticipationDecisionId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long?>("ProductId")
+                        .HasColumnType("bigint");
+
+                    b.Property<int?>("Quantity")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("ReasonCode")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("ReasonNotes")
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
+
+                    b.Property<string>("UnitOfMeasure")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<int?>("UomId")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("WarningSnapshotJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BusinessUnitId", "CurrencyId");
+
+                    b.HasIndex("BusinessUnitId", "UomId");
+
+                    b.HasIndex("BusinessUnitId", "ParticipationDecisionId", "LeadItemRevisionId")
+                        .IsUnique();
+
+                    b.HasIndex("BusinessUnitId", "LeadItemRevisionId", "LeadRevisionId", "LeadId");
+
+                    b.HasIndex("BusinessUnitId", "ParticipationDecisionId", "LeadId", "LeadRevisionId")
+                        .HasDatabaseName("IX_LeadLineParticipationDecisions_BusinessUnitId_Participatio~1");
+
+                    b.ToTable("LeadLineParticipationDecisions", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_LeadLineParticipationDecisions_Choice", "\"Choice\" IN ('Pending','Bid','NoBid','Clarify')");
+
+                            t.HasCheckConstraint("CK_LeadLineParticipationDecisions_NoBidReason", "\"Choice\" NOT IN ('NoBid','Clarify') OR ((\"ReasonCode\" IS NOT NULL AND trim(\"ReasonCode\") <> '') OR (\"ReasonNotes\" IS NOT NULL AND length(trim(\"ReasonNotes\")) >= 5))");
+
+                            t.HasCheckConstraint("CK_LeadLineParticipationDecisions_BidCommercialIdentity", "\"Choice\" <> 'Bid' OR (\"Quantity\" > 0 AND \"UomId\" IS NOT NULL AND \"CurrencyId\" IS NOT NULL AND \"UnitOfMeasure\" IS NOT NULL AND trim(\"UnitOfMeasure\") <> '' AND \"Currency\" IS NOT NULL AND trim(\"Currency\") <> '')");
+
+                            t.HasCheckConstraint("CK_LeadLineParticipationDecisions_Quantity", "\"Quantity\" IS NULL OR \"Quantity\" > 0");
+                        });
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.CommercialCases.Participation.LeadParticipationDecision", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<long>("BusinessUnitId")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTimeOffset>("DecidedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("DecidedBy")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<long>("FitAssessmentId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("IdempotencyKey")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<bool>("IsCommitted")
+                        .HasColumnType("boolean");
+
+                    b.Property<long>("LeadId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("LeadRevisionId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("Notes")
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
+
+                    b.Property<string>("Outcome")
+                        .IsRequired()
+                        .HasMaxLength(24)
+                        .HasColumnType("character varying(24)");
+
+                    b.Property<string>("ReasonCode")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("RequestHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character(64)")
+                        .IsFixedLength();
+
+                    b.Property<int>("Sequence")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BusinessUnitId", "IdempotencyKey")
+                        .IsUnique();
+
+                    b.HasIndex("BusinessUnitId", "LeadId");
+
+                    b.HasIndex("BusinessUnitId", "LeadRevisionId", "LeadId");
+
+                    b.HasIndex("BusinessUnitId", "LeadRevisionId", "Sequence")
+                        .IsUnique();
+
+                    b.HasIndex("BusinessUnitId", "FitAssessmentId", "LeadId", "LeadRevisionId");
+
+                    b.ToTable("LeadParticipationDecisions", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_LeadParticipationDecisions_Outcome", "\"Outcome\" IN ('Pending','FullBid','PartialBid','NoBid')");
+                        });
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.CommercialCases.Promotion.RfqPromotion", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<long>("BusinessUnitId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("IdempotencyKey")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<long>("LeadId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("LeadRevisionId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("ParticipationDecisionId")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTimeOffset>("PromotedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("PromotedBy")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("RequestHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character(64)")
+                        .IsFixedLength();
+
+                    b.HasKey("Id");
+
+                    b.HasAlternateKey("BusinessUnitId", "Id");
+
+                    b.HasIndex("BusinessUnitId", "IdempotencyKey")
+                        .IsUnique();
+
+                    b.HasIndex("BusinessUnitId", "LeadId");
+
+                    b.HasIndex("BusinessUnitId", "ParticipationDecisionId")
+                        .IsUnique();
+
+                    b.HasIndex("BusinessUnitId", "LeadRevisionId", "LeadId");
+
+                    b.HasIndex("BusinessUnitId", "ParticipationDecisionId", "LeadId", "LeadRevisionId");
+
+                    b.ToTable("RfqPromotions", (string)null);
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.CommercialDocuments.CommercialDocumentClassification", b =>
@@ -3865,7 +4165,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("CurrencyId")
                         .HasColumnType("bigint");
@@ -3878,7 +4178,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("numeric(18,2)");
 
                     b.Property<DateTime>("EffectiveFrom")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("EvidenceReference")
                         .IsRequired()
@@ -3886,7 +4186,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(500)");
 
                     b.Property<DateTime?>("ExpiresOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("IdempotencyKey")
                         .IsRequired()
@@ -3924,10 +4224,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ResolvedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime?>("ReviewOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Status")
                         .IsRequired()
@@ -3997,7 +4297,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("jsonb");
 
                     b.Property<DateTime>("OccurredOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.HasKey("Id");
 
@@ -4030,7 +4330,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("CurrencyId")
                         .HasColumnType("bigint");
@@ -4065,7 +4365,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ModifiedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("TimeZoneId")
                         .IsRequired()
@@ -4129,7 +4429,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("CurrencyId")
                         .HasColumnType("bigint");
@@ -4150,7 +4450,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(100)");
 
                     b.Property<DateTime>("PaymentDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("ReceiptNumber")
                         .IsRequired()
@@ -4174,7 +4474,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ReversedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Status")
                         .IsRequired()
@@ -4235,7 +4535,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ApprovedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("BankAccountId")
                         .HasColumnType("bigint");
@@ -4252,7 +4552,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("CancelledOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("CommercialCaseId")
                         .HasColumnType("bigint");
@@ -4263,7 +4563,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("CurrencyId")
                         .HasColumnType("bigint");
@@ -4288,7 +4588,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("DisbursementUpdatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("EvidenceReference")
                         .HasMaxLength(500)
@@ -4335,7 +4635,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ReleasedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("RequestHash")
                         .IsRequired()
@@ -4343,7 +4643,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(64)");
 
                     b.Property<DateTime>("RequestedExecutionDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("ReversalEvidenceReference")
                         .HasMaxLength(500)
@@ -4358,7 +4658,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ReversedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("SourcePaymentId")
                         .HasColumnType("bigint");
@@ -4469,10 +4769,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("CancelledOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime>("CapturedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<decimal>("ClosingBalance")
                         .HasPrecision(18, 2)
@@ -4488,7 +4788,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<decimal>("CreditTotal")
                         .HasPrecision(18, 2)
@@ -4506,7 +4806,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CutoffAt")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<decimal>("DebitTotal")
                         .HasPrecision(18, 2)
@@ -4517,7 +4817,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("FinalizedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("GeneratorVersion")
                         .IsRequired()
@@ -4543,7 +4843,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("numeric(18,2)");
 
                     b.Property<DateTime>("PeriodStart")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("RequestHash")
                         .IsRequired()
@@ -4634,7 +4934,7 @@ namespace ERP_RFQ_Automation.Migrations
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
 
                     b.Property<DateTime>("ActivityDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("AgingBucket")
                         .IsRequired()
@@ -4668,7 +4968,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(500)");
 
                     b.Property<DateTime?>("DueDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<decimal>("OutstandingAmount")
                         .HasPrecision(18, 2)
@@ -4730,7 +5030,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("CurrencyId")
                         .HasColumnType("bigint");
@@ -4765,17 +5065,17 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(128)");
 
                     b.Property<DateTime>("NextActionOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime>("OldestDueDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<decimal?>("PromiseAmount")
                         .HasPrecision(18, 2)
                         .HasColumnType("numeric(18,2)");
 
                     b.Property<DateTime?>("PromiseDueOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("RequestHash")
                         .IsRequired()
@@ -4796,7 +5096,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("UpdatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("Version")
                         .IsConcurrencyToken()
@@ -4861,13 +5161,13 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(120)");
 
                     b.Property<DateTime>("OccurredOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<Guid>("ProviderEventId")
                         .HasColumnType("uuid");
 
                     b.Property<DateTime>("ProviderOccurredOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("ProviderReference")
                         .HasMaxLength(100)
@@ -4926,7 +5226,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ApprovedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("ArtifactContent")
                         .IsRequired()
@@ -4958,7 +5258,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("CancelledOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("CreatedBy")
                         .IsRequired()
@@ -4966,7 +5266,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("CustomerStatementId")
                         .HasColumnType("bigint");
@@ -4976,7 +5276,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("DeliveryUpdatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("DunningCaseId")
                         .HasColumnType("bigint");
@@ -5007,7 +5307,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ReleasedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("RequestHash")
                         .IsRequired()
@@ -5082,14 +5382,14 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ActivatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("ApprovedBy")
                         .HasMaxLength(255)
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ApprovedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("BusinessUnitId")
                         .HasColumnType("bigint");
@@ -5103,7 +5403,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<int>("GraceDays")
                         .HasColumnType("integer");
@@ -5149,7 +5449,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("RetiredOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Status")
                         .IsRequired()
@@ -5266,7 +5566,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("integer");
 
                     b.Property<DateTime?>("CompletedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("CompletionEvidenceReference")
                         .HasMaxLength(500)
@@ -5278,10 +5578,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime>("CutoffAt")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("DunningPolicyId")
                         .HasColumnType("bigint");
@@ -5310,7 +5610,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("uuid");
 
                     b.Property<DateTime?>("LeaseUntil")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<int>("NoticeCount")
                         .HasColumnType("integer");
@@ -5358,7 +5658,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("CurrencyId")
                         .HasColumnType("bigint");
@@ -5443,7 +5743,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("CustomerId")
                         .HasColumnType("bigint");
@@ -5453,7 +5753,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("DeactivatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("DeactivationReason")
                         .HasMaxLength(500)
@@ -5465,10 +5765,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(200)");
 
                     b.Property<DateTime>("EffectiveFrom")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime?>("EffectiveTo")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("IdempotencyKey")
                         .IsRequired()
@@ -5560,13 +5860,13 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("integer");
 
                     b.Property<DateTime>("AvailableOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("BusinessUnitId")
                         .HasColumnType("bigint");
 
                     b.Property<DateTime?>("DeadLetteredOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<Guid>("EventId")
                         .HasColumnType("uuid");
@@ -5588,17 +5888,17 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("uuid");
 
                     b.Property<DateTime?>("LeaseUntil")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime>("OccurredOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Payload")
                         .IsRequired()
                         .HasColumnType("jsonb");
 
                     b.Property<DateTime?>("ProcessedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<int>("SchemaVersion")
                         .ValueGeneratedOnAdd()
@@ -5664,7 +5964,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("CustomerPaymentId")
                         .HasColumnType("bigint");
@@ -5706,7 +6006,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ClosedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("ClosureEvidenceReference")
                         .HasMaxLength(500)
@@ -5718,10 +6018,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime>("DueOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("DunningCaseId")
                         .HasColumnType("bigint");
@@ -5743,7 +6043,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("PromisedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("RequestHash")
                         .IsRequired()
@@ -5805,7 +6105,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("CurrencyId")
                         .HasColumnType("bigint");
@@ -5818,7 +6118,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("numeric(18,2)");
 
                     b.Property<DateTime>("DocumentDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("DocumentNumber")
                         .HasMaxLength(50)
@@ -5830,7 +6130,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(20)");
 
                     b.Property<DateTime>("DueDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("IdempotencyKey")
                         .IsRequired()
@@ -5842,7 +6142,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("IssuedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("OrderId")
                         .HasColumnType("bigint");
@@ -5885,7 +6185,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("VoidedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.HasKey("Id");
 
@@ -5991,14 +6291,14 @@ namespace ERP_RFQ_Automation.Migrations
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
 
                     b.Property<DateTime>("AccountingDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("ApprovedBy")
                         .HasMaxLength(255)
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ApprovedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("BusinessUnitId")
                         .HasColumnType("bigint");
@@ -6012,7 +6312,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("CancelledOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("CommercialCaseId")
                         .HasColumnType("bigint");
@@ -6023,7 +6323,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("CurrencyId")
                         .HasColumnType("bigint");
@@ -6077,7 +6377,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ReversedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Status")
                         .IsRequired()
@@ -6194,13 +6494,13 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(40)");
 
                     b.Property<DateTime>("FirstDetectedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("FollowUpTaskId")
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("LastDetectedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("NexoraSerial")
                         .IsRequired()
@@ -6221,7 +6521,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(100)");
 
                     b.Property<DateTime?>("ResolvedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("RuleVersion")
                         .IsRequired()
@@ -6234,7 +6534,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(20)");
 
                     b.Property<DateTime>("SlaDueAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("SourceId")
                         .HasColumnType("bigint");
@@ -6342,7 +6642,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(160)");
 
                     b.Property<DateTime>("OccurredAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Reason")
                         .IsRequired()
@@ -6407,7 +6707,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(160)");
 
                     b.Property<DateTime>("OccurredAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("OperationType")
                         .IsRequired()
@@ -6452,7 +6752,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("integer");
 
                     b.Property<DateTime>("AvailableAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("BusinessUnitId")
                         .HasColumnType("bigint");
@@ -6466,14 +6766,14 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(100)");
 
                     b.Property<DateTime>("OccurredAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Payload")
                         .IsRequired()
                         .HasColumnType("jsonb");
 
                     b.Property<DateTime?>("ProcessedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.HasKey("Id");
 
@@ -6508,7 +6808,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(160)");
 
                     b.Property<DateTime>("CreatedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("DecisionCode")
                         .IsRequired()
@@ -6525,7 +6825,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(80)");
 
                     b.Property<DateTime>("FindingGeneratedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("FindingKey")
                         .IsRequired()
@@ -6622,7 +6922,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(160)");
 
                     b.Property<DateTime>("OccurredAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("OpportunityRecommendationId")
                         .HasColumnType("bigint");
@@ -6689,7 +6989,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(160)");
 
                     b.Property<DateTime>("OccurredAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("OpportunityRecommendationId")
                         .HasColumnType("bigint");
@@ -6753,7 +7053,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(160)");
 
                     b.Property<DateTime>("OccurredAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("OperationType")
                         .IsRequired()
@@ -6803,7 +7103,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("integer");
 
                     b.Property<DateTime>("AvailableAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("BusinessUnitId")
                         .HasColumnType("bigint");
@@ -6818,7 +7118,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(2000)");
 
                     b.Property<DateTime>("OccurredAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("OpportunityEventId")
                         .HasColumnType("bigint");
@@ -6828,7 +7128,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("jsonb");
 
                     b.Property<DateTime?>("ProcessedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.HasKey("Id");
 
@@ -6871,7 +7171,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("jsonb");
 
                     b.Property<DateTime>("ObservedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("OpportunityRecommendationId")
                         .HasColumnType("bigint");
@@ -6943,7 +7243,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("numeric(5,4)");
 
                     b.Property<DateTime>("EvidenceCutoffAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("EvidenceHash")
                         .IsRequired()
@@ -6968,7 +7268,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(60)");
 
                     b.Property<DateTime>("GeneratedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("LeadId")
                         .HasColumnType("bigint");
@@ -7116,7 +7416,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("OccurredAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("OutcomeCode")
                         .IsRequired()
@@ -7170,7 +7470,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(100)");
 
                     b.Property<DateTime>("CreatedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("CreatedBy")
                         .IsRequired()
@@ -7186,7 +7486,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("DueAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<int>("Priority")
                         .HasColumnType("integer");
@@ -7202,7 +7502,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(24)");
 
                     b.Property<DateTime>("UpdatedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("Version")
                         .IsConcurrencyToken()
@@ -7260,7 +7560,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(160)");
 
                     b.Property<DateTime>("OccurredAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Reason")
                         .IsRequired()
@@ -7341,7 +7641,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(160)");
 
                     b.Property<DateTime>("RecognizedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<decimal?>("RevenueAmount")
                         .HasPrecision(19, 4)
@@ -7383,10 +7683,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("numeric(10,4)");
 
                     b.Property<DateTime>("EffectiveFromUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime?>("EffectiveToUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<bool>("IsRoutingEligible")
                         .HasColumnType("boolean");
@@ -7405,7 +7705,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("text[]");
 
                     b.Property<DateTime>("UpdatedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("UpdatedBy")
                         .IsRequired()
@@ -7444,10 +7744,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("EffectiveFromUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime?>("EffectiveToUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<bool>("IsPrimary")
                         .HasColumnType("boolean");
@@ -7504,7 +7804,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("OccurredOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<string>("Reason")
@@ -7579,10 +7879,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(320)");
 
                     b.Property<DateTime>("EffectiveFrom")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime?>("EffectiveTo")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("IdentifierType")
                         .IsRequired()
@@ -7593,7 +7893,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("boolean");
 
                     b.Property<DateTime?>("LastObservedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("LearnedFromLeadId")
                         .HasColumnType("bigint");
@@ -7654,10 +7954,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("EffectiveFrom")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime?>("EffectiveTo")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<bool>("IsActive")
                         .HasColumnType("boolean");
@@ -7727,6 +8027,13 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<long?>("AssignedByUserId")
                         .HasColumnType("bigint");
 
+                    b.Property<string>("AssignmentMethod")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasDefaultValue("AUTOMATIC");
+
                     b.Property<string>("AssignmentScope")
                         .IsRequired()
                         .HasMaxLength(32)
@@ -7745,10 +8052,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(100)");
 
                     b.Property<DateTime>("EffectiveFrom")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime?>("EffectiveTo")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("FromUserId")
                         .HasColumnType("bigint");
@@ -7757,6 +8064,11 @@ namespace ERP_RFQ_Automation.Migrations
                         .IsRequired()
                         .HasMaxLength(160)
                         .HasColumnType("character varying(160)");
+
+                    b.Property<bool>("IsManualOverride")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false);
 
                     b.Property<long>("LeadId")
                         .HasColumnType("bigint");
@@ -7812,7 +8124,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(100)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("CustomerId")
                         .HasColumnType("bigint");
@@ -7896,10 +8208,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime?>("ClaimedUntil")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime>("EnteredOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("IdempotencyKey")
                         .IsRequired()
@@ -7936,13 +8248,13 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(80)");
 
                     b.Property<DateTime?>("ResolvedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("RoutingDecisionId")
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("SlaDueOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Status")
                         .IsRequired()
@@ -7997,7 +8309,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(200)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<int>("DisplayOrder")
                         .ValueGeneratedOnAdd()
@@ -8014,7 +8326,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(200)");
 
                     b.Property<DateTime?>("RetiredOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("RetirementReason")
                         .HasMaxLength(1000)
@@ -8110,7 +8422,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("EntityId")
                         .HasColumnType("bigint");
@@ -8202,7 +8514,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("text");
 
                     b.Property<DateTime?>("TimestampValue")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("UpdatedBy")
                         .IsRequired()
@@ -8210,7 +8522,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(200)");
 
                     b.Property<DateTime>("UpdatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("Version")
                         .IsConcurrencyToken()
@@ -8257,7 +8569,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(200)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("DataType")
                         .IsRequired()
@@ -8341,7 +8653,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<long>("CustomerId")
@@ -8399,7 +8711,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("numeric(9,2)");
 
                     b.Property<DateTime?>("GpsCapturedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<decimal?>("GpsLatitude")
                         .HasPrecision(10, 7)
@@ -8439,7 +8751,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("ReceivedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("RecordedBy")
                         .IsRequired()
@@ -8447,7 +8759,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("RecordedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("ShipmentId")
                         .HasColumnType("bigint");
@@ -8587,7 +8899,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("DecidedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Decision")
                         .IsRequired()
@@ -9909,8 +10221,11 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
+
+                    b.Property<long?>("EmailInquiryComponentId")
+                        .HasColumnType("bigint");
 
                     b.Property<string>("FileName")
                         .HasMaxLength(512)
@@ -9925,7 +10240,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(4000)");
 
                     b.Property<DateTime?>("LeaseExpiresAt")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("LeasedBy")
                         .HasMaxLength(200)
@@ -9935,7 +10250,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("integer");
 
                     b.Property<DateTime>("NextAttemptAt")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<int>("Priority")
                         .HasColumnType("integer");
@@ -9966,7 +10281,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("UpdatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.HasKey("Id");
@@ -9979,6 +10294,10 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.HasIndex("BusinessUnitId", "ContentHash")
                         .HasDatabaseName("IX_ExtractionJobs_BU_ContentHash");
+
+                    b.HasIndex("BusinessUnitId", "EmailInquiryComponentId")
+                        .IsUnique()
+                        .HasFilter("\"EmailInquiryComponentId\" IS NOT NULL");
 
                     b.HasIndex("BusinessUnitId", "SourceDocumentOccurrenceId")
                         .IsUnique()
@@ -10028,7 +10347,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ApprovedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("BusinessUnitId")
                         .HasColumnType("bigint");
@@ -10039,13 +10358,13 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime>("EffectiveFrom")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime?>("EffectiveTo")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("FromCurrencyId")
                         .HasColumnType("bigint");
@@ -10094,7 +10413,7 @@ namespace ERP_RFQ_Automation.Migrations
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
 
                     b.Property<DateTime>("AsOf")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("BusinessUnitId")
                         .HasColumnType("bigint");
@@ -10105,7 +10424,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CapturedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("DocumentId")
                         .HasColumnType("bigint");
@@ -10126,7 +10445,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("numeric(20,10)");
 
                     b.Property<DateTime>("RateEffectiveFrom")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("ResolutionPath")
                         .IsRequired()
@@ -10183,7 +10502,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ClosedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("CreatedBy")
                         .IsRequired()
@@ -10191,10 +10510,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime>("EndsOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<int>("FiscalYear")
                         .HasColumnType("integer");
@@ -10225,7 +10544,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ReopenedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("RequestHash")
                         .IsRequired()
@@ -10237,10 +10556,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("SoftClosedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime>("StartsOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Status")
                         .IsRequired()
@@ -10276,7 +10595,7 @@ namespace ERP_RFQ_Automation.Migrations
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
 
                     b.Property<DateTime>("AccountingDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("AccountingPeriodId")
                         .HasColumnType("bigint");
@@ -10293,7 +10612,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("CancelledOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("CreatedBy")
                         .IsRequired()
@@ -10301,7 +10620,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Description")
                         .IsRequired()
@@ -10325,7 +10644,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("PostedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("RequestHash")
                         .IsRequired()
@@ -10345,7 +10664,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ReversedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("ReversesJournalEntryId")
                         .HasColumnType("bigint");
@@ -10508,7 +10827,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("CurrencyId")
                         .HasColumnType("bigint");
@@ -10518,7 +10837,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("DeactivatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("DeactivationReason")
                         .HasMaxLength(500)
@@ -10592,7 +10911,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<int>("FiscalYearStartMonth")
                         .HasColumnType("integer");
@@ -10666,7 +10985,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<int?>("CustomsClearanceLeadDays")
                         .HasColumnType("integer");
@@ -10676,7 +10995,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ModifiedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<int?>("PutawayLeadDays")
                         .HasColumnType("integer");
@@ -10731,7 +11050,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<bool>("IsActive")
                         .HasColumnType("boolean");
@@ -10746,7 +11065,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ModifiedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Name")
                         .IsRequired()
@@ -10809,7 +11128,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateOnly?>("CustomsClearanceOn")
                         .HasColumnType("date");
@@ -10825,7 +11144,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("EtaUpdatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("IdempotencyKey")
                         .IsRequired()
@@ -10843,7 +11162,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(32)");
 
                     b.Property<DateTime?>("MaterialAvailableComputedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateOnly?>("MaterialAvailableDate")
                         .HasColumnType("date");
@@ -10865,7 +11184,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ModifiedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("PortOfEntryId")
                         .HasColumnType("bigint");
@@ -10989,6 +11308,275 @@ namespace ERP_RFQ_Automation.Migrations
                         });
                 });
 
+            modelBuilder.Entity("ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssembly", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<long?>("AssembledLeadId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("BusinessUnitId")
+                        .HasColumnType("bigint");
+
+                    b.Property<int>("CompletedComponentCount")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("ConcurrencyVersion")
+                        .IsConcurrencyToken()
+                        .HasColumnType("integer");
+
+                    b.Property<DateTimeOffset>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<long>("EmailConfigurationId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("EmailIngestId")
+                        .HasColumnType("bigint");
+
+                    b.Property<int>("ExpectedComponentCount")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("ManifestContractVersion")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("MessageKey")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<string>("RawEvidenceSha256")
+                        .HasMaxLength(64)
+                        .HasColumnType("character(64)")
+                        .IsFixedLength();
+
+                    b.Property<string>("RawEvidenceUri")
+                        .HasMaxLength(1024)
+                        .HasColumnType("character varying(1024)");
+
+                    b.Property<string>("RawEvidenceVersionId")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<DateTimeOffset?>("ReceivedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("RecipientsJson")
+                        .HasColumnType("jsonb");
+
+                    b.Property<string>("SenderAddress")
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)");
+
+                    b.Property<string>("SkippedPartsJson")
+                        .HasColumnType("jsonb");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("StatusReason")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
+                    b.Property<string>("Subject")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
+                    b.Property<DateTimeOffset>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("EmailIngestId")
+                        .IsUnique();
+
+                    b.HasIndex("BusinessUnitId", "AssembledLeadId");
+
+                    b.HasIndex("BusinessUnitId", "EmailConfigurationId", "MessageKey")
+                        .IsUnique();
+
+                    b.HasIndex("BusinessUnitId", "Status", "UpdatedAtUtc");
+
+                    b.ToTable("EmailInquiryAssemblies", (string)null);
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponent", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<long>("AssemblyId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("BusinessUnitId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long?>("ByteSize")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("ComponentKey")
+                        .IsRequired()
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)");
+
+                    b.Property<int>("ConcurrencyVersion")
+                        .IsConcurrencyToken()
+                        .HasColumnType("integer");
+
+                    b.Property<string>("ContentHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("character(64)")
+                        .IsFixedLength();
+
+                    b.Property<DateTimeOffset>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("EvidenceUri")
+                        .HasMaxLength(1024)
+                        .HasColumnType("character varying(1024)");
+
+                    b.Property<long?>("ExtractionJobId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("FileName")
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(24)
+                        .HasColumnType("character varying(24)");
+
+                    b.Property<string>("MimeType")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<int>("NestingDepth")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Ordinal")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("ReasonCode")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("ReasonDetail")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
+                    b.Property<long?>("SourceDocumentOccurrenceId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(24)
+                        .HasColumnType("character varying(24)");
+
+                    b.Property<DateTimeOffset>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BusinessUnitId", "ExtractionJobId");
+
+                    b.HasIndex("BusinessUnitId", "Status");
+
+                    b.HasIndex("BusinessUnitId", "AssemblyId", "ComponentKey")
+                        .IsUnique();
+
+                    b.HasIndex("BusinessUnitId", "AssemblyId", "Ordinal")
+                        .IsUnique();
+
+                    b.ToTable("EmailInquiryComponents", (string)null);
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponentResult", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<string>("AiProviderClass")
+                        .HasMaxLength(24)
+                        .HasColumnType("character varying(24)");
+
+                    b.Property<long>("AssemblyId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("BusinessUnitId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("ComponentId")
+                        .HasColumnType("bigint");
+
+                    b.Property<int>("ConcurrencyVersion")
+                        .IsConcurrencyToken()
+                        .HasColumnType("integer");
+
+                    b.Property<DateTimeOffset>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("DiagnosticsJson")
+                        .HasColumnType("jsonb");
+
+                    b.Property<int>("ExpectedItemCount")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("ExtractedItemCount")
+                        .HasColumnType("integer");
+
+                    b.Property<long>("ExtractionJobId")
+                        .HasColumnType("bigint");
+
+                    b.Property<decimal?>("HeaderConfidence")
+                        .HasPrecision(5, 4)
+                        .HasColumnType("numeric(5,4)");
+
+                    b.Property<string>("ModelIdentifier")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<int>("PayloadContractVersion")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("PayloadJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.Property<string>("ProcessingPath")
+                        .IsRequired()
+                        .HasMaxLength(48)
+                        .HasColumnType("character varying(48)");
+
+                    b.Property<string>("ReviewReason")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
+                    b.Property<DateTimeOffset>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BusinessUnitId", "AssemblyId");
+
+                    b.HasIndex("BusinessUnitId", "ComponentId")
+                        .IsUnique();
+
+                    b.ToTable("EmailInquiryComponentResults", (string)null);
+                });
+
             modelBuilder.Entity("ERP_RFQ_Automation.Intelligence.Pricing.QuotePriceAttestation", b =>
                 {
                     b.Property<long>("Id")
@@ -11010,7 +11598,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("ConfirmedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<long?>("CurrencyId")
@@ -11172,7 +11760,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(160)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("IdempotencyKey")
                         .IsRequired()
@@ -11183,7 +11771,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("OccurredOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("ProductId")
                         .HasColumnType("bigint");
@@ -11268,7 +11856,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("numeric(18,4)");
 
                     b.Property<DateTime>("InventoryAsOfUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("LeadId")
                         .HasColumnType("bigint");
@@ -11315,7 +11903,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(80)");
 
                     b.Property<DateTime>("ResolvedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<int>("ResourceLimit")
                         .HasColumnType("integer");
@@ -11382,7 +11970,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(160)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<bool>("IsActive")
                         .HasColumnType("boolean");
@@ -11432,7 +12020,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(160)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateOnly>("EffectiveOn")
                         .HasColumnType("date");
@@ -11478,7 +12066,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(160)");
 
                     b.Property<DateTime?>("AcknowledgedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("AcknowledgementReason")
                         .HasMaxLength(500)
@@ -11492,7 +12080,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<decimal>("IncomingQuantity")
                         .HasPrecision(18, 4)
@@ -11521,14 +12109,14 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("numeric(18,4)");
 
                     b.Property<DateTime>("RaisedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("ResolutionReason")
                         .HasMaxLength(120)
                         .HasColumnType("character varying(120)");
 
                     b.Property<DateTime?>("ResolvedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Severity")
                         .IsRequired()
@@ -11589,7 +12177,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime?>("ConsumedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("CreatedBy")
                         .IsRequired()
@@ -11597,7 +12185,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(256)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("IdempotencyKey")
                         .IsRequired()
@@ -11621,7 +12209,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("numeric(18,4)");
 
                     b.Property<DateTime?>("ReleasedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Status")
                         .IsRequired()
@@ -11935,6 +12523,12 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<long>("BusinessUnitId")
                         .HasColumnType("bigint");
 
+                    b.Property<long>("LeadId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long?>("LeadItemId")
+                        .HasColumnType("bigint");
+
                     b.Property<long>("LeadRevisionId")
                         .HasColumnType("bigint");
 
@@ -11952,6 +12546,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("jsonb");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("LeadId", "LeadItemId");
+
+                    b.HasIndex("BusinessUnitId", "LeadRevisionId", "LeadId");
 
                     b.HasIndex("BusinessUnitId", "LeadRevisionId", "LineNumber")
                         .IsUnique();
@@ -12255,7 +12853,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(200)");
 
                     b.Property<DateTime>("UpdatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("UserId")
                         .HasColumnType("bigint");
@@ -12329,7 +12927,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("OccurredOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<string>("Reason")
@@ -12407,7 +13005,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<long?>("EntityId")
@@ -12448,7 +13046,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<string>("FileName")
@@ -12478,7 +13076,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(50)");
 
                     b.Property<DateTime?>("UploadedDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.HasKey("Id")
                         .HasName("PK__Attachme__3214EC2740D763DA");
@@ -12514,8 +13112,17 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
+
+                    b.Property<long?>("DefaultLeadOwnerSetByUserId")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTime?>("DefaultLeadOwnerSetOn")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<long?>("DefaultLeadOwnerUserId")
+                        .HasColumnType("bigint");
 
                     b.Property<string>("Description")
                         .HasMaxLength(500)
@@ -12531,7 +13138,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ModifiedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("TaxRegistrationNumber")
                         .HasMaxLength(50)
@@ -12570,7 +13177,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<string>("MasterReference")
@@ -12615,7 +13222,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("CustomerId")
                         .HasColumnType("bigint")
@@ -12657,7 +13264,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ModifiedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("PhoneNo")
                         .HasMaxLength(50)
@@ -12729,7 +13336,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("CurrencyName")
                         .IsRequired()
@@ -12754,7 +13361,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ModifiedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Symbol")
                         .HasMaxLength(10)
@@ -12825,7 +13432,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("CustomFieldsJson")
                         .HasColumnType("jsonb")
@@ -12852,7 +13459,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ModifiedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Name")
                         .IsRequired()
@@ -12965,7 +13572,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<string>("EmailAddress")
@@ -12984,14 +13591,14 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasDefaultValue(true);
 
                     b.Property<DateTime?>("LastPollAttemptOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("LastPollError")
                         .HasMaxLength(500)
                         .HasColumnType("character varying(500)");
 
                     b.Property<DateTime?>("LastSuccessfulPollOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Password")
                         .IsRequired()
@@ -13039,9 +13646,13 @@ namespace ERP_RFQ_Automation.Migrations
 
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
 
+                    b.Property<DateTime?>("BytesPurgedOn")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("bytes_purged_on");
+
                     b.Property<DateTime>("CreatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<long>("EmailConfigurationId")
@@ -13057,6 +13668,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasMaxLength(255)
                         .HasColumnType("character varying(255)");
 
+                    b.Property<string>("InReplyToMessageId")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
                     b.Property<string>("MessageId")
                         .IsRequired()
                         .HasMaxLength(255)
@@ -13068,11 +13683,24 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(50)");
 
                     b.Property<DateTime?>("ParsedAt")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("PurgeReason")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)")
+                        .HasColumnName("purge_reason");
+
+                    b.Property<long?>("PurgedByUserId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("purged_by_user_id");
 
                     b.Property<string>("RawEmailPath")
                         .HasMaxLength(500)
                         .HasColumnType("character varying(500)");
+
+                    b.Property<string>("ReferencesJson")
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
 
                     b.Property<string>("SkippedAttachmentsJson")
                         .HasMaxLength(2000)
@@ -13083,7 +13711,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("TriageDecidedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("TriageOutcome")
                         .HasMaxLength(32)
@@ -13099,7 +13727,10 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasIndex(new[] { "EmailConfigurationId", "MessageId" }, "UQ_EmailIngests_EmailConfigurationID_MessageID")
                         .IsUnique();
 
-                    b.ToTable("EmailIngests");
+                    b.ToTable("EmailIngests", t =>
+                        {
+                            t.HasCheckConstraint("CK_EmailIngests_purge_tombstone_complete", "(\"bytes_purged_on\" IS NULL AND \"purged_by_user_id\" IS NULL AND \"purge_reason\" IS NULL) OR (\"bytes_purged_on\" IS NOT NULL AND \"purged_by_user_id\" IS NOT NULL AND length(trim(\"purge_reason\")) > 0)");
+                        });
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.Models.ExtractionCorpusEntry", b =>
@@ -13120,7 +13751,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CapturedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<int>("CorrectedCount")
@@ -13204,7 +13835,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("OccurredOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<string>("Reason")
@@ -13228,6 +13859,11 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasIndex("BusinessUnitId", "OccurredOn")
                         .HasDatabaseName("IX_IamAuditEvents_BU_OccurredOn");
 
+                    b.HasIndex("BusinessUnitId", "Action", "CorrelationId")
+                        .IsUnique()
+                        .HasDatabaseName("UX_IamAuditEvents_EmailTriageReprocess_Idempotency")
+                        .HasFilter("\"Action\" = 'EmailTriageReprocessed' AND \"CorrelationId\" IS NOT NULL");
+
                     b.HasIndex("BusinessUnitId", "TargetType", "TargetId")
                         .HasDatabaseName("IX_IamAuditEvents_BU_Target");
 
@@ -13249,7 +13885,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Description")
                         .HasMaxLength(255)
@@ -13279,7 +13915,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ModifiedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("ResourceId")
                         .HasColumnType("bigint")
@@ -13292,7 +13928,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime?>("UploadDate")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<long?>("UploadedBy")
@@ -13338,7 +13974,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("text");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<decimal>("DamagedQuantity")
                         .HasPrecision(18, 4)
@@ -13384,7 +14020,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("text");
 
                     b.Property<DateTime?>("ModifiedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("PartNo")
                         .IsRequired()
@@ -13468,7 +14104,7 @@ namespace ERP_RFQ_Automation.Migrations
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
 
                     b.Property<DateTime?>("AcknowledgmentDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("AgreementReference")
                         .HasColumnType("text");
@@ -13483,13 +14119,29 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(500)");
 
                     b.Property<DateTime?>("AssignOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("AssignTo")
                         .HasColumnType("bigint");
 
+                    b.Property<long?>("AssignedByUserId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("AssignmentMethod")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasDefaultValue("AUTOMATIC");
+
+                    b.Property<long>("AssignmentVersion")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(1L);
+
                     b.Property<DateTime?>("BidClosingDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("BidClosingDateHijri")
                         .HasColumnType("text");
@@ -13537,7 +14189,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedDate")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<string>("CurrentInquiryFingerprint")
@@ -13595,7 +14247,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasDefaultValue("UNRESOLVED");
 
                     b.Property<DateTime?>("CustomerMatchedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("CustomerPortalNameExtracted")
                         .HasMaxLength(120)
@@ -13660,8 +14312,13 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("integer")
                         .HasDefaultValue(1);
 
+                    b.Property<bool>("ManualAssignmentOverride")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false);
+
                     b.Property<DateTime?>("ModifiedDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<int?>("NoOfLineItems")
                         .HasColumnType("integer");
@@ -13674,16 +14331,16 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("text");
 
                     b.Property<DateTime?>("OutcomeOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("OutcomeReasonId")
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("RecDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime?>("RequiredDeliveryDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<bool>("RequiresCommercialReview")
                         .ValueGeneratedOnAdd()
@@ -13695,7 +14352,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ReviewApprovedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("ReviewVersion")
                         .IsConcurrencyToken()
@@ -13717,7 +14374,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime?>("SubDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("SupplierAccountRefOnDocument")
                         .HasMaxLength(100)
@@ -13754,6 +14411,9 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasIndex("BusinessUnitId", "DuplicateStatus")
                         .HasDatabaseName("IX_Lead_BU_DuplicateStatus");
 
+                    b.HasIndex("BusinessUnitId", "AssignTo", "AssignmentMethod")
+                        .HasDatabaseName("IX_Leads_BusinessUnitID_AssignTo_AssignmentMethod");
+
                     b.HasIndex(new[] { "BusinessUnitId", "ContactId" }, "IX_Leads_BusinessUnitID_ContactID");
 
                     b.HasIndex(new[] { "BusinessUnitId", "CustomerId" }, "IX_Leads_BusinessUnitID_CustomerID");
@@ -13766,6 +14426,8 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.ToTable("Leads", t =>
                         {
+                            t.HasCheckConstraint("CK_Leads_AssignmentMethod", "\"AssignmentMethod\" IN ('AUTOMATIC','MANUAL')");
+
                             t.HasCheckConstraint("CK_Leads_CustomerIdentityStatus", "CASE WHEN \"CustomerMatchStatus\" IN ('UNRESOLVED','SUGGESTED','AMBIGUOUS') THEN \"CustomerID\" IS NULL ELSE \"CustomerID\" IS NOT NULL END");
                         });
                 });
@@ -13796,7 +14458,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(100)");
 
                     b.Property<DateTime?>("BidClosingDateLine")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("BuyerName")
                         .HasMaxLength(200)
@@ -13828,8 +14490,16 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(100)")
                         .HasColumnName("CustomerRFQNo");
 
+                    b.Property<long?>("EvidenceSourceLeadItemId")
+                        .HasColumnType("bigint");
+
                     b.Property<string>("ExtraFields")
                         .HasColumnType("jsonb");
+
+                    b.Property<bool>("IsCurrentRevisionProjection")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true);
 
                     b.Property<string>("ItemMaterialCode")
                         .HasMaxLength(100)
@@ -13875,7 +14545,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("integer");
 
                     b.Property<DateTime?>("ReceivedDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("StorageLocation")
                         .HasMaxLength(100)
@@ -13890,6 +14560,10 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.HasKey("Id")
                         .HasName("PK__LeadItem__3214EC2776894FBF");
+
+                    b.HasIndex("LeadId", "EvidenceSourceLeadItemId");
+
+                    b.HasIndex("LeadId", "IsCurrentRevisionProjection");
 
                     b.HasIndex(new[] { "BidClosingDateLine" }, "IX_LeadItems_BidClosingDateLine");
 
@@ -13914,7 +14588,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<int>("FinancialYearStartMonth")
@@ -13928,7 +14602,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(100)");
 
                     b.Property<DateTime?>("ModifiedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Prefix")
                         .IsRequired()
@@ -13986,7 +14660,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("ReviewedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<long>("ToVersion")
@@ -14024,7 +14698,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("ChangedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<long>("CommercialCaseId")
@@ -14084,7 +14758,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Description")
                         .HasMaxLength(255)
@@ -14100,7 +14774,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ModifiedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("ModuleName")
                         .IsRequired()
@@ -14152,7 +14826,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<long?>("CurrencyId")
@@ -14168,7 +14842,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnName("CustomerID");
 
                     b.Property<DateTime?>("DeliveryDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<decimal?>("DiscountAmount")
                         .ValueGeneratedOnAdd()
@@ -14190,7 +14864,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ModifiedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("NexoraSerial")
                         .HasMaxLength(100)
@@ -14202,7 +14876,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("OrderDate")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<string>("OrderNo")
@@ -14215,7 +14889,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("decimal(18, 2)");
 
                     b.Property<DateTime?>("PaymentDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("PaymentMethodId")
                         .HasColumnType("bigint")
@@ -14330,7 +15004,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedDate")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<long?>("CustomerAwardLineAllocationId")
@@ -14356,7 +15030,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ModifiedDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("OrderId")
                         .HasColumnType("bigint")
@@ -14444,7 +15118,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<decimal?>("Depth")
                         .HasColumnType("decimal(18, 2)");
@@ -14501,7 +15175,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ModifiedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("PartNo")
                         .IsRequired()
@@ -14593,7 +15267,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Description")
                         .HasMaxLength(255)
@@ -14618,11 +15292,11 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ModifiedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime?>("UploadDate")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<long?>("UploadedBy")
@@ -14662,7 +15336,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Description")
                         .HasMaxLength(255)
@@ -14678,7 +15352,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ModifiedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("ParentCategoryId")
                         .HasColumnType("bigint")
@@ -14715,7 +15389,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime?>("CreatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<string>("Description")
@@ -14731,7 +15405,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(100)");
 
                     b.Property<DateTime?>("ModifiedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("SubCategoryName")
                         .IsRequired()
@@ -14776,7 +15450,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime?>("CreatedDate")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<long?>("CurrencyId")
@@ -14792,6 +15466,10 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<decimal?>("DiscountValue")
                         .HasColumnType("decimal(18, 2)");
+
+                    b.Property<string>("ExternalQuoteReference")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
 
                     b.Property<int>("FinancialCalculationVersion")
                         .ValueGeneratedOnAdd()
@@ -14812,25 +15490,32 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ModifiedDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("NexoraSerial")
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
+
+                    b.Property<string>("Origin")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)")
+                        .HasDefaultValue("PIPELINE");
 
                     b.Property<string>("OutcomeNote")
                         .HasMaxLength(500)
                         .HasColumnType("character varying(500)");
 
                     b.Property<DateTime?>("OutcomeOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("OutcomeReasonId")
                         .HasColumnType("bigint");
 
                     b.Property<DateTime?>("QuoteDate")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<string>("QuoteNo")
@@ -14847,10 +15532,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("RemovedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime?>("RespondedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<int>("RevisionNo")
                         .ValueGeneratedOnAdd()
@@ -14865,7 +15550,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnName("RFQID");
 
                     b.Property<DateTime?>("SentOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<int>("SourceLeadRevision")
                         .HasColumnType("integer");
@@ -14881,10 +15566,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("decimal(18, 2)");
 
                     b.Property<DateTime?>("ValidUntil")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime?>("ValidityExtendedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.HasKey("Id")
                         .HasName("PK__Quotes__3214EC27B0FC1337");
@@ -14897,6 +15582,11 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.HasIndex("StatusId");
 
+                    b.HasIndex("BusinessUnitId", "ExternalQuoteReference")
+                        .IsUnique()
+                        .HasDatabaseName("UX_Quotes_BU_ExternalQuoteReference")
+                        .HasFilter("\"ExternalQuoteReference\" IS NOT NULL");
+
                     b.HasIndex("BusinessUnitId", "RemovedOn")
                         .HasDatabaseName("IX_Quotes_BU_RemovedOn");
 
@@ -14908,6 +15598,9 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasIndex("BusinessUnitId", "ValidityExtendedOn")
                         .HasDatabaseName("IX_Quotes_BU_ValidityExtendedOn")
                         .HasFilter("\"ValidityExtendedOn\" IS NOT NULL");
+
+                    b.HasIndex("BusinessUnitId", "Origin", "QuoteDate")
+                        .HasDatabaseName("IX_Quotes_BU_Origin_QuoteDate");
 
                     b.HasIndex(new[] { "BusinessUnitId", "CommercialCaseId" }, "IX_Quotes_BusinessUnitID_CommercialCaseID");
 
@@ -14922,6 +15615,8 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.ToTable("Quotes", t =>
                         {
+                            t.HasCheckConstraint("CK_Quotes_Origin", "\"Origin\" IN ('PIPELINE', 'BACKFILL')");
+
                             t.HasCheckConstraint("CK_Quotes_Removal", "(\"RemovedOn\" IS NULL AND \"RemovedBy\" IS NULL AND \"RemovalReason\" IS NULL) OR (\"RemovedOn\" IS NOT NULL AND \"RemovedBy\" IS NOT NULL AND trim(\"RemovedBy\") <> '' AND \"RemovalReason\" IS NOT NULL AND trim(\"RemovalReason\") <> '')");
                         });
                 });
@@ -14962,7 +15657,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime?>("ModifiedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<string>("PrimaryColor")
@@ -14996,7 +15691,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime?>("CreatedDate")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<string>("CustomerLineRef")
@@ -15017,6 +15712,9 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<decimal?>("DiscountValue")
                         .HasColumnType("decimal(18, 2)");
 
+                    b.Property<decimal?>("HeaderDiscountAllocated")
+                        .HasColumnType("decimal(18, 6)");
+
                     b.Property<string>("ItemDescription")
                         .HasColumnType("text");
 
@@ -15025,7 +15723,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ModifiedDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("ProductId")
                         .HasColumnType("bigint")
@@ -15136,7 +15834,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("RemovedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("StatusCode")
                         .HasMaxLength(100)
@@ -15190,7 +15888,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("ExtendedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<string>("IdempotencyKey")
@@ -15199,10 +15897,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(160)");
 
                     b.Property<DateTime>("NewValidUntil")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime?>("PreviousValidUntil")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("QuoteId")
                         .HasColumnType("bigint");
@@ -15239,10 +15937,10 @@ namespace ERP_RFQ_Automation.Migrations
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
 
                     b.Property<DateTime?>("AcknowledgmentDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime?>("BidClosingDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("BiddingDecision")
                         .HasMaxLength(200)
@@ -15271,7 +15969,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedDate")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<long?>("CustomerId")
@@ -15300,7 +15998,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(40)");
 
                     b.Property<DateTime?>("ModifiedDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("NexoraSerial")
                         .HasMaxLength(100)
@@ -15313,8 +16011,14 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasMaxLength(200)
                         .HasColumnType("character varying(200)");
 
+                    b.Property<long?>("ParticipationDecisionId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long?>("PromotionId")
+                        .HasColumnType("bigint");
+
                     b.Property<DateTime>("RecDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Rfqno")
                         .IsRequired()
@@ -15335,25 +16039,44 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint")
                         .HasColumnName("RFQTypeID");
 
+                    b.Property<long?>("SourceLeadRevisionId")
+                        .HasColumnType("bigint");
+
                     b.Property<DateTime?>("SubDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.HasKey("Id")
                         .HasName("PK__RFQ__3214EC27E71B0249");
 
                     b.HasIndex("CustomerId");
 
-                    b.HasIndex("LeadId");
+                    b.HasIndex("LeadId")
+                        .IsUnique()
+                        .HasFilter("\"LeadID\" IS NOT NULL");
 
                     b.HasIndex("RfqstatusId");
 
                     b.HasIndex("RfqtypeId");
 
+                    b.HasIndex("BusinessUnitId", "ParticipationDecisionId");
+
+                    b.HasIndex("BusinessUnitId", "PromotionId")
+                        .IsUnique()
+                        .HasFilter("\"PromotionId\" IS NOT NULL");
+
+                    b.HasIndex("BusinessUnitId", "SourceLeadRevisionId");
+
+                    b.HasIndex("BusinessUnitId", "PromotionId", "LeadId", "SourceLeadRevisionId", "ParticipationDecisionId")
+                        .IsUnique();
+
                     b.HasIndex(new[] { "BusinessUnitId", "CommercialCaseId" }, "IX_RFQ_BusinessUnitID_CommercialCaseID");
 
                     b.HasIndex(new[] { "BusinessUnitId", "NexoraSerial" }, "IX_RFQ_BusinessUnitID_NexoraSerial");
 
-                    b.ToTable("RFQ", (string)null);
+                    b.ToTable("RFQ", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_RFQ_LeadPromotionLineage", "(\"LeadID\" IS NULL AND \"PromotionId\" IS NULL AND \"SourceLeadRevisionId\" IS NULL AND \"ParticipationDecisionId\" IS NULL) OR (\"LeadID\" IS NOT NULL AND \"PromotionId\" IS NOT NULL AND \"SourceLeadRevisionId\" IS NOT NULL AND \"ParticipationDecisionId\" IS NOT NULL)");
+                        });
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.Models.Rfqitem", b =>
@@ -15382,7 +16105,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(200)");
 
                     b.Property<DateTime?>("BidClosingDateLine")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("BuyerName")
                         .HasMaxLength(400)
@@ -15403,7 +16126,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedDate")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<string>("Currency")
@@ -15457,7 +16180,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(40)");
 
                     b.Property<DateTime?>("ModifiedDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("NoQuoteReason")
                         .HasMaxLength(500)
@@ -15468,7 +16191,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(120)");
 
                     b.Property<DateTime?>("ParticipationDecidedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("ParticipationDecision")
                         .IsRequired()
@@ -15481,24 +16204,47 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint")
                         .HasColumnName("ProductID");
 
+                    b.Property<string>("ProductResolutionReason")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<string>("ProductResolvedBy")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<DateTime?>("ProductResolvedOn")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<string>("ProductShortDescription")
                         .HasColumnType("text");
 
                     b.Property<string>("ProductShortName")
                         .HasColumnType("text");
 
-                    b.Property<int>("Quantity")
+                    b.Property<int?>("Quantity")
                         .HasColumnType("integer");
 
                     b.Property<DateTime?>("ReceivedDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime?>("RequiredDesiredDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("Rfqid")
                         .HasColumnType("bigint")
                         .HasColumnName("RFQID");
+
+                    b.Property<long?>("SourceBusinessUnitId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long?>("SourceLeadId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long?>("SourceLeadItemRevisionId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long?>("SourceLeadRevisionId")
+                        .HasColumnType("bigint");
 
                     b.Property<string>("StorageLocation")
                         .HasMaxLength(200)
@@ -15540,6 +16286,10 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.HasIndex("WarehouseId");
 
+                    b.HasIndex("SourceBusinessUnitId", "SourceLeadItemRevisionId");
+
+                    b.HasIndex("SourceBusinessUnitId", "SourceLeadItemRevisionId", "SourceLeadRevisionId", "SourceLeadId");
+
                     b.HasIndex(new[] { "Rfqid", "ParticipationDecision" }, "IX_RFQItems_Rfqid_Participation");
 
                     b.ToTable("RFQItems", null, t =>
@@ -15548,7 +16298,11 @@ namespace ERP_RFQ_Automation.Migrations
 
                             t.HasCheckConstraint("CK_RFQItems_Participation_Decision", "\"ParticipationDecision\" IN ('Pending','Quote','NoQuote')");
 
-                            t.HasCheckConstraint("CK_RFQItems_Quantity_Positive", "\"Quantity\" > 0");
+                            t.HasCheckConstraint("CK_RFQItems_Quantity_Positive", "\"Quantity\" IS NULL OR \"Quantity\" > 0");
+
+                            t.HasCheckConstraint("CK_RFQItems_SourceLineage", "(\"SourceBusinessUnitId\" IS NULL AND \"SourceLeadId\" IS NULL AND \"SourceLeadRevisionId\" IS NULL AND \"SourceLeadItemRevisionId\" IS NULL) OR (\"SourceBusinessUnitId\" IS NOT NULL AND \"SourceLeadId\" IS NOT NULL AND \"SourceLeadRevisionId\" IS NOT NULL AND \"SourceLeadItemRevisionId\" IS NOT NULL)");
+
+                            t.HasCheckConstraint("CK_Rfqitems_ProductResolution", "(\"ProductResolvedBy\" IS NULL AND \"ProductResolvedOn\" IS NULL) OR (\"ProductResolvedBy\" IS NOT NULL AND trim(\"ProductResolvedBy\") <> '' AND \"ProductResolvedOn\" IS NOT NULL)");
                         });
                 });
 
@@ -15591,14 +16345,14 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("ModifiedBy")
                         .HasMaxLength(255)
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ModifiedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("ModuleId")
                         .HasColumnType("bigint")
@@ -15649,7 +16403,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedDate")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<string>("Description")
@@ -15666,7 +16420,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(50)");
 
                     b.Property<DateTime?>("ModifiedDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<int>("StateId")
                         .HasColumnType("integer")
@@ -15712,7 +16466,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedDate")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<string>("Description")
@@ -15729,7 +16483,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(50)");
 
                     b.Property<DateTime?>("ModifiedDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.HasKey("CountryId")
                         .HasName("PK__SetCount__10D160BF33E5BD3A");
@@ -15763,7 +16517,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedDate")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<string>("Description")
@@ -15780,7 +16534,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(50)");
 
                     b.Property<DateTime?>("ModifiedDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("StateCode")
                         .IsRequired()
@@ -15822,7 +16576,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedDate")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<string>("Description")
@@ -15839,7 +16593,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(50)");
 
                     b.Property<DateTime?>("ModifiedDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("UomCode")
                         .IsRequired()
@@ -15875,7 +16629,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("text");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Description")
                         .HasColumnType("text");
@@ -15889,7 +16643,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("text");
 
                     b.Property<DateTime?>("ModifiedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("ParentSetupId")
                         .HasColumnType("bigint")
@@ -15933,7 +16687,7 @@ namespace ERP_RFQ_Automation.Migrations
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
 
                     b.Property<DateTime?>("ActualDeliveryDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("BusinessUnitId")
                         .HasColumnType("bigint")
@@ -15953,7 +16707,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<int?>("DeliveryCityId")
@@ -15972,10 +16726,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("DeliveryStatusChangedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime?>("EstimatedDeliveryDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("ExternalId")
                         .HasMaxLength(255)
@@ -15996,7 +16750,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ModifiedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("NexoraSerial")
                         .HasColumnType("text");
@@ -16018,7 +16772,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(100)");
 
                     b.Property<DateTime>("ShipmentDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("ShipmentNo")
                         .IsRequired()
@@ -16078,7 +16832,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<bool>("IsActive")
@@ -16091,7 +16845,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ModifiedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Notes")
                         .HasMaxLength(500)
@@ -16132,7 +16886,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("ChangedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("NewStatusId")
                         .HasColumnType("bigint");
@@ -16214,7 +16968,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int?>("CreditDays")
+                        .HasColumnType("integer");
 
                     b.Property<long?>("CurrencyId")
                         .HasColumnType("bigint")
@@ -16230,14 +16987,14 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(10)");
 
                     b.Property<DateTime?>("EffectiveFrom")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("GovernanceReviewedBy")
                         .HasMaxLength(255)
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("GovernanceReviewedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("GovernanceStatus")
                         .IsRequired()
@@ -16262,7 +17019,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ModifiedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Name")
                         .IsRequired()
@@ -16300,6 +17057,10 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<string>("TaxRegistrationNumber")
                         .HasMaxLength(50)
                         .HasColumnType("character varying(50)");
+
+                    b.Property<string>("Tier")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
 
                     b.Property<string>("VerificationStatus")
                         .IsRequired()
@@ -16355,6 +17116,8 @@ namespace ERP_RFQ_Automation.Migrations
 
                             t.HasCheckConstraint("CK_Suppliers_TaxRegistrationNumber", "\"TaxRegistrationNumber\" IS NULL OR (\"TaxRegistrationNumber\" ~ '^[A-Z0-9./]{5,50}$' AND (\"TaxRegistrationNumber\" !~ '^3[0-9]*$' OR \"TaxRegistrationNumber\" ~ '^3[0-9]{13}3$'))");
 
+                            t.HasCheckConstraint("CK_Suppliers_Tier", "\"Tier\" IS NULL OR \"Tier\" IN ('TIER_1_PARTNER','TIER_2_EXTENDED','TIER_3_OUT_OF_NETWORK')");
+
                             t.HasCheckConstraint("CK_Suppliers_VerificationStatus", "\"VerificationStatus\" IN ('UNKNOWN','PENDING','VERIFIED','FAILED','EXPIRED')");
                         });
                 });
@@ -16378,7 +17141,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<string>("Currency")
@@ -16397,7 +17160,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("PurchaseDate")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<decimal>("Quantity")
@@ -16443,7 +17206,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedDate")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<long?>("CurrencyId")
@@ -16488,7 +17251,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(256)");
 
                     b.Property<DateTime?>("ModifiedDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<decimal>("OtherCost")
                         .HasPrecision(18, 4)
@@ -16501,7 +17264,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("decimal(18, 2)");
 
                     b.Property<DateTime?>("QuoteDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("QuoteReference")
                         .HasMaxLength(100)
@@ -16558,7 +17321,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("integer");
 
                     b.Property<DateTime?>("ValidUntil")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("Version")
                         .IsConcurrencyToken()
@@ -16630,7 +17393,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<DateOnly>("EffectiveDate")
@@ -16659,7 +17422,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ModifiedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("State")
                         .HasMaxLength(100)
@@ -16709,7 +17472,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("ManagerId")
                         .HasColumnType("bigint")
@@ -16720,7 +17483,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ModifiedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("SubTeamId")
                         .HasColumnType("bigint")
@@ -16762,10 +17525,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime?>("DeactivatedAtUtc")
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasColumnName("DeactivatedAtUtc");
 
                     b.Property<string>("Email")
@@ -16789,7 +17552,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasDefaultValue(true);
 
                     b.Property<DateTime?>("LastLogin")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("LastName")
                         .IsRequired()
@@ -16809,7 +17572,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ModifiedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("PasswordHash")
                         .IsRequired()
@@ -16879,14 +17642,14 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("ModifiedBy")
                         .HasMaxLength(255)
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ModifiedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("UserGroupsName")
                         .IsRequired()
@@ -16908,7 +17671,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(10)");
 
                     b.Property<DateTime>("LastPurchasedDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<decimal>("LatestPrice")
                         .HasColumnType("decimal(18, 6)");
@@ -16985,7 +17748,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<bool?>("IsActive")
@@ -17006,7 +17769,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ModifiedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("PostalCode")
                         .HasMaxLength(20)
@@ -17048,7 +17811,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<string>("ModifiedBy")
@@ -17056,7 +17819,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ModifiedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<decimal?>("OutputTaxRatePercent")
                         .ValueGeneratedOnAdd()
@@ -17134,7 +17897,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("CancelledOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("CommercialCaseId")
                         .HasColumnType("bigint");
@@ -17144,7 +17907,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ConfirmedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("CreatedBy")
                         .IsRequired()
@@ -17153,7 +17916,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<long>("CurrencyId")
@@ -17170,7 +17933,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ModifiedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("QuoteId")
                         .HasColumnType("bigint");
@@ -17308,7 +18071,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<long>("CurrencyId")
@@ -17332,7 +18095,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ModifiedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("NormalizedExternalPoNumber")
                         .IsRequired()
@@ -17340,13 +18103,13 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(200)");
 
                     b.Property<DateTime>("PoDate")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("QuoteId")
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("ReceivedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("RfqId")
                         .HasColumnType("bigint");
@@ -17522,7 +18285,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("OccurredOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<string>("PreviousState")
@@ -17597,17 +18360,17 @@ namespace ERP_RFQ_Automation.Migrations
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
 
                     b.Property<DateTime>("CreatedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime>("ExpiresAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Label")
                         .HasMaxLength(200)
                         .HasColumnType("character varying(200)");
 
                     b.Property<DateTime?>("LastUsedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("PlatformUserId")
                         .HasColumnType("bigint");
@@ -17617,7 +18380,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(256)");
 
                     b.Property<DateTime?>("RevokedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("RevokedBy")
                         .HasMaxLength(320)
@@ -17644,6 +18407,16 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<long>("Id")
                         .HasColumnType("bigint");
 
+                    b.Property<bool>("BrowserTrustEnabled")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true);
+
+                    b.Property<int>("BrowserTrustHours")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(12);
+
                     b.Property<string>("ChangeReason")
                         .HasMaxLength(1000)
                         .HasColumnType("character varying(1000)");
@@ -17656,10 +18429,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("CreatedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime>("EffectiveFromUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("EnvironmentClass")
                         .IsRequired()
@@ -17669,10 +18442,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasDefaultValue("Production");
 
                     b.Property<DateTime?>("ExpiresAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime?>("ExpiryRecordedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Mode")
                         .IsRequired()
@@ -17682,7 +18455,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasDefaultValue("REQUIRED");
 
                     b.Property<DateTime>("UpdatedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("Version")
                         .IsConcurrencyToken()
@@ -17692,6 +18465,8 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.ToTable("PlatformMfaPolicies", "platform", t =>
                         {
+                            t.HasCheckConstraint("CK_PlatformMfaPolicies_BrowserTrustHours", "\"BrowserTrustHours\" BETWEEN 8 AND 720");
+
                             t.HasCheckConstraint("CK_PlatformMfaPolicies_Singleton", "\"Id\" = 1");
                         });
                 });
@@ -17728,7 +18503,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(256)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Disposition")
                         .IsRequired()
@@ -17745,7 +18520,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(256)");
 
                     b.Property<DateTime?>("ModifiedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("OpaqueProviderReference")
                         .IsRequired()
@@ -17785,7 +18560,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(256)");
 
                     b.Property<DateTime?>("VerifiedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("Version")
                         .IsConcurrencyToken()
@@ -17984,7 +18759,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("CompletedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("ContentSha256")
                         .IsRequired()
@@ -18002,7 +18777,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(256)");
 
                     b.Property<DateTime>("RequestedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Sections")
                         .IsRequired()
@@ -18057,7 +18832,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("PlacedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Reason")
                         .IsRequired()
@@ -18076,7 +18851,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime?>("ReleasedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Scope")
                         .IsRequired()
@@ -18128,7 +18903,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(32)");
 
                     b.Property<DateTime>("OccurredOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Reason")
                         .IsRequired()
@@ -18177,7 +18952,7 @@ namespace ERP_RFQ_Automation.Migrations
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("DeletionReason")
                         .HasMaxLength(1000)
@@ -18188,7 +18963,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(256)");
 
                     b.Property<DateTime?>("DeletionScheduledOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("ErasedIdentityCount")
                         .HasColumnType("bigint");
@@ -18198,17 +18973,17 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(256)");
 
                     b.Property<DateTime?>("LastExportedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime?>("ModifiedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("PersonalDataErasedBy")
                         .HasMaxLength(256)
                         .HasColumnType("character varying(256)");
 
                     b.Property<DateTime?>("PersonalDataErasedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("PersonalDataErasureReason")
                         .HasMaxLength(1000)
@@ -18218,10 +18993,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("uuid");
 
                     b.Property<DateTime?>("PurgeEligibleOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime?>("PurgeExecutedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("PurgeExecutedRowCount")
                         .HasColumnType("bigint");
@@ -18234,14 +19009,14 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(1000)");
 
                     b.Property<DateTime?>("PurgeStartedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("PurgedBy")
                         .HasMaxLength(256)
                         .HasColumnType("character varying(256)");
 
                     b.Property<DateTime?>("PurgedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("PurgedRowCount")
                         .HasColumnType("bigint");
@@ -18253,6 +19028,18 @@ namespace ERP_RFQ_Automation.Migrations
                         .IsRequired()
                         .HasMaxLength(32)
                         .HasColumnType("character varying(32)");
+
+                    b.Property<DateTime?>("StoragePurgeCompletedOn")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("StoragePurgeDetail")
+                        .HasColumnType("jsonb");
+
+                    b.Property<string>("StoragePurgeInventory")
+                        .HasColumnType("jsonb");
+
+                    b.Property<int?>("StoragePurgeOutstandingCount")
+                        .HasColumnType("integer");
 
                     b.Property<long>("TenantId")
                         .HasColumnType("bigint");
@@ -18281,10 +19068,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("ExpiresAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime>("IssuedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Jti")
                         .IsRequired()
@@ -18297,7 +19084,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(1000)");
 
                     b.Property<DateTime?>("RevokedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("RevokedBy")
                         .HasMaxLength(256)
@@ -18332,7 +19119,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(64)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Features")
                         .IsRequired()
@@ -18392,7 +19179,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Ip")
                         .HasMaxLength(64)
@@ -18433,13 +19220,13 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime?>("ConsumedAtUtc")
                         .IsConcurrencyToken()
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime>("CreatedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime>("ExpiresAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<int>("FailedAttempts")
                         .IsConcurrencyToken()
@@ -18461,7 +19248,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime?>("EnabledAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("LastAcceptedTotpStep")
                         .IsConcurrencyToken()
@@ -18474,7 +19261,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnName("TotpSecretProtected");
 
                     b.Property<DateTime>("UpdatedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.HasKey("PlatformUserId");
 
@@ -18496,14 +19283,14 @@ namespace ERP_RFQ_Automation.Migrations
                         .IsFixedLength();
 
                     b.Property<DateTime>("CreatedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("PlatformUserId")
                         .HasColumnType("bigint");
 
                     b.Property<DateTime?>("UsedAtUtc")
                         .IsConcurrencyToken()
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.HasKey("Id");
 
@@ -18525,10 +19312,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("ExpiresAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime>("IssuedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Jti")
                         .IsRequired()
@@ -18536,10 +19323,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(64)");
 
                     b.Property<DateTime?>("LastPasswordReauthAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime?>("MfaAuthenticatedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("PlatformUserId")
                         .HasColumnType("bigint");
@@ -18549,7 +19336,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(256)");
 
                     b.Property<DateTime?>("RevokedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("RevokedBy")
                         .HasMaxLength(256)
@@ -18580,7 +19367,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("text");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("DisplayName")
                         .HasMaxLength(200)
@@ -18595,7 +19382,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("boolean");
 
                     b.Property<DateTime?>("LastLogin")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("PasswordHash")
                         .IsRequired()
@@ -18669,7 +19456,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(1000)");
 
                     b.Property<DateTime?>("BillingStartsOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("City")
                         .HasMaxLength(128)
@@ -18680,10 +19467,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(320)");
 
                     b.Property<DateTime?>("ContractEndOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime?>("ContractStartOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("CountryCode")
                         .HasMaxLength(2)
@@ -18694,7 +19481,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("text");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("DataRegion")
                         .HasMaxLength(32)
@@ -18712,11 +19499,17 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(320)");
 
                     b.Property<DateTime?>("DeploymentProfileApprovedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("DeploymentProfileReason")
                         .HasMaxLength(1000)
                         .HasColumnType("character varying(1000)");
+
+                    b.Property<string>("Entitlements")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("jsonb")
+                        .HasDefaultValue("{}");
 
                     b.Property<string>("Industry")
                         .HasMaxLength(128)
@@ -18738,7 +19531,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("text");
 
                     b.Property<DateTime?>("ModifiedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Name")
                         .IsRequired()
@@ -18800,7 +19593,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(64)");
 
                     b.Property<DateTime?>("TrialEndsOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Website")
                         .HasMaxLength(512)
@@ -18831,7 +19624,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(512)");
 
                     b.Property<DateTime>("CreatedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("FromAddress")
                         .IsRequired()
@@ -18844,7 +19637,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(200)");
 
                     b.Property<DateTime?>("LastFailureAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("LastFailureKind")
                         .HasMaxLength(48)
@@ -18855,7 +19648,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(1000)");
 
                     b.Property<DateTime?>("LastVerifiedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("LastVerifiedBy")
                         .HasMaxLength(320)
@@ -18933,7 +19726,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(1000)");
 
                     b.Property<DateTime>("UpdatedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("UpdatedBy")
                         .HasMaxLength(320)
@@ -18965,10 +19758,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(256)");
 
                     b.Property<DateTime>("ExpiresAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime>("IssuedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("IssuedBy")
                         .IsRequired()
@@ -18976,10 +19769,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(256)");
 
                     b.Property<DateTime?>("LastSentAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime?>("RedeemedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("RedeemedFromIp")
                         .HasMaxLength(64)
@@ -18990,7 +19783,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(1000)");
 
                     b.Property<DateTime?>("RevokedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("RevokedBy")
                         .HasMaxLength(256)
@@ -19042,7 +19835,7 @@ namespace ERP_RFQ_Automation.Migrations
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Name")
                         .IsRequired()
@@ -19065,7 +19858,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("UpdatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("Version")
                         .IsConcurrencyToken()
@@ -19114,7 +19907,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(320)");
 
                     b.Property<DateTime?>("CompletedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("CorrelationId")
                         .IsRequired()
@@ -19122,7 +19915,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(64)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("CurrentStep")
                         .HasMaxLength(64)
@@ -19158,14 +19951,14 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(320)");
 
                     b.Property<DateTime?>("LastRecoveredOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("LastRecoveryReason")
                         .HasMaxLength(1000)
                         .HasColumnType("character varying(1000)");
 
                     b.Property<DateTime?>("LeaseHeartbeatAt")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("LeaseOwner")
                         .HasMaxLength(200)
@@ -19175,7 +19968,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("uuid");
 
                     b.Property<DateTime?>("LeaseUntil")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Name")
                         .IsRequired()
@@ -19214,7 +20007,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(64)");
 
                     b.Property<DateTime?>("StartedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("State")
                         .IsRequired()
@@ -19263,7 +20056,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("integer");
 
                     b.Property<DateTime?>("CompletedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Detail")
                         .HasColumnType("jsonb");
@@ -19286,7 +20079,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("integer");
 
                     b.Property<DateTime?>("StartedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Status")
                         .IsRequired()
@@ -19326,13 +20119,13 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(8000)");
 
                     b.Property<DateTime?>("ClosedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime>("CreatedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime?>("FirstRespondedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("OpenedByPlatformUserId")
                         .HasColumnType("bigint");
@@ -19343,7 +20136,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(16)");
 
                     b.Property<DateTime?>("RedactedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("RedactedReason")
                         .HasMaxLength(200)
@@ -19361,7 +20154,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(4000)");
 
                     b.Property<DateTime?>("ResolvedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Severity")
                         .IsRequired()
@@ -19382,7 +20175,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("UpdatedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("Version")
                         .IsConcurrencyToken()
@@ -19418,7 +20211,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(24)");
 
                     b.Property<DateTime>("LinkedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("LinkedByLabel")
                         .IsRequired()
@@ -19479,7 +20272,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(8000)");
 
                     b.Property<DateTime>("CreatedAtUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<bool>("IsInternal")
                         .ValueGeneratedOnAdd()
@@ -19522,7 +20315,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<int>("CurrentVersionNumber")
                         .HasColumnType("integer");
@@ -19549,7 +20342,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("UpdatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("Version")
                         .HasColumnType("bigint");
@@ -19596,7 +20389,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(160)");
 
                     b.Property<DateTime>("OccurredOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Reason")
                         .IsRequired()
@@ -19637,7 +20430,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("DefinitionJson")
                         .IsRequired()
@@ -19647,7 +20440,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime?>("PublishedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Status")
                         .IsRequired()
@@ -19655,7 +20448,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(24)");
 
                     b.Property<DateTime?>("TestedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<int>("VersionNumber")
                         .HasColumnType("integer");
@@ -19707,7 +20500,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(160)");
 
                     b.Property<DateTime>("OccurredOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("ToStatus")
                         .IsRequired()
@@ -19756,10 +20549,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime>("DueOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("EvidenceJson")
                         .IsRequired()
@@ -19806,7 +20599,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(240)");
 
                     b.Property<DateTime>("UpdatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("Version")
                         .HasColumnType("bigint");
@@ -19865,7 +20658,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(160)");
 
                     b.Property<DateTime>("OccurredOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Reason")
                         .IsRequired()
@@ -19899,7 +20692,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("IdentityKey")
                         .IsRequired()
@@ -19949,7 +20742,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("IdempotencyKey")
                         .IsRequired()
@@ -19962,7 +20755,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(80)");
 
                     b.Property<DateTime>("ReceivedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("RequestHash")
                         .IsRequired()
@@ -20061,7 +20854,7 @@ namespace ERP_RFQ_Automation.Migrations
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
 
                     b.Property<DateTime?>("AppliedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("BusinessUnitId")
                         .HasColumnType("bigint");
@@ -20077,7 +20870,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(160)");
 
                     b.Property<DateTime>("ObservedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<decimal>("ObservedQuantity")
                         .HasPrecision(18, 4)
@@ -20101,7 +20894,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("ReceivedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("RejectionCode")
                         .HasMaxLength(120)
@@ -20175,7 +20968,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(160)");
 
                     b.Property<DateTime>("OccurredOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("PayloadJson")
                         .IsRequired()
@@ -20211,7 +21004,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("CurrencyId")
                         .HasColumnType("bigint");
@@ -20223,7 +21016,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime?>("DeliveredOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("DeliveryLocation")
                         .HasMaxLength(500)
@@ -20235,7 +21028,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(24)");
 
                     b.Property<DateTime?>("DispatchedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<decimal?>("ExternalApprovedUnitCost")
                         .HasPrecision(18, 4)
@@ -20286,14 +21079,14 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(160)");
 
                     b.Property<DateTime?>("LastSynchronizedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("ModifiedBy")
                         .HasMaxLength(255)
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ModifiedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("NexoraSerial")
                         .IsRequired()
@@ -20335,7 +21128,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(32)");
 
                     b.Property<DateTime?>("SupplierConfirmedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("SupplierId")
                         .HasColumnType("bigint");
@@ -20409,10 +21202,13 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime?>("DeadLetteredOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("DispatchRound")
+                        .HasColumnType("integer");
 
                     b.Property<string>("LastErrorCode")
                         .HasMaxLength(120)
@@ -20426,7 +21222,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("uuid");
 
                     b.Property<DateTime?>("LeaseUntil")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("MessageType")
                         .IsRequired()
@@ -20434,7 +21230,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(80)");
 
                     b.Property<DateTime>("NextAttemptOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("OriginCorrelationId")
                         .HasMaxLength(160)
@@ -20453,7 +21249,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("SentOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Status")
                         .IsRequired()
@@ -20464,7 +21260,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("UpdatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.HasKey("Id");
 
@@ -20498,7 +21294,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long?>("CustomerId")
                         .HasColumnType("bigint");
@@ -20556,7 +21352,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("numeric(18,4)");
 
                     b.Property<DateTime?>("RequiredOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("RfqId")
                         .HasColumnType("bigint");
@@ -20595,7 +21391,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("UpdatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("Version")
                         .IsConcurrencyToken()
@@ -20637,10 +21433,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime?>("EvidenceFreshOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("EvidenceJson")
                         .IsRequired()
@@ -20673,7 +21469,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("UpdatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.HasKey("Id");
 
@@ -20703,7 +21499,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("AcknowledgedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("AcknowledgementNote")
                         .HasMaxLength(1000)
@@ -20721,7 +21517,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime?>("ApprovedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("BusinessUnitId")
                         .HasColumnType("bigint");
@@ -20738,7 +21534,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("CurrencyId")
                         .HasColumnType("bigint");
@@ -20770,7 +21566,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ModifiedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("NexoraSerial")
                         .HasColumnType("text");
@@ -20803,7 +21599,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime?>("SentToSupplierOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Status")
                         .IsRequired()
@@ -20979,7 +21775,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(64)");
 
                     b.Property<DateTime>("AvailableOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Body")
                         .IsRequired()
@@ -20990,10 +21786,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime?>("CompletedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime?>("DeadLetteredOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("FromEmail")
                         .HasMaxLength(320)
@@ -21005,7 +21801,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(160)");
 
                     b.Property<DateTime?>("LastAttemptOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("LastErrorCode")
                         .HasMaxLength(160)
@@ -21019,7 +21815,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("uuid");
 
                     b.Property<DateTime?>("LeaseUntil")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("QuoteId")
                         .HasColumnType("bigint");
@@ -21030,7 +21826,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(320)");
 
                     b.Property<DateTime>("RequestedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Subject")
                         .IsRequired()
@@ -21079,7 +21875,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<int>("DayOfMonth")
@@ -21104,7 +21900,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(1000)");
 
                     b.Property<DateTime?>("LastRunOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("LastRunOutcome")
                         .HasMaxLength(30)
@@ -21115,10 +21911,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ModifiedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime?>("NextRunOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Recipients")
                         .IsRequired()
@@ -21157,7 +21953,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<bool>("IsEnabled")
                         .ValueGeneratedOnAdd()
@@ -21173,7 +21969,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("UpdatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<int>("Version")
                         .ValueGeneratedOnAdd()
@@ -21209,13 +22005,13 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("integer");
 
                     b.Property<DateTime>("FirstFailedOnUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime>("LastFailedOnUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime?>("LockedUntilUtc")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Plane")
                         .IsRequired()
@@ -21232,6 +22028,77 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasDatabaseName("UX_LoginAttempts_Plane_AttemptKey");
 
                     b.ToTable("LoginAttempts", (string)null);
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Security.PasswordReset.PasswordResetToken", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTime>("ExpiresAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime>("IssuedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("LastSentAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("RedeemedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("RedeemedFromIp")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("RequestedFromIp")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("RevocationReason")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
+                    b.Property<DateTime?>("RevokedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("RevokedBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<int>("SendCount")
+                        .HasColumnType("integer");
+
+                    b.Property<long?>("TenantId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("TokenHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<long>("UserId")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ExpiresAtUtc")
+                        .HasDatabaseName("IX_PasswordResetTokens_ExpiresAtUtc");
+
+                    b.HasIndex("TenantId")
+                        .HasDatabaseName("IX_PasswordResetTokens_TenantId");
+
+                    b.HasIndex("TokenHash")
+                        .IsUnique()
+                        .HasDatabaseName("UX_PasswordResetTokens_TokenHash");
+
+                    b.HasIndex("UserId", "RedeemedAtUtc", "RevokedAtUtc")
+                        .HasDatabaseName("IX_PasswordResetTokens_UserId_Live");
+
+                    b.ToTable("PasswordResetTokens", "platform");
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.Services.FolderIngestionRetryState", b =>
@@ -21254,14 +22121,14 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(400)");
 
                     b.Property<DateTime>("FirstFailedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("LastErrorType")
                         .HasMaxLength(200)
                         .HasColumnType("character varying(200)");
 
                     b.Property<DateTime>("LastFailedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("SourceLabel")
                         .IsRequired()
@@ -21294,7 +22161,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<string>("DedupKey")
@@ -21328,7 +22195,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(320)");
 
                     b.Property<DateTime?>("SettledOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Status")
                         .IsRequired()
@@ -21364,7 +22231,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("CreatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<int>("CriticalDaysBeforeClose")
@@ -21397,7 +22264,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.Property<DateTime>("UpdatedOn")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp without time zone")
+                        .HasColumnType("timestamp with time zone")
                         .HasDefaultValueSql("now()");
 
                     b.Property<int>("WarnDaysBeforeClose")
@@ -21410,6 +22277,68 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasDatabaseName("UX_SlaPolicies_BU");
 
                     b.ToTable("SlaPolicies", (string)null);
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.SupplierEvaluation.SupplierComparisonWeights", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<long>("BusinessUnitId")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTime>("CreatedOn")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasDefaultValueSql("now()");
+
+                    b.Property<int>("LeadTimeWeight")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(20);
+
+                    b.Property<string>("ModifiedBy")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<DateTime?>("ModifiedOn")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("PaymentTermsWeight")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(0);
+
+                    b.Property<int>("PriceWeight")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(80);
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(1L);
+
+                    b.Property<int>("WarrantyWeight")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(0);
+
+                    b.HasKey("Id");
+
+                    b.HasAlternateKey("BusinessUnitId", "Id");
+
+                    b.HasIndex("BusinessUnitId")
+                        .IsUnique();
+
+                    b.ToTable("SupplierComparisonWeights", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_SupplierComparisonWeights_Total", "\"PriceWeight\" >= 0 AND \"LeadTimeWeight\" >= 0 AND \"WarrantyWeight\" >= 0 AND \"PaymentTermsWeight\" >= 0 AND (\"PriceWeight\" + \"LeadTimeWeight\" + \"WarrantyWeight\" + \"PaymentTermsWeight\") = 100");
+                        });
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.SupplierQuotes.CustomerQuoteSourcingDecision", b =>
@@ -21437,7 +22366,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("CurrencyId")
                         .HasColumnType("bigint");
@@ -21566,7 +22495,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(160)");
 
                     b.Property<DateTime>("DecidedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Disposition")
                         .IsRequired()
@@ -21647,7 +22576,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<int>("CurrentRevisionNumber")
                         .HasColumnType("integer");
@@ -21685,7 +22614,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("UpdatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<long>("Version")
                         .IsConcurrencyToken()
@@ -21732,7 +22661,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("numeric(5,4)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<bool>("Critical")
                         .HasColumnType("boolean");
@@ -21870,6 +22799,9 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasMaxLength(500)
                         .HasColumnType("character varying(500)");
 
+                    b.Property<int?>("WarrantyMonths")
+                        .HasColumnType("integer");
+
                     b.HasKey("Id");
 
                     b.HasIndex("BusinessUnitId", "CommercialDemandLineId");
@@ -21879,7 +22811,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.ToTable("supplier_quote_lines", null, t =>
                         {
-                            t.HasCheckConstraint("CK_supplier_quote_lines_Values", "\"LineNumber\" > 0 AND \"Quantity\" > 0 AND \"UnitPrice\" >= 0 AND (\"AvailableQuantity\" IS NULL OR \"AvailableQuantity\" >= 0) AND (\"MinimumOrderQuantity\" IS NULL OR \"MinimumOrderQuantity\" > 0) AND (\"LeadTimeDays\" IS NULL OR \"LeadTimeDays\" >= 0)");
+                            t.HasCheckConstraint("CK_supplier_quote_lines_Values", "\"LineNumber\" > 0 AND \"Quantity\" > 0 AND \"UnitPrice\" >= 0 AND (\"AvailableQuantity\" IS NULL OR \"AvailableQuantity\" >= 0) AND (\"MinimumOrderQuantity\" IS NULL OR \"MinimumOrderQuantity\" > 0) AND (\"LeadTimeDays\" IS NULL OR \"LeadTimeDays\" >= 0) AND (\"WarrantyMonths\" IS NULL OR (\"WarrantyMonths\" >= 0 AND \"WarrantyMonths\" <= 600))");
                         });
                 });
 
@@ -21914,7 +22846,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("ReviewedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Status")
                         .IsRequired()
@@ -21962,7 +22894,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CapturedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("CorrelationId")
                         .IsRequired()
@@ -22037,7 +22969,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("numeric(18,4)");
 
                     b.Property<DateTime?>("ValidUntil")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.HasKey("Id");
 
@@ -22081,7 +23013,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("CreatedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateOnly?>("ExpiryDate")
                         .HasColumnType("date");
@@ -22113,7 +23045,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ModifiedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("NexoraSerial")
                         .HasMaxLength(100)
@@ -22149,10 +23081,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("QuarantinedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime>("ReceivedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("ReleaseReason")
                         .HasMaxLength(1000)
@@ -22163,7 +23095,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("ReleasedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Status")
                         .IsRequired()
@@ -22302,7 +23234,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("UploadedOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.HasKey("Id");
 
@@ -22366,7 +23298,7 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasColumnType("character varying(255)");
 
                     b.Property<DateTime>("DeclaredOn")
-                        .HasColumnType("timestamp without time zone");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("IdempotencyKey")
                         .IsRequired()
@@ -23097,6 +24029,104 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Navigation("BusinessUnit");
 
                     b.Navigation("LifecycleEvent");
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.CommercialCases.Participation.LeadFitAssessment", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Models.Lead", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "LeadId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ERP_RFQ_Automation.LeadIdentity.LeadRevision", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "LeadRevisionId", "LeadId")
+                        .HasPrincipalKey("BusinessUnitId", "Id", "LeadId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.CommercialCases.Participation.LeadLineParticipationDecision", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Models.Currency", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "CurrencyId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("ERP_RFQ_Automation.Models.SetUom", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "UomId")
+                        .HasPrincipalKey("BusinessUnitId", "UomId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("ERP_RFQ_Automation.LeadIdentity.LeadItemRevision", "LeadItemRevision")
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "LeadItemRevisionId", "LeadRevisionId", "LeadId")
+                        .HasPrincipalKey("BusinessUnitId", "Id", "LeadRevisionId", "LeadId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ERP_RFQ_Automation.CommercialCases.Participation.LeadParticipationDecision", "ParticipationDecision")
+                        .WithMany("Lines")
+                        .HasForeignKey("BusinessUnitId", "ParticipationDecisionId", "LeadId", "LeadRevisionId")
+                        .HasPrincipalKey("BusinessUnitId", "Id", "LeadId", "LeadRevisionId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("LeadItemRevision");
+
+                    b.Navigation("ParticipationDecision");
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.CommercialCases.Participation.LeadParticipationDecision", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Models.Lead", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "LeadId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ERP_RFQ_Automation.LeadIdentity.LeadRevision", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "LeadRevisionId", "LeadId")
+                        .HasPrincipalKey("BusinessUnitId", "Id", "LeadId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ERP_RFQ_Automation.CommercialCases.Participation.LeadFitAssessment", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "FitAssessmentId", "LeadId", "LeadRevisionId")
+                        .HasPrincipalKey("BusinessUnitId", "Id", "LeadId", "LeadRevisionId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.CommercialCases.Promotion.RfqPromotion", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Models.Lead", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "LeadId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ERP_RFQ_Automation.LeadIdentity.LeadRevision", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "LeadRevisionId", "LeadId")
+                        .HasPrincipalKey("BusinessUnitId", "Id", "LeadId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ERP_RFQ_Automation.CommercialCases.Participation.LeadParticipationDecision", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "ParticipationDecisionId", "LeadId", "LeadRevisionId")
+                        .HasPrincipalKey("BusinessUnitId", "Id", "LeadId", "LeadRevisionId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.CommercialDocuments.CommercialDocumentClassification", b =>
@@ -24328,6 +25358,12 @@ namespace ERP_RFQ_Automation.Migrations
 
             modelBuilder.Entity("ERP_RFQ_Automation.Extraction.ExtractionJob", b =>
                 {
+                    b.HasOne("ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponent", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "EmailInquiryComponentId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict);
+
                     b.HasOne("ERP_RFQ_Automation.DocumentIntelligence.Persistence.SourceDocumentOccurrence", null)
                         .WithMany()
                         .HasForeignKey("BusinessUnitId", "SourceDocumentOccurrenceId")
@@ -24473,6 +25509,41 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasPrincipalKey("BusinessUnitId", "Id")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssembly", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Models.EmailIngest", "EmailIngest")
+                        .WithOne()
+                        .HasForeignKey("ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssembly", "EmailIngestId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("EmailIngest");
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponent", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssembly", "Assembly")
+                        .WithMany("Components")
+                        .HasForeignKey("BusinessUnitId", "AssemblyId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Assembly");
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponentResult", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponent", "Component")
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "ComponentId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Component");
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.Intelligence.Pricing.QuotePriceAttestation", b =>
@@ -24673,12 +25744,20 @@ namespace ERP_RFQ_Automation.Migrations
 
             modelBuilder.Entity("ERP_RFQ_Automation.LeadIdentity.LeadItemRevision", b =>
                 {
+                    b.HasOne("ERP_RFQ_Automation.Models.LeadItem", "LeadItem")
+                        .WithMany()
+                        .HasForeignKey("LeadId", "LeadItemId")
+                        .HasPrincipalKey("LeadId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict);
+
                     b.HasOne("ERP_RFQ_Automation.LeadIdentity.LeadRevision", "Revision")
                         .WithMany("Items")
-                        .HasForeignKey("BusinessUnitId", "LeadRevisionId")
-                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .HasForeignKey("BusinessUnitId", "LeadRevisionId", "LeadId")
+                        .HasPrincipalKey("BusinessUnitId", "Id", "LeadId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
+
+                    b.Navigation("LeadItem");
 
                     b.Navigation("Revision");
                 });
@@ -25004,6 +26083,12 @@ namespace ERP_RFQ_Automation.Migrations
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired()
                         .HasConstraintName("FK_LeadItems_Leads");
+
+                    b.HasOne("ERP_RFQ_Automation.Models.LeadItem", null)
+                        .WithMany()
+                        .HasForeignKey("LeadId", "EvidenceSourceLeadItemId")
+                        .HasPrincipalKey("LeadId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict);
 
                     b.Navigation("Lead");
                 });
@@ -25426,6 +26511,24 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasPrincipalKey("BusinessUnitId", "Id")
                         .OnDelete(DeleteBehavior.Restrict);
 
+                    b.HasOne("ERP_RFQ_Automation.CommercialCases.Participation.LeadParticipationDecision", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "ParticipationDecisionId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("ERP_RFQ_Automation.LeadIdentity.LeadRevision", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId", "SourceLeadRevisionId")
+                        .HasPrincipalKey("BusinessUnitId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("ERP_RFQ_Automation.CommercialCases.Promotion.RfqPromotion", null)
+                        .WithOne()
+                        .HasForeignKey("ERP_RFQ_Automation.Models.Rfq", "BusinessUnitId", "PromotionId", "LeadId", "SourceLeadRevisionId", "ParticipationDecisionId")
+                        .HasPrincipalKey("ERP_RFQ_Automation.CommercialCases.Promotion.RfqPromotion", "BusinessUnitId", "Id", "LeadId", "LeadRevisionId", "ParticipationDecisionId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
                     b.Navigation("BusinessUnit");
 
                     b.Navigation("Customer");
@@ -25475,6 +26578,12 @@ namespace ERP_RFQ_Automation.Migrations
                         .WithMany("Rfqitems")
                         .HasForeignKey("WarehouseId")
                         .HasConstraintName("FK_RFQItems_Warehouse");
+
+                    b.HasOne("ERP_RFQ_Automation.LeadIdentity.LeadItemRevision", null)
+                        .WithMany()
+                        .HasForeignKey("SourceBusinessUnitId", "SourceLeadItemRevisionId", "SourceLeadRevisionId", "SourceLeadId")
+                        .HasPrincipalKey("BusinessUnitId", "Id", "LeadRevisionId", "LeadId")
+                        .OnDelete(DeleteBehavior.Restrict);
 
                     b.Navigation("CurrencyNavigation");
 
@@ -26630,6 +27739,15 @@ namespace ERP_RFQ_Automation.Migrations
                         .IsRequired();
                 });
 
+            modelBuilder.Entity("ERP_RFQ_Automation.SupplierEvaluation.SupplierComparisonWeights", b =>
+                {
+                    b.HasOne("ERP_RFQ_Automation.Models.BusinessUnit", null)
+                        .WithMany()
+                        .HasForeignKey("BusinessUnitId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("ERP_RFQ_Automation.SupplierQuotes.CustomerQuoteSourcingDecision", b =>
                 {
                     b.HasOne("ERP_RFQ_Automation.Procurement.CommercialDemandLine", null)
@@ -27006,6 +28124,11 @@ namespace ERP_RFQ_Automation.Migrations
                         .IsRequired();
                 });
 
+            modelBuilder.Entity("ERP_RFQ_Automation.CommercialCases.Participation.LeadParticipationDecision", b =>
+                {
+                    b.Navigation("Lines");
+                });
+
             modelBuilder.Entity("ERP_RFQ_Automation.CommercialFinance.CustomerPayment", b =>
                 {
                     b.Navigation("Allocations");
@@ -27153,6 +28276,11 @@ namespace ERP_RFQ_Automation.Migrations
             modelBuilder.Entity("ERP_RFQ_Automation.InboundLogistics.SupplierShipment", b =>
                 {
                     b.Navigation("Lines");
+                });
+
+            modelBuilder.Entity("ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssembly", b =>
+                {
+                    b.Navigation("Components");
                 });
 
             modelBuilder.Entity("ERP_RFQ_Automation.Intelligence.Pricing.QuotePriceAttestation", b =>

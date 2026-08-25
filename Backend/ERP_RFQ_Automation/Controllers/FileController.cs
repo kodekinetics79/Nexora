@@ -204,6 +204,86 @@ namespace ERP_RFQ_Automation.Controllers
         }
 
         /// <summary>
+        /// Serves the immutable evidence object addressed by its durable SourceDocument id.
+        /// Authorization is proved through the tenant-scoped Lead occurrence/document ledger;
+        /// filenames and legacy attachment paths are never used as identity.
+        /// </summary>
+        [HttpGet("source-document/{sourceDocumentId:long}")]
+        [RequireModulePermission("Leads", PermissionAction.View)]
+        public async Task<IActionResult> DownloadSourceDocument(long sourceDocumentId, CancellationToken ct)
+        {
+            var rawBusinessUnitId = User.FindFirst("businessUnitId")?.Value;
+            if (!long.TryParse(rawBusinessUnitId, out var businessUnitId) || businessUnitId <= 0)
+                return BadRequest("Business Unit ID is required.");
+
+            try
+            {
+                var isAuthorizedLeadEvidence = await _context.Set<LeadOccurrenceDocument>()
+                    .AsNoTracking()
+                    .AnyAsync(link => link.BusinessUnitId == businessUnitId
+                        && link.SourceDocumentId == sourceDocumentId
+                        && link.Occurrence.LeadId.HasValue, ct);
+                if (!isAuthorizedLeadEvidence)
+                {
+                    isAuthorizedLeadEvidence = await _context.Set<LeadIngestionOccurrence>()
+                        .AsNoTracking()
+                        .AnyAsync(occurrence => occurrence.BusinessUnitId == businessUnitId
+                            && occurrence.SourceDocumentId == sourceDocumentId
+                            && occurrence.LeadId.HasValue, ct);
+                }
+                if (!isAuthorizedLeadEvidence)
+                    return NotFound();
+
+                var document = await _context.Set<SourceDocument>().AsNoTracking()
+                    .SingleOrDefaultAsync(candidate => candidate.BusinessUnitId == businessUnitId
+                        && candidate.Id == sourceDocumentId, ct);
+                if (document is null)
+                    return NotFound();
+                if (document.PurgeState != EvidencePurgeState.Present)
+                    return StatusCode(StatusCodes.Status410Gone, new
+                    {
+                        message = "The retained evidence bytes were removed under the tenant retention policy.",
+                        document.BytesPurgedOn,
+                        document.PurgePolicyCode
+                    });
+                if (document.SecurityStatus != DocumentSecurityStatus.Cleared)
+                    return Conflict("The source document is not cleared for viewing.");
+                if (!document.ExtractionJobId.HasValue)
+                    return NotFound("The source document has no exact stored-object relation.");
+
+                var job = await _context.Set<ExtractionJob>().AsNoTracking()
+                    .SingleOrDefaultAsync(candidate => candidate.BusinessUnitId == businessUnitId
+                        && candidate.Id == document.ExtractionJobId.Value
+                        && candidate.ContentHash == document.ContentHash, ct);
+                if (job is null || string.IsNullOrWhiteSpace(job.StoragePath))
+                    return NotFound("The source document has no exact stored-object relation.");
+
+                var stream = await _evidenceStorage.OpenVerifiedReadAsync(
+                    job.StoragePath, document.ContentHash, ct);
+                Response.Headers[IntegrityHeader] = IntegrityVerified;
+                var contentType = string.IsNullOrWhiteSpace(document.DetectedMimeType)
+                    ? "application/octet-stream"
+                    : document.DetectedMimeType;
+                return File(stream, contentType, document.OriginalFileName, enableRangeProcessing: true);
+            }
+            catch (FileNotFoundException)
+            {
+                return NotFound("The requested source document was not found in evidence storage.");
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                _logger.LogWarning(ex, "Rejected unsafe storage identity for source document {SourceDocumentId}.", sourceDocumentId);
+                return NotFound();
+            }
+            catch (InvalidDataException ex)
+            {
+                _logger.LogWarning(ex, "Evidence integrity verification failed for source document {SourceDocumentId}.", sourceDocumentId);
+                return Problem(statusCode: StatusCodes.Status409Conflict,
+                    title: "The evidence object failed integrity verification.");
+            }
+        }
+
+        /// <summary>
         /// FR-MTR-02. Serves a material-lot compliance certificate.
         ///
         /// <para><b>A separate route, not a third branch on the one above.</b> Two reasons, and

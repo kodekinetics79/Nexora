@@ -30,6 +30,7 @@ const state = {
   version: 3,
   isTerminal: false,
   allowedTransitions: [
+    { statusId: 8, statusCode: 'QUALIFIED', label: 'Qualified', requiresReason: false },
     { statusId: 9, statusCode: 'DISQUALIFIED', label: 'Passed', requiresReason: true },
   ],
 };
@@ -79,5 +80,22 @@ describe('LeadDecisionActions', () => {
     expect(await screen.findByText('Why is this inquiry ending?')).toBeInTheDocument();
     expect(screen.getByText(/Moving to Passed closes the case/)).toBeInTheDocument();
     expect(getLeadOutcomeReasons).toHaveBeenCalledOnce();
+  });
+
+  it('qualifies through the server-provided governed lifecycle transition', async () => {
+    renderActions();
+    const qualify = await screen.findByRole('button', { name: 'Qualify Lead' });
+    await waitFor(() => expect(qualify).toBeEnabled());
+    fireEvent.click(qualify);
+
+    expect(screen.getByText(/does not create an RFQ/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm qualification' }));
+
+    await waitFor(() => expect(transition).toHaveBeenCalledWith(
+      'leads',
+      42,
+      state,
+      state.allowedTransitions[0],
+    ));
   });
 });

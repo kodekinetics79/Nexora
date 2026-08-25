@@ -128,7 +128,7 @@ public sealed class LeadIdentityApplicationServiceTests
         Assert.Equal(created.NexoraSerial, revision.NexoraSerial);
         Assert.Equal(2, revision.RevisionNumber);
         Assert.False(revision.ShouldRoute);
-        Assert.Equal(15, (await context.Leads.Include(x => x.LeadItems).SingleAsync(x => x.Id == created.LeadId)).LeadItems.Single().Quantity);
+        Assert.Equal(15, (await context.Leads.Include(x => x.LeadItems).SingleAsync(x => x.Id == created.LeadId)).LeadItems.Single(x => x.IsCurrentRevisionProjection).Quantity);
 
         context.ChangeTracker.Clear();
         var separate = await service.ReconcileAsync(Candidate(71, 7201, "RFQ-ACME-10", "buyer@acme.test", 10),
@@ -171,7 +171,7 @@ public sealed class LeadIdentityApplicationServiceTests
         Assert.Equal(revised.NexoraSerial, resend.NexoraSerial);
         Assert.Equal(2, await context.Set<LeadRevision>().CountAsync(x => x.LeadId == created.LeadId));
         Assert.Equal(15, (await context.Leads.Include(x => x.LeadItems)
-            .SingleAsync(x => x.Id == created.LeadId)).LeadItems.Single().Quantity);
+            .SingleAsync(x => x.Id == created.LeadId)).LeadItems.Single(x => x.IsCurrentRevisionProjection).Quantity);
     }
 
     [Fact]
@@ -390,7 +390,7 @@ public sealed class LeadIdentityApplicationServiceTests
 
         context.ChangeTracker.Clear();
         var unrelated = Candidate(77, 7801, "RFQ-GROUP-B", "b@group.test", 3);
-        var line = unrelated.LeadItems.Single();
+        var line = unrelated.LeadItems.Single(x => x.IsCurrentRevisionProjection);
         line.ManufacturerPartNumber = "PN-UNRELATED";
         line.ProductShortDescription = "Unrelated motor";
         var separate = await service.ReconcileAsync(unrelated,
@@ -443,7 +443,7 @@ public sealed class LeadIdentityApplicationServiceTests
         var canonical = await context.Leads.Include(x => x.LeadItems).SingleAsync(x => x.Id == created.LeadId);
         Assert.Equal("RFQ-2026/0012", canonical.Rfqno);
         Assert.Equal("John Smith", canonical.BuyersName);
-        var line = Assert.Single(canonical.LeadItems);
+        var line = Assert.Single(canonical.LeadItems, x => x.IsCurrentRevisionProjection);
         Assert.Equal("AB-123/X", line.ManufacturerPartNumber);
         Assert.Equal("1/2\" SS Ball Valve, 300#", line.ProductShortDescription);
         Assert.Equal(25, line.Quantity);
@@ -497,7 +497,7 @@ public sealed class LeadIdentityApplicationServiceTests
         context.ChangeTracker.Clear();
         var canonical = await context.Leads.Include(x => x.LeadItems).SingleAsync(x => x.Id == created.LeadId);
         Assert.Equal("RFQ-2026/0013", canonical.Rfqno);
-        var line = Assert.Single(canonical.LeadItems);
+        var line = Assert.Single(canonical.LeadItems, x => x.IsCurrentRevisionProjection);
         Assert.Equal("AB-123/X", line.ManufacturerPartNumber);
         Assert.Equal(10, line.Quantity);
         Assert.Equal(1234.56m, line.UnitPrice);
@@ -531,7 +531,7 @@ public sealed class LeadIdentityApplicationServiceTests
         Assert.True(await context.Set<LeadIdentityAuditEvent>()
             .AnyAsync(x => x.LeadId == created.LeadId && x.EventType == "LEAD_REVISION_CREATED"));
         Assert.Equal(25, (await context.Leads.Include(x => x.LeadItems)
-            .SingleAsync(x => x.Id == created.LeadId)).LeadItems.Single().Quantity);
+            .SingleAsync(x => x.Id == created.LeadId)).LeadItems.Single(x => x.IsCurrentRevisionProjection).Quantity);
     }
 
     [Fact]
@@ -560,7 +560,7 @@ public sealed class LeadIdentityApplicationServiceTests
             .AnyAsync(x => x.LeadId == created.LeadId && x.EventType == "LEAD_REVISION_CREATED"));
         var canonical = await context.Leads.Include(x => x.LeadItems).SingleAsync(x => x.Id == created.LeadId);
         Assert.Equal("RFQ-4471 Rev B", canonical.Rfqno);
-        Assert.Equal(25, canonical.LeadItems.Single().Quantity);
+        Assert.Equal(25, canonical.LeadItems.Single(x => x.IsCurrentRevisionProjection).Quantity);
     }
 
     [Fact]
@@ -584,7 +584,7 @@ public sealed class LeadIdentityApplicationServiceTests
         Assert.Equal(1, await context.Leads.CountAsync());
         var canonical = await context.Leads.Include(x => x.LeadItems).SingleAsync(x => x.Id == created.LeadId);
         Assert.Equal("RFQ-4471 Rev B", canonical.Rfqno);
-        Assert.Equal(25, canonical.LeadItems.Single().Quantity);
+        Assert.Equal(25, canonical.LeadItems.Single(x => x.IsCurrentRevisionProjection).Quantity);
     }
 
     [Fact]
@@ -953,7 +953,7 @@ public sealed class LeadIdentityApplicationServiceTests
         Assert.Equal(1, await context.Leads.CountAsync());
         Assert.Contains("email thread", revision.Reasons.Single(), StringComparison.Ordinal);
         Assert.Equal(25, (await context.Leads.Include(x => x.LeadItems)
-            .SingleAsync(x => x.Id == created.LeadId)).LeadItems.Single().Quantity);
+            .SingleAsync(x => x.Id == created.LeadId)).LeadItems.Single(x => x.IsCurrentRevisionProjection).Quantity);
     }
 
     [Fact]

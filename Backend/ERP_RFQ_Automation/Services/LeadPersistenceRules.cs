@@ -1,6 +1,9 @@
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.ChangeTracking;
+using ERP_RFQ_Automation.LeadIdentity;
+using ERP_RFQ_Automation.CommercialCases.Participation;
+using ERP_RFQ_Automation.CommercialCases.Promotion;
 
 namespace ERP_RFQ_Automation.Services;
 
@@ -19,6 +22,13 @@ internal static class LeadPersistenceRules
 
     private static void EnforceReferenceImmutability(ChangeTracker changeTracker)
     {
+        RefuseMutation<LeadRevision>(changeTracker, "Lead revisions are append-only.");
+        RefuseMutation<LeadItemRevision>(changeTracker, "Lead revision lines are append-only.");
+        RefuseMutation<LeadFitAssessment>(changeTracker, "Lead fit assessments are append-only.");
+        RefuseMutation<LeadParticipationDecision>(changeTracker, "Lead participation decisions are append-only.");
+        RefuseMutation<LeadLineParticipationDecision>(changeTracker, "Lead line participation decisions are append-only.");
+        RefuseMutation<RfqPromotion>(changeTracker, "RFQ promotion receipts are append-only.");
+
         foreach (var entry in changeTracker.Entries<Lead>().Where(e => e.State == EntityState.Modified))
         {
             var reference = entry.Property(e => e.CommercialCaseReference);
@@ -46,6 +56,13 @@ internal static class LeadPersistenceRules
             if (businessUnitId.IsModified && businessUnitId.OriginalValue != businessUnitId.CurrentValue)
                 throw new InvalidOperationException("A commercial case cannot be moved to another tenant.");
         }
+    }
+
+    private static void RefuseMutation<TEntity>(ChangeTracker changeTracker, string message)
+        where TEntity : class
+    {
+        if (changeTracker.Entries<TEntity>().Any(e => e.State is EntityState.Modified or EntityState.Deleted))
+            throw new InvalidOperationException(message);
     }
 
     private static void PrepareNonPostgresChanges(ErpRfqAutomationContext context)

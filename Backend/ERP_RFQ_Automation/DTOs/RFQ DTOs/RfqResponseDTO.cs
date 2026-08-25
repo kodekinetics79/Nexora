@@ -23,6 +23,13 @@ namespace ERP_RFQ_Automation.DTOs.RfqDTOs
         public long? RfqtypeId { get; set; }
         public string? DurationAgreement { get; set; }
         public long? LeadId { get; set; }
+        public long? PromotionId { get; set; }
+        public long? SourceLeadRevisionId { get; set; }
+        public int? SourceLeadRevisionNumber { get; set; }
+        public long? ParticipationDecisionId { get; set; }
+        public int? ParticipationVersion { get; set; }
+        public DateTimeOffset? PromotedAtUtc { get; set; }
+        public string? PromotedBy { get; set; }
         public int ActiveLeadRevision { get; set; }
         public string CreatedBy { get; set; } = null!;
         public DateTime CreatedDate { get; set; }
@@ -89,6 +96,7 @@ namespace ERP_RFQ_Automation.DTOs.RfqDTOs
         public string? ModifiedBy { get; set; }
         public DateTime? ModifiedDate { get; set; }
         public decimal? Aiconfidence { get; set; }
+        public long? SourceLeadItemRevisionId { get; set; }
 
         // ---- Line participation: which lines Nexora will actually quote ----
         // A partial bid is the normal case on an industrial bid list; see

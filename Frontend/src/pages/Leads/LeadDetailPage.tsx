@@ -13,7 +13,7 @@ import {
   Description as FileIcon,
   Download as DownloadIcon,
   NavigateNext as NextIcon,
-  AutoAwesome as SparkleIcon,
+  RuleOutlined as DecisionIcon,
   OpenInNew as WorkspaceIcon,
 } from '@mui/icons-material';
 import leadService from '../../api/services/leadService';
@@ -138,7 +138,12 @@ const LeadDetailPage: React.FC = () => {
 
   // Review state, from facts the platform records — not from a model score.
   const awaitingReview = (lead.headerRemarks ?? '').startsWith('[NEEDS REVIEW]');
-  const reviewedByPerson = !awaitingReview && (lead.reviewVersion ?? 0) > 0;
+  // `reviewVersion` proves only that review activity was recorded. It does not identify the
+  // reviewer, scope or source coverage, so it must not be presented as “Checked by a person”.
+  // The Decision Workbench uses the persisted verification status/actor/time contract.
+  const reviewActivityRecorded = !awaitingReview && (lead.reviewVersion ?? 0) > 0;
+  const decisionClosed = ['CONVERTED_TO_RFQ', 'DISQUALIFIED', 'LOST', 'CANCELLED', 'COMPLETED', 'DUPLICATED']
+    .includes((lead.leadStatusCode ?? '').trim().toUpperCase());
 
   return (
     <Box sx={{ p: { xs: 1, sm: 2, md: 3 }, maxWidth: 1800, mx: 'auto', minWidth: 0 }}>
@@ -219,15 +224,15 @@ const LeadDetailPage: React.FC = () => {
               Workspace
             </Button>
           )}
-          {hasPermission('Leads', 'create') && hasPermission('RFQ Management', 'create') && <Button
+          <Button
             variant="contained"
-            startIcon={<SparkleIcon />}
+            startIcon={<DecisionIcon />}
             size="small"
-            onClick={() => navigate(`/procurement/leads/${lead.id}/convert`)}
+            onClick={() => navigate(`/procurement/leads/${lead.id}/workbench`)}
             sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
           >
-            Qualify & Create RFQ
-          </Button>}
+            {decisionClosed ? 'View decision record' : 'Open decision workbench'}
+          </Button>
         </Stack>
       </Box>
 
@@ -410,9 +415,9 @@ const LeadDetailPage: React.FC = () => {
                 ) : (
                   <Chip
                     size="small"
-                    color={reviewedByPerson ? 'success' : 'default'}
+                    color="default"
                     variant="outlined"
-                    label={reviewedByPerson ? 'Checked by a person' : 'Not flagged for review'}
+                    label={reviewActivityRecorded ? 'Review activity recorded' : 'Not flagged for review'}
                     sx={{ fontWeight: 800, fontSize: '0.7rem' }}
                   />
                 )}

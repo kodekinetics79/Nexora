@@ -28,6 +28,12 @@ public interface ILeadIdentityApplicationService
     /// commercial facts. Safe to call unconditionally — a lead that already has one is untouched.</summary>
     Task<LeadReconciliationResult> EstablishBaselineRevisionAsync(
         long businessUnitId, long leadId, LeadIdentityBaselineRequest request, CancellationToken ct = default);
+
+    /// <summary>Appends a revision for an explicit human correction or identity decision.
+    /// The occurrence records content/audit provenance, never a synthetic inbound receipt.</summary>
+    Task<LeadReconciliationResult> AppendHumanRevisionAsync(long businessUnitId, long leadId,
+        string actorId, string reason, string idempotencyKey, CancellationToken ct = default)
+        => throw new NotSupportedException("This identity implementation does not support human revision appends.");
 }
 
 public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationService
@@ -384,11 +390,11 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         var occurrence = NewOccurrence(canonical.BusinessUnitId, intake, fingerprint, scope, LeadOccurrenceClassification.Revision, .98m, reasons, canonical.Id, null);
         _db.Add(occurrence); await _db.SaveChangesAsync(ct);
         var next = canonical.CurrentRevisionNumber + 1;
-        var revision = BuildRevision(incoming, occurrence, next, fingerprint, intake);
-        revision.LeadId = canonical.Id;
         var previousSnapshot = canonical.CurrentRevisionId.HasValue
             ? await _db.Set<LeadRevision>().Where(x => x.Id == canonical.CurrentRevisionId.Value).Select(x => x.SnapshotJson).SingleOrDefaultAsync(ct)
             : JsonSerializer.Serialize(Snapshot(canonical));
+        ApplyCurrentProjection(canonical, incoming);
+        var revision = BuildRevision(canonical, occurrence, next, fingerprint, intake);
         foreach (var d in Diff(previousSnapshot, revision.SnapshotJson))
         {
             d.BusinessUnitId = canonical.BusinessUnitId;
@@ -397,7 +403,7 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         _db.Add(revision); await _db.SaveChangesAsync(ct);
         occurrence.LeadRevisionId = revision.Id; canonical.CurrentRevisionId = revision.Id; canonical.CurrentRevisionNumber = next;
         canonical.CurrentInquiryFingerprint = fingerprint; canonical.CurrentOccurrenceClassification = LeadOccurrenceClassification.Revision.ToString();
-        canonical.IngestedAtUtc = intake.IngestedAtUtc; ApplyCurrentProjection(canonical, incoming);
+        canonical.IngestedAtUtc = intake.IngestedAtUtc;
         await AddImpactsAsync(canonical, revision, ct); AddAudit(occurrence, canonical.Id, "LEAD_REVISION_CREATED", intake, new { revision = next });
         await _db.SaveChangesAsync(ct); if (ownsTransaction) await tx.CommitAsync(ct);
         return new(canonical.Id, canonical.CommercialCaseReference, occurrence.Id, revision.Id, next, occurrence.Classification, occurrence.Confidence, occurrence.DecisionReasons(), false);
@@ -876,27 +882,29 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
             var previous = canonical.CurrentRevisionId.HasValue
                 ? await _db.Set<LeadRevision>().Where(x => x.Id == canonical.CurrentRevisionId.Value).Select(x => x.SnapshotJson).SingleAsync(ct)
                 : JsonSerializer.Serialize(Snapshot(canonical));
+            verbatimApplied = ApplyVerbatimProjection(canonical, candidate.ProposedLeadSnapshotJson);
+            // Older possible-match rows may predate verbatim snapshot retention. The human
+            // decision is still an occurrence and deserves an immutable revision record, but it
+            // must never claim normalized candidate values were applied. Re-state the previous
+            // canonical snapshot and exact current line identities instead.
+            var revisionSnapshot = verbatimApplied == true ? proposed : previous;
             var revision = new LeadRevision { BusinessUnitId = bu, LeadId = canonical.Id,
                 RevisionNumber = canonical.CurrentRevisionNumber + 1, EstablishedByOccurrence = occurrence,
-                LogicalInquiryFingerprint = occurrence.LogicalInquiryFingerprint, SnapshotJson = proposed,
+                LogicalInquiryFingerprint = occurrence.LogicalInquiryFingerprint, SnapshotJson = revisionSnapshot,
                 CustomerRfqReference = canonical.Rfqno, NormalizedCustomerRfqReference = Normalize(canonical.Rfqno),
                 CustomerIdSnapshot = canonical.CustomerId, ContactIdSnapshot = canonical.ContactId, CreatedAtUtc = DateTimeOffset.UtcNow,
                 CreatedBy = actorId, ProcessingPath = LeadProcessingPath.HumanReview, ExternalAiUsed = occurrence.ExternalAiUsed };
-            foreach (var difference in Diff(previous, proposed)) { difference.BusinessUnitId = bu; revision.Differences.Add(difference); }
-            PopulateRevisionItems(revision, proposed);
+            foreach (var difference in Diff(previous, revisionSnapshot)) { difference.BusinessUnitId = bu; revision.Differences.Add(difference); }
+            // Read the reference after projection, before the first append-only save. Updating
+            // the revision after insertion would correctly trip LeadPersistenceRules.
+            revision.CustomerRfqReference = canonical.Rfqno;
+            revision.NormalizedCustomerRfqReference = Normalize(canonical.Rfqno);
+            PopulateRevisionItems(revision, revisionSnapshot,
+                canonical.LeadItems.Where(x => x.IsCurrentRevisionProjection));
             _db.Add(revision); await _db.SaveChangesAsync(ct);
             occurrence.Classification = LeadOccurrenceClassification.Revision; occurrence.LeadId = canonical.Id; occurrence.LeadRevisionId = revision.Id;
             canonical.CurrentRevisionId = revision.Id; canonical.CurrentRevisionNumber = revision.RevisionNumber;
             canonical.CurrentInquiryFingerprint = occurrence.LogicalInquiryFingerprint; canonical.CurrentOccurrenceClassification = LeadOccurrenceClassification.Revision.ToString();
-            verbatimApplied = ApplyVerbatimProjection(canonical, candidate.ProposedLeadSnapshotJson);
-            if (verbatimApplied == true)
-            {
-                // The revision indexes the reference the amendment actually carries. Reading it
-                // from the pre-projection canonical made the newest revision index the SUPERSEDED
-                // reference, so the unbounded revision lookup lagged one amendment behind.
-                revision.CustomerRfqReference = canonical.Rfqno;
-                revision.NormalizedCustomerRfqReference = Normalize(canonical.Rfqno);
-            }
             await AddImpactsAsync(canonical, revision, ct);
         }
         else if (request.Action == "create_new")
@@ -918,7 +926,7 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
                 SnapshotJson = proposed, CustomerRfqReference = newLead.Rfqno, NormalizedCustomerRfqReference = Normalize(newLead.Rfqno),
                 CustomerIdSnapshot = newLead.CustomerId, ContactIdSnapshot = newLead.ContactId, CreatedAtUtc = DateTimeOffset.UtcNow, CreatedBy = actorId,
                 ProcessingPath = LeadProcessingPath.HumanReview, ExternalAiUsed = occurrence.ExternalAiUsed };
-            PopulateRevisionItems(revision, proposed);
+            PopulateRevisionItems(revision, proposed, newLead.LeadItems);
             _db.Add(revision); await _db.SaveChangesAsync(ct);
             newLead.CurrentRevisionId = revision.Id; newLead.CurrentRevisionNumber = 1; newLead.CurrentInquiryFingerprint = occurrence.LogicalInquiryFingerprint;
             newLead.CurrentOccurrenceClassification = LeadOccurrenceClassification.New.ToString(); newLead.IngestedAtUtc = occurrence.IngestedAtUtc;
@@ -1133,6 +1141,110 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         return new Guid(System.Security.Cryptography.MD5.HashData(System.Text.Encoding.UTF8.GetBytes(seed)));
     }
 
+    public async Task<LeadReconciliationResult> AppendHumanRevisionAsync(long businessUnitId, long leadId,
+        string actorId, string reason, string idempotencyKey, CancellationToken ct = default)
+    {
+        if (businessUnitId <= 0) throw new ArgumentOutOfRangeException(nameof(businessUnitId));
+        if (string.IsNullOrWhiteSpace(actorId)) throw new ArgumentException("An authenticated actor is required.");
+        if (string.IsNullOrWhiteSpace(reason)) throw new ArgumentException("A human correction reason is required.");
+        if (string.IsNullOrWhiteSpace(idempotencyKey)) throw new ArgumentException("An idempotency key is required.");
+
+        var replay = await _db.Set<LeadIngestionOccurrence>().AsNoTracking()
+            .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.IdempotencyKey == idempotencyKey, ct);
+        if (replay?.LeadRevisionId is long replayRevisionId)
+        {
+            var replayLead = await _db.Leads.AsNoTracking().SingleAsync(x => x.Id == leadId, ct);
+            return new(replayLead.Id, replayLead.CommercialCaseReference ?? string.Empty, replay.Id,
+                replayRevisionId, replayLead.CurrentRevisionNumber, replay.Classification, replay.Confidence,
+                replay.DecisionReasons(), false);
+        }
+
+        var ownsTransaction = _db.Database.CurrentTransaction is null;
+        await using var ownedTransaction = ownsTransaction
+            ? await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct)
+            : null;
+        var lead = await _db.Leads.Include(x => x.LeadItems)
+            .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.Id == leadId, ct)
+            ?? throw new KeyNotFoundException($"Lead {leadId} was not found in this business unit.");
+        var previousRevision = lead.CurrentRevisionId.HasValue
+            ? await _db.Set<LeadRevision>().AsNoTracking().Where(x => x.BusinessUnitId == businessUnitId
+                && x.Id == lead.CurrentRevisionId.Value)
+                .Select(x => new { x.SnapshotJson, x.EstablishedByOccurrenceId }).SingleAsync(ct)
+            : null;
+        var previousSnapshot = previousRevision?.SnapshotJson;
+        var number = lead.CurrentRevisionNumber + 1;
+        var now = DateTimeOffset.UtcNow;
+        var fingerprint = Fingerprint(lead);
+        var intake = new LeadIntakeDescriptor(
+            BatchId: BaselineBatchId(businessUnitId, "HumanCorrection"), SourceChannel: "HumanCorrection",
+            IdempotencyKey: idempotencyKey.Trim(), ExternalSourceId: null, EmailThreadId: null,
+            SourceSystem: "HumanCorrection", Sender: null, Subject: null, OriginalFileName: null,
+            MimeType: null, FileSize: null, ContentHash: null, SourceDocumentId: null,
+            ExtractionJobId: null, SourceReceivedAtUtc: null, IngestedAtUtc: now,
+            ProcessingPath: LeadProcessingPath.HumanReview, ExternalAiUsed: false, ExternalCost: null,
+            ActorType: "AuthenticatedUser", ActorId: actorId.Trim(), CorrelationId: idempotencyKey.Trim());
+        await EnsureBatchAsync(businessUnitId, intake, ct);
+        var classification = number == 1 ? LeadOccurrenceClassification.New : LeadOccurrenceClassification.Revision;
+        var occurrence = NewOccurrence(businessUnitId, intake, fingerprint, null, classification, 1m,
+            [reason.Trim(), "Human-authored canonical revision; no inbound document receipt was created."], lead.Id, null);
+        occurrence.RecordKind = LeadOccurrenceRecordKind.IdentityBaseline;
+        occurrence.PolicyVersion = "release-01a/human-revision-v1";
+        // A human correction is not a new receipt, but the corrected revision remains derived
+        // from the exact documents that established the previous revision. Copy only those
+        // governed relations; never manufacture receipt metadata or a new source object.
+        if (previousRevision is not null)
+        {
+            var inheritedLinks = await _db.Set<LeadOccurrenceDocument>().AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId
+                    && x.OccurrenceId == previousRevision.EstablishedByOccurrenceId)
+                .OrderBy(x => x.Ordinal).ThenBy(x => x.Id).ToListAsync(ct);
+            var directDocumentId = await _db.Set<LeadIngestionOccurrence>().AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId
+                    && x.Id == previousRevision.EstablishedByOccurrenceId)
+                .Select(x => x.SourceDocumentId).SingleAsync(ct);
+            foreach (var link in inheritedLinks.GroupBy(x => x.SourceDocumentId).Select(x => x.First()))
+                occurrence.Documents.Add(new LeadOccurrenceDocument
+                {
+                    BusinessUnitId = businessUnitId,
+                    SourceDocumentId = link.SourceDocumentId,
+                    Role = link.Role,
+                    Ordinal = link.Ordinal,
+                    LinkedAtUtc = now
+                });
+            if (directDocumentId.HasValue
+                && occurrence.Documents.All(x => x.SourceDocumentId != directDocumentId.Value))
+                occurrence.Documents.Add(new LeadOccurrenceDocument
+                {
+                    BusinessUnitId = businessUnitId,
+                    SourceDocumentId = directDocumentId.Value,
+                    Role = "Primary",
+                    Ordinal = occurrence.Documents.Count == 0 ? 1 : occurrence.Documents.Max(x => x.Ordinal) + 1,
+                    LinkedAtUtc = now
+                });
+        }
+        _db.Add(occurrence);
+        await _db.SaveChangesAsync(ct);
+
+        var revision = BuildRevision(lead, occurrence, number, fingerprint, intake);
+        if (previousSnapshot is not null)
+            foreach (var difference in Diff(previousSnapshot, revision.SnapshotJson)) revision.Differences.Add(difference);
+        _db.Add(revision);
+        await _db.SaveChangesAsync(ct);
+        occurrence.LeadRevisionId = revision.Id;
+        lead.CurrentRevisionId = revision.Id;
+        lead.CurrentRevisionNumber = number;
+        lead.CurrentInquiryFingerprint = fingerprint;
+        lead.CurrentOccurrenceClassification = classification.ToString();
+        lead.IdentityVersion += 1;
+        if (number > 1) await AddImpactsAsync(lead, revision, ct);
+        AddAudit(occurrence, lead.Id, "HUMAN_CANONICAL_REVISION_APPENDED", intake,
+            new { revision = number, reason = reason.Trim(), lineCount = revision.Items.Count });
+        await _db.SaveChangesAsync(ct);
+        if (ownedTransaction is not null) await ownedTransaction.CommitAsync(ct);
+        return new(lead.Id, lead.CommercialCaseReference ?? string.Empty, occurrence.Id, revision.Id,
+            number, classification, 1m, occurrence.DecisionReasons(), false);
+    }
+
     private async Task EnsureBatchAsync(long bu, LeadIntakeDescriptor intake, CancellationToken ct)
     {
         if (_db.Database.IsNpgsql())
@@ -1176,8 +1288,19 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
             CustomerRfqReference = lead.Rfqno, NormalizedCustomerRfqReference = Normalize(lead.Rfqno), CustomerIdSnapshot = lead.CustomerId,
             ContactIdSnapshot = lead.ContactId, CreatedAtUtc = DateTimeOffset.UtcNow, CreatedBy = intake.ActorId,
             ProcessingPath = intake.ProcessingPath, ExternalAiUsed = intake.ExternalAiUsed };
-        var line = 0; foreach (var item in lead.LeadItems) revision.Items.Add(new LeadItemRevision { BusinessUnitId = lead.BusinessUnitId,
-            LineNumber = ++line, LineFingerprint = LineFingerprint(item), SnapshotJson = JsonSerializer.Serialize(ItemSnapshot(item)) });
+        var line = 0;
+        foreach (var item in lead.LeadItems.Where(x => x.IsCurrentRevisionProjection)
+                     .OrderBy(x => Normalize(x.LineItemNo), StringComparer.Ordinal)
+                     .ThenBy(LineFingerprint, StringComparer.Ordinal))
+            revision.Items.Add(new LeadItemRevision
+            {
+                BusinessUnitId = lead.BusinessUnitId,
+                LeadId = lead.Id,
+                LeadItem = item,
+                LineNumber = ++line,
+                LineFingerprint = LineFingerprint(item),
+                SnapshotJson = JsonSerializer.Serialize(ItemSnapshot(item))
+            });
         return revision;
     }
 
@@ -1208,9 +1331,14 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
     {
         target.Rfqno = source.Rfqno; target.BuyersName = source.BuyersName; target.RecDate = source.RecDate; target.BidClosingDate = source.BidClosingDate;
         target.HeaderRemarks = source.HeaderRemarks; target.NoOfLineItems = source.NoOfLineItems; target.Rfqtype = source.Rfqtype; target.ModifiedDate = DateTime.UtcNow;
-        _db.RemoveRange(target.LeadItems);
-        target.LeadItems.Clear();
-        foreach (var item in source.LeadItems) target.LeadItems.Add(CloneCurrentItem(item));
+        foreach (var item in target.LeadItems.Where(x => x.IsCurrentRevisionProjection))
+            item.IsCurrentRevisionProjection = false;
+        foreach (var item in source.LeadItems)
+        {
+            var clone = CloneCurrentItem(item);
+            clone.IsCurrentRevisionProjection = true;
+            target.LeadItems.Add(clone);
+        }
     }
     public static string Fingerprint(Lead lead) => Hash(JsonSerializer.Serialize(Snapshot(lead)));
     // Quantity is nullable because LeadItem.Quantity is. A line whose quantity was never
@@ -1219,7 +1347,8 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
     // a quantity are not the same document, and dedup must not treat them as one.
     private sealed record ItemFingerprintSnapshot(string? line, string? part, string? description, int? Quantity, string? uom, string? date);
     private static object Snapshot(Lead x) => new { rfq = Normalize(x.Rfqno), buyer = Normalize(x.BuyersName), closing = x.BidClosingDate?.ToUniversalTime().ToString("O"),
-        items = x.LeadItems.Select(ItemSnapshot).OrderBy(i => i.part).ThenBy(i => i.line).ToArray() };
+        items = x.LeadItems.Where(i => i.IsCurrentRevisionProjection)
+            .Select(ItemSnapshot).OrderBy(i => i.part).ThenBy(i => i.line).ToArray() };
     private static ItemFingerprintSnapshot ItemSnapshot(LeadItem x) => new(Normalize(x.LineItemNo), Normalize(x.ManufacturerPartNumber ?? x.ItemMaterialCode),
         Normalize(x.ProductShortDescription ?? x.ItemText), x.Quantity, NormalizeUom(x.UnitOfMeasure), x.BidClosingDateLine?.ToUniversalTime().ToString("O"));
     private static string LineFingerprint(LeadItem x) => Hash(JsonSerializer.Serialize(ItemSnapshot(x)));
@@ -1248,8 +1377,8 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
     private static string Hash(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
     private static decimal Similarity(Lead a, Lead b)
     {
-        var left = a.LeadItems.Select(LineIdentityFingerprint).ToHashSet();
-        var right = b.LeadItems.Select(LineIdentityFingerprint).ToHashSet();
+        var left = a.LeadItems.Where(x => x.IsCurrentRevisionProjection).Select(LineIdentityFingerprint).ToHashSet();
+        var right = b.LeadItems.Where(x => x.IsCurrentRevisionProjection).Select(LineIdentityFingerprint).ToHashSet();
         if (left.Count == 0 || right.Count == 0) return Normalize(a.Rfqno) == Normalize(b.Rfqno) && Normalize(a.Rfqno) != null ? .8m : 0m;
         var overlap = left.Intersect(right).Count();
         var jaccard = (decimal)overlap / left.Union(right).Count();
@@ -1443,16 +1572,28 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         return JsonElement.DeepEquals(leftDocument.RootElement, rightDocument.RootElement);
     }
 
-    private static void PopulateRevisionItems(LeadRevision revision, string snapshotJson)
+    private static void PopulateRevisionItems(LeadRevision revision, string snapshotJson, IEnumerable<LeadItem> canonicalItems)
     {
         using var document = JsonDocument.Parse(snapshotJson);
         if (!document.RootElement.TryGetProperty("items", out var items) || items.ValueKind != JsonValueKind.Array) return;
+        var candidates = canonicalItems.GroupBy(LineFingerprint, StringComparer.Ordinal)
+            .ToDictionary(x => x.Key, x => new Queue<LeadItem>(x), StringComparer.Ordinal);
         var line = 0;
         foreach (var item in items.EnumerateArray())
         {
             var json = item.GetRawText();
-            revision.Items.Add(new LeadItemRevision { BusinessUnitId = revision.BusinessUnitId, LineNumber = ++line,
-                LineFingerprint = Hash(json), SnapshotJson = json });
+            var fingerprint = Hash(json);
+            if (!candidates.TryGetValue(fingerprint, out var matches) || matches.Count == 0)
+                throw new InvalidOperationException("The reviewed revision line cannot be linked to an exact canonical Lead item.");
+            revision.Items.Add(new LeadItemRevision
+            {
+                BusinessUnitId = revision.BusinessUnitId,
+                LeadId = revision.LeadId,
+                LeadItem = matches.Dequeue(),
+                LineNumber = ++line,
+                LineFingerprint = fingerprint,
+                SnapshotJson = json
+            });
         }
     }
 
@@ -1505,7 +1646,13 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         lead.Rfqtype = snapshot.Rfqtype;
         lead.NoOfLineItems = snapshot.NoOfLineItems ?? snapshot.Items.Count;
         lead.ModifiedDate = DateTime.UtcNow;
-        if (lead.Id != 0) { _db.RemoveRange(lead.LeadItems); lead.LeadItems.Clear(); }
+        // LeadItemRevision is immutable and points at the exact canonical LeadItem that produced
+        // it. Deleting the previous projection would either violate that lineage FK or erase the
+        // evidence behind an older revision. Keep prior projections in place and make only the
+        // newly confirmed amendment visible as the current projection.
+        if (lead.Id != 0)
+            foreach (var existing in lead.LeadItems.Where(x => x.IsCurrentRevisionProjection))
+                existing.IsCurrentRevisionProjection = false;
         foreach (var item in snapshot.Items)
             lead.LeadItems.Add(new LeadItem
             {
@@ -1520,7 +1667,8 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
                 AlternateProductName = item.AlternateProductName, AlternatePartNumber = item.AlternatePartNumber,
                 ItemText = item.ItemText, MaterialPotext = item.MaterialPotext, LeadTime = item.LeadTime,
                 ReceivedDate = item.ReceivedDate, BidClosingDateLine = item.BidClosingDateLine,
-                Aiconfidence = item.Aiconfidence, ExtraFields = item.ExtraFields
+                Aiconfidence = item.Aiconfidence, ExtraFields = item.ExtraFields,
+                IsCurrentRevisionProjection = true
             });
         return true;
     }

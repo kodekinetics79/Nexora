@@ -111,24 +111,10 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
 
     // ================================================================ Convert
 
-    public async Task<long> ConvertAsync(long leadId, long businessUnitId, ConvertRequest request, CancellationToken ct)
+    public Task<long> ConvertAsync(long leadId, long businessUnitId, ConvertRequest request, CancellationToken ct)
     {
-        var strategy = _db.Database.CreateExecutionStrategy();
-        try
-        {
-            return await strategy.ExecuteAsync(() => ConvertCoreAsync(leadId, businessUnitId, request, ct));
-        }
-        catch (DbUpdateException ex) when (LeadConversionGate.IsDuplicateKey(ex))
-        {
-            // Lost the race against the RFQ."LeadID" partial unique index: another caller
-            // converted this lead between our existence check and our insert. The lead HAS
-            // its RFQ — resolve to it exactly as the read-then-return idempotent path would.
-            _db.ChangeTracker.Clear();
-            var winner = await _db.Rfqs.AsNoTracking()
-                .FirstOrDefaultAsync(r => r.LeadId == leadId && r.BusinessUnitId == businessUnitId, ct);
-            if (winner == null) throw; // Not our index after all — surface the truth.
-            return winner.Id;
-        }
+        return Task.FromException<long>(new InvalidOperationException(
+            "Direct intelligence conversion is retired. Commit the current Lead Revision participation decision and invoke RFQ Promotion."));
     }
 
     private async Task<long> ConvertCoreAsync(long leadId, long businessUnitId, ConvertRequest request, CancellationToken ct)
@@ -380,8 +366,8 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
         };
         rfq.InheritCommercialIdentity(lead);
 
-        _db.Rfqs.Add(rfq);
-        await _db.SaveChangesAsync(ct);
+        throw new InvalidOperationException(
+            "Retired intelligence RFQ persistence path reached. Use the RFQ Promotion service.");
         if (_lineResolution is not null)
         {
             await _lineResolution.ResolveLeadAsync(businessUnitId, lead.Id, 10, ct);
@@ -843,13 +829,12 @@ public sealed class LeadConversionIntelligence : ILeadConversionIntelligence
             .OrderBy(line => line.LineNumber)
             .ToListAsync(ct);
 
-        for (var index = 0; index < items.Count; index++)
+        foreach (var item in items)
         {
-            var item = items[index];
-            var revisionLine = int.TryParse(item.LineItemNo, out var lineNumber)
-                ? revisionLines.FirstOrDefault(line => line.LineNumber == lineNumber)
-                : null;
-            revisionLine ??= revisionLines.ElementAtOrDefault(index);
+            // Catalog evidence belongs to the immutable revision line that names this exact
+            // canonical projection. Line numbers and collection positions are presentation
+            // details and must never be used as identity fallbacks.
+            var revisionLine = revisionLines.SingleOrDefault(line => line.LeadItemId == item.Id);
             if (revisionLine is null) continue;
             var part = FirstValue(item.ManufacturerPartNumber, item.ItemMaterialCode);
             var description = FirstValue(item.ProductShortDescription, item.ProductShortName, item.ItemText);
