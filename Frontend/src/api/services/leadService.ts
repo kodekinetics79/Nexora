@@ -227,7 +227,6 @@ export interface AttachmentResponseDTO {
 
 export interface AcceptedLeadResponseDTO {
   id: number;
-  leadId: number;
   rfqno: string;
   buyersName: string;
   clientemail?: string | null;
