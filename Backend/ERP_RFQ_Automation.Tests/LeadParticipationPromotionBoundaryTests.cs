@@ -96,6 +96,15 @@ public sealed class LeadParticipationPromotionBoundaryTests
         Assert.Contains("RfqPromotions", migration, StringComparison.Ordinal);
         Assert.Contains("TR_LeadRevisions_AppendOnly", migration, StringComparison.Ordinal);
         Assert.Contains("TR_LeadItemRevisions_AppendOnly", migration, StringComparison.Ordinal);
+        var suspendExistingGuard = migration.IndexOf(
+            "DISABLE TRIGGER trg_lead_item_revisions_append_only", StringComparison.Ordinal);
+        var lineageBackfill = migration.IndexOf(
+            "UPDATE \"LeadItemRevisions\" line", StringComparison.Ordinal);
+        var restoreExistingGuard = migration.IndexOf(
+            "ENABLE TRIGGER trg_lead_item_revisions_append_only", StringComparison.Ordinal);
+        Assert.True(suspendExistingGuard >= 0, "The existing append-only guard must be suspended for the lineage backfill.");
+        Assert.True(lineageBackfill > suspendExistingGuard, "The lineage backfill must run after the existing guard is suspended.");
+        Assert.True(restoreExistingGuard > lineageBackfill, "The existing guard must be restored after the lineage backfill.");
         Assert.Contains("CK_RFQ_LeadPromotionLineage", migration, StringComparison.Ordinal);
         Assert.Contains("SourceBusinessUnitId", migration, StringComparison.Ordinal);
         Assert.Contains("FOREIGN KEY (\"SourceBusinessUnitId\", \"SourceLeadItemRevisionId\", \"SourceLeadRevisionId\", \"SourceLeadId\")", migration, StringComparison.Ordinal);
