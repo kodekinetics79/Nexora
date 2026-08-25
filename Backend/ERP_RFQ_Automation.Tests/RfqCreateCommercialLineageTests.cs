@@ -39,7 +39,7 @@ public sealed class RfqCreateCommercialLineageTests
     // ── repository: shell-lead generation ────────────────────────────────────────────
 
     [Fact]
-    public async Task Create_without_lead_generates_a_lineage_valid_shell_lead_in_the_same_transaction()
+    public async Task Direct_create_without_lead_is_retired_without_stranding_a_shell_lead()
     {
         using var db = new TestDb();
         await using (var seed = db.ContextFor(null))
@@ -49,42 +49,11 @@ public sealed class RfqCreateCommercialLineageTests
         }
 
         await using var context = db.ContextFor(Bu);
-        var rfq = NewRfq(customerId: CustomerId, leadId: null);
-        rfq.BuyersName = "Manually Entered Buyer";
-        await new RfqRepository(context).AddAsync(rfq);
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            new RfqRepository(context).AddAsync(NewRfq(customerId: CustomerId, leadId: null)));
 
-        await using var assertContext = db.ContextFor(null);
-        var persistedRfq = await assertContext.Rfqs.AsNoTracking().SingleAsync(r => r.Id == rfq.Id);
-        Assert.NotNull(persistedRfq.LeadId);
-        Assert.Matches($@"^NXR-RFQ-{Bu}-\d{{4}}-\d{{8}}$", persistedRfq.Rfqno);
-        Assert.Equal(RfqStatusDraftId, persistedRfq.RfqstatusId);
-
-        var lead = await assertContext.Leads.AsNoTracking().SingleAsync(l => l.Id == persistedRfq.LeadId!.Value);
-        // Tenant + customer + provenance the task demands of a shell lead.
-        Assert.Equal(Bu, lead.BusinessUnitId);
-        Assert.Equal(CustomerId, lead.CustomerId);
-        Assert.Equal("CUSTOMER_CONFIRMED", lead.CustomerMatchStatus); // fits the varchar(32) column
-        Assert.Null(lead.ContactId); // contact stays honestly unresolved
-        Assert.Equal("manual-rfq", lead.LeadSource);
-        Assert.Equal("ops@nexora.example.t", lead.CreatedBy); // actor, truncated to the Leads varchar(20)
-        Assert.Null(lead.Aiconfidence);
-        Assert.False(lead.RequiresCommercialReview); // human-entered facts: no extraction review debt
-        Assert.Equal("Manually Entered Buyer", lead.BuyersName);
-
-        // Lifecycle: born already converted, so it never appears as an untriaged lead
-        // and cannot be converted into a second RFQ.
-        Assert.Equal(LeadStatusConvertedId, lead.LeadStatusId);
-
-        // Serial lineage: the lead owns a commercial case and the RFQ inherited it.
-        Assert.True(lead.CommercialCaseId > 0);
-        Assert.False(string.IsNullOrWhiteSpace(lead.CommercialCaseReference));
-        Assert.Equal(lead.CommercialCaseId, persistedRfq.CommercialCaseId);
-        Assert.Equal(lead.CommercialCaseReference, persistedRfq.NexoraSerial);
-        Assert.Equal(CustomerId, persistedRfq.CustomerId);
-        Assert.NotNull(await assertContext.CommercialCases.AsNoTracking()
-            .SingleOrDefaultAsync(c => c.Id == lead.CommercialCaseId));
-        Assert.Single(await assertContext.LeadStatusHistories.AsNoTracking()
-            .Where(h => h.LeadId == lead.Id && h.EventType == "Created").ToListAsync());
+        AssertRetired(error);
+        await AssertNoCommercialOriginationAsync(db);
     }
 
     [Fact]
@@ -98,13 +67,11 @@ public sealed class RfqCreateCommercialLineageTests
         }
 
         await using var context = db.ContextFor(Bu);
-        var error = await Assert.ThrowsAsync<ArgumentException>(() =>
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             new RfqRepository(context).AddAsync(NewRfq(customerId: null, leadId: null)));
 
-        Assert.Contains("customer", error.Message, StringComparison.OrdinalIgnoreCase);
-        await using var assertContext = db.ContextFor(null);
-        Assert.Empty(await assertContext.Rfqs.AsNoTracking().ToListAsync());
-        Assert.Empty(await assertContext.Leads.AsNoTracking().ToListAsync());
+        AssertRetired(error);
+        await AssertNoCommercialOriginationAsync(db);
     }
 
     [Fact]
@@ -119,10 +86,10 @@ public sealed class RfqCreateCommercialLineageTests
         }
 
         await using var context = db.ContextFor(Bu);
-        var error = await Assert.ThrowsAsync<ArgumentException>(() =>
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             new RfqRepository(context).AddAsync(NewRfq(customerId: 9_710, leadId: null)));
 
-        Assert.Contains("customer", error.Message, StringComparison.OrdinalIgnoreCase);
+        AssertRetired(error);
         await using var assertContext = db.ContextFor(null);
         Assert.Empty(await assertContext.Leads.AsNoTracking().ToListAsync());
     }
@@ -141,10 +108,10 @@ public sealed class RfqCreateCommercialLineageTests
         }
 
         await using var context = db.ContextFor(Bu);
-        var error = await Assert.ThrowsAsync<ArgumentException>(() =>
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             new RfqRepository(context).AddAsync(NewRfq(customerId: null, leadId: foreignLeadId)));
 
-        Assert.Contains("does not exist in this business unit", error.Message);
+        AssertRetired(error);
         await using var assertContext = db.ContextFor(null);
         Assert.Empty(await assertContext.Rfqs.AsNoTracking().ToListAsync());
     }
@@ -156,7 +123,7 @@ public sealed class RfqCreateCommercialLineageTests
     /// behaviour this test always pinned.
     /// </summary>
     [Fact]
-    public async Task Create_with_a_qualified_tenant_lead_converts_it_and_keeps_the_lineage_behaviour()
+    public async Task Direct_create_with_a_qualified_tenant_lead_is_retired()
     {
         using var db = new TestDb();
         long leadId;
@@ -171,32 +138,13 @@ public sealed class RfqCreateCommercialLineageTests
         }
 
         await using var context = db.ContextFor(Bu);
-        var rfq = NewRfq(customerId: CustomerId, leadId: leadId);
-        await new RfqRepository(context).AddAsync(rfq);
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            new RfqRepository(context).AddAsync(NewRfq(customerId: CustomerId, leadId: leadId)));
 
+        AssertRetired(error);
         await using var assertContext = db.ContextFor(null);
-        var persistedRfq = await assertContext.Rfqs.AsNoTracking().SingleAsync(r => r.Id == rfq.Id);
-        var lead2 = await assertContext.Leads.AsNoTracking().SingleAsync(l => l.Id == leadId);
-        Assert.Equal(leadId, persistedRfq.LeadId);
-        Assert.Equal(lead2.CommercialCaseId, persistedRfq.CommercialCaseId);
-        Assert.Equal(lead2.CommercialCaseReference, persistedRfq.NexoraSerial);
-        Assert.Matches($@"^NXR-RFQ-{Bu}-\d{{4}}-\d{{8}}$", persistedRfq.Rfqno);
-        // No second lead was invented for a request that already had one.
-        Assert.Single(await assertContext.Leads.AsNoTracking().ToListAsync());
-
-        // The lead was CONVERTED, exactly as through the conversion endpoints: governed
-        // transition to CONVERTED_TO_RFQ plus the dedicated promotion event, atomically
-        // with the RFQ insert.
-        Assert.Equal(LeadStatusConvertedId, lead2.LeadStatusId);
-        var promotion = await assertContext.CommercialLifecycleEvents.AsNoTracking()
-            .SingleAsync(e => e.AggregateId == leadId && e.EventType == "PromotedToRfq");
-        Assert.Equal($"rfq-{rfq.Id}", promotion.RequestReference);
-        var outbox = await assertContext.LifecycleOutboxMessages.AsNoTracking()
-            .SingleAsync(m => m.EventType == "commercial-case.lead.promoted-to-rfq");
-        // Parsed, not substring-matched: the jsonb column re-serialises with its own spacing.
-        using var payload = System.Text.Json.JsonDocument.Parse(outbox.Payload);
-        Assert.Equal(rfq.Id, payload.RootElement.GetProperty("RfqId").GetInt64());
-        Assert.Equal(leadId, payload.RootElement.GetProperty("LeadId").GetInt64());
+        Assert.Empty(await assertContext.Rfqs.AsNoTracking().ToListAsync());
+        Assert.Empty(await assertContext.CommercialLifecycleEvents.AsNoTracking().ToListAsync());
     }
 
     [Fact]
@@ -219,17 +167,16 @@ public sealed class RfqCreateCommercialLineageTests
         var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             new RfqRepository(context).AddAsync(NewRfq(customerId: CustomerId, leadId: leadId)));
 
-        Assert.Contains("Only a qualified lead", error.Message);
+        AssertRetired(error);
         await using var assertContext = db.ContextFor(null);
         Assert.Empty(await assertContext.Rfqs.AsNoTracking().ToListAsync());
     }
 
     [Fact]
-    public async Task Create_for_a_lead_that_already_has_an_rfq_is_refused_naming_it()
+    public async Task Repeated_direct_create_attempts_remain_retired()
     {
         using var db = new TestDb();
         long leadId;
-        long existingRfqId;
         await using (var seed = db.ContextFor(null))
         {
             SeedTenant(seed);
@@ -242,17 +189,15 @@ public sealed class RfqCreateCommercialLineageTests
 
         await using var context = db.ContextFor(Bu);
         var repository = new RfqRepository(context);
-        var first = NewRfq(customerId: CustomerId, leadId: leadId);
-        await repository.AddAsync(first);
-        existingRfqId = first.Id;
-
-        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        var first = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            repository.AddAsync(NewRfq(customerId: CustomerId, leadId: leadId)));
+        var second = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             repository.AddAsync(NewRfq(customerId: CustomerId, leadId: leadId)));
 
-        // Actionable: the refusal names the RFQ the caller should open instead.
-        Assert.Contains($"RFQ #{existingRfqId}", error.Message);
+        AssertRetired(first);
+        Assert.Equal(first.Message, second.Message);
         await using var assertContext = db.ContextFor(null);
-        Assert.Single(await assertContext.Rfqs.AsNoTracking().Where(r => r.LeadId == leadId).ToListAsync());
+        Assert.Empty(await assertContext.Rfqs.AsNoTracking().Where(r => r.LeadId == leadId).ToListAsync());
     }
 
     [Fact]
@@ -283,7 +228,7 @@ public sealed class RfqCreateCommercialLineageTests
     // ── controller: end-to-end create and RFC 7807 bodies ────────────────────────────
 
     [Fact]
-    public async Task Controller_create_without_lead_returns_201_with_the_inherited_serial()
+    public async Task Controller_direct_create_returns_a_renderable_retirement_conflict()
     {
         using var db = new TestDb();
         await using (var seed = db.ContextFor(null))
@@ -305,15 +250,8 @@ public sealed class RfqCreateCommercialLineageTests
             ]
         });
 
-        var created = Assert.IsType<CreatedAtActionResult>(result.Result);
-        var dto = Assert.IsType<RfqResponseDTO>(created.Value);
-        Assert.NotNull(dto.LeadId);
-        Assert.False(string.IsNullOrWhiteSpace(dto.NexoraSerial));
-        Assert.Equal(CustomerId, dto.CustomerId);
-        Assert.Single(dto.Rfqitems);
-        // FX guard (coexistence with the header-currency work): currency-silent lines
-        // stay currency-silent — nothing invented a currency during creation.
-        Assert.Null(Assert.Single(dto.Rfqitems).CurrencyId);
+        var problem = AssertProblem(result.Result, StatusCodes.Status409Conflict);
+        Assert.Contains("Direct formal RFQ creation is retired", problem.Detail, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -330,8 +268,8 @@ public sealed class RfqCreateCommercialLineageTests
         var controller = Controller(new RfqRepository(context));
         var result = await controller.Create(new RfqCreateRequestDTO { RecDate = DateTime.UtcNow });
 
-        var problem = AssertProblem(result.Result, StatusCodes.Status400BadRequest);
-        Assert.Contains("customer", problem.Detail, StringComparison.OrdinalIgnoreCase);
+        var problem = AssertProblem(result.Result, StatusCodes.Status409Conflict);
+        Assert.Contains("Direct formal RFQ creation is retired", problem.Detail, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -353,8 +291,8 @@ public sealed class RfqCreateCommercialLineageTests
             LeadId = 9_740
         });
 
-        var problem = AssertProblem(result.Result, StatusCodes.Status400BadRequest);
-        Assert.Contains("does not exist in this business unit", problem.Detail);
+        var problem = AssertProblem(result.Result, StatusCodes.Status409Conflict);
+        Assert.Contains("Direct formal RFQ creation is retired", problem.Detail, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -386,7 +324,7 @@ public sealed class RfqCreateCommercialLineageTests
     // fall under one-RFQ-per-lead and conversions would begin colliding with imports).
 
     [Fact]
-    public async Task Template_bulk_import_creates_rfqs_without_a_lead()
+    public async Task Template_bulk_import_is_retired_and_creates_no_rfq()
     {
         using var db = new TestDb();
         await using var context = db.ContextFor(Bu);
@@ -400,13 +338,14 @@ public sealed class RfqCreateCommercialLineageTests
         var result = await uploader.UploadTemplateAsync(
             TemplateWorkbook(("RFQ-IMP-1", "Import Buyer", "Widget", 5)), Bu, "importer@nexora.test");
 
-        Assert.True(result.Success, result.Message);
-        var rfq = Assert.Single(await context.Rfqs.AsNoTracking().ToListAsync());
-        Assert.Null(rfq.LeadId);
+        Assert.False(result.Success);
+        Assert.Contains("Direct spreadsheet-to-RFQ creation is retired", result.Message,
+            StringComparison.Ordinal);
+        Assert.Empty(await context.Rfqs.AsNoTracking().ToListAsync());
     }
 
     [Fact]
-    public async Task Customer_excel_import_creates_its_rfq_without_a_lead()
+    public async Task Customer_excel_import_is_retired_and_creates_no_rfq()
     {
         using var db = new TestDb();
         await using var context = db.ContextFor(Bu);
@@ -416,9 +355,10 @@ public sealed class RfqCreateCommercialLineageTests
         var result = await ManualDoor(context).ProcessCustomerRfqExcelAsync(
             CustomerExcelFile(), Bu, "importer@nexora.test");
 
-        Assert.True(result.Success, result.Message);
-        var rfq = await context.Rfqs.AsNoTracking().SingleAsync(r => r.Id == result.Data);
-        Assert.Null(rfq.LeadId);
+        Assert.False(result.Success);
+        Assert.Contains("Direct spreadsheet-to-RFQ creation is retired", result.Message,
+            StringComparison.Ordinal);
+        Assert.Empty(await context.Rfqs.AsNoTracking().ToListAsync());
     }
 
     /// <summary>Nexora's own RFQ bulk template (RfqUploaderService.GenerateTemplateAsync
@@ -527,6 +467,18 @@ public sealed class RfqCreateCommercialLineageTests
             CreatedBy = "seed",
             CreatedOn = DateTime.UtcNow
         });
+    }
+
+    private static void AssertRetired(InvalidOperationException error) =>
+        Assert.Contains("Direct formal RFQ creation is retired", error.Message, StringComparison.Ordinal);
+
+    private static async Task AssertNoCommercialOriginationAsync(TestDb database)
+    {
+        await using var context = database.ContextFor(null);
+        Assert.Empty(await context.Rfqs.AsNoTracking().ToListAsync());
+        Assert.Empty(await context.Leads.AsNoTracking().ToListAsync());
+        Assert.Empty(await context.Set<ERP_RFQ_Automation.CommercialCases.Promotion.RfqPromotion>()
+            .AsNoTracking().ToListAsync());
     }
 
     private static Rfq NewRfq(long? customerId, long? leadId) => new()

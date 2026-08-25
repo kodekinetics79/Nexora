@@ -69,21 +69,12 @@ public sealed class PostgreSqlProductionDialectTests
                 INSERT INTO "BusinessUnits"
                     ("ID", "BusinessUnitCode", "BusinessUnitName", "CreatedBy", "CreatedOn")
                 VALUES (94001, 'FINMIG', 'Finance arithmetic', 'tests', now());
-                INSERT INTO "Leads"
-                    ("ID", "RFQNo", "RecDate", "LeadSource", "CreatedBy", "CreatedDate", "BusinessUnitID")
-                VALUES (94001, 'FIN-LEAD', now(), 'Tests', 'tests', now(), 94001);
                 INSERT INTO "RFQ"
-                    ("ID", "RFQNo", "RecDate", "BusinessUnitID", "LeadID", "CommercialCaseID",
-                     "NexoraSerial", "CreatedBy", "CreatedDate")
-                SELECT 94001, 'FIN-RFQ', now(), 94001, 94001,
-                       lead."CommercialCaseId", lead."CommercialCaseReference", 'tests', now()
-                FROM "Leads" lead WHERE lead."ID" = 94001;
+                    ("ID", "RFQNo", "RecDate", "BusinessUnitID", "CreatedBy", "CreatedDate")
+                VALUES (94001, 'FIN-RFQ', now(), 94001, 'tests', now());
                 INSERT INTO "Quotes"
-                    ("ID", "QuoteNo", "BusinessUnitID", "RFQID", "CommercialCaseID", "NexoraSerial",
-                     "CreatedBy", "CreatedDate", "TotalAmount")
-                SELECT 94001, 'QT-DEFAULT-VERSION', 94001, 94001, rfq."CommercialCaseID",
-                       rfq."NexoraSerial", 'tests', now(), 100
-                FROM "RFQ" rfq WHERE rfq."ID" = 94001;
+                    ("ID", "QuoteNo", "BusinessUnitID", "RFQID", "CreatedBy", "CreatedDate", "TotalAmount")
+                VALUES (94001, 'QT-DEFAULT-VERSION', 94001, 94001, 'tests', now(), 100);
                 """;
             await seed.ExecuteNonQueryAsync();
         }

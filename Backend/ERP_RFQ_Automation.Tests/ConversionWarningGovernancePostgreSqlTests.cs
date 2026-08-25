@@ -155,10 +155,7 @@ public sealed class ConversionWarningGovernancePostgreSqlTests
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(
             () => ConvertAsync(leadId, new ConvertRequest { ActingUser = "sara@nexora.sa" }));
 
-        Assert.Contains("00010", ex.Message);
-        Assert.Contains("acknowledged", ex.Message, StringComparison.OrdinalIgnoreCase);
-        // the operator is told WHAT to fix, not handed a generic validation error
-        Assert.Contains("No catalog match", ex.Message);
+        Assert.Contains("Direct intelligence conversion is retired", ex.Message, StringComparison.Ordinal);
         Assert.Equal(0, await RfqCountForAsync(leadId));
     }
 
@@ -175,7 +172,7 @@ public sealed class ConversionWarningGovernancePostgreSqlTests
             Items = { new ConvertRequestItem { LeadItemId = lineId, AcknowledgeWarning = true } }
         }));
 
-        Assert.Contains("reason", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Direct intelligence conversion is retired", ex.Message, StringComparison.Ordinal);
         Assert.Equal(0, await RfqCountForAsync(leadId));
     }
 
@@ -205,7 +202,7 @@ public sealed class ConversionWarningGovernancePostgreSqlTests
         var leadId = await QualifiedLeadAsync(Line("00010", 5, "EA", "UNMATCHED-D"));
         var lineId = await FirstLineIdAsync(leadId);
 
-        var rfqId = await ConvertAsync(leadId, new ConvertRequest
+        await AssertRetiredAsync(leadId, new ConvertRequest
         {
             ActingUser = "sara@nexora.sa",
             Items =
@@ -218,23 +215,6 @@ public sealed class ConversionWarningGovernancePostgreSqlTests
                 }
             }
         });
-
-        Assert.True(rfqId > 0);
-
-        // The acknowledgement is durable, and it lives on the EXISTING lifecycle event rather
-        // than in a new audit table — ReasonCode/ReasonNotes were previously always null.
-        await using var owner = _database.ContextFor(null);
-        var converted = await owner.CommercialLifecycleEvents.AsNoTracking()
-            .SingleAsync(e => e.AggregateType == "Lead" && e.AggregateId == leadId
-                              && e.NewStatusCode == "CONVERTED_TO_RFQ"
-                              // The dedicated PromotedToRfq event also lands at this status;
-                              // the acknowledgement lives on the transition event.
-                              && e.EventType == "StatusTransitioned");
-        Assert.Equal("CONVERTED_WITH_ACKNOWLEDGED_WARNINGS", converted.ReasonCode);
-        Assert.Contains("00010", converted.ReasonNotes!);
-        Assert.Contains("drawing pack", converted.ReasonNotes!);
-        // WHAT was waived, not merely that something was
-        Assert.Contains("No catalog match", converted.ReasonNotes!);
     }
 
     [Fact]
@@ -246,7 +226,7 @@ public sealed class ConversionWarningGovernancePostgreSqlTests
             Line("00010", 5, "EA", "UNMATCHED-E"), Line("00020", 8, "EA", "UNMATCHED-F"));
         var lineIds = await LineIdsAsync(leadId);
 
-        var rfqId = await ConvertAsync(leadId, new ConvertRequest
+        await AssertRetiredAsync(leadId, new ConvertRequest
         {
             ActingUser = "sara@nexora.sa",
             AcknowledgeAllWarnings = true,
@@ -257,9 +237,6 @@ public sealed class ConversionWarningGovernancePostgreSqlTests
                 new ConvertRequestItem { LeadItemId = lineIds[1], AcknowledgeWarning = true }
             }
         });
-
-        await using var owner = _database.ContextFor(null);
-        Assert.Equal(2, await owner.Rfqitems.AsNoTracking().CountAsync(i => i.Rfqid == rfqId));
     }
 
     [Fact]
@@ -277,7 +254,7 @@ public sealed class ConversionWarningGovernancePostgreSqlTests
             Line("00010", 5, "EA", "UNMATCHED-G"), Line("00020", 0, "EA", "UNMATCHED-H"));
         var lineIds = await LineIdsAsync(leadId);
 
-        var rfqId = await ConvertAsync(leadId, new ConvertRequest
+        await AssertRetiredAsync(leadId, new ConvertRequest
         {
             ActingUser = "sara@nexora.sa",
             AcknowledgeAllWarnings = true,
@@ -288,11 +265,6 @@ public sealed class ConversionWarningGovernancePostgreSqlTests
                 new ConvertRequestItem { LeadItemId = lineIds[1], Include = false } // the zero-qty line
             }
         });
-
-        await using var owner = _database.ContextFor(null);
-        // Only the included line travelled; the excluded one is still on the lead, untouched.
-        Assert.Equal(1, await owner.Rfqitems.AsNoTracking().CountAsync(i => i.Rfqid == rfqId));
-        Assert.Equal(2, await owner.LeadItems.AsNoTracking().CountAsync(i => i.LeadId == leadId));
     }
 
     [Fact]
@@ -305,15 +277,11 @@ public sealed class ConversionWarningGovernancePostgreSqlTests
         var leadId = await QualifiedLeadAsync(Line("00010", 0, "EA", "UNMATCHED-Q"));
         var lineId = await FirstLineIdAsync(leadId);
 
-        var rfqId = await ConvertAsync(leadId, new ConvertRequest
+        await AssertRetiredAsync(leadId, new ConvertRequest
         {
             ActingUser = "sara@nexora.sa",
             Items = { new ConvertRequestItem { LeadItemId = lineId, Include = true, Quantity = 25 } }
         });
-
-        await using var owner = _database.ContextFor(null);
-        var line = await owner.Rfqitems.AsNoTracking().SingleAsync(i => i.Rfqid == rfqId);
-        Assert.Equal(25, line.Quantity);   // the corrected value is what was written
     }
 
     [Fact]
@@ -326,7 +294,7 @@ public sealed class ConversionWarningGovernancePostgreSqlTests
             Line("00010", 5, "EA", "UNMATCHED-K"), Line("00020", 7, "EA", "UNMATCHED-L"));
         var lineIds = await LineIdsAsync(leadId);
 
-        var rfqId = await ConvertAsync(leadId, new ConvertRequest
+        await AssertRetiredAsync(leadId, new ConvertRequest
         {
             ActingUser = "sara@nexora.sa",
             Items =
@@ -340,9 +308,6 @@ public sealed class ConversionWarningGovernancePostgreSqlTests
                 new ConvertRequestItem { LeadItemId = lineIds[1], Include = false }
             }
         });
-
-        await using var owner = _database.ContextFor(null);
-        Assert.Equal(1, await owner.Rfqitems.AsNoTracking().CountAsync(i => i.Rfqid == rfqId));
     }
 
     [Fact]
@@ -371,6 +336,13 @@ public sealed class ConversionWarningGovernancePostgreSqlTests
         await using var owner = _database.ContextFor(null);
         return await owner.LeadItems.AsNoTracking()
             .Where(i => i.LeadId == leadId).OrderBy(i => i.Id).Select(i => i.Id).ToListAsync();
+    }
+
+    private async Task AssertRetiredAsync(long leadId, ConvertRequest request)
+    {
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => ConvertAsync(leadId, request));
+        Assert.Contains("Direct intelligence conversion is retired", error.Message, StringComparison.Ordinal);
+        Assert.Equal(0, await RfqCountForAsync(leadId));
     }
 
     // ------------------------------------------------------------------ currency
@@ -403,24 +375,19 @@ public sealed class ConversionWarningGovernancePostgreSqlTests
         // told the one thing that actually stops the conversion.
         var refused = await Assert.ThrowsAsync<InvalidOperationException>(
             () => ConvertAsync(leadId, new ConvertRequest { ActingUser = "sara@nexora.sa" }));
-        Assert.Contains("currency", refused.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Direct intelligence conversion is retired", refused.Message, StringComparison.Ordinal);
         Assert.Equal(0, await RfqCountForAsync(leadId));
 
         // Stating it on the conversion is enough: no second approval, no reopened review.
         // The line still carries a soft "no catalog match" warning, acknowledged as any
         // operator would have to — this fix does not weaken that gate.
-        var rfqId = await ConvertAsync(leadId, new ConvertRequest
+        await AssertRetiredAsync(leadId, new ConvertRequest
         {
             ActingUser = "sara@nexora.sa",
             Currency = "usd",
             WarningAcknowledgementReason = "Checked against the source bid list.",
             Items = new() { new ConvertRequestItem { LeadItemId = itemId, AcknowledgeWarning = true } },
         });
-
-        await using var owner = _database.ContextFor(null);
-        var line = await owner.Rfqitems.AsNoTracking().SingleAsync(x => x.Rfqid == rfqId);
-        // Stored in the three-letter form the review path validates, not as it was typed.
-        Assert.Equal("USD", line.Currency);
     }
 
     [Fact]
@@ -436,7 +403,7 @@ public sealed class ConversionWarningGovernancePostgreSqlTests
             var itemId = await read.LeadItems.AsNoTracking()
                 .Where(x => x.LeadId == leadId).Select(x => x.Id).SingleAsync();
 
-            var rfqId = await ConvertAsync(leadId, new ConvertRequest
+            await AssertRetiredAsync(leadId, new ConvertRequest
             {
                 ActingUser = "sara@nexora.sa",
                 Currency = "USD",
@@ -449,10 +416,6 @@ public sealed class ConversionWarningGovernancePostgreSqlTests
                     },
                 },
             });
-
-            await using var owner = _database.ContextFor(null);
-            var line = await owner.Rfqitems.AsNoTracking().SingleAsync(x => x.Rfqid == rfqId);
-            Assert.Equal("SAR", line.Currency);
         }
     }
 
@@ -479,7 +442,7 @@ public sealed class ConversionWarningGovernancePostgreSqlTests
             itemIds = await read.LeadItems.AsNoTracking()
                 .Where(x => x.LeadId == leadId).Select(x => x.Id).ToArrayAsync();
 
-        var rfqId = await ConvertAsync(leadId, new ConvertRequest
+        await AssertRetiredAsync(leadId, new ConvertRequest
         {
             ActingUser = "sara@nexora.sa",
             Currency = "USD",
@@ -491,25 +454,5 @@ public sealed class ConversionWarningGovernancePostgreSqlTests
                 LeadItemId = id, AcknowledgeWarning = true,
             }).ToList(),
         });
-
-        await using var owner = _database.ContextFor(null);
-        Assert.Equal(20, await owner.Rfqitems.AsNoTracking().CountAsync(x => x.Rfqid == rfqId));
-
-        // The acknowledgement survives as evidence, within the column's limit. Nothing else
-        // records it, so an empty or truncated-to-nothing note would lose the audit trail.
-        var note = await owner.Set<CommercialLifecycleEvent>().AsNoTracking()
-            .Where(e => e.AggregateType == "Lead" && e.AggregateId == leadId
-                        // Same disambiguation as the acknowledgement assertion above: the
-                        // dedicated PromotedToRfq event also lands on this lead and is NEWER,
-                        // so an unfiltered OrderByDescending(Id) reads the promotion — which
-                        // carries no acknowledgement — instead of the transition that does.
-                        && e.EventType == "StatusTransitioned")
-            .OrderByDescending(e => e.Id)
-            .Select(e => e.ReasonNotes)
-            .FirstOrDefaultAsync();
-        Assert.False(string.IsNullOrWhiteSpace(note));
-        Assert.True(note!.Length <= 1000, $"reason notes were {note.Length} characters");
-        Assert.Contains("20 line(s)", note);
-        Assert.Contains("Reviewed against the source Aramco bid list", note);
     }
 }

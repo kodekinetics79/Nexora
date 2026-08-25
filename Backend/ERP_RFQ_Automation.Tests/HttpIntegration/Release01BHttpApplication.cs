@@ -6,6 +6,8 @@ using System.Text.Json;
 using ERP_RFQ_Automation.Agent.Models;
 using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.CommercialIntelligence.Sales;
+using ERP_RFQ_Automation.CommercialCases.Participation;
+using ERP_RFQ_Automation.CommercialCases.Promotion;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.Infrastructure.Storage;
@@ -446,12 +448,6 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
             CreatedOn = DateTime.UtcNow,
             ConcurrencyToken = Guid.NewGuid()
         });
-        LinkRfqToLead(db, TenantAProcurementRfqId, TenantALeadId);
-        LinkRfqToLead(db, TenantBProcurementRfqId, TenantBLeadId);
-        SeedSupplierNegotiationQuote(db, TenantA, TenantAProcurementOffset,
-            TenantASupplierQuoteId, 596_110, 596_120, 596_130, 596_140, "A");
-        SeedSupplierNegotiationQuote(db, TenantB, TenantBProcurementOffset,
-            TenantBSupplierQuoteId, 596_210, 596_220, 596_230, 596_240, "B");
         db.FollowUpTasks.Add(new FollowUpTask
         {
             Id = 596_300,
@@ -478,6 +474,8 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
         var tenantAOccurrence = Occurrence(TenantABatchId, TenantA, "tenant-a-new", LeadOccurrenceClassification.New, now);
         tenantAOccurrence.LeadId = TenantALeadId;
         tenantAOccurrence.OriginalFileName = "tenant-a.txt";
+        var tenantBOccurrence = Occurrence(TenantBBatchId, TenantB, "tenant-b-new", LeadOccurrenceClassification.New, now);
+        tenantBOccurrence.LeadId = TenantBLeadId;
         var possibleMatch = Occurrence(TenantABatchId, TenantA, "tenant-a-possible", LeadOccurrenceClassification.PossibleMatchReviewRequired, now);
         possibleMatch.Id = TenantAMatchOccurrenceId;
         possibleMatch.MatchCandidates.Add(new LeadMatchCandidate
@@ -495,9 +493,18 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
         db.Set<LeadIngestionOccurrence>().AddRange(
             tenantAOccurrence,
             possibleMatch,
-            Occurrence(TenantBBatchId, TenantB, "tenant-b-new", LeadOccurrenceClassification.New, now),
+            tenantBOccurrence,
             Occurrence(TenantBBatchId, TenantB, "tenant-b-duplicate", LeadOccurrenceClassification.ExactDuplicate, now));
         await db.SaveChangesAsync();
+
+        await SeedPromotedRfqLineageAsync(db, TenantA, TenantALeadId, tenantAOccurrence.Id,
+            TenantAProcurementRfqId, TenantAProcurementOffset, 597_100, now);
+        await SeedPromotedRfqLineageAsync(db, TenantB, TenantBLeadId, tenantBOccurrence.Id,
+            TenantBProcurementRfqId, TenantBProcurementOffset, 597_200, now);
+        SeedSupplierNegotiationQuote(db, TenantA, TenantAProcurementOffset,
+            TenantASupplierQuoteId, 596_110, 596_120, 596_130, 596_140, "A");
+        SeedSupplierNegotiationQuote(db, TenantB, TenantBProcurementOffset,
+            TenantBSupplierQuoteId, 596_210, 596_220, 596_230, 596_240, "B");
 
         var corpusA = DocumentCorpus.Create(TenantA, TenantABatchId, CorpusSourceType.ManualUpload, now);
         var corpusB = DocumentCorpus.Create(TenantB, TenantBBatchId, CorpusSourceType.ManualUpload, now);
@@ -646,15 +653,149 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
         db.SupplierQuotes.Add(quote);
     }
 
-    private static void LinkRfqToLead(ErpRfqAutomationContext db, long rfqId, long leadId)
+    private static async Task SeedPromotedRfqLineageAsync(
+        ErpRfqAutomationContext db,
+        long tenantId,
+        long leadId,
+        long occurrenceId,
+        long rfqId,
+        long procurementOffset,
+        long idBase,
+        DateTimeOffset now)
     {
         var rfq = db.Rfqs.Local.Single(x => x.Id == rfqId);
         var lead = db.Leads.Local.Single(x => x.Id == leadId);
+        var leadItem = new LeadItem
+        {
+            Id = idBase,
+            LeadId = leadId,
+            ItemMaterialCode = $"HTTP-PART-{tenantId}",
+            ProductShortDescription = "HTTP promoted fixture line",
+            Quantity = 10,
+            UnitOfMeasure = "EA",
+            Currency = $"Q{procurementOffset}",
+            IsCurrentRevisionProjection = true
+        };
+        db.LeadItems.Add(leadItem);
+        await db.SaveChangesAsync();
+
+        var revision = new LeadRevision
+        {
+            Id = idBase + 1,
+            BusinessUnitId = tenantId,
+            LeadId = leadId,
+            RevisionNumber = 1,
+            EstablishedByOccurrenceId = occurrenceId,
+            LogicalInquiryFingerprint = new string(tenantId == TenantA ? 'a' : 'b', 64),
+            SnapshotJson = "{}",
+            CustomerIdSnapshot = lead.CustomerId,
+            CreatedAtUtc = now,
+            CreatedBy = "release-01b-tests",
+            ProcessingPath = LeadProcessingPath.Deterministic
+        };
+        var revisionLine = new LeadItemRevision
+        {
+            Id = idBase + 2,
+            BusinessUnitId = tenantId,
+            LeadId = leadId,
+            LeadRevisionId = revision.Id,
+            LeadItemId = leadItem.Id,
+            LineNumber = 1,
+            LineFingerprint = new string(tenantId == TenantA ? 'c' : 'd', 64),
+            SnapshotJson = "{}"
+        };
+        revision.Items.Add(revisionLine);
+        db.Set<LeadRevision>().Add(revision);
+        await db.SaveChangesAsync();
+
+        lead.CurrentRevisionId = revision.Id;
+        lead.CurrentRevisionNumber = revision.RevisionNumber;
+        var fit = new LeadFitAssessment
+        {
+            Id = idBase + 3,
+            BusinessUnitId = tenantId,
+            LeadId = leadId,
+            LeadRevisionId = revision.Id,
+            Sequence = 1,
+            PolicyVersion = "release-01b-http-fixture/v1",
+            Recommendation = "FIT",
+            IsActionable = true,
+            AssessmentJson = "{}",
+            IdempotencyKey = $"release-01b-fit:{tenantId}:{leadId}",
+            RequestHash = new string('e', 64),
+            AssessedBy = "release-01b-tests",
+            AssessedAtUtc = now
+        };
+        db.Set<LeadFitAssessment>().Add(fit);
+        await db.SaveChangesAsync();
+
+        var decision = new LeadParticipationDecision
+        {
+            Id = idBase + 4,
+            BusinessUnitId = tenantId,
+            LeadId = leadId,
+            LeadRevisionId = revision.Id,
+            FitAssessmentId = fit.Id,
+            Sequence = 1,
+            IsCommitted = true,
+            Outcome = LeadParticipationOutcome.FullBid,
+            Notes = "Representative committed participation fixture.",
+            IdempotencyKey = $"release-01b-participation:{tenantId}:{leadId}",
+            RequestHash = new string('f', 64),
+            DecidedBy = "release-01b-tests",
+            DecidedAtUtc = now
+        };
+        decision.Lines.Add(new LeadLineParticipationDecision
+        {
+            Id = idBase + 5,
+            BusinessUnitId = tenantId,
+            LeadId = leadId,
+            LeadRevisionId = revision.Id,
+            ParticipationDecisionId = decision.Id,
+            LeadItemRevisionId = revisionLine.Id,
+            Choice = LeadLineParticipationChoice.Bid,
+            ReasonNotes = "Approved by the representative HTTP fixture.",
+            ProductId = ProcurementTestData.Product + procurementOffset,
+            Quantity = 10,
+            UnitOfMeasure = "EA",
+            UomId = checked((int)(ProcurementTestData.Uom + procurementOffset)),
+            Currency = $"Q{procurementOffset}",
+            CurrencyId = ProcurementTestData.Currency + procurementOffset,
+            CatalogPolicyVersion = "release-01b-http-fixture/v1",
+            WarningSnapshotJson = "{}"
+        });
+        db.Set<LeadParticipationDecision>().Add(decision);
+        await db.SaveChangesAsync();
+
+        var promotion = new RfqPromotion
+        {
+            Id = idBase + 6,
+            BusinessUnitId = tenantId,
+            LeadId = leadId,
+            LeadRevisionId = revision.Id,
+            ParticipationDecisionId = decision.Id,
+            IdempotencyKey = $"release-01b-promotion:{tenantId}:{leadId}",
+            RequestHash = new string('1', 64),
+            PromotedBy = "release-01b-tests",
+            PromotedAtUtc = now
+        };
+        db.Set<RfqPromotion>().Add(promotion);
+        await db.SaveChangesAsync();
+
         db.Entry(rfq).Property(x => x.CommercialCaseId).CurrentValue = null;
         db.Entry(rfq).Property(x => x.NexoraSerial).CurrentValue = null;
         rfq.LeadId = leadId;
+        rfq.PromotionId = promotion.Id;
+        rfq.SourceLeadRevisionId = revision.Id;
+        rfq.ParticipationDecisionId = decision.Id;
         rfq.CustomerId = lead.CustomerId;
         rfq.InheritCommercialIdentity(lead);
+        var rfqItem = db.Rfqitems.Local.Single(x => x.Rfqid == rfqId);
+        rfqItem.SourceBusinessUnitId = tenantId;
+        rfqItem.SourceLeadId = leadId;
+        rfqItem.SourceLeadRevisionId = revision.Id;
+        rfqItem.SourceLeadItemRevisionId = revisionLine.Id;
+        await db.SaveChangesAsync();
     }
 
     private static BusinessUnit BusinessUnit(long id, string code) => new()

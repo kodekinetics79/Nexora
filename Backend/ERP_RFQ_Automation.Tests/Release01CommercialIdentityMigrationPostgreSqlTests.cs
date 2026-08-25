@@ -86,6 +86,7 @@ public sealed class Release01CommercialIdentityMigrationPostgreSqlTests(PostgreS
                      "BusinessUnitID", "Clientemail")
                 VALUES ({TenantTwo}, 'CROSS-LEAD', now(), 'MigrationTest', 'tests', now(),
                         {TenantTwo}, 'unknown@nexora.invalid');
+                {GovernedLineageSql(TenantTwo, TenantTwo, "cross")}
                 """;
             await seed.ExecuteNonQueryAsync();
         }
@@ -103,11 +104,15 @@ public sealed class Release01CommercialIdentityMigrationPostgreSqlTests(PostgreS
                      "BusinessUnitID", "Clientemail")
                 VALUES ({TenantOne}, 'ORDER-LEAD', now(), 'MigrationTest', 'tests', now(),
                         {TenantOne}, 'unknown@nexora.invalid');
+                {GovernedLineageSql(TenantOne, TenantOne, "order")}
                 INSERT INTO "RFQ"
                     ("ID", "RFQNo", "RecDate", "BusinessUnitID", "LeadID", "CommercialCaseID",
-                     "NexoraSerial", "CreatedBy", "CreatedDate")
+                     "NexoraSerial", "PromotionId", "SourceLeadRevisionId", "ParticipationDecisionId",
+                     "CreatedBy", "CreatedDate")
                 SELECT {TenantOne}, 'ORDER-RFQ', now(), {TenantOne}, {TenantOne},
-                       lead."CommercialCaseId", lead."CommercialCaseReference", 'tests', now()
+                       lead."CommercialCaseId", lead."CommercialCaseReference",
+                       {TenantOne + 4_000_000}, {TenantOne + 1_000_000}, {TenantOne + 3_000_000},
+                       'tests', now()
                 FROM "Leads" lead WHERE lead."ID" = {TenantOne};
                 INSERT INTO "Quotes"
                     ("ID", "QuoteNo", "BusinessUnitID", "RFQID", "CommercialCaseID", "NexoraSerial",
@@ -130,9 +135,12 @@ public sealed class Release01CommercialIdentityMigrationPostgreSqlTests(PostgreS
             "cross_tenant" => $"""
                 INSERT INTO "RFQ"
                     ("ID", "RFQNo", "RecDate", "BusinessUnitID", "LeadID", "CommercialCaseID",
-                     "NexoraSerial", "CreatedBy", "CreatedDate")
+                     "NexoraSerial", "PromotionId", "SourceLeadRevisionId", "ParticipationDecisionId",
+                     "CreatedBy", "CreatedDate")
                 SELECT {TenantOne}, 'CROSS-RFQ', now(), {TenantOne}, {TenantTwo},
-                       lead."CommercialCaseId", lead."CommercialCaseReference", 'tests', now()
+                       lead."CommercialCaseId", lead."CommercialCaseReference",
+                       {TenantTwo + 4_000_000}, {TenantTwo + 1_000_000}, {TenantTwo + 3_000_000},
+                       'tests', now()
                 FROM "Leads" lead WHERE lead."ID" = {TenantTwo};
                 """,
             "null_customer" => $"""
@@ -206,7 +214,7 @@ public sealed class Release01CommercialIdentityMigrationPostgreSqlTests(PostgreS
         await using (var seed = connection.CreateCommand())
         {
             seed.Transaction = transaction;
-            seed.CommandText = """
+            seed.CommandText = $"""
                 INSERT INTO "BusinessUnits"
                     ("ID", "BusinessUnitCode", "BusinessUnitName", "CreatedBy", "CreatedOn")
                 VALUES (94901, 'REL01', 'Release 01 identity', 'tests', now());
@@ -224,12 +232,15 @@ public sealed class Release01CommercialIdentityMigrationPostgreSqlTests(PostgreS
                      "BusinessUnitID", "Clientemail", "CustomerID", "ContactID", "CustomerMatchStatus")
                 VALUES (94901, 'CUSTOMER-RFQ-94901', now(), 'MigrationTest', 'tests', now(), 94901,
                         'buyer@nexora.invalid', 94901, 94901, 'VERIFIED');
+                {GovernedLineageSql(94901, 94901, "lineage")}
                 INSERT INTO "RFQ"
                     ("ID", "RFQNo", "RecDate", "BusinessUnitID", "LeadID", "CommercialCaseID",
-                     "NexoraSerial", "CustomerID", "ContactID", "CreatedBy", "CreatedDate")
+                     "NexoraSerial", "CustomerID", "ContactID", "PromotionId",
+                     "SourceLeadRevisionId", "ParticipationDecisionId", "CreatedBy", "CreatedDate")
                 SELECT 94901, 'NEXORA-RFQ-94901', now(), 94901, 94901,
                        lead."CommercialCaseId", lead."CommercialCaseReference",
-                       lead."CustomerID", lead."ContactID", 'tests', now()
+                       lead."CustomerID", lead."ContactID", 4094901, 1094901, 3094901,
+                       'tests', now()
                 FROM "Leads" lead WHERE lead."ID" = 94901;
                 INSERT INTO "Quotes"
                     ("ID", "QuoteNo", "BusinessUnitID", "RFQID", "CommercialCaseID", "NexoraSerial",
@@ -298,6 +309,54 @@ public sealed class Release01CommercialIdentityMigrationPostgreSqlTests(PostgreS
             """UPDATE "Quotes" SET "StatusID" = 1 WHERE "ID" = 94901;""");
 
         await transaction.RollbackAsync();
+    }
+
+    private static string GovernedLineageSql(long tenantId, long leadId, string suffix)
+    {
+        var occurrenceId = leadId + 5_000_000;
+        var revisionId = leadId + 1_000_000;
+        var fitId = leadId + 2_000_000;
+        var decisionId = leadId + 3_000_000;
+        var promotionId = leadId + 4_000_000;
+        var batchId = $"00000000-0000-0000-0000-{leadId:D12}";
+        return $"""
+            INSERT INTO "LeadIngestionBatches"
+                ("Id", "BusinessUnitId", "SourceChannel", "CreatedBy", "CreatedAtUtc", "UpdatedAtUtc", "Version")
+            VALUES ('{batchId}'::uuid, {tenantId}, 'MigrationTest', 'tests', now(), now(), 1);
+            INSERT INTO "LeadIngestionOccurrences"
+                ("Id", "RecordKind", "BusinessUnitId", "BatchId", "LeadId", "SourceChannel",
+                 "IdempotencyKey", "LogicalInquiryFingerprint", "Classification", "Confidence",
+                 "DecisionReasonsJson", "PolicyVersion", "ProcessingPath", "ExternalAiUsed",
+                 "IngestedAtUtc", "CreatedAtUtc", "ActorType", "ActorId", "CorrelationId", "Version")
+            VALUES ({occurrenceId}, 'Inquiry', {tenantId}, '{batchId}'::uuid, {leadId}, 'MigrationTest',
+                    'release01-occurrence-{suffix}', repeat('a', 64), 'New', 1,
+                    '[]'::jsonb, 'release01-fixture/v1', 'Deterministic', false,
+                    now(), now(), 'TestFixture', 'tests', 'release01-{suffix}', 1);
+            INSERT INTO "LeadRevisions"
+                ("Id", "BusinessUnitId", "LeadId", "RevisionNumber", "EstablishedByOccurrenceId",
+                 "LogicalInquiryFingerprint", "SnapshotJson", "CreatedAtUtc", "CreatedBy",
+                 "ProcessingPath", "ExternalAiUsed")
+            VALUES ({revisionId}, {tenantId}, {leadId}, 1, {occurrenceId}, repeat('b', 64),
+                    jsonb_build_object(), now(), 'tests', 'Deterministic', false);
+            UPDATE "Leads" SET "CurrentRevisionId" = {revisionId}, "CurrentRevisionNumber" = 1
+            WHERE "BusinessUnitID" = {tenantId} AND "ID" = {leadId};
+            INSERT INTO "LeadFitAssessments"
+                ("Id", "BusinessUnitId", "LeadId", "LeadRevisionId", "Sequence", "PolicyVersion",
+                 "Recommendation", "IsActionable", "AssessmentJson", "IdempotencyKey", "RequestHash",
+                 "AssessedBy", "AssessedAtUtc")
+            VALUES ({fitId}, {tenantId}, {leadId}, {revisionId}, 1, 'release01-fixture/v1',
+                    'FIT', true, jsonb_build_object(), 'release01-fit-{suffix}', repeat('c', 64), 'tests', now());
+            INSERT INTO "LeadParticipationDecisions"
+                ("Id", "BusinessUnitId", "LeadId", "LeadRevisionId", "FitAssessmentId", "Sequence",
+                 "IsCommitted", "Outcome", "Notes", "IdempotencyKey", "RequestHash", "DecidedBy", "DecidedAtUtc")
+            VALUES ({decisionId}, {tenantId}, {leadId}, {revisionId}, {fitId}, 1, true, 'FullBid',
+                    'Governed relational fixture.', 'release01-decision-{suffix}', repeat('d', 64), 'tests', now());
+            INSERT INTO "RfqPromotions"
+                ("Id", "BusinessUnitId", "LeadId", "LeadRevisionId", "ParticipationDecisionId",
+                 "IdempotencyKey", "RequestHash", "PromotedBy", "PromotedAtUtc")
+            VALUES ({promotionId}, {tenantId}, {leadId}, {revisionId}, {decisionId},
+                    'release01-promotion-{suffix}', repeat('e', 64), 'tests', now());
+            """;
     }
 
     /// <summary>

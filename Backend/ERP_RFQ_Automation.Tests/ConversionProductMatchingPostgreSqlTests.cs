@@ -149,18 +149,17 @@ public sealed class ConversionProductMatchingPostgreSqlTests
 
     /// <summary>Converts through the entry point the "Create RFQ" button reaches, and reads back
     /// the product actually written onto the RFQ line — not the preview's opinion of it.</summary>
-    private async Task<long?> ConvertAndReadProductIdAsync(long leadId)
+    private async Task AssertDirectConversionRetiredAsync(long leadId)
     {
-        long rfqId;
+        InvalidOperationException error;
         await using (var ctx = _database.TenantContextWithRls(Tenant))
-            rfqId = await new LeadConversionIntelligence(ctx).ConvertAsync(
-                leadId, Tenant, new ConvertRequest { ActingUser = "sara@nexora.sa" }, default);
+            error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                new LeadConversionIntelligence(ctx).ConvertAsync(
+                    leadId, Tenant, new ConvertRequest { ActingUser = "sara@nexora.sa" }, default));
 
+        Assert.Contains("Direct intelligence conversion is retired", error.Message, StringComparison.Ordinal);
         await using var owner = _database.ContextFor(null);
-        return await owner.Rfqitems.AsNoTracking()
-            .Where(i => i.Rfqid == rfqId)
-            .Select(i => i.ProductId)
-            .SingleAsync();
+        Assert.Empty(await owner.Rfqs.AsNoTracking().Where(r => r.LeadId == leadId).ToListAsync());
     }
 
     // ------------------------------------------------------------------ the ladder
@@ -181,7 +180,7 @@ public sealed class ConversionProductMatchingPostgreSqlTests
         Assert.Equal(1.00m, line.Confidence);
         Assert.Equal("Matched by material code", line.Matches[0].Reason);
         Assert.Equal(productId, line.BestMatchProductId);
-        Assert.Equal(productId, await ConvertAndReadProductIdAsync(leadId));
+        await AssertDirectConversionRetiredAsync(leadId);
     }
 
     /// <summary>
@@ -241,7 +240,8 @@ public sealed class ConversionProductMatchingPostgreSqlTests
         var line = await PreviewLineAsync(leadId);
         Assert.False(line.NeedsAttention, $"line still flagged: {line.AttentionReason}");
 
-        Assert.Equal(productId, await ConvertAndReadProductIdAsync(leadId));
+        Assert.Equal(productId, line.BestMatchProductId);
+        await AssertDirectConversionRetiredAsync(leadId);
     }
 
     // ------------------------------------------------------------------ negative controls
@@ -267,9 +267,7 @@ public sealed class ConversionProductMatchingPostgreSqlTests
             $"prose scored {line.Confidence} and would have auto-assigned.");
         Assert.True(line.NeedsAttention);
 
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => ConvertAndReadProductIdAsync(leadId));
-        Assert.Contains("acknowledged", ex.Message, StringComparison.OrdinalIgnoreCase);
+        await AssertDirectConversionRetiredAsync(leadId);
     }
 
     /// <summary>
