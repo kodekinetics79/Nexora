@@ -352,6 +352,22 @@ namespace ERP_RFQ_Automation.Services
                             + "its own tenant scope.");
                     }
 
+                    // The platform discovery above is only a snapshot. A tenant administrator can
+                    // deactivate this mailbox while the work gate is running or while an earlier
+                    // mailbox is being processed. The scoped row is the authority immediately
+                    // before network access, so stale discovery must never turn a retired mailbox
+                    // into one final IMAP connection attempt.
+                    if (!config.IsActive
+                        || !string.Equals(config.Protocol, "IMAP", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _logger.LogInformation(
+                            "Skipping mailbox {Email} (configuration {ConfigurationId}, BU "
+                            + "{BusinessUnitId}) because it was deactivated or ceased to be IMAP "
+                            + "after discovery.",
+                            handle.EmailAddress, handle.Id, handle.BusinessUnitId);
+                        continue;
+                    }
+
                     _logger.LogInformation("Starting process for configuration: {Email}", config.EmailAddress);
                     outcome = await ProcessConfigAsync(mailboxScope.ServiceProvider, config);
                 }

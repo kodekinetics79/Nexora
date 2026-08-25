@@ -388,6 +388,8 @@ describe('ActivationPolicyPanel', () => {
     const tabs = await screen.findAllByRole('tab');
     expect(tabs[0]).toHaveTextContent('Overview');
     expect(tabs[1]).toHaveTextContent('Activation');
+    expect(tabs[2]).toHaveTextContent('Offboarding & deletion');
+    expect(screen.getByRole('button', { name: 'Offboard / delete tenant' })).toBeVisible();
 
     expect(await screen.findByText('Authoritative tenant activation')).toBeVisible();
     expect(await screen.findByRole('button', { name: 'Activate tenant' })).toBeInTheDocument();

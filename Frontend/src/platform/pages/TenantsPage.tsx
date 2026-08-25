@@ -53,6 +53,7 @@ import { ErrorState } from '../components/States';
 import { countryLabel, countryName } from '../components/localeData';
 import { isTrialExpired } from '../components/provisionValidation';
 import { fmtDate, fmtRelative } from '../components/format';
+import { tenantOffboardingPath } from './tenantNavigation';
 
 type ActionKind = 'suspend' | 'resume' | 'archive' | 'restore' | 'impersonate';
 
@@ -271,14 +272,14 @@ export default function TenantsPage() {
               </IconButton>
             </span>
           </Tooltip>
-          <Tooltip title={permissions.isOwner ? 'Delete / offboard with retention controls' : REQUIRED_ROLE_COPY.owner}>
+          <Tooltip title={permissions.isOwner ? 'Offboard / delete tenant with retention and approval controls' : REQUIRED_ROLE_COPY.owner}>
             <span>
               <IconButton
                 size="small"
                 color="error"
-                aria-label="Delete or offboard tenant"
+                aria-label="Offboard or delete tenant"
                 disabled={!permissions.isOwner}
-                onClick={() => navigate(`/platform/tenants/${p.row.id}?tab=lifecycle`)}
+                onClick={() => navigate(tenantOffboardingPath(p.row.id))}
               >
                 <DeleteIcon fontSize="small" />
               </IconButton>
