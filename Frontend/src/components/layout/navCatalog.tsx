@@ -192,7 +192,7 @@ export const PRIMARY_NAV: PrimaryNavItem[] = [
     icon: <LeadIcon />,
     path: '/procurement/leads/all',
     moduleName: 'Leads',
-    activePrefixes: ['/procurement/leads/view', '/leads/view', '/commercial-cases'],
+    activePrefixes: ['/procurement/leads/view', '/procurement/leads/', '/leads/view', '/commercial-cases'],
     views: [
       {
         key: 'leads-all',

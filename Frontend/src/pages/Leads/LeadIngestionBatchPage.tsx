@@ -389,9 +389,9 @@ const ReconciliationRow = ({ item, onRetryHold, retrying, retryOutcome }: Reconc
                 <Button
                   variant="contained"
                   size="small"
-                  onClick={() => navigate(`/procurement/leads/${item.leadId}/convert`)}
+                  onClick={() => navigate(`/procurement/leads/${item.leadId}/workbench`)}
                 >
-                  Prepare RFQ
+                  Open decision workbench
                 </Button>
               )}
             </>

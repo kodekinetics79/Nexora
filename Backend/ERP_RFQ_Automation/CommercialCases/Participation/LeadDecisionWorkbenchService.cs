@@ -79,7 +79,7 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
         var decision = await _db.Set<LeadParticipationDecision>().AsNoTracking().Include(x => x.Lines)
             .Where(x => x.BusinessUnitId == businessUnitId && x.LeadRevisionId == revision.Id)
             .OrderByDescending(x => x.Sequence).FirstOrDefaultAsync(ct);
-        var hasStaleDecision = decision is null && await _db.Set<LeadParticipationDecision>().AsNoTracking()
+        var hasDecisionOnPriorRevision = decision is null && await _db.Set<LeadParticipationDecision>().AsNoTracking()
             .AnyAsync(x => x.BusinessUnitId == businessUnitId && x.LeadId == leadId, ct);
         var promotion = await _db.Set<RfqPromotion>().AsNoTracking()
             .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.LeadId == leadId, ct);
@@ -159,7 +159,7 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
         var decisionByLine = decision?.Lines.ToDictionary(x => x.LeadItemRevisionId) ?? new();
         var lines = revision.Items.OrderBy(x => x.LineNumber).Select(item =>
         {
-            var snapshot = LineSnapshot.Parse(item.SnapshotJson);
+            var snapshot = LeadRevisionLineSnapshot.Parse(item.SnapshotJson);
             decisionByLine.TryGetValue(item.Id, out var lineDecision);
             var canonical = item.LeadItemId.HasValue && canonicalById.TryGetValue(item.LeadItemId.Value, out var linked)
                 ? linked : null;
@@ -215,7 +215,14 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
             blockers.Add(new("SOURCE_LINEAGE_INCOMPLETE", "Every Lead line must have exact persisted source-field evidence before RFQ promotion."));
         if (fit is null) blockers.Add(new("FIT_REQUIRED", "Save a human fit assessment for the current revision."));
         else if (!fit.IsActionable) blockers.Add(new("FIT_NOT_ACTIONABLE", "The current fit assessment does not authorize RFQ promotion."));
-        if (decision is null) blockers.Add(new("PARTICIPATION_REQUIRED", "Save participation choices for every current revision line."));
+        if (decision is null)
+        {
+            blockers.Add(hasDecisionOnPriorRevision
+                ? new("PARTICIPATION_STALE", "The saved participation belongs to an earlier Lead revision. Review and recommit every current line.")
+                : new("PARTICIPATION_REQUIRED", "Save participation choices for every current revision line."));
+        }
+        else if (fit is null || decision.FitAssessmentId != fit.Id)
+            blockers.Add(new("PARTICIPATION_STALE", "The fit assessment changed after participation was saved. Review and recommit participation."));
         else if (!decision.IsCommitted) blockers.Add(new("PARTICIPATION_DRAFT", "Commit participation before RFQ promotion."));
         if (decision?.Lines.Any(x => x.Choice is LeadLineParticipationChoice.Pending or LeadLineParticipationChoice.Clarify) == true)
             blockers.Add(new("PARTICIPATION_UNRESOLVED", "Resolve Pending and Clarify lines before RFQ promotion."));
@@ -240,7 +247,7 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
             .Select(x => new DecisionValueOptionDto(x.Code, x.CurrencyName))
             .ToArrayAsync(ct);
 
-        var status = hasStaleDecision ? "STALE" : decision is null ? "NONE" : decision.IsCommitted ? "COMMITTED" : "DRAFT";
+        var status = LeadDecisionParticipationState.Resolve(decision, fit, hasDecisionOnPriorRevision);
         return new LeadDecisionWorkbenchDto(lead.Id, revision.Id, revision.RevisionNumber, lead.CurrentRevisionNumber,
             decision?.Sequence, status, lead.LeadStatus?.SetupCode ?? "UNKNOWN", lead.LeadStatus?.SetupValue,
             lead.CommercialCaseReference, revision.CustomerRfqReference, lead.CustomerId, customerName,
@@ -304,21 +311,49 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
     private static string? GetString(JsonElement root, string name) =>
         root.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
 
-    private sealed record LineSnapshot(string? LineNumber, string? Part, string? Description, int? Quantity, string? UnitOfMeasure)
-    {
-        public static LineSnapshot Parse(string json)
-        {
-            using var document = JsonDocument.Parse(json);
-            var root = document.RootElement;
-            return new(GetString(root, "line"), GetString(root, "part"), GetString(root, "description"),
-                GetInt(root, "Quantity") ?? GetInt(root, "quantity"), GetString(root, "uom"));
-        }
-        private static int? GetInt(JsonElement root, string name) =>
-            root.TryGetProperty(name, out var value) && value.TryGetInt32(out var result) ? result : null;
-    }
-
     private sealed record LineFieldEvidenceProjection(long LeadItemId, string FieldName,
         string? RawValue, string? SourceAddress);
+}
+
+internal static class LeadDecisionParticipationState
+{
+    public static string Resolve(LeadParticipationDecision? decision, LeadFitAssessment? latestFit,
+        bool hasDecisionOnPriorRevision)
+    {
+        if (decision is null)
+            return hasDecisionOnPriorRevision ? "STALE" : "NONE";
+        if (latestFit is null || decision.FitAssessmentId != latestFit.Id)
+            return "STALE";
+        return decision.IsCommitted ? "COMMITTED" : "DRAFT";
+    }
+}
+
+internal sealed record LeadRevisionLineSnapshot(
+    string? LineNumber,
+    string? Part,
+    string? Description,
+    int? Quantity,
+    string? UnitOfMeasure)
+{
+    public static LeadRevisionLineSnapshot Parse(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        var root = document.RootElement;
+        return new(GetString(root, "line"), GetString(root, "part"), GetString(root, "description"),
+            GetInt(root, "Quantity") ?? GetInt(root, "quantity"), GetString(root, "uom"));
+    }
+
+    private static string? GetString(JsonElement root, string name) =>
+        root.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
+
+    private static int? GetInt(JsonElement root, string name) =>
+        root.TryGetProperty(name, out var value)
+        && value.ValueKind == JsonValueKind.Number
+        && value.TryGetInt32(out var result)
+            ? result
+            : null;
 }
 
 public sealed record DecisionReasonCodeDto(string Code, string Label, IReadOnlyList<string> AppliesTo, string? Description);

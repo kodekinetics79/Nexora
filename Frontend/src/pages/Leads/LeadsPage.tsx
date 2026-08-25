@@ -995,12 +995,12 @@ const LeadsPage: React.FC = () => {
                 <ViewIcon fontSize="small" />
               </IconButton>
             </Tooltip>
-            {hasPermission('Leads', 'edit') && <Tooltip title="Prepare RFQ">
+            {hasPermission('Leads', 'edit') && <Tooltip title="Open decision workbench">
               <IconButton
                 size="small"
-                aria-label="Prepare RFQ"
+                aria-label="Open decision workbench"
                 sx={{ color: 'secondary.main' }}
-                onClick={() => navigate(`/procurement/leads/${p.row.id}/convert`)}
+                onClick={() => navigate(`/procurement/leads/${p.row.id}/workbench`)}
               >
                 <SparkleIcon fontSize="small" />
               </IconButton>

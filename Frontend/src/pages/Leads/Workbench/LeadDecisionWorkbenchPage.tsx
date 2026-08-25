@@ -44,6 +44,7 @@ import { retryOperation, type RetryOperation } from './retryIdempotency';
 import {
   blockerAction,
   countDecisions,
+  decisionRecordIsLocked,
   decisionsEqual,
   initializeDecisionMap,
   promotionBlockers,
@@ -55,7 +56,7 @@ type WorkbenchStage = 'evidence' | 'validate' | 'participation' | 'promote';
 
 const stageLabel: Record<WorkbenchStage, string> = {
   evidence: '1. Evidence',
-  validate: '2. Validate Lead',
+  validate: '2. Review transformation',
   participation: '3. Fit & Participation',
   promote: '4. Promote',
 };
@@ -230,6 +231,9 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
   const governed = Object.values(decisions).every(validGovernedDecision);
   const allDecided = counts.total > 0 && counts.pending === 0;
   const fullNoBid = counts.total > 0 && counts.noBid === counts.total;
+  const fullNoBidClosed = fullNoBid && workbench.participationStatus === 'COMMITTED';
+  const decisionMutationPending = fitMutation.isPending || participationMutation.isPending || promotionMutation.isPending;
+  const decisionRecordLocked = decisionRecordIsLocked(workbench, decisions);
   const validUnitCodes = new Set((workbench.unitOptions ?? []).map((option) => option.code.toUpperCase()));
   const validCurrencyCodes = new Set((workbench.currencyOptions ?? []).map((option) => option.code.toUpperCase()));
   const bidValuesReady = workbench.lines.every((line) => {
@@ -250,7 +254,8 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
   // and saveable, but cannot be labelled COMMITTED or become an RFQ promotion input.
   const canCommit = canEdit && allDecided && counts.clarify === 0 && governed
     && (fullNoBid ? (fitAssessment?.version ?? 0) > 0 : bidValuesReady && fitActionable && sourceAndLifecycleReady)
-    && !participationMutation.isPending
+    && !decisionMutationPending
+    && !fullNoBidClosed
     && (dirty || workbench.participationStatus !== 'COMMITTED');
   const blockers = promotionBlockers({
     workbench,
@@ -260,7 +265,10 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
     participationStatus: workbench.participationStatus,
     participationVersion: workbench.participationVersion,
   });
-  const primaryBlocker = blockers[0] ?? null;
+  const promotionPermissionBlocker = !canPromote && counts.bid > 0
+    ? 'RFQ creation permission is required. Hand this committed decision to an authorized RFQ owner.'
+    : null;
+  const primaryBlocker = promotionPermissionBlocker ?? blockers[0] ?? null;
   const actionableBlockers = workbench.blockers
     .map((blocker) => ({ code: blocker.code, action: blockerAction(blocker, leadId) }))
     .filter((item): item is { code: string; action: { label: string; path: string } } => Boolean(item.action));
@@ -324,17 +332,20 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
           <Box sx={{ display: { xs: 'none', xl: 'block' } }}><SourceEvidencePanel workbench={workbench} compact /></Box>
           <Box sx={{ minWidth: 0 }}>
             <Stack direction="row" spacing={1} sx={{ justifyContent: 'space-between', alignItems: 'end', mb: 1, flexWrap: 'wrap' }}>
-              <Box><Typography variant="h6" sx={{ fontWeight: 900 }}>Validate Lead lines</Typography><Typography variant="caption" color="text.secondary">Virtualized grid · exact persisted source-field values remain beside normalized values</Typography></Box>
+              <Box><Typography variant="h6" sx={{ fontWeight: 900 }}>Review transformed Lead lines</Typography><Typography variant="caption" color="text.secondary">Exact source values remain beside canonical values and RFQ participation inputs.</Typography></Box>
               <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
                 <Chip size="small" label={`${workbench.lines.filter((line) => line.verificationStatus !== 'VERIFIED').length} need review`} color={workbench.lines.every((line) => line.verificationStatus === 'VERIFIED') ? 'success' : 'warning'} variant="outlined" />
-                {workbench.verificationStatus !== 'VERIFIED' ? (
-                  <Button size="small" variant="outlined" onClick={() => navigate(`/procurement/extraction/review/${leadId}`)}>Open extraction review</Button>
-                ) : null}
+                <Button size="small" variant="outlined" onClick={() => navigate(`/procurement/extraction/review/${leadId}`)}>
+                  {workbench.verificationStatus === 'VERIFIED' ? 'Correct canonical Lead' : 'Open extraction review'}
+                </Button>
               </Stack>
             </Stack>
+            <Alert severity="info" sx={{ mb: 1 }}>
+              Canonical Lead corrections create a new immutable revision in Extraction Review. Choices made in this grid are participation inputs only.
+            </Alert>
             <LeadValidationGrid lines={workbench.lines} decisions={decisions} reasonCodes={workbench.reasonCodes}
               unitOptions={workbench.unitOptions ?? []} currencyOptions={workbench.currencyOptions ?? []}
-              readOnly={!canEdit || participationMutation.isPending || Boolean(workbench.promotion)} onDecisionsChange={setDecisions} />
+              readOnly={!canEdit || decisionMutationPending || decisionRecordLocked} onDecisionsChange={setDecisions} />
           </Box>
         </Box>
       ) : null}
@@ -346,7 +357,7 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
             leadRevisionId={workbench.leadRevisionId}
             decisionVersion={workbench.decisionVersion}
             saving={fitMutation.isPending}
-            readOnly={!canEdit || Boolean(workbench.promotion)}
+            readOnly={!canEdit || decisionMutationPending || decisionRecordLocked}
             onSave={(request) => fitMutation.mutate(request)}
           />
           <Paper variant="outlined" sx={{ p: 2, borderRadius: 2 }}>
@@ -360,7 +371,7 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
               reasonCodes={workbench.reasonCodes}
               unitOptions={workbench.unitOptions ?? []}
               currencyOptions={workbench.currencyOptions ?? []}
-              readOnly={!canEdit || participationMutation.isPending || Boolean(workbench.promotion)}
+              readOnly={!canEdit || decisionMutationPending || decisionRecordLocked}
               onDecisionsChange={setDecisions}
             />
           </Paper>
@@ -378,8 +389,13 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
             <CountChip label="Excluded as no-bid" count={counts.noBid} />
             <CountChip label="Awaiting clarification" count={counts.clarify} color="info" />
           </Stack>
-          {fullNoBid && workbench.participationStatus === 'COMMITTED' ? (
+          {fullNoBidClosed ? (
             <Alert severity="info"><AlertTitle>Full no-bid committed</AlertTitle>No RFQ will be created for this Lead revision.</Alert>
+          ) : !canPromote && blockers.length === 0 ? (
+            <Alert severity="warning">
+              <AlertTitle>Authorized RFQ owner required</AlertTitle>
+              This decision is ready, but your role cannot create RFQs. An authorized RFQ owner must perform the promotion.
+            </Alert>
           ) : blockers.length > 0 ? (
             <Alert severity="warning">
               <AlertTitle>Promotion is not ready</AlertTitle>
@@ -420,7 +436,7 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
           <Button
             variant="outlined"
             startIcon={<SaveIcon />}
-            disabled={!canEdit || !dirty || (fitAssessment?.version ?? 0) <= 0 || participationMutation.isPending || Boolean(workbench.promotion)}
+            disabled={!canEdit || !dirty || (fitAssessment?.version ?? 0) <= 0 || decisionMutationPending || decisionRecordLocked}
             onClick={() => participationMutation.mutate({ commit: false })}
           >
             Save draft
@@ -428,7 +444,7 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
           <Button
             variant="contained"
             color={fullNoBid ? 'warning' : 'primary'}
-            disabled={!canCommit || Boolean(workbench.promotion)}
+            disabled={!canCommit || decisionRecordLocked}
             onClick={() => {
               if (fullNoBid) setFullNoBidDialogOpen(true);
               else {
