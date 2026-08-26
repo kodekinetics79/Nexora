@@ -51,7 +51,7 @@ const OutstandingRFQsPage: React.FC = () => {
   const [assignToUserId, setAssignToUserId] = useState<string>('');
   const [assignComment, setAssignComment] = useState('');
 
-  const isAdminOrManager = userData?.roleName?.toLowerCase().includes('admin') || userData?.roleName?.toLowerCase().includes('manager');
+  const isAdminOrManager = userData?.isManager === true || userData?.isSuperAdmin === true;
 
   const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['rfqs-outstanding', paginationModel, search],

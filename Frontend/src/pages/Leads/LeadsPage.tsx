@@ -234,9 +234,7 @@ const LeadsPage: React.FC = () => {
   const { enqueueSnackbar } = useSnackbar();
   const { hasPermission, userData } = useAuth();
   const myUserId = userData?.id ?? null;
-  const isManager = userData?.isManager === true
-    || Boolean(userData?.isSuperAdmin)
-    || /admin|manager/i.test(userData?.roleName ?? '');
+  const isManager = userData?.isManager === true || Boolean(userData?.isSuperAdmin);
   const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ pageSize: 10, page: 0 });
   const [search, setSearch] = useState('');
   const [leadSource, setLeadSource] = useState('all');

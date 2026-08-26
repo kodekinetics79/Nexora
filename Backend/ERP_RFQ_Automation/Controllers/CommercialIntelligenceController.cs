@@ -25,17 +25,16 @@ public sealed class CommercialIntelligenceController(
     {
         var tenant = TenantId();
         var userId = UserId();
-        var roleId = ClaimId("roleId");
-        if (!userId.HasValue || roleId <= 0) return Forbid();
-        var tenantWide = await roleGate.IsManagerOrAdminAsync(roleId, tenant);
+        var scope = await ResolveAccountScopeAsync(tenant, ct);
+        if (!userId.HasValue || scope is null) return Forbid();
         var now = DateTime.UtcNow;
         var followUpQuery = db.FollowUpTasks.AsNoTracking()
             .Where(x => x.BusinessUnitId == tenant && x.Status != FollowUpStatus.Completed && x.Status != FollowUpStatus.Cancelled);
-        if (!tenantWide)
-            followUpQuery = followUpQuery.Where(x => x.AssignedToUserId == userId.Value);
+        if (!scope.IsTenantWide)
+            followUpQuery = followUpQuery.Where(x => scope.UserIds.Contains(x.AssignedToUserId));
         var followUps = await followUpQuery
             .OrderBy(x => x.DueAtUtc).Take(100).ToListAsync(ct);
-        var unassigned = tenantWide
+        var unassigned = scope.Tier is AccountScopeTier.ManagedScope or AccountScopeTier.Tenant
             ? await db.Set<UnassignedWorkItem>().AsNoTracking()
                 .Where(x => x.BusinessUnitId == tenant && x.Status == WorkItemStatus.Open).CountAsync(ct)
             : 0;
@@ -67,7 +66,7 @@ public sealed class CommercialIntelligenceController(
             reason = x.task.PurposeCode, dueAt = (DateTime?)x.task.DueAtUtc,
             priority = x.task.DueAtUtc < now ? "Critical" : "Due"
         }).ToArray();
-        return Ok(new { generatedAt = now, scope = tenantWide ? "tenant" : "assigned_to_me", metrics = new[] {
+        return Ok(new { generatedAt = now, scope = ScopeWireName(scope), metrics = new[] {
             Metric("open-follow-ups", "Open follow-ups", followUps.Count),
             Metric("overdue-follow-ups", "Overdue follow-ups", overdue),
             Metric("unassigned-leads", "Unassigned leads", unassigned)
@@ -84,7 +83,9 @@ public sealed class CommercialIntelligenceController(
         if (roleId <= 0 || !await roleGate.IsManagerOrAdminAsync(roleId, tenant))
             return Forbid();
 
-        var reps = await BuildRepSummaries(tenant, ct);
+        var scope = await ResolveAccountScopeAsync(tenant, ct);
+        if (scope is null) return Forbid();
+        var reps = await BuildRepSummaries(tenant, ct, scope);
         return Ok(new { generatedAt = DateTime.UtcNow, metrics = new[] {
             Metric("active-reps", "Active representatives", reps.Count),
             Metric("active-leads", "Active assigned leads", reps.Sum(x => x.ActiveLeads)),
@@ -95,7 +96,12 @@ public sealed class CommercialIntelligenceController(
     [HttpGet("reps")]
     [RequireManagerRole]
     [RequireModulePermission("Users", PermissionAction.View)]
-    public async Task<ActionResult> Reps(CancellationToken ct) => Ok(await BuildRepSummaries(TenantId(), ct));
+    public async Task<ActionResult> Reps(CancellationToken ct)
+    {
+        var tenant = TenantId();
+        var scope = await ResolveAccountScopeAsync(tenant, ct);
+        return scope is null ? Forbid() : Ok(await BuildRepSummaries(tenant, ct, scope));
+    }
 
     /// <summary>
     /// The read side of <c>POST reps/{userId}/routing-profile</c>.
@@ -227,8 +233,9 @@ public sealed class CommercialIntelligenceController(
     public async Task<ActionResult> Rep(long userId, [FromQuery] DateTime? from, [FromQuery] DateTime? to, CancellationToken ct)
     {
         var tenant = TenantId();
-        if (!await IsTenantWideAsync(tenant) && UserId() != userId) return Forbid();
-        var summary = (await BuildRepSummaries(tenant, ct)).SingleOrDefault(x => x.UserId == userId);
+        var scope = await ResolveAccountScopeAsync(tenant, ct);
+        if (scope is null || (!scope.IsTenantWide && !scope.UserIds.Contains(userId))) return Forbid();
+        var summary = (await BuildRepSummaries(tenant, ct, scope)).SingleOrDefault(x => x.UserId == userId);
         if (summary == null) return NotFound();
         var accountCount = await db.Set<CustomerOwnership>().CountAsync(x => x.BusinessUnitId == tenant && x.PrimaryUserId == userId && x.IsActive, ct);
         var now = DateTime.UtcNow;
@@ -537,12 +544,12 @@ public sealed class CommercialIntelligenceController(
         CancellationToken ct)
     {
         var tenant = TenantId();
-        var tenantWide = await IsTenantWideAsync(tenant);
-        var userId = UserId();
-        if (!tenantWide && !userId.HasValue) return Forbid();
+        var scope = await ResolveAccountScopeAsync(tenant, ct);
+        if (scope is null) return Forbid();
         var query = db.FollowUpTasks.AsNoTracking().Where(x => x.BusinessUnitId == tenant &&
             (string.IsNullOrWhiteSpace(status) || status != "open" || x.Status == FollowUpStatus.Open || x.Status == FollowUpStatus.InProgress));
-        if (!tenantWide) query = query.Where(x => x.AssignedToUserId == userId!.Value);
+        if (!scope.IsTenantWide)
+            query = query.Where(x => scope.UserIds.Contains(x.AssignedToUserId));
         if (sourceId.HasValue) query = query.Where(x => x.Id == sourceId.Value);
         if (customerId.HasValue)
             query = query.Where(x => x.AggregateType == "Quote" && db.Quotes.Any(q =>
@@ -566,15 +573,16 @@ public sealed class CommercialIntelligenceController(
     {
         var tenant = TenantId();
         var actorUserId = UserId();
-        if (!await IsTenantWideAsync(tenant))
+        var scope = await ResolveAccountScopeAsync(tenant, ct);
+        if (scope is null) return Forbid();
+        if (!scope.IsTenantWide)
         {
-            if (!actorUserId.HasValue) return Forbid();
             var assignedTo = await db.FollowUpTasks.AsNoTracking()
                 .Where(x => x.BusinessUnitId == tenant && x.Id == id)
                 .Select(x => (long?)x.AssignedToUserId)
                 .SingleOrDefaultAsync(ct);
             if (!assignedTo.HasValue) return NotFound();
-            if (assignedTo.Value != actorUserId.Value) return Forbid();
+            if (!scope.UserIds.Contains(assignedTo.Value)) return Forbid();
         }
         await sales.TransitionFollowUpAsync(tenant, id, new TransitionFollowUpTaskCommand(
             FollowUpStatus.Completed, request.ExpectedVersion, UserId()?.ToString() ?? "authenticated-user",
@@ -587,21 +595,27 @@ public sealed class CommercialIntelligenceController(
     public async Task<ActionResult> Performance([FromQuery] DateTime from, [FromQuery] DateTime to, CancellationToken ct)
     {
         var tenant = TenantId();
-        var tenantWide = await IsTenantWideAsync(tenant);
+        var scope = await ResolveAccountScopeAsync(tenant, ct);
+        if (scope is null) return Forbid();
+        var tenantWide = scope.IsTenantWide;
         var actorUserId = UserId();
-        if (!tenantWide && !actorUserId.HasValue) return Forbid();
         var fromUtc = NormalizeUtc(from);
         var toUtc = NormalizeUtc(to);
         if (fromUtc >= toUtc || toUtc - fromUtc > TimeSpan.FromDays(366))
             return BadRequest(new { error = "The performance period must be between 1 and 366 days." });
-        var results = await sales.GetPerformanceAsync(tenant, new SalesPerformanceQuery(
-            tenantWide ? null : actorUserId, fromUtc, toUtc,
-            DateTime.UtcNow < toUtc ? DateTime.UtcNow : toUtc.AddTicks(-1)), ct);
+        var asOf = DateTime.UtcNow < toUtc ? DateTime.UtcNow : toUtc.AddTicks(-1);
+        var results = tenantWide
+            ? await sales.GetPerformanceAsync(tenant,
+                new SalesPerformanceQuery(null, fromUtc, toUtc, asOf), ct)
+            : (await Task.WhenAll(scope.UserIds.Select(userId =>
+                sales.GetPerformanceAsync(tenant,
+                    new SalesPerformanceQuery(userId, fromUtc, toUtc, asOf), ct))))
+                .SelectMany(x => x).ToList();
         var attributedOutcomeIds = await db.CommercialActivities.AsNoTracking()
             .Where(activity => activity.BusinessUnitId == tenant && activity.AggregateType == "Quote" &&
                 (activity.ActivityType == CommercialActivityType.Won || activity.ActivityType == CommercialActivityType.Lost) &&
                 activity.OccurredAtUtc >= fromUtc && activity.OccurredAtUtc < toUtc &&
-                (tenantWide || activity.SalesRepUserId == actorUserId))
+                (tenantWide || scope.UserIds.Contains(activity.SalesRepUserId)))
             .Select(activity => activity.AggregateId).Distinct().ToArrayAsync(ct);
         int? recordedOutcomeCount = null;
         int? unattributedOutcomeCount = null;
@@ -619,8 +633,7 @@ public sealed class CommercialIntelligenceController(
                 ? null
                 : Math.Round(attributedOutcomeIds.Length * 100m / recordedOutcomeCount.Value, 1);
         }
-        var reps = await BuildRepSummaries(tenant, ct);
-        if (!tenantWide) reps = reps.Where(x => x.UserId == actorUserId).ToList();
+        var reps = await BuildRepSummaries(tenant, ct, scope);
         var rows = from rep in reps join result in results on rep.UserId equals result.SalesRepUserId into resultRows from result in resultRows.DefaultIfEmpty()
             select new { rep.UserId, rep.Name, rep.Email, rep.RoleName, rep.ActiveLeads, rep.OverdueLeads, rep.OpenRfqs,
                 rep.DraftQuotes, rep.FollowUpsDue, rep.PipelineGroups,
@@ -641,7 +654,7 @@ public sealed class CommercialIntelligenceController(
                 revenueByCurrency = result?.RevenueByCurrency.Select(x => new CurrencyAmountGroup(x.CurrencyCode, x.WeightedRevenueAmount)).ToArray()
                     ?? Array.Empty<CurrencyAmountGroup>() };
         return Ok(new { generatedAt = DateTime.UtcNow, from = fromUtc, to = toUtc,
-            scope = tenantWide ? "tenant" : "assigned_to_me", minimumConversionSample = MinimumConversionSample,
+            scope = ScopeWireName(scope), minimumConversionSample = MinimumConversionSample,
             outcomeReconciliation = new {
                 recordedOutcomes = recordedOutcomeCount,
                 attributedOutcomes = attributedOutcomeIds.Length,
@@ -653,11 +666,27 @@ public sealed class CommercialIntelligenceController(
                 Metric("decided", "Decided outcomes", results.Sum(x => x.WonCount + x.LostCount)) }, representatives = rows });
     }
 
-    private async Task<List<RepSummary>> BuildRepSummaries(long tenant, CancellationToken ct)
+    private async Task<List<RepSummary>> BuildRepSummaries(
+        long tenant, CancellationToken ct, AccountTeamScope? scope = null)
     {
-        var users = await db.Users.AsNoTracking().Include(x => x.Role).Where(x => x.Buid == tenant && x.IsActive != false).OrderBy(x => x.FirstName).ThenBy(x => x.LastName).ToListAsync(ct);
-        var assignments = await db.Set<LeadAssignment>().AsNoTracking().Where(x => x.BusinessUnitId == tenant && x.EffectiveTo == null).ToListAsync(ct);
-        var followUps = await db.FollowUpTasks.AsNoTracking().Where(x => x.BusinessUnitId == tenant && x.Status != FollowUpStatus.Completed && x.Status != FollowUpStatus.Cancelled).ToListAsync(ct);
+        var allowedUserIds = scope is { IsTenantWide: false } ? scope.UserIds : null;
+        var usersQuery = db.Users.AsNoTracking().Include(x => x.Role)
+            .Where(x => x.Buid == tenant && x.IsActive != false);
+        if (allowedUserIds is not null)
+            usersQuery = usersQuery.Where(x => allowedUserIds.Contains(x.Id));
+        var users = await usersQuery.OrderBy(x => x.FirstName).ThenBy(x => x.LastName).ToListAsync(ct);
+        var assignmentsQuery = db.Set<LeadAssignment>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == tenant && x.EffectiveTo == null);
+        var followUpsQuery = db.FollowUpTasks.AsNoTracking()
+            .Where(x => x.BusinessUnitId == tenant && x.Status != FollowUpStatus.Completed
+                && x.Status != FollowUpStatus.Cancelled);
+        if (allowedUserIds is not null)
+        {
+            assignmentsQuery = assignmentsQuery.Where(x => allowedUserIds.Contains(x.ToUserId));
+            followUpsQuery = followUpsQuery.Where(x => allowedUserIds.Contains(x.AssignedToUserId));
+        }
+        var assignments = await assignmentsQuery.ToListAsync(ct);
+        var followUps = await followUpsQuery.ToListAsync(ct);
         var leadIds = assignments.Select(x => x.LeadId).Distinct().ToArray();
         var leads = await db.Leads.AsNoTracking().Include(x => x.LeadStatus).Where(x => x.BusinessUnitId == tenant && leadIds.Contains(x.Id)).ToListAsync(ct);
         var rfqs = await db.Rfqs.AsNoTracking().Include(x => x.Rfqstatus).Where(x => x.BusinessUnitId == tenant && x.LeadId.HasValue && leadIds.Contains(x.LeadId.Value)).ToListAsync(ct);
@@ -729,8 +758,23 @@ public sealed class CommercialIntelligenceController(
     private long TenantId() => long.TryParse(User.FindFirst("businessUnitId")?.Value, out var id) && id > 0 ? id : throw new SalesConflictException("Business Unit ID is required.");
     private long? UserId() => long.TryParse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? User.FindFirst("sub")?.Value, out var id) ? id : null;
     private long ClaimId(string claimType) => long.TryParse(User.FindFirst(claimType)?.Value, out var id) ? id : 0;
-    private Task<bool> IsTenantWideAsync(long tenant) =>
-        roleGate.IsManagerOrAdminAsync(ClaimId("roleId"), tenant);
+    private async Task<AccountTeamScope?> ResolveAccountScopeAsync(long tenant, CancellationToken ct)
+    {
+        var userId = UserId();
+        var roleId = ClaimId("roleId");
+        if (!userId.HasValue || roleId <= 0) return null;
+        if (accountScope is not null)
+            return await accountScope.ResolveAsync(userId.Value, roleId, tenant, DateTime.UtcNow, ct);
+        return await roleGate.IsManagerOrAdminAsync(roleId, tenant)
+            ? AccountTeamScope.TenantWide(userId.Value)
+            : new AccountTeamScope(AccountScopeTier.AssignedAccounts, userId.Value, [], [userId.Value]);
+    }
+    private static string ScopeWireName(AccountTeamScope scope) => scope.Tier switch
+    {
+        AccountScopeTier.Tenant => "tenant",
+        AccountScopeTier.ManagedScope => "managed_scope",
+        _ => "assigned_to_me"
+    };
     private string IdempotencyKey() => Request.Headers.TryGetValue("Idempotency-Key", out var value) && !string.IsNullOrWhiteSpace(value) ? value.ToString() : throw new SalesValidationException("Idempotency-Key header is required.");
     private string CorrelationId() => Request.Headers.TryGetValue("X-Correlation-ID", out var value) && !string.IsNullOrWhiteSpace(value)
         ? value.ToString().Trim()
