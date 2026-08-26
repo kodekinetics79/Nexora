@@ -5,7 +5,7 @@
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 WORKDIR /src
 COPY ERP_RFQ_Automation/ERP_RFQ_Automation.csproj ERP_RFQ_Automation/
-RUN dotnet restore ERP_RFQ_Automation/ERP_RFQ_Automation.csproj
+RUN dotnet restore ERP_RFQ_Automation/ERP_RFQ_Automation.csproj --runtime linux-x64
 COPY ERP_RFQ_Automation/ ERP_RFQ_Automation/
 
 # BUILD MEMORY. History first, because the stopgap this replaces was load-bearing for weeks and
@@ -33,13 +33,20 @@ COPY ERP_RFQ_Automation/ ERP_RFQ_Automation/
 # rather than kept "just in case": a knob that does not fix the problem still taxes every build
 # and, worse, reads to the next person like an explanation.
 #
-# ALSO MEASURED AND REJECTED. Do not re-propose these without numbers (host, unconstrained,
+# ALSO MEASURED. Do not re-propose these without numbers (host, unconstrained,
 # baseline 7343 MB):
 #     -m:1                           7547 MB   WORSE  (+2.8%)
 #     /p:UseSharedCompilation=false  7752 MB   WORSE  (+5.6%)
 #     /p:Nullable=disable            7819 MB   WORSE  (+6.5%)
 #     DOTNET_GCHeapHardLimit=4GiB    4550 MB   but the BUILD FAILS
-#     RunAnalyzers=false             5935 MB   helps (-19%) but disables real diagnostics
+#     RunAnalyzers=false             5935 MB   helps (-19%)
+#
+# Analyzer execution is disabled ONLY for this packaging publish. GitHub CI restores and performs
+# a Release build with analyzers before a commit can merge, so diagnostics remain a required gate;
+# rerunning the same analyzers inside Render's image packager adds no coverage. Measured against
+# commit 0f098bd in the Linux AMD64 sdk:8.0 image with a 7 GiB cgroup: the final RID-specific
+# packaging command passed in 71 seconds at 5,434,818,560 bytes peak under emulation. The previous
+# command exceeded Render's 8 GB build limit.
 #
 # THE ACTUAL FIX is the squashed baseline: one Designer file instead of 134. Same harness, same
 # 7 GiB container: 5946 MB and FAILING before, 3589 MB and PASSING after, and 113 s -> 23 s.
@@ -79,32 +86,53 @@ ENV DOTNET_CLI_TELEMETRY_OPTOUT=1 \
 #   2,039,430               -> 6367 MB, 90 s, passes  <- last measured PASS
 #   2,225,279               ->          72 s, System.OutOfMemoryException
 #   2,308,701 (today, 134)  ->         113 s, System.OutOfMemoryException
-# The budget is 1,200,000 — about 59% of the last proven-good point, which is ~38 further
-# migrations of runway after the squash, against ~61 before it would actually break. It fires
-# with real time to schedule the next squash rather than during a failing deploy.
+# The live estate reached 639,787 lines on 2026-08-26. The 800,000-line budget leaves room for
+# roughly five more current-size migrations while forcing the next squash well before Render can
+# rediscover the limit as an unexplained OOM kill.
 #
 # It counts the EVALUATED @(Compile) item list, not files on disk. That distinction is the whole
 # point: the squash leaves the 134 superseded migrations on disk for reversibility and removes
 # them from compilation in the .csproj, so a `cat Migrations/*.Designer.cs` guard would fail a
 # build that is actually fine. What costs memory is what Roslyn is handed.
-RUN lines=$(dotnet msbuild ERP_RFQ_Automation/ERP_RFQ_Automation.csproj -nologo -getItem:Compile \
-              | grep -o '"FullPath": "[^"]*\.Designer\.cs"' | cut -d'"' -f4 \
-              | tr '\n' '\0' | xargs -0 --no-run-if-empty cat | wc -l); \
-    budget=1200000; \
-    echo "migration Designer files: ${lines} lines (budget ${budget})"; \
+RUN designers=$(dotnet msbuild ERP_RFQ_Automation/ERP_RFQ_Automation.csproj -nologo -getItem:Compile \
+              | grep -o '"FullPath": "[^"]*\.Designer\.cs"' | cut -d'"' -f4 || true); \
+    count=$(printf '%s\n' "${designers}" | sed '/^$/d' | wc -l); \
+    lines=$(printf '%s\n' "${designers}" | tr '\n' '\0' \
+              | xargs -0 --no-run-if-empty cat | wc -l); \
+    budget=800000; \
+    echo "migration Designer files: ${count} files, ${lines} lines (budget ${budget})"; \
+    if [ "${count}" -eq 0 ]; then \
+      echo "BUILD SAFETY FAILURE: no compiled EF migration Designer files."; \
+      echo "The runtime would start without a discoverable schema migration."; \
+      exit 1; \
+    fi; \
     if [ "${lines}" -gt "${budget}" ]; then \
       echo "=================================================================="; \
       echo "BUILD MEMORY BUDGET EXCEEDED: ${lines} > ${budget} Designer lines."; \
       echo "Each migration embeds a full copy of the schema and Roslyn holds an"; \
       echo "IOperation tree per method body. At 2,308,701 lines this build died"; \
       echo "with System.OutOfMemoryException on Render's 8 GB Starter pipeline."; \
-      echo "Squash the migration estate again before adding more."; \
+      echo "Squash the live migration estate again before adding more."; \
       echo "Measure: scripts/dev/measure-build-memory.sh --snapshot --mode docker"; \
       echo "=================================================================="; \
       exit 1; \
     fi
 
-RUN dotnet publish ERP_RFQ_Automation/ERP_RFQ_Automation.csproj -c Release -o /app /p:UseAppHost=false
+RUN dotnet publish ERP_RFQ_Automation/ERP_RFQ_Automation.csproj \
+      -c Release -o /app --no-restore \
+      --runtime linux-x64 --self-contained false \
+      /p:UseAppHost=false \
+      /p:RunAnalyzers=false \
+      /p:EnableNETAnalyzers=false \
+      /p:EnforceCodeStyleInBuild=false
+
+# NuGet otherwise publishes native binaries for every supported OS/CPU. The RID-specific publish
+# above retains Render's Linux x64 QuestPDF/pdfium/qpdf assets. Tesseract's package still copies
+# Windows x86/x64 DLLs as content, so remove only those two unusable payloads; the runtime stage
+# installs Linux libraries and binds the exact wrapper names below. Verified by the production
+# OCR startup probe (Tesseract 5.3.0 recognition + pdfium rasterization both Operational).
+RUN rm -rf /app/x86 \
+    && find /app/x64 -maxdepth 1 -type f -name '*.dll' -delete
 
 # ---- runtime ----
 FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
@@ -114,7 +142,7 @@ FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
 # not — Tesseract 5.2.0 contains no .so and no runtimes/ directory at all, so the managed
 # wrapper depends entirely on what this image provides, under the exact names it probes for.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libleptonica-dev libtesseract-dev tesseract-ocr \
+    && apt-get install -y --no-install-recommends liblept5 libtesseract5 \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=build /app ./
