@@ -28,11 +28,17 @@ export interface DecisionCounts {
 export const initializeDecisionMap = (workbench: LeadDecisionWorkbenchDTO): DecisionMap => {
   const decisions: DecisionMap = {};
   for (const line of workbench.lines) {
+    // A deterministic, warning-free catalog resolution is typed reconciliation evidence, not a
+    // participation decision. Carry it into the editable draft so an operator who later marks
+    // Bid does not silently discard the exact match before RFQ promotion. Warning lines still
+    // require an explicit human product choice (or an acknowledged unresolved Bid).
+    const reconciledProductId = line.participation?.productId
+      ?? (!line.needsAttention ? line.bestMatchProductId ?? undefined : undefined);
     decisions[line.revisionLineId] = {
       decision: line.participation?.decision ?? 'Pending',
       ...(line.participation?.reasonCode ? { reasonCode: line.participation.reasonCode } : {}),
       ...(line.participation?.note ? { note: line.participation.note } : {}),
-      ...(line.participation?.productId ? { productId: line.participation.productId } : {}),
+      ...(reconciledProductId ? { productId: reconciledProductId } : {}),
       ...((line.participation?.quantity ?? (Number.isInteger(line.normalizedQuantity) ? line.normalizedQuantity : line.quantity)) != null
         ? { quantity: line.participation?.quantity ?? (Number.isInteger(line.normalizedQuantity) ? line.normalizedQuantity! : line.quantity!) } : {}),
       ...((line.participation?.unitOfMeasure ?? line.normalizedUom ?? line.unitOfMeasure)
@@ -71,6 +77,23 @@ export const decisionRecordIsLocked = (
 export const validGovernedDecision = (decision: EditableLineDecision): boolean => {
   if (decision.decision === 'Pending' || decision.decision === 'Bid') return true;
   return Boolean(decision.reasonCode?.trim());
+};
+
+export const bidCommercialValuesReady = (
+  decisions: DecisionMap,
+  unitOptions: Array<{ code: string }>,
+  currencyOptions: Array<{ code: string }>,
+  needsAttentionByRevisionLine: Record<number, boolean | undefined> = {},
+): boolean => {
+  const validUnitCodes = new Set(unitOptions.map((option) => option.code.toUpperCase()));
+  const validCurrencyCodes = new Set(currencyOptions.map((option) => option.code.toUpperCase()));
+  return Object.entries(decisions).every(([revisionLineId, decision]) => {
+    if (decision.decision !== 'Bid') return true;
+    return Boolean(decision.quantity && Number.isInteger(decision.quantity) && decision.quantity > 0
+      && decision.unitOfMeasure && validUnitCodes.has(decision.unitOfMeasure.toUpperCase())
+      && decision.currency && validCurrencyCodes.has(decision.currency.toUpperCase())
+      && (!needsAttentionByRevisionLine[Number(revisionLineId)] || (decision.note?.trim().length ?? 0) >= 5));
+  });
 };
 
 export const fitAssessmentDraftComplete = (

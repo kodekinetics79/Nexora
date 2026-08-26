@@ -187,7 +187,10 @@ public sealed class GlobalSearchService : IGlobalSearchService
         if (roleId <= 0) return false;
         if (await _roleGate.GetRoleRankAsync(roleId, businessUnitId) >= RoleRanks.Admin) return true;
         return await _permissions.CheckPermissionAsync(
-            roleId, SearchEntities.ModuleFor(entity), nameof(PermissionAction.View), businessUnitId);
+            roleId,
+            SearchEntities.ModuleFor(entity),
+            ModulePermissionPolicyProvider.ToRepositoryAction(PermissionAction.View),
+            businessUnitId);
     }
 
     // ── the families ─────────────────────────────────────────────────────────

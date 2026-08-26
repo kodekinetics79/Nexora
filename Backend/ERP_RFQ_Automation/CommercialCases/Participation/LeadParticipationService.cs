@@ -291,7 +291,10 @@ public sealed class LeadParticipationService : ILeadParticipationService
                     && (string.IsNullOrWhiteSpace(line.ReasonNotes) || line.ReasonNotes.Trim().Length < 5))
                     throw new ArgumentException(
                         $"Bid revision line {line.LeadItemRevisionId} has a catalog or normalization warning and requires a meaningful human acknowledgement note.");
-                if (command.Commit && line.Choice == LeadLineParticipationChoice.Bid)
+                // The database invariant applies to every persisted Bid line, including drafts.
+                // Validate against tenant masters here so an incomplete draft produces a useful
+                // client error instead of surfacing as a check-constraint 500 at SaveChanges.
+                if (line.Choice == LeadLineParticipationChoice.Bid)
                 {
                     if (!leadItemByRevisionLine.TryGetValue(line.LeadItemRevisionId, out var currentLeadItemId)
                         || !currentLeadItems.TryGetValue(currentLeadItemId, out var sourceLine))

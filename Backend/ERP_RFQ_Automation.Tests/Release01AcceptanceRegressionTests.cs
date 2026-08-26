@@ -9,9 +9,10 @@ namespace ERP_RFQ_Automation.Tests;
 public sealed class Release01AcceptanceRegressionTests
 {
     [Theory]
-    [InlineData(typeof(LeadController), 2)]
-    // 7 = + IPriceAttestationService (R5 price-provenance attestation).
-    [InlineData(typeof(QuoteController), 7)]
+    // Lead adds the authenticated commercial row-scope dependency.
+    [InlineData(typeof(LeadController), 3)]
+    // Quote adds the row-scope dependency after IPriceAttestationService and the logger.
+    [InlineData(typeof(QuoteController), 8)]
     public void UnexpectedControllerErrors_DoNotExposeInternalExceptionText(Type controllerType, int dependencyCount)
     {
         var arguments = Enumerable.Repeat<object?>(null, dependencyCount).ToArray();

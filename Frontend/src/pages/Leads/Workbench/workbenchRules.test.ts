@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { LeadDecisionWorkbenchDTO } from '../../../api/services/leadDecisionService';
 import {
+  bidCommercialValuesReady,
   blockerAction,
   countDecisions,
   decisionRecordIsLocked,
@@ -10,6 +11,22 @@ import {
   promotionBlockers,
   validGovernedDecision,
 } from './workbenchRules';
+
+describe('bidCommercialValuesReady', () => {
+  it('rejects a Bid draft whose UOM is not an active tenant master value', () => {
+    expect(bidCommercialValuesReady(
+      { 7: { decision: 'Bid', quantity: 1, unitOfMeasure: 'JOB', currency: 'USD' } },
+      [{ code: 'EA' }],
+      [{ code: 'USD' }],
+    )).toBe(false);
+  });
+
+  it('accepts governed values and requires an acknowledgement for warning lines', () => {
+    const decisions = { 7: { decision: 'Bid' as const, quantity: 1, unitOfMeasure: 'EA', currency: 'USD', note: 'Reviewed source.' } };
+    expect(bidCommercialValuesReady(decisions, [{ code: 'EA' }], [{ code: 'USD' }], { 7: true })).toBe(true);
+    expect(bidCommercialValuesReady({ 7: { ...decisions[7], note: 'no' } }, [{ code: 'EA' }], [{ code: 'USD' }], { 7: true })).toBe(false);
+  });
+});
 
 const workbench = (over: Partial<LeadDecisionWorkbenchDTO> = {}): LeadDecisionWorkbenchDTO => ({
   leadId: 42,
@@ -58,6 +75,20 @@ describe('Lead Decision Workbench rules', () => {
     expect(initializeDecisionMap(record)).toEqual({
       101: { decision: 'Bid' },
       102: { decision: 'NoBid', reasonCode: 'NO_SOURCE', note: 'Obsolete' },
+    });
+  });
+
+  it('carries warning-free typed catalog reconciliation into the draft without deciding participation', () => {
+    const decisions = initializeDecisionMap(workbench({
+      lines: [
+        { id: 1, revisionLineId: 101, verificationStatus: 'VERIFIED', bestMatchProductId: 501, needsAttention: false },
+        { id: 2, revisionLineId: 102, verificationStatus: 'VERIFIED', bestMatchProductId: 502, needsAttention: true },
+      ],
+    }));
+
+    expect(decisions).toEqual({
+      101: { decision: 'Pending', productId: 501 },
+      102: { decision: 'Pending' },
     });
   });
 

@@ -81,6 +81,29 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
 
     [Fact]
     [Trait("Category", "PostgreSQL")]
+    public async Task A_bid_draft_rejects_a_unit_that_is_not_in_the_active_tenant_master()
+    {
+        var scenario = await CreateScenarioAsync([
+            Line("00010", 1, "JOB", "SAR", "SERVICE-JOB")
+        ], "draft-invalid-uom");
+        await using var context = database.ContextFor(Tenant);
+        var participation = Service(context);
+        var fit = await FitAsync(participation, scenario, "draft-invalid-uom");
+        var draft = new CommitLeadParticipationCommand(
+            scenario.RevisionId, scenario.RevisionNumber, null, false, fit.Id,
+            [Bid(scenario.LineRevisionIds[0], "Reviewed by the bid desk.")],
+            $"warning-decision:draft-invalid-uom:{scenario.LeadId}", "tests");
+
+        var error = await Assert.ThrowsAsync<ArgumentException>(() =>
+            participation.CommitDecisionAsync(Tenant, scenario.LeadId, draft));
+
+        Assert.Contains("active tenant unit of measure", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(await context.Set<LeadParticipationDecision>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == Tenant && x.LeadId == scenario.LeadId).ToListAsync());
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
     public async Task Acknowledged_warning_corrections_and_partial_no_bid_are_immutable_and_only_bid_lines_promote()
     {
         var scenario = await CreateScenarioAsync([
