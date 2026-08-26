@@ -44,6 +44,7 @@ import {
   type WorkbenchStage,
 } from './WorkbenchStageNavigation';
 import { retryOperation, type RetryOperation } from './retryIdempotency';
+import FeatureHelp from '../../../components/common/FeatureHelp';
 import {
   blockerAction,
   countDecisions,
@@ -320,7 +321,16 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
           <Box sx={{ display: { xs: 'none', xl: 'block' } }}><SourceEvidencePanel workbench={workbench} compact /></Box>
           <Box sx={{ minWidth: 0 }}>
             <Stack direction="row" spacing={1} sx={{ justifyContent: 'space-between', alignItems: 'end', mb: 1, flexWrap: 'wrap' }}>
-              <Box><Typography component="h2" variant="h6" sx={{ fontWeight: 900 }}>Review transformed Lead lines</Typography><Typography variant="caption" color="text.secondary">Exact source values remain beside canonical values and RFQ participation inputs.</Typography></Box>
+              <Box>
+                <Stack direction="row" spacing={0.25} sx={{ alignItems: 'center' }}>
+                  <Typography component="h2" variant="h6" sx={{ fontWeight: 900 }}>Review transformed Lead lines</Typography>
+                  <FeatureHelp
+                    label="Lead transformation review"
+                    description="Compare what Nexora extracted with the original email or attachment. Correcting canonical Lead data creates a new immutable revision; participation choices do not rewrite the source."
+                  />
+                </Stack>
+                <Typography variant="caption" color="text.secondary">Exact source values remain beside canonical values and RFQ participation inputs.</Typography>
+              </Box>
               <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
                 <Chip size="small" label={`${workbench.lines.filter((line) => line.verificationStatus !== 'VERIFIED').length} need review`} color={workbench.lines.every((line) => line.verificationStatus === 'VERIFIED') ? 'success' : 'warning'} variant="outlined" />
                 <Button size="small" variant="outlined" onClick={() => navigate(`/procurement/extraction/review/${leadId}`)}>
@@ -349,7 +359,13 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
             onSave={(request) => fitMutation.mutate(request)}
           />
           <Paper component="section" aria-labelledby="participation-lines-heading" variant="outlined" sx={{ p: 2, borderRadius: 2 }}>
-            <Typography id="participation-lines-heading" component="h2" variant="h6" sx={{ fontWeight: 900 }}>Participation by line</Typography>
+            <Stack direction="row" spacing={0.25} sx={{ alignItems: 'center' }}>
+              <Typography id="participation-lines-heading" component="h2" variant="h6" sx={{ fontWeight: 900 }}>Participation by line</Typography>
+              <FeatureHelp
+                label="participation by line"
+                description="Decide Bid, No-bid, or Clarify for each requested line. Only committed Bid lines can enter the formal RFQ; excluded lines remain recorded against this Lead revision."
+              />
+            </Stack>
             <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
               Every line starts undecided. No-bid and clarification require a governed reason. These decisions belong to the Lead revision, before any RFQ exists.
             </Typography>
@@ -368,7 +384,13 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
 
       <WorkbenchStagePanel stage="promote" activeStage={stage}>
         <Paper variant="outlined" component="section" aria-labelledby="promotion-heading" sx={{ p: { xs: 2, md: 3 }, borderRadius: 2 }}>
-          <Typography id="promotion-heading" component="h2" variant="h6" sx={{ fontWeight: 900 }}>RFQ promotion</Typography>
+          <Stack direction="row" spacing={0.25} sx={{ alignItems: 'center' }}>
+            <Typography id="promotion-heading" component="h2" variant="h6" sx={{ fontWeight: 900 }}>RFQ promotion</Typography>
+            <FeatureHelp
+              label="RFQ promotion"
+              description="The only governed action that creates a formal RFQ from a Lead. It copies only committed Bid lines and is idempotent, so retrying cannot create a duplicate RFQ."
+            />
+          </Stack>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
             Promotion creates one formal RFQ from only the lines committed as Bid. It cannot qualify the Lead or invent a participation decision.
           </Typography>

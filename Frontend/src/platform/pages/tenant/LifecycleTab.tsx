@@ -43,6 +43,7 @@ import { usePlatformPermissions } from '../../auth/usePlatformPermissions';
 import { useStepUpReauthentication, isStepUpCancelled } from '../../auth/useStepUpReauthentication';
 import { REQUIRED_ROLE_COPY } from '../../auth/permissions';
 import type { Tenant, TenantOffboardingStatus, TenantPurgeResult } from '../../types';
+import FeatureHelp from '../../../components/common/FeatureHelp';
 
 /**
  * The platform's own floor, mirrored so the operator is told before the request rather
@@ -82,6 +83,14 @@ const STAGE_TONE = {
   PendingDeletion: 'warning',
   Purged: 'error',
 } as const;
+
+const destructionStageLabel = (status: TenantOffboardingStatus): string => {
+  if (status.stage === 'NotScheduled') return 'No deletion scheduled';
+  if (status.stage === 'Purged') return 'Tenant data deleted; audit tombstone retained';
+  return status.isPurgeEligible
+    ? 'Ready for independent deletion approval'
+    : 'Retention period in progress';
+};
 
 export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
   const queryClient = useQueryClient();
@@ -310,7 +319,7 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
 
       {status.stage === 'Purged' && (
         <Alert severity="error" sx={{ borderRadius: 2 }}>
-          <AlertTitle sx={{ fontWeight: 800 }}>This tenant has been purged</AlertTitle>
+          <AlertTitle sx={{ fontWeight: 800 }}>Tenant data deleted; audit tombstone retained</AlertTitle>
           Destroyed {status.purgedOn ? fmtDateTime(status.purgedOn) : 'at an unrecorded time'} by{' '}
           {status.purgedBy ?? 'an unrecorded actor'}
           {status.purgedRowCount == null ? '' : `, ${fmtNumber(status.purgedRowCount)} rows`}. What remains is a
@@ -321,7 +330,7 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
       {status.stage === 'PendingDeletion' && (
         <Alert severity="warning" sx={{ borderRadius: 2 }}>
           <AlertTitle sx={{ fontWeight: 800 }}>
-            Deletion scheduled{status.purgeEligibleOn ? ` — purge allowed from ${fmtDateTime(status.purgeEligibleOn)}` : ''}
+            Retention period in progress{status.purgeEligibleOn ? ` — permanent deletion eligible from ${fmtDateTime(status.purgeEligibleOn)}` : ''}
           </AlertTitle>
           <Typography variant="body2" sx={{ mb: 1 }}>
             {status.deletionReason ?? 'No reason recorded.'} — scheduled by {status.deletionScheduledBy ?? 'unknown'}
@@ -336,8 +345,8 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
           />
           <Typography variant="caption" sx={{ fontWeight: 700, mt: 0.5, display: 'block' }}>
             {status.isPurgeEligible
-              ? 'The retention window has elapsed. A purge is now permitted.'
-              : `${status.daysUntilPurgeEligible ?? '—'} day(s) of the ${status.retentionDays ?? '—'}-day window remaining. The purge is refused until it elapses.`}
+              ? 'The retention period has elapsed. A different Platform Owner may now independently approve permanent deletion.'
+              : `${status.daysUntilPurgeEligible ?? '—'} day(s) of the ${status.retentionDays ?? '—'}-day period remaining. Permanent deletion is refused until it elapses.`}
           </Typography>
         </Alert>
       )}
@@ -354,7 +363,7 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
       {activeHolds.length > 0 && (
         <Alert severity="error" icon={<HoldIcon />} sx={{ borderRadius: 2 }}>
           <AlertTitle sx={{ fontWeight: 800 }}>
-            Legal hold active — purge and personal-data erasure are blocked
+            Legal hold active — permanent deletion and personal-data de-identification are blocked
           </AlertTitle>
           {activeHolds.map((hold) => (
             <Box key={hold.id} sx={{ mt: 1 }}>
@@ -375,7 +384,7 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
       {permissions.isOwner && legalHolds.isError && (
         <Alert severity="error" sx={{ borderRadius: 2 }}>
           <AlertTitle sx={{ fontWeight: 800 }}>Legal-hold status could not be verified</AlertTitle>
-          Purge and personal-data erasure remain unavailable until the legal-hold record can be read.
+          Permanent deletion and personal-data de-identification remain unavailable until the legal-hold record can be read.
           <Button size="small" color="inherit" onClick={() => legalHolds.refetch()} sx={{ ml: 1 }}>
             Retry
           </Button>
@@ -392,7 +401,16 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
 
       <Grid container spacing={2.5}>
         <Grid size={{ xs: 12, md: 5 }}>
-          <PageSection title="Where this tenant stands">
+          <PageSection
+            title="Where this tenant stands"
+            help={(
+              <FeatureHelp
+                label="tenant lifecycle and deletion stage"
+                title="Two separate states"
+                description="Service status controls access. The deletion stage records whether a retention period is running or permanent deletion has completed. Archiving alone never destroys data."
+              />
+            )}
+          >
             <Stack spacing={1.5}>
               <Stack direction="row" alignItems="center" justifyContent="space-between">
                 <Typography variant="body2" color="text.secondary">
@@ -404,7 +422,7 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
                 <Typography variant="body2" color="text.secondary">
                   Destruction stage
                 </Typography>
-                <SoftChip label={status.stage} tone={STAGE_TONE[status.stage]} dot={false} />
+                <SoftChip label={destructionStageLabel(status)} tone={STAGE_TONE[status.stage]} dot={false} />
               </Stack>
               <Typography variant="caption" color="text.secondary">
                 {/* The two axes are independent by design; showing only one is how a
@@ -484,7 +502,15 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
         <Grid size={{ xs: 12, md: 7 }}>
           <PageSection
             title="Offboarding"
-            subtitle="Hand the data back, start the clock, then destroy. Each button is enabled by the server, not by this screen."
+            subtitle="Hand the data back, start the retention period, then obtain independent approval for permanent deletion. Each button is enabled by the server, not by this screen."
+            help={(
+              <FeatureHelp
+                label="tenant offboarding"
+                title="How tenant offboarding works"
+                description="Archive the tenant, export its data for handoff, wait through the retention period, then have a different Platform Owner approve permanent deletion. An active legal hold stops destruction."
+                placement="left"
+              />
+            )}
           >
             <Stack spacing={1.5}>
               <RoleGate allowed={permissions.isOwner} requirement={REQUIRED_ROLE_COPY.owner}>
@@ -542,7 +568,7 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
                     }
                     onClick={() => setPurgeOpen(true)}
                   >
-                    Purge tenant records
+                    Permanently delete eligible tenant data
                   </Button>
                 )}
               </RoleGate>
@@ -556,17 +582,17 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
                     disabled={disabled || destructiveHoldGuard || !status.canErasePersonalData}
                     onClick={() => setEraseOpen(true)}
                   >
-                    Erase personal data
+                    De-identify people; retain required records
                   </Button>
                 )}
               </RoleGate>
 
               {permissions.isOwner && status.purgeRequiresDifferentApprover && (
                 <Alert severity="warning" sx={{ borderRadius: 2 }}>
-                  <AlertTitle sx={{ fontWeight: 800 }}>A second Owner has to run this purge</AlertTitle>
+                  <AlertTitle sx={{ fontWeight: 800 }}>A second Owner must approve permanent deletion</AlertTitle>
                   You scheduled this deletion
                   {status.deletionApprovedBy ? ` (${status.deletionApprovedBy})` : ''}, so the server
-                  will refuse a purge from you. Destroying a customer&apos;s records is the one act
+                  will refuse permanent deletion from you. Destroying a customer&apos;s records is the one act
                   here that no later reviewer can correct, and every other control on the path —
                   the role, the typed name, the reason, the clock — is one person satisfying a rule.
                   The platform already requires an independent checker to finalize an invoice, to
@@ -600,7 +626,7 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
                 sx={{ borderRadius: 2, mt: 2 }}
                 onClose={() => setPurgeReceipt(null)}
               >
-                <AlertTitle sx={{ fontWeight: 800 }}>Purge complete — what was destroyed and what was kept</AlertTitle>
+                <AlertTitle sx={{ fontWeight: 800 }}>Permanent deletion complete — what was destroyed and what was kept</AlertTitle>
                 <Typography variant="body2" sx={{ mb: 1 }}>{purgeReceipt.summary}</Typography>
                 <Stack spacing={0.5}>
                   <Typography variant="body2">
@@ -610,8 +636,8 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
                   <Typography variant="body2">
                     <strong>Kept:</strong> {fmtNumber(purgeReceipt.lifecycleEventsRetained)} lifecycle
                     events and {fmtNumber(purgeReceipt.platformAuditRecordsRetained)} platform audit
-                    records — the account of how this customer was treated, which is the operator&apos;s
-                    record and not theirs.
+                    records, retained under Nexora&apos;s legal, financial, and security obligations with
+                    restricted access.
                   </Typography>
                   <Typography variant="body2">
                     <strong>Redacted rather than deleted:</strong>{' '}
@@ -862,9 +888,9 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
 
       <DestructiveConfirmDialog
         open={purgeOpen}
-        title={`Purge ${tenant.name}`}
+        title={`Permanently delete eligible data for ${tenant.name}`}
         confirmationRequired={status.confirmationRequired}
-        confirmLabel="Purge everything"
+        confirmLabel="Confirm permanent deletion"
         disclosures={status.disclosures}
         description={
           <>
@@ -930,9 +956,9 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
 
       <DestructiveConfirmDialog
         open={eraseOpen}
-        title={`Erase personal data for ${tenant.name}`}
+        title={`De-identify people for ${tenant.name}`}
         confirmationRequired={status.confirmationRequired}
-        confirmLabel="Erase identities"
+        confirmLabel="Confirm de-identification"
         disclosures={status.disclosures}
         description={
           <>

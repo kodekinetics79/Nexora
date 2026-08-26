@@ -20,6 +20,7 @@ import { openAuthenticatedFile } from '../../../utils/authenticatedFile';
 import { formatDateSafe } from '../../../utils/dates';
 import { presentableErrorMessage } from '../../../utils/apiErrors';
 import { inspectableEvidenceUrl } from './evidenceRules';
+import FeatureHelp from '../../../components/common/FeatureHelp';
 
 const SourceEvidencePanel: React.FC<{ workbench: LeadDecisionWorkbenchDTO; compact?: boolean }> = ({ workbench, compact = false }) => {
   const { enqueueSnackbar } = useSnackbar();
@@ -42,7 +43,13 @@ const SourceEvidencePanel: React.FC<{ workbench: LeadDecisionWorkbenchDTO; compa
     >
       <Stack direction="row" sx={{ alignItems: 'center', justifyContent: 'space-between', gap: 1, mb: 1.5 }}>
         <Box>
-          <Typography id="source-evidence-heading" component="h2" variant="h6" sx={{ fontWeight: 900 }}>Source evidence</Typography>
+          <Stack direction="row" spacing={0.25} sx={{ alignItems: 'center' }}>
+            <Typography id="source-evidence-heading" component="h2" variant="h6" sx={{ fontWeight: 900 }}>Source evidence</Typography>
+            <FeatureHelp
+              label="source evidence"
+              description="The retained email occurrence and customer documents used to create this Lead revision. If the original content cannot be inspected, validation and RFQ promotion remain blocked."
+            />
+          </Stack>
           <Typography variant="caption" color="text.secondary">Durable occurrence and retained customer documents</Typography>
         </Box>
         <Chip size="small" label={`${inspectable}/${workbench.evidence.length} inspectable`} color={workbench.evidence.length > 0 && inspectable === workbench.evidence.length ? 'success' : 'warning'} variant="outlined" />

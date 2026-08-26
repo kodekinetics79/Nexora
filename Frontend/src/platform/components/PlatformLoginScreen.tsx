@@ -24,6 +24,7 @@ import { usePlatformAuth } from '../auth/usePlatformAuth';
 import type { PlatformMfaChallenge } from '../auth/usePlatformAuth';
 import { platformErrorMessage } from '../api/apiError';
 import { fmtTrustWindow } from './format';
+import FeatureHelp from '../../components/common/FeatureHelp';
 
 /**
  * The platform-owner sign-in screen. Rendered in place by `PlatformGuard` when
@@ -114,9 +115,16 @@ export default function PlatformLoginScreen() {
             <BoltIcon sx={{ fontSize: 30 }} />
           </Box>
           <Box>
-            <Typography variant="h5" sx={{ fontWeight: 900, letterSpacing: '-0.5px' }}>
-              Platform Console
-            </Typography>
+            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 0.25 }}>
+              <Typography variant="h5" sx={{ fontWeight: 900, letterSpacing: '-0.5px' }}>
+                Platform Console
+              </Typography>
+              <FeatureHelp
+                label="Platform Console"
+                description="A separate control plane for authorized platform operators. Platform Owners can administer, offboard, and permanently delete tenants here; a tenant administrator cannot delete an entire tenant."
+                placement="right"
+              />
+            </Box>
             <Typography
               sx={{
                 fontWeight: 700,
