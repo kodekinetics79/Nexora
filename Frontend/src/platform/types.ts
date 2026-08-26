@@ -1580,6 +1580,15 @@ export interface TenantOffboardingStatus {
   history: TenantLifecycleEvent[];
   exports: TenantExportReceipt[];
   disclosures: string[];
+
+  /** Server-resolved facts; the client never infers a billing waiver from an empty screen. */
+  commercialEvidenceRequired: boolean;
+  canAttestNonCustomer: boolean;
+  nonCustomerAttestedOn: string | null;
+  nonCustomerAttestedBy: string | null;
+  billingStatementCount: number;
+  subscriptionInvoiceCount: number;
+  readinessFailures: Array<{ code: string; detail: string }>;
 }
 
 export interface PendingTenantDeletion {

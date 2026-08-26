@@ -288,6 +288,81 @@ public sealed class TenantOffboardingReadinessTests
     }
 
     [Fact]
+    public async Task Owner_attestation_unlocks_only_the_commercial_gate_for_a_zero_billing_legacy_tenant()
+    {
+        using var db = new TenantLifecycleTestDb();
+        var tenant = await SeedNonCustomerTenantAsync(
+            db, "legacy-production-test", 91_105, profile: TenantDeploymentProfile.Production);
+        await using var context = db.ContextFor(null);
+        var readiness = new TenantOffboardingReadinessService(context);
+        var service = TenantLifecycleHarness.Service(context, readiness: readiness);
+
+        var status = await service.AttestNonCustomerAsync(
+            tenant.Id,
+            new AttestNonCustomerRetirementRequest
+            {
+                Reason = "This environment was created for internal workflow testing only.",
+                Confirmation = tenant.Name
+            },
+            TenantLifecycleHarness.Operator(), null, CancellationToken.None);
+
+        Assert.False(status.CommercialEvidenceRequired);
+        Assert.False(status.CanAttestNonCustomer);
+        Assert.NotNull(status.NonCustomerAttestedOn);
+        Assert.Equal("operator@example.test", status.NonCustomerAttestedBy);
+        Assert.True(status.CanScheduleDeletion);
+        Assert.DoesNotContain(status.ReadinessFailures,
+            f => f.Code == TenantOffboardingReadinessCodes.FinalBillingMissing);
+
+        await using var verify = db.ContextFor(null);
+        Assert.Single(await verify.Set<TenantLifecycleEvent>()
+            .Where(x => x.TenantId == tenant.Id
+                        && x.Action == TenantLifecycleActions.AttestNonCustomer)
+            .ToListAsync());
+        Assert.Single(await verify.Set<PlatformAuditLog>()
+            .Where(x => x.Action == TenantLifecycleActions.AttestNonCustomer)
+            .ToListAsync());
+
+        // A lost response and browser retry must not manufacture a second approval event.
+        await service.AttestNonCustomerAsync(
+            tenant.Id,
+            new AttestNonCustomerRetirementRequest
+            {
+                Reason = "This environment was created for internal workflow testing only.",
+                Confirmation = tenant.Name
+            },
+            TenantLifecycleHarness.Operator(), null, CancellationToken.None);
+        Assert.Single(await verify.Set<TenantLifecycleEvent>()
+            .Where(x => x.TenantId == tenant.Id
+                        && x.Action == TenantLifecycleActions.AttestNonCustomer)
+            .ToListAsync());
+    }
+
+    [Fact]
+    public async Task An_attestation_never_overrides_a_real_billing_footprint()
+    {
+        using var db = new TenantLifecycleTestDb();
+        var tenant = await SeedReadyTenantAsync(db, "billed-production", 91_106);
+        await using var context = db.ContextFor(null);
+        var service = TenantLifecycleHarness.Service(
+            context, readiness: new TenantOffboardingReadinessService(context));
+
+        var refusal = await Assert.ThrowsAsync<TenantOffboardingRefusedException>(() =>
+            service.AttestNonCustomerAsync(
+                tenant.Id,
+                new AttestNonCustomerRetirementRequest
+                {
+                    Reason = "Incorrectly attempting to retire a billed customer as a test.",
+                    Confirmation = tenant.Name
+                },
+                TenantLifecycleHarness.Operator(), null, CancellationToken.None));
+
+        Assert.Contains("billing statement(s)", refusal.Message);
+        Assert.DoesNotContain(await context.Set<TenantLifecycleEvent>().ToListAsync(),
+            x => x.Action == TenantLifecycleActions.AttestNonCustomer);
+    }
+
+    [Fact]
     public async Task Everything_structural_still_applies_to_a_tenant_with_no_books()
     {
         // The skip is scoped to the commercial block. Archived-first, the export receipt and the

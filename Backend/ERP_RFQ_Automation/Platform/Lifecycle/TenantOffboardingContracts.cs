@@ -98,6 +98,20 @@ public sealed class CancelTenantDeletionRequest
 }
 
 /// <summary>
+/// Governs the narrow legacy case where a tenant was historically labelled Production but never
+/// became a billed customer. This does not rewrite its deployment profile and does not waive the
+/// export, legal-hold, erasure, retention, or independent-approval controls.
+/// </summary>
+public sealed class AttestNonCustomerRetirementRequest
+{
+    [Required]
+    public string Reason { get; set; } = null!;
+
+    [Required]
+    public string Confirmation { get; set; } = null!;
+}
+
+/// <summary>
 /// An export produces the tenant's ENTIRE commercial history as a file, so it carries the same
 /// contract as the destructive verbs: a reason somebody can read later, and the tenant's name
 /// typed back.
@@ -219,7 +233,16 @@ public sealed record TenantOffboardingStatusDto(
 
     IReadOnlyList<TenantLifecycleEventDto> History,
     IReadOnlyList<TenantExportReceiptDto> Exports,
-    IReadOnlyList<string> Disclosures);
+    IReadOnlyList<string> Disclosures,
+
+    // server-resolved commercial retirement position and actionable schedule blockers
+    bool CommercialEvidenceRequired,
+    bool CanAttestNonCustomer,
+    DateTime? NonCustomerAttestedOn,
+    string? NonCustomerAttestedBy,
+    int BillingStatementCount,
+    int SubscriptionInvoiceCount,
+    IReadOnlyList<TenantOffboardingReadinessFailure> ReadinessFailures);
 
 /// <summary>A tenant on the purge work queue.</summary>
 public sealed record PendingTenantDeletionDto(

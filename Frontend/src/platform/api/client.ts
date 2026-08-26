@@ -326,6 +326,10 @@ export interface PlatformApi {
     tenantId: string,
     body: { reason: string; confirmation: string },
   ): Promise<TenantExportDownload>;
+  attestNonCustomerRetirement(
+    tenantId: string,
+    body: { reason: string; confirmation: string },
+  ): Promise<TenantOffboardingStatus>;
   scheduleTenantDeletion(
     tenantId: string,
     body: { reason: string; retentionDays?: number | null },
@@ -905,6 +909,13 @@ const normalizeOffboarding = (wire: WireRecord): TenantOffboardingStatus => ({
     id: asId(receipt.id as string | number),
   })),
   disclosures: (wire.disclosures as string[]) ?? [],
+  commercialEvidenceRequired: wire.commercialEvidenceRequired !== false,
+  canAttestNonCustomer: Boolean(wire.canAttestNonCustomer),
+  nonCustomerAttestedOn: (wire.nonCustomerAttestedOn as string) ?? null,
+  nonCustomerAttestedBy: (wire.nonCustomerAttestedBy as string) ?? null,
+  billingStatementCount: num(wire.billingStatementCount),
+  subscriptionInvoiceCount: num(wire.subscriptionInvoiceCount),
+  readinessFailures: (wire.readinessFailures as TenantOffboardingStatus['readinessFailures']) ?? [],
 });
 
 const normalizeRevenueRisk = (wire: WireRecord): TenantRevenueRisk => ({
@@ -1468,6 +1479,13 @@ const httpPlatformApi: PlatformApi = {
       totalRows: rows == null ? null : Number(rows),
     };
   },
+  attestNonCustomerRetirement: async (tenantId, body) =>
+    normalizeOffboarding(
+      (await platformHttp.post<WireRecord>(
+        `/api/platform/tenants/${tenantId}/offboarding/attest-non-customer`,
+        body,
+      )).data,
+    ),
   scheduleTenantDeletion: async (tenantId, body) =>
     normalizeOffboarding(
       (await platformHttp.post<WireRecord>(

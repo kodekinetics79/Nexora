@@ -125,6 +125,19 @@ public sealed class TenantOffboardingController(
         long tenantId, [FromBody] ScheduleTenantDeletionRequest request, CancellationToken ct) =>
         Execute(() => offboarding.ScheduleDeletionAsync(tenantId, request, User, HttpContext, ct));
 
+    /// <summary>
+    /// Resolves the legacy-test-tenant dead end without rewriting history or weakening the real
+    /// customer path. The service accepts this only for an archived, zero-billing tenant and writes
+    /// an append-only lifecycle event plus a platform audit record.
+    /// </summary>
+    // POST /api/platform/tenants/{tenantId}/offboarding/attest-non-customer
+    [HttpPost("{tenantId:long}/offboarding/attest-non-customer")]
+    [Authorize(Policy = PlatformPolicies.Owner)]
+    [PlatformHighRiskOperation("tenant.attest-non-customer")]
+    public Task<ActionResult<TenantOffboardingStatusDto>> AttestNonCustomer(
+        long tenantId, [FromBody] AttestNonCustomerRetirementRequest request, CancellationToken ct) =>
+        Execute(() => offboarding.AttestNonCustomerAsync(tenantId, request, User, HttpContext, ct));
+
     // POST /api/platform/tenants/{tenantId}/offboarding/cancel-deletion
     [HttpPost("{tenantId:long}/offboarding/cancel-deletion")]
     [Authorize(Policy = PlatformPolicies.Owner)]

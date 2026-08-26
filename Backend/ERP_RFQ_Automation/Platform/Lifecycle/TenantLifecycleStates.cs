@@ -119,6 +119,7 @@ public static class TenantLifecycleGraph
 public static class TenantLifecycleActions
 {
     public const string Export = "tenant.offboarding.export";
+    public const string AttestNonCustomer = "tenant.offboarding.attest-non-customer";
     public const string ScheduleDeletion = "tenant.offboarding.schedule-deletion";
     public const string CancelDeletion = "tenant.offboarding.cancel-deletion";
 
@@ -148,8 +149,9 @@ public static class TenantOffboardingDisclosure
     /// conclusion is that the gate is unreliable rather than that this tenant has no books.
     /// </summary>
     public const string NoCommercialEvidenceRequired =
-        "This tenant is on a non-production deployment profile and has no billing statements and "
-        + "no invoices, so the commercial closure evidence a departing customer requires — a Final "
+        "This tenant has no billing statements and no invoices, and its non-customer status is "
+        + "established either by its governed non-production profile or by an Owner's append-only "
+        + "retirement attestation. The commercial closure evidence a departing customer requires — a Final "
         + "billing statement, a finalized invoice and a reconciled accounting acknowledgement — "
         + "does not apply and was not asked for. There are no books to close and nobody to hand "
         + "them to. Every other requirement is unchanged: the tenant must be archived, free of "

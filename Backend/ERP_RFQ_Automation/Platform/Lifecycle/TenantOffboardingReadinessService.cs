@@ -24,6 +24,21 @@ public sealed record TenantOffboardingReadinessFailure(string Code, string Detai
 public sealed record TenantOffboardingReadinessResult(
     bool Ready, IReadOnlyList<TenantOffboardingReadinessFailure> Failures);
 
+/// <summary>
+/// The persisted facts behind the commercial-closure gate. A deployment label is policy; billing
+/// statements and invoices are facts, and the facts always win. A Production-labelled legacy
+/// tenant may be retired as a non-customer only after an Owner attests to that decision and only
+/// while the platform can prove that no billing footprint exists.
+/// </summary>
+public sealed record TenantCommercialRetirementPosition(
+    bool HasCommercialFootprint,
+    int BillingStatementCount,
+    int SubscriptionInvoiceCount,
+    bool HasNonCustomerAttestation,
+    DateTime? NonCustomerAttestedOn,
+    string? NonCustomerAttestedBy,
+    bool CommercialEvidenceApplies);
+
 public enum TenantOffboardingReadinessPhase { Schedule, Purge }
 
 public interface ITenantOffboardingReadinessService
@@ -41,6 +56,9 @@ public interface ITenantOffboardingReadinessService
     /// that still required it would be worse than saying nothing.</para>
     /// </summary>
     Task<bool> CommercialEvidenceAppliesAsync(Tenant tenant, CancellationToken ct = default);
+
+    Task<TenantCommercialRetirementPosition> GetCommercialRetirementPositionAsync(
+        Tenant tenant, CancellationToken ct = default);
 }
 
 /// <summary>
@@ -200,11 +218,40 @@ public sealed class TenantOffboardingReadinessService(ErpRfqAutomationContext db
     /// <inheritdoc />
     public async Task<bool> CommercialEvidenceAppliesAsync(
         Tenant tenant, CancellationToken ct = default)
-        => tenant.DeploymentProfile == TenantDeploymentProfile.Production
-           || await db.Set<BillingStatement>().AsNoTracking()
-               .AnyAsync(x => x.TenantId == tenant.Id, ct)
-           || await db.Set<SubscriptionInvoice>().AsNoTracking()
-               .AnyAsync(x => x.TenantId == tenant.Id, ct);
+        => (await GetCommercialRetirementPositionAsync(tenant, ct)).CommercialEvidenceApplies;
+
+    public async Task<TenantCommercialRetirementPosition> GetCommercialRetirementPositionAsync(
+        Tenant tenant, CancellationToken ct = default)
+    {
+        var statementCount = await db.Set<BillingStatement>().AsNoTracking()
+            .CountAsync(x => x.TenantId == tenant.Id, ct);
+        var invoiceCount = await db.Set<SubscriptionInvoice>().AsNoTracking()
+            .CountAsync(x => x.TenantId == tenant.Id, ct);
+        var footprint = statementCount > 0 || invoiceCount > 0;
+
+        var attestation = await db.Set<TenantLifecycleEvent>().AsNoTracking()
+            .Where(x => x.TenantId == tenant.Id
+                        && x.Action == TenantLifecycleActions.AttestNonCustomer)
+            .OrderByDescending(x => x.OccurredOn).ThenByDescending(x => x.Id)
+            .Select(x => new { x.OccurredOn, x.ActorEmail })
+            .FirstOrDefaultAsync(ct);
+
+        // A later billing record invalidates the practical effect of an earlier attestation. The
+        // event remains in history (it is append-only), but it can never be used to waive real
+        // books that subsequently appeared.
+        var applies = footprint
+                      || tenant.DeploymentProfile == TenantDeploymentProfile.Production
+                         && attestation is null;
+
+        return new TenantCommercialRetirementPosition(
+            footprint,
+            statementCount,
+            invoiceCount,
+            attestation is not null,
+            attestation?.OccurredOn,
+            attestation?.ActorEmail,
+            applies);
+    }
 
     private static DateTime Max(DateTime value, DateTime? candidate) =>
         candidate is not null && candidate.Value > value ? candidate.Value : value;

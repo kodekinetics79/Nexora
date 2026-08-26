@@ -26,6 +26,7 @@ import {
   RestorePageOutlined as RestoreIcon,
   UndoOutlined as CancelDeletionIcon,
   GavelOutlined as HoldIcon,
+  FactCheckOutlined as AttestIcon,
 } from '@mui/icons-material';
 import { useSnackbar } from 'notistack';
 import Stack from '../../components/Flex';
@@ -105,6 +106,8 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
   const [reversible, setReversible] = useState<Reversible | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
   const [scheduleOpen, setScheduleOpen] = useState(false);
+  const [attestOpen, setAttestOpen] = useState(false);
+  const [attestConfirmation, setAttestConfirmation] = useState('');
   const [retentionDays, setRetentionDays] = useState('30');
   const [cancelOpen, setCancelOpen] = useState(false);
   const [purgeOpen, setPurgeOpen] = useState(false);
@@ -209,6 +212,22 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
     onError: fail('Scheduling the deletion was refused'),
   });
 
+  const attestMutation = useMutation({
+    mutationFn: (reason: string) => stepUp.guard(() => platformApi.attestNonCustomerRetirement(
+      tenant.id,
+      { reason, confirmation: attestConfirmation.trim() },
+    )),
+    onSuccess: () => {
+      enqueueSnackbar('Non-customer retirement recorded — billing closure no longer blocks this zero-billing tenant', {
+        variant: 'success',
+      });
+      setAttestOpen(false);
+      setAttestConfirmation('');
+      invalidate();
+    },
+    onError: fail('The non-customer retirement attestation was refused'),
+  });
+
   const cancelMutation = useMutation({
     mutationFn: (reason: string) => platformApi.cancelTenantDeletion(tenant.id, reason),
     onSuccess: () => {
@@ -285,6 +304,10 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
       />
     );
   }
+
+  // Older API deployments do not send the checklist during a rolling frontend/backend release.
+  // Treat that as "no checklist supplied" rather than crashing the entire tenant console.
+  const readinessFailures = status.readinessFailures ?? [];
 
   const retentionProblem =
     retentionDays.trim() === ''
@@ -513,6 +536,49 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
             )}
           >
             <Stack spacing={1.5}>
+              {status.canAttestNonCustomer && (
+                <Alert severity="warning" icon={<AttestIcon />} sx={{ borderRadius: 2 }}>
+                  <AlertTitle sx={{ fontWeight: 800 }}>Legacy Production label, but no billing records</AlertTitle>
+                  The server found {status.billingStatementCount} billing statements and{' '}
+                  {status.subscriptionInvoiceCount} subscription invoices. If this tenant was only used for
+                  testing and never became a paying customer, an Owner can record that fact without rewriting
+                  its historical deployment profile. Export, legal hold, erasure, retention, and independent
+                  deletion approval remain mandatory.
+                  <Box sx={{ mt: 1.5 }}>
+                    <Button
+                      variant="contained"
+                      color="warning"
+                      startIcon={<AttestIcon />}
+                      onClick={() => setAttestOpen(true)}
+                    >
+                      Record never became a customer
+                    </Button>
+                  </Box>
+                </Alert>
+              )}
+
+              {status.nonCustomerAttestedOn && !status.commercialEvidenceRequired && (
+                <Alert severity="success" icon={<AttestIcon />} sx={{ borderRadius: 2 }}>
+                  <AlertTitle sx={{ fontWeight: 800 }}>Zero-billing non-customer status recorded</AlertTitle>
+                  Recorded {fmtDateTime(status.nonCustomerAttestedOn)} by{' '}
+                  {status.nonCustomerAttestedBy ?? 'an unrecorded Owner'}. Billing closure does not apply;
+                  every structural offboarding control still does.
+                </Alert>
+              )}
+
+              {status.stage === 'NotScheduled' && readinessFailures.length > 0 && (
+                <Alert severity="info" sx={{ borderRadius: 2 }}>
+                  <AlertTitle sx={{ fontWeight: 800 }}>Complete these items before scheduling deletion</AlertTitle>
+                  <Box component="ul" sx={{ m: 0, pl: 2.5 }}>
+                    {readinessFailures.map((failure) => (
+                      <Typography component="li" variant="body2" key={failure.code} sx={{ mb: 0.5 }}>
+                        {failure.detail}
+                      </Typography>
+                    ))}
+                  </Box>
+                </Alert>
+              )}
+
               <RoleGate allowed={permissions.isOwner} requirement={REQUIRED_ROLE_COPY.owner}>
                 {(disabled) => (
                   <Button
@@ -833,6 +899,46 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
         busy={exportMutation.isPending}
         onClose={() => setExportOpen(false)}
         onConfirm={(body) => exportMutation.mutate(body)}
+      />
+
+      <ReasonDialog
+        open={attestOpen}
+        title="Record that this tenant never became a customer"
+        confirmLabel="Record governed attestation"
+        confirmColor="warning"
+        minReasonLength={15}
+        reasonLabel="Why was this tenant never a customer?"
+        reasonHelper="At least 15 characters. This becomes part of the immutable lifecycle history."
+        description={(
+          <>
+            This does not delete <strong>{tenant.name}</strong> and does not change its historical Production
+            label. It records an Owner&apos;s decision that the zero-billing tenant was a test or demo tenant, so
+            impossible final-billing documents are not required. If billing records exist now or appear later,
+            the server refuses the waiver.
+          </>
+        )}
+        extra={(
+          <TextField
+            fullWidth
+            required
+            label={`Type ${status.confirmationRequired} to confirm`}
+            value={attestConfirmation}
+            onChange={(event) => setAttestConfirmation(event.target.value)}
+            helperText="Type the tenant name exactly, including capitalisation."
+            slotProps={{ htmlInput: { autoComplete: 'off', spellCheck: false } }}
+          />
+        )}
+        extraProblem={
+          attestConfirmation.trim() === status.confirmationRequired
+            ? null
+            : `Type ${status.confirmationRequired} exactly to continue.`
+        }
+        busy={attestMutation.isPending}
+        onClose={() => {
+          setAttestOpen(false);
+          setAttestConfirmation('');
+        }}
+        onConfirm={(reason) => attestMutation.mutate(reason)}
       />
 
       <ReasonDialog

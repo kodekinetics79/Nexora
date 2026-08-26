@@ -234,6 +234,17 @@ public static class TenantLifecycleHarness
         // fixtures using it generally do.
         public Task<bool> CommercialEvidenceAppliesAsync(
             Tenant tenant, CancellationToken ct = default) => Task.FromResult(true);
+
+        public Task<TenantCommercialRetirementPosition> GetCommercialRetirementPositionAsync(
+            Tenant tenant, CancellationToken ct = default) => Task.FromResult(
+                new TenantCommercialRetirementPosition(
+                    HasCommercialFootprint: true,
+                    BillingStatementCount: 1,
+                    SubscriptionInvoiceCount: 1,
+                    HasNonCustomerAttestation: false,
+                    NonCustomerAttestedOn: null,
+                    NonCustomerAttestedBy: null,
+                    CommercialEvidenceApplies: true));
     }
 }
 
