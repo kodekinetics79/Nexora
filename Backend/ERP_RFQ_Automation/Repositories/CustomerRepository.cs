@@ -139,7 +139,22 @@ namespace ERP_RFQ_Automation.Repositories
             return customer ?? throw new KeyNotFoundException($"Customer with ID {id} not found in Business Unit {businessUnitId}.");
         }
 
-        public async Task AddAsync(Customer customer, long businessUnitId, string actor)
+        public Task AddAsync(Customer customer, long businessUnitId, string actor) =>
+            AddInternalAsync(customer, businessUnitId, actor, initialOwnerUserId: null);
+
+        public Task AddOwnedAsync(Customer customer, long businessUnitId, string actor, long ownerUserId)
+        {
+            if (ownerUserId <= 0)
+                throw new ArgumentException("An initial customer owner is required.", nameof(ownerUserId));
+
+            return AddInternalAsync(customer, businessUnitId, actor, ownerUserId);
+        }
+
+        private async Task AddInternalAsync(
+            Customer customer,
+            long businessUnitId,
+            string actor,
+            long? initialOwnerUserId)
         {
             ValidateTenantAndActor(businessUnitId, actor);
             NormalizeAndValidate(customer);
@@ -152,6 +167,11 @@ namespace ERP_RFQ_Automation.Repositories
                     throw new ArgumentException("A customer with this name already exists in the authenticated tenant.");
                 if (!await _context.BusinessUnits.AnyAsync(bu => bu.Id == businessUnitId))
                     throw new ArgumentException("The authenticated Business Unit does not exist.");
+                if (initialOwnerUserId.HasValue && !await _context.Users.AnyAsync(user =>
+                        user.Id == initialOwnerUserId.Value
+                        && user.Buid == businessUnitId
+                        && user.IsActive == true))
+                    throw new ArgumentException("The initial customer owner must be an active user in the authenticated tenant.");
 
                 await ValidateTenantReferencesAsync(input, businessUnitId);
 
@@ -178,6 +198,24 @@ namespace ERP_RFQ_Automation.Repositories
                 await _context.SaveChangesAsync();
                 await CustomerIdentityMaintenance.SynchronizeAsync(
                     _context, businessUnitId, candidate.Id, "CustomerProfile");
+
+                if (initialOwnerUserId.HasValue)
+                {
+                    _context.Set<CustomerOwnership>().Add(new CustomerOwnership
+                    {
+                        BusinessUnitId = businessUnitId,
+                        CustomerId = candidate.Id,
+                        PrimaryUserId = initialOwnerUserId.Value,
+                        Scope = OwnershipScope.GeneralCustomer,
+                        Priority = 100,
+                        EffectiveFrom = candidate.CreatedOn,
+                        IsActive = true,
+                        Source = "customer-profile-create",
+                        Reason = "The scoped creator retains access to the account they created.",
+                        Version = 1
+                    });
+                }
+
                 await _context.SaveChangesAsync();
                 return candidate;
             });

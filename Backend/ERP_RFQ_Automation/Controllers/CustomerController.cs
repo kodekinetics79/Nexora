@@ -147,6 +147,9 @@ namespace ERP_RFQ_Automation.Controllers
                 if (!TryGetAuthenticatedBusinessUnitId(out var businessUnitId))
                     return BadRequest("Business Unit ID is required.");
 
+                var scope = await ResolveAccountScopeAsync(businessUnitId);
+                if (scope is null) return Forbid();
+
                 string? imagePath = null;
                 if (request.ImageFile != null)
                     imagePath = await SaveCustomerImageAsync(request.ImageFile, HttpContext.RequestAborted);
@@ -176,7 +179,11 @@ namespace ERP_RFQ_Automation.Controllers
                     AccountTeamId = request.AccountTeamId
                 };
 
-                await _repository.AddAsync(customer, businessUnitId, AuthenticatedActor());
+                var actor = AuthenticatedActor();
+                if (scope.IsTenantWide)
+                    await _repository.AddAsync(customer, businessUnitId, actor);
+                else
+                    await _repository.AddOwnedAsync(customer, businessUnitId, actor, scope.UserId);
 
                 var response = MapToResponse(customer);
                 return CreatedAtAction(nameof(GetById), new { id = customer.Id }, response);
