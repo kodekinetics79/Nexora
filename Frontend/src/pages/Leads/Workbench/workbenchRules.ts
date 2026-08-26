@@ -137,6 +137,32 @@ export const promotionBlockers = (input: PromotionRuleInput): string[] => {
   return [...new Set(blockers)];
 };
 
+const displayedBlockerFamily = (message: string): string => {
+  const normalized = message.trim().toLowerCase();
+  if (/source-field evidence|source validation|source lineage|authoritative source/.test(normalized)) return 'source-readiness';
+  if (/fit assessment|human fit/.test(normalized)) return 'fit-assessment';
+  if (/participation choices for every|decide the remaining \d+ line/.test(normalized)) return 'line-decisions';
+  if (/save and commit the current participation|commit the participation decision/.test(normalized)) return 'participation-commit';
+  return normalized.replaceAll(/[^a-z0-9]+/g, ' ').trim();
+};
+
+/**
+ * Compresses equivalent client/server explanations for display only.
+ *
+ * `promotionBlockers` remains the authoritative client-side gate and the API keeps returning every
+ * server blocker. The first message in a family wins, which intentionally preserves the server's
+ * more specific wording because server blockers are appended before locally derived guidance.
+ */
+export const deduplicateDisplayedPromotionBlockers = (blockers: string[]): string[] => {
+  const seen = new Set<string>();
+  return blockers.filter((blocker) => {
+    const family = displayedBlockerFamily(blocker);
+    if (seen.has(family)) return false;
+    seen.add(family);
+    return true;
+  });
+};
+
 export const decisionsEqual = (left: DecisionMap, right: DecisionMap): boolean => {
   const leftKeys = Object.keys(left);
   const rightKeys = Object.keys(right);

@@ -87,6 +87,13 @@ const ageInHoursPhrase = (hours: number | null | undefined): string | undefined 
   return `Waiting ${days} day${days === 1 ? '' : 's'}`;
 };
 
+/**
+ * SearchPurchaseOrders is deliberately a historical search endpoint, not an open-work endpoint.
+ * Keep partial/open records visible, fail open for future statuses, and remove only lifecycle
+ * states the customer can no longer act on from the urgent Inbox.
+ */
+const TERMINAL_CLIENT_PO_STATUSES = new Set(['FULLY_AWARDED', 'CLOSED', 'CANCELLED']);
+
 const InboxPage: React.FC = () => {
   const navigate = useNavigate();
   const { userData, hasPermission } = useAuth();
@@ -100,6 +107,7 @@ const InboxPage: React.FC = () => {
     () => INBOX_QUEUES.filter((queue) => hasPermission(queue.moduleName)),
     [hasPermission],
   );
+  const canManageRoles = hasPermission('Roles & Permissions', 'edit');
 
   /**
    * One `useQueries` rather than six `useQuery` calls, so the set of queues can be permission-
@@ -151,7 +159,9 @@ const InboxPage: React.FC = () => {
             sx={{ mt: 0.5, maxWidth: 720, lineHeight: 1.6 }}
             aria-live="polite"
           >
-            {anyLoading
+            {queues.length === 0
+              ? 'Your role does not have any Inbox work queues.'
+              : anyLoading
               ? 'Checking what is waiting on you…'
               : failedCount > 0 && waitingCount === 0
                 ? 'Some of your queues could not be read. What is shown below is not the whole picture.'
@@ -164,6 +174,7 @@ const InboxPage: React.FC = () => {
           variant="outlined"
           startIcon={<RefreshIcon />}
           onClick={refreshAll}
+          disabled={queues.length === 0}
           sx={{ flexShrink: 0, fontWeight: 700 }}
         >
           Refresh
@@ -175,15 +186,18 @@ const InboxPage: React.FC = () => {
       {queues.length === 0 && (
         <Paper variant="outlined" sx={{ p: 4, borderRadius: 3, textAlign: 'center' }}>
           <Typography variant="h6" sx={{ fontWeight: 700 }}>
-            No work queues are open to your role.
+            Your role has no Inbox work queues.
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mt: 1, maxWidth: 560, mx: 'auto' }}>
-            The Inbox shows enquiries, RFQs, quotes and orders. Your account has not been granted any
-            of those modules yet — an administrator can grant them under Setup → Roles &amp; Permissions.
+            {canManageRoles
+              ? 'This role has not been granted Leads, RFQ Management, Supplier History, Quotations or Customer Awards. Grant the modules it needs under Roles & Permissions.'
+              : 'The Inbox shows enquiries, RFQs, supplier replies, quotes and customer orders. Ask your Nexora administrator to grant this role the modules it needs under Roles & Permissions.'}
           </Typography>
-          <Button variant="contained" sx={{ mt: 2.5 }} onClick={() => navigate('/setup')}>
-            Open Setup
-          </Button>
+          {canManageRoles ? (
+            <Button variant="contained" sx={{ mt: 2.5 }} onClick={() => navigate('/security/roles')}>
+              Open Roles &amp; Permissions
+            </Button>
+          ) : null}
         </Paper>
       )}
 
@@ -472,6 +486,7 @@ export async function loadQueue(key: QueueKey, businessUnitId?: number): Promise
     case 'client-pos': {
       const rows = await customerAwardService.searchPurchaseOrders('', 25);
       return rows
+        .filter((row) => !TERMINAL_CLIENT_PO_STATUSES.has((row.status ?? '').trim().toUpperCase()))
         .map((row) => ({
           id: row.id,
           reference: row.externalPoNumber || row.internalNumber || `PO ${row.id}`,

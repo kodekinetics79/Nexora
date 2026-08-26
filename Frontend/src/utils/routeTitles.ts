@@ -169,7 +169,8 @@ const DYNAMIC_ROUTE_TITLES: ReadonlyArray<readonly [string, string]> = [
   ['/sales/shipments/from-order/:id', 'Create Shipment from Order'],
   ['/sales/shipments/edit/:id', 'Edit Shipment'],
   ['/sales/shipments/:id', 'Shipment Details'],
-  ['/procurement/rfqs/process/:id', 'Process RFQ'],
+  // Tombstoned compatibility address: it redirects immediately to the governed Lead workbench.
+  ['/procurement/rfqs/process/:id', 'Lead Decision Workbench'],
   ['/procurement/rfqs/view/:id', 'View RFQ'],
   ['/procurement/rfqs/:id/pricing', 'RFQ Smart Pricing'],
   ['/procurement/rfqs/:rfqId/sourcing', 'Sourcing Workbench'],

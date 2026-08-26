@@ -4,6 +4,7 @@ import {
   blockerAction,
   countDecisions,
   decisionRecordIsLocked,
+  deduplicateDisplayedPromotionBlockers,
   fitAssessmentDraftComplete,
   initializeDecisionMap,
   promotionBlockers,
@@ -100,6 +101,28 @@ describe('Lead Decision Workbench rules', () => {
     expect(blockers).toContain('Save the fit assessment before deciding participation.');
     expect(blockers).toContain('Decide the remaining 3 lines.');
     expect(blockers).toContain('Commit the participation decision before promotion.');
+  });
+
+  it('deduplicates equivalent displayed blockers while retaining the first server explanation', () => {
+    const blockers = [
+      'Every Lead line must have exact persisted source-field evidence before RFQ promotion.',
+      'Save a human fit assessment for the current revision.',
+      'Save participation choices for every current revision line.',
+      'Complete source validation before promoting an RFQ.',
+      'Save the fit assessment before deciding participation.',
+      'Decide the remaining 1 line.',
+      'Mark at least one line as Bid, or close the lead as a full no-bid.',
+      'Commit the participation decision before promotion.',
+    ];
+
+    expect(deduplicateDisplayedPromotionBlockers(blockers)).toEqual([
+      blockers[0],
+      blockers[1],
+      blockers[2],
+      blockers[6],
+      blockers[7],
+    ]);
+    expect(blockers).toHaveLength(8);
   });
 
   it('treats governed version-zero criteria as an unsaved first assessment', () => {

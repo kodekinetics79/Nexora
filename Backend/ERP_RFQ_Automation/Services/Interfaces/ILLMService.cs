@@ -227,7 +227,29 @@ namespace ERP_RFQ_Automation.Services.Interfaces
         // being invented as 1. Trailing optional parameters: every existing positional
         // construction site and every model output that omits them keeps working unchanged.
         string? SourceSpan = null,
-        string? QuantityToken = null);
+        string? QuantityToken = null,
+
+        // Server-owned provenance. The conversational verifier overwrites the first flag
+        // after locating SourceSpan in the exact submitted message; the component boundary
+        // overwrites the job id before the result becomes durable. Model-supplied values are
+        // therefore never trusted. These fields travel with a component result so the later
+        // message-level assembler can still bind each line to the correct immutable source.
+        bool SourceSpanVerified = false,
+        long? SourceExtractionJobId = null,
+
+        // Exact parser-owned cell/field lineage. This is populated only by the deterministic
+        // structured-document mapper, cleared from every model response, and stamped with the
+        // owning extraction job at the durable component boundary. It must survive message-level
+        // email assembly so an attachment-derived Lead line can still prove where every value
+        // came from when the governed RFQ promotion gate revalidates the revision.
+        List<LeadItemEvidenceData>? VerifiedEvidence = null);
+
+    public sealed record LeadItemEvidenceData(
+        string FieldName,
+        string RawValue,
+        string? NormalizedValue,
+        string SourceAddress,
+        decimal Confidence);
 
     /// <summary>
     /// Tolerant reader for the LLM's ExtraFields object: accepts string/number/bool

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -1377,9 +1378,19 @@ public sealed class LeadPersister : ILeadPersister
     /// today's contract version.</para>
     /// </summary>
     private static ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryComponentResultPayload
-        BuildComponentResultPayload(ChunkedExtractionOutcome outcome)
+        BuildComponentResultPayload(ExtractionJob job, ChunkedExtractionOutcome outcome)
         => new(
-            System.Text.Json.JsonSerializer.Serialize(outcome.Result),
+            System.Text.Json.JsonSerializer.Serialize(outcome.Result is null
+                ? null
+                : outcome.Result with
+                {
+                    Items = outcome.Result.Items.Select(item => item with
+                    {
+                        // Never accept a provider-authored job id. The worker that owns this
+                        // component is the provenance authority.
+                        SourceExtractionJobId = job.Id
+                    }).ToList()
+                }),
             outcome.ProcessingPath.ToString(),
             outcome.AiProviderClass?.ToString(),
             null,
@@ -1475,7 +1486,7 @@ public sealed class LeadPersister : ILeadPersister
             // The result becomes DURABLE, the component completes, and the message is
             // re-evaluated — one transaction, in the coordinator. No Lead is created here:
             // that is the barrier's job once every sibling has finished.
-            var payload = BuildComponentResultPayload(outcome);
+            var payload = BuildComponentResultPayload(job, outcome);
             var evaluation = await _emailAssemblies.RecordComponentResultAsync(
                 job.BusinessUnitId, ownedComponentId, job.Id, payload, ct);
 
@@ -1722,7 +1733,13 @@ public sealed class LeadPersister : ILeadPersister
                 await _context.SaveChangesAsync(ct);
             }
             var canonicalIds = reconciliation.Where(x => x.LeadId > 0).Select(x => x.LeadId).Distinct().ToArray();
-            leads = await _context.Leads.Include(x => x.LeadItems).Where(x => canonicalIds.Contains(x.Id)).ToListAsync(ct);
+            var loadedLeads = await _context.Leads.Include(x => x.LeadItems)
+                .Where(x => canonicalIds.Contains(x.Id)).ToListAsync(ct);
+            // SQL does not preserve the order of an IN predicate. Evidence persistence is
+            // positional (result group N belongs to reconciled Lead N), so re-establish the
+            // reconciliation order explicitly instead of binding a source line to whichever
+            // Lead PostgreSQL happened to return first.
+            leads = canonicalIds.Select(id => loadedLeads.Single(x => x.Id == id)).ToList();
         }
         else
         {
@@ -1746,7 +1763,7 @@ public sealed class LeadPersister : ILeadPersister
             // Lightweight provider tests intentionally use a reduced model without the
             // evidence ledger. Production PostgreSQL contexts always include it.
             if (_context.Model.FindEntityType(typeof(SourceDocument)) is not null)
-                await PersistUnstructuredRunAsync(job, outcome, ct);
+                await PersistUnstructuredRunAsync(job, outcome, leads, ct);
         }
 
         _log.LogInformation(
@@ -1777,55 +1794,264 @@ public sealed class LeadPersister : ILeadPersister
     }
 
     private async Task PersistUnstructuredRunAsync(
-        ExtractionJob job, ChunkedExtractionOutcome outcome, CancellationToken ct)
+        ExtractionJob job, ChunkedExtractionOutcome outcome, IReadOnlyList<Lead> leads,
+        CancellationToken ct)
     {
-        var source = await _context.Set<SourceDocument>()
-            .Include(x => x.Corpus)
-            .SingleOrDefaultAsync(x => x.BusinessUnitId == job.BusinessUnitId
-                                       && x.ContentHash == job.ContentHash, ct)
-            ?? throw new InvalidOperationException(
-                $"Extraction job {job.Id} has no authoritative source-document record.");
-        if (source.SecurityStatus != DocumentSecurityStatus.Cleared)
-            throw new InvalidOperationException($"Source document {source.Id} has not passed security inspection.");
+        const string parserVersion = "llm-unstructured/v2";
+        const string schemaVersion = "lead-extraction/v2";
 
-        var existing = await _context.Set<ExtractionRun>().AnyAsync(x =>
-            x.BusinessUnitId == job.BusinessUnitId && x.ExtractionJobId == job.Id
-            && x.AttemptNumber == job.Attempts, ct);
-        if (existing)
+        var groups = outcome.SplitResults is { Count: > 1 }
+            ? outcome.SplitResults
+            : outcome.Result is null ? [] : [outcome.Result];
+        // Reconciliation may deliberately produce no Lead when a commercially similar inquiry
+        // requires human identity review.  That is a valid zero-output run: retain the extraction
+        // and source-document lifecycle, but do not invent a canonical inquiry/line graph.  Any
+        // non-zero mismatch is still corruption because positional evidence could bind to the
+        // wrong Lead.
+        var hasCanonicalOutput = groups.Count == leads.Count;
+        if (!hasCanonicalOutput && leads.Count != 0)
+            throw new InvalidOperationException(
+                "Unstructured evidence persistence requires one reconciled Lead per extraction group.");
+
+        // The current job is always part of the ledger, even when no line earned exact source
+        // evidence. A message-level assembly may also carry verified lines from sibling
+        // components; only jobs in the same tenant and intake batch are accepted.
+        var requestedJobIds = groups.SelectMany(x => x.Items)
+            .Where(x => (x.SourceSpanVerified && !string.IsNullOrWhiteSpace(x.SourceSpan))
+                        || x.VerifiedEvidence is { Count: > 0 })
+            .Select(x => x.SourceExtractionJobId ?? job.Id)
+            .Append(job.Id)
+            .Distinct()
+            .ToArray();
+        var sourceJobs = await _context.Set<ExtractionJob>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == job.BusinessUnitId
+                        && x.BatchId == job.BatchId
+                        && requestedJobIds.Contains(x.Id))
+            .ToListAsync(ct);
+        var sourceJobById = sourceJobs.ToDictionary(x => x.Id);
+        if (!sourceJobById.ContainsKey(job.Id))
+            sourceJobById[job.Id] = job;
+
+        var contentHashes = sourceJobById.Values.Select(x => x.ContentHash).Distinct().ToArray();
+        var sources = await _context.Set<SourceDocument>()
+            .Include(x => x.Corpus)
+            .Where(x => x.BusinessUnitId == job.BusinessUnitId
+                        && contentHashes.Contains(x.ContentHash))
+            .ToListAsync(ct);
+        var sourceByHash = sources.ToDictionary(x => x.ContentHash, StringComparer.OrdinalIgnoreCase);
+        if (!sourceByHash.TryGetValue(job.ContentHash, out var anchorSource))
+            throw new InvalidOperationException(
+                $"Extraction job {job.Id} has no authoritative source-document record.");
+        if (sources.Any(x => x.SecurityStatus != DocumentSecurityStatus.Cleared))
+            throw new InvalidOperationException("Every source document must pass security inspection before evidence is persisted.");
+
+        if (_context.Database.IsNpgsql())
+        {
+            await _context.Database.ExecuteSqlInterpolatedAsync(
+                $"SELECT pg_advisory_xact_lock(hashtextextended({"unstructured-evidence:" + anchorSource.Id}, 0))", ct);
+        }
+
+        // The anchor run is the replay fence for the whole graph. The Lead reconciliation and
+        // this method execute in one transaction, so an existing run means the immutable
+        // inquiry/line/field graph already committed too.
+        if (await _context.Set<ExtractionRun>().AnyAsync(x =>
+                x.BusinessUnitId == job.BusinessUnitId && x.ExtractionJobId == job.Id
+                && x.AttemptNumber == Math.Max(1, job.Attempts), ct))
             return;
 
-        var ownsSourceLifecycle = source.ProcessingStatus == DocumentProcessingStatus.Received;
-        if (ownsSourceLifecycle)
-            source.StartExtraction();
-        var run = ExtractionRun.Create(job.BusinessUnitId, source.Id, Guid.NewGuid(), job.Id,
-            job.Attempts, "llm-unstructured/v1", "lead-extraction/v1");
-        run.RecordProcessingEvidence(outcome.ProcessingPath, outcome.OcrStatus,
-            outcome.OcrPageCount, outcome.OcrTruncated);
+        var validSourceJobs = sourceJobById.Values
+            .Where(x => sourceByHash.ContainsKey(x.ContentHash))
+            .DistinctBy(x => x.Id)
+            .ToArray();
         var externalRequests = await _context.Set<ERP_RFQ_Automation.AI.AiRequest>()
             .AsNoTracking()
-            .Where(x => x.BusinessUnitId == job.BusinessUnitId && x.ExtractionJobId == job.Id
-                && x.ProviderClass == ERP_RFQ_Automation.AI.AiProviderClass.External)
+            .Where(x => x.BusinessUnitId == job.BusinessUnitId
+                        && x.ExtractionJobId.HasValue
+                        && requestedJobIds.Contains(x.ExtractionJobId.Value)
+                        && x.ProviderClass == ERP_RFQ_Automation.AI.AiProviderClass.External)
             .ToListAsync(ct);
-        var cost = ProcessingCostAttribution.Summarize(externalRequests);
-        run.RecordCostStatus(
-            cost.Status,
-            outcome.OcrStatus == ExtractionOcrStatus.NotRequired ? "NotRequired" : "LocalUnpriced",
-            cost.Amount,
-            cost.Currency);
-        run.Start();
-        _context.Add(run);
+
+        var runs = new Dictionary<long, ExtractionRun>();
+        var ownsLifecycle = new HashSet<long>();
+        foreach (var sourceJob in validSourceJobs)
+        {
+            var source = sourceByHash[sourceJob.ContentHash];
+            if (source.ProcessingStatus == DocumentProcessingStatus.Received)
+            {
+                source.StartExtraction();
+                ownsLifecycle.Add(source.Id);
+            }
+
+            var runId = DeterministicUnstructuredRunId(sourceJob, parserVersion);
+            var run = ExtractionRun.Create(job.BusinessUnitId, source.Id, runId, sourceJob.Id,
+                Math.Max(1, sourceJob.Attempts), parserVersion, schemaVersion);
+            run.RecordProcessingEvidence(outcome.ProcessingPath, outcome.OcrStatus,
+                outcome.OcrPageCount, outcome.OcrTruncated);
+            var cost = ProcessingCostAttribution.Summarize(
+                externalRequests.Where(x => x.ExtractionJobId == sourceJob.Id).ToList());
+            run.RecordCostStatus(cost.Status,
+                outcome.OcrStatus == ExtractionOcrStatus.NotRequired ? "NotRequired" : "LocalUnpriced",
+                cost.Amount, cost.Currency);
+            run.Start();
+            runs[sourceJob.Id] = run;
+            _context.Add(run);
+        }
         await _context.SaveChangesAsync(ct);
 
-        if (ownsSourceLifecycle)
+        if (_context.Database.IsNpgsql())
+            await _context.Database.ExecuteSqlInterpolatedAsync(
+                $"SELECT pg_advisory_xact_lock({anchorSource.CorpusId})", ct);
+        var nextInquiryNumber = (await _context.Set<CanonicalInquiry>()
+            .Where(x => x.CorpusId == anchorSource.CorpusId)
+            .Select(x => (int?)x.InquiryNumber)
+            .MaxAsync(ct) ?? 0) + 1;
+
+        var pending = new List<(LeadItemData Item, CanonicalLineItem Line, int Ordinal)>();
+        for (var groupIndex = 0; hasCanonicalOutput && groupIndex < groups.Count; groupIndex++)
         {
-            source.StartNormalization();
-            source.RequireReview(0);
+            var result = groups[groupIndex];
+            var lead = leads[groupIndex];
+            var inquiry = CanonicalInquiry.Create(job.BusinessUnitId, anchorSource.CorpusId,
+                nextInquiryNumber++);
+            inquiry.PopulateHeader(result.Rfqno, result.BuyersName, null, null);
+            inquiry.BindLead(lead.Id);
+            // Model-derived commercial facts always require a person, even when the quoted
+            // source span is exact.
+            inquiry.RequireReview();
+            _context.Add(inquiry);
+            await _context.SaveChangesAsync(ct);
+
+            // A canonical Lead retains prior projection rows so immutable revisions and
+            // downstream records never lose their historical line ids.  Evidence from this
+            // extraction belongs only to the newly reconciled current projection; counting
+            // historical rows makes every amendment fail after reconciliation and rolls the
+            // whole revision transaction back.
+            var leadItems = lead.LeadItems
+                .Where(x => x.IsCurrentRevisionProjection)
+                .OrderBy(x => x.Id)
+                .ToArray();
+            if (leadItems.Length != result.Items.Count)
+                throw new InvalidOperationException(
+                    $"Lead {lead.Id} has {leadItems.Length} lines but its extraction group has {result.Items.Count}.");
+            for (var lineIndex = 0; lineIndex < result.Items.Count; lineIndex++)
+            {
+                var item = result.Items[lineIndex];
+                var description = item.ProductShortName
+                                  ?? item.ProductShortDescription
+                                  ?? item.ItemText
+                                  ?? "[description requires review]";
+                var line = CanonicalLineItem.Create(job.BusinessUnitId, inquiry.Id, lineIndex + 1,
+                    description, item.Quantity is > 0 ? item.Quantity : null, item.UnitOfMeasure);
+                line.Enrich(item.ManufacturerName, item.ManufacturerPartNumber, item.Currency,
+                    item.UnitPrice, ParseNonNegativeInt(item.LeadTime), JsonSerializer.Serialize(item),
+                    CanonicalValidationStatus.Warning);
+                line.BindLeadItem(leadItems[lineIndex].Id);
+                _context.Add(line);
+                pending.Add((item, line, lineIndex + 1));
+            }
+            await _context.SaveChangesAsync(ct);
         }
-        if (source.Corpus.Status == CorpusStatus.Processing)
-            source.Corpus.RequireReview();
-        run.Complete(outcome.PageCount, 0, 0, outcome.ExtractedItemCount, 0, 0);
+
+        var pagesByJob = new Dictionary<long, DocumentPage>();
+        foreach (var sourceJob in validSourceJobs)
+        {
+            var source = sourceByHash[sourceJob.ContentHash];
+            var page = await _context.Set<DocumentPage>()
+                .SingleOrDefaultAsync(x => x.BusinessUnitId == job.BusinessUnitId
+                                           && x.DocumentId == source.Id && x.PageNumber == 1, ct);
+            if (page is null)
+            {
+                page = DocumentPage.Create(job.BusinessUnitId, source.Id, 1, 1, 1);
+                if (outcome.OcrStatus == ExtractionOcrStatus.NotRequired)
+                    page.MarkOcrNotRequired();
+                _context.Add(page);
+                await _context.SaveChangesAsync(ct);
+            }
+            pagesByJob[sourceJob.Id] = page;
+        }
+
+        var regionCounts = runs.Keys.ToDictionary(x => x, _ => 0);
+        var evidenceCounts = runs.Keys.ToDictionary(x => x, _ => 0);
+        foreach (var (item, line, ordinal) in pending)
+        {
+            var sourceJobId = item.SourceExtractionJobId ?? job.Id;
+            if (!runs.TryGetValue(sourceJobId, out var run)
+                || !pagesByJob.TryGetValue(sourceJobId, out var page))
+                continue; // foreign/stale provenance can never satisfy the evidence gate.
+
+            if (item.SourceSpanVerified && !string.IsNullOrWhiteSpace(item.SourceSpan))
+            {
+                var raw = item.SourceSpan.Trim();
+                var address = $"message-body:verified-span:{ordinal}";
+                var region = DocumentRegion.Create(job.BusinessUnitId, page.Id,
+                    DocumentRegionType.Text, 0, ordinal - 1, 1, 1, raw, 1m,
+                    sourceAddress: address);
+                _context.Add(region);
+                await _context.SaveChangesAsync(ct);
+                _context.Add(FieldEvidence.ForLineItem(job.BusinessUnitId, region.Id, line.Id,
+                    "SourceSpan", raw, item.ProductShortName ?? item.ProductShortDescription,
+                    1m, parserVersion, run.RunId,
+                    valueKind: FieldValueKind.Text,
+                    validationStatus: FieldValidationStatus.Valid,
+                    transformationsJson: "[]"));
+                regionCounts[sourceJobId]++;
+                evidenceCounts[sourceJobId]++;
+            }
+
+            foreach (var exact in item.VerifiedEvidence ?? [])
+            {
+                if (string.IsNullOrWhiteSpace(exact.FieldName)
+                    || string.IsNullOrWhiteSpace(exact.RawValue)
+                    || string.IsNullOrWhiteSpace(exact.SourceAddress))
+                    continue;
+                var region = DocumentRegion.Create(job.BusinessUnitId, page.Id,
+                    DocumentRegionType.TableCell, 0, ordinal - 1, 1, 1, exact.RawValue.Trim(),
+                    Math.Clamp(exact.Confidence, 0m, 1m),
+                    sourceAddress: exact.SourceAddress.Trim());
+                _context.Add(region);
+                await _context.SaveChangesAsync(ct);
+                _context.Add(FieldEvidence.ForLineItem(job.BusinessUnitId, region.Id, line.Id,
+                    exact.FieldName.Trim(), exact.RawValue.Trim(), exact.NormalizedValue,
+                    Math.Clamp(exact.Confidence, 0m, 1m), parserVersion, run.RunId,
+                    valueKind: FieldValueKind.Text,
+                    validationStatus: FieldValidationStatus.Valid,
+                    transformationsJson: "[]"));
+                regionCounts[sourceJobId]++;
+                evidenceCounts[sourceJobId]++;
+            }
+        }
+        await _context.SaveChangesAsync(ct);
+
+        foreach (var sourceJob in validSourceJobs)
+        {
+            var source = sourceByHash[sourceJob.ContentHash];
+            if (ownsLifecycle.Contains(source.Id))
+            {
+                source.StartNormalization();
+                source.RequireReview(1);
+            }
+            if (source.Corpus.Status == CorpusStatus.Processing)
+                source.Corpus.RequireReview();
+            var isAnchor = sourceJob.Id == job.Id;
+            runs[sourceJob.Id].Complete(1, regionCounts[sourceJob.Id],
+                isAnchor && hasCanonicalOutput ? groups.Count : 0,
+                isAnchor && hasCanonicalOutput ? groups.Sum(x => x.Items.Count) : 0,
+                evidenceCounts[sourceJob.Id], 0);
+        }
         await _context.SaveChangesAsync(ct);
     }
+
+    private static Guid DeterministicUnstructuredRunId(ExtractionJob job, string parserVersion)
+    {
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(
+            $"{job.BusinessUnitId}|{job.Id}|{Math.Max(1, job.Attempts)}|{job.ContentHash}|{parserVersion}"));
+        return new Guid(bytes.AsSpan(0, 16));
+    }
+
+    private static int? ParseNonNegativeInt(string? value) =>
+        int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) && parsed >= 0
+            ? parsed
+            : null;
 
     public async Task<long?> PersistAndCompleteAsync(
         ExtractionJob job,

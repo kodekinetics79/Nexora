@@ -15,7 +15,6 @@ import {
   Visibility as ViewIcon,
   Refresh as RefreshIcon,
   Email as EmailIcon,
-  FlashOn as ProcessIcon,
   Layers as ItemsIcon,
 } from '@mui/icons-material';
 import leadService, { assignabilityNote } from '../../../api/services/leadService';
@@ -185,7 +184,7 @@ const OutstandingRFQsPage: React.FC = () => {
     {
       field: 'actions',
       headerName: t('actions'),
-      width: 100,
+      width: 64,
       sortable: false,
       renderCell: (p) => (
         <Stack direction="row" spacing={1} sx={{ height: '100%', alignItems: 'center' }}>
@@ -196,15 +195,6 @@ const OutstandingRFQsPage: React.FC = () => {
               onClick={() => navigate(`/procurement/leads/view/${p.row.id}`)}
             >
               <ViewIcon fontSize="small" />
-            </IconButton>
-          </Tooltip>
-          <Tooltip title="Process to RFQ">
-            <IconButton
-              size="small"
-              sx={{ color: 'success.main', bgcolor: 'success.lighter', '&:hover': { bgcolor: 'success.light', color: 'white' } }}
-              onClick={() => navigate(`/procurement/rfqs/process/${p.row.id}`)}
-            >
-              <ProcessIcon fontSize="small" />
             </IconButton>
           </Tooltip>
         </Stack>

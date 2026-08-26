@@ -17,8 +17,6 @@ import {
   Link,
   Paper,
   Stack,
-  Tab,
-  Tabs,
   TablePagination,
   Typography,
 } from '@mui/material';
@@ -40,26 +38,23 @@ import FitAssessmentPanel from './FitAssessmentPanel';
 import FullNoBidCommitDialog from './FullNoBidCommitDialog';
 import LeadValidationGrid from './LeadValidationGrid';
 import SourceEvidencePanel from './SourceEvidencePanel';
+import {
+  WorkbenchStagePanel,
+  WorkbenchStageTabs,
+  type WorkbenchStage,
+} from './WorkbenchStageNavigation';
 import { retryOperation, type RetryOperation } from './retryIdempotency';
 import {
   blockerAction,
   countDecisions,
   decisionRecordIsLocked,
+  deduplicateDisplayedPromotionBlockers,
   decisionsEqual,
   initializeDecisionMap,
   promotionBlockers,
   validGovernedDecision,
   type DecisionMap,
 } from './workbenchRules';
-
-type WorkbenchStage = 'evidence' | 'validate' | 'participation' | 'promote';
-
-const stageLabel: Record<WorkbenchStage, string> = {
-  evidence: '1. Evidence',
-  validate: '2. Review transformation',
-  participation: '3. Fit & Participation',
-  promote: '4. Promote',
-};
 
 const CountChip = ({ label, count, color = 'default' }: { label: string; count: number; color?: 'default' | 'success' | 'warning' | 'info' }) => (
   <Chip size="small" label={`${label} ${count}`} color={color} variant={count > 0 ? 'filled' : 'outlined'} sx={{ fontWeight: 800 }} />
@@ -265,10 +260,11 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
     participationStatus: workbench.participationStatus,
     participationVersion: workbench.participationVersion,
   });
+  const displayedBlockers = deduplicateDisplayedPromotionBlockers(blockers);
   const promotionPermissionBlocker = !canPromote && counts.bid > 0
     ? 'RFQ creation permission is required. Hand this committed decision to an authorized RFQ owner.'
     : null;
-  const primaryBlocker = promotionPermissionBlocker ?? blockers[0] ?? null;
+  const primaryBlocker = promotionPermissionBlocker ?? displayedBlockers[0] ?? null;
   const actionableBlockers = workbench.blockers
     .map((blocker) => ({ code: blocker.code, action: blockerAction(blocker, leadId) }))
     .filter((item): item is { code: string; action: { label: string; path: string } } => Boolean(item.action));
@@ -285,7 +281,7 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
         <Stack direction={{ xs: 'column', lg: 'row' }} sx={{ justifyContent: 'space-between', gap: 2 }}>
           <Box sx={{ minWidth: 0 }}>
             <Stack direction="row" spacing={1} sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
-              <Typography variant="h5" sx={{ fontWeight: 950, overflowWrap: 'anywhere' }}>{workbench.customerRfqReference || `Lead #${leadId}`}</Typography>
+              <Typography component="h1" variant="h5" sx={{ fontWeight: 950, overflowWrap: 'anywhere' }}>{workbench.customerRfqReference || `Lead #${leadId}`}</Typography>
               <Chip size="small" label={workbench.lifecycleStatusLabel || workbench.lifecycleStatusCode} variant="outlined" />
               <Chip size="small" label={`Revision ${workbench.leadRevisionNumber}`} color="primary" variant="outlined" />
               <Chip size="small" label={workbench.verificationStatus.replaceAll('_', ' ')} color={workbench.verificationStatus === 'VERIFIED' ? 'success' : 'warning'} variant="outlined" />
@@ -313,26 +309,18 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
 
       {!canEdit ? <Alert severity="info" sx={{ mb: 1.5 }}>This decision record is read-only for your role.</Alert> : null}
 
-      <Paper variant="outlined" sx={{ mb: 1.5, borderRadius: 2, overflow: 'hidden' }}>
-        <Tabs
-          value={stage}
-          onChange={(_event, value: WorkbenchStage) => setStage(value)}
-          variant="scrollable"
-          scrollButtons="auto"
-          aria-label="Lead decision stages"
-        >
-          {(Object.keys(stageLabel) as WorkbenchStage[]).map((key) => <Tab key={key} value={key} label={stageLabel[key]} />)}
-        </Tabs>
-      </Paper>
+      <WorkbenchStageTabs value={stage} onChange={setStage} />
 
-      {stage === 'evidence' ? <SourceEvidencePanel workbench={workbench} /> : null}
+      <WorkbenchStagePanel stage="evidence" activeStage={stage}>
+        <SourceEvidencePanel workbench={workbench} />
+      </WorkbenchStagePanel>
 
-      {stage === 'validate' ? (
+      <WorkbenchStagePanel stage="validate" activeStage={stage}>
         <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', xl: 'minmax(300px, 0.36fr) minmax(0, 1fr)' }, gap: 1.5 }}>
           <Box sx={{ display: { xs: 'none', xl: 'block' } }}><SourceEvidencePanel workbench={workbench} compact /></Box>
           <Box sx={{ minWidth: 0 }}>
             <Stack direction="row" spacing={1} sx={{ justifyContent: 'space-between', alignItems: 'end', mb: 1, flexWrap: 'wrap' }}>
-              <Box><Typography variant="h6" sx={{ fontWeight: 900 }}>Review transformed Lead lines</Typography><Typography variant="caption" color="text.secondary">Exact source values remain beside canonical values and RFQ participation inputs.</Typography></Box>
+              <Box><Typography component="h2" variant="h6" sx={{ fontWeight: 900 }}>Review transformed Lead lines</Typography><Typography variant="caption" color="text.secondary">Exact source values remain beside canonical values and RFQ participation inputs.</Typography></Box>
               <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
                 <Chip size="small" label={`${workbench.lines.filter((line) => line.verificationStatus !== 'VERIFIED').length} need review`} color={workbench.lines.every((line) => line.verificationStatus === 'VERIFIED') ? 'success' : 'warning'} variant="outlined" />
                 <Button size="small" variant="outlined" onClick={() => navigate(`/procurement/extraction/review/${leadId}`)}>
@@ -348,9 +336,9 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
               readOnly={!canEdit || decisionMutationPending || decisionRecordLocked} onDecisionsChange={setDecisions} />
           </Box>
         </Box>
-      ) : null}
+      </WorkbenchStagePanel>
 
-      {stage === 'participation' ? (
+      <WorkbenchStagePanel stage="participation" activeStage={stage}>
         <Stack spacing={2}>
           <FitAssessmentPanel
             assessment={fitAssessment}
@@ -360,8 +348,8 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
             readOnly={!canEdit || decisionMutationPending || decisionRecordLocked}
             onSave={(request) => fitMutation.mutate(request)}
           />
-          <Paper variant="outlined" sx={{ p: 2, borderRadius: 2 }}>
-            <Typography variant="h6" sx={{ fontWeight: 900 }}>Participation by line</Typography>
+          <Paper component="section" aria-labelledby="participation-lines-heading" variant="outlined" sx={{ p: 2, borderRadius: 2 }}>
+            <Typography id="participation-lines-heading" component="h2" variant="h6" sx={{ fontWeight: 900 }}>Participation by line</Typography>
             <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
               Every line starts undecided. No-bid and clarification require a governed reason. These decisions belong to the Lead revision, before any RFQ exists.
             </Typography>
@@ -376,11 +364,11 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
             />
           </Paper>
         </Stack>
-      ) : null}
+      </WorkbenchStagePanel>
 
-      {stage === 'promote' ? (
+      <WorkbenchStagePanel stage="promote" activeStage={stage}>
         <Paper variant="outlined" component="section" aria-labelledby="promotion-heading" sx={{ p: { xs: 2, md: 3 }, borderRadius: 2 }}>
-          <Typography id="promotion-heading" variant="h6" sx={{ fontWeight: 900 }}>RFQ promotion</Typography>
+          <Typography id="promotion-heading" component="h2" variant="h6" sx={{ fontWeight: 900 }}>RFQ promotion</Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
             Promotion creates one formal RFQ from only the lines committed as Bid. It cannot qualify the Lead or invent a participation decision.
           </Typography>
@@ -396,11 +384,11 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
               <AlertTitle>Authorized RFQ owner required</AlertTitle>
               This decision is ready, but your role cannot create RFQs. An authorized RFQ owner must perform the promotion.
             </Alert>
-          ) : blockers.length > 0 ? (
+          ) : displayedBlockers.length > 0 ? (
             <Alert severity="warning">
               <AlertTitle>Promotion is not ready</AlertTitle>
               <Stack component="ul" spacing={0.5} sx={{ my: 0, pl: 2.5 }}>
-                {blockers.map((blocker) => <Typography component="li" variant="body2" key={blocker}>{blocker}</Typography>)}
+                {displayedBlockers.map((blocker) => <Typography component="li" variant="body2" key={blocker}>{blocker}</Typography>)}
               </Stack>
               {actionableBlockers.length > 0 ? (
                 <Stack direction="row" spacing={1} sx={{ mt: 1.5, flexWrap: 'wrap' }}>
@@ -416,7 +404,7 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
             <Alert severity="success">The committed participation decision is ready to promote.</Alert>
           )}
         </Paper>
-      ) : null}
+      </WorkbenchStagePanel>
 
       <Paper
         elevation={6}

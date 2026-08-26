@@ -224,6 +224,11 @@ public sealed class AcceptanceJourneyTests : IAsyncLifetime
             {
                 await using var ctx = ContextFor(null);
                 var lead = await ctx.Leads.AsNoTracking().SingleOrDefaultAsync(l => l.Id == original.Id);
+                var amendmentJob = await ctx.Set<ExtractionJob>().AsNoTracking()
+                    .OrderByDescending(x => x.Id).FirstOrDefaultAsync();
+                if (amendmentJob is not null && !string.IsNullOrWhiteSpace(amendmentJob.LastError))
+                    throw new InvalidOperationException(
+                        $"The amendment extraction failed in {amendmentJob.Status}: {amendmentJob.LastError}");
                 return lead?.CurrentRevisionNumber == 2;
             }, "the canonical lead never reached revision 2");
 
@@ -248,6 +253,68 @@ public sealed class AcceptanceJourneyTests : IAsyncLifetime
         {
             await StopWorkerAsync(worker);
         }
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task A_quoted_only_thread_reply_is_retained_without_a_phantom_revision()
+    {
+        await using var imap = new FakeImapServer(CorpusGenerator.IntakeAddress);
+        imap.AddMessage(CorpusManifest.Bytes("email-simple-english.eml"));
+        await SeedMailboxAsync(imap);
+        Assert.True((await PollAsync()).AllSucceeded);
+
+        var worker = StartWorker();
+        try
+        {
+            var original = await WaitForLeadAsync(l => l.Rfqno == "RFQ-CORPUS-001");
+            imap.AddMessage(BuildQuotedOnlyReply());
+            Assert.True((await PollAsync()).AllSucceeded);
+            await WaitUntilAsync(async () =>
+            {
+                await using var ctx = ContextFor(null);
+                var reply = await ctx.EmailIngests.AsNoTracking()
+                    .SingleOrDefaultAsync(x => x.MessageId == "corpus-acknowledgement@corpus.nexora.example");
+                return reply is not null && !string.Equals(reply.ParseStatus, "Queued", StringComparison.OrdinalIgnoreCase);
+            }, "the quoted-only reply never reached a terminal intake state");
+
+            await using var ctx = ContextFor(null);
+            var lead = await ctx.Leads.AsNoTracking().SingleAsync(x => x.Id == original.Id);
+            Assert.Equal(1, await ctx.Leads.CountAsync());
+            Assert.Equal(1, lead.CurrentRevisionNumber);
+            Assert.Equal(1, await ctx.Set<LeadRevision>().CountAsync(x => x.LeadId == lead.Id));
+            var reply = await ctx.EmailIngests.AsNoTracking()
+                .SingleAsync(x => x.MessageId == "corpus-acknowledgement@corpus.nexora.example");
+            Assert.Equal("corpus-simple-en@corpus.nexora.example", reply.InReplyToMessageId);
+            Assert.Contains("corpus-simple-en@corpus.nexora.example", reply.ReferencesJson);
+        }
+        finally
+        {
+            await StopWorkerAsync(worker);
+        }
+    }
+
+    private static byte[] BuildQuotedOnlyReply()
+    {
+        const string raw = """
+            From: Ahmed Al Farsi <ahmed@alnoortrading.ae>
+            Date: Mon, 10 Aug 2026 11:00:00 +0400
+            Subject: RE: RFQ RFQ-CORPUS-001 - cable tray
+            Message-Id: <corpus-acknowledgement@corpus.nexora.example>
+            To: Intake <intake@tenant.example>
+            In-Reply-To: <corpus-simple-en@corpus.nexora.example>
+            References: <corpus-simple-en@corpus.nexora.example>
+            MIME-Version: 1.0
+            Content-Type: text/plain; charset=utf-8
+
+            Thank you, received.
+
+            On Mon, 10 Aug 2026, Ahmed Al Farsi wrote:
+            > Dear team,
+            > Please quote 40 nos cable tray 300mm hot dip galvanized (part CT-300-HDG), delivery Jebel Ali by 15 September 2026.
+            > Reference: RFQ-CORPUS-001
+            """;
+        return System.Text.Encoding.UTF8.GetBytes(raw.Replace("\n", "\r\n", StringComparison.Ordinal));
     }
 
     // =====================================================================================
