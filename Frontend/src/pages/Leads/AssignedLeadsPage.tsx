@@ -46,7 +46,7 @@ const AssignedLeadsPage: React.FC = () => {
   // Inline 2-click reassign: click the assignee name, then pick the new name.
   const [quickAssign, setQuickAssign] = useState<{ el: HTMLElement, leadId: number, expectedAssigneeId: number } | null>(null);
 
-  const isAdminOrManager = userData?.roleName?.toLowerCase().includes('admin') || userData?.roleName?.toLowerCase().includes('manager');
+  const isAdminOrManager = userData?.isManager === true || userData?.isSuperAdmin === true;
 
   const getUrgencyColor = (dateStr: string | null) => {
     if (!dateStr) return 'text.secondary';

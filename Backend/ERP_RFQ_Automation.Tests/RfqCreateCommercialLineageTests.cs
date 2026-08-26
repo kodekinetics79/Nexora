@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using ERP_RFQ_Automation.Controllers;
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.DTOs.LookupDTOs;
 using ERP_RFQ_Automation.DTOs.RfqDTOs;
 using ERP_RFQ_Automation.Interfaces;
@@ -506,7 +507,12 @@ public sealed class RfqCreateCommercialLineageTests
     };
 
     private static RfqController Controller(IRfqRepository repository)
-        => new(repository, null!, null!, null!)
+        => new(
+            repository,
+            null!,
+            null!,
+            null!,
+            commercialAccess: new PermitCommercialAccessContext(Bu))
         {
             ControllerContext = new ControllerContext
             {
@@ -542,13 +548,14 @@ public sealed class RfqCreateCommercialLineageTests
         public Task<(IEnumerable<RfqResponseDTO>, int TotalItems)> GetAllAsync(
             long businessUnitId, int pageNumber = 1, int pageSize = 10, string? search = null,
             bool? isActive = null, long? assignedToId = null, string? createdBy = null,
-            long? rfqStatusId = null, string? rfqStatusCode = null, string? readiness = null)
+            long? rfqStatusId = null, string? rfqStatusCode = null, string? readiness = null,
+            AccountTeamScope? accessScope = null)
             => Task.FromResult<(IEnumerable<RfqResponseDTO>, int)>(([], 0));
-        public Task<RfqResponseDTO> GetByIdAsync(long id, long businessUnitId) => throw exception;
+        public Task<RfqResponseDTO> GetByIdAsync(long id, long businessUnitId, AccountTeamScope? accessScope = null) => throw exception;
         public Task UpdateAsync(Rfq rfq) => throw exception;
         public Task DeleteAsync(long id, long businessUnitId) => throw exception;
         public Task<long> ApproveAsync(long id, string approvedBy, long businessUnitId, long? customerId = null) => throw exception;
         public Task<List<RFQTypeLookupDTO>> GetRFQTypeAsync() => throw exception;
-        public Task<RfqStatsDTO> GetRfqStatsAsync(long businessUnitId) => throw exception;
+        public Task<RfqStatsDTO> GetRfqStatsAsync(long businessUnitId, AccountTeamScope? accessScope = null) => throw exception;
     }
 }

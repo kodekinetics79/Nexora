@@ -49,9 +49,10 @@ public sealed record GlobalSearchRequest(
 /// <see cref="GlobalSearchResponse.DeniedEntities"/> rather than dropped, because a silently
 /// shorter answer is indistinguishable from "nothing matched".</para>
 ///
-/// <para><b>Customers are additionally account-scoped.</b> The customer family runs through
-/// <see cref="AccountTeamReadFilter"/>, the same predicate the customer list and the dashboard use,
-/// so quick search cannot become the way to enumerate accounts a rep may not open.</para>
+/// <para><b>Commercial families are row-scoped.</b> Customers run through
+/// <see cref="AccountTeamReadFilter"/> and Lead → RFQ → Quote → Order → Shipment run through the
+/// same inherited commercial scope as their detail APIs. Quick search cannot become the way to
+/// enumerate a colleague's pipeline.</para>
 ///
 /// <para><b>Matching.</b> Case-insensitive CONTAINS on the identifying columns of each family. It
 /// is deliberately not a ranked full-text search: PostgreSQL <c>tsvector</c> indexes, a stemmer and
@@ -186,7 +187,10 @@ public sealed class GlobalSearchService : IGlobalSearchService
         if (roleId <= 0) return false;
         if (await _roleGate.GetRoleRankAsync(roleId, businessUnitId) >= RoleRanks.Admin) return true;
         return await _permissions.CheckPermissionAsync(
-            roleId, SearchEntities.ModuleFor(entity), nameof(PermissionAction.View), businessUnitId);
+            roleId,
+            SearchEntities.ModuleFor(entity),
+            ModulePermissionPolicyProvider.ToRepositoryAction(PermissionAction.View),
+            businessUnitId);
     }
 
     // ── the families ─────────────────────────────────────────────────────────
@@ -307,6 +311,7 @@ public sealed class GlobalSearchService : IGlobalSearchService
     {
         var query = _db.Leads.AsNoTracking()
             .Where(l => l.BusinessUnitId == request.BusinessUnitId)
+            .InCommercialScope(_db, request.BusinessUnitId, request.Scope, DateTime.UtcNow)
             .Where(l => l.Rfqno != null && l.Rfqno.ToLower().Contains(pattern)
                         || l.BuyersName != null && l.BuyersName.ToLower().Contains(pattern)
                         || l.Clientemail != null && l.Clientemail.ToLower().Contains(pattern)
@@ -350,6 +355,7 @@ public sealed class GlobalSearchService : IGlobalSearchService
 
         var rows = await Dated(_db.Rfqs.AsNoTracking()
                 .Where(r => r.BusinessUnitId == request.BusinessUnitId)
+                .InCommercialScope(_db, request.BusinessUnitId, request.Scope, DateTime.UtcNow)
                 .Where(r => r.Rfqno.ToLower().Contains(pattern)
                             || r.BuyersName != null && r.BuyersName.ToLower().Contains(pattern)
                             || r.OpportunityNo != null && r.OpportunityNo.ToLower().Contains(pattern)),
@@ -372,6 +378,7 @@ public sealed class GlobalSearchService : IGlobalSearchService
     {
         var query = _db.Quotes.AsNoTracking()
             .Where(q => q.BusinessUnitId == request.BusinessUnitId)
+            .InCommercialScope(_db, request.BusinessUnitId, request.Scope, DateTime.UtcNow)
             .Where(q => q.QuoteNo.ToLower().Contains(pattern)
                         || q.Customer != null && q.Customer.Name.ToLower().Contains(pattern));
 
@@ -401,6 +408,7 @@ public sealed class GlobalSearchService : IGlobalSearchService
     {
         var query = _db.Orders.AsNoTracking()
             .Where(o => o.BusinessUnitId == request.BusinessUnitId)
+            .InCommercialScope(_db, request.BusinessUnitId, request.Scope, DateTime.UtcNow)
             .Where(o => o.OrderNo.ToLower().Contains(pattern)
                         || o.Customer != null && o.Customer.Name.ToLower().Contains(pattern));
 
@@ -428,8 +436,13 @@ public sealed class GlobalSearchService : IGlobalSearchService
     private async Task<List<SearchHit>> SearchShipmentsAsync(
         GlobalSearchRequest request, string pattern, long[]? statusIds, int limit, CancellationToken ct)
     {
+        var orderIds = _db.Orders.AsNoTracking()
+            .Where(o => o.BusinessUnitId == request.BusinessUnitId)
+            .InCommercialScope(_db, request.BusinessUnitId, request.Scope, DateTime.UtcNow)
+            .Select(o => o.Id);
         var query = _db.Shipments.AsNoTracking()
             .Where(s => s.BusinessUnitId == request.BusinessUnitId)
+            .Where(s => orderIds.Contains(s.OrderId))
             .Where(s => s.ShipmentNo.ToLower().Contains(pattern)
                         || s.TrackingNumber != null && s.TrackingNumber.ToLower().Contains(pattern)
                         || s.Carrier != null && s.Carrier.ToLower().Contains(pattern));

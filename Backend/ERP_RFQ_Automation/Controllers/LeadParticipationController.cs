@@ -15,13 +15,15 @@ public sealed class LeadParticipationController : ControllerBase
     private readonly ILeadParticipationService _participation;
     private readonly IRfqPromotionService _promotion;
     private readonly ILeadDecisionWorkbenchService _workbench;
+    private readonly ICommercialAccessContext _commercialAccess;
 
     public LeadParticipationController(ILeadParticipationService participation, IRfqPromotionService promotion,
-        ILeadDecisionWorkbenchService workbench)
+        ILeadDecisionWorkbenchService workbench, ICommercialAccessContext commercialAccess)
     {
         _participation = participation;
         _promotion = promotion;
         _workbench = workbench;
+        _commercialAccess = commercialAccess;
     }
 
     [HttpGet("participation")]
@@ -29,6 +31,7 @@ public sealed class LeadParticipationController : ControllerBase
     public async Task<ActionResult<LeadParticipationResult?>> GetCurrent(long leadId, CancellationToken ct)
     {
         if (!TryContext(out var businessUnitId, out _)) return Unauthorized();
+        if (!await _commercialAccess.CanAccessLeadAsync(leadId, ct)) return NotFound();
         return Ok(await _participation.GetCurrentDecisionAsync(businessUnitId, leadId, ct));
     }
 
@@ -38,6 +41,7 @@ public sealed class LeadParticipationController : ControllerBase
         long leadId, [FromBody] FitAssessmentRequest request, CancellationToken ct)
     {
         if (!TryContext(out var businessUnitId, out var actor)) return Unauthorized();
+        if (!await _commercialAccess.CanAccessLeadAsync(leadId, ct)) return NotFound();
         if (!TryIdempotencyKey(out var key)) return IdempotencyRequired();
         try
         {
@@ -59,6 +63,7 @@ public sealed class LeadParticipationController : ControllerBase
         long leadId, [FromBody] ParticipationDecisionRequest request, CancellationToken ct)
     {
         if (!TryContext(out var businessUnitId, out var actor)) return Unauthorized();
+        if (!await _commercialAccess.CanAccessLeadAsync(leadId, ct)) return NotFound();
         if (!TryIdempotencyKey(out var key)) return IdempotencyRequired();
         try
         {
@@ -83,6 +88,7 @@ public sealed class LeadParticipationController : ControllerBase
         long leadId, [FromBody] PromoteRfqRequest request, CancellationToken ct)
     {
         if (!TryContext(out var businessUnitId, out var actor)) return Unauthorized();
+        if (!await _commercialAccess.CanAccessLeadAsync(leadId, ct)) return NotFound();
         if (!TryIdempotencyKey(out var key)) return IdempotencyRequired();
         try
         {
@@ -102,6 +108,7 @@ public sealed class LeadParticipationController : ControllerBase
     public async Task<ActionResult<LeadDecisionWorkbenchDto>> GetWorkbench(long leadId, CancellationToken ct)
     {
         if (!TryContext(out var businessUnitId, out _)) return Unauthorized();
+        if (!await _commercialAccess.CanAccessLeadAsync(leadId, ct)) return NotFound();
         try { return Ok(await _workbench.GetAsync(businessUnitId, leadId, ct)); }
         catch (KeyNotFoundException ex) { return NotFound(Problem(404, "Lead not found", ex.Message)); }
         catch (InvalidOperationException ex) { return Conflict(Problem(409, "Workbench unavailable", ex.Message)); }
@@ -113,6 +120,7 @@ public sealed class LeadParticipationController : ControllerBase
         long leadId, [FromBody] SaveFitAssessmentRequest request, CancellationToken ct)
     {
         if (!TryContext(out var businessUnitId, out var actor)) return Unauthorized();
+        if (!await _commercialAccess.CanAccessLeadAsync(leadId, ct)) return NotFound();
         if (!TryIdempotencyKey(out var key)) return IdempotencyRequired();
         try
         {
@@ -135,6 +143,7 @@ public sealed class LeadParticipationController : ControllerBase
         long leadId, [FromBody] SaveParticipationRequest request, CancellationToken ct)
     {
         if (!TryContext(out var businessUnitId, out var actor)) return Unauthorized();
+        if (!await _commercialAccess.CanAccessLeadAsync(leadId, ct)) return NotFound();
         if (!TryIdempotencyKey(out var key)) return IdempotencyRequired();
         try
         {
@@ -160,6 +169,7 @@ public sealed class LeadParticipationController : ControllerBase
         long leadId, [FromBody] PromoteToRfqRequest request, CancellationToken ct)
     {
         if (!TryContext(out var businessUnitId, out var actor)) return Unauthorized();
+        if (!await _commercialAccess.CanAccessLeadAsync(leadId, ct)) return NotFound();
         if (!TryIdempotencyKey(out var key)) return IdempotencyRequired();
         try
         {

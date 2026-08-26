@@ -413,6 +413,9 @@ public sealed class CustomerContactAuthorizationTests
             return Task.CompletedTask;
         }
 
+        public Task AddOwnedAsync(Customer customer, long businessUnitId, string actor, long ownerUserId) =>
+            AddAsync(customer, businessUnitId, actor);
+
         public Task UpdateAsync(Customer customer, long businessUnitId, string actor, Guid expectedConcurrencyToken)
         {
             WasAccessed = true;

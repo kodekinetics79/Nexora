@@ -66,9 +66,8 @@ const LeadOwnerControl: React.FC<Props> = ({
    */
   const owners = useOwnerOptions(canEdit && (menuOpen || Boolean(pickerAnchor)));
   const myOption = (owners.data ?? []).find((option) => option.userId === userData?.id) ?? null;
-  const isManager = userData?.isManager === true
-    || Boolean(userData?.isSuperAdmin)
-    || /admin|manager/i.test(userData?.roleName ?? '');
+  // The server resolves authority. Role names are display text, not permission signals.
+  const isManager = userData?.isManager === true || Boolean(userData?.isSuperAdmin);
   const authority = ownershipAuthority(assignedToId, userData?.id ?? null, isManager);
   /**
    * A rep looking at a COLLEAGUE's lead may do none of the three things this menu offers, and a

@@ -449,7 +449,8 @@ builder.Services.AddScoped<IAuthorizationHandler, PermissionHandler>();
 // [RequireModulePermission("Leads", PermissionAction.Edit)] produces dynamic policy
 // names ("ModulePermission:{module}:{action}") resolved by ModulePermissionPolicyProvider
 // — no per-policy registration needed. IRoleGate backs the manager/admin gate
-// ([RequireManagerRole]) and the super-admin bypass; IMemoryCache gives both a 60s TTL.
+// ([RequireManagerRole]), the tenant-owner gate ([RequireTenantOwnerRole]), and the
+// admin-rank module rule; IMemoryCache gives role-rank lookups a 60s TTL.
 // ForbiddenJsonResultHandler turns every authorization 403 into a small generic JSON
 // body that leaks no module names.
 builder.Services.AddMemoryCache();
@@ -459,6 +460,7 @@ builder.Services.AddScoped<IRoleGate, RoleGate>();
 // because the answer is a property of the CALLER — a singleton would have to be keyed by user and
 // would then be a cache of authorization decisions with no invalidation.
 builder.Services.AddScoped<IAccountTeamScopeResolver, AccountTeamScopeResolver>();
+builder.Services.AddScoped<ICommercialAccessContext, CommercialAccessContext>();
 // FR-DSH-04: the cross-entity quick search behind the top bar. Scoped for the same reason —
 // its permission and account-scope decisions are the caller's, not the process's.
 builder.Services.AddScoped<ERP_RFQ_Automation.Search.IGlobalSearchService,
@@ -491,6 +493,7 @@ builder.Services.AddScoped<ERP_RFQ_Automation.Platform.Testing.TenantDataReset>(
 // delays reconciliation rather than the whole boot.
 builder.Services.AddHostedService<ModuleCatalogStartupService>();
 builder.Services.AddScoped<IAuthorizationHandler, ManagerRoleHandler>();
+builder.Services.AddScoped<IAuthorizationHandler, TenantOwnerRoleHandler>();
 builder.Services.AddSingleton<IAuthorizationPolicyProvider, ModulePermissionPolicyProvider>();
 builder.Services.AddSingleton<IAuthorizationMiddlewareResultHandler, ForbiddenJsonResultHandler>();
 

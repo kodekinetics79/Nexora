@@ -12,6 +12,7 @@ using System.Text.Json;
 using ERP_RFQ_Automation.Inventory.Commercial;
 using ERP_RFQ_Automation.CommercialRouting;
 using ERP_RFQ_Automation.LeadIdentity;
+using ERP_RFQ_Automation.Authorization;
 
 namespace ERP_RFQ_Automation.Repositories
 {
@@ -165,7 +166,7 @@ namespace ERP_RFQ_Automation.Repositories
             return (queueView, owner, ownerUserId);
         }
 
-        public async Task<(IEnumerable<LeadResponseDTO>, int TotalCount)> GetLeadListAsync(int pageNumber, int pageSize, long? id, string? rfqno, string? buyersName, string? leadSource, long businessUnitId, DateTime? startDate = null, DateTime? endDate = null, string? emailSource = null, string? clientemail = null, string? view = null)
+        public async Task<(IEnumerable<LeadResponseDTO>, int TotalCount)> GetLeadListAsync(int pageNumber, int pageSize, long? id, string? rfqno, string? buyersName, string? leadSource, long businessUnitId, DateTime? startDate = null, DateTime? endDate = null, string? emailSource = null, string? clientemail = null, string? view = null, AccountTeamScope? accessScope = null)
         {
             var (queueView, ownerFilter, ownerUserId) = ParseLeadListView(view);
 
@@ -177,6 +178,9 @@ namespace ERP_RFQ_Automation.Repositories
                 // has to travel with the page or each row costs a lazy round trip.
                 .Include(l => l.AssignToNavigation)
                 .Where(l => l.BusinessUnitId == businessUnitId);
+
+            if (accessScope != null)
+                query = query.InCommercialScope(_context, businessUnitId, accessScope, DateTime.UtcNow);
 
             // The default list is the untriaged inbox — RfqRepository spells LeadStatusId == null
             // out as "new lead to review". "open" and "revisions" deliberately escape it: ANY
@@ -1093,12 +1097,14 @@ namespace ERP_RFQ_Automation.Repositories
             };
         }
 
-        public async Task<LeadStatsDTO> GetLeadStatsAsync(long businessUnitId)
+        public async Task<LeadStatsDTO> GetLeadStatsAsync(long businessUnitId, AccountTeamScope? accessScope = null)
         {
-            var leads = await _context.Leads
+            var query = _context.Leads
                 .AsNoTracking()
-                .Where(l => l.BusinessUnitId == businessUnitId)
-                .ToListAsync();
+                .Where(l => l.BusinessUnitId == businessUnitId);
+            if (accessScope != null)
+                query = query.InCommercialScope(_context, businessUnitId, accessScope, DateTime.UtcNow);
+            var leads = await query.ToListAsync();
 
             var now = DateTime.UtcNow;
             var sevenDaysLater = now.AddDays(7);
@@ -1121,7 +1127,7 @@ namespace ERP_RFQ_Automation.Repositories
         // Leads whose linked EmailIngest is flagged NeedsReview and that have not yet been
         // triaged (LeadStatusId == null). BU scoping is enforced by the global query filter;
         // the explicit BusinessUnitId predicate mirrors GetLeadListAsync for clarity.
-        public async Task<(IEnumerable<LeadNeedsReviewItemDTO>, int TotalCount)> GetNeedsReviewLeadsAsync(int pageNumber, int pageSize, long businessUnitId, string? search = null)
+        public async Task<(IEnumerable<LeadNeedsReviewItemDTO>, int TotalCount)> GetNeedsReviewLeadsAsync(int pageNumber, int pageSize, long businessUnitId, string? search = null, AccountTeamScope? accessScope = null)
         {
             var query = _context.Leads
                 .AsNoTracking()
@@ -1129,6 +1135,9 @@ namespace ERP_RFQ_Automation.Repositories
                 .Where(l => l.BusinessUnitId == businessUnitId)
                 .Where(l => l.LeadStatusId == null)
                 .Where(l => l.EmailIngests == null || l.EmailIngests.ParseStatus == "NeedsReview");
+
+            if (accessScope != null)
+                query = query.InCommercialScope(_context, businessUnitId, accessScope, DateTime.UtcNow);
 
             if (!string.IsNullOrWhiteSpace(search))
             {

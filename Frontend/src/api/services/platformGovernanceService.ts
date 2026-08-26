@@ -243,6 +243,10 @@ export interface EvidenceRetentionRunResult {
   disclosure: string | null;
   /** True when this Idempotency-Key had already run; nothing additional was deleted. */
   idempotentReplay: boolean;
+  /** Server-signed frozen candidate set. Required on the destructive follow-up request. */
+  previewToken: string | null;
+  /** Short expiry prevents an old preview authorizing deletion after material state changes. */
+  previewExpiresOn: string | null;
   skipped: EvidenceRetentionExclusion[];
   /**
    * False when the deployment returned no `skipped` array at all. An empty list then means
@@ -343,6 +347,8 @@ export const readEvidenceRetentionRun = (
     legacyCopiesUnresolved: asCount(root.legacyCopiesUnresolved),
     disclosure: asText(root.disclosure),
     idempotentReplay: asFlag(root.idempotentReplay) ?? false,
+    previewToken: asText(root.previewToken),
+    previewExpiresOn: asText(root.previewExpiresOn),
     skipped: skippedReported ? (root.skipped as unknown[]).map(readExclusion) : [],
     skippedReported,
     missingFields,
@@ -639,12 +645,18 @@ export const platformGovernanceService = {
   runEvidenceRetentionPurge: async (command: {
     dryRun: boolean;
     reason: string;
+    /** Signed by the server during preview; required for permanent deletion. */
+    previewToken?: string;
     /** Caller-owned so a retry of the SAME confirmed purge cannot delete twice. */
     idempotencyKey: string;
   }): Promise<EvidenceRetentionRunResult> => {
     const { data } = await axiosInstance.post<unknown>(
       '/api/platform-governance/evidence-retention/purge-run',
-      { dryRun: command.dryRun, reason: command.reason },
+      {
+        dryRun: command.dryRun,
+        reason: command.reason,
+        previewToken: command.previewToken ?? null,
+      },
       { headers: { 'Idempotency-Key': command.idempotencyKey } });
     return readEvidenceRetentionRun(data, command.dryRun);
   },

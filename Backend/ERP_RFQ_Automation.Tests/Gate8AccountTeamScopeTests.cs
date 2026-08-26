@@ -225,12 +225,11 @@ public sealed class Gate8AccountTeamScopeTests
     }
 
     /// <summary>
-    /// A customer nobody has put in a book is not "restricted to nobody" — there is no team to
-    /// restrict it to. It stays readable, exactly as it was before the column existed, and the row
-    /// says so out loud rather than rendering a blank that reads like a loading state.
+    /// A customer nobody has put in a book is visible only through the governed routing queue.
+    /// Ordinary customer reads must not expose the complete legacy/unassigned book to every rep.
     /// </summary>
     [Fact]
-    public async Task A_customer_with_no_account_team_stays_readable_and_says_so()
+    public async Task A_customer_with_no_account_team_is_not_in_an_ordinary_rep_read()
     {
         using var db = new TestDb();
         await using var context = db.ContextFor(Bu);
@@ -241,9 +240,7 @@ public sealed class Gate8AccountTeamScopeTests
         var (rows, _) = await new CustomerRepository(context)
             .GetAllAsync(1, 50, null, null, null, null, null, Bu, scope);
 
-        var unassigned = Assert.Single(rows, r => r.Name == "Unassigned Account");
-        Assert.Null(unassigned.AccountTeamId);
-        Assert.Null(unassigned.AccountTeamName);
+        Assert.DoesNotContain(rows, r => r.Name == "Unassigned Account");
 
         var owned = Assert.Single(rows, r => r.Name == "North Account");
         Assert.Equal(NorthTeam, owned.AccountTeamId);

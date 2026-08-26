@@ -23,6 +23,14 @@ namespace ERP_RFQ_Automation.Interfaces
         Task<Customer> GetByIdAsync(long id, long businessUnitId, AccountTeamScope scope);
 
         Task AddAsync(Customer customer, long businessUnitId, string actor);
+
+        /// <summary>
+        /// Creates a customer and its initial named ownership in one transaction. Scoped commercial
+        /// users must never lose access to an account between the create response and the first
+        /// follow-up request.
+        /// </summary>
+        Task AddOwnedAsync(Customer customer, long businessUnitId, string actor, long ownerUserId);
+
         Task UpdateAsync(Customer customer, long businessUnitId, string actor, Guid expectedConcurrencyToken);
         Task DeleteAsync(long id, long businessUnitId, string actor, Guid expectedConcurrencyToken);
         /// <summary>

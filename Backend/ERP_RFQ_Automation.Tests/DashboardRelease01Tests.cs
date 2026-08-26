@@ -365,7 +365,8 @@ public sealed class DashboardRelease01Tests
         public Task<TeamWorkloadDTO> GetTeamWorkloadAsync(long businessUnitId) => throw new NotSupportedException();
         public Task<PipelineAnalyticsDTO> GetPipelineAnalyticsAsync(long businessUnitId) => throw new NotSupportedException();
         public Task<DeadlineBoardDTO> GetDeadlineBoardAsync(
-            long businessUnitId, int maxLeads = 200, CancellationToken cancellationToken = default)
+            long businessUnitId, int maxLeads = 200, CancellationToken cancellationToken = default,
+            AccountTeamScope? accessScope = null)
             => throw new NotSupportedException();
         public Task<DocumentYieldDTO> GetDocumentYieldAsync(
             long businessUnitId, DateTime from, DateTime to, CancellationToken cancellationToken = default)

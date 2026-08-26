@@ -246,6 +246,21 @@ public sealed class Gate8GlobalSearchTests
         Assert.Contains(response.Hits, h => h.Entity == SearchEntities.Customer);
     }
 
+    [Fact]
+    public async Task Search_uses_the_same_CanView_action_as_module_authorization()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(Bu);
+        await SeedAsync(context);
+        var permissions = new StubPermissions(requiredAction: "CanView");
+
+        var response = await Search(context, "meridian", permissions: permissions);
+
+        Assert.NotEmpty(response.SearchedEntities);
+        Assert.Empty(response.DeniedEntities);
+        Assert.All(permissions.Actions, action => Assert.Equal("CanView", action));
+    }
+
     /// <summary>A one-character term is refused rather than served slowly and uselessly.</summary>
     [Fact]
     public async Task A_term_shorter_than_the_minimum_is_refused()
@@ -346,10 +361,17 @@ public sealed class Gate8GlobalSearchTests
         await context.SaveChangesAsync();
     }
 
-    private sealed class StubPermissions(string? denied = null) : IRolePermissionRepository
+    private sealed class StubPermissions(string? denied = null, string? requiredAction = null) : IRolePermissionRepository
     {
+        public List<string> Actions { get; } = [];
+
         public Task<bool> CheckPermissionAsync(long roleId, string moduleName, string action, long businessUnitId)
-            => Task.FromResult(!string.Equals(moduleName, denied, StringComparison.Ordinal));
+        {
+            Actions.Add(action);
+            return Task.FromResult(
+                !string.Equals(moduleName, denied, StringComparison.Ordinal)
+                && (requiredAction is null || string.Equals(action, requiredAction, StringComparison.Ordinal)));
+        }
 
         public Task<(IEnumerable<RolePermission>, int TotalCount)> GetAllAsync(
             int pageNumber, int pageSize, long? id, long? roleId, long? moduleId, long businessUnitId)

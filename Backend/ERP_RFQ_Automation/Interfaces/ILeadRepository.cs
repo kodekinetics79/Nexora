@@ -2,11 +2,12 @@
 using ERP_RFQ_Automation.DTOs.AcceptedLeadDTOs;
 using ERP_RFQ_Automation.DTOs.Lead;
 using ERP_RFQ_Automation.DTOs.LeadDTOs;
+using ERP_RFQ_Automation.Authorization;
 namespace ERP_RFQ_Automation.Interfaces
 {
     public interface ILeadRepository
     {
-        Task<(IEnumerable<LeadResponseDTO>, int TotalCount)> GetLeadListAsync(int pageNumber, int pageSize, long? id, string? rfqno, string? buyersName, string? leadSource, long businessUnitId, DateTime? startDate = null, DateTime? endDate = null, string? emailSource = null, string? clientemail = null, string? view = null);
+        Task<(IEnumerable<LeadResponseDTO>, int TotalCount)> GetLeadListAsync(int pageNumber, int pageSize, long? id, string? rfqno, string? buyersName, string? leadSource, long businessUnitId, DateTime? startDate = null, DateTime? endDate = null, string? emailSource = null, string? clientemail = null, string? view = null, AccountTeamScope? accessScope = null);
         Task<IEnumerable<EmailConfigurationDropdownDTO>> GetActiveEmailConfigurationsAsync(long businessUnitId);
 
         Task<IEnumerable<RejectionReasonDTO>> GetLeadRejectionReasonsAsync();
@@ -44,10 +45,10 @@ namespace ERP_RFQ_Automation.Interfaces
         /// </summary>
         Task<List<ClientCandidateDTO>> GetClientCandidatesAsync(long id, long businessUnitId);
 
-        Task<LeadStatsDTO> GetLeadStatsAsync(long businessUnitId);
+        Task<LeadStatsDTO> GetLeadStatsAsync(long businessUnitId, AccountTeamScope? accessScope = null);
 
         // Extraction review workbench
-        Task<(IEnumerable<LeadNeedsReviewItemDTO>, int TotalCount)> GetNeedsReviewLeadsAsync(int pageNumber, int pageSize, long businessUnitId, string? search = null);
+        Task<(IEnumerable<LeadNeedsReviewItemDTO>, int TotalCount)> GetNeedsReviewLeadsAsync(int pageNumber, int pageSize, long businessUnitId, string? search = null, AccountTeamScope? accessScope = null);
         Task<LeadResponseDTO?> SubmitLeadReviewAsync(
             long id, long businessUnitId, LeadReviewSubmitDTO review, string reviewedBy = "system");
         Task<LeadResponseDTO?> RequestClarificationAsync(

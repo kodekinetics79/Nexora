@@ -9,6 +9,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Data;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
+using ERP_RFQ_Automation.Authorization;
 
 namespace ERP_RFQ_Automation.Services
 {
@@ -41,15 +42,15 @@ namespace ERP_RFQ_Automation.Services
                         new ERP_RFQ_Automation.Inventory.InventoryAvailabilityService(context))));
         }
 
-        public async Task<IEnumerable<OrderDto>> GetAllOrdersAsync(long businessUnitId)
+        public async Task<IEnumerable<OrderDto>> GetAllOrdersAsync(long businessUnitId, AccountTeamScope? accessScope = null)
         {
-            var orders = await _orderRepository.GetAllOrdersAsync(businessUnitId);
+            var orders = await _orderRepository.GetAllOrdersAsync(businessUnitId, accessScope);
             return orders.Select(MapToDto).ToList();
         }
 
-        public async Task<OrderDto?> GetOrderByIdAsync(long id, long businessUnitId)
+        public async Task<OrderDto?> GetOrderByIdAsync(long id, long businessUnitId, AccountTeamScope? accessScope = null)
         {
-            var order = await _orderRepository.GetOrderByIdAsync(id, businessUnitId);
+            var order = await _orderRepository.GetOrderByIdAsync(id, businessUnitId, accessScope);
             return order == null ? null : MapToDto(order);
         }
 
@@ -612,15 +613,15 @@ namespace ERP_RFQ_Automation.Services
                     || s.SetupValue.ToUpper() == "CANCELLED" || s.SetupValue.ToUpper() == "CANCELED"));
         }
 
-        public async Task<IEnumerable<OrderDto>> GetOrdersByCustomerIdAsync(long customerId, long businessUnitId)
+        public async Task<IEnumerable<OrderDto>> GetOrdersByCustomerIdAsync(long customerId, long businessUnitId, AccountTeamScope? accessScope = null)
         {
-            var orders = await _orderRepository.GetOrdersByCustomerIdAsync(customerId, businessUnitId);
+            var orders = await _orderRepository.GetOrdersByCustomerIdAsync(customerId, businessUnitId, accessScope);
             return orders.Select(MapToDto).ToList();
         }
 
-        public async Task<InvoiceDto?> GetInvoiceDataAsync(long orderId, long businessUnitId)
+        public async Task<InvoiceDto?> GetInvoiceDataAsync(long orderId, long businessUnitId, AccountTeamScope? accessScope = null)
         {
-            var order = await _orderRepository.GetOrderForInvoiceAsync(orderId, businessUnitId);
+            var order = await _orderRepository.GetOrderForInvoiceAsync(orderId, businessUnitId, accessScope);
             if (order == null) return null;
 
             return new InvoiceDto

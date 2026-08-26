@@ -52,6 +52,7 @@ import {
   deduplicateDisplayedPromotionBlockers,
   decisionsEqual,
   initializeDecisionMap,
+  bidCommercialValuesReady,
   promotionBlockers,
   validGovernedDecision,
   type DecisionMap,
@@ -230,16 +231,12 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
   const fullNoBidClosed = fullNoBid && workbench.participationStatus === 'COMMITTED';
   const decisionMutationPending = fitMutation.isPending || participationMutation.isPending || promotionMutation.isPending;
   const decisionRecordLocked = decisionRecordIsLocked(workbench, decisions);
-  const validUnitCodes = new Set((workbench.unitOptions ?? []).map((option) => option.code.toUpperCase()));
-  const validCurrencyCodes = new Set((workbench.currencyOptions ?? []).map((option) => option.code.toUpperCase()));
-  const bidValuesReady = workbench.lines.every((line) => {
-    const decision = decisions[line.revisionLineId];
-    if (decision?.decision !== 'Bid') return true;
-    return Boolean(decision.quantity && Number.isInteger(decision.quantity) && decision.quantity > 0
-      && decision.unitOfMeasure && validUnitCodes.has(decision.unitOfMeasure.toUpperCase())
-      && decision.currency && validCurrencyCodes.has(decision.currency.toUpperCase())
-      && (!line.needsAttention || (decision.note?.trim().length ?? 0) >= 5));
-  });
+  const bidValuesReady = bidCommercialValuesReady(
+    decisions,
+    workbench.unitOptions ?? [],
+    workbench.currencyOptions ?? [],
+    Object.fromEntries(workbench.lines.map((line) => [line.revisionLineId, line.needsAttention])),
+  );
   const fitActionable = Boolean(fitAssessment && fitAssessment.version > 0
     && fitAssessment.overallDecision !== 'NOT_FIT'
     && fitAssessment.criteria.every((criterion) => criterion.decision === 'PASS' || criterion.decision === 'NOT_APPLICABLE'));
@@ -446,7 +443,8 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
           <Button
             variant="outlined"
             startIcon={<SaveIcon />}
-            disabled={!canEdit || !dirty || (fitAssessment?.version ?? 0) <= 0 || decisionMutationPending || decisionRecordLocked}
+            disabled={!canEdit || !dirty || (fitAssessment?.version ?? 0) <= 0
+              || decisionMutationPending || decisionRecordLocked}
             onClick={() => participationMutation.mutate({ commit: false })}
           >
             Save draft

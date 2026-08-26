@@ -15,7 +15,8 @@ namespace ERP_RFQ_Automation.Interfaces
 
         /// <summary>Pilot analytics: open enquiries bucketed by days to bid closing date, with line counts.</summary>
         Task<DeadlineBoardDTO> GetDeadlineBoardAsync(
-            long businessUnitId, int maxLeads = 200, CancellationToken cancellationToken = default);
+            long businessUnitId, int maxLeads = 200, CancellationToken cancellationToken = default,
+            ERP_RFQ_Automation.Authorization.AccountTeamScope? accessScope = null);
 
         /// <summary>Pilot analytics: documents in, leads out, and the coverage of what came out.</summary>
         Task<DocumentYieldDTO> GetDocumentYieldAsync(

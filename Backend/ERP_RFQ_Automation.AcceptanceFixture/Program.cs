@@ -1,9 +1,14 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.CommercialIntelligence.Sales;
 using ERP_RFQ_Automation.CommercialRouting;
+using ERP_RFQ_Automation.CommercialCases.Participation;
+using ERP_RFQ_Automation.CommercialCases.Promotion;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.Agent.Models;
+using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.Inventory;
 using ERP_RFQ_Automation.Inventory.Commercial;
 using ERP_RFQ_Automation.LeadIdentity;
@@ -11,6 +16,8 @@ using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.OrderToCash;
 using ERP_RFQ_Automation.Procurement;
 using ERP_RFQ_Automation.ProductIntelligence;
+using ERP_RFQ_Automation.Platform.Entitlements;
+using ERP_RFQ_Automation.Security;
 using ERP_RFQ_Automation.SupplierQuotes;
 using Microsoft.EntityFrameworkCore;
 using Models = ERP_RFQ_Automation.Models;
@@ -21,10 +28,22 @@ AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
 const long tenantId = 80101;
 const long otherTenantId = 80102;
 const string fixtureActor = "acceptance-fixture";
-var connection = Environment.GetEnvironmentVariable("NEXORA_ACCEPTANCE_CONNECTION")
+string? Argument(string name)
+{
+    var index = Array.FindIndex(args, value => value.Equals($"--{name}", StringComparison.OrdinalIgnoreCase));
+    return index >= 0 && index + 1 < args.Length ? args[index + 1] : null;
+}
+
+var connection = Argument("connection")
+    ?? Environment.GetEnvironmentVariable("NEXORA_ACCEPTANCE_CONNECTION")
     ?? throw new InvalidOperationException("NEXORA_ACCEPTANCE_CONNECTION is required.");
-var password = Environment.GetEnvironmentVariable("NEXORA_ACCEPTANCE_PASSWORD")
+var password = Argument("password")
+    ?? Environment.GetEnvironmentVariable("NEXORA_ACCEPTANCE_PASSWORD")
     ?? throw new InvalidOperationException("NEXORA_ACCEPTANCE_PASSWORD is required.");
+var secretProtectionKey = Argument("secret-protection-key")
+    ?? Environment.GetEnvironmentVariable("NEXORA_ACCEPTANCE_SECRET_PROTECTION_KEY")
+    ?? throw new InvalidOperationException("NEXORA_ACCEPTANCE_SECRET_PROTECTION_KEY is required.");
+SecretProtection.Use(new AesGcmSecretProtector(Convert.FromBase64String(secretProtectionKey)));
 var options = new DbContextOptionsBuilder<ErpRfqAutomationContext>().UseNpgsql(connection).Options;
 await using var db = new ErpRfqAutomationContext(options);
 var now = DateTime.UtcNow;
@@ -39,10 +58,14 @@ var platformTenant = await EnsurePlatformTenantAsync(
 await EnsurePlatformTenantAsync(
     "release-01c1-other", "Release 01C1 Other Tenant", otherTenantId, platformPlan.Id);
 await EnsurePlatformUserAsync("owner@acceptance.local", "Acceptance Platform Owner");
-var managerRole = await EnsureRoleAsync(tenantId, "R01C1_MANAGER", "Acceptance Manager");
-var editorRole = await EnsureRoleAsync(tenantId, "R01C1_EDITOR", "Acceptance Sales Editor");
-var deniedRole = await EnsureRoleAsync(tenantId, "R01C1_DENIED", "Acceptance Denied");
-var otherRole = await EnsureRoleAsync(otherTenantId, "R01C1_OTHER", "Acceptance Other Tenant");
+await EnsureUomAsync("EA", "Each");
+await EnsureUomAsync("JOB", "Job");
+var ownerRole = await EnsureRoleAsync(tenantId, "R01C1_OWNER", "Acceptance Tenant Owner", RoleRanks.Owner);
+var managerRole = await EnsureRoleAsync(tenantId, "R01C1_MANAGER", "Acceptance Manager", RoleRanks.Manager);
+var editorRole = await EnsureRoleAsync(tenantId, "R01C1_EDITOR", "Acceptance Sales Editor", RoleRanks.Member);
+var deniedRole = await EnsureRoleAsync(tenantId, "R01C1_DENIED", "Acceptance Denied", RoleRanks.Member);
+var otherRole = await EnsureRoleAsync(otherTenantId, "R01C1_OTHER", "Acceptance Other Tenant", RoleRanks.Member);
+await EnsureUserAsync(tenantId, ownerRole.SetupId, "owner@release01c1.local", "Olivia", "Owner");
 var manager = await EnsureUserAsync(tenantId, managerRole.SetupId, "manager@release01c1.local", "Morgan", "Manager");
 await EnsureUserAsync(tenantId, editorRole.SetupId, "editor@release01c1.local", "Elliot", "Editor");
 await EnsureUserAsync(tenantId, deniedRole.SetupId, "denied@release01c1.local", "Dana", "Denied");
@@ -51,7 +74,8 @@ await EnsureUserAsync(otherTenantId, otherRole.SetupId, "other@release01c1.local
 var permissionModules = new[]
 {
     "Leads", "Dashboard", "Users", "Customers", "Products", "Product Categories",
-    "Supplier History", "Supplier Negotiation", "RFQ Management", "Quotations", "Orders", "Customer Awards"
+    "Suppliers", "Shipments", "Supplier History", "Supplier Negotiation", "RFQ Management",
+    "Quotations", "Orders", "Customer Awards"
 };
 foreach (var moduleName in permissionModules)
 {
@@ -62,7 +86,8 @@ foreach (var moduleName in permissionModules)
 var otherLeadsModule = await EnsureModuleAsync("Leads");
 await EnsurePermissionAsync(otherTenantId, otherRole.SetupId, otherLeadsModule.Id, create: true, edit: true);
 var otherOrdersModule = await EnsureModuleAsync("Orders");
-await EnsurePermissionAsync(otherTenantId, otherRole.SetupId, otherOrdersModule.Id, create: false, edit: false);
+await EnsurePermissionAsync(otherTenantId, otherRole.SetupId, otherOrdersModule.Id,
+    create: false, edit: false, view: false);
 await db.SaveChangesAsync();
 
 var northstar = await EnsureCustomerAsync("Northstar Process Controls", "buyer@northstar.local");
@@ -76,7 +101,7 @@ var originalLead = await EnsureIdentityLeadAsync(
 EnsureCommercialIdentity(originalLead, northstar.Id, null, "MATCHED");
 await db.SaveChangesAsync();
 
-var salesRole = await EnsureRoleAsync(tenantId, "CORE_SALES_REP", "Core Sales Representative");
+var salesRole = await EnsureRoleAsync(tenantId, "CORE_SALES_REP", "Core Sales Representative", RoleRanks.Member);
 var sarah = await EnsureUserAsync(tenantId, salesRole.SetupId, "sarah.malik@acceptance.local", "Sarah", "Malik");
 var ahmed = await EnsureUserAsync(tenantId, salesRole.SetupId, "ahmed.khan@acceptance.local", "Ahmed", "Khan");
 var priya = await EnsureUserAsync(tenantId, salesRole.SetupId, "priya.nair@acceptance.local", "Priya", "Nair");
@@ -89,7 +114,7 @@ foreach (var moduleName in permissionModules)
 }
 await db.SaveChangesAsync();
 
-var team = await EnsureTeamAsync("Core Commercial Intelligence", sarah.Id);
+var team = await EnsureTeamAsync("Core Commercial Intelligence", manager.Id);
 await EnsureSalesRepAsync(sarah.Id, 100, 1.25m, ["NORTH", "KEY-ACCOUNT"], ["VALVES", "CONTROLS"]);
 await EnsureSalesRepAsync(ahmed.Id, 85, 1.10m, ["NORTH", "BACKUP"], ["VALVES", "MRO"]);
 await EnsureSalesRepAsync(priya.Id, 70, 1.40m, ["WEST"], ["ELECTRICAL", "AUTOMATION"]);
@@ -229,7 +254,10 @@ var ambiguousLead = await EnsureIdentityLeadAsync(
     "CORE-AMBIGUOUS-001", "ABC Procurement", "shared-buying@acceptance.local", sarah.Id,
     Guid.Parse("c0e00000-0000-0000-0000-000000000301"), "core-ambiguous-customer",
     "ambiguous-customer.csv", ("1", "CORE-ATP-100", "Customer identity requires review", 1));
-EnsureCommercialIdentity(ambiguousLead, abc.Id, null, "AMBIGUOUS");
+ambiguousLead.SuggestCommercialIdentity(
+    "MULTIPLE_LOCAL_CUSTOMER_SIGNALS", 0.55m,
+    "ABC Engineering is a candidate, but the evidence is not strong enough to link automatically.",
+    ambiguous: true, now);
 ambiguousLead.RequiresCommercialReview = true;
 ambiguousLead.AssignComment = "Customer Resolution Required: multiple local identity signals require manager review.";
 
@@ -267,6 +295,12 @@ var quoteDraftLead = await EnsureSixLineCopyAsync(
 var rfqCreationLead = await EnsureSixLineCopyAsync(
     "CORE-RFQ-CREATE-006", "core-rfq-create-six", Guid.Parse("c0e00000-0000-0000-0000-000000000402"));
 rfqCreationLead.CommercialFactsVerified = true;
+var partialBidLead = await EnsureSixLineCopyAsync(
+    "CORE-PARTIAL-BID-006", "core-partial-bid-six", Guid.Parse("c0e00000-0000-0000-0000-000000000404"));
+partialBidLead.CommercialFactsVerified = true;
+var noBidLead = await EnsureSixLineCopyAsync(
+    "CORE-NO-BID-006", "core-no-bid-six", Guid.Parse("c0e00000-0000-0000-0000-000000000405"));
+noBidLead.CommercialFactsVerified = true;
 var inventoryFailureLead = await EnsureIdentityLeadAsync(
     "CORE-INVENTORY-CHECK-FAIL", "Inventory Failure Buyer", "procurement@abc-engineering.local", sarah.Id,
     Guid.Parse("c0e00000-0000-0000-0000-000000000403"), "core-inventory-failure",
@@ -275,7 +309,13 @@ EnsureCommercialIdentity(inventoryFailureLead, abc.Id, abcContact.Id, "MATCHED")
 await db.SaveChangesAsync();
 await EnsureSetupAsync("RFQStatus", "DRAFT", "Draft");
 await EnsureSetupAsync("LeadStatus", "CONVERTED_TO_RFQ", "Converted to RFQ");
+await EnsureSetupAsync("LeadStatus", "DISQUALIFIED", "Disqualified");
 await EnsureLeadQualifiedAsync(rfqCreationLead.Id);
+await EnsureLeadQualifiedAsync(partialBidLead.Id);
+await EnsureLeadQualifiedAsync(noBidLead.Id);
+await EnsurePromotionEvidenceAsync(rfqCreationLead);
+await EnsurePromotionEvidenceAsync(partialBidLead);
+await EnsurePromotionEvidenceAsync(noBidLead);
 
 var mainRfq = await EnsureRfqAsync(sixLineLead, "CORE-RFQ-006");
 var quoteDraftRfq = await EnsureRfqAsync(quoteDraftLead, "CORE-RFQ-QUOTE-DRAFT-006");
@@ -341,7 +381,7 @@ async Task<PlatformModels.Plan> EnsurePlatformPlanAsync(
     existing.MaxConcurrentExtractionJobs = concurrency;
     existing.MaxDocsPerMonth = documents;
     existing.MaxSeats = seats;
-    existing.Features = "{\"local_first_ai\":true,\"commercial_intelligence\":true}";
+    existing.Features = FullyLicensedEntitlements();
     existing.IsActive = true;
     await db.SaveChangesAsync();
     return existing;
@@ -360,9 +400,13 @@ async Task<PlatformModels.Tenant> EnsurePlatformTenantAsync(
     existing.Status = PlatformModels.TenantStatus.Active;
     existing.PlanId = planId;
     existing.PrimaryBusinessUnitId = businessUnitId;
+    existing.Entitlements = FullyLicensedEntitlements();
     await db.SaveChangesAsync();
     return existing;
 }
+
+string FullyLicensedEntitlements() => JsonSerializer.Serialize(
+    TypedEntitlementCatalog.Keys.Order().ToDictionary(key => key, _ => true, StringComparer.Ordinal));
 
 async Task<PlatformModels.PlatformUser> EnsurePlatformUserAsync(string email, string displayName)
 {
@@ -382,11 +426,19 @@ async Task<PlatformModels.PlatformUser> EnsurePlatformUserAsync(string email, st
     return existing;
 }
 
-async Task<SetupMaster> EnsureRoleAsync(long bu, string code, string name)
+async Task<SetupMaster> EnsureRoleAsync(long bu, string code, string name, short rank)
 {
     var existing = await db.SetupMasters.SingleOrDefaultAsync(x => x.BusinessUnitId == bu && x.SetupType == "Role" && x.SetupCode == code);
-    if (existing is not null) return existing;
-    var value = new SetupMaster { BusinessUnitId = bu, SetupType = "Role", SetupCode = code, SetupValue = name, IsActive = true, CreatedBy = fixtureActor, CreatedOn = now };
+    if (existing is not null)
+    {
+        existing.SetupValue = name;
+        existing.RoleRank = rank;
+        existing.IsActive = true;
+        await db.SaveChangesAsync();
+        return existing;
+    }
+    var value = new SetupMaster { BusinessUnitId = bu, SetupType = "Role", SetupCode = code, SetupValue = name,
+        RoleRank = rank, IsActive = true, CreatedBy = fixtureActor, CreatedOn = now };
     db.Add(value); await db.SaveChangesAsync(); return value;
 }
 
@@ -418,15 +470,16 @@ async Task<Module> EnsureModuleAsync(string name)
     db.Add(value); await db.SaveChangesAsync(); return value;
 }
 
-async Task EnsurePermissionAsync(long bu, long role, long module, bool create, bool edit)
+async Task EnsurePermissionAsync(long bu, long role, long module, bool create, bool edit, bool view = true)
 {
     var existing = await db.RolePermissions.SingleOrDefaultAsync(x => x.BusinessUnitId == bu && x.RoleId == role && x.ModuleId == module);
     if (existing is null)
     {
-        db.Add(new RolePermission { BusinessUnitId = bu, RoleId = role, ModuleId = module, CanCreate = create,
+        db.Add(new RolePermission { BusinessUnitId = bu, RoleId = role, ModuleId = module, CanView = view, CanCreate = create,
             CanEdit = edit, CanDelete = false, CreatedBy = fixtureActor, CreatedOn = now });
         return;
     }
+    existing.CanView = view;
     existing.CanCreate = existing.CanCreate == true || create;
     existing.CanEdit = existing.CanEdit == true || edit;
 }
@@ -504,7 +557,12 @@ async Task<Lead> EnsureIdentityLeadAsync(string rfq, string buyer, string email,
 async Task<Team> EnsureTeamAsync(string name, long managerId)
 {
     var existing = await db.Teams.SingleOrDefaultAsync(x => x.BusinessUnitId == tenantId && x.TeamName == name);
-    if (existing is not null) return existing;
+    if (existing is not null)
+    {
+        existing.ManagerId = managerId;
+        await db.SaveChangesAsync();
+        return existing;
+    }
     var value = new Team { BusinessUnitId = tenantId, TeamName = name, ManagerId = managerId, CreatedBy = fixtureActor, CreatedOn = now };
     db.Add(value); await db.SaveChangesAsync(); return value;
 }
@@ -522,9 +580,11 @@ async Task EnsureSalesRepAsync(long userId, int capacity, decimal weight, string
 
 async Task EnsureMembershipAsync(long userId, long teamId, bool primary)
 {
-    if (await db.SalesTeamMemberships.AnyAsync(x => x.BusinessUnitId == tenantId && x.UserId == userId && x.TeamId == teamId && x.EffectiveToUtc == null)) return;
-    db.Add(new SalesTeamMembership { BusinessUnitId = tenantId, UserId = userId, TeamId = teamId,
-        IsPrimary = primary, EffectiveFromUtc = now.AddDays(-30) });
+    var user = await db.Users.SingleAsync(x => x.Buid == tenantId && x.Id == userId);
+    user.TeamId = teamId;
+    if (!await db.SalesTeamMemberships.AnyAsync(x => x.BusinessUnitId == tenantId && x.UserId == userId && x.TeamId == teamId && x.EffectiveToUtc == null))
+        db.Add(new SalesTeamMembership { BusinessUnitId = tenantId, UserId = userId, TeamId = teamId,
+            IsPrimary = primary, EffectiveFromUtc = now.AddDays(-30) });
     await db.SaveChangesAsync();
 }
 
@@ -777,9 +837,11 @@ async Task<long> EnsureNegotiationSupplierQuoteAsync(
             RequestedPartNumber = product.PartNo,
             Description = rfqItem.ProductShortDescription ?? product.ProductName ?? product.PartNo ?? "Acceptance product",
             UnitOfMeasure = rfqItem.UnitOfMeasure ?? "EA",
-            RequestedQuantity = rfqItem.Quantity,
+            RequestedQuantity = rfqItem.Quantity
+                ?? throw new InvalidOperationException("Acceptance RFQ item quantity is required."),
             StockQuantity = 0,
-            UnfulfilledQuantity = rfqItem.Quantity,
+            UnfulfilledQuantity = rfqItem.Quantity
+                ?? throw new InvalidOperationException("Acceptance RFQ item quantity is required."),
             SearchLimit = 10,
             Status = SourcingCaseStatuses.ComparisonReady,
             NextAction = "Review supplier bid quality and prepare negotiation",
@@ -870,7 +932,9 @@ async Task<long> EnsureNegotiationSupplierQuoteAsync(
         {
             new ERP_RFQ_Automation.SupplierQuotes.CaptureSupplierQuoteLine(1, rfqItem.Id, demandLine.Id, product.PartNo, null,
                 "PCS-TX-300", product.ProductName ?? product.PartNo ?? "Acceptance product",
-                rfqItem.Quantity, rfqItem.Quantity,
+                rfqItem.Quantity
+                    ?? throw new InvalidOperationException("Acceptance RFQ item quantity is required."),
+                rfqItem.Quantity,
                 rfqItem.UnitOfMeasure ?? "EA", 452m, 4m, 14, "IN_STOCK", "US", "12 months",
                 false, null, Array.Empty<CaptureSupplierQuoteEvidence>())
         },
@@ -937,6 +1001,157 @@ async Task<Lead> EnsureSixLineCopyAsync(string rfqNumber, string key, Guid batch
     lead.AssignComment = "Confirmed ABC Engineering account owner available within capacity.";
     await db.SaveChangesAsync();
     return lead;
+}
+
+async Task EnsurePromotionEvidenceAsync(Lead lead)
+{
+    await db.Entry(lead).Collection(x => x.LeadItems).LoadAsync();
+    var revision = await db.Set<LeadRevision>().AsNoTracking()
+        .SingleAsync(x => x.BusinessUnitId == tenantId && x.Id == lead.CurrentRevisionId!.Value);
+    var occurrence = await db.Set<LeadIngestionOccurrence>().AsNoTracking()
+        .SingleAsync(x => x.BusinessUnitId == tenantId && x.Id == revision.EstablishedByOccurrenceId);
+    var originalDocument = await db.Set<SourceDocument>().AsNoTracking()
+        .SingleAsync(x => x.BusinessUnitId == tenantId && x.Id == occurrence.SourceDocumentId!.Value);
+
+    var csv = new StringBuilder("Line,Part,Description,Quantity,UOM,Currency\n");
+    foreach (var item in lead.LeadItems.GroupBy(x => x.Id).Select(x => x.First()).OrderBy(x => x.LineItemNo))
+        csv.AppendLine($"{item.LineItemNo},{item.ManufacturerPartNumber},{item.ProductShortDescription},{item.Quantity},{item.UnitOfMeasure},{item.Currency ?? "USD"}");
+    var bytes = Encoding.UTF8.GetBytes(csv.ToString());
+    var hash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+    var relativePath = $"acceptance/{tenantId}/{hash}.csv";
+    var storageRoot = Argument("storage-root")
+        ?? Environment.GetEnvironmentVariable("NEXORA_ACCEPTANCE_STORAGE_ROOT")
+        ?? Path.Combine(Path.GetTempPath(), "nexora-acceptance-storage");
+    var physicalPath = Path.Combine(storageRoot, relativePath);
+    Directory.CreateDirectory(Path.GetDirectoryName(physicalPath)!);
+    await File.WriteAllBytesAsync(physicalPath, bytes);
+
+    var job = await db.Set<ExtractionJob>().SingleOrDefaultAsync(x =>
+        x.BusinessUnitId == tenantId && x.ContentHash == hash && x.ResultLeadId == lead.Id);
+    if (job is null)
+    {
+        job = new ExtractionJob
+        {
+            BatchId = occurrence.BatchId,
+            BusinessUnitId = tenantId,
+            SourceType = ExtractionSourceType.ManualUpload,
+            ContentHash = hash,
+            StoragePath = relativePath,
+            FileName = $"{lead.Rfqno}-evidence.csv",
+            FileType = "csv",
+            Status = ExtractionStatus.Succeeded,
+            Priority = 0,
+            SchedulerTag = 0,
+            Attempts = 1,
+            MaxAttempts = 5,
+            NextAttemptAt = now,
+            ResultLeadId = lead.Id,
+            CreatedOn = now,
+            UpdatedOn = now
+        };
+        db.Add(job);
+        await db.SaveChangesAsync();
+    }
+
+    var document = await db.Set<SourceDocument>().SingleOrDefaultAsync(x =>
+        x.BusinessUnitId == tenantId && x.ContentHash == hash);
+    if (document is null)
+    {
+        document = SourceDocument.Create(tenantId, originalDocument.CorpusId, hash,
+            $"{lead.Rfqno}-evidence.csv", "text/csv", "local", relativePath, hash, bytes.Length);
+        document.ReleaseFromQuarantine("local", relativePath, hash);
+        document.BindExtractionJob(job.Id);
+        db.Add(document);
+        await db.SaveChangesAsync();
+    }
+    else if (!document.ExtractionJobId.HasValue)
+    {
+        document.BindExtractionJob(job.Id);
+        await db.SaveChangesAsync();
+    }
+
+    if (!await db.Set<LeadOccurrenceDocument>().AnyAsync(x => x.BusinessUnitId == tenantId
+            && x.OccurrenceId == occurrence.Id && x.SourceDocumentId == document.Id))
+    {
+        db.Add(new LeadOccurrenceDocument
+        {
+            BusinessUnitId = tenantId,
+            OccurrenceId = occurrence.Id,
+            SourceDocumentId = document.Id,
+            Role = "Primary",
+            Ordinal = 99,
+            LinkedAtUtc = DateTimeOffset.UtcNow
+        });
+    }
+
+    if (await db.Set<FieldEvidence>().AnyAsync(x => x.BusinessUnitId == tenantId
+            && x.LineItem != null && x.LineItem.LeadItemId != null
+            && lead.LeadItems.Select(item => item.Id).Contains(x.LineItem.LeadItemId.Value)))
+    {
+        await db.SaveChangesAsync();
+        return;
+    }
+
+    var run = await db.Set<ExtractionRun>().SingleOrDefaultAsync(x =>
+        x.BusinessUnitId == tenantId && x.SourceDocumentId == document.Id && x.AttemptNumber == 1);
+    var runId = run?.RunId ?? Guid.NewGuid();
+    if (run is null)
+    {
+        run = ExtractionRun.Create(tenantId, document.Id, runId, job.Id, 1,
+            "acceptance-csv/v1", "lead-evidence/v1");
+        db.Add(run);
+    }
+    var page = await db.Set<DocumentPage>().SingleOrDefaultAsync(x =>
+        x.BusinessUnitId == tenantId && x.DocumentId == document.Id && x.PageNumber == 1);
+    if (page is null)
+    {
+        page = DocumentPage.Create(tenantId, document.Id, 1, 100, 100);
+        db.Add(page);
+    }
+    var inquiry = await db.Set<CanonicalInquiry>().SingleOrDefaultAsync(x =>
+        x.BusinessUnitId == tenantId && x.CorpusId == originalDocument.CorpusId && x.InquiryNumber == 1);
+    if (inquiry is null)
+    {
+        inquiry = CanonicalInquiry.Create(tenantId, originalDocument.CorpusId, 1);
+        inquiry.PopulateHeader(lead.Rfqno, lead.BuyersName, lead.RecDate, lead.BidClosingDate);
+        inquiry.BindLead(lead.Id);
+        db.Add(inquiry);
+    }
+    await db.SaveChangesAsync();
+
+    var region = await db.Set<DocumentRegion>().FirstOrDefaultAsync(x =>
+        x.BusinessUnitId == tenantId && x.PageId == page.Id && x.RegionType == DocumentRegionType.Table);
+    if (region is null)
+    {
+        region = DocumentRegion.Create(tenantId, page.Id, DocumentRegionType.Table,
+            0, 0, 100, 100, csv.ToString(), 1m);
+        db.Add(region);
+        await db.SaveChangesAsync();
+    }
+
+    foreach (var item in lead.LeadItems.GroupBy(x => x.Id).Select(x => x.First()).OrderBy(x => x.LineItemNo))
+    {
+        var lineNumber = int.TryParse(item.LineItemNo, out var parsedLineNumber) ? parsedLineNumber : 1;
+        var canonical = await db.Set<CanonicalLineItem>().SingleOrDefaultAsync(x =>
+            x.BusinessUnitId == tenantId && x.InquiryId == inquiry.Id && x.LineNumber == lineNumber);
+        if (canonical is null)
+        {
+            canonical = CanonicalLineItem.Create(tenantId, inquiry.Id, lineNumber,
+                item.ProductShortDescription ?? item.ItemText ?? "Requested line",
+                item.Quantity, item.UnitOfMeasure);
+            canonical.Enrich(null, item.ManufacturerPartNumber, item.Currency ?? "USD", null, null, "{}",
+                CanonicalValidationStatus.Valid);
+            canonical.BindLeadItem(item.Id);
+            db.Add(canonical);
+            await db.SaveChangesAsync();
+        }
+        if (!await db.Set<FieldEvidence>().AnyAsync(x => x.BusinessUnitId == tenantId
+                && x.LineItemId == canonical.Id))
+            db.Add(FieldEvidence.ForLineItem(tenantId, region.Id, canonical.Id, "requestedLine",
+                item.ProductShortDescription, item.ManufacturerPartNumber, 1m,
+                "acceptance-fixture", runId, validationStatus: FieldValidationStatus.Valid));
+    }
+    await db.SaveChangesAsync();
 }
 
 void EnsureCommercialIdentity(Lead lead, long customerId, long? contactId, string matchStatus)
@@ -1039,16 +1254,26 @@ async Task<Rfq> EnsureRfqAsync(Lead lead, string rfqNumber)
         .SingleOrDefaultAsync(x => x.BusinessUnitId == tenantId
             && (x.Rfqno == rfqNumber || x.LeadId == lead.Id));
     if (existing is not null) return existing;
+    await db.Entry(lead).Collection(x => x.LeadItems).LoadAsync();
+    var authorization = await EnsurePromotionAuthorizationAsync(lead);
+    var revisionLines = await db.Set<LeadItemRevision>().AsNoTracking()
+        .Where(x => x.BusinessUnitId == tenantId && x.LeadRevisionId == authorization.RevisionId)
+        .ToDictionaryAsync(x => x.LeadItemId!.Value);
     var products = await db.Products.Where(x => x.Buid == tenantId).ToDictionaryAsync(x => x.PartNo, x => x.Id);
     var draftStatus = await EnsureSetupAsync("RFQStatus", "DRAFT", "Draft");
     var rfq = new Rfq { Rfqno = rfqNumber, BuyersName = lead.BuyersName, RecDate = now,
         BidClosingDate = lead.BidClosingDate, LeadId = lead.Id, CustomerId = lead.CustomerId,
         BusinessUnitId = tenantId, RfqstatusId = draftStatus.SetupId, CreatedBy = fixtureActor,
-        CreatedDate = now, NoOfLineItems = lead.LeadItems.Count };
+        CreatedDate = now, NoOfLineItems = lead.LeadItems.Count,
+        PromotionId = authorization.PromotionId,
+        SourceLeadRevisionId = authorization.RevisionId,
+        ParticipationDecisionId = authorization.DecisionId };
     rfq.InheritCommercialIdentity(lead);
     foreach (var item in lead.LeadItems.OrderBy(x => x.LineItemNo))
     {
         products.TryGetValue(item.ManufacturerPartNumber ?? string.Empty, out var productId);
+        if (!revisionLines.TryGetValue(item.Id, out var revisionLine))
+            throw new InvalidOperationException($"Fixture lead line {item.Id} has no immutable revision lineage.");
         rfq.Rfqitems.Add(new Rfqitem { LineItemNo = item.LineItemNo,
             ProductId = productId == 0 ? null : productId, ProductShortDescription = item.ProductShortDescription,
             ItemMaterialCode = item.ItemMaterialCode, ManufacturerPartNumber = item.ManufacturerPartNumber,
@@ -1057,9 +1282,111 @@ async Task<Rfq> EnsureRfqAsync(Lead lead, string rfqNumber)
             // and CHECK > 0, so an unquantified lead line is a fixture bug, not a runtime case.
             Quantity = item.Quantity ?? throw new InvalidOperationException(
                 $"Fixture lead line {item.LineItemNo} has no quantity."),
-            UnitOfMeasure = item.UnitOfMeasure ?? "EA", CreatedBy = fixtureActor, CreatedDate = now });
+            UnitOfMeasure = item.UnitOfMeasure ?? "EA", CreatedBy = fixtureActor, CreatedDate = now,
+            SourceBusinessUnitId = tenantId, SourceLeadId = lead.Id,
+            SourceLeadRevisionId = authorization.RevisionId,
+            SourceLeadItemRevisionId = revisionLine.Id });
     }
     db.Add(rfq); await db.SaveChangesAsync(); return rfq;
+}
+
+async Task<(long RevisionId, long DecisionId, long PromotionId)> EnsurePromotionAuthorizationAsync(Lead lead)
+{
+    if (!lead.CurrentRevisionId.HasValue)
+        throw new InvalidOperationException($"Fixture lead {lead.Id} has no immutable current revision.");
+    var revisionId = lead.CurrentRevisionId.Value;
+    var fitKey = $"acceptance-fit:{tenantId}:{revisionId}";
+    var fit = await db.Set<LeadFitAssessment>().SingleOrDefaultAsync(x =>
+        x.BusinessUnitId == tenantId && x.IdempotencyKey == fitKey);
+    if (fit is null)
+    {
+        fit = new LeadFitAssessment
+        {
+            BusinessUnitId = tenantId, LeadId = lead.Id, LeadRevisionId = revisionId,
+            Sequence = 1, PolicyVersion = "acceptance/v1", Recommendation = "BID",
+            IsActionable = true,
+            AssessmentJson = "{\"fixture\":true,\"decision\":\"BID\"}",
+            IdempotencyKey = fitKey,
+            RequestHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(fitKey))).ToLowerInvariant(),
+            AssessedBy = fixtureActor, AssessedAtUtc = DateTimeOffset.UtcNow
+        };
+        db.Add(fit);
+        await db.SaveChangesAsync();
+    }
+
+    var decisionKey = $"acceptance-participation:{tenantId}:{revisionId}";
+    var decision = await db.Set<LeadParticipationDecision>().Include(x => x.Lines)
+        .SingleOrDefaultAsync(x => x.BusinessUnitId == tenantId && x.IdempotencyKey == decisionKey);
+    if (decision is null)
+    {
+        var uom = await EnsureUomAsync("EA", "Each");
+        var currency = await EnsureCurrencyAsync("USD", "US Dollar", "$");
+        var revisionLines = await db.Set<LeadItemRevision>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == tenantId && x.LeadRevisionId == revisionId)
+            .OrderBy(x => x.LineNumber).ToArrayAsync();
+        var currentItems = lead.LeadItems.ToDictionary(x => x.Id);
+        decision = new LeadParticipationDecision
+        {
+            BusinessUnitId = tenantId, LeadId = lead.Id, LeadRevisionId = revisionId,
+            FitAssessmentId = fit.Id, Sequence = 1, IsCommitted = true,
+            Outcome = LeadParticipationOutcome.FullBid,
+            Notes = "Authorized acceptance-fixture participation decision.",
+            IdempotencyKey = decisionKey,
+            RequestHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(decisionKey))).ToLowerInvariant(),
+            DecidedBy = fixtureActor, DecidedAtUtc = DateTimeOffset.UtcNow
+        };
+        foreach (var line in revisionLines)
+        {
+            if (!line.LeadItemId.HasValue || !currentItems.TryGetValue(line.LeadItemId.Value, out var current))
+                throw new InvalidOperationException($"Fixture revision line {line.Id} has no canonical Lead item.");
+            var productId = await db.Products.Where(x => x.Buid == tenantId
+                    && x.PartNo == current.ManufacturerPartNumber)
+                .Select(x => (long?)x.Id).SingleOrDefaultAsync();
+            decision.Lines.Add(new LeadLineParticipationDecision
+            {
+                BusinessUnitId = tenantId, LeadId = lead.Id, LeadRevisionId = revisionId,
+                LeadItemRevisionId = line.Id, Choice = LeadLineParticipationChoice.Bid,
+                ProductId = productId, Quantity = current.Quantity,
+                UnitOfMeasure = current.UnitOfMeasure ?? "EA", UomId = uom.UomId,
+                Currency = current.Currency ?? "USD", CurrencyId = currency.Id,
+                CatalogPolicyVersion = "acceptance/v1", WarningSnapshotJson = "{}"
+            });
+        }
+        db.Add(decision);
+        await db.SaveChangesAsync();
+    }
+
+    var promotionKey = $"acceptance-promotion:{tenantId}:{revisionId}";
+    var promotion = await db.Set<RfqPromotion>().SingleOrDefaultAsync(x =>
+        x.BusinessUnitId == tenantId && x.IdempotencyKey == promotionKey);
+    if (promotion is null)
+    {
+        promotion = new RfqPromotion
+        {
+            BusinessUnitId = tenantId, LeadId = lead.Id, LeadRevisionId = revisionId,
+            ParticipationDecisionId = decision.Id, IdempotencyKey = promotionKey,
+            RequestHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(promotionKey))).ToLowerInvariant(),
+            PromotedBy = fixtureActor, PromotedAtUtc = DateTimeOffset.UtcNow
+        };
+        db.Add(promotion);
+        await db.SaveChangesAsync();
+    }
+    return (revisionId, decision.Id, promotion.Id);
+}
+
+async Task<SetUom> EnsureUomAsync(string code, string name)
+{
+    var existing = await db.SetUoms.SingleOrDefaultAsync(x =>
+        x.BusinessUnitId == tenantId && x.UomCode == code);
+    if (existing is not null) return existing;
+    var uom = new SetUom
+    {
+        BusinessUnitId = tenantId, UomCode = code, UomName = name,
+        IsActive = true, CreatedBy = fixtureActor, CreatedDate = now
+    };
+    db.Add(uom);
+    await db.SaveChangesAsync();
+    return uom;
 }
 
 async Task EnsureLineResolutionsAsync(Lead lead, Rfq rfq, Product full, Product partialProduct,
@@ -1125,7 +1452,9 @@ async Task<Quote> EnsureQuoteAsync(Rfq rfq, long statusId, string quoteNumber, s
     quote.InheritCommercialIdentity(rfq);
     foreach (var line in rfq.Rfqitems.OrderBy(x => x.Id))
         quote.QuoteItems.Add(new QuoteItem { RfqitemId = line.Id, ProductId = line.ProductId,
-            ItemDescription = line.ProductShortDescription ?? line.ItemText, Quantity = line.Quantity,
+            ItemDescription = line.ProductShortDescription ?? line.ItemText,
+            Quantity = line.Quantity
+                ?? throw new InvalidOperationException("Acceptance RFQ item quantity is required."),
             UnitPrice = 0, TotalAmount = 0, CreatedBy = actorEmail, CreatedDate = now.AddDays(-1) });
     db.Add(quote); await db.SaveChangesAsync(); return quote;
 }
@@ -1165,10 +1494,9 @@ async Task<Order> EnsureOrderAsync(Quote quote, Rfq rfq, Lead lead, long statusI
     var order = new Order { OrderNo = "CORE-ALLOCATE-001", QuoteId = quote.Id, Rfqid = rfq.Id,
         LeadId = lead.Id, CustomerId = abc.Id, BusinessUnitId = tenantId, StatusId = statusId,
         SourceType = OrderSourceTypes.LegacyQuote,
-        CommercialCaseId = quote.CommercialCaseId, NexoraSerial = quote.NexoraSerial,
-        ContactId = quote.ContactId,
         OrderDate = now, TotalAmount = 270m, SubTotal = 270m, CreatedBy = fixtureActor,
         CreatedOn = now, IsActive = true };
+    order.InheritCommercialIdentity(quote);
     order.OrderItems.Add(new OrderItem { ProductId = product.Id, Description = product.ProductName,
         Quantity = 2, UnitPrice = 135m, TotalAmount = 270m, WarehouseId = warehouse.Id,
         CreatedBy = fixtureActor, CreatedDate = now, IsActive = true });
@@ -1250,13 +1578,13 @@ async Task<long> EnsureSourcedCustomerOrderAsync(Quote quote, Rfq rfq, Product p
         OrderNo = "CORE-SOURCED-CUSTOMER-ORDER", QuoteId = quote.Id, Rfqid = rfq.Id,
         LeadId = rfq.LeadId, CustomerId = abc.Id, BusinessUnitId = tenantId,
         StatusId = orderStatusId, CurrencyId = currencyId, SourceType = OrderSourceTypes.CustomerAward,
-        CustomerAwardId = award.Id, CommercialCaseId = quote.CommercialCaseId,
-        NexoraSerial = quote.NexoraSerial, ContactId = quote.ContactId, OrderDate = now,
+        CustomerAwardId = award.Id, OrderDate = now,
         SubTotal = allocation.AwardedQuantity * allocation.UnitPriceSnapshot,
         DiscountAmount = allocation.DiscountSnapshot, TaxAmount = allocation.TaxSnapshot,
         TotalAmount = allocation.TotalSnapshot, BalanceAmount = allocation.TotalSnapshot,
         CreatedBy = fixtureActor, CreatedOn = now, IsActive = true
     };
+    order.InheritCommercialIdentity(quote);
     order.OrderItems.Add(new OrderItem
     {
         ProductId = product.Id, Description = poLine.Description, Quantity = allocation.AwardedQuantity,
@@ -1373,6 +1701,8 @@ async Task PrintFixtureAsync()
     Console.WriteLine($"E2E_V2_SOURCED_CUSTOMER_ORDER_LINE_ID={sourcedCustomerOrderLineId}");
     Console.WriteLine($"E2E_CORE_STALE_QUOTE_ID={mainQuote.Id}");
     Console.WriteLine($"E2E_CORE_RFQ_CREATION_LEAD_ID={rfqCreationLead.Id}");
+    Console.WriteLine($"E2E_CORE_PARTIAL_BID_LEAD_ID={partialBidLead.Id}");
+    Console.WriteLine($"E2E_CORE_NO_BID_LEAD_ID={noBidLead.Id}");
     Console.WriteLine($"E2E_CORE_RFQ_CREATION_NEXORA_SERIAL={rfqCreationLead.CommercialCaseReference}");
     Console.WriteLine($"E2E_CORE_RFQ_ID={mainRfq.Id}");
     Console.WriteLine($"E2E_V24_SUPPLIER_QUOTE_ID={negotiationSupplierQuoteId}");

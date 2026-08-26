@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { LeadDecisionEvidenceDTO } from '../../../api/services/leadDecisionService';
-import { inspectableEvidenceUrl } from './evidenceRules';
+import { evidenceRenderKey, inspectableEvidenceUrl } from './evidenceRules';
 
 const evidence = (over: Partial<LeadDecisionEvidenceDTO> = {}): LeadDecisionEvidenceDTO => ({
   occurrenceId: 1,
@@ -20,5 +20,15 @@ describe('inspectableEvidenceUrl', () => {
     expect(inspectableEvidenceUrl(evidence({ downloadUrl: '/api/source/1' }))).toBe('/api/source/1');
     expect(inspectableEvidenceUrl(evidence({ contentUrl: '/api/content/1' }))).toBe('/api/content/1');
     expect(inspectableEvidenceUrl(evidence({ sourceAvailable: false, downloadUrl: '/api/source/1' }))).toBeNull();
+  });
+});
+
+describe('evidenceRenderKey', () => {
+  it('keeps same-named evidence rows distinct across documents and repeated projections', () => {
+    const first = evidence({ occurrenceId: 18, sourceDocumentId: 41, name: 'request.csv' });
+    const second = evidence({ occurrenceId: 18, sourceDocumentId: 42, name: 'request.csv' });
+
+    expect(evidenceRenderKey(first, 0)).not.toBe(evidenceRenderKey(second, 1));
+    expect(evidenceRenderKey(first, 0)).not.toBe(evidenceRenderKey(first, 1));
   });
 });

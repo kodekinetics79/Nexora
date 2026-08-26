@@ -291,6 +291,8 @@ public sealed class LeadParticipationService : ILeadParticipationService
                     && (string.IsNullOrWhiteSpace(line.ReasonNotes) || line.ReasonNotes.Trim().Length < 5))
                     throw new ArgumentException(
                         $"Bid revision line {line.LeadItemRevisionId} has a catalog or normalization warning and requires a meaningful human acknowledgement note.");
+                // Drafts may preserve incomplete commercial identity for later human completion.
+                // Commit is the boundary that requires active tenant masters and positive quantity.
                 if (command.Commit && line.Choice == LeadLineParticipationChoice.Bid)
                 {
                     if (!leadItemByRevisionLine.TryGetValue(line.LeadItemRevisionId, out var currentLeadItemId)

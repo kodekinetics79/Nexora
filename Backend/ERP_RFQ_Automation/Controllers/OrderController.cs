@@ -18,16 +18,23 @@ namespace ERP_RFQ_Automation.Controllers
         private readonly IOrderService _orderService;
         private readonly IOrderRepository _repository;
         private readonly ERP_RFQ_Automation.Inventory.IOrderStockReservationService _stock;
+        private readonly ICommercialAccessContext? _commercialAccess;
 
         public OrderController(
             IOrderService orderService,
             IOrderRepository repository,
-            ERP_RFQ_Automation.Inventory.IOrderStockReservationService stock)
+            ERP_RFQ_Automation.Inventory.IOrderStockReservationService stock,
+            ICommercialAccessContext? commercialAccess = null)
         {
             _orderService = orderService;
             _repository = repository;
             _stock = stock;
+            _commercialAccess = commercialAccess;
         }
+
+        private async Task<bool> CanAccessOrderAsync(long id) =>
+            _commercialAccess != null
+            && await _commercialAccess.CanAccessOrderAsync(id, HttpContext.RequestAborted);
 
         private long ResolveBusinessUnitId(long? businessUnitId)
         {
@@ -42,6 +49,7 @@ namespace ERP_RFQ_Automation.Controllers
         {
             var buId = ResolveBusinessUnitId(businessUnitId);
             if (buId <= 0) return BadRequest("Business Unit ID is required.");
+            if (!await CanAccessOrderAsync(id)) return NotFound();
             var actor = User.FindFirst("email")?.Value ?? User.Identity?.Name;
             var result = await _stock.ReserveOrderAsync(buId, id, actor);
             return Ok(result);
@@ -54,6 +62,7 @@ namespace ERP_RFQ_Automation.Controllers
         {
             var buId = ResolveBusinessUnitId(businessUnitId);
             if (buId <= 0) return BadRequest("Business Unit ID is required.");
+            if (!await CanAccessOrderAsync(id)) return NotFound();
             var actor = User.FindFirst("email")?.Value ?? User.Identity?.Name;
             var released = await _stock.ReleaseOrderAsync(buId, id, actor);
             return Ok(new { orderId = id, released });
@@ -66,6 +75,7 @@ namespace ERP_RFQ_Automation.Controllers
         {
             var buId = ResolveBusinessUnitId(businessUnitId);
             if (buId <= 0) return BadRequest("Business Unit ID is required.");
+            if (!await CanAccessOrderAsync(id)) return NotFound();
             var actor = User.FindFirst("email")?.Value ?? User.Identity?.Name;
             var consumed = await _stock.ConsumeOrderAsync(buId, id, actor);
             return Ok(new { orderId = id, consumed });
@@ -84,7 +94,9 @@ namespace ERP_RFQ_Automation.Controllers
                 if (targetBUId <= 0)
                     return BadRequest("Business Unit ID is required.");
 
-                var orders = await _orderService.GetAllOrdersAsync(targetBUId);
+                var actor = _commercialAccess == null ? null : await _commercialAccess.ResolveAsync(HttpContext.RequestAborted);
+                if (actor == null || actor.BusinessUnitId != targetBUId) return Forbid();
+                var orders = await _orderService.GetAllOrdersAsync(targetBUId, actor.AccountScope);
                 return Ok(orders);
             }
             catch (Exception ex)
@@ -106,7 +118,9 @@ namespace ERP_RFQ_Automation.Controllers
                 if (targetBUId <= 0)
                     return BadRequest("Business Unit ID is required.");
 
-                var order = await _orderService.GetOrderByIdAsync(id, targetBUId);
+                var actor = _commercialAccess == null ? null : await _commercialAccess.ResolveAsync(HttpContext.RequestAborted);
+                if (actor == null || actor.BusinessUnitId != targetBUId) return NotFound();
+                var order = await _orderService.GetOrderByIdAsync(id, targetBUId, actor.AccountScope);
                 if (order == null)
                 {
                     return NotFound();
@@ -132,6 +146,16 @@ namespace ERP_RFQ_Automation.Controllers
                 if (targetBUId <= 0)
                     return BadRequest("Business Unit ID is required.");
 
+                if (_commercialAccess == null) return Forbid();
+                if (createOrderDto.LeadId.HasValue
+                    && !await _commercialAccess.CanAccessLeadAsync(createOrderDto.LeadId.Value, HttpContext.RequestAborted))
+                    return NotFound();
+                if (createOrderDto.RfqId.HasValue
+                    && !await _commercialAccess.CanAccessRfqAsync(createOrderDto.RfqId.Value, HttpContext.RequestAborted))
+                    return NotFound();
+                if (!await _commercialAccess.CanAccessCustomerAsync(createOrderDto.CustomerId, HttpContext.RequestAborted))
+                    return NotFound();
+
                 var order = await _orderService.CreateManualOrderAsync(createOrderDto, targetBUId);
                 return CreatedAtAction(nameof(GetOrder), new { id = order.Id }, order);
             }
@@ -153,6 +177,10 @@ namespace ERP_RFQ_Automation.Controllers
 
                 if (targetBUId <= 0)
                     return BadRequest("Business Unit ID is required.");
+
+                if (_commercialAccess == null
+                    || !await _commercialAccess.CanAccessRfqAsync(rfqId, HttpContext.RequestAborted))
+                    return NotFound();
 
                 var order = await _orderService.CreateOrderFromRfqAsync(rfqId, targetBUId);
                 return CreatedAtAction(nameof(GetOrder), new { id = order.Id }, order);
@@ -184,6 +212,7 @@ namespace ERP_RFQ_Automation.Controllers
             try
             {
                 var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+                if (!await CanAccessOrderAsync(id)) return NotFound();
                 var updatedOrder = await _orderService.UpdateOrderAsync(id, updateOrderDto, businessUnitId);
                 return Ok(updatedOrder);
             }
@@ -207,6 +236,8 @@ namespace ERP_RFQ_Automation.Controllers
                 if (targetBUId <= 0)
                     return BadRequest("Business Unit ID is required.");
 
+                if (!await CanAccessOrderAsync(id)) return NotFound();
+
                 await _orderService.DeleteOrderAsync(id, targetBUId);
                 return NoContent();
             }
@@ -229,7 +260,11 @@ namespace ERP_RFQ_Automation.Controllers
                 if (targetBUId <= 0)
                     return BadRequest("Business Unit ID is required.");
 
-                var orders = await _orderService.GetOrdersByCustomerIdAsync(customerId, targetBUId);
+                var actor = _commercialAccess == null ? null : await _commercialAccess.ResolveAsync(HttpContext.RequestAborted);
+                if (actor == null || actor.BusinessUnitId != targetBUId
+                    || !await _commercialAccess!.CanAccessCustomerAsync(customerId, HttpContext.RequestAborted))
+                    return NotFound();
+                var orders = await _orderService.GetOrdersByCustomerIdAsync(customerId, targetBUId, actor.AccountScope);
                 return Ok(orders);
             }
             catch (Exception ex)
@@ -250,7 +285,9 @@ namespace ERP_RFQ_Automation.Controllers
                 if (targetBUId <= 0)
                     return BadRequest("Business Unit ID is required.");
 
-                var invoice = await _orderService.GetInvoiceDataAsync(id, targetBUId);
+                var actor = _commercialAccess == null ? null : await _commercialAccess.ResolveAsync(HttpContext.RequestAborted);
+                if (actor == null || actor.BusinessUnitId != targetBUId) return NotFound();
+                var invoice = await _orderService.GetInvoiceDataAsync(id, targetBUId, actor.AccountScope);
                 if (invoice == null) return NotFound();
                 return Ok(invoice);
             }
@@ -269,7 +306,9 @@ namespace ERP_RFQ_Automation.Controllers
                 var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
                 if (businessUnitId == 0) return BadRequest("Business Unit ID is required.");
                 
-                var stats = await _repository.GetOrderStatsAsync(businessUnitId);
+                var actor = _commercialAccess == null ? null : await _commercialAccess.ResolveAsync(HttpContext.RequestAborted);
+                if (actor == null || actor.BusinessUnitId != businessUnitId) return Forbid();
+                var stats = await _repository.GetOrderStatsAsync(businessUnitId, actor.AccountScope);
                 return Ok(stats);
             }
             catch (Exception ex)

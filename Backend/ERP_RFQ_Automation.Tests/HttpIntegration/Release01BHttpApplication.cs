@@ -8,6 +8,7 @@ using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.CommercialIntelligence.Sales;
 using ERP_RFQ_Automation.CommercialCases.Participation;
 using ERP_RFQ_Automation.CommercialCases.Promotion;
+using ERP_RFQ_Automation.CommercialRouting;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.Infrastructure.Storage;
@@ -418,6 +419,20 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
         db.Customers.AddRange(
             Customer(TenantACustomerId, TenantA, "Tenant A Customer", "buyer-a@nexora.invalid"),
             Customer(TenantBCustomerId, TenantB, "Tenant B Customer", "buyer-b@nexora.invalid"));
+        db.Set<CustomerOwnership>().Add(new CustomerOwnership
+        {
+            Id = 86_401,
+            BusinessUnitId = TenantA,
+            CustomerId = TenantACustomerId,
+            PrimaryUserId = GrowthRepUser,
+            Scope = OwnershipScope.GeneralCustomer,
+            Priority = 100,
+            EffectiveFrom = now.UtcDateTime.AddDays(-1),
+            IsActive = true,
+            Source = "release-01b-tests",
+            Reason = "Existing account assigned to the authenticated sales representative.",
+            Version = 1
+        });
         db.Contacts.AddRange(
             Contact(TenantAContactId, TenantA, TenantACustomerId, "contact-a@nexora.invalid"),
             Contact(TenantBContactId, TenantB, TenantBCustomerId, "contact-b@nexora.invalid"));

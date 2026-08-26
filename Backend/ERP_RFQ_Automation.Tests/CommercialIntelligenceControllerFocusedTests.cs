@@ -272,6 +272,52 @@ public sealed class CommercialIntelligenceControllerFocusedTests
     }
 
     [Fact]
+    public async Task SalesToday_ForManagerReturnsOnlyManagedTeamWork()
+    {
+        const long tenant = 87_212;
+        const long manager = 87_213;
+        const long managedRep = 87_214;
+        const long otherRep = 87_215;
+        using var database = new TestDb();
+        await using var context = database.ContextFor(tenant);
+        Seed.BusinessUnit(context, tenant);
+        context.Users.AddRange(
+            User(manager, tenant, "manager@test"),
+            User(managedRep, tenant, "managed@test"),
+            User(otherRep, tenant, "other-team@test"));
+        var now = DateTime.UtcNow;
+        context.FollowUpTasks.AddRange(
+            FollowUp(87_216, tenant, manager, now.AddHours(-1), "MANAGER_TASK"),
+            FollowUp(87_217, tenant, managedRep, now.AddHours(-1), "MANAGED_TASK"),
+            FollowUp(87_218, tenant, otherRep, now.AddHours(-1), "OTHER_TEAM_TASK"));
+        await context.SaveChangesAsync();
+        var managedScope = new AccountTeamScope(
+            AccountScopeTier.ManagedScope, manager, [], [manager, managedRep]);
+        var controller = new CommercialIntelligenceController(
+            context,
+            null!,
+            null!,
+            new TestRoleGate(true),
+            new FixedAccountScopeResolver(managedScope))
+        {
+            ControllerContext = new ControllerContext
+            {
+                HttpContext = new DefaultHttpContext { User = Principal(tenant, manager) }
+            }
+        };
+
+        var response = Assert.IsType<OkObjectResult>(await controller.SalesToday(default));
+        using var document = JsonDocument.Parse(JsonSerializer.Serialize(
+            response.Value, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+
+        Assert.Equal("managed_scope", document.RootElement.GetProperty("scope").GetString());
+        var reasons = document.RootElement.GetProperty("attentionItems").EnumerateArray()
+            .Select(x => x.GetProperty("reason").GetString()).ToArray();
+        Assert.Equal(["MANAGED_TASK", "MANAGER_TASK"], reasons.Order().ToArray());
+        Assert.DoesNotContain("OTHER_TEAM_TASK", reasons);
+    }
+
+    [Fact]
     public async Task TeamOverview_ForIndividualRepIsForbidden()
     {
         const long tenant = 87_220;
@@ -473,6 +519,16 @@ public sealed class CommercialIntelligenceControllerFocusedTests
             Task.FromResult(manager ? RoleRanks.Manager : RoleRanks.Member);
         public Task<bool> IsManagerOrAdminAsync(long roleId, long businessUnitId) => Task.FromResult(manager);
         public Task<bool> CanManageRoleAsync(long callerRoleId, long? targetRoleId, long businessUnitId) => Task.FromResult(manager);
+    }
+
+    private sealed class FixedAccountScopeResolver(AccountTeamScope scope) : IAccountTeamScopeResolver
+    {
+        public Task<AccountTeamScope> ResolveAsync(
+            long userId,
+            long roleId,
+            long businessUnitId,
+            DateTime asOfUtc,
+            CancellationToken ct = default) => Task.FromResult(scope);
     }
 
     private static User User(long id, long tenant, string email) => new()

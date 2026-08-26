@@ -19,7 +19,7 @@ import type { LeadDecisionWorkbenchDTO } from '../../../api/services/leadDecisio
 import { openAuthenticatedFile } from '../../../utils/authenticatedFile';
 import { formatDateSafe } from '../../../utils/dates';
 import { presentableErrorMessage } from '../../../utils/apiErrors';
-import { inspectableEvidenceUrl } from './evidenceRules';
+import { evidenceRenderKey, inspectableEvidenceUrl } from './evidenceRules';
 import FeatureHelp from '../../../components/common/FeatureHelp';
 
 const SourceEvidencePanel: React.FC<{ workbench: LeadDecisionWorkbenchDTO; compact?: boolean }> = ({ workbench, compact = false }) => {
@@ -77,11 +77,11 @@ const SourceEvidencePanel: React.FC<{ workbench: LeadDecisionWorkbenchDTO; compa
           <Typography variant="caption" color="text.disabled" sx={{ display: 'block', mt: 0.5, fontFamily: 'monospace', overflowWrap: 'anywhere' }}>{workbench.emailMessageId || 'Message-ID not captured'}</Typography>
         </Paper>
 
-        {workbench.evidence.map((item) => {
+        {workbench.evidence.map((item, index) => {
           const sourceUrl = inspectableEvidenceUrl(item);
           const canInspect = Boolean(sourceUrl);
           return (
-          <Paper key={`${item.occurrenceId}-${item.name}`} variant="outlined" sx={{ p: 1.5, borderRadius: 2 }}>
+          <Paper key={evidenceRenderKey(item, index)} variant="outlined" sx={{ p: 1.5, borderRadius: 2 }}>
             <Stack direction="row" spacing={1.25} sx={{ alignItems: 'flex-start' }}>
               <DocumentIcon color={canInspect ? 'primary' : 'disabled'} fontSize="small" />
               <Box sx={{ flex: 1, minWidth: 0 }}>
