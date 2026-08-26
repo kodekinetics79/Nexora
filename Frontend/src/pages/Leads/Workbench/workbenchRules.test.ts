@@ -3,6 +3,7 @@ import type { LeadDecisionWorkbenchDTO } from '../../../api/services/leadDecisio
 import {
   blockerAction,
   countDecisions,
+  decisionRecordIsLocked,
   fitAssessmentDraftComplete,
   initializeDecisionMap,
   promotionBlockers,
@@ -149,5 +150,22 @@ describe('Lead Decision Workbench rules', () => {
 
     expect(promotionBlockers({ workbench: record, decisions, fitAssessment: fit, dirty: false, participationStatus: 'COMMITTED', participationVersion: 9 }))
       .toContain('Resolve the 1 line awaiting clarification before promotion.');
+  });
+
+  it('locks a committed full no-bid and any already-promoted decision record', () => {
+    const noBid = {
+      101: { decision: 'NoBid' as const, reasonCode: 'OUT_OF_SCOPE' },
+      102: { decision: 'NoBid' as const, reasonCode: 'OUT_OF_SCOPE' },
+      103: { decision: 'NoBid' as const, reasonCode: 'OUT_OF_SCOPE' },
+    };
+    expect(decisionRecordIsLocked(workbench({ participationStatus: 'COMMITTED' }), noBid)).toBe(true);
+    expect(decisionRecordIsLocked(workbench({ participationStatus: 'DRAFT' }), noBid)).toBe(false);
+    expect(decisionRecordIsLocked(workbench({ promotion: {
+      rfqId: 77,
+      leadRevisionNumber: 1,
+      participationVersion: 1,
+      promotedLineCount: 1,
+      promotedAtUtc: '2026-08-25T12:00:00Z',
+    } }), initializeDecisionMap(workbench()))).toBe(true);
   });
 });

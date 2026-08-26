@@ -72,7 +72,13 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
             : null;
         var tx = _db.Database.CurrentTransaction!;
         if (_db.Database.IsNpgsql())
+        {
+            // Serialize the idempotency scope first. The inquiry lock below may legitimately
+            // differ for two conflicting payloads; without this lock they race to the unique key
+            // and the loser surfaces as a 500 instead of a deterministic conflict.
+            await _db.Database.ExecuteSqlInterpolatedAsync($"SELECT pg_advisory_xact_lock(hashtextextended({$"lead-reconcile-idempotency:{candidate.BusinessUnitId}:{intake.IdempotencyKey}"}, 0))", ct);
             await _db.Database.ExecuteSqlInterpolatedAsync($"SELECT pg_advisory_xact_lock(hashtextextended({candidate.BusinessUnitId + ":" + (scope is not null && normalizedRfq is not null ? scope + ":" + normalizedRfq : intake.ExternalSourceId ?? intake.ContentHash ?? fingerprint)}, 0))", ct);
+        }
         // THE EXTERNAL-DEPENDENCY CEILING IS NOT ENFORCED HERE — DELIBERATELY.
         //
         // This used to re-implement it: last 100 occurrences, hardcoded .10m, throw on
@@ -103,9 +109,10 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
 
         var replay = await _db.Set<LeadIngestionOccurrence>().AsNoTracking()
             .Where(x => x.BusinessUnitId == candidate.BusinessUnitId && x.IdempotencyKey == intake.IdempotencyKey)
-            .Select(x => new { x.Id, x.LeadId, x.LeadRevisionId, x.Classification, x.Confidence, x.DecisionReasonsJson }).SingleOrDefaultAsync(ct);
+            .SingleOrDefaultAsync(ct);
         if (replay is not null)
         {
+            LeadIdentityIdempotencyBinding.EnsureReconciliationReplay(replay, intake, fingerprint);
             var existingLead = replay.LeadId.HasValue
                 ? await _db.Leads.AsNoTracking().SingleAsync(x => x.Id == replay.LeadId.Value, ct)
                 : null;
@@ -848,8 +855,11 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
             await _db.Database.ExecuteSqlInterpolatedAsync($"SELECT pg_advisory_xact_lock(hashtextextended({$"match-review:{bu}:{occurrenceId}"}, 0))", ct);
         var occurrence = await _db.Set<LeadIngestionOccurrence>().Include(x => x.MatchCandidates)
             .SingleOrDefaultAsync(x => x.BusinessUnitId == bu && x.Id == occurrenceId, ct) ?? throw new KeyNotFoundException();
-        if (await _db.Set<LeadIdentityAuditEvent>().AsNoTracking().AnyAsync(x => x.BusinessUnitId == bu && x.IdempotencyKey == request.IdempotencyKey, ct))
+        var replayAudit = await _db.Set<LeadIdentityAuditEvent>().AsNoTracking()
+            .SingleOrDefaultAsync(x => x.BusinessUnitId == bu && x.IdempotencyKey == request.IdempotencyKey, ct);
+        if (replayAudit is not null)
         {
+            LeadIdentityIdempotencyBinding.EnsureMatchDecisionReplay(replayAudit, occurrenceId, request);
             var replayLead = occurrence.LeadId.HasValue
                 ? await _db.Leads.AsNoTracking().SingleAsync(x => x.BusinessUnitId == bu && x.Id == occurrence.LeadId.Value, ct) : null;
             if (ownsTransaction) await transaction!.CommitAsync(ct);
@@ -935,7 +945,7 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         else if (request.Action == "reject") occurrence.Classification = LeadOccurrenceClassification.RejectedOrUnprocessable;
         occurrence.Version++;
         _db.Add(new LeadIdentityAuditEvent { BusinessUnitId = bu, LeadId = occurrence.LeadId, OccurrenceId = occurrence.Id,
-            EventType = "POSSIBLE_MATCH_DECIDED", PayloadJson = JsonSerializer.Serialize(new { request.Action, request.Reason, request.CandidateLeadId, verbatimProjectionApplied = verbatimApplied }),
+            EventType = "POSSIBLE_MATCH_DECIDED", PayloadJson = JsonSerializer.Serialize(new { request.Action, request.Reason, request.CandidateLeadId, request.ExpectedVersion, verbatimProjectionApplied = verbatimApplied }),
             ActorType = "User", ActorId = actorId, CorrelationId = $"review:{occurrence.Id}", IdempotencyKey = request.IdempotencyKey, OccurredAtUtc = DateTimeOffset.UtcNow });
         await _db.SaveChangesAsync(ct);
         var lead = occurrence.LeadId.HasValue ? await _db.Leads.AsNoTracking().SingleAsync(x => x.Id == occurrence.LeadId, ct) : null;
@@ -1153,6 +1163,7 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
             .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.IdempotencyKey == idempotencyKey, ct);
         if (replay?.LeadRevisionId is long replayRevisionId)
         {
+            LeadIdentityIdempotencyBinding.EnsureHumanRevisionReplay(replay, leadId);
             var replayLead = await _db.Leads.AsNoTracking().SingleAsync(x => x.Id == leadId, ct);
             return new(replayLead.Id, replayLead.CommercialCaseReference ?? string.Empty, replay.Id,
                 replayRevisionId, replayLead.CurrentRevisionNumber, replay.Classification, replay.Confidence,
@@ -1710,5 +1721,45 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
     {
         if (!element.TryGetProperty(property, out var value) || value.ValueKind != JsonValueKind.String) return null;
         return value.GetString() is { Length: > 0 } text ? text : null;
+    }
+}
+
+internal static class LeadIdentityIdempotencyBinding
+{
+    public static void EnsureReconciliationReplay(LeadIngestionOccurrence replay,
+        LeadIntakeDescriptor request, string logicalInquiryFingerprint)
+    {
+        if (!string.Equals(replay.LogicalInquiryFingerprint, logicalInquiryFingerprint, StringComparison.Ordinal)
+            || !string.Equals(replay.SourceChannel, request.SourceChannel, StringComparison.Ordinal)
+            || !string.Equals(replay.ExternalSourceId, request.ExternalSourceId, StringComparison.Ordinal)
+            || !string.Equals(replay.ContentHash, request.ContentHash, StringComparison.Ordinal))
+            throw new InvalidOperationException("The ingestion idempotency key was already used for a different inquiry payload.");
+    }
+
+    public static void EnsureMatchDecisionReplay(LeadIdentityAuditEvent replay, long occurrenceId,
+        MatchDecisionRequest request)
+    {
+        if (replay.EventType != "POSSIBLE_MATCH_DECIDED" || replay.OccurrenceId != occurrenceId)
+            throw new InvalidOperationException("The match-decision idempotency key was already used for a different operation.");
+        using var payload = JsonDocument.Parse(replay.PayloadJson);
+        var root = payload.RootElement;
+        var action = root.TryGetProperty("Action", out var actionElement) ? actionElement.GetString() : null;
+        var reason = root.TryGetProperty("Reason", out var reasonElement) ? reasonElement.GetString() : null;
+        long? candidateLeadId = root.TryGetProperty("CandidateLeadId", out var candidateElement)
+            && candidateElement.ValueKind == JsonValueKind.Number ? candidateElement.GetInt64() : null;
+        int? expectedVersion = root.TryGetProperty("ExpectedVersion", out var versionElement)
+            && versionElement.ValueKind == JsonValueKind.Number ? versionElement.GetInt32() : null;
+        if (!string.Equals(action, request.Action, StringComparison.Ordinal)
+            || !string.Equals(reason, request.Reason, StringComparison.Ordinal)
+            || candidateLeadId != request.CandidateLeadId
+            || expectedVersion.HasValue && expectedVersion.Value != request.ExpectedVersion)
+            throw new InvalidOperationException("The match-decision idempotency key was already used for a different decision payload.");
+    }
+
+    public static void EnsureHumanRevisionReplay(LeadIngestionOccurrence replay, long leadId)
+    {
+        if (replay.LeadId != leadId || replay.RecordKind != LeadOccurrenceRecordKind.IdentityBaseline
+            || !string.Equals(replay.SourceChannel, "HumanCorrection", StringComparison.Ordinal))
+            throw new InvalidOperationException("The human-revision idempotency key was already used for a different Lead or operation.");
     }
 }

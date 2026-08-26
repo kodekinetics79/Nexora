@@ -56,6 +56,17 @@ export const countDecisions = (decisions: DecisionMap): DecisionCounts => {
   return counts;
 };
 
+export const decisionRecordIsLocked = (
+  workbench: Pick<LeadDecisionWorkbenchDTO, 'participationStatus' | 'promotion'>,
+  decisions: DecisionMap,
+): boolean => {
+  if (workbench.promotion) return true;
+  const counts = countDecisions(decisions);
+  return workbench.participationStatus === 'COMMITTED'
+    && counts.total > 0
+    && counts.noBid === counts.total;
+};
+
 export const validGovernedDecision = (decision: EditableLineDecision): boolean => {
   if (decision.decision === 'Pending' || decision.decision === 'Bid') return true;
   return Boolean(decision.reasonCode?.trim());

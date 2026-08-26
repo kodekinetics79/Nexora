@@ -143,6 +143,56 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
         Assert.Equal(20, await context.Rfqitems.AsNoTracking().CountAsync(x => x.Rfqid == promoted.RfqId));
     }
 
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task Full_no_bid_disqualifies_the_lead_and_can_never_create_an_rfq()
+    {
+        var scenario = await CreateScenarioAsync([
+            Line("00010", 3, "EA", "SAR", "DECLINED-01"),
+            Line("00020", 5, "EA", "SAR", "DECLINED-02")
+        ], "full-no-bid");
+        await using var context = database.ContextFor(Tenant);
+        var participation = Service(context);
+        var fit = await FitAsync(participation, scenario, "full-no-bid");
+        var lines = scenario.LineRevisionIds.Select(id => new LeadLineParticipationCommand(
+            id,
+            LeadLineParticipationChoice.NoBid,
+            ReasonCode: "OUT_OF_SCOPE",
+            ReasonNotes: "The requested line is outside the approved product scope."))
+            .ToArray();
+
+        var decision = await participation.CommitDecisionAsync(Tenant, scenario.LeadId,
+            new CommitLeadParticipationCommand(
+                scenario.RevisionId,
+                scenario.RevisionNumber,
+                null,
+                true,
+                fit.Id,
+                lines,
+                $"warning-decision:full-no-bid:{scenario.LeadId}",
+                "tests",
+                "OUT_OF_SCOPE",
+                "The bid desk confirmed that none of the requested scope can be supplied."));
+
+        Assert.Equal(LeadParticipationOutcome.NoBid, decision.Outcome);
+        Assert.All(decision.Lines, line => Assert.Equal(LeadLineParticipationChoice.NoBid, line.Choice));
+        var lead = await context.Leads.AsNoTracking().Include(x => x.LeadStatus)
+            .SingleAsync(x => x.BusinessUnitId == Tenant && x.Id == scenario.LeadId);
+        Assert.Equal("DISQUALIFIED", lead.LeadStatus?.SetupCode);
+        Assert.Empty(await context.Set<RfqPromotion>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == Tenant && x.LeadId == scenario.LeadId).ToListAsync());
+        Assert.Empty(await context.Rfqs.AsNoTracking()
+            .Where(x => x.BusinessUnitId == Tenant && x.LeadId == scenario.LeadId).ToListAsync());
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => new RfqPromotionService(context,
+                new ExactEvidenceStorage(scenario.StorageUri, scenario.EvidenceHash, scenario.EvidenceBytes))
+            .PromoteAsync(Tenant, scenario.LeadId, Promotion(scenario, decision, "full-no-bid")));
+        Assert.Empty(await context.Set<RfqPromotion>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == Tenant && x.LeadId == scenario.LeadId).ToListAsync());
+        Assert.Empty(await context.Rfqs.AsNoTracking()
+            .Where(x => x.BusinessUnitId == Tenant && x.LeadId == scenario.LeadId).ToListAsync());
+    }
+
     private async Task<Scenario> CreateScenarioAsync(IReadOnlyList<LeadItem> lines, string suffix)
     {
         await SeedTenantAsync();
