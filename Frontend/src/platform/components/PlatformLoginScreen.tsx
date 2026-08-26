@@ -282,6 +282,16 @@ export default function PlatformLoginScreen() {
           </Stack>
         </form>
         )}
+
+        <Button
+          component="a"
+          href="/login"
+          fullWidth
+          color="inherit"
+          sx={{ mt: 2, textTransform: 'none' }}
+        >
+          Back to tenant sign-in
+        </Button>
       </Paper>
     </Box>
   );

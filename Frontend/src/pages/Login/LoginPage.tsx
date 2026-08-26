@@ -798,6 +798,26 @@ const LoginPage: React.FC = () => {
                 </Button>
               )}
             </form>
+
+            {!businessUnitOptions && (
+              <Box
+                component="aside"
+                aria-label="Platform administration sign-in"
+                sx={{ mt: 3, pt: 2.5, borderTop: '1px solid', borderColor: 'divider', textAlign: 'center' }}
+              >
+                <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.75 }}>
+                  Platform Owners use a separate control-plane account for cross-tenant administration.
+                </Typography>
+                <Button
+                  variant="text"
+                  size="small"
+                  onClick={() => navigate('/platform/tenants')}
+                  sx={{ fontWeight: 800, textTransform: 'none' }}
+                >
+                  Platform Owner? Manage or delete tenants
+                </Button>
+              </Box>
+            )}
           </Box>
         </FormSection>
       </GlassCard>
