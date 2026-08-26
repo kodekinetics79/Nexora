@@ -39,7 +39,7 @@ const orDash = (value: string | number | null | undefined) =>
 
 interface Props {
   tenant: Tenant;
-  /** Read once by the page shell so the banners and the Lifecycle tab agree. */
+  /** Read once by the page shell so the banners and the Offboarding & deletion tab agree. */
   offboarding: TenantOffboardingStatus | undefined;
   /** True when the offboarding read FAILED, which is not the same as a tenant with no clock. */
   offboardingUnavailable?: boolean;
@@ -75,7 +75,7 @@ export default function OverviewTab({ tenant, offboarding, offboardingUnavailabl
             This trial ended {tenant.trialEndsOn ? fmtDate(tenant.trialEndsOn) : 'in the past'}
           </AlertTitle>
           The workspace is still being served for free. Convert it to a billable plan on the Commercial tab, or
-          suspend it on Lifecycle.
+          suspend it on Offboarding &amp; deletion.
         </Alert>
       )}
 
@@ -104,7 +104,7 @@ export default function OverviewTab({ tenant, offboarding, offboardingUnavailabl
         <Alert severity="warning" sx={{ borderRadius: 2 }}>
           <AlertTitle sx={{ fontWeight: 800 }}>Offboarding state unknown</AlertTitle>
           The retention and purge record for this tenant could not be read, so this page cannot
-          tell you whether a deletion is scheduled. Open the Lifecycle tab before acting on it.
+          tell you whether a deletion is scheduled. Open Offboarding &amp; deletion before acting on it.
         </Alert>
       )}
 

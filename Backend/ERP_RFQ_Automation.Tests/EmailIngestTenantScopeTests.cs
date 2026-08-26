@@ -1,5 +1,6 @@
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.MultiTenancy;
+using ERP_RFQ_Automation.Platform.Lifecycle;
 using ERP_RFQ_Automation.Services;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.Data.Sqlite;
@@ -126,6 +127,34 @@ public sealed class EmailIngestTenantScopeTests
     }
 
     /// <summary>
+    /// A mailbox may be retired after the platform discovery query has copied its handle but before
+    /// the tenant-scoped context re-reads the credential. The scoped row is authoritative: the stale
+    /// handle must not cause one final connection attempt, poll-ledger write, or failed health entry.
+    /// </summary>
+    [Fact]
+    public async Task A_mailbox_deactivated_after_discovery_is_not_polled()
+    {
+        using var host = new PollerHost();
+        await host.SeedMailboxAsync(TenantA);
+
+        var gate = new DeactivatingWorkGate(host.Context);
+        var report = await host.PollAsync(
+            tenantScope: host.Services.GetRequiredService<ITenantScopeAccessor>(),
+            workGate: gate);
+
+        Assert.True(gate.Deactivated);
+        Assert.Empty(report.Mailboxes);
+
+        await using var verify = host.Context();
+        var config = await verify.EmailConfigurations.IgnoreQueryFilters()
+            .SingleAsync(c => c.BusinessUnitId == TenantA);
+        Assert.False(config.IsActive);
+        Assert.Null(config.LastPollAttemptOn);
+        Assert.Null(config.LastSuccessfulPollOn);
+        Assert.Equal(0, config.ConsecutivePollFailures);
+    }
+
+    /// <summary>
     /// A real container over a real SQLite database, wired the way Program.cs wires the background
     /// path: a singleton <see cref="ITenantScopeAccessor"/>, a SCOPED <see cref="ITenantContext"/>
     /// that reads it once at construction, and a scoped DbContext that captures that.
@@ -195,7 +224,9 @@ public sealed class EmailIngestTenantScopeTests
             await db.SaveChangesAsync();
         }
 
-        public Task<MailboxPollReport> PollAsync(ITenantScopeAccessor tenantScope)
+        public Task<MailboxPollReport> PollAsync(
+            ITenantScopeAccessor tenantScope,
+            ITenantWorkGate? workGate = null)
         {
             var service = new EmailService(
                 context: Context(),
@@ -206,7 +237,7 @@ public sealed class EmailIngestTenantScopeTests
                 configuration: new ConfigurationBuilder().Build(),
                 storage: new TenantWorkGateStorage(_root),
                 pollerHealth: null,
-                workGate: null,
+                workGate: workGate,
                 tenantScope: tenantScope);
             return service.FetchAndSaveLeadsAsync();
         }
@@ -229,6 +260,32 @@ public sealed class EmailIngestTenantScopeTests
                 => BusinessUnitId = scope.BusinessUnitId;
 
             public long? BusinessUnitId { get; }
+        }
+    }
+
+    /// <summary>
+    /// Deterministically places deactivation in the production race window: EmailService calls the
+    /// work gate after its unscoped handle snapshot and before its scoped credential re-read.
+    /// </summary>
+    private sealed class DeactivatingWorkGate(Func<ErpRfqAutomationContext> context) : ITenantWorkGate
+    {
+        public bool Deactivated { get; private set; }
+
+        public Task<bool> MayConsumeResourcesAsync(long businessUnitId, CancellationToken ct = default)
+            => Task.FromResult(true);
+
+        public async Task<IReadOnlyList<long>> FilterServiceableAsync(
+            IEnumerable<long> businessUnitIds,
+            CancellationToken ct = default)
+        {
+            var admitted = businessUnitIds.Distinct().ToArray();
+            await using var db = context();
+            var mailbox = await db.EmailConfigurations.IgnoreQueryFilters()
+                .SingleAsync(c => admitted.Contains(c.BusinessUnitId), ct);
+            mailbox.IsActive = false;
+            await db.SaveChangesAsync(ct);
+            Deactivated = true;
+            return admitted;
         }
     }
 }

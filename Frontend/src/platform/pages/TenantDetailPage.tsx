@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { Box, Button, Tab, Tabs } from '@mui/material';
+import { Box, Button, Tab, Tabs, Tooltip } from '@mui/material';
 import { ArrowBack as BackIcon, DeleteOutlined as DeleteIcon, EditOutlined as EditIcon } from '@mui/icons-material';
 import Stack from '../components/Flex';
 import { platformApi } from '../api/client';
@@ -23,49 +23,14 @@ import DataStorageTab from './tenant/DataStorageTab';
 import ProfileAccessTab from './tenant/ProfileAccessTab';
 import ProvisioningDiagnosticsTab from './tenant/ProvisioningDiagnosticsTab';
 import UsersTab from './tenant/UsersTab';
-
-const TABS = [
-  { key: 'overview', label: 'Overview' },
-  // Second, and named after what the operator came to do.
-  //
-  // Activation used to render inside Lifecycle — the tab you open to DELETE a tenant, ninth of
-  // eleven — because activation is technically the first lifecycle transition. That is true from
-  // the inside and useless from the outside: an operator with a tenant stuck in Provisioning does
-  // not go looking for it under the destructive verbs, and one sat unactivatable for three days
-  // with every provisioning step recorded Succeeded because the only screen naming the blockers,
-  // and carrying the only Activate button, was filed there. It is deliberately not on Lifecycle
-  // as well: two Activate buttons on two tabs is two ways to fire the same one-way transition,
-  // and the second one is always the one nobody tested.
-  { key: 'activation', label: 'Activation' },
-  { key: 'profile-access', label: 'Profile & access' },
-  // Next to Profile & access because they answer adjacent questions — who this customer is,
-  // and who inside it can sign in. TenantAdmin-gated, like the founding-administrator panel it
-  // sits beside: reading and staffing a customer's roster is the same class of authority.
-  { key: 'users', label: 'Users' },
-  // Deliberately high in the order and visible to every platform role: it is read-only, and it
-  // is the screen somebody opens when a tenant is stuck. Burying it behind the money tabs is
-  // how "Provisioning failed." stayed the whole story for as long as it did.
-  { key: 'provisioning', label: 'Provisioning' },
-  { key: 'commercial', label: 'Commercial' },
-  // Named "Modules" rather than "Entitlements" because that is the noun an operator uses when
-  // they arrive here, and because the screen is now a control rather than a report. The URL key
-  // stays `entitlements` so links already pasted into tickets keep opening the right tab.
-  { key: 'entitlements', label: 'Modules' },
-  { key: 'support', label: 'Support' },
-  { key: 'audit', label: 'Audit' },
-  { key: 'lifecycle', label: 'Lifecycle' },
-  { key: 'ai-governance', label: 'AI governance' },
-  { key: 'data-storage', label: 'Data & storage' },
-] as const;
-
-type TabKey = (typeof TABS)[number]['key'];
+import { TENANT_DETAIL_TABS, type TenantDetailTabKey } from './tenantNavigation';
 
 export default function TenantDetailPage() {
   const { id = '' } = useParams();
   const navigate = useNavigate();
   const permissions = usePlatformPermissions();
   const availableTabs = useMemo(
-    () => TABS.filter((entry) =>
+    () => TENANT_DETAIL_TABS.filter((entry) =>
       (entry.key !== 'support' || permissions.canAdministerTenants)
       && (entry.key !== 'profile-access' || permissions.canAdministerTenants)
       && (entry.key !== 'users' || permissions.canAdministerTenants)
@@ -73,13 +38,13 @@ export default function TenantDetailPage() {
       && (entry.key !== 'data-storage' || permissions.isOwner)),
     [permissions.canAdministerTenants, permissions.isOwner],
   );
-  // The tab lives in the URL so a link to a customer's lifecycle screen is a link that
-  // opens on it — which is what an operator pastes into a ticket.
+  // The tab lives in the URL so a link to a customer's offboarding screen opens on it — which is
+  // what an operator pastes into a ticket. The legacy key remains stable for existing links.
   const [searchParams, setSearchParams] = useSearchParams();
 
-  const tab = useMemo<TabKey>(() => {
+  const tab = useMemo<TenantDetailTabKey>(() => {
     const requested = searchParams.get('tab');
-    return (availableTabs.find((entry) => entry.key === requested)?.key ?? 'overview') as TabKey;
+    return (availableTabs.find((entry) => entry.key === requested)?.key ?? 'overview') as TenantDetailTabKey;
   }, [availableTabs, searchParams]);
 
   const openTab = (next: string) => {
@@ -94,8 +59,8 @@ export default function TenantDetailPage() {
     enabled: id !== '',
   });
 
-  // Read here rather than inside the Lifecycle tab so the Overview banner and the
-  // Lifecycle screen are looking at the same retention clock, not two fetches of it.
+  // Read here rather than inside the offboarding tab so the Overview banner and the deletion
+  // screen are looking at the same retention clock, not two fetches of it.
   const offboardingQuery = useQuery({
     queryKey: platformKeys.offboarding(id),
     queryFn: () => platformApi.getOffboarding(id),
@@ -135,9 +100,11 @@ export default function TenantDetailPage() {
               </Button>
             )}
             {permissions.isOwner && (
-              <Button size="small" variant="outlined" color="error" startIcon={<DeleteIcon />} onClick={() => openTab('lifecycle')}>
-                Delete / offboard
-              </Button>
+              <Tooltip describeChild title="Open governed tenant offboarding, retention, and deletion controls">
+                <Button size="small" variant="outlined" color="error" startIcon={<DeleteIcon />} onClick={() => openTab('lifecycle')}>
+                  Offboard / delete tenant
+                </Button>
+              </Tooltip>
             )}
             <BillingModeChip mode={tenant.billingMode} />
             <PlanChip tier={tenant.planCode ?? 'none'} />
@@ -148,7 +115,7 @@ export default function TenantDetailPage() {
 
       <Tabs
         value={tab}
-        onChange={(_event, next: TabKey) => openTab(next)}
+        onChange={(_event, next: TenantDetailTabKey) => openTab(next)}
         variant="scrollable"
         scrollButtons="auto"
         aria-label="Tenant operations"
