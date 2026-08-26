@@ -28408,6 +28408,9 @@ namespace ERP_RFQ_Automation.Migrations
                     b.Property<long?>("CurrencyId")
                         .HasColumnType("bigint");
 
+                    b.Property<bool>("DecisionIsCommitted")
+                        .HasColumnType("boolean");
+
                     b.Property<long>("LeadItemRevisionId")
                         .HasColumnType("bigint");
 
@@ -28451,7 +28454,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.HasIndex("BusinessUnitId", "CurrencyId");
 
-                    b.HasIndex("BusinessUnitId", "ParticipationDecisionId", "LeadId", "LeadRevisionId")
+                    b.HasIndex("BusinessUnitId", "ParticipationDecisionId", "LeadId", "LeadRevisionId", "DecisionIsCommitted")
                         .HasDatabaseName("IX_LeadLineParticipationDecisions_BusinessUnitId_Participatio~1");
 
                     b.HasIndex("BusinessUnitId", "ParticipationDecisionId", "LeadItemRevisionId")
@@ -28465,7 +28468,7 @@ namespace ERP_RFQ_Automation.Migrations
 
                             t.HasCheckConstraint("CK_LeadLineParticipationDecisions_NoBidReason", "\"Choice\" NOT IN ('NoBid','Clarify') OR ((\"ReasonCode\" IS NOT NULL AND trim(\"ReasonCode\") <> '') OR (\"ReasonNotes\" IS NOT NULL AND length(trim(\"ReasonNotes\")) >= 5))");
 
-                            t.HasCheckConstraint("CK_LeadLineParticipationDecisions_BidCommercialIdentity", "\"Choice\" <> 'Bid' OR (\"Quantity\" > 0 AND \"UomId\" IS NOT NULL AND \"CurrencyId\" IS NOT NULL AND \"UnitOfMeasure\" IS NOT NULL AND trim(\"UnitOfMeasure\") <> '' AND \"Currency\" IS NOT NULL AND trim(\"Currency\") <> '')");
+                            t.HasCheckConstraint("CK_LeadLineParticipationDecisions_BidCommercialIdentity", "NOT (\"DecisionIsCommitted\" AND \"Choice\" = 'Bid') OR (\"Quantity\" > 0 AND \"UomId\" IS NOT NULL AND \"CurrencyId\" IS NOT NULL AND \"UnitOfMeasure\" IS NOT NULL AND trim(\"UnitOfMeasure\") <> '' AND \"Currency\" IS NOT NULL AND trim(\"Currency\") <> '')");
 
                             t.HasCheckConstraint("CK_LeadLineParticipationDecisions_Quantity", "\"Quantity\" IS NULL OR \"Quantity\" > 0");
                         });
@@ -28533,6 +28536,9 @@ namespace ERP_RFQ_Automation.Migrations
                     b.HasKey("Id");
 
                     b.HasAlternateKey("BusinessUnitId", "Id", "LeadId", "LeadRevisionId");
+
+                    b.HasAlternateKey("BusinessUnitId", "Id", "LeadId", "LeadRevisionId", "IsCommitted")
+                        .HasName("AK_LeadParticipationDecisions_CommittedConsistency");
 
                     b.HasIndex("BusinessUnitId", "FitAssessmentId", "LeadId", "LeadRevisionId");
 
@@ -28646,9 +28652,10 @@ namespace ERP_RFQ_Automation.Migrations
 
                     b.HasOne("ERP_RFQ_Automation.CommercialCases.Participation.LeadParticipationDecision", null)
                         .WithMany()
-                        .HasForeignKey("BusinessUnitId", "ParticipationDecisionId", "LeadId", "LeadRevisionId")
-                        .HasPrincipalKey("BusinessUnitId", "Id", "LeadId", "LeadRevisionId")
+                        .HasForeignKey("BusinessUnitId", "ParticipationDecisionId", "LeadId", "LeadRevisionId", "DecisionIsCommitted")
+                        .HasPrincipalKey("BusinessUnitId", "Id", "LeadId", "LeadRevisionId", "IsCommitted")
                         .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("FK_LeadLineParticipationDecisions_DecisionCommitConsistency")
                         .IsRequired();
 
                     b.HasOne("ERP_RFQ_Automation.Models.SetUom", null)

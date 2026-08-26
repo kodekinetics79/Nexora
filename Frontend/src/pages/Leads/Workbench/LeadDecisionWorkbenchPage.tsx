@@ -444,7 +444,7 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
             variant="outlined"
             startIcon={<SaveIcon />}
             disabled={!canEdit || !dirty || (fitAssessment?.version ?? 0) <= 0
-              || (counts.bid > 0 && !bidValuesReady) || decisionMutationPending || decisionRecordLocked}
+              || decisionMutationPending || decisionRecordLocked}
             onClick={() => participationMutation.mutate({ commit: false })}
           >
             Save draft

@@ -168,6 +168,8 @@ public sealed class LeadParticipationPromotionBoundaryTests
         };
         var migration = File.ReadAllText(Path.Combine(FindRepositoryRoot(),
             "Backend/ERP_RFQ_Automation/MigrationsBaseline/20260825043000_LeadParticipationAndRfqPromotion.cs"));
+        var draftIdentityMigration = File.ReadAllText(Path.Combine(FindRepositoryRoot(),
+            "Backend/ERP_RFQ_Automation/MigrationsBaseline/20260826134500_ParticipationDraftCommercialIdentity.cs"));
 
         foreach (var (type, table) in expectedTables)
         {
@@ -186,6 +188,7 @@ public sealed class LeadParticipationPromotionBoundaryTests
         var participationLineType = context.Model.FindEntityType(typeof(LeadLineParticipationDecision))!;
         Assert.NotNull(participationLineType.FindProperty(nameof(LeadLineParticipationDecision.LeadId)));
         Assert.NotNull(participationLineType.FindProperty(nameof(LeadLineParticipationDecision.LeadRevisionId)));
+        Assert.NotNull(participationLineType.FindProperty(nameof(LeadLineParticipationDecision.DecisionIsCommitted)));
         Assert.Contains(participationLineType.GetForeignKeys(), fk =>
             fk.PrincipalEntityType.ClrType == typeof(LeadParticipationDecision)
             && fk.Properties.Select(x => x.Name).SequenceEqual(new[]
@@ -193,7 +196,8 @@ public sealed class LeadParticipationPromotionBoundaryTests
                 nameof(LeadLineParticipationDecision.BusinessUnitId),
                 nameof(LeadLineParticipationDecision.ParticipationDecisionId),
                 nameof(LeadLineParticipationDecision.LeadId),
-                nameof(LeadLineParticipationDecision.LeadRevisionId)
+                nameof(LeadLineParticipationDecision.LeadRevisionId),
+                nameof(LeadLineParticipationDecision.DecisionIsCommitted)
             }));
         Assert.Contains(participationLineType.GetForeignKeys(), fk =>
             fk.PrincipalEntityType.ClrType == typeof(LeadItemRevision)
@@ -209,6 +213,12 @@ public sealed class LeadParticipationPromotionBoundaryTests
         Assert.Contains("\"ParticipationDecisionId\" bigint", migration, StringComparison.Ordinal);
         Assert.Contains("\"SourceLeadItemRevisionId\" bigint", migration, StringComparison.Ordinal);
         Assert.Contains("\"SourceBusinessUnitId\" bigint", migration, StringComparison.Ordinal);
+        Assert.Contains("DecisionIsCommitted", draftIdentityMigration, StringComparison.Ordinal);
+        Assert.Contains("AK_LeadParticipationDecisions_CommittedConsistency", draftIdentityMigration, StringComparison.Ordinal);
+        Assert.Contains("FK_LeadLineParticipationDecisions_DecisionCommitConsistency", draftIdentityMigration, StringComparison.Ordinal);
+        Assert.Contains("NOT (\"DecisionIsCommitted\" AND \"Choice\" = 'Bid')", draftIdentityMigration, StringComparison.Ordinal);
+        Assert.Contains("DISABLE TRIGGER \"TR_LeadLineParticipationDecisions_AppendOnly\"", draftIdentityMigration, StringComparison.Ordinal);
+        Assert.Contains("ENABLE TRIGGER \"TR_LeadLineParticipationDecisions_AppendOnly\"", draftIdentityMigration, StringComparison.Ordinal);
         var lineType = context.Model.FindEntityType(typeof(Rfqitem))!;
         var revisionLineForeignKey = Assert.Single(lineType.GetForeignKeys(), fk => fk.PrincipalEntityType.ClrType == typeof(LeadItemRevision));
         Assert.Equal(
@@ -279,6 +289,7 @@ public sealed class LeadParticipationPromotionBoundaryTests
 
         Assert.Contains("20260825043000_LeadParticipationAndRfqPromotion", context.Database.GetMigrations());
         Assert.Contains("20260826010000_ReserveConvertedLeadStatusForRfqPromotion", context.Database.GetMigrations());
+        Assert.Contains("20260826134500_ParticipationDraftCommercialIdentity", context.Database.GetMigrations());
     }
 
     [Fact]

@@ -70,6 +70,12 @@ public sealed class LeadLineParticipationDecision
     public long LeadId { get; set; }
     public long LeadRevisionId { get; set; }
     public long ParticipationDecisionId { get; set; }
+    /// <summary>
+    /// Database-bound mirror of the immutable parent decision state. The composite foreign key
+    /// prevents a line from claiming draft semantics beneath a committed decision, while allowing
+    /// incomplete commercial identity to be retained safely in a draft.
+    /// </summary>
+    public bool DecisionIsCommitted { get; set; }
     public long LeadItemRevisionId { get; set; }
     public LeadLineParticipationChoice Choice { get; set; }
     public string? ReasonCode { get; set; }

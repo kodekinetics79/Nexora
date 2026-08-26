@@ -81,24 +81,46 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
 
     [Fact]
     [Trait("Category", "PostgreSQL")]
-    public async Task A_bid_draft_rejects_a_unit_that_is_not_in_the_active_tenant_master()
+    public async Task Incomplete_bid_draft_is_durable_but_cannot_be_committed_or_promoted()
     {
         var scenario = await CreateScenarioAsync([
-            Line("00010", 1, "JOB", "SAR", "SERVICE-JOB")
-        ], "draft-invalid-uom");
+            Line("00010", 4, null, null, "DRAFT-INCOMPLETE")
+        ], "incomplete-draft");
         await using var context = database.ContextFor(Tenant);
         var participation = Service(context);
-        var fit = await FitAsync(participation, scenario, "draft-invalid-uom");
-        var draft = new CommitLeadParticipationCommand(
-            scenario.RevisionId, scenario.RevisionNumber, null, false, fit.Id,
-            [Bid(scenario.LineRevisionIds[0], "Reviewed by the bid desk.")],
-            $"warning-decision:draft-invalid-uom:{scenario.LeadId}", "tests");
+        var fit = await FitAsync(participation, scenario, "incomplete-draft");
+        var line = Bid(scenario.LineRevisionIds[0],
+            "The draft retains the buyer line while commercial identity is completed.");
 
-        var error = await Assert.ThrowsAsync<ArgumentException>(() =>
-            participation.CommitDecisionAsync(Tenant, scenario.LeadId, draft));
+        var draft = await participation.CommitDecisionAsync(Tenant, scenario.LeadId,
+            new CommitLeadParticipationCommand(
+                scenario.RevisionId, scenario.RevisionNumber, null, false, fit.Id, [line],
+                $"warning-decision:incomplete-draft:{scenario.LeadId}", "tests"));
 
-        Assert.Contains("active tenant unit of measure", error.Message, StringComparison.OrdinalIgnoreCase);
-        Assert.Empty(await context.Set<LeadParticipationDecision>().AsNoTracking()
+        Assert.False(draft.IsCommitted);
+        Assert.Equal(LeadParticipationOutcome.Pending, draft.Outcome);
+        var draftLine = Assert.Single(draft.Lines);
+        Assert.Equal(4, draftLine.Quantity);
+        Assert.Null(draftLine.UomId);
+        Assert.Null(draftLine.CurrencyId);
+        Assert.Empty(await context.Rfqs.AsNoTracking()
+            .Where(x => x.BusinessUnitId == Tenant && x.LeadId == scenario.LeadId).ToListAsync());
+
+        var rejected = await Assert.ThrowsAsync<ArgumentException>(() =>
+            participation.CommitDecisionAsync(Tenant, scenario.LeadId,
+                new CommitLeadParticipationCommand(
+                    scenario.RevisionId, scenario.RevisionNumber, draft.Sequence, true, fit.Id, [line],
+                    $"warning-decision:incomplete-commit:{scenario.LeadId}", "tests")));
+        Assert.Contains("unit of measure", rejected.Message, StringComparison.OrdinalIgnoreCase);
+
+        var persisted = await context.Set<LeadParticipationDecision>().AsNoTracking()
+            .Include(x => x.Lines)
+            .Where(x => x.BusinessUnitId == Tenant && x.LeadId == scenario.LeadId)
+            .ToListAsync();
+        var immutableDraft = Assert.Single(persisted);
+        Assert.False(immutableDraft.IsCommitted);
+        Assert.False(Assert.Single(immutableDraft.Lines).DecisionIsCommitted);
+        Assert.Empty(await context.Set<RfqPromotion>().AsNoTracking()
             .Where(x => x.BusinessUnitId == Tenant && x.LeadId == scenario.LeadId).ToListAsync());
     }
 

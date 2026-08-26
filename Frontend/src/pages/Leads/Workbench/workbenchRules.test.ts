@@ -13,7 +13,7 @@ import {
 } from './workbenchRules';
 
 describe('bidCommercialValuesReady', () => {
-  it('rejects a Bid draft whose UOM is not an active tenant master value', () => {
+  it('blocks Bid commitment when the UOM is not an active tenant master value', () => {
     expect(bidCommercialValuesReady(
       { 7: { decision: 'Bid', quantity: 1, unitOfMeasure: 'JOB', currency: 'USD' } },
       [{ code: 'EA' }],
