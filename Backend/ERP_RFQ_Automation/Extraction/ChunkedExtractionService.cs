@@ -522,7 +522,12 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
                     $"AI governance refused this request before any model call was made ({ex.Code}).",
                     input, diagnostics);
             }
-            var single = wholeDocument.Result;
+            var single = wholeDocument.Result is null
+                ? null
+                : wholeDocument.Result with
+                {
+                    Items = (wholeDocument.Result.Items ?? []).Select(WithoutServerOwnedEvidence).ToList()
+                };
             if (single is null)
                 return Failed(0, wholeDocument.OutputTruncated
                     ? $"The model ran out of output budget ({_llm.MaxOutputTokens} tokens) before it finished "
@@ -996,7 +1001,18 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
     /// call makes the same mistake impossible for every field added from now on.
     /// </summary>
     private static LeadExtractionResult WithItems(LeadExtractionResult header, List<LeadItemData> items, double overall)
-        => header with { OverallConfidence = overall, Items = items };
+        => header with
+        {
+            OverallConfidence = overall,
+            Items = items.Select(WithoutServerOwnedEvidence).ToList()
+        };
+
+    private static LeadItemData WithoutServerOwnedEvidence(LeadItemData item) => item with
+    {
+        SourceSpanVerified = false,
+        SourceExtractionJobId = null,
+        VerifiedEvidence = null
+    };
 
     /// <summary>
     /// The deterministic spreadsheet/CSV path. It produces no document-level classification
@@ -1073,7 +1089,9 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
     }
 
     private static LeadItemData MapCanonicalItem(CanonicalRfqLineItem line)
-        => new(
+    {
+        var evidence = MapCanonicalEvidence(line);
+        return new(
             CompanyRef: null, CompanyRefConfidence: 0,
             CustomerAccountPortalId: null, CustomerAccountPortalIdConfidence: 0,
             CustomerRfqno: null, CustomerRfqnoConfidence: 0,
@@ -1112,7 +1130,57 @@ public sealed class ChunkedExtractionService : IChunkedExtractionService
             LeadTimeConfidence: (double)line.LeadTimeDays.Confidence,
             ReceivedDate: null, ReceivedDateConfidence: 0,
             BidClosingDateLine: null, BidClosingDateLineConfidence: 0,
-            ItemConfidence: AverageConfidence(line));
+            ItemConfidence: AverageConfidence(line),
+            VerifiedEvidence: evidence.Count == 0 ? null : evidence);
+    }
+
+    private static List<LeadItemEvidenceData> MapCanonicalEvidence(CanonicalRfqLineItem line)
+    {
+        var result = new List<LeadItemEvidenceData>();
+        AddEvidence(result, "LineItemNo", line.LineItemNo.Evidence,
+            line.LineItemNo.Value, line.LineItemNo.Confidence);
+        AddEvidence(result, "ProductShortName", line.ProductName.Evidence,
+            line.ProductName.Value, line.ProductName.Confidence);
+        AddEvidence(result, "Quantity", line.Quantity.Evidence,
+            line.Quantity.Kind == CanonicalValueKind.Normalized
+                ? line.Quantity.Value.ToString(CultureInfo.InvariantCulture) : null,
+            line.Quantity.Confidence);
+        AddEvidence(result, "UnitOfMeasure", line.UnitOfMeasure.Evidence,
+            line.UnitOfMeasure.Value, line.UnitOfMeasure.Confidence);
+        AddEvidence(result, "UnitPrice", line.UnitPrice.Evidence,
+            line.UnitPrice.Kind == CanonicalValueKind.Normalized
+                ? line.UnitPrice.Value.ToString(CultureInfo.InvariantCulture) : null,
+            line.UnitPrice.Confidence);
+        AddEvidence(result, "Currency", line.Currency.Evidence,
+            line.Currency.Value, line.Currency.Confidence);
+        AddEvidence(result, "ManufacturerName", line.ManufacturerName.Evidence,
+            line.ManufacturerName.Value, line.ManufacturerName.Confidence);
+        AddEvidence(result, "ManufacturerPartNumber", line.ManufacturerPartNumber.Evidence,
+            line.ManufacturerPartNumber.Value, line.ManufacturerPartNumber.Confidence);
+        AddEvidence(result, "LeadTime", line.LeadTimeDays.Evidence,
+            line.LeadTimeDays.Kind == CanonicalValueKind.Normalized
+                ? line.LeadTimeDays.Value.ToString(CultureInfo.InvariantCulture) : null,
+            line.LeadTimeDays.Confidence);
+        AddEvidence(result, "ItemText", line.ItemText.Evidence,
+            line.ItemText.Value, line.ItemText.Confidence);
+        return result;
+    }
+
+    private static void AddEvidence(
+        ICollection<LeadItemEvidenceData> destination,
+        string fieldName,
+        IEnumerable<SourceEvidence> evidence,
+        string? normalizedValue,
+        decimal confidence)
+    {
+        foreach (var source in evidence)
+        {
+            if (string.IsNullOrWhiteSpace(source.RawValue) || string.IsNullOrWhiteSpace(source.Location))
+                continue;
+            destination.Add(new LeadItemEvidenceData(fieldName, source.RawValue.Trim(), normalizedValue,
+                source.Location.Trim(), confidence));
+        }
+    }
 
     /// <summary>
     /// Confidence in how well this line was READ, over the fields the document actually

@@ -165,7 +165,36 @@ public sealed class EmailToLeadVerticalSlicePostgreSqlTests(PostgreSqlTestDataba
             Assert.Contains(lines, i => (i.ProductShortName ?? "").Contains("Ball valve DN50"));
             Assert.Contains(lines, i => (i.ProductShortName ?? "").Contains("Ring joint gasket"));
 
-            // (h) The evidence chain is intact: the raw .eml is still addressable and the
+            // (h) Assembly preserved the deterministic attachment lineage rather than only
+            //     copying commercial values into LeadItems. This is what the later promotion
+            //     gate reads: exact raw cells, exact source addresses and the canonical line
+            //     bound to the final message-level Lead line.
+            var canonicalLines = await context.Set<CanonicalLineItem>().AsNoTracking()
+                .Where(x => x.Inquiry.LeadId == lead.Id)
+                .OrderBy(x => x.LineNumber)
+                .ToListAsync();
+            Assert.Equal(5, canonicalLines.Count);
+            Assert.All(canonicalLines, x => Assert.NotNull(x.LeadItemId));
+
+            var exactEvidence = await context.Set<FieldEvidence>().AsNoTracking()
+                .Include(x => x.Region).ThenInclude(x => x.Page).ThenInclude(x => x.Document)
+                .Where(x => x.LineItem != null && x.LineItem.Inquiry.LeadId == lead.Id)
+                .ToListAsync();
+            Assert.Equal(25, exactEvidence.Count);
+            Assert.Contains(exactEvidence, x =>
+                x.FieldName == "ManufacturerPartNumber"
+                && x.RawValue == "VLV-1001"
+                && x.NormalizedValue == "VLV-1001"
+                && x.Region.SourceAddress == "'CSV'!A2"
+                && x.Region.Page.Document.OriginalFileName == "valves.csv");
+            Assert.Contains(exactEvidence, x =>
+                x.FieldName == "Quantity"
+                && x.RawValue == "60"
+                && x.NormalizedValue == "60"
+                && x.Region.SourceAddress == "'CSV'!C2"
+                && x.Region.Page.Document.OriginalFileName == "gaskets.csv");
+
+            // (i) The evidence chain is intact: the raw .eml is still addressable and the
             //     hash recorded at capture still describes it.
             Assert.False(string.IsNullOrWhiteSpace(assembly.RawEvidenceUri));
             Assert.Equal(64, assembly.RawEvidenceSha256?.Length);
@@ -175,11 +204,11 @@ public sealed class EmailToLeadVerticalSlicePostgreSqlTests(PostgreSqlTestDataba
             Assert.True(raw.Length > 0);
         }
 
-        // (i) The CSVs never reached a model. If they had, the run is neither deterministic
+        // (j) The CSVs never reached a model. If they had, the run is neither deterministic
         //     nor cheap, and the structured fast path has silently regressed.
         Assert.Equal(0, llm.CallCount);
 
-        // ---- 5. REPLAY: draining again must not manufacture a second Lead. ----
+        // ---- 5. REPLAY: draining again must not manufacture a second Lead or evidence. ----
         await EmailToLeadHarness.DrainQueueAsync(services, BusinessUnitId);
         using (var scope = services.CreateScope())
         {
@@ -188,6 +217,8 @@ public sealed class EmailToLeadVerticalSlicePostgreSqlTests(PostgreSqlTestDataba
             var context = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
             Assert.Equal(1, await context.Leads.AsNoTracking()
                 .CountAsync(l => l.BusinessUnitId == BusinessUnitId));
+            Assert.Equal(25, await context.Set<FieldEvidence>().AsNoTracking()
+                .CountAsync(x => x.BusinessUnitId == BusinessUnitId));
         }
     }
 
@@ -228,6 +259,48 @@ public sealed class EmailToLeadVerticalSlicePostgreSqlTests(PostgreSqlTestDataba
             .Where(a => a.ParentType == "Lead" && a.ParentId == lead.Id).ToListAsync());
         Assert.EndsWith("_body.txt", evidence.FileName);
         Assert.NotNull(evidence.ContentSha256);
+
+        var canonicalLine = Assert.Single(await context.Set<CanonicalLineItem>().AsNoTracking()
+            .Where(item => item.BusinessUnitId == businessUnitId && item.LeadItemId == line.Id)
+            .ToListAsync());
+        var fieldEvidence = Assert.Single(await context.Set<FieldEvidence>().AsNoTracking()
+            .Include(item => item.Region)
+            .Where(item => item.BusinessUnitId == businessUnitId
+                           && item.LineItemId == canonicalLine.Id)
+            .ToListAsync());
+        Assert.Equal("SourceSpan", fieldEvidence.FieldName);
+        Assert.Equal("Please quote 7 EA BODY-ONLY-700 pressure transmitters, delivery DDP Jubail.",
+            fieldEvidence.RawValue);
+        Assert.Equal("message-body:verified-span:1", fieldEvidence.Region.SourceAddress);
+    }
+
+    [Fact]
+    public async Task Unverified_model_span_stays_visible_but_never_becomes_promotion_evidence()
+    {
+        var businessUnitId = UniqueBusinessUnitId();
+        var messageId = $"vertical-unverified-span-{Guid.NewGuid():N}@buyer.example";
+        await using (var connection = await _database.OpenConnectionAsync())
+            await EmailToLeadHarness.SeedTenantAsync(connection, businessUnitId, messageId);
+
+        await using var services = EmailToLeadHarness.BuildGraph(
+            _database.ConnectionString, _storageRoot, new EmailToLeadHarness.RefusingLlm(),
+            registrations => registrations.AddScoped<IConversationalExtractionService, UnverifiedBodyOnlyExtractor>());
+        await EmailToLeadHarness.CaptureAndScheduleAsync(services, businessUnitId,
+            EmailToLeadHarness.BuildBodyOnlyMessage(messageId), expectedComponentCount: 1);
+        await EmailToLeadHarness.DrainQueueAsync(services, businessUnitId);
+
+        using var scope = services.CreateScope();
+        using var tenant = scope.ServiceProvider.GetRequiredService<ITenantScopeAccessor>().Push(businessUnitId);
+        var context = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+        var lead = await context.Leads.AsNoTracking().SingleAsync(x => x.BusinessUnitId == businessUnitId);
+        var leadItemId = await context.LeadItems.AsNoTracking()
+            .Where(x => x.LeadId == lead.Id).Select(x => x.Id).SingleAsync();
+        var canonicalLineId = await context.Set<CanonicalLineItem>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId && x.LeadItemId == leadItemId)
+            .Select(x => x.Id).SingleAsync();
+
+        Assert.False(await context.Set<FieldEvidence>().AsNoTracking().AnyAsync(x =>
+            x.BusinessUnitId == businessUnitId && x.LineItemId == canonicalLineId));
     }
 
     [Fact]
@@ -789,10 +862,33 @@ public sealed class EmailToLeadVerticalSlicePostgreSqlTests(PostgreSqlTestDataba
             => Task.FromResult(new ChunkedExtractionOutcome
             {
                 Status = ExtractionOutcomeStatus.Ok,
-                Result = Ext.Result([Ext.Item(0.98, "BODY-ONLY-700 pressure transmitter", 7)], 0.98),
+                Result = Ext.Result([Ext.Item(0.98, "BODY-ONLY-700 pressure transmitter", 7) with
+                {
+                    SourceSpan = "Please quote 7 EA BODY-ONLY-700 pressure transmitters, delivery DDP Jubail.",
+                    SourceSpanVerified = true
+                }], 0.98),
                 ExpectedItemCount = 1,
                 ExtractedItemCount = 1,
                 ProcessingPath = ExtractionProcessingPath.NativeParser
+            });
+    }
+
+    private sealed class UnverifiedBodyOnlyExtractor : IConversationalExtractionService
+    {
+        public Task<ChunkedExtractionOutcome> ExtractAsync(
+            DocumentExtractionInput input, bool threadContinuation, CancellationToken ct = default)
+            => Task.FromResult(new ChunkedExtractionOutcome
+            {
+                Status = ExtractionOutcomeStatus.NeedsReview,
+                ReviewReason = "The quoted source text could not be located.",
+                Result = Ext.Result([Ext.Item(0.98, "INVENTED-999 switchgear", 2) with
+                {
+                    SourceSpan = "2 EA INVENTED-999 switchgear",
+                    SourceSpanVerified = false
+                }], 0.98),
+                ExpectedItemCount = 1,
+                ExtractedItemCount = 1,
+                ProcessingPath = ExtractionProcessingPath.LocalModel
             });
     }
 

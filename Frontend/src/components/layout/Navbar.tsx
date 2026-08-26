@@ -16,12 +16,18 @@ import {
   InputBase,
   Popper,
   Paper,
+  Stack,
   ClickAwayListener,
   List,
   ListItemButton,
   Chip,
   CircularProgress,
   Alert,
+  Dialog,
+  DialogContent,
+  DialogTitle,
+  useMediaQuery,
+  useTheme,
 } from '@mui/material';
 import {
   Menu as MenuIcon,
@@ -31,6 +37,7 @@ import {
   Logout,
   Person,
   Language,
+  Close as CloseIcon,
 } from '@mui/icons-material';
 import { useNavigate } from 'react-router-dom';
 import { useAppTheme } from '../../context/ThemeContext';
@@ -40,7 +47,14 @@ import searchService, {
   MIN_SEARCH_LENGTH,
   routeForHit,
   type GlobalSearchResponse,
+  type SearchEntity,
+  type SearchHit,
 } from '../../api/services/searchService';
+import {
+  clearRecentSearchHits,
+  loadRecentSearchHits,
+  rememberSearchHit,
+} from './globalSearchHistory';
 
 interface NavbarProps {
   onToggleSidebar: () => void;
@@ -55,12 +69,64 @@ const PROFILE_BUTTON_ID = 'account-menu-button';
 const PROFILE_MENU_ID = 'account-menu';
 const COLOR_MENU_ID = 'color-theme-menu';
 const SEARCH_RESULTS_ID = 'global-search-results';
+const MOBILE_SEARCH_RESULTS_ID = 'mobile-global-search-results';
+const SEARCH_ENTITY_ORDER = Object.keys(ENTITY_LABELS) as SearchEntity[];
+const ENTITY_GROUP_LABELS: Record<SearchEntity, string> = {
+  customer: 'Customers',
+  supplier: 'Suppliers',
+  product: 'Products',
+  lead: 'Enquiries',
+  rfq: 'RFQs',
+  quote: 'Quotes',
+  order: 'Orders',
+  shipment: 'Shipments',
+};
+
+const visuallyHidden = {
+  position: 'absolute',
+  width: 1,
+  height: 1,
+  p: 0,
+  m: -1,
+  overflow: 'hidden',
+  clip: 'rect(0 0 0 0)',
+  whiteSpace: 'nowrap',
+  border: 0,
+} as const;
+
+interface IndexedSearchHit {
+  hit: SearchHit;
+  index: number;
+}
+
+const groupSearchHits = (hits: SearchHit[]): Array<{ entity: SearchEntity; items: IndexedSearchHit[] }> => {
+  const byEntity = new Map<SearchEntity, SearchHit[]>();
+  for (const hit of hits) {
+    const current = byEntity.get(hit.entity);
+    if (current) current.push(hit);
+    else byEntity.set(hit.entity, [hit]);
+  }
+
+  let index = 0;
+  return SEARCH_ENTITY_ORDER.flatMap((entity) => {
+    const entityHits = byEntity.get(entity);
+    if (!entityHits?.length) return [];
+    const items = entityHits.map((hit) => ({ hit, index: index++ }));
+    return [{ entity, items }];
+  });
+};
+
+const optionId = (resultsId: string, hit: SearchHit) =>
+  `${resultsId}-${hit.entity}-${hit.id}`;
 
 const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth, sidebarExpanded, sidebarId }) => {
   const { mode, setMode, primaryColor, setPrimaryColor } = useAppTheme();
   const { userData, logout } = useAuth();
   const navigate = useNavigate();
-  const searchInputRef = React.useRef<HTMLInputElement>(null);
+  const muiTheme = useTheme();
+  const desktopSearch = useMediaQuery(muiTheme.breakpoints.up('md'));
+  const desktopSearchInputRef = React.useRef<HTMLInputElement>(null);
+  const mobileSearchInputRef = React.useRef<HTMLInputElement>(null);
   const [searchValue, setSearchValue] = React.useState('');
   const [anchorEl, setAnchorEl] = React.useState<null | HTMLElement>(null);
   const [colorMenuAnchor, setColorMenuAnchor] = React.useState<null | HTMLElement>(null);
@@ -89,8 +155,37 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth, sidebarEx
   const [searching, setSearching] = React.useState(false);
   const [searchError, setSearchError] = React.useState<string | null>(null);
   const [searchOpen, setSearchOpen] = React.useState(false);
+  const [mobileSearchOpen, setMobileSearchOpen] = React.useState(false);
+  const [activeOptionIndex, setActiveOptionIndex] = React.useState(-1);
+  const [recentHits, setRecentHits] = React.useState<SearchHit[]>([]);
   const searchAnchorRef = React.useRef<HTMLDivElement>(null);
   const trimmedQuery = searchValue.trim();
+  const historyScope = React.useMemo(() => ({
+    businessUnitId: userData.businessUnitId,
+    userId: userData.id,
+  }), [userData.businessUnitId, userData.id]);
+  const showingRecent = trimmedQuery.length === 0;
+  const displayedHits = showingRecent ? recentHits : (results?.hits ?? []);
+  const groupedHits = React.useMemo(() => groupSearchHits(displayedHits), [displayedHits]);
+  const selectableHits = React.useMemo(
+    () => groupedHits.flatMap((group) => group.items.map((item) => item.hit)),
+    [groupedHits],
+  );
+  const activeHit = activeOptionIndex >= 0 ? selectableHits[activeOptionIndex] : undefined;
+
+  const refreshRecentHits = React.useCallback(() => {
+    const history = loadRecentSearchHits(historyScope);
+    setRecentHits(history);
+    return history;
+  }, [historyScope]);
+
+  React.useEffect(() => {
+    refreshRecentHits();
+  }, [refreshRecentHits]);
+
+  React.useEffect(() => {
+    setActiveOptionIndex(-1);
+  }, [trimmedQuery, results, recentHits]);
 
   React.useEffect(() => {
     if (trimmedQuery.length < MIN_SEARCH_LENGTH) {
@@ -100,11 +195,12 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth, sidebarEx
       return;
     }
 
+    setResults(null);
+    setSearchError(null);
+    setSearching(true);
     const controller = new AbortController();
     // Debounced, so a typed word costs one query rather than one per keystroke.
     const timer = window.setTimeout(async () => {
-      setSearching(true);
-      setSearchError(null);
       try {
         const response = await searchService.search({ q: trimmedQuery, limit: 5 }, controller.signal);
         setResults(response);
@@ -115,10 +211,11 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth, sidebarEx
         // The server's message is surfaced verbatim; the client invents no copy that could
         // contradict it, and a failure is never rendered as "no results".
         const detail = (error as { response?: { data?: unknown } })?.response?.data;
+        const errorMessage = error instanceof Error ? error.message.trim() : '';
         setSearchError(
           typeof detail === 'string' && detail.trim()
             ? detail
-            : 'Search is unavailable right now. Nothing was searched.',
+            : errorMessage || 'Search is unavailable right now. Nothing was searched.',
         );
         setSearchOpen(true);
       } finally {
@@ -132,36 +229,102 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth, sidebarEx
     };
   }, [trimmedQuery]);
 
-  const openHit = (path: string) => {
+  const openHit = (hit: SearchHit) => {
+    setRecentHits(rememberSearchHit(historyScope, hit));
     setSearchOpen(false);
+    setMobileSearchOpen(false);
+    setActiveOptionIndex(-1);
     setSearchValue('');
-    searchInputRef.current?.blur();
-    navigate(path);
+    desktopSearchInputRef.current?.blur();
+    mobileSearchInputRef.current?.blur();
+    navigate(routeForHit(hit));
   };
 
   const handleQuickSearch = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Escape') {
-      setSearchOpen(false);
-      return;
+    const optionCount = selectableHits.length;
+    switch (e.key) {
+      case 'ArrowDown':
+        e.preventDefault();
+        setSearchOpen(true);
+        setActiveOptionIndex((current) => optionCount === 0 ? -1 : current < optionCount - 1 ? current + 1 : 0);
+        break;
+      case 'ArrowUp':
+        e.preventDefault();
+        setSearchOpen(true);
+        setActiveOptionIndex((current) => optionCount === 0 ? -1 : current > 0 ? current - 1 : optionCount - 1);
+        break;
+      case 'Home':
+        if (optionCount === 0) return;
+        e.preventDefault();
+        setSearchOpen(true);
+        setActiveOptionIndex(0);
+        break;
+      case 'End':
+        if (optionCount === 0) return;
+        e.preventDefault();
+        setSearchOpen(true);
+        setActiveOptionIndex(optionCount - 1);
+        break;
+      case 'Enter': {
+        if (optionCount === 0) return;
+        e.preventDefault();
+        openHit(selectableHits[activeOptionIndex >= 0 ? activeOptionIndex : 0]);
+        break;
+      }
+      case 'Escape':
+        e.preventDefault();
+        setSearchOpen(false);
+        setActiveOptionIndex(-1);
+        if (!desktopSearch) setMobileSearchOpen(false);
+        break;
+      default:
+        break;
     }
-    if (e.key !== 'Enter') return;
-    e.preventDefault();
-    // Enter opens the first result. When there is none it does NOTHING and the panel keeps
-    // saying so — it does not navigate somewhere plausible.
-    const first = results?.hits?.[0];
-    if (first) openHit(routeForHit(first));
   };
+
+  const handleSearchFocus = () => {
+    if (showingRecent) refreshRecentHits();
+    setSearchOpen(true);
+  };
+
+  const clearHistory = () => {
+    clearRecentSearchHits(historyScope);
+    setRecentHits([]);
+    setActiveOptionIndex(-1);
+  };
+
+  const openMobileSearch = React.useCallback(() => {
+    refreshRecentHits();
+    setMobileSearchOpen(true);
+    setSearchOpen(true);
+  }, [refreshRecentHits]);
+
+  const closeMobileSearch = () => {
+    setMobileSearchOpen(false);
+    setSearchOpen(false);
+    setActiveOptionIndex(-1);
+  };
+
+  const setMobileSearchInput = React.useCallback((node: HTMLInputElement | null) => {
+    mobileSearchInputRef.current = node;
+    if (node && mobileSearchOpen) node.focus();
+  }, [mobileSearchOpen]);
 
   React.useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
-        searchInputRef.current?.focus();
+        if (desktopSearch) {
+          setSearchOpen(true);
+          desktopSearchInputRef.current?.focus();
+        } else {
+          openMobileSearch();
+        }
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, []);
+  }, [desktopSearch, openMobileSearch]);
 
   const handleProfileClick = (event: React.MouseEvent<HTMLElement>) => {
     setAnchorEl(event.currentTarget);
@@ -175,6 +338,165 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth, sidebarEx
     setAnchorEl(null);
     setColorMenuAnchor(null);
   };
+
+  const liveSearchMessage = searching
+    ? 'Searching Nexora.'
+    : searchError
+      ? `Search failed. ${searchError}`
+      : trimmedQuery.length >= MIN_SEARCH_LENGTH && results
+        ? `${results.hits.length} search ${results.hits.length === 1 ? 'result' : 'results'} shown.`
+        : showingRecent && searchOpen
+          ? `${recentHits.length} recently opened ${recentHits.length === 1 ? 'record' : 'records'} shown.`
+          : '';
+
+  const renderSearchInput = (
+    inputRef: React.Ref<HTMLInputElement>,
+    resultsId: string,
+  ) => (
+    <InputBase
+      inputRef={inputRef}
+      value={searchValue}
+      onChange={(event) => {
+        setSearchValue(event.target.value);
+        setActiveOptionIndex(-1);
+      }}
+      onKeyDown={handleQuickSearch}
+      onFocus={handleSearchFocus}
+      placeholder="Search Nexora…"
+      type="search"
+      inputProps={{
+        'aria-label': 'Search customers, suppliers, products, enquiries, quotes, orders and shipments',
+        'aria-expanded': searchOpen,
+        'aria-controls': resultsId,
+        'aria-activedescendant': activeHit ? optionId(resultsId, activeHit) : undefined,
+        role: 'combobox',
+        'aria-autocomplete': 'list',
+      }}
+      sx={{
+        flex: 1,
+        minWidth: 0,
+        fontSize: '0.875rem',
+        color: 'text.primary',
+        '& input::placeholder': { color: 'text.secondary', opacity: 0.8 },
+      }}
+    />
+  );
+
+  const renderSearchPanel = (resultsId: string, mobile = false) => (
+    <Paper
+      elevation={mobile ? 0 : 8}
+      sx={{
+        mt: mobile ? 1.5 : 1,
+        width: mobile ? '100%' : 460,
+        maxWidth: '100%',
+        maxHeight: mobile ? 'none' : 480,
+        overflowY: 'auto',
+        borderRadius: mobile ? 2 : 3,
+        border: '1px solid',
+        borderColor: 'divider',
+      }}
+    >
+      {showingRecent ? (
+        <Stack direction="row" spacing={1} sx={{ alignItems: 'center', justifyContent: 'space-between', px: 2, py: 1.25 }}>
+          <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>Recently opened</Typography>
+          {recentHits.length > 0 ? (
+            <ButtonBase onClick={clearHistory} sx={{ color: 'primary.main', borderRadius: 1, px: 1, py: 0.5, fontSize: '0.75rem', fontWeight: 700 }}>
+              Clear history
+            </ButtonBase>
+          ) : null}
+        </Stack>
+      ) : null}
+
+      {showingRecent && recentHits.length === 0 ? (
+        <Typography variant="body2" color="text.secondary" sx={{ px: 2, pb: 2 }}>
+          No recently opened records in this session.
+        </Typography>
+      ) : null}
+
+      {!showingRecent && trimmedQuery.length < MIN_SEARCH_LENGTH ? (
+        <Typography variant="body2" color="text.secondary" sx={{ p: 2 }}>
+          Enter at least {MIN_SEARCH_LENGTH} characters to search.
+        </Typography>
+      ) : null}
+
+      {searchError ? <Alert severity="error" sx={{ borderRadius: 0 }}>{searchError}</Alert> : null}
+
+      {!searchError && searching ? (
+        <Stack direction="row" spacing={1} role="status" sx={{ alignItems: 'center', p: 2 }}>
+          <CircularProgress size={18} />
+          <Typography variant="body2" color="text.secondary">Searching Nexora…</Typography>
+        </Stack>
+      ) : null}
+
+      {!searchError && !searching && results && results.hits.length === 0 ? (
+        <Box sx={{ p: 2 }}>
+          <Typography variant="body2" sx={{ fontWeight: 700 }}>
+            Nothing matches “{results.query}”.
+          </Typography>
+          <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+            Searched {results.searchedEntities.length} record types. Nothing was opened.
+          </Typography>
+        </Box>
+      ) : null}
+
+      <Box id={resultsId} role="listbox" aria-label={showingRecent ? 'Recently opened records' : 'Search results'}>
+        {!searchError && !searching && groupedHits.map((group) => {
+          const headingId = `${resultsId}-${group.entity}-heading`;
+          return (
+            <Box key={group.entity} role="group" aria-labelledby={headingId} sx={{ borderTop: '1px solid', borderColor: 'divider' }}>
+              <Typography id={headingId} variant="caption" sx={{ display: 'block', px: 2, pt: 1.25, pb: 0.5, fontWeight: 900, color: 'text.secondary', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                {ENTITY_GROUP_LABELS[group.entity]}
+              </Typography>
+              <List dense disablePadding role="presentation">
+                {group.items.map(({ hit, index }) => (
+                  <ListItemButton
+                    id={optionId(resultsId, hit)}
+                    key={`${hit.entity}-${hit.id}`}
+                    role="option"
+                    aria-selected={activeOptionIndex === index}
+                    selected={activeOptionIndex === index}
+                    onMouseMove={() => setActiveOptionIndex(index)}
+                    onClick={() => openHit(hit)}
+                    sx={{ alignItems: 'flex-start', gap: 1, px: 2 }}
+                  >
+                    <Chip size="small" label={ENTITY_LABELS[hit.entity]} sx={{ fontWeight: 700, fontSize: 10, height: 20, mt: 0.25 }} />
+                    <Box sx={{ minWidth: 0, flex: 1 }}>
+                      <Typography variant="body2" sx={{ fontWeight: 700 }} noWrap>{hit.title}</Typography>
+                      <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block' }} noWrap>
+                        {hit.subtitle || 'No secondary reference recorded'}{hit.status ? ` · ${hit.status}` : ''}
+                      </Typography>
+                      <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block' }}>
+                        matched on {hit.matchedOn}
+                      </Typography>
+                    </Box>
+                  </ListItemButton>
+                ))}
+              </List>
+            </Box>
+          );
+        })}
+      </Box>
+
+      {!showingRecent && !searchError && !searching && results
+        && (results.notes.length > 0 || results.deniedEntities.length > 0 || results.truncated.length > 0) ? (
+          <Box sx={{ px: 2, py: 1, borderTop: '1px solid', borderColor: 'divider' }}>
+            {results.truncated.length > 0 ? (
+              <Typography variant="caption" sx={{ display: 'block', color: 'text.secondary' }}>
+                More {results.truncated.map((entity) => ENTITY_LABELS[entity].toLowerCase()).join(', ')} results exist than are shown.
+              </Typography>
+            ) : null}
+            {results.deniedEntities.length > 0 ? (
+              <Typography variant="caption" sx={{ display: 'block', color: 'text.secondary' }}>
+                Not searched — you do not have access to: {results.deniedEntities.map((entity) => ENTITY_LABELS[entity]).join(', ')}.
+              </Typography>
+            ) : null}
+            {results.notes.map((note) => (
+              <Typography key={note} variant="caption" sx={{ display: 'block', color: 'text.secondary' }}>{note}</Typography>
+            ))}
+          </Box>
+        ) : null}
+    </Paper>
+  );
 
   const colorOptions = [
     { name: 'Executive Navy', color: '#1e3a8a' },
@@ -223,143 +545,101 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth, sidebarEx
           >
             <MenuIcon />
           </IconButton>
-          <ClickAwayListener onClickAway={() => setSearchOpen(false)}>
-            <Box sx={{ display: { xs: 'none', md: 'block' } }}>
+          {desktopSearch ? (
+            <ClickAwayListener onClickAway={() => { setSearchOpen(false); setActiveOptionIndex(-1); }}>
+              <Box>
+                <Box
+                  ref={searchAnchorRef}
+                  data-search-field="desktop"
+                  sx={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    backgroundColor: mode === 'dark' ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.03)',
+                    px: 2,
+                    py: 0.5,
+                    borderRadius: 2,
+                    width: { md: 260, lg: 320 },
+                    border: '1px solid',
+                    borderColor: 'divider',
+                    '&:focus-within': {
+                      outline: '3px solid',
+                      outlineColor: 'primary.main',
+                      outlineOffset: 2,
+                      borderColor: 'primary.main',
+                    },
+                  }}
+                >
+                  <SearchIcon aria-hidden sx={{ color: 'text.secondary', mr: 1, fontSize: 18 }} />
+                  {renderSearchInput(desktopSearchInputRef, SEARCH_RESULTS_ID)}
+                  {searching ? (
+                    <CircularProgress size={14} aria-label="Searching" sx={{ ml: 1 }} />
+                  ) : (
+                    <Box aria-hidden sx={{ ml: 'auto', px: 0.8, py: 0.2, backgroundColor: 'action.hover', borderRadius: 1, border: '1px solid', borderColor: 'divider' }}>
+                      <Typography variant="caption" sx={{ fontWeight: 700, fontSize: 10, opacity: 0.8 }}>⌘ K</Typography>
+                    </Box>
+                  )}
+                </Box>
+                <Popper open={searchOpen} anchorEl={searchAnchorRef.current} placement="bottom-start" sx={{ zIndex: (theme) => theme.zIndex.modal }}>
+                  {renderSearchPanel(SEARCH_RESULTS_ID)}
+                </Popper>
+              </Box>
+            </ClickAwayListener>
+          ) : (
+            <Tooltip title="Search Nexora">
+              <IconButton color="inherit" onClick={openMobileSearch} aria-label="Open global search" aria-haspopup="dialog">
+                <SearchIcon />
+              </IconButton>
+            </Tooltip>
+          )}
+
+          <Box role="status" aria-live="polite" aria-atomic="true" sx={visuallyHidden}>
+            {liveSearchMessage}
+          </Box>
+
+          <Dialog
+            fullScreen
+            open={mobileSearchOpen}
+            onClose={closeMobileSearch}
+            disableAutoFocus
+            aria-labelledby="mobile-search-title"
+            slotProps={{
+              transition: { onEntered: () => mobileSearchInputRef.current?.focus() },
+            }}
+          >
+            <DialogTitle id="mobile-search-title" component="div" sx={{ px: 2, py: 1.5 }}>
+              <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
+                <Typography variant="h6" component="h2" sx={{ flex: 1, fontWeight: 800 }}>Search Nexora</Typography>
+                <IconButton aria-label="Close search" onClick={closeMobileSearch}><CloseIcon /></IconButton>
+              </Stack>
+            </DialogTitle>
+            <DialogContent dividers sx={{ p: 1.5 }}>
               <Box
-                ref={searchAnchorRef}
+                data-search-field="mobile"
                 sx={{
                   display: 'flex',
                   alignItems: 'center',
-                  backgroundColor: mode === 'dark' ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.03)',
-                  px: 2,
-                  py: 0.5,
-                  borderRadius: 2,
-                  width: 320,
+                  gap: 1,
+                  px: 1.5,
+                  py: 1,
                   border: '1px solid',
                   borderColor: 'divider',
+                  borderRadius: 2,
+                  bgcolor: 'action.hover',
+                  '&:focus-within': {
+                    outline: '3px solid',
+                    outlineColor: 'primary.main',
+                    outlineOffset: 2,
+                    borderColor: 'primary.main',
+                  },
                 }}
               >
-                <SearchIcon aria-hidden sx={{ color: 'text.secondary', mr: 1, fontSize: 18 }} />
-                <InputBase
-                  inputRef={searchInputRef}
-                  value={searchValue}
-                  onChange={(e) => setSearchValue(e.target.value)}
-                  onKeyDown={handleQuickSearch}
-                  onFocus={() => { if (results || searchError) setSearchOpen(true); }}
-                  placeholder="Search customers, suppliers, products, documents..."
-                  type="search"
-                  // Placeholders are not a reliable accessible name (SC 4.1.2) —
-                  // they disappear on input and are ignored by some AT.
-                  inputProps={{
-                    'aria-label':
-                      'Search customers, suppliers, products, enquiries, quotes, orders and shipments',
-                    'aria-expanded': searchOpen,
-                    'aria-controls': SEARCH_RESULTS_ID,
-                    role: 'combobox',
-                    'aria-autocomplete': 'list',
-                  }}
-                  sx={{
-                    flex: 1,
-                    fontSize: '0.875rem',
-                    color: 'text.primary',
-                    '& input::placeholder': { color: 'text.secondary', opacity: 0.7 },
-                  }}
-                />
-                {searching ? (
-                  <CircularProgress size={14} aria-label="Searching" sx={{ ml: 1 }} />
-                ) : (
-                  <Box aria-hidden sx={{ ml: 'auto', px: 0.8, py: 0.2, backgroundColor: 'action.hover', borderRadius: 1, border: '1px solid', borderColor: 'divider' }}>
-                    <Typography variant="caption" sx={{ fontWeight: 700, fontSize: 10, opacity: 0.8 }}>⌘ K</Typography>
-                  </Box>
-                )}
+                <SearchIcon aria-hidden color="action" />
+                {renderSearchInput(setMobileSearchInput, MOBILE_SEARCH_RESULTS_ID)}
+                {searching ? <CircularProgress size={18} aria-label="Searching" /> : null}
               </Box>
-
-              <Popper
-                open={searchOpen && trimmedQuery.length >= MIN_SEARCH_LENGTH}
-                anchorEl={searchAnchorRef.current}
-                placement="bottom-start"
-                sx={{ zIndex: (theme) => theme.zIndex.modal }}
-              >
-                <Paper
-                  id={SEARCH_RESULTS_ID}
-                  elevation={8}
-                  sx={{ mt: 1, width: 460, maxHeight: 480, overflowY: 'auto', borderRadius: 3, border: '1px solid', borderColor: 'divider' }}
-                >
-                  {searchError && (
-                    // A failed request is NOT rendered as "no results" — the two mean opposite
-                    // things and conflating them is how a broken search looks like an empty estate.
-                    <Alert severity="error" sx={{ borderRadius: 0 }}>{searchError}</Alert>
-                  )}
-
-                  {!searchError && results && results.hits.length === 0 && (
-                    <Box sx={{ p: 2 }}>
-                      <Typography variant="body2" sx={{ fontWeight: 700 }}>
-                        Nothing matches “{results.query}”.
-                      </Typography>
-                      <Typography variant="caption" sx={{ color: 'text.secondary' }}>
-                        Searched {results.searchedEntities.length} record types. Nothing was opened.
-                      </Typography>
-                    </Box>
-                  )}
-
-                  {!searchError && results && results.hits.length > 0 && (
-                    <List dense role="listbox" aria-label="Search results" sx={{ py: 0.5 }}>
-                      {results.hits.map((hit) => (
-                        <ListItemButton
-                          key={`${hit.entity}-${hit.id}`}
-                          role="option"
-                          onClick={() => openHit(routeForHit(hit))}
-                          sx={{ alignItems: 'flex-start', gap: 1 }}
-                        >
-                          <Chip
-                            size="small"
-                            label={ENTITY_LABELS[hit.entity]}
-                            sx={{ fontWeight: 700, fontSize: 10, height: 20, mt: 0.25 }}
-                          />
-                          <Box sx={{ minWidth: 0, flex: 1 }}>
-                            <Typography variant="body2" sx={{ fontWeight: 700 }} noWrap>
-                              {hit.title}
-                            </Typography>
-                            <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block' }} noWrap>
-                              {hit.subtitle || 'No secondary reference recorded'}
-                              {hit.status ? ` · ${hit.status}` : ''}
-                            </Typography>
-                            {/* Why this row is here. Without it a hit on a VAT number next to a
-                                name search reads as a bug. */}
-                            <Typography variant="caption" sx={{ color: 'text.disabled', display: 'block' }}>
-                              matched on {hit.matchedOn}
-                            </Typography>
-                          </Box>
-                        </ListItemButton>
-                      ))}
-                    </List>
-                  )}
-
-                  {/* Stated gaps. A shorter answer with no explanation is indistinguishable from
-                      "nothing matched", which is the defect this whole control replaces. */}
-                  {!searchError && results && (results.notes.length > 0 || results.deniedEntities.length > 0 || results.truncated.length > 0) && (
-                    <Box sx={{ px: 2, py: 1, borderTop: '1px solid', borderColor: 'divider' }}>
-                      {results.truncated.length > 0 && (
-                        <Typography variant="caption" sx={{ display: 'block', color: 'text.secondary' }}>
-                          More {results.truncated.map((e) => ENTITY_LABELS[e].toLowerCase()).join(', ')} results exist than are shown.
-                        </Typography>
-                      )}
-                      {results.deniedEntities.length > 0 && (
-                        <Typography variant="caption" sx={{ display: 'block', color: 'text.secondary' }}>
-                          Not searched — you do not have access to: {results.deniedEntities.map((e) => ENTITY_LABELS[e]).join(', ')}.
-                        </Typography>
-                      )}
-                      {results.notes.map((note) => (
-                        <Typography key={note} variant="caption" sx={{ display: 'block', color: 'text.secondary' }}>
-                          {note}
-                        </Typography>
-                      ))}
-                    </Box>
-                  )}
-                </Paper>
-              </Popper>
-            </Box>
-          </ClickAwayListener>
+              {searchOpen ? renderSearchPanel(MOBILE_SEARCH_RESULTS_ID, true) : null}
+            </DialogContent>
+          </Dialog>
         </Box>
 
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
@@ -483,7 +763,7 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth, sidebarEx
 
           <Divider sx={{ my: 1, opacity: 0.5 }} />
 
-          <MenuItem onClick={() => { handleClose(); logout(); }} sx={{ borderRadius: 2, py: 1.5, color: 'error.main' }}>
+          <MenuItem onClick={() => { clearHistory(); handleClose(); logout(); }} sx={{ borderRadius: 2, py: 1.5, color: 'error.main' }}>
             <ListItemIcon><Logout fontSize="small" color="error" /></ListItemIcon>
             <ListItemText
               primary="Log Out Session"
@@ -576,4 +856,3 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth, sidebarEx
 };
 
 export default Navbar;
-

@@ -125,6 +125,31 @@ describe('what is waiting on you', () => {
     expect(items[0].path).not.toContain('undefined');
   });
 
+  it('keeps open customer POs urgent and excludes only terminal lifecycle records', async () => {
+    const purchaseOrder = (id: number, status: string, receivedOn: string) => ({
+      id,
+      internalNumber: `PO-${id}`,
+      externalPoNumber: `CUSTOMER-${id}`,
+      customerName: 'Northstar Industries',
+      nexoraSerial: `NX-${id}`,
+      receivedOn,
+      status,
+      matchOutcome: 'POSSIBLE_MATCH_REVIEW',
+      discrepancyCount: 0,
+    });
+    api.clientPos.mockResolvedValue([
+      purchaseOrder(1, 'DRAFT', '2026-08-20T00:00:00Z'),
+      purchaseOrder(2, 'PARTIALLY_AWARDED', '2026-08-21T00:00:00Z'),
+      purchaseOrder(3, 'FULLY_AWARDED', '2026-08-22T00:00:00Z'),
+      purchaseOrder(4, 'CLOSED', '2026-08-23T00:00:00Z'),
+      purchaseOrder(5, 'CANCELLED', '2026-08-24T00:00:00Z'),
+    ]);
+
+    const items = await loadQueue('client-pos');
+
+    expect(items.map((item) => item.id)).toEqual([1, 2]);
+  });
+
   it('counts the work and says so in a sentence, not in a chart', async () => {
     api.needsReview.mockResolvedValue({
       ...empty,
@@ -251,8 +276,20 @@ describe('permissions decide what is even asked for', () => {
     renderInbox();
 
     expect(
-      await screen.findByText('No work queues are open to your role.'),
+      await screen.findByText('Your role has no Inbox work queues.'),
     ).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Open Setup' })).toBeInTheDocument();
+    expect(screen.getByText('Your role does not have any Inbox work queues.')).toBeInTheDocument();
+    expect(screen.queryByText(/nothing is waiting on you/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /roles & permissions/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/ask your Nexora administrator/i)).toBeInTheDocument();
+  });
+
+  it('offers the governed Roles & Permissions door only to a user who can manage it', async () => {
+    auth.modules = ['Roles & Permissions'];
+
+    renderInbox();
+
+    expect(await screen.findByRole('button', { name: 'Open Roles & Permissions' })).toBeInTheDocument();
+    expect(screen.getByText(/grant the modules it needs/i)).toBeInTheDocument();
   });
 });

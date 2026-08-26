@@ -112,7 +112,14 @@ public static class ProseAnchorVerifier
             // caught by the reviewer, whereas a silently deleted real line is caught by
             // nobody and costs the bid. The counts below still drive that review flag.
             if (!verified) unanchored++;
-            kept.Add(item);
+            // This value is server-owned. Always replace anything the provider returned so
+            // only a deterministic match against the submitted text can become evidence.
+            kept.Add(item with
+            {
+                SourceSpanVerified = verified,
+                SourceExtractionJobId = null,
+                VerifiedEvidence = null
+            });
         }
 
         if (unanchored > 0)

@@ -42,7 +42,7 @@ const SourceEvidencePanel: React.FC<{ workbench: LeadDecisionWorkbenchDTO; compa
     >
       <Stack direction="row" sx={{ alignItems: 'center', justifyContent: 'space-between', gap: 1, mb: 1.5 }}>
         <Box>
-          <Typography id="source-evidence-heading" variant="h6" sx={{ fontWeight: 900 }}>Source evidence</Typography>
+          <Typography id="source-evidence-heading" component="h2" variant="h6" sx={{ fontWeight: 900 }}>Source evidence</Typography>
           <Typography variant="caption" color="text.secondary">Durable occurrence and retained customer documents</Typography>
         </Box>
         <Chip size="small" label={`${inspectable}/${workbench.evidence.length} inspectable`} color={workbench.evidence.length > 0 && inspectable === workbench.evidence.length ? 'success' : 'warning'} variant="outlined" />
@@ -62,7 +62,7 @@ const SourceEvidencePanel: React.FC<{ workbench: LeadDecisionWorkbenchDTO; compa
         <Paper variant="outlined" sx={{ p: 1.5, borderRadius: 2, bgcolor: 'action.hover' }}>
           <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mb: 1 }}>
             <EmailIcon color="primary" fontSize="small" />
-            <Typography variant="subtitle2" sx={{ fontWeight: 900 }}>Email occurrence</Typography>
+            <Typography component="h3" variant="subtitle2" sx={{ fontWeight: 900 }}>Email occurrence</Typography>
           </Stack>
           <Typography variant="body2" sx={{ fontWeight: 800, overflowWrap: 'anywhere' }}>{workbench.emailSubject || 'Subject not captured'}</Typography>
           <Typography variant="caption" color="text.secondary" sx={{ display: 'block', overflowWrap: 'anywhere' }}>{workbench.senderEmail || 'Sender not captured'}</Typography>

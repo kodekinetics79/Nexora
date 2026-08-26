@@ -33,6 +33,7 @@ public class ProseAnchorVerifierTests
         Assert.Equal(2, verification.Items.Count);
         Assert.Equal(0, verification.UnanchoredItemCount);
         Assert.True(verification.Clean);
+        Assert.All(verification.Items, item => Assert.True(item.SourceSpanVerified));
     }
 
     [Fact]
@@ -54,6 +55,8 @@ public class ProseAnchorVerifierTests
         Assert.Equal(2, verification.Items.Count);
         Assert.Equal(1, verification.UnanchoredItemCount);
         Assert.False(verification.Clean);
+        Assert.True(verification.Items[0].SourceSpanVerified);
+        Assert.False(verification.Items[1].SourceSpanVerified);
         Assert.Contains(verification.Diagnostics, d => d.Contains("UNVERIFIED"));
     }
 
@@ -65,6 +68,7 @@ public class ProseAnchorVerifierTests
         Assert.Single(verification.Items);
         Assert.Equal(1, verification.UnanchoredItemCount);
         Assert.False(verification.Clean);
+        Assert.False(verification.Items[0].SourceSpanVerified);
     }
 
     [Fact]
@@ -83,6 +87,8 @@ public class ProseAnchorVerifierTests
 
         Assert.Equal(2, verification.Items.Count);
         Assert.Equal(1, verification.UnanchoredItemCount);
+        Assert.True(verification.Items[0].SourceSpanVerified);
+        Assert.False(verification.Items[1].SourceSpanVerified);
     }
 
     [Fact]

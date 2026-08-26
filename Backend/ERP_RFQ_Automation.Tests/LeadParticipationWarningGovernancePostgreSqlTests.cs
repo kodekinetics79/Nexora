@@ -119,9 +119,10 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
         Assert.Contains("No catalog match found", bid.WarningSnapshotJson, StringComparison.OrdinalIgnoreCase);
         Assert.Single(decision.Lines, x => x.Choice == LeadLineParticipationChoice.NoBid);
 
-        var promoted = await new RfqPromotionService(context,
-                new ExactEvidenceStorage(scenario.StorageUri, scenario.EvidenceHash, scenario.EvidenceBytes))
-            .PromoteAsync(Tenant, scenario.LeadId, Promotion(scenario, decision, "partial"));
+        var promotionCommand = Promotion(scenario, decision, "partial");
+        var promotion = new RfqPromotionService(context,
+            new ExactEvidenceStorage(scenario.StorageUri, scenario.EvidenceHash, scenario.EvidenceBytes));
+        var promoted = await promotion.PromoteAsync(Tenant, scenario.LeadId, promotionCommand);
         var rfq = await context.Rfqs.AsNoTracking().Include(x => x.Rfqitems)
             .SingleAsync(x => x.Id == promoted.RfqId);
         var promotedLine = Assert.Single(rfq.Rfqitems);
@@ -130,6 +131,20 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
         Assert.Equal("EA", promotedLine.UnitOfMeasure);
         Assert.Equal("SAR", promotedLine.Currency);
         Assert.Equal(scenario.LineRevisionIds[0], promotedLine.SourceLeadItemRevisionId);
+
+        // A network retry after commit must return the durable receipt, not manufacture a
+        // second formal RFQ or a second copy of an approved line.
+        var replay = await promotion.PromoteAsync(Tenant, scenario.LeadId, promotionCommand);
+        Assert.True(replay.Replayed);
+        Assert.Equal(promoted.PromotionId, replay.PromotionId);
+        Assert.Equal(promoted.RfqId, replay.RfqId);
+        Assert.Equal(promoted.RfqNumber, replay.RfqNumber);
+        Assert.Equal(1, await context.Set<RfqPromotion>().AsNoTracking()
+            .CountAsync(x => x.BusinessUnitId == Tenant && x.LeadId == scenario.LeadId));
+        Assert.Equal(1, await context.Rfqs.AsNoTracking()
+            .CountAsync(x => x.BusinessUnitId == Tenant && x.LeadId == scenario.LeadId));
+        Assert.Equal(1, await context.Rfqitems.AsNoTracking()
+            .CountAsync(x => x.Rfqid == promoted.RfqId));
     }
 
     [Fact]

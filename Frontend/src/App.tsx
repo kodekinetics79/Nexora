@@ -66,7 +66,6 @@ const ExtractionReviewDetailPage = lazy(() => import('./pages/ExtractionReview/E
 const AllRFQsPage = lazy(() => import('./pages/Procurement/RFQs/AllRFQsPage'));
 const DraftRFQsPage = lazy(() => import('./pages/Procurement/RFQs/DraftRFQsPage'));
 const OutstandingRFQsPage = lazy(() => import('./pages/Procurement/RFQs/OutstandingRFQsPage'));
-const ProcessRFQPage = lazy(() => import('./pages/Procurement/RFQs/ProcessRFQPage'));
 const ViewRFQPage = lazy(() => import('./pages/Procurement/RFQs/ViewRFQPage'));
 const SourcingWorkbenchPage = lazy(() => import('./pages/Procurement/Sourcing/SourcingWorkbenchPage'));
 const SourcingCasePage = lazy(() => import('./pages/Procurement/Sourcing/SourcingCasePage'));
@@ -253,7 +252,10 @@ function App() {
       <Route path="/procurement/rfqs/all" element={<MainLayout><PermissionGuard moduleName="RFQ Management"><AllRFQsPage /></PermissionGuard></MainLayout>} />
       <Route path="/procurement/rfqs/draft" element={<MainLayout><PermissionGuard moduleName="RFQ Management"><DraftRFQsPage /></PermissionGuard></MainLayout>} />
       <Route path="/procurement/rfqs/outstanding" element={<MainLayout><PermissionGuard moduleName="RFQ Management"><OutstandingRFQsPage /></PermissionGuard></MainLayout>} />
-      <Route path="/procurement/rfqs/process/:id" element={<MainLayout><PermissionGuard moduleName="RFQ Management" action="edit"><ProcessRFQPage /></PermissionGuard></MainLayout>} />
+      {/* Tombstone the former direct Lead -> RFQ creator. Old bookmarks and notifications must
+          enter the governed Lead decision workbench; this address never renders a second creation
+          experience. The destination route owns its normal Leads permission gate. */}
+      <Route path="/procurement/rfqs/process/:id" element={<LeadConvertRedirectPage />} />
       <Route path="/procurement/rfqs/view/:id" element={<MainLayout><PermissionGuard moduleName="RFQ Management"><ViewRFQPage /></PermissionGuard></MainLayout>} />
       <Route path="/procurement/rfqs/:id/pricing" element={<MainLayout><PermissionGuard moduleName="RFQ Management"><PermissionGuard moduleName="Quotations"><RfqPricingPage /></PermissionGuard></PermissionGuard></MainLayout>} />
       <Route path="/procurement/rfqs/:rfqId/sourcing" element={<MainLayout><PermissionGuard moduleName="RFQ Management"><SourcingWorkbenchPage /></PermissionGuard></MainLayout>} />

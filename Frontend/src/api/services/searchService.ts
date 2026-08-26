@@ -114,7 +114,19 @@ const searchService = {
       },
       signal,
     });
-    return response.data;
+    const data = response.data as Partial<GlobalSearchResponse> | null | undefined;
+    // A successful HTTP status with an empty or stale response contract used to leave the
+    // combobox expanded with a blank panel: neither results, no-match nor error. Refuse that
+    // impossible state here so the UI can state the outage and offer a retry.
+    if (!data || typeof data.query !== 'string'
+      || !Array.isArray(data.hits)
+      || !Array.isArray(data.searchedEntities)
+      || !Array.isArray(data.deniedEntities)
+      || !Array.isArray(data.truncated)
+      || !Array.isArray(data.notes)) {
+      throw new Error('Search returned an unreadable response.');
+    }
+    return data as GlobalSearchResponse;
   },
 };
 
