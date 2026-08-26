@@ -1803,7 +1803,13 @@ public sealed class LeadPersister : ILeadPersister
         var groups = outcome.SplitResults is { Count: > 1 }
             ? outcome.SplitResults
             : outcome.Result is null ? [] : [outcome.Result];
-        if (groups.Count != leads.Count)
+        // Reconciliation may deliberately produce no Lead when a commercially similar inquiry
+        // requires human identity review.  That is a valid zero-output run: retain the extraction
+        // and source-document lifecycle, but do not invent a canonical inquiry/line graph.  Any
+        // non-zero mismatch is still corruption because positional evidence could bind to the
+        // wrong Lead.
+        var hasCanonicalOutput = groups.Count == leads.Count;
+        if (!hasCanonicalOutput && leads.Count != 0)
             throw new InvalidOperationException(
                 "Unstructured evidence persistence requires one reconciled Lead per extraction group.");
 
@@ -1901,7 +1907,7 @@ public sealed class LeadPersister : ILeadPersister
             .MaxAsync(ct) ?? 0) + 1;
 
         var pending = new List<(LeadItemData Item, CanonicalLineItem Line, int Ordinal)>();
-        for (var groupIndex = 0; groupIndex < groups.Count; groupIndex++)
+        for (var groupIndex = 0; hasCanonicalOutput && groupIndex < groups.Count; groupIndex++)
         {
             var result = groups[groupIndex];
             var lead = leads[groupIndex];
@@ -2028,8 +2034,8 @@ public sealed class LeadPersister : ILeadPersister
                 source.Corpus.RequireReview();
             var isAnchor = sourceJob.Id == job.Id;
             runs[sourceJob.Id].Complete(1, regionCounts[sourceJob.Id],
-                isAnchor ? groups.Count : 0,
-                isAnchor ? groups.Sum(x => x.Items.Count) : 0,
+                isAnchor && hasCanonicalOutput ? groups.Count : 0,
+                isAnchor && hasCanonicalOutput ? groups.Sum(x => x.Items.Count) : 0,
                 evidenceCounts[sourceJob.Id], 0);
         }
         await _context.SaveChangesAsync(ct);

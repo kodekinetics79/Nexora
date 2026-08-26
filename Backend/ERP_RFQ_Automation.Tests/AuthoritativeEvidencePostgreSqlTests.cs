@@ -595,7 +595,7 @@ public sealed class AuthoritativeEvidencePostgreSqlTests
             Assert.Equal(DocumentProcessingStatus.ReviewRequired, source.ProcessingStatus);
             Assert.Equal(CorpusStatus.ReviewRequired, source.Corpus.Status);
             Assert.Equal(ExtractionRunStatus.Completed, run.Status);
-            Assert.Equal("llm-unstructured/v1", run.ParserVersion);
+            Assert.Equal("llm-unstructured/v2", run.ParserVersion);
             Assert.Equal(1, await verify.Set<ExtractionRun>()
                 .CountAsync(x => x.BusinessUnitId == tenantId && x.Status == ExtractionRunStatus.Completed));
             Assert.Equal(ExtractionStatus.Succeeded, jobState.Status);
