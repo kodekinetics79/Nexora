@@ -83,8 +83,18 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
             .AnyAsync(x => x.BusinessUnitId == businessUnitId && x.LeadId == leadId, ct);
         var promotion = await _db.Set<RfqPromotion>().AsNoTracking()
             .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.LeadId == leadId, ct);
-        var rfq = promotion is null ? null : await _db.Rfqs.AsNoTracking()
-            .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.PromotionId == promotion.Id, ct);
+        var rfq = await _db.Rfqs.AsNoTracking()
+            .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.LeadId == leadId, ct);
+        var promotedRevision = promotion is null ? null : await _db.Set<LeadRevision>().AsNoTracking()
+            .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.Id == promotion.LeadRevisionId, ct);
+        var promotedDecision = promotion is null ? null : await _db.Set<LeadParticipationDecision>().AsNoTracking()
+            .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId
+                && x.Id == promotion.ParticipationDecisionId, ct);
+        var openRfqRevisionImpact = rfq is null ? null : await _db.Set<LeadRevisionImpact>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId && x.LeadId == leadId
+                && x.AggregateType == "RFQ" && x.AggregateId == rfq.Id
+                && x.ImpactType == "RFQ_REVISION_REQUIRED" && x.Status == "OPEN")
+            .OrderByDescending(x => x.CreatedAtUtc).FirstOrDefaultAsync(ct);
         var customerName = lead.CustomerId.HasValue
             ? await _db.Customers.AsNoTracking().Where(x => x.Buid == businessUnitId && x.Id == lead.CustomerId.Value)
                 .Select(x => x.Name).SingleOrDefaultAsync(ct)
@@ -210,6 +220,19 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
         }).ToArray();
 
         var blockers = new List<DecisionBlockerDto>();
+        if (rfq is not null && promotion is null)
+            blockers.Add(new("LEGACY_RFQ",
+                "A formal RFQ already exists for this Lead without a governed promotion receipt. The decision record is read-only; review the existing RFQ without fabricating missing lineage.",
+                "Open existing RFQ", $"/procurement/rfqs/view/{rfq.Id}"));
+        if (LifecyclePolicy.Canonicalize("Lead", lead.LeadStatus?.SetupCode, lead.LeadStatus?.SetupValue)
+                == "CONVERTED_TO_RFQ" && rfq is null)
+            blockers.Add(new("INCONSISTENT_CONVERTED_STATE",
+                "This Lead is marked converted but no formal RFQ exists. An administrator must audit and repair the lifecycle state.",
+                "Open Lead lifecycle", $"/procurement/leads/view/{lead.Id}"));
+        if (openRfqRevisionImpact is not null && rfq is not null)
+            blockers.Add(new("RFQ_REVISION_REQUIRED",
+                "A reply or amendment created a newer immutable Lead revision after RFQ promotion. Review the existing RFQ and resolve the change through a governed RFQ revision process; do not promote again.",
+                "Open existing RFQ", $"/procurement/rfqs/view/{rfq.Id}"));
         if (evidence.Count == 0) blockers.Add(new("SOURCE_UNAVAILABLE", "No retained source evidence is linked to the current revision."));
         if (lines.Any(x => x.VerificationStatus == "MISSING_SOURCE"))
             blockers.Add(new("SOURCE_LINEAGE_INCOMPLETE", "Every Lead line must have exact persisted source-field evidence before RFQ promotion."));
@@ -259,8 +282,8 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
             lead.ReviewApprovedBy, lead.ReviewApprovedOn.HasValue
                 ? new DateTimeOffset(DateTime.SpecifyKind(lead.ReviewApprovedOn.Value, DateTimeKind.Utc)) : null,
             new SourceCoverageDto(lines.Count(x => x.VerificationStatus != "MISSING_SOURCE"), lines.Length), evidence, lines,
-            reasonCodes, unitOptions, currencyOptions, fit is null ? DefaultFitAssessment() : FitDto(fit), promotion is null || rfq is null || decision is null ? null
-                : new PromotionReceiptDto(rfq.Id, rfq.Rfqno, revision.RevisionNumber, decision.Sequence,
+            reasonCodes, unitOptions, currencyOptions, fit is null ? DefaultFitAssessment() : FitDto(fit), promotion is null || rfq is null || promotedRevision is null || promotedDecision is null ? null
+                : new PromotionReceiptDto(rfq.Id, rfq.Rfqno, promotedRevision.RevisionNumber, promotedDecision.Sequence,
                     rfq.NoOfLineItems ?? 0, promotion.PromotedAtUtc, promotion.PromotedBy), blockers);
     }
 

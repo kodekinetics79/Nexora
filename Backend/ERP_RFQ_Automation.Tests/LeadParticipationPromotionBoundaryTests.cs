@@ -135,6 +135,26 @@ public sealed class LeadParticipationPromotionBoundaryTests
     }
 
     [Fact]
+    public void Converted_lead_status_is_reserved_for_exact_rfq_promotion_lineage()
+    {
+        var root = FindRepositoryRoot();
+        var migration = File.ReadAllText(Path.Combine(root,
+            "Backend/ERP_RFQ_Automation/MigrationsBaseline/20260826010000_ReserveConvertedLeadStatusForRfqPromotion.cs"));
+        var lifecycle = File.ReadAllText(Path.Combine(root,
+            "Backend/ERP_RFQ_Automation/CommercialCases/Lifecycle/LifecycleApplicationService.cs"));
+        var promotion = File.ReadAllText(Path.Combine(root,
+            "Backend/ERP_RFQ_Automation/CommercialCases/Promotion/RfqPromotionService.cs"));
+
+        Assert.Contains("trg_leads_require_rfq_promotion_for_converted_status", migration, StringComparison.Ordinal);
+        Assert.Contains("RfqPromotions", migration, StringComparison.Ordinal);
+        Assert.Contains("SourceLeadRevisionId", migration, StringComparison.Ordinal);
+        Assert.Contains("ParticipationDecisionId", migration, StringComparison.Ordinal);
+        Assert.Contains("CONVERTED_TO_RFQ is reserved for RFQ Promotion", lifecycle, StringComparison.Ordinal);
+        Assert.Contains("CompleteRfqPromotionInCurrentTransactionAsync", promotion, StringComparison.Ordinal);
+        Assert.DoesNotContain("TransitionLeadInCurrentTransactionAsync(\n                    businessUnitId, leadId", promotion, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Runtime_model_and_hand_written_migration_use_the_same_tables_and_lineage_columns()
     {
         using var database = new TestDb();
@@ -258,6 +278,7 @@ public sealed class LeadParticipationPromotionBoundaryTests
         using var context = database.ContextFor(null);
 
         Assert.Contains("20260825043000_LeadParticipationAndRfqPromotion", context.Database.GetMigrations());
+        Assert.Contains("20260826010000_ReserveConvertedLeadStatusForRfqPromotion", context.Database.GetMigrations());
     }
 
     [Fact]

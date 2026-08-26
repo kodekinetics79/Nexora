@@ -169,7 +169,7 @@ const LeadValidationGrid: React.FC<LeadValidationGridProps> = ({
         <Tooltip title={fields.length
           ? fields.map((field) => `${field.field}${field.sourceAddress ? ` at ${field.sourceAddress}` : ''}: ${field.rawValue}`).join('\n')
           : 'No exact source-field value was captured'}>
-          <Box sx={{ minWidth: 0 }}>
+          <Box tabIndex={0} aria-label={fields.length ? 'Exact source fields; focus for details' : 'No exact source-field value was captured'} sx={{ minWidth: 0 }}>
             {fields.length ? fields.map((field) => (
               <Typography key={`${field.field}-${field.sourceAddress || ''}`} variant="caption" noWrap sx={{ display: 'block' }}>
                 <Box component="span" sx={{ color: 'text.secondary', fontWeight: 800 }}>{field.field}{field.sourceAddress ? ` · ${field.sourceAddress}` : ''}: </Box>
@@ -291,6 +291,8 @@ const LeadValidationGrid: React.FC<LeadValidationGridProps> = ({
       renderCell: ({ row }) => (
         <Tooltip title={row.verificationDetail || verificationLabel(row.verificationStatus)}>
           <Chip
+            tabIndex={0}
+            aria-label={`${verificationLabel(row.verificationStatus)}; focus for validation details`}
             size="small"
             variant="outlined"
             color={row.verificationStatus === 'VERIFIED' ? 'success' : row.verificationStatus === 'MISSING_SOURCE' ? 'error' : 'warning'}
@@ -338,7 +340,7 @@ const LeadValidationGrid: React.FC<LeadValidationGridProps> = ({
         const savedWarning = parseCatalogWarningSnapshot(snapshot);
         return (
           <Tooltip title={snapshot || 'No warning snapshot'}>
-            <Box sx={{ minWidth: 0 }}>
+            <Box tabIndex={0} aria-label="Saved participation decision; focus for warning details" sx={{ minWidth: 0 }}>
               <Typography variant="caption" sx={{ display: 'block', fontWeight: 800 }} noWrap>
                 {decision.decision === 'Bid' ? (savedWarning.needsAttention ? 'Warning acknowledged' : 'Bid approved') : reason?.label || decision.reasonCode || 'Reason missing'}
               </Typography>

@@ -13,7 +13,6 @@ import {
   Edit as EditIcon,
   CheckCircle as ApproveIcon,
   RequestQuote as QuoteDraftIcon,
-  Download as ExportIcon,
   NavigateNext as NextIcon,
   Schedule as HistoryIcon,
   OpenInNew as WorkspaceIcon,
@@ -317,18 +316,6 @@ const ViewRFQPage: React.FC = () => {
             >
               Back
             </Button>
-            {isDraft && hasPermission('RFQ Management', 'edit') && (
-              <>
-                <Button
-                  variant="outlined"
-                  color="primary"
-                  startIcon={<EditIcon />}
-                  sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
-                >
-                  Edit Draft
-                </Button>
-              </>
-            )}
             {hasPermission('Quotations', 'create') && (
               // A disabled button wrapped in a Tooltip needs a focusable element between them,
               // otherwise the reason is unreachable by pointer and by keyboard alike.
@@ -342,13 +329,6 @@ const ViewRFQPage: React.FC = () => {
                 </span>
               </Tooltip>
             )}
-            <Button
-              variant="outlined"
-              startIcon={<ExportIcon />}
-              sx={{ fontWeight: 800, borderRadius: 2, px: 3, borderColor: 'divider', color: 'text.secondary' }}
-            >
-              Export
-            </Button>
           </Stack>
         </Box>
         <Paper sx={{ mt: 2, p: 2, borderRadius: 1, border: '1px solid', borderColor: 'divider', bgcolor: 'background.paper' }}>

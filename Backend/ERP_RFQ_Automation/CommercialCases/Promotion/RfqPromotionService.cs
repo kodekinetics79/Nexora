@@ -324,13 +324,11 @@ public sealed class RfqPromotionService : IRfqPromotionService
 
                 var lifecycle = new LifecycleApplicationService(_db);
                 var actor = new LifecycleActor(command.Actor.Trim(), "AuthenticatedUser");
-                await lifecycle.TransitionLeadInCurrentTransactionAsync(
-                    businessUnitId, leadId, actor,
+                await lifecycle.CompleteRfqPromotionInCurrentTransactionAsync(
+                    businessUnitId, leadId, rfq.Id, receiptEntity.Id, command.ExpectedLeadRevisionId, decision.Id, actor,
                     new LifecycleTransitionCommand("CONVERTED_TO_RFQ", lead.LifecycleVersion, null, decision.Notes,
                         "Api", $"promotion-{receiptEntity.Id}", $"rfq-{rfq.Id}",
-                        $"rfq-promotion:{businessUnitId}:{receiptEntity.Id}"), false, ct);
-                await lifecycle.RecordLeadPromotedToRfqInCurrentTransactionAsync(
-                    businessUnitId, leadId, rfq.Id, actor, $"promotion-{receiptEntity.Id}", ct);
+                        $"rfq-promotion:{businessUnitId}:{receiptEntity.Id}"), ct);
                 await tx.CommitAsync(ct);
                 return Result(receiptEntity, rfq, command.ExpectedDecisionVersion, decision.Sequence, replayed: false);
             });

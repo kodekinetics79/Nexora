@@ -57,10 +57,11 @@ export const countDecisions = (decisions: DecisionMap): DecisionCounts => {
 };
 
 export const decisionRecordIsLocked = (
-  workbench: Pick<LeadDecisionWorkbenchDTO, 'participationStatus' | 'promotion'>,
+  workbench: Pick<LeadDecisionWorkbenchDTO, 'participationStatus' | 'promotion' | 'blockers'>,
   decisions: DecisionMap,
 ): boolean => {
   if (workbench.promotion) return true;
+  if (workbench.blockers.some(({ code }) => ['LEGACY_RFQ', 'INCONSISTENT_CONVERTED_STATE', 'RFQ_REVISION_REQUIRED'].includes(code))) return true;
   const counts = countDecisions(decisions);
   return workbench.participationStatus === 'COMMITTED'
     && counts.total > 0
