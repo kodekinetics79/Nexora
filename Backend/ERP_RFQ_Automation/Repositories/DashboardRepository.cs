@@ -233,15 +233,19 @@ namespace ERP_RFQ_Automation.Repositories
         ///     books a loss that predates the product. Same rule as the workload view.
         /// </summary>
         public async Task<DeadlineBoardDTO> GetDeadlineBoardAsync(
-            long businessUnitId, int maxLeads = 200, CancellationToken cancellationToken = default)
+            long businessUnitId, int maxLeads = 200, CancellationToken cancellationToken = default,
+            ERP_RFQ_Automation.Authorization.AccountTeamScope? accessScope = null)
         {
             var now = DateTime.UtcNow;
             var today = now.Date;
 
             // "Open" mirrors GetDashboardDataAsync's ActiveLeads: untriaged leads count,
             // because untriaged is precisely the state the deadline board exists to surface.
-            var rows = await _context.Leads.AsNoTracking()
-                .Where(l => l.BusinessUnitId == businessUnitId)
+            var query = _context.Leads.AsNoTracking()
+                .Where(l => l.BusinessUnitId == businessUnitId);
+            if (accessScope != null)
+                query = query.InCommercialScope(_context, businessUnitId, accessScope, now);
+            var rows = await query
                 .Where(l => l.LeadStatus == null
                             || (l.LeadStatus.SetupValue != "Rejected" && l.LeadStatus.SetupValue != "Closed"))
                 .Where(l => l.LeadRejectedReasonId == null)

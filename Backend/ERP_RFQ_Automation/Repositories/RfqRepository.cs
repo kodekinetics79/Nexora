@@ -7,6 +7,7 @@ using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.DTOs.RfqDTOs;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Authorization;
 using Microsoft.EntityFrameworkCore;
 using System;
 using System.Collections.Generic;
@@ -24,7 +25,7 @@ namespace ERP_RFQ_Automation.Repositories
             _context = context;
         }
 
-        public async Task<(IEnumerable<RfqResponseDTO>, int TotalItems)> GetAllAsync(long businessUnitId, int pageNumber = 1, int pageSize = 10, string? search = null, bool? isActive = null, long? assignedToId = null, string? createdBy = null, long? rfqStatusId = null, string? rfqStatusCode = null, string? readiness = null)
+        public async Task<(IEnumerable<RfqResponseDTO>, int TotalItems)> GetAllAsync(long businessUnitId, int pageNumber = 1, int pageSize = 10, string? search = null, bool? isActive = null, long? assignedToId = null, string? createdBy = null, long? rfqStatusId = null, string? rfqStatusCode = null, string? readiness = null, AccountTeamScope? accessScope = null)
         {
             IQueryable<Rfq> query = _context.Rfqs
                 .AsNoTracking()
@@ -34,6 +35,9 @@ namespace ERP_RFQ_Automation.Repositories
                 .Include(r => r.Rfqstatus)
                 .Include(r => r.RfqtypeNavigation)
                 .Include(r => r.Customer);
+
+            if (accessScope != null)
+                query = query.InCommercialScope(_context, businessUnitId, accessScope, DateTime.UtcNow);
 
             if (rfqStatusId.HasValue)
             {
@@ -143,9 +147,9 @@ namespace ERP_RFQ_Automation.Repositories
             return (dtos, totalItems);
         }
 
-        public async Task<RfqResponseDTO> GetByIdAsync(long id, long businessUnitId)
+        public async Task<RfqResponseDTO> GetByIdAsync(long id, long businessUnitId, AccountTeamScope? accessScope = null)
         {
-            var rfq = await _context.Rfqs
+            var query = _context.Rfqs
                 .Include(r => r.BusinessUnit)
                 .Include(r => r.Lead)
                 .Include(r => r.Rfqstatus)
@@ -156,7 +160,10 @@ namespace ERP_RFQ_Automation.Repositories
                 .Include(r => r.Rfqitems).ThenInclude(i => i.Uom)
                 .Include(r => r.Rfqitems).ThenInclude(i => i.Warehouse)
                 .Include(r => r.Customer)
-                .FirstOrDefaultAsync(r => r.Id == id && r.BusinessUnitId == businessUnitId);
+                .Where(r => r.Id == id && r.BusinessUnitId == businessUnitId);
+            if (accessScope != null)
+                query = query.InCommercialScope(_context, businessUnitId, accessScope, DateTime.UtcNow);
+            var rfq = await query.FirstOrDefaultAsync();
 
             if (rfq == null)
                 throw new KeyNotFoundException($"RFQ with ID {id} not found in Business Unit {businessUnitId}.");
@@ -817,12 +824,14 @@ namespace ERP_RFQ_Automation.Repositories
                 .ToListAsync();
         }
 
-        public async Task<RfqStatsDTO> GetRfqStatsAsync(long businessUnitId)
+        public async Task<RfqStatsDTO> GetRfqStatsAsync(long businessUnitId, AccountTeamScope? accessScope = null)
         {
-            var rfqs = await _context.Rfqs
+            var query = _context.Rfqs
                 .AsNoTracking()
-                .Where(r => r.BusinessUnitId == businessUnitId)
-                .ToListAsync();
+                .Where(r => r.BusinessUnitId == businessUnitId);
+            if (accessScope != null)
+                query = query.InCommercialScope(_context, businessUnitId, accessScope, DateTime.UtcNow);
+            var rfqs = await query.ToListAsync();
 
             var now = DateTime.UtcNow;
             var sevenDaysLater = now.AddDays(7);

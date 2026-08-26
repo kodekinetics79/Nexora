@@ -16,7 +16,8 @@ public sealed class CommercialIntelligenceController(
     ErpRfqAutomationContext db,
     ISalesApplicationService sales,
     ICommercialRoutingApplicationService routing,
-    IRoleGate roleGate) : ControllerBase
+    IRoleGate roleGate,
+    IAccountTeamScopeResolver? accountScope = null) : ControllerBase
 {
     [HttpGet("sales-today")]
     [RequireModulePermission("Leads", PermissionAction.View)]
@@ -301,7 +302,15 @@ public sealed class CommercialIntelligenceController(
         [FromQuery] long? customerId = null)
     {
         var tenant = TenantId();
+        var roleId = ClaimId("roleId");
+        var userId = UserId();
+        if (accountScope != null && (!userId.HasValue || roleId <= 0)) return Forbid();
+        var scope = accountScope == null
+            ? AccountTeamScope.TenantWide(userId ?? 1)
+            : await accountScope.ResolveAsync(userId!.Value, roleId, tenant, DateTime.UtcNow, ct);
         var customerQuery = db.Customers.AsNoTracking().Where(x => x.Buid == tenant);
+        if (!scope.IsTenantWide)
+            customerQuery = customerQuery.InAccountScope(db, tenant, scope, DateTime.UtcNow);
         if (customerId.HasValue)
             customerQuery = customerQuery.Where(x => x.Id == customerId.Value);
         else if (!string.IsNullOrWhiteSpace(search))
@@ -313,9 +322,14 @@ public sealed class CommercialIntelligenceController(
             .Where(x => x.BusinessUnitId == tenant && ids.Contains(x.CustomerId) && x.IsActive && x.EffectiveTo == null)
             .OrderByDescending(x => x.Priority).ThenByDescending(x => x.EffectiveFrom).ToListAsync(ct);
         var users = await db.Users.AsNoTracking().Where(x => x.Buid == tenant).ToDictionaryAsync(x => x.Id, ct);
-        var leadRows = await db.Leads.AsNoTracking().Include(x => x.LeadStatus).Where(x => x.BusinessUnitId == tenant && x.CustomerId.HasValue && ids.Contains(x.CustomerId.Value)).ToListAsync(ct);
+        var leadRows = await db.Leads.AsNoTracking().Include(x => x.LeadStatus)
+            .Where(x => x.BusinessUnitId == tenant)
+            .InCommercialScope(db, tenant, scope, DateTime.UtcNow)
+            .Where(x => x.CustomerId.HasValue && ids.Contains(x.CustomerId.Value)).ToListAsync(ct);
         var quoteRows = await db.Quotes.AsNoTracking().Include(x => x.Status).Include(x => x.Currency)
-            .Where(x => x.BusinessUnitId == tenant && x.CustomerId.HasValue && ids.Contains(x.CustomerId.Value)).ToListAsync(ct);
+            .Where(x => x.BusinessUnitId == tenant)
+            .InCommercialScope(db, tenant, scope, DateTime.UtcNow)
+            .Where(x => x.CustomerId.HasValue && ids.Contains(x.CustomerId.Value)).ToListAsync(ct);
         return Ok(customers.Select(customer => {
             var owner = ownerships.FirstOrDefault(x => x.CustomerId == customer.Id);
             users.TryGetValue(owner?.PrimaryUserId ?? 0, out var user);

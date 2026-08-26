@@ -24,16 +24,21 @@ namespace ERP_RFQ_Automation.Controllers
         private readonly Services.IQuoteService _quoteService;
         private readonly ErpRfqAutomationContext _context;
         private readonly ILifecycleApplicationService _lifecycle;
+        private readonly ICommercialAccessContext? _commercialAccess;
         private readonly ILogger<RfqController>? _logger;
 
-        public RfqController(IRfqRepository repository, Services.IQuoteService quoteService, ErpRfqAutomationContext context, ILifecycleApplicationService lifecycle, ILogger<RfqController>? logger = null)
+        public RfqController(IRfqRepository repository, Services.IQuoteService quoteService, ErpRfqAutomationContext context, ILifecycleApplicationService lifecycle, ILogger<RfqController>? logger = null, ICommercialAccessContext? commercialAccess = null)
         {
             _repository = repository;
             _quoteService = quoteService;
             _context = context;
             _lifecycle = lifecycle;
             _logger = logger;
+            _commercialAccess = commercialAccess;
         }
+
+        private async Task<bool> CanAccessRfqAsync(long id, CancellationToken ct = default) =>
+            _commercialAccess != null && await _commercialAccess.CanAccessRfqAsync(id, ct);
 
         [HttpGet]
         [RequireModulePermission("RFQ Management", PermissionAction.View)]
@@ -62,7 +67,9 @@ namespace ERP_RFQ_Automation.Controllers
                     return BadRequest(Problem(StatusCodes.Status400BadRequest, "Invalid RFQ query",
                         "Page size must be between 1 and 1000."));
 
-                var (items, totalItems) = await _repository.GetAllAsync(businessUnitId, pageNumber, pageSize, search, isActive, assignedToId, createdBy, rfqStatusId, rfqStatusCode, readiness);
+                var actor = _commercialAccess == null ? null : await _commercialAccess.ResolveAsync(HttpContext.RequestAborted);
+                if (actor == null || actor.BusinessUnitId != businessUnitId) return Forbid();
+                var (items, totalItems) = await _repository.GetAllAsync(businessUnitId, pageNumber, pageSize, search, isActive, assignedToId, createdBy, rfqStatusId, rfqStatusCode, readiness, actor.AccountScope);
                 
                 return Ok(new PaginatedRfqResponseDTO
                 {
@@ -88,7 +95,9 @@ namespace ERP_RFQ_Automation.Controllers
                 if (!TryGetAuthenticatedBusinessUnitId(out var businessUnitId))
                     return Unauthorized();
 
-                var rfq = await _repository.GetByIdAsync(id, businessUnitId);
+                var actor = _commercialAccess == null ? null : await _commercialAccess.ResolveAsync(HttpContext.RequestAborted);
+                if (actor == null || actor.BusinessUnitId != businessUnitId) return NotFound();
+                var rfq = await _repository.GetByIdAsync(id, businessUnitId, actor.AccountScope);
                 return Ok(rfq);
             }
             catch (KeyNotFoundException)
@@ -125,6 +134,7 @@ namespace ERP_RFQ_Automation.Controllers
                 return BadRequest(Problem(StatusCodes.Status400BadRequest, "Invalid request", "Business Unit ID is required."));
             var actor = User.FindFirst(ClaimTypes.Email)?.Value ?? User.Identity?.Name;
             if (string.IsNullOrWhiteSpace(actor)) return Unauthorized();
+            if (!await CanAccessRfqAsync(id, ct)) return NotFound();
 
             // Tenant-scoped by the RFQ, and the line must belong to THAT RFQ — never trust a
             // caller-supplied line id to be inside the RFQ they named.
@@ -187,6 +197,7 @@ namespace ERP_RFQ_Automation.Controllers
                 return BadRequest(Problem(StatusCodes.Status400BadRequest, "Invalid request", "Business Unit ID is required."));
             var actor = User.FindFirst(ClaimTypes.Email)?.Value ?? User.Identity?.Name;
             if (string.IsNullOrWhiteSpace(actor)) return Unauthorized();
+            if (!await CanAccessRfqAsync(id, ct)) return NotFound();
 
             // Tenant-scoped by the RFQ, and the line must belong to THAT RFQ — never trust a
             // caller-supplied line id to be inside the RFQ they named.
@@ -236,6 +247,7 @@ namespace ERP_RFQ_Automation.Controllers
                         "Business Unit ID is required."));
                 var actor = User.FindFirst(ClaimTypes.Email)?.Value ?? User.Identity?.Name;
                 if (string.IsNullOrWhiteSpace(actor)) return Unauthorized();
+                if (!await CanAccessRfqAsync(id, ct)) return NotFound();
 
                 var quote = await _quoteService.PrepareDraftFromRfqAsync(id, businessUnitId, actor, ct);
                 return Ok(quote);
@@ -267,6 +279,13 @@ namespace ERP_RFQ_Automation.Controllers
                 // (no lead AND no tenant-owned customer) surface as a structured 400 below.
                 var actor = User.FindFirst(ClaimTypes.Email)?.Value ?? User.Identity?.Name;
                 if (string.IsNullOrWhiteSpace(actor)) return Unauthorized();
+                if (_commercialAccess == null) return Forbid();
+                if (request.LeadId.HasValue
+                    && !await _commercialAccess.CanAccessLeadAsync(request.LeadId.Value, HttpContext.RequestAborted))
+                    return NotFound();
+                if (!request.LeadId.HasValue && request.CustomerId.HasValue
+                    && !await _commercialAccess.CanAccessCustomerAsync(request.CustomerId.Value, HttpContext.RequestAborted))
+                    return NotFound();
 
             var rfq = new Rfq
             {
@@ -328,7 +347,9 @@ namespace ERP_RFQ_Automation.Controllers
 
             await _repository.AddAsync(rfq);
 
-            var response = await _repository.GetByIdAsync(rfq.Id, rfq.BusinessUnitId);
+            var createdScope = await _commercialAccess.ResolveAsync(HttpContext.RequestAborted);
+            if (createdScope == null) return Forbid();
+            var response = await _repository.GetByIdAsync(rfq.Id, rfq.BusinessUnitId, createdScope.AccountScope);
 
             return CreatedAtAction(nameof(GetById), new { id = rfq.Id }, response);
             }
@@ -362,6 +383,7 @@ namespace ERP_RFQ_Automation.Controllers
                 var actor = User.FindFirst(ClaimTypes.Email)?.Value ?? User.Identity?.Name;
                 if (string.IsNullOrWhiteSpace(actor))
                     return Unauthorized();
+                if (!await CanAccessRfqAsync(id, HttpContext.RequestAborted)) return NotFound();
 
             var rfq = new Rfq
             {
@@ -456,6 +478,7 @@ namespace ERP_RFQ_Automation.Controllers
             if (!TryGetAuthenticatedBusinessUnitId(out var businessUnitId))
                 return BadRequest(Problem(StatusCodes.Status400BadRequest, "Invalid request",
                     "Business Unit ID is required."));
+            if (!await CanAccessRfqAsync(id, HttpContext.RequestAborted)) return NotFound();
             var approvedBy = User.Identity?.Name ?? "System";
 
             var quoteDelivered = false;
@@ -601,7 +624,9 @@ namespace ERP_RFQ_Automation.Controllers
                     return BadRequest(Problem(StatusCodes.Status400BadRequest, "Invalid request",
                         "Business Unit ID is required."));
 
-                var stats = await _repository.GetRfqStatsAsync(businessUnitId);
+                var actor = _commercialAccess == null ? null : await _commercialAccess.ResolveAsync(HttpContext.RequestAborted);
+                if (actor == null || actor.BusinessUnitId != businessUnitId) return Forbid();
+                var stats = await _repository.GetRfqStatsAsync(businessUnitId, actor.AccountScope);
                 return Ok(stats);
             }
             catch (Exception ex)
@@ -620,6 +645,8 @@ namespace ERP_RFQ_Automation.Controllers
             {
                 if (!TryGetAuthenticatedBusinessUnitId(out var businessUnitId))
                     return Unauthorized();
+
+                if (!await CanAccessRfqAsync(id, HttpContext.RequestAborted)) return NotFound();
 
                 await _repository.DeleteAsync(id, businessUnitId);
                 return NoContent();

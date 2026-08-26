@@ -13,14 +13,12 @@ namespace ERP_RFQ_Automation.Authorization;
 /// read, the global quick search and the release-01 dashboard all call THIS method; delete it and
 /// four compilations fail.</para>
 ///
-/// <para><b>What null means, and why it is visible.</b> A customer with no
-/// <see cref="Customer.AccountTeamId"/> is not "restricted to nobody" — it is a customer nobody has
-/// put in a book yet, and there is no team to restrict it to. It stays readable by every caller who
-/// holds the Customers permission, exactly as it was before the column existed, and every read
-/// surface renders it as a stated gap ("No account team") rather than as a blank. Assigning a team
-/// is the act that NARROWS access. Treating null as "invisible" would have made every pre-existing
-/// customer vanish on deploy, which is failure #10 in a different costume: a backfill whose meaning
-/// is the opposite of the code's.</para>
+/// <para><b>What null means.</b> A customer with no <see cref="Customer.AccountTeamId"/> is waiting
+/// in the governed routing queue; it is not tenant-readable commercial data. Ordinary account
+/// reads therefore exclude it for members and managers unless the caller is a currently named
+/// primary/backup owner. The queue exposes only the minimal facts required to claim or assign the
+/// account. This prevents every sales representative from seeing the complete legacy/unassigned
+/// book while still giving administrators a tenant-wide remediation path.</para>
 ///
 /// <para><b>Named ownership still reads.</b> A rep who is the primary or backup owner of an account
 /// (<see cref="CustomerOwnership"/>) keeps access to it even when the account sits in another team's
@@ -49,8 +47,7 @@ public static class AccountTeamReadFilter
         var userId = scope.UserId;
 
         return customers.Where(customer =>
-            customer.AccountTeamId == null
-            || teamIds.Contains(customer.AccountTeamId.Value)
+            customer.AccountTeamId != null && teamIds.Contains(customer.AccountTeamId.Value)
             || db.Set<CustomerOwnership>().Any(ownership =>
                 ownership.BusinessUnitId == businessUnitId
                 && ownership.CustomerId == customer.Id

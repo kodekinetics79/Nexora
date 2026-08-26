@@ -78,8 +78,14 @@ namespace ERP_RFQ_Automation.Controllers
             [FromQuery] int maxLeads = 200, CancellationToken cancellationToken = default)
         {
             var businessUnitId = ClaimId("businessUnitId");
-            if (businessUnitId <= 0) return Forbid();
-            return Ok(await _repository.GetDeadlineBoardAsync(businessUnitId, maxLeads, cancellationToken));
+            var roleId = ClaimId("roleId");
+            var userId = ClaimId(ClaimTypes.NameIdentifier);
+            if (userId <= 0) userId = ClaimId("sub");
+            if (businessUnitId <= 0 || roleId <= 0 || userId <= 0) return Forbid();
+            var scope = await _accountScope.ResolveAsync(
+                userId, roleId, businessUnitId, DateTime.UtcNow, cancellationToken);
+            return Ok(await _repository.GetDeadlineBoardAsync(
+                businessUnitId, maxLeads, cancellationToken, scope));
         }
 
         /// <summary>

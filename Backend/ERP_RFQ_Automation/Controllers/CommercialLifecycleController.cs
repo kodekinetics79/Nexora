@@ -15,13 +15,16 @@ public sealed class CommercialLifecycleController : ControllerBase
     private readonly ILifecycleApplicationService _lifecycle;
     private readonly IRoleGate _roleGate;
     private readonly ILeadOutcomeReasons _leadOutcomeReasons;
+    private readonly ICommercialAccessContext _commercialAccess;
 
     public CommercialLifecycleController(
-        ILifecycleApplicationService lifecycle, IRoleGate roleGate, ILeadOutcomeReasons leadOutcomeReasons)
+        ILifecycleApplicationService lifecycle, IRoleGate roleGate, ILeadOutcomeReasons leadOutcomeReasons,
+        ICommercialAccessContext commercialAccess)
     {
         _lifecycle = lifecycle;
         _roleGate = roleGate;
         _leadOutcomeReasons = leadOutcomeReasons;
+        _commercialAccess = commercialAccess;
     }
 
     /// <summary>
@@ -35,13 +38,17 @@ public sealed class CommercialLifecycleController : ControllerBase
 
     [HttpGet("leads/{id:long}/lifecycle")]
     [RequireModulePermission("Leads", PermissionAction.View)]
-    public Task<ActionResult<LifecycleStateView>> GetLeadState(long id, CancellationToken ct)
-        => Execute(() => _lifecycle.GetLeadStateAsync(TenantId(), id, ct));
+    public async Task<ActionResult<LifecycleStateView>> GetLeadState(long id, CancellationToken ct)
+    {
+        if (!await _commercialAccess.CanAccessLeadAsync(id, ct)) return NotFound();
+        return await Execute(() => _lifecycle.GetLeadStateAsync(TenantId(), id, ct));
+    }
 
     [HttpPost("leads/{id:long}/transition")]
     [RequireModulePermission("Leads", PermissionAction.Edit)]
     public async Task<ActionResult<LifecycleTransitionResult>> TransitionLead(long id, [FromBody] LifecycleTransitionRequest request, CancellationToken ct)
     {
+        if (!await _commercialAccess.CanAccessLeadAsync(id, ct)) return NotFound();
         if (await RequiresManagerAsync("Lead", request.TargetStatusCode)) return Forbid();
         return await Execute(() => _lifecycle.TransitionLeadAsync(
             TenantId(), id, Actor(), Command(request, request.TargetStatusCode ?? string.Empty), false, ct));
@@ -50,18 +57,25 @@ public sealed class CommercialLifecycleController : ControllerBase
     [HttpPost("leads/{id:long}/reopen")]
     [RequireModulePermission("Leads", PermissionAction.Edit)]
     [RequireManagerRole]
-    public Task<ActionResult<LifecycleTransitionResult>> ReopenLead(long id, [FromBody] LifecycleTransitionRequest request, CancellationToken ct)
-        => Execute(() => _lifecycle.TransitionLeadAsync(TenantId(), id, Actor(), Command(request, LifecyclePolicy.ReopenTarget("Lead")), true, ct));
+    public async Task<ActionResult<LifecycleTransitionResult>> ReopenLead(long id, [FromBody] LifecycleTransitionRequest request, CancellationToken ct)
+    {
+        if (!await _commercialAccess.CanAccessLeadAsync(id, ct)) return NotFound();
+        return await Execute(() => _lifecycle.TransitionLeadAsync(TenantId(), id, Actor(), Command(request, LifecyclePolicy.ReopenTarget("Lead")), true, ct));
+    }
 
     [HttpGet("rfqs/{id:long}/lifecycle")]
     [RequireModulePermission("RFQ Management", PermissionAction.View)]
-    public Task<ActionResult<LifecycleStateView>> GetRfqState(long id, CancellationToken ct)
-        => Execute(() => _lifecycle.GetRfqStateAsync(TenantId(), id, ct));
+    public async Task<ActionResult<LifecycleStateView>> GetRfqState(long id, CancellationToken ct)
+    {
+        if (!await _commercialAccess.CanAccessRfqAsync(id, ct)) return NotFound();
+        return await Execute(() => _lifecycle.GetRfqStateAsync(TenantId(), id, ct));
+    }
 
     [HttpPost("rfqs/{id:long}/transition")]
     [RequireModulePermission("RFQ Management", PermissionAction.Edit)]
     public async Task<ActionResult<LifecycleTransitionResult>> TransitionRfq(long id, [FromBody] LifecycleTransitionRequest request, CancellationToken ct)
     {
+        if (!await _commercialAccess.CanAccessRfqAsync(id, ct)) return NotFound();
         if (await RequiresManagerAsync("Rfq", request.TargetStatusCode)) return Forbid();
         return await Execute(() => _lifecycle.TransitionRfqAsync(
             TenantId(), id, Actor(), Command(request, request.TargetStatusCode ?? string.Empty), false, ct));
@@ -70,8 +84,11 @@ public sealed class CommercialLifecycleController : ControllerBase
     [HttpPost("rfqs/{id:long}/reopen")]
     [RequireModulePermission("RFQ Management", PermissionAction.Edit)]
     [RequireManagerRole]
-    public Task<ActionResult<LifecycleTransitionResult>> ReopenRfq(long id, [FromBody] LifecycleTransitionRequest request, CancellationToken ct)
-        => Execute(() => _lifecycle.TransitionRfqAsync(TenantId(), id, Actor(), Command(request, LifecyclePolicy.ReopenTarget("Rfq")), true, ct));
+    public async Task<ActionResult<LifecycleTransitionResult>> ReopenRfq(long id, [FromBody] LifecycleTransitionRequest request, CancellationToken ct)
+    {
+        if (!await _commercialAccess.CanAccessRfqAsync(id, ct)) return NotFound();
+        return await Execute(() => _lifecycle.TransitionRfqAsync(TenantId(), id, Actor(), Command(request, LifecyclePolicy.ReopenTarget("Rfq")), true, ct));
+    }
 
     private async Task<ActionResult<T>> Execute<T>(Func<Task<T>> action)
     {

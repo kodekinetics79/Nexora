@@ -15,11 +15,28 @@ using ERP_RFQ_Automation.Repositories;
 public class LeadController : ControllerBase
 {
     private readonly ILeadRepository _repository;
+    private readonly ICommercialAccessContext _commercialAccess;
     private readonly ILogger<LeadController>? _logger;
-    public LeadController(ILeadRepository repository, ILogger<LeadController>? logger = null)
+    public LeadController(
+        ILeadRepository repository,
+        ICommercialAccessContext commercialAccess,
+        ILogger<LeadController>? logger = null)
     {
         _repository = repository;
+        _commercialAccess = commercialAccess;
         _logger = logger;
+    }
+
+    private async Task<bool> CanAccessLeadAsync(long id) =>
+        await _commercialAccess.CanAccessLeadAsync(id, HttpContext.RequestAborted);
+
+    private static string? BindMineFilterToActor(string? view, long userId)
+    {
+        if (string.IsNullOrWhiteSpace(view)) return view;
+        return string.Join(',', view.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(token => token.StartsWith("mine", StringComparison.OrdinalIgnoreCase)
+                ? $"mine:{userId}"
+                : token));
     }
 
     private ObjectResult Unexpected(Exception exception, string operation)
@@ -60,8 +77,12 @@ public class LeadController : ControllerBase
             if (pageSize < 1 || pageSize > 1000)
                 return BadRequest("Page size must be between 1 and 1000.");
 
+            var actor = await _commercialAccess.ResolveAsync(HttpContext.RequestAborted);
+            if (actor == null || actor.BusinessUnitId != targetBUId) return Forbid();
+            view = BindMineFilterToActor(view, actor.UserId);
+
             // Use explicit types for deconstruction to avoid inference errors
-            (IEnumerable<LeadResponseDTO> leads, int totalCount) = await _repository.GetLeadListAsync(pageNumber, pageSize, id, rfqno, buyersName, leadSource, targetBUId, startDate, endDate, emailSource, clientemail, view);
+            (IEnumerable<LeadResponseDTO> leads, int totalCount) = await _repository.GetLeadListAsync(pageNumber, pageSize, id, rfqno, buyersName, leadSource, targetBUId, startDate, endDate, emailSource, clientemail, view, actor.AccountScope);
 
             var response = new PaginatedResponseDTO<LeadResponseDTO>
             {
@@ -108,6 +129,7 @@ public class LeadController : ControllerBase
         try
         {
             var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+            if (!await CanAccessLeadAsync(id)) return NotFound();
             await _repository.AcceptLeadAsync(id, businessUnitId);
             return Ok("Lead accepted successfully.");
         }
@@ -156,6 +178,7 @@ public class LeadController : ControllerBase
         try
         {
             var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
+            if (!await CanAccessLeadAsync(id)) return NotFound();
             await _repository.RejectLeadAsync(id, reasonId, businessUnitId);
             return Ok("Lead rejected successfully.");
         }
@@ -176,7 +199,9 @@ public class LeadController : ControllerBase
             var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
             if (businessUnitId == 0) return BadRequest("Business Unit ID is required.");
             
-            var stats = await _repository.GetLeadStatsAsync(businessUnitId);
+            var actor = await _commercialAccess.ResolveAsync(HttpContext.RequestAborted);
+            if (actor == null || actor.BusinessUnitId != businessUnitId) return Forbid();
+            var stats = await _repository.GetLeadStatsAsync(businessUnitId, actor.AccountScope);
             return Ok(stats);
         }
         catch (Exception ex)
@@ -202,7 +227,9 @@ public class LeadController : ControllerBase
                 return BadRequest("Page number must be greater than or equal to 1.");
             pageSize = Math.Clamp(pageSize, 1, 200);
 
-            (IEnumerable<LeadNeedsReviewItemDTO> leads, int totalCount) = await _repository.GetNeedsReviewLeadsAsync(pageNumber, pageSize, businessUnitId, search);
+            var actor = await _commercialAccess.ResolveAsync(HttpContext.RequestAborted);
+            if (actor == null || actor.BusinessUnitId != businessUnitId) return Forbid();
+            (IEnumerable<LeadNeedsReviewItemDTO> leads, int totalCount) = await _repository.GetNeedsReviewLeadsAsync(pageNumber, pageSize, businessUnitId, search, actor.AccountScope);
 
             var response = new PaginatedResponseDTO<LeadNeedsReviewItemDTO>
             {
@@ -230,6 +257,7 @@ public class LeadController : ControllerBase
 
             var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
             if (businessUnitId == 0) return BadRequest("Business Unit ID is required.");
+            if (!await CanAccessLeadAsync(id)) return NotFound();
 
             var reviewedBy = User.FindFirstValue(ClaimTypes.NameIdentifier)
                 ?? User.FindFirstValue(ClaimTypes.Email)
@@ -265,6 +293,7 @@ public class LeadController : ControllerBase
             if (!ModelState.IsValid) return BadRequest(ModelState);
             var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
             if (businessUnitId == 0) return BadRequest("Business Unit ID is required.");
+            if (!await CanAccessLeadAsync(id)) return NotFound();
             var requestedBy = User.FindFirstValue(ClaimTypes.NameIdentifier)
                 ?? User.FindFirstValue(ClaimTypes.Email)
                 ?? User.Identity?.Name
@@ -298,6 +327,7 @@ public class LeadController : ControllerBase
 
             var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
             if (businessUnitId == 0) return BadRequest("Business Unit ID is required.");
+            if (!await CanAccessLeadAsync(id)) return NotFound();
 
             var resolvedBy = User.FindFirst(System.Security.Claims.ClaimTypes.Email)?.Value
                              ?? User.FindFirst("email")?.Value
@@ -344,6 +374,7 @@ public class LeadController : ControllerBase
 
             var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
             if (businessUnitId == 0) return BadRequest("Business Unit ID is required.");
+            if (!await CanAccessLeadAsync(id)) return NotFound();
 
             var linkedBy = User.FindFirstValue(ClaimTypes.NameIdentifier)
                 ?? User.FindFirstValue(ClaimTypes.Email)
@@ -379,6 +410,8 @@ public class LeadController : ControllerBase
         {
             var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
             if (businessUnitId == 0) return BadRequest("Business Unit ID is required.");
+
+            if (!await CanAccessLeadAsync(id)) return NotFound();
 
             var lead = await _repository.GetLeadByIdAsync(id, businessUnitId);
             if (lead == null) return NotFound($"Lead with ID {id} not found.");
@@ -424,6 +457,8 @@ public class LeadController : ControllerBase
         {
             var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
             if (businessUnitId == 0) return BadRequest("Business Unit ID is required.");
+
+            if (!await CanAccessLeadAsync(id)) return NotFound();
             
             var lead = await _repository.GetLeadByIdAsync(id, businessUnitId);
             if (lead == null) return NotFound($"Lead with ID {id} not found.");

@@ -2,6 +2,7 @@ using ERP_RFQ_Automation.DTOs.QuoteDTOs;
 using ERP_RFQ_Automation.Fx;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.Services;
 using Microsoft.EntityFrameworkCore;
 using System;
@@ -20,7 +21,7 @@ namespace ERP_RFQ_Automation.Repositories
             _context = context;
         }
 
-        public async Task<(IEnumerable<QuoteResponseDTO>, int TotalItems)> GetAllAsync(long businessUnitId, int pageNumber, int pageSize, string? search = null, string? state = null)
+        public async Task<(IEnumerable<QuoteResponseDTO>, int TotalItems)> GetAllAsync(long businessUnitId, int pageNumber, int pageSize, string? search = null, string? state = null, AccountTeamScope? accessScope = null)
         {
             IQueryable<Quote> query = _context.Quotes
                 .AsNoTracking()
@@ -35,6 +36,9 @@ namespace ERP_RFQ_Automation.Repositories
                 .Include(q => q.Currency)
                 .Include(q => q.BusinessUnit)
                 .Include(q => q.DiscountType);
+
+            if (accessScope != null)
+                query = query.InCommercialScope(_context, businessUnitId, accessScope, DateTime.UtcNow);
 
             var normalizedState = state?.Trim().ToLowerInvariant();
             if (normalizedState == "draft")
@@ -108,9 +112,9 @@ namespace ERP_RFQ_Automation.Repositories
                 ?? ERP_RFQ_Automation.Sla.SlaPolicy.Default(businessUnitId).StaleQuoteDays;
         }
 
-        public async Task<QuoteResponseDTO> GetByIdAsync(long id, long businessUnitId)
+        public async Task<QuoteResponseDTO> GetByIdAsync(long id, long businessUnitId, AccountTeamScope? accessScope = null)
         {
-            var quote = await _context.Quotes
+            var query = _context.Quotes
                 .AsNoTracking()
                 .Include(q => q.Customer)
                 .Include(q => q.Rfq).ThenInclude(r => r.Lead)
@@ -123,7 +127,10 @@ namespace ERP_RFQ_Automation.Repositories
                 // Without this include the projection below cannot state what the customer asked
                 // for, and — worse — cannot state the line's tax category. See MapToDTO.
                 .Include(q => q.QuoteItems).ThenInclude(qi => qi.Rfqitem)
-                .FirstOrDefaultAsync(q => q.Id == id && q.BusinessUnitId == businessUnitId);
+                .Where(q => q.Id == id && q.BusinessUnitId == businessUnitId);
+            if (accessScope != null)
+                query = query.InCommercialScope(_context, businessUnitId, accessScope, DateTime.UtcNow);
+            var quote = await query.FirstOrDefaultAsync();
 
             if (quote == null)
                 throw new KeyNotFoundException($"Quote with ID {id} not found.");
@@ -445,13 +452,16 @@ namespace ERP_RFQ_Automation.Repositories
                 : quote.StatusId.Value == DraftQuoteStatusIdFallback;
         }
 
-        public async Task<QuoteStatsDTO> GetQuoteStatsAsync(long businessUnitId)
+        public async Task<QuoteStatsDTO> GetQuoteStatsAsync(long businessUnitId, AccountTeamScope? accessScope = null)
         {
-            var quotes = await _context.Quotes
+            var query = _context.Quotes
                 .AsNoTracking()
                 // A withdrawn quote is not part of the pipeline; counting it would overstate both
                 // the open value and the acceptance rate.
-                .Where(q => q.BusinessUnitId == businessUnitId && q.RemovedOn == null)
+                .Where(q => q.BusinessUnitId == businessUnitId && q.RemovedOn == null);
+            if (accessScope != null)
+                query = query.InCommercialScope(_context, businessUnitId, accessScope, DateTime.UtcNow);
+            var quotes = await query
                 .Select(q => new { q.Id, q.StatusId, q.ValidUntil, q.TotalAmount, q.CurrencyId })
                 .ToListAsync();
 

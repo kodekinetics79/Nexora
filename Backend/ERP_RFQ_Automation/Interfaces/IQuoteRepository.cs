@@ -1,5 +1,6 @@
 using ERP_RFQ_Automation.DTOs.QuoteDTOs;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Authorization;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 
@@ -7,8 +8,8 @@ namespace ERP_RFQ_Automation.Interfaces
 {
     public interface IQuoteRepository
     {
-        Task<(IEnumerable<QuoteResponseDTO>, int TotalItems)> GetAllAsync(long businessUnitId, int pageNumber, int pageSize, string? search = null, string? state = null);
-        Task<QuoteResponseDTO> GetByIdAsync(long id, long businessUnitId);
+        Task<(IEnumerable<QuoteResponseDTO>, int TotalItems)> GetAllAsync(long businessUnitId, int pageNumber, int pageSize, string? search = null, string? state = null, AccountTeamScope? accessScope = null);
+        Task<QuoteResponseDTO> GetByIdAsync(long id, long businessUnitId, AccountTeamScope? accessScope = null);
         Task AddAsync(Quote quote);
         Task UpdateAsync(Quote quote);
         /// <summary>
@@ -18,6 +19,6 @@ namespace ERP_RFQ_Automation.Interfaces
         /// not exist in this tenant.
         /// </summary>
         Task<QuoteRemovalOutcome?> RemoveAsync(long id, long businessUnitId, string reason, string actor);
-        Task<QuoteStatsDTO> GetQuoteStatsAsync(long businessUnitId);
+        Task<QuoteStatsDTO> GetQuoteStatsAsync(long businessUnitId, AccountTeamScope? accessScope = null);
     }
 }

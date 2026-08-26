@@ -1,6 +1,7 @@
 using System.Reflection;
 using System.Security.Claims;
 using ERP_RFQ_Automation.Controllers;
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.DTOs.LookupDTOs;
 using ERP_RFQ_Automation.DTOs.RfqDTOs;
 using ERP_RFQ_Automation.Interfaces;
@@ -143,7 +144,16 @@ public sealed class RfqServerAuthorityTests
         if (actor is not null)
             claims.Add(new Claim(ClaimTypes.Email, actor));
 
-        return new RfqController(repository, null!, null!, null!)
+        var authenticatedTenant = long.TryParse(businessUnitClaim, out var parsedTenant) && parsedTenant > 0
+            ? parsedTenant
+            : 1;
+
+        return new RfqController(
+            repository,
+            null!,
+            null!,
+            null!,
+            commercialAccess: new PermitCommercialAccessContext(authenticatedTenant))
         {
             ControllerContext = new ControllerContext
             {
@@ -189,13 +199,14 @@ public sealed class RfqServerAuthorityTests
         public Task<(IEnumerable<RfqResponseDTO>, int TotalItems)> GetAllAsync(
             long businessUnitId, int pageNumber = 1, int pageSize = 10, string? search = null,
             bool? isActive = null, long? assignedToId = null, string? createdBy = null,
-            long? rfqStatusId = null, string? rfqStatusCode = null, string? readiness = null)
+            long? rfqStatusId = null, string? rfqStatusCode = null, string? readiness = null,
+            AccountTeamScope? accessScope = null)
         {
             Record(businessUnitId);
             return Task.FromResult<(IEnumerable<RfqResponseDTO>, int)>(([], 0));
         }
 
-        public Task<RfqResponseDTO> GetByIdAsync(long id, long businessUnitId)
+        public Task<RfqResponseDTO> GetByIdAsync(long id, long businessUnitId, AccountTeamScope? accessScope = null)
         {
             Record(businessUnitId);
             return Task.FromResult(new RfqResponseDTO
@@ -228,6 +239,6 @@ public sealed class RfqServerAuthorityTests
         public Task AddAsync(Rfq rfq) => throw new NotSupportedException();
         public Task<long> ApproveAsync(long id, string approvedBy, long businessUnitId, long? customerId = null) => throw new NotSupportedException();
         public Task<List<RFQTypeLookupDTO>> GetRFQTypeAsync() => throw new NotSupportedException();
-        public Task<RfqStatsDTO> GetRfqStatsAsync(long businessUnitId) => throw new NotSupportedException();
+        public Task<RfqStatsDTO> GetRfqStatsAsync(long businessUnitId, AccountTeamScope? accessScope = null) => throw new NotSupportedException();
     }
 }

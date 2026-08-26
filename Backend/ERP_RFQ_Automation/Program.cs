@@ -460,6 +460,7 @@ builder.Services.AddScoped<IRoleGate, RoleGate>();
 // because the answer is a property of the CALLER — a singleton would have to be keyed by user and
 // would then be a cache of authorization decisions with no invalidation.
 builder.Services.AddScoped<IAccountTeamScopeResolver, AccountTeamScopeResolver>();
+builder.Services.AddScoped<ICommercialAccessContext, CommercialAccessContext>();
 // FR-DSH-04: the cross-entity quick search behind the top bar. Scoped for the same reason —
 // its permission and account-scope decisions are the caller's, not the process's.
 builder.Services.AddScoped<ERP_RFQ_Automation.Search.IGlobalSearchService,

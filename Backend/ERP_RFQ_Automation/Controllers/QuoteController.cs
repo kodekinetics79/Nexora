@@ -28,6 +28,7 @@ namespace ERP_RFQ_Automation.Controllers
         private readonly ILifecycleApplicationService _lifecycle;
         private readonly ErpRfqAutomationContext _context;
         private readonly ERP_RFQ_Automation.Intelligence.Pricing.IPriceAttestationService _attestations;
+        private readonly ICommercialAccessContext? _commercialAccess;
         private readonly ILogger<QuoteController>? _logger;
 
         public QuoteController(
@@ -37,7 +38,8 @@ namespace ERP_RFQ_Automation.Controllers
             ILifecycleApplicationService lifecycle,
             ErpRfqAutomationContext context,
             ERP_RFQ_Automation.Intelligence.Pricing.IPriceAttestationService attestations,
-            ILogger<QuoteController>? logger = null)
+            ILogger<QuoteController>? logger = null,
+            ICommercialAccessContext? commercialAccess = null)
         {
             _repository = repository;
             _quoteService = quoteService;
@@ -46,7 +48,11 @@ namespace ERP_RFQ_Automation.Controllers
             _context = context;
             _attestations = attestations;
             _logger = logger;
+            _commercialAccess = commercialAccess;
         }
+
+        private async Task<bool> CanAccessQuoteAsync(long id, CancellationToken ct = default) =>
+            _commercialAccess != null && await _commercialAccess.CanAccessQuoteAsync(id, ct);
 
         private ObjectResult Unexpected(Exception exception, string operation)
         {
@@ -80,7 +86,9 @@ namespace ERP_RFQ_Automation.Controllers
                 if (pageSize < 1 || pageSize > 1000)
                     return BadRequest("Page size must be between 1 and 1000.");
 
-                var (items, totalItems) = await _repository.GetAllAsync(targetBUId, pageNumber, pageSize, search, state);
+                var actor = _commercialAccess == null ? null : await _commercialAccess.ResolveAsync(HttpContext.RequestAborted);
+                if (actor == null || actor.BusinessUnitId != targetBUId) return Forbid();
+                var (items, totalItems) = await _repository.GetAllAsync(targetBUId, pageNumber, pageSize, search, state, actor.AccountScope);
                 Response.Headers.Append("X-Total-Count", totalItems.ToString());
                 return Ok(new { items, totalItems });
             }
@@ -102,7 +110,9 @@ namespace ERP_RFQ_Automation.Controllers
                 if (targetBUId <= 0)
                     return BadRequest("Business Unit ID is required.");
 
-                var quote = await _repository.GetByIdAsync(id, targetBUId);
+                var actor = _commercialAccess == null ? null : await _commercialAccess.ResolveAsync(HttpContext.RequestAborted);
+                if (actor == null || actor.BusinessUnitId != targetBUId) return NotFound();
+                var quote = await _repository.GetByIdAsync(id, targetBUId, actor.AccountScope);
                 return Ok(quote);
             }
             catch (KeyNotFoundException)
@@ -132,6 +142,9 @@ namespace ERP_RFQ_Automation.Controllers
                 var claimBUId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
                 if (claimBUId <= 0) return BadRequest("Business Unit ID is required.");
                 if (!request.RfqId.HasValue) return BadRequest("An RFQ is required to create a Quote.");
+                if (_commercialAccess == null
+                    || !await _commercialAccess.CanAccessRfqAsync(request.RfqId.Value, HttpContext.RequestAborted))
+                    return NotFound();
                 request.BusinessUnitId = claimBUId;
                 request.CreatedBy = ActorEmail();
 
@@ -159,7 +172,9 @@ namespace ERP_RFQ_Automation.Controllers
                 // idempotent-replay path, inside that transaction — so the identity is committed
                 // atomically with the quote rather than in a second, separate write.
                 var created = await _quoteService.CreateQuoteAsync(request);
-                var quote = await _repository.GetByIdAsync(created.Id, claimBUId);
+                var actorScope = await _commercialAccess.ResolveAsync(HttpContext.RequestAborted);
+                if (actorScope == null) return Forbid();
+                var quote = await _repository.GetByIdAsync(created.Id, claimBUId, actorScope.AccountScope);
                 return CreatedAtAction(nameof(GetById), new { id = quote.Id, businessUnitId = quote.BusinessUnitId }, quote);
             }
             catch (ArgumentException ex)
@@ -194,6 +209,7 @@ namespace ERP_RFQ_Automation.Controllers
             {
                 var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
                 if (businessUnitId <= 0) return BadRequest("Business Unit ID is required.");
+                if (!await CanAccessQuoteAsync(id, HttpContext.RequestAborted)) return NotFound();
                 var existing = await _context.Quotes.AsNoTracking()
                     .SingleOrDefaultAsync(item => item.Id == id && item.BusinessUnitId == businessUnitId);
                 if (existing == null) return NotFound();
@@ -241,6 +257,7 @@ namespace ERP_RFQ_Automation.Controllers
                     return BadRequest("Business Unit ID is required.");
                 if (string.IsNullOrWhiteSpace(reason))
                     return BadRequest("A reason is required to remove a quotation.");
+                if (!await CanAccessQuoteAsync(id, HttpContext.RequestAborted)) return NotFound();
 
                 var outcome = await _repository.RemoveAsync(id, targetBUId, reason, ActorEmail());
                 if (outcome == null) return NotFound();
@@ -287,6 +304,7 @@ namespace ERP_RFQ_Automation.Controllers
             {
                 var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
                 if (businessUnitId <= 0) return Forbid();
+                if (!await CanAccessQuoteAsync(id, HttpContext.RequestAborted)) return NotFound();
                 var bytes = await _quoteService.GenerateQuotePdfAsync(
                     id, businessUnitId, ct: HttpContext.RequestAborted);
                 return File(bytes, "application/pdf", $"Quote_{id}.pdf");
@@ -331,6 +349,7 @@ namespace ERP_RFQ_Automation.Controllers
 
             var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
             if (businessUnitId <= 0) return BadRequest(new { message = "Business Unit ID is required." });
+            if (!await CanAccessQuoteAsync(id, HttpContext.RequestAborted)) return NotFound();
 
             try
             {
@@ -354,6 +373,7 @@ namespace ERP_RFQ_Automation.Controllers
         {
             var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
             if (businessUnitId <= 0) return BadRequest(new { message = "Business Unit ID is required." });
+            if (!await CanAccessQuoteAsync(id, HttpContext.RequestAborted)) return NotFound();
             try
             {
                 return Ok(await _quoteService.GetValidityExtensionsAsync(id, businessUnitId, HttpContext.RequestAborted));
@@ -369,6 +389,7 @@ namespace ERP_RFQ_Automation.Controllers
         {
             var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
             if (businessUnitId <= 0) return BadRequest(new { message = "A valid businessUnitId claim is required." });
+            if (!await CanAccessQuoteAsync(id, ct)) return NotFound();
             try
             {
                 var actor = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
@@ -389,6 +410,7 @@ namespace ERP_RFQ_Automation.Controllers
             {
                 var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
                 if (businessUnitId <= 0) return BadRequest("Business Unit ID is required.");
+                if (!await CanAccessQuoteAsync(id, HttpContext.RequestAborted)) return NotFound();
                 // WP-B3: the send may be parked as a below-floor approval instead of
                 // being performed; 409 tells the caller it is queued, not failed.
                 var result = await _quoteService.SendQuoteEmailAsync(id, businessUnitId, recipientEmail, options: new QuoteSendOptions
@@ -472,6 +494,7 @@ namespace ERP_RFQ_Automation.Controllers
             {
                 var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
                 if (businessUnitId <= 0) return BadRequest("Business Unit ID is required.");
+                if (!await CanAccessQuoteAsync(id, HttpContext.RequestAborted)) return NotFound();
 
                 var revision = await _quoteService.ReviseQuoteAsync(id, businessUnitId, ActorEmail());
                 return CreatedAtAction(nameof(GetById),
@@ -497,6 +520,7 @@ namespace ERP_RFQ_Automation.Controllers
             {
                 var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
                 if (businessUnitId <= 0) return BadRequest("Business Unit ID is required.");
+                if (!await CanAccessQuoteAsync(id, HttpContext.RequestAborted)) return NotFound();
 
                 return Ok(await _quoteService.GetRevisionInfoAsync(id, businessUnitId));
             }
@@ -514,6 +538,7 @@ namespace ERP_RFQ_Automation.Controllers
             {
                 var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
                 if (businessUnitId <= 0) return BadRequest("Business Unit ID is required.");
+                if (!await CanAccessQuoteAsync(id, HttpContext.RequestAborted)) return NotFound();
                 return Ok(await _lifecycle.GetQuoteStateAsync(businessUnitId, id, HttpContext.RequestAborted));
             }
             catch (LifecycleNotFoundException) { return NotFound(); }
@@ -530,6 +555,7 @@ namespace ERP_RFQ_Automation.Controllers
                 if (!ModelState.IsValid) return BadRequest(ModelState);
                 var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
                 if (businessUnitId <= 0) return BadRequest("Business Unit ID is required.");
+                if (!await CanAccessQuoteAsync(id, HttpContext.RequestAborted)) return NotFound();
                 var result = await _lifecycle.TransitionQuoteAsync(
                     businessUnitId,
                     id,
@@ -571,6 +597,7 @@ namespace ERP_RFQ_Automation.Controllers
             {
                 var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
                 if (businessUnitId <= 0) return BadRequest("Business Unit ID is required.");
+                if (!await CanAccessQuoteAsync(id, HttpContext.RequestAborted)) return NotFound();
 
                 var result = await _outcomeService.SetOutcomeAsync(
                     id, businessUnitId, ActorEmail(), request.Outcome, request.ReasonCode, request.Note);
@@ -608,6 +635,7 @@ namespace ERP_RFQ_Automation.Controllers
             {
                 var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
                 if (businessUnitId <= 0) return BadRequest("Business Unit ID is required.");
+                if (!await CanAccessQuoteAsync(id, HttpContext.RequestAborted)) return NotFound();
 
                 await _outcomeService.MarkRespondedAsync(id, businessUnitId, ActorEmail());
                 return Ok(new { id, responded = true });
@@ -647,6 +675,7 @@ namespace ERP_RFQ_Automation.Controllers
         {
             var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
             if (businessUnitId <= 0) return BadRequest(new { message = "Business Unit ID is required." });
+            if (!await CanAccessQuoteAsync(id, ct)) return NotFound();
             try
             {
                 var state = await _attestations.EvaluateAsync(id, businessUnitId, ct);
@@ -668,6 +697,7 @@ namespace ERP_RFQ_Automation.Controllers
             var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
             if (businessUnitId <= 0) return BadRequest(new { message = "Business Unit ID is required." });
             if (request is null) return BadRequest(new { message = "A price source and reference are required." });
+            if (!await CanAccessQuoteAsync(id, ct)) return NotFound();
             try
             {
                 await _attestations.AttestAsync(
@@ -755,7 +785,9 @@ namespace ERP_RFQ_Automation.Controllers
                 var businessUnitId = long.Parse(User.FindFirst("businessUnitId")?.Value ?? "0");
                 if (businessUnitId == 0) return BadRequest("Business Unit ID is required.");
                 
-                var stats = await _repository.GetQuoteStatsAsync(businessUnitId);
+                var actor = _commercialAccess == null ? null : await _commercialAccess.ResolveAsync(HttpContext.RequestAborted);
+                if (actor == null || actor.BusinessUnitId != businessUnitId) return Forbid();
+                var stats = await _repository.GetQuoteStatsAsync(businessUnitId, actor.AccountScope);
                 return Ok(stats);
             }
             catch (Exception ex)

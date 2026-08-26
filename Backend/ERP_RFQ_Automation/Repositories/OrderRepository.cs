@@ -2,6 +2,7 @@ using ERP_RFQ_Automation.DTOs.OrderDTOs;
 using ERP_RFQ_Automation.Fx;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Authorization;
 using Microsoft.EntityFrameworkCore;
 using System;
 using System.Collections.Generic;
@@ -19,10 +20,12 @@ namespace ERP_RFQ_Automation.Repositories
             _context = context;
         }
 
-        public async Task<IEnumerable<Order>> GetAllOrdersAsync(long businessUnitId)
+        public async Task<IEnumerable<Order>> GetAllOrdersAsync(long businessUnitId, AccountTeamScope? accessScope = null)
         {
-            return await _context.Orders
-                .Where(o => o.BusinessUnitId == businessUnitId)
+            var query = _context.Orders.Where(o => o.BusinessUnitId == businessUnitId);
+            if (accessScope != null)
+                query = query.InCommercialScope(_context, businessUnitId, accessScope, DateTime.UtcNow);
+            return await query
                 .Include(o => o.Customer)
                 .Include(o => o.Status)
                 .Include(o => o.PaymentStatus)
@@ -36,9 +39,9 @@ namespace ERP_RFQ_Automation.Repositories
                 .ToListAsync();
         }
 
-        public async Task<Order?> GetOrderByIdAsync(long id, long businessUnitId)
+        public async Task<Order?> GetOrderByIdAsync(long id, long businessUnitId, AccountTeamScope? accessScope = null)
         {
-            return await _context.Orders
+            var query = _context.Orders
                 .Include(o => o.Customer)
                 .Include(o => o.Status)
                 .Include(o => o.PaymentStatus)
@@ -50,7 +53,10 @@ namespace ERP_RFQ_Automation.Repositories
                 .Include(o => o.OrderItems)
                     .ThenInclude(oi => oi.Product)
                 .Include(o => o.Shipments)
-                .FirstOrDefaultAsync(o => o.Id == id && o.BusinessUnitId == businessUnitId);
+                .Where(o => o.Id == id && o.BusinessUnitId == businessUnitId);
+            if (accessScope != null)
+                query = query.InCommercialScope(_context, businessUnitId, accessScope, DateTime.UtcNow);
+            return await query.FirstOrDefaultAsync();
         }
 
         public async Task<Order> CreateOrderAsync(Order order)
@@ -81,9 +87,9 @@ namespace ERP_RFQ_Automation.Repositories
             }
         }
 
-        public async Task<Order?> GetOrderForInvoiceAsync(long id, long businessUnitId)
+        public async Task<Order?> GetOrderForInvoiceAsync(long id, long businessUnitId, AccountTeamScope? accessScope = null)
         {
-            return await _context.Orders
+            var query = _context.Orders
                 .Include(o => o.Customer).ThenInclude(c => c.Contacts)
                 .Include(o => o.Status)
                 // An invoice that states amounts without a currency is not a document anyone
@@ -91,7 +97,10 @@ namespace ERP_RFQ_Automation.Repositories
                 .Include(o => o.Currency)
                 .Include(o => o.OrderItems).ThenInclude(i => i.Product)
                 .Include(o => o.Quote).ThenInclude(q => q.Rfq).ThenInclude(r => r.Lead)
-                .FirstOrDefaultAsync(o => o.Id == id && o.BusinessUnitId == businessUnitId);
+                .Where(o => o.Id == id && o.BusinessUnitId == businessUnitId);
+            if (accessScope != null)
+                query = query.InCommercialScope(_context, businessUnitId, accessScope, DateTime.UtcNow);
+            return await query.FirstOrDefaultAsync();
         }
 
         public async Task<string> GetNextOrderNumberAsync(long businessUnitId)
@@ -119,19 +128,25 @@ namespace ERP_RFQ_Automation.Repositories
             return $"{prefix}{nextSequence:D6}";
         }
 
-        public async Task<IEnumerable<Order>> GetOrdersByCustomerIdAsync(long customerId, long businessUnitId)
+        public async Task<IEnumerable<Order>> GetOrdersByCustomerIdAsync(long customerId, long businessUnitId, AccountTeamScope? accessScope = null)
         {
-             return await _context.Orders
-                .Where(o => o.CustomerId == customerId && o.BusinessUnitId == businessUnitId)
+             var query = _context.Orders
+                .Where(o => o.CustomerId == customerId && o.BusinessUnitId == businessUnitId);
+             if (accessScope != null)
+                 query = query.InCommercialScope(_context, businessUnitId, accessScope, DateTime.UtcNow);
+             return await query
                 .Include(o => o.Status)
                 .ToListAsync();
         }
 
-        public async Task<OrderStatsDTO> GetOrderStatsAsync(long businessUnitId)
+        public async Task<OrderStatsDTO> GetOrderStatsAsync(long businessUnitId, AccountTeamScope? accessScope = null)
         {
-            var orders = await _context.Orders
+            var query = _context.Orders
                 .AsNoTracking()
-                .Where(o => o.BusinessUnitId == businessUnitId)
+                .Where(o => o.BusinessUnitId == businessUnitId);
+            if (accessScope != null)
+                query = query.InCommercialScope(_context, businessUnitId, accessScope, DateTime.UtcNow);
+            var orders = await query
                 .Select(o => new { o.Id, o.StatusId, o.TotalAmount, o.CurrencyId })
                 .ToListAsync();
 
