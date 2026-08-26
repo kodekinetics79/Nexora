@@ -36,6 +36,8 @@ public static class ParticipationModelBuilderExtensions
             e.HasKey(x => x.Id);
             e.HasAlternateKey(x => new { x.BusinessUnitId, x.Id });
             e.HasAlternateKey(x => new { x.BusinessUnitId, x.Id, x.LeadId, x.LeadRevisionId });
+            e.HasAlternateKey(x => new { x.BusinessUnitId, x.Id, x.LeadId, x.LeadRevisionId, x.IsCommitted })
+                .HasName("AK_LeadParticipationDecisions_CommittedConsistency");
             e.Property(x => x.Outcome).HasConversion<string>().HasMaxLength(24);
             e.Property(x => x.ReasonCode).HasMaxLength(64);
             e.Property(x => x.Notes).HasMaxLength(2000);
@@ -65,7 +67,7 @@ public static class ParticipationModelBuilderExtensions
                 table.HasCheckConstraint("CK_LeadLineParticipationDecisions_Quantity",
                     "\"Quantity\" IS NULL OR \"Quantity\" > 0");
                 table.HasCheckConstraint("CK_LeadLineParticipationDecisions_BidCommercialIdentity",
-                    "\"Choice\" <> 'Bid' OR (\"Quantity\" > 0 AND \"UomId\" IS NOT NULL AND \"CurrencyId\" IS NOT NULL AND \"UnitOfMeasure\" IS NOT NULL AND trim(\"UnitOfMeasure\") <> '' AND \"Currency\" IS NOT NULL AND trim(\"Currency\") <> '')");
+                    "NOT (\"DecisionIsCommitted\" AND \"Choice\" = 'Bid') OR (\"Quantity\" > 0 AND \"UomId\" IS NOT NULL AND \"CurrencyId\" IS NOT NULL AND \"UnitOfMeasure\" IS NOT NULL AND trim(\"UnitOfMeasure\") <> '' AND \"Currency\" IS NOT NULL AND trim(\"Currency\") <> '')");
             });
             e.HasKey(x => x.Id);
             e.Property(x => x.Choice).HasConversion<string>().HasMaxLength(16);
@@ -81,9 +83,10 @@ public static class ParticipationModelBuilderExtensions
                 .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id }).OnDelete(DeleteBehavior.Restrict);
             e.HasIndex(x => new { x.BusinessUnitId, x.ParticipationDecisionId, x.LeadItemRevisionId }).IsUnique();
             e.HasOne(x => x.ParticipationDecision).WithMany(x => x.Lines)
-                .HasForeignKey(x => new { x.BusinessUnitId, x.ParticipationDecisionId, x.LeadId, x.LeadRevisionId })
-                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id, x.LeadId, x.LeadRevisionId })
-                .OnDelete(DeleteBehavior.Restrict);
+                .HasForeignKey(x => new { x.BusinessUnitId, x.ParticipationDecisionId, x.LeadId, x.LeadRevisionId, x.DecisionIsCommitted })
+                .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id, x.LeadId, x.LeadRevisionId, x.IsCommitted })
+                .OnDelete(DeleteBehavior.Restrict)
+                .HasConstraintName("FK_LeadLineParticipationDecisions_DecisionCommitConsistency");
             e.HasOne(x => x.LeadItemRevision).WithMany()
                 .HasForeignKey(x => new { x.BusinessUnitId, x.LeadItemRevisionId, x.LeadRevisionId, x.LeadId })
                 .HasPrincipalKey(x => new { x.BusinessUnitId, x.Id, x.LeadRevisionId, x.LeadId })

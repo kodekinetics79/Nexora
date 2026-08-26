@@ -32,6 +32,7 @@ import leadDecisionService, {
   type SaveFitAssessmentRequest,
 } from '../../../api/services/leadDecisionService';
 import { useAuth } from '../../../context/AuthContext';
+import ApiErrorNotice from '../../../components/common/ApiErrorNotice';
 import { presentableErrorMessage } from '../../../utils/apiErrors';
 import { formatDateSafe } from '../../../utils/dates';
 import FitAssessmentPanel from './FitAssessmentPanel';
@@ -405,6 +406,35 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
           )}
         </Paper>
       </WorkbenchStagePanel>
+
+      {(fitMutation.isError || participationMutation.isError || promotionMutation.isError) ? (
+        <Stack spacing={1} sx={{ mt: 2 }} aria-label="Decision save errors">
+          {fitMutation.isError ? (
+            <ApiErrorNotice
+              error={fitMutation.error}
+              fallbackMessage="The fit assessment was not saved. Your entries remain available in this tab."
+              onRetry={fitMutation.variables ? () => fitMutation.mutate(fitMutation.variables) : undefined}
+              retryLabel="Retry fit assessment"
+            />
+          ) : null}
+          {participationMutation.isError ? (
+            <ApiErrorNotice
+              error={participationMutation.error}
+              fallbackMessage="The participation decision was not saved. Your line selections remain available in this tab."
+              onRetry={participationMutation.variables ? () => participationMutation.mutate(participationMutation.variables) : undefined}
+              retryLabel="Retry participation save"
+            />
+          ) : null}
+          {promotionMutation.isError ? (
+            <ApiErrorNotice
+              error={promotionMutation.error}
+              fallbackMessage="The approved lines were not promoted. No second RFQ was created."
+              onRetry={() => promotionMutation.mutate()}
+              retryLabel="Retry RFQ promotion"
+            />
+          ) : null}
+        </Stack>
+      ) : null}
 
       <Paper
         elevation={6}

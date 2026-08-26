@@ -38,7 +38,8 @@ public sealed class LeadParticipationPromotionPostgreSqlTests(PostgreSqlTestData
             FROM pg_constraint
             WHERE conname = ANY (ARRAY[
                 'CK_LeadLineParticipationDecisions_BidCommercialIdentity',
-                'FK_LeadLineParticipationDecisions_DecisionConsistency',
+                'AK_LeadParticipationDecisions_CommittedConsistency',
+                'FK_LeadLineParticipationDecisions_DecisionCommitConsistency',
                 'FK_LeadLineParticipationDecisions_RevisionLineConsistency',
                 'FK_RfqPromotions_DecisionConsistency',
                 'FK_RFQ_PromotionConsistency',
@@ -48,7 +49,8 @@ public sealed class LeadParticipationPromotionPostgreSqlTests(PostgreSqlTestData
         Assert.Equal(new HashSet<string>(StringComparer.Ordinal)
         {
             "CK_LeadLineParticipationDecisions_BidCommercialIdentity",
-            "FK_LeadLineParticipationDecisions_DecisionConsistency",
+            "AK_LeadParticipationDecisions_CommittedConsistency",
+            "FK_LeadLineParticipationDecisions_DecisionCommitConsistency",
             "FK_LeadLineParticipationDecisions_RevisionLineConsistency",
             "FK_RfqPromotions_DecisionConsistency",
             "FK_RFQ_PromotionConsistency",
@@ -65,6 +67,7 @@ public sealed class LeadParticipationPromotionPostgreSqlTests(PostgreSqlTestData
         Assert.Contains("Quantity", bidGuard, StringComparison.Ordinal);
         Assert.Contains("UomId", bidGuard, StringComparison.Ordinal);
         Assert.Contains("CurrencyId", bidGuard, StringComparison.Ordinal);
+        Assert.Contains("DecisionIsCommitted", bidGuard, StringComparison.Ordinal);
 
         var triggers = await ReadSetAsync(connection, """
             SELECT tgname

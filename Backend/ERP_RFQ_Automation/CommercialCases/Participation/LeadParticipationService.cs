@@ -360,6 +360,7 @@ public sealed class LeadParticipationService : ILeadParticipationService
                     LeadId = leadId,
                     LeadRevisionId = command.ExpectedLeadRevisionId,
                     LeadItemRevisionId = line.LeadItemRevisionId,
+                    DecisionIsCommitted = command.Commit,
                     Choice = line.Choice,
                     ReasonCode = Clean(line.ReasonCode),
                     ReasonNotes = Clean(line.ReasonNotes),
