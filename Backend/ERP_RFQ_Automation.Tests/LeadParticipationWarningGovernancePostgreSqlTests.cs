@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using ERP_RFQ_Automation.CommercialCases.Participation;
 using ERP_RFQ_Automation.CommercialCases.Promotion;
@@ -30,6 +31,25 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
     private const long CurrencyId = 9_472_303;
     private const long ProductId = 9_472_304;
     private static DateTime Now => DateTime.UtcNow;
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task Workbench_displays_customer_line_identity_without_changing_normalized_revision_fingerprint()
+    {
+        var scenario = await CreateScenarioAsync([
+            Line("2.1.3", 12, "EA", "SAR", "LINE-PUNCTUATION")
+        ], "line-identity");
+        await using var context = database.ContextFor(Tenant);
+
+        var revisionLine = await context.Set<LeadItemRevision>().AsNoTracking()
+            .SingleAsync(x => x.BusinessUnitId == Tenant && x.LeadRevisionId == scenario.RevisionId);
+        using (var snapshot = JsonDocument.Parse(revisionLine.SnapshotJson))
+            Assert.Equal("213", snapshot.RootElement.GetProperty("line").GetString());
+
+        var workbench = await new LeadDecisionWorkbenchService(context, new LeadOutcomeReasons(context))
+            .GetAsync(Tenant, scenario.LeadId);
+        Assert.Equal("2.1.3", Assert.Single(workbench.Lines).LineItemNo);
+    }
 
     [Fact]
     [Trait("Category", "PostgreSQL")]
