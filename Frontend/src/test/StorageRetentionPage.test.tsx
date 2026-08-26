@@ -82,6 +82,8 @@ const DRY_RUN = readEvidenceRetentionRun({
   legacyCopiesUnresolved: 0,
   disclosure: DISCLOSURE,
   idempotentReplay: false,
+  previewToken: 'server-signed-preview-token',
+  previewExpiresOn: '2026-08-26T23:59:00Z',
   skipped: [
     { documentId: 412, fileName: 'INV-2211.pdf', reason: 'STATUTORY_RETENTION' },
     { documentId: 415, fileName: 'RFQ-8841.pdf', reason: 'The document is under legal hold.' },
@@ -429,7 +431,11 @@ describe('StorageRetentionPage', () => {
     fireEvent.click(confirmButton);
 
     await waitFor(() => expect(runEvidenceRetentionPurge).toHaveBeenLastCalledWith(
-      expect.objectContaining({ dryRun: false, reason: 'Quarterly storage reclaim' }),
+      expect.objectContaining({
+        dryRun: false,
+        reason: 'Quarterly storage reclaim',
+        previewToken: 'server-signed-preview-token',
+      }),
     ));
     expect(await screen.findByText(/stored files deleted/i)).toBeInTheDocument();
   });

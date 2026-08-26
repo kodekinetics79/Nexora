@@ -1,4 +1,5 @@
 using System.Data;
+using System.Security.Cryptography;
 using System.Text.Json;
 using ERP_RFQ_Automation.CommercialDocuments;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
@@ -9,6 +10,7 @@ using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Platform.Lifecycle;
 using ERP_RFQ_Automation.PlatformGovernance;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.Extensions.Logging;
 
 namespace ERP_RFQ_Automation.Retention;
@@ -43,10 +45,15 @@ public sealed class EvidenceRetentionService(
     IEvidenceObjectStorage storage,
     LegacyAttachmentPurgeResolver legacyCopies,
     CommercialDocumentArchiveService archive,
-    ILogger<EvidenceRetentionService> log)
+    ILogger<EvidenceRetentionService> log,
+    IDataProtectionProvider? dataProtection = null)
 {
     private const string Area = "EvidenceRetention";
     private const int BatchSize = 200;
+    private static readonly TimeSpan PreviewLifetime = TimeSpan.FromMinutes(10);
+    private readonly IDataProtector previewProtector =
+        (dataProtection ?? new EphemeralDataProtectionProvider())
+        .CreateProtector("Nexora.EvidenceRetention.PurgePreview.v1");
 
     public const string ActionPolicyUpdated = "RETENTION_POLICY_UPDATED";
     public const string ActionPurgeRun = "EVIDENCE_BYTES_PURGE_RUN";
@@ -230,8 +237,29 @@ public sealed class EvidenceRetentionService(
         }
 
         var now = DateTime.UtcNow;
-        var scanned = await AgeEligibleQuery(tenantId, policy, now).CountAsync(ct);
-        var eligible = await EligibleAsync(tenantId, policy, now, ct);
+        PurgePreviewEnvelope? preview = null;
+        if (!command.IsDryRun)
+            preview = ReadPreview(command.PreviewToken, tenantId, actorUserId, policy, now);
+
+        var scanned = command.IsDryRun
+            ? await AgeEligibleQuery(tenantId, policy, now).CountAsync(ct)
+            : preview!.Scanned;
+        var eligible = await EligibleAsync(
+            tenantId,
+            policy,
+            now,
+            ct,
+            command.IsDryRun ? null : preview!.DocumentIds);
+
+        if (!command.IsDryRun)
+        {
+            var currentIds = eligible.Select(x => x.Id).Order().ToArray();
+            var previewIds = preview!.DocumentIds.Order().ToArray();
+            if (!currentIds.SequenceEqual(previewIds))
+                throw new PlatformGovernanceConflictException(
+                    "The protected-document or eligibility state changed after this preview. Nothing was "
+                    + "deleted. Run a new preview and confirm the current document set.");
+        }
         var skipped = await SkipReportAsync(tenantId, policy, now, eligible, ct);
 
         if (!command.IsDryRun)
@@ -259,10 +287,24 @@ public sealed class EvidenceRetentionService(
             legacyUnresolved += outcome.LegacyUnresolved;
         }
 
+        DateTimeOffset? previewExpiresOn = command.IsDryRun
+            ? DateTimeOffset.UtcNow.Add(PreviewLifetime)
+            : null;
+        var previewToken = command.IsDryRun
+            ? ProtectPreview(new PurgePreviewEnvelope(
+                tenantId,
+                actorUserId,
+                policy.Version,
+                scanned,
+                eligible.Select(x => x.Id).Order().ToArray(),
+                previewExpiresOn!.Value))
+            : null;
+
         var result = new EvidenceRetentionPurgeResult(
             command.IsDryRun, scanned, eligible.Count, purged, bytesReclaimed,
             legacyDeleted, legacyUnresolved, skipped,
-            EvidenceRetentionDisclosure.For(command.IsDryRun, purged, bytesReclaimed), false);
+            EvidenceRetentionDisclosure.For(command.IsDryRun, purged, bytesReclaimed), false,
+            previewToken, previewExpiresOn);
 
         if (!command.IsDryRun)
         {
@@ -273,6 +315,58 @@ public sealed class EvidenceRetentionService(
     }
 
     private sealed record DocumentPurgeOutcome(long BytesFreed, int LegacyDeleted, int LegacyUnresolved);
+
+    private sealed record PurgePreviewEnvelope(
+        long TenantId,
+        long ActorUserId,
+        int PolicyVersion,
+        int Scanned,
+        long[] DocumentIds,
+        DateTimeOffset ExpiresOn);
+
+    private string ProtectPreview(PurgePreviewEnvelope preview) =>
+        previewProtector.Protect(JsonSerializer.Serialize(preview, JsonOptions));
+
+    private PurgePreviewEnvelope ReadPreview(
+        string? token,
+        long tenantId,
+        long actorUserId,
+        EvidenceRetentionPolicy policy,
+        DateTime now)
+    {
+        if (string.IsNullOrWhiteSpace(token))
+            throw new PlatformGovernanceValidationException(
+                "A signed purge preview is required before permanent deletion. Run a new preview first.");
+
+        try
+        {
+            var preview = JsonSerializer.Deserialize<PurgePreviewEnvelope>(
+                previewProtector.Unprotect(token), JsonOptions)
+                ?? throw new CryptographicException("The preview payload is empty.");
+
+            if (preview.TenantId != tenantId || preview.ActorUserId != actorUserId)
+                throw new PlatformGovernanceValidationException(
+                    "This purge preview belongs to a different tenant or user. Run your own preview.");
+            if (preview.PolicyVersion != policy.Version)
+                throw new PlatformGovernanceConflictException(
+                    "The retention policy changed after this preview. Nothing was deleted. Run a new preview.");
+            if (preview.ExpiresOn <= new DateTimeOffset(now, TimeSpan.Zero))
+                throw new PlatformGovernanceConflictException(
+                    "This purge preview expired. Nothing was deleted. Run a new preview to confirm the current state.");
+            if (preview.DocumentIds.Length > BatchSize || preview.DocumentIds.Any(x => x <= 0)
+                || preview.DocumentIds.Distinct().Count() != preview.DocumentIds.Length)
+                throw new CryptographicException("The preview candidate set is invalid.");
+
+            return preview;
+        }
+        catch (PlatformGovernanceValidationException) { throw; }
+        catch (PlatformGovernanceConflictException) { throw; }
+        catch (Exception exception) when (exception is CryptographicException or JsonException)
+        {
+            throw new PlatformGovernanceValidationException(
+                "The purge preview is invalid or no longer usable. Nothing was deleted. Run a new preview.");
+        }
+    }
 
     private async Task<DocumentPurgeOutcome> PurgeOneAsync(
         long tenantId, long actorUserId, EvidenceRetentionPolicy policy, string reason,
@@ -557,7 +651,8 @@ public sealed class EvidenceRetentionService(
     /// hidden from the UI — it cannot be returned to the purge loop at all.
     /// </summary>
     private async Task<List<PurgeCandidate>> EligibleAsync(
-        long tenantId, EvidenceRetentionPolicy policy, DateTime now, CancellationToken ct)
+        long tenantId, EvidenceRetentionPolicy policy, DateTime now, CancellationToken ct,
+        IReadOnlyCollection<long>? restrictToDocumentIds = null)
     {
         if (await TenantHoldBlocksAsync(tenantId, ct))
             return [];
@@ -569,7 +664,9 @@ public sealed class EvidenceRetentionService(
         var openInquiryStatuses = EvidenceRetentionEligibility.OpenInquiryStatuses.ToArray();
         var openLeadIds = OpenLeadIdsQuery(tenantId);
 
+        var restrictedIds = restrictToDocumentIds?.ToArray();
         var query = AgeEligibleQuery(tenantId, policy, now)
+            .Where(d => restrictedIds == null || restrictedIds.Contains(d.Id))
             .Where(d => !blockedByGovernance.Contains(d.Id))
             .Where(d => !blockedByHumanAction.Contains(d.Id))
             // Statutory retention beats tenant preference, always.
@@ -601,12 +698,13 @@ public sealed class EvidenceRetentionService(
                 l.BusinessUnitId == tenantId && l.SourceDocumentId == d.Id
                 && l.LeadId.HasValue && openLeadIds.Contains(l.LeadId.Value)))
             .OrderBy(d => d.CreatedOn).ThenBy(d => d.Id)
-            .Take(BatchSize)
             .Select(d => new PurgeCandidate(d.Id, d.OriginalFileName, d.ContentHash, d.ByteSize,
                 d.ObjectBucket, d.ObjectKey, d.ObjectVersion, d.SecurityStatus, d.ProcessingStatus,
                 d.CorpusId, d.CreatedOn, "selected", d.PurgePolicyCode));
 
-        return await query.ToListAsync(ct);
+        return restrictToDocumentIds is null
+            ? await query.Take(BatchSize).ToListAsync(ct)
+            : await query.ToListAsync(ct);
     }
 
     /// <summary>Leads that are not in a terminal state. A lead with NO status counts as

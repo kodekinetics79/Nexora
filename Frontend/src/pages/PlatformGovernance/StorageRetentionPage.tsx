@@ -388,6 +388,7 @@ export default function StorageRetentionPage() {
     mutationFn: () => platformGovernanceService.runEvidenceRetentionPurge({
       dryRun: false,
       reason: purgeReason.trim(),
+      previewToken: preview?.previewToken ?? undefined,
       // Reused across retries of THIS confirmed purge so a lost response cannot delete twice.
       idempotencyKey: purgeKey ?? newIdempotencyKey(),
     }),
@@ -480,7 +481,9 @@ export default function StorageRetentionPage() {
   const purgeReasonGiven = purgeReason.trim().length > 0;
   /** The saved switch records consent for a manually confirmed purge; it starts no scheduler. */
   const policyOptedIn = summary.data?.policy.isEnabled === true;
-  const canDelete = canManageRetention && hasSomethingToDelete && purgeReasonGiven && policyOptedIn;
+  const hasSignedPreview = preview?.previewToken != null;
+  const canDelete = canManageRetention && hasSomethingToDelete && hasSignedPreview
+    && purgeReasonGiven && policyOptedIn;
 
   const excluded = useMemo(() => preview?.skipped ?? [], [preview]);
 
@@ -960,6 +963,12 @@ export default function StorageRetentionPage() {
               Deleting stays disabled until a preview has been run.
             </Typography>
           )}
+          {previewShown && !hasSignedPreview && (
+            <Alert severity="warning" sx={{ mt: 2 }}>
+              This server did not sign the preview, so permanent deletion remains disabled. Nothing
+              is at risk. Deploy the matching retention backend and run the preview again.
+            </Alert>
+          )}
           {previewShown && !purgeReasonGiven && (
             <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
               Enter a reason to enable permanent deletion.
@@ -996,6 +1005,13 @@ export default function StorageRetentionPage() {
                   ? `${formatCount(excluded.length)} kept back`
                   : 'Exclusions not reported'} />
               </Stack>
+              {preview.previewExpiresOn && (
+                <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 2 }}>
+                  This protected preview expires at {new Date(preview.previewExpiresOn).toLocaleString()}.
+                  If it expires or any protection status changes, Nexora deletes nothing and asks
+                  you to preview again.
+                </Typography>
+              )}
 
               {eligible === 0 && (
                 <Alert severity="info" sx={{ mb: 2 }}>

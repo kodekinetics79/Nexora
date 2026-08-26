@@ -37,7 +37,10 @@ public sealed record UpdateEvidenceRetentionPolicyCommand(int RetentionDays, boo
 /// and true all simulate. The destructive reading must be the one that was asked for, never
 /// the one that fell out of a default.</para>
 /// </summary>
-public sealed record EvidenceRetentionPurgeCommand(bool? DryRun, string Reason)
+public sealed record EvidenceRetentionPurgeCommand(
+    bool? DryRun,
+    string Reason,
+    string? PreviewToken = null)
 {
     public bool IsDryRun => DryRun is not false;
 }
@@ -57,7 +60,9 @@ public sealed record EvidenceRetentionPurgeResult(
     int LegacyCopiesUnresolved,
     IReadOnlyList<EvidenceRetentionSkip> Skipped,
     string Disclosure,
-    bool IdempotentReplay);
+    bool IdempotentReplay,
+    string? PreviewToken = null,
+    DateTimeOffset? PreviewExpiresOn = null);
 
 public static class EvidenceRetentionDisclosure
 {

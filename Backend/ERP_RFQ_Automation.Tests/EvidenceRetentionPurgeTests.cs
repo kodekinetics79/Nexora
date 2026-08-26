@@ -48,8 +48,8 @@ public sealed class EvidenceRetentionPurgeTests(PostgreSqlTestDatabase database)
             Assert.True(File.Exists(quarantinePath));
 
             var service = NewService(db, files);
-            var result = await service.RunPurgeAsync(tenantId, 9, "purge-1",
-                new EvidenceRetentionPurgeCommand(false, "Reclaiming space under the 90-day policy."), default);
+            var result = await RunConfirmedAsync(service, tenantId, 9, "purge-1",
+                "Reclaiming space under the 90-day policy.");
 
             Assert.False(result.DryRun);
             Assert.Equal(1, result.Eligible);
@@ -145,22 +145,19 @@ public sealed class EvidenceRetentionPurgeTests(PostgreSqlTestDatabase database)
             await SeedPurgeableDocumentAsync(db, tenantId, files, "rfq-once.pdf");
             var service = NewService(db, files);
 
-            var first = await service.RunPurgeAsync(tenantId, 9, "purge-a",
-                new EvidenceRetentionPurgeCommand(false, "First run."), default);
+            var first = await RunConfirmedAsync(service, tenantId, 9, "purge-a", "First run.");
             Assert.Equal(1, first.Purged);
 
             // A fresh key: nothing is eligible any more, so the run does nothing.
             db.ChangeTracker.Clear();
-            var second = await service.RunPurgeAsync(tenantId, 9, "purge-b",
-                new EvidenceRetentionPurgeCommand(false, "Second run."), default);
+            var second = await RunConfirmedAsync(service, tenantId, 9, "purge-b", "Second run.");
             Assert.Equal(0, second.Eligible);
             Assert.Equal(0, second.Purged);
             Assert.Equal(0, second.BytesReclaimed);
 
             // The ORIGINAL key replays the original answer instead of re-running.
             db.ChangeTracker.Clear();
-            var replay = await service.RunPurgeAsync(tenantId, 9, "purge-a",
-                new EvidenceRetentionPurgeCommand(false, "First run."), default);
+            var replay = await RunConfirmedAsync(service, tenantId, 9, "purge-a", "First run.");
             Assert.True(replay.IdempotentReplay);
             Assert.Equal(first.Purged, replay.Purged);
             Assert.Equal(first.BytesReclaimed, replay.BytesReclaimed);
@@ -186,9 +183,8 @@ public sealed class EvidenceRetentionPurgeTests(PostgreSqlTestDatabase database)
             File.Delete(files.ResolvePath(document.ClearedKey));
             File.Delete(files.ResolvePath(document.QuarantineKey));
 
-            var result = await NewService(db, files).RunPurgeAsync(tenantId, 9, "purge-lost",
-                new EvidenceRetentionPurgeCommand(false, "Reconciling documents whose bytes are gone."),
-                default);
+            var result = await RunConfirmedAsync(NewService(db, files), tenantId, 9, "purge-lost",
+                "Reconciling documents whose bytes are gone.");
 
             Assert.Equal(1, result.Purged);
             Assert.Equal(0, result.BytesReclaimed);
@@ -241,8 +237,94 @@ public sealed class EvidenceRetentionPurgeTests(PostgreSqlTestDatabase database)
             // The estimate is the promise the real run has to keep.
             db.ChangeTracker.Clear();
             var real = await service.RunPurgeAsync(tenantId, 9, "purge-real",
-                new EvidenceRetentionPurgeCommand(false, "Confirmed."), default);
+                new EvidenceRetentionPurgeCommand(false, "Confirmed.", dry.PreviewToken), default);
             Assert.Equal(dry.BytesReclaimed, real.BytesReclaimed);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task Destructive_run_requires_an_untampered_actor_bound_preview()
+    {
+        var tenantId = NewTenantId();
+        var root = NewRoot();
+        try
+        {
+            await using var db = database.ContextFor(null);
+            await SeedAsync(db, tenantId, enabled: true);
+            var files = new LocalFileStorage(root, root);
+            var document = await SeedPurgeableDocumentAsync(db, tenantId, files, "rfq-signed-preview.pdf");
+            var service = NewService(db, files);
+            var preview = await service.RunPurgeAsync(tenantId, 9, "preview-signed",
+                new EvidenceRetentionPurgeCommand(true, "Preview signed candidate set."), default);
+
+            Assert.False(string.IsNullOrWhiteSpace(preview.PreviewToken));
+            Assert.True(preview.PreviewExpiresOn > DateTimeOffset.UtcNow);
+
+            await Assert.ThrowsAsync<PlatformGovernanceValidationException>(() =>
+                service.RunPurgeAsync(tenantId, 9, "missing-preview",
+                    new EvidenceRetentionPurgeCommand(false, "Missing preview."), default));
+            await Assert.ThrowsAsync<PlatformGovernanceValidationException>(() =>
+                service.RunPurgeAsync(tenantId, 9, "tampered-preview",
+                    new EvidenceRetentionPurgeCommand(false, "Tampered preview.",
+                        preview.PreviewToken + "tampered"), default));
+            await Assert.ThrowsAsync<PlatformGovernanceValidationException>(() =>
+                service.RunPurgeAsync(tenantId, 10, "other-actor-preview",
+                    new EvidenceRetentionPurgeCommand(false, "Another actor's preview.",
+                        preview.PreviewToken), default));
+
+            Assert.True(File.Exists(files.ResolvePath(document.ClearedKey)));
+            Assert.True(File.Exists(files.ResolvePath(document.QuarantineKey)));
+            db.ChangeTracker.Clear();
+            Assert.Equal(EvidencePurgeState.Present,
+                (await db.Set<SourceDocument>().SingleAsync(x => x.Id == document.Id)).PurgeState);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task A_new_legal_hold_after_preview_invalidates_the_whole_run()
+    {
+        var tenantId = NewTenantId();
+        var root = NewRoot();
+        try
+        {
+            await using var db = database.ContextFor(null);
+            await SeedAsync(db, tenantId, enabled: true);
+            var files = new LocalFileStorage(root, root);
+            var document = await SeedPurgeableDocumentAsync(db, tenantId, files, "rfq-preview-then-hold.pdf");
+            var service = NewService(db, files);
+            var preview = await service.RunPurgeAsync(tenantId, 9, "preview-before-hold",
+                new EvidenceRetentionPurgeCommand(true, "Preview before legal hold."), default);
+            Assert.Equal(1, preview.Eligible);
+
+            var platformTenant = await db.Set<Tenant>().IgnoreQueryFilters()
+                .SingleAsync(x => x.PrimaryBusinessUnitId == tenantId);
+            db.Set<TenantLegalHold>().Add(new TenantLegalHold
+            {
+                TenantId = platformTenant.Id,
+                Scope = "AllTenantData",
+                Authority = "Litigation counsel",
+                Reason = "Preserve all evidence before the confirmed purge executes.",
+                EvidenceReference = "case://preview-race",
+                PlacedOn = DateTime.UtcNow,
+                PlacedByPlatformUserId = 17,
+                PlacedBy = "legal@nexora.test"
+            });
+            await db.SaveChangesAsync();
+
+            await Assert.ThrowsAsync<PlatformGovernanceConflictException>(() =>
+                service.RunPurgeAsync(tenantId, 9, "execute-after-hold",
+                    new EvidenceRetentionPurgeCommand(false, "Execute frozen preview.",
+                        preview.PreviewToken), default));
+
+            Assert.True(File.Exists(files.ResolvePath(document.ClearedKey)));
+            Assert.True(File.Exists(files.ResolvePath(document.QuarantineKey)));
+            db.ChangeTracker.Clear();
+            Assert.Equal(EvidencePurgeState.Present,
+                (await db.Set<SourceDocument>().SingleAsync(x => x.Id == document.Id)).PurgeState);
         }
         finally { Directory.Delete(root, recursive: true); }
     }
@@ -285,8 +367,7 @@ public sealed class EvidenceRetentionPurgeTests(PostgreSqlTestDatabase database)
             var service = NewService(db, files);
 
             await Assert.ThrowsAsync<PlatformGovernanceConflictException>(() =>
-                service.RunPurgeAsync(tenantId, 9, "purge-disabled",
-                    new EvidenceRetentionPurgeCommand(false, "Not opted in."), default));
+                RunConfirmedAsync(service, tenantId, 9, "purge-disabled", "Not opted in."));
             Assert.True(File.Exists(files.ResolvePath(document.ClearedKey)));
 
             // A dry run still works, so a tenant can see the estimate before committing.
@@ -325,9 +406,9 @@ public sealed class EvidenceRetentionPurgeTests(PostgreSqlTestDatabase database)
             var clearedPath = files.ResolvePath(document.ClearedKey);
             var quarantinePath = files.ResolvePath(document.QuarantineKey);
 
-            var result = await NewService(db, files).RunPurgeAsync(tenantId, 9, $"purge-{exclusion}",
-                new EvidenceRetentionPurgeCommand(false, $"Attempting to purge a {exclusion} document."),
-                default);
+            var result = await RunConfirmedAsync(
+                NewService(db, files), tenantId, 9, $"purge-{exclusion}",
+                $"Attempting to purge a {exclusion} document.");
 
             Assert.Equal(0, result.Eligible);
             Assert.Equal(0, result.Purged);
@@ -395,9 +476,8 @@ public sealed class EvidenceRetentionPurgeTests(PostgreSqlTestDatabase database)
             Assert.True(await db.TenantGovernanceAuditEvents.AsNoTracking().AnyAsync(x =>
                 x.BusinessUnitId == tenantId && x.Action == "DELETION_REQUESTED"));
 
-            var result = await NewService(db, files).RunPurgeAsync(tenantId, 9, "purge-stuck",
-                new EvidenceRetentionPurgeCommand(false, "Clearing a document a tenant asked us to delete."),
-                default);
+            var result = await RunConfirmedAsync(NewService(db, files), tenantId, 9, "purge-stuck",
+                "Clearing a document a tenant asked us to delete.");
 
             Assert.Equal(1, result.Eligible);
             Assert.Equal(1, result.Purged);
@@ -436,8 +516,8 @@ public sealed class EvidenceRetentionPurgeTests(PostgreSqlTestDatabase database)
             await SeedPurgeableDocumentAsync(db, tenantId, files, "rfq-kept-b.pdf",
                 exclusion: "statutory-classification");
 
-            var result = await NewService(db, files).RunPurgeAsync(tenantId, 9, "purge-kept",
-                new EvidenceRetentionPurgeCommand(false, "Reclaiming space."), default);
+            var service = NewService(db, files);
+            var result = await RunConfirmedAsync(service, tenantId, 9, "purge-kept", "Reclaiming space.");
             Assert.Equal(0, result.Purged);
 
             var kept = await db.TenantGovernanceAuditEvents.AsNoTracking()
@@ -461,8 +541,7 @@ public sealed class EvidenceRetentionPurgeTests(PostgreSqlTestDatabase database)
 
             // The whole run, including the kept event, replays rather than doubling.
             db.ChangeTracker.Clear();
-            await NewService(db, files).RunPurgeAsync(tenantId, 9, "purge-kept",
-                new EvidenceRetentionPurgeCommand(false, "Reclaiming space."), default);
+            await RunConfirmedAsync(service, tenantId, 9, "purge-kept", "Reclaiming space.");
             Assert.Single(await db.TenantGovernanceAuditEvents.AsNoTracking()
                 .Where(x => x.BusinessUnitId == tenantId
                     && x.Action == EvidenceRetentionService.ActionRunKept)
@@ -489,8 +568,8 @@ public sealed class EvidenceRetentionPurgeTests(PostgreSqlTestDatabase database)
             var documentB = await SeedPurgeableDocumentAsync(db, tenantB, files, "rfq-tenant-b.pdf");
 
             // Tenant A runs a purge. Tenant B has an eligible document; A must not see it.
-            var result = await NewService(db, files).RunPurgeAsync(tenantA, 9, "purge-cross",
-                new EvidenceRetentionPurgeCommand(false, "Tenant A run."), default);
+            var result = await RunConfirmedAsync(
+                NewService(db, files), tenantA, 9, "purge-cross", "Tenant A run.");
 
             Assert.Equal(0, result.Scanned);
             Assert.Equal(0, result.Purged);
@@ -553,8 +632,8 @@ public sealed class EvidenceRetentionPurgeTests(PostgreSqlTestDatabase database)
                 "{\"reason\":\"containment regression fixture\"}");
             await db.SaveChangesAsync();
 
-            var result = await NewService(db, files).RunPurgeAsync(tenantId, 9, "purge-traversal",
-                new EvidenceRetentionPurgeCommand(false, "Containment regression."), default);
+            var result = await RunConfirmedAsync(
+                NewService(db, files), tenantId, 9, "purge-traversal", "Containment regression.");
 
             // The document is selectable — containment is enforced at the deletion boundary,
             // not by hoping such a row never exists.
@@ -627,8 +706,8 @@ public sealed class EvidenceRetentionPurgeTests(PostgreSqlTestDatabase database)
             await SeedAsync(db, tenantId, enabled: true);
             var files = new LocalFileStorage(root, root);
             var document = await SeedPurgeableDocumentAsync(db, tenantId, files, "rfq-immutable.pdf");
-            await NewService(db, files).RunPurgeAsync(tenantId, 9, "purge-immutable",
-                new EvidenceRetentionPurgeCommand(false, "Purge then attempt tampering."), default);
+            await RunConfirmedAsync(
+                NewService(db, files), tenantId, 9, "purge-immutable", "Purge then attempt tampering.");
 
             await using var connection = await database.OpenConnectionAsync();
 
@@ -693,8 +772,8 @@ public sealed class EvidenceRetentionPurgeTests(PostgreSqlTestDatabase database)
             });
             await db.SaveChangesAsync();
 
-            var result = await NewService(db, files).RunPurgeAsync(tenantId, 9, "held-run",
-                new EvidenceRetentionPurgeCommand(false, "Attempt retention while held."), default);
+            var result = await RunConfirmedAsync(
+                NewService(db, files), tenantId, 9, "held-run", "Attempt retention while held.");
 
             Assert.Equal(0, result.Eligible);
             Assert.Equal(0, result.Purged);
@@ -732,8 +811,9 @@ public sealed class EvidenceRetentionPurgeTests(PostgreSqlTestDatabase database)
             storage = new BlockingDeleteEvidenceStorage(new LocalEvidenceObjectStorage(raceFiles));
             await using var purgeDb = database.ContextFor(null);
             var purgeService = NewService(purgeDb, raceFiles, storage);
-            var purgeTask = purgeService.RunPurgeAsync(tenantId, 9, "deletion-wins-race",
-                new EvidenceRetentionPurgeCommand(false, "Exercise legal-hold deletion fencing."), default);
+            var purgeTask = RunConfirmedAsync(
+                purgeService, tenantId, 9, "deletion-wins-race",
+                "Exercise legal-hold deletion fencing.");
 
             await storage.DeleteEntered.WaitAsync(TestWaits.Liveness);
 
@@ -777,6 +857,30 @@ public sealed class EvidenceRetentionPurgeTests(PostgreSqlTestDatabase database)
             new LegacyAttachmentPurgeResolver(db, files),
             new CommercialDocumentArchiveService(db),
             new NoopLogger<EvidenceRetentionService>());
+
+    private static async Task<EvidenceRetentionPurgeResult> RunConfirmedAsync(
+        EvidenceRetentionService service,
+        long tenantId,
+        long actorUserId,
+        string idempotencyKey,
+        string reason,
+        CancellationToken ct = default)
+    {
+        var preview = await service.RunPurgeAsync(
+            tenantId,
+            actorUserId,
+            $"{idempotencyKey}:preview",
+            new EvidenceRetentionPurgeCommand(true, $"Preview: {reason}"),
+            ct);
+        Assert.False(string.IsNullOrWhiteSpace(preview.PreviewToken));
+
+        return await service.RunPurgeAsync(
+            tenantId,
+            actorUserId,
+            idempotencyKey,
+            new EvidenceRetentionPurgeCommand(false, reason, preview.PreviewToken),
+            ct);
+    }
 
     private static async Task SeedAsync(ErpRfqAutomationContext db, long tenantId,
         bool enabled, bool createPolicy = true)
