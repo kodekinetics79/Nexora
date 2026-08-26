@@ -431,4 +431,53 @@ describe('ActivationPolicyPanel', () => {
     expect(screen.queryByText('Authoritative tenant activation')).toBeNull();
     expect(screen.queryByRole('button', { name: 'Activate tenant' })).toBeNull();
   });
+
+  it('guides an Owner through the zero-billing legacy-tenant retirement attestation', async () => {
+    vi.spyOn(platformApi, 'getOffboarding').mockResolvedValue({
+      tenantId: '9', tenantName: 'Acme', tenantSlug: 'acme', tenantStatus: 'Archived',
+      stage: 'NotScheduled',
+      retentionDays: null, deletionScheduledOn: null, purgeEligibleOn: null, isPurgeEligible: false,
+      daysUntilPurgeEligible: null, deletionReason: null, deletionScheduledBy: null,
+      purgedOn: null, purgedBy: null, purgedRowCount: null,
+      personalDataErasedOn: null, personalDataErasedBy: null, erasedIdentityCount: null,
+      lastExportedOn: null, lastExportedBy: null,
+      canScheduleDeletion: false, canCancelDeletion: false, canPurge: false,
+      canErasePersonalData: true, purgeRequiresDifferentApprover: false,
+      deletionApprovedBy: null, confirmationRequired: 'Acme',
+      history: [], exports: [], disclosures: [],
+      commercialEvidenceRequired: true, canAttestNonCustomer: true,
+      nonCustomerAttestedOn: null, nonCustomerAttestedBy: null,
+      billingStatementCount: 0, subscriptionInvoiceCount: 0,
+      readinessFailures: [
+        { code: 'FINAL_BILLING_MISSING', detail: 'No final billing statement proves terminal usage.' },
+        { code: 'EXPORT_RECEIPT_MISSING', detail: 'Take a new export after archiving the tenant.' },
+      ],
+    });
+    vi.spyOn(platformApi, 'listTenantLegalHolds').mockResolvedValue([]);
+
+    render(
+      <MemoryRouter>
+        <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+          <SnackbarProvider>
+            <LifecycleTab tenant={{ ...tenant, status: 'archived' } as Tenant} />
+          </SnackbarProvider>
+        </QueryClientProvider>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('Legacy Production label, but no billing records')).toBeVisible();
+    expect(screen.getByText('Take a new export after archiving the tenant.')).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Record never became a customer' }));
+
+    const dialog = within(await screen.findByRole('dialog', {
+      name: 'Record that this tenant never became a customer',
+    }));
+    const submit = dialog.getByRole('button', { name: 'Record governed attestation' });
+    expect(submit).toBeDisabled();
+    fireEvent.change(dialog.getAllByRole('textbox')[1], {
+      target: { value: 'Created solely for internal workflow verification.' },
+    });
+    fireEvent.change(dialog.getAllByRole('textbox')[0], { target: { value: 'Acme' } });
+    expect(submit).toBeEnabled();
+  });
 });
