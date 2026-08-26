@@ -90,6 +90,28 @@ public sealed class LifecycleApplicationServiceTests
     }
 
     [Fact]
+    public async Task QualifiedLead_CannotBeMarkedConvertedOutsideRfqPromotion()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(741);
+        var lead = Seed.Lead(context, 1041, 741);
+        var qualified = Status(context, 5051, 741, "LeadStatus", "QUALIFIED", "Qualified");
+        Status(context, 5052, 741, "LeadStatus", "CONVERTED_TO_RFQ", "Converted to RFQ");
+        lead.LeadStatus = qualified;
+        lead.LeadStatusId = qualified.SetupId;
+        await context.SaveChangesAsync();
+
+        var error = await Assert.ThrowsAsync<LifecycleValidationException>(() =>
+            Service(context).TransitionLeadAsync(741, 1041, Actor(),
+                Command("CONVERTED_TO_RFQ", 1, "direct-convert"), false, default));
+
+        Assert.Contains("reserved for RFQ Promotion", error.Message);
+        Assert.Equal(qualified.SetupId, context.Leads.Single().LeadStatusId);
+        Assert.Empty(context.CommercialLifecycleEvents);
+        Assert.Empty(context.LifecycleOutboxMessages);
+    }
+
+    [Fact]
     public async Task ReceivedLead_CanBePassedDirectlyWithGovernedOutcome()
     {
         using var db = new TestDb();
@@ -400,6 +422,7 @@ public sealed class LifecycleApplicationServiceTests
         Status(context, 517, 83, "LeadStatus", "PENDING_IDENTIFICATION", "Pending Identification");
         Status(context, 518, 83, "LeadStatus", "QUALIFIED", "Qualified");
         Status(context, 519, 83, "LeadStatus", "CANCELLED", "Cancelled");
+        Status(context, 5191, 83, "LeadStatus", "CONVERTED_TO_RFQ", "Converted to RFQ");
         await context.SaveChangesAsync();
 
         var state = await Service(context).GetLeadStateAsync(83, 112, default);

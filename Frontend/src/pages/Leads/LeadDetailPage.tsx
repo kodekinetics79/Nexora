@@ -149,8 +149,8 @@ const LeadDetailPage: React.FC = () => {
     <Box sx={{ p: { xs: 1, sm: 2, md: 3 }, maxWidth: 1800, mx: 'auto', minWidth: 0 }}>
       {/* Breadcrumb Header */}
       <Breadcrumbs separator={<NextIcon sx={{ fontSize: 14 }} />} sx={{ mb: 2 }}>
-        <Link component="button" variant="caption" onClick={() => navigate('/dashboard')} sx={{ color: 'text.secondary', fontWeight: 700, textDecoration: 'none', textTransform: 'uppercase' }}>
-          {t('rfqs_management') || 'RFQs Management'}
+        <Link component="button" variant="caption" onClick={() => navigate('/inbox')} sx={{ color: 'text.secondary', fontWeight: 700, textDecoration: 'none', textTransform: 'uppercase' }}>
+          {t('inbox') || 'Inbox'}
         </Link>
         <Link component="button" variant="caption" onClick={() => navigate('/procurement/leads/all')} sx={{ color: 'text.secondary', fontWeight: 700, textDecoration: 'none', textTransform: 'uppercase' }}>
           {t('leads') || 'Leads'}

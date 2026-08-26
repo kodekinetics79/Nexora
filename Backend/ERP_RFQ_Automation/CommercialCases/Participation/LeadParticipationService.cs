@@ -100,6 +100,7 @@ public sealed class LeadParticipationService : ILeadParticipationService
                 ?? throw new KeyNotFoundException($"Lead {leadId} was not found in this business unit.");
             EnsureCurrentRevision(lead, command.ExpectedLeadRevisionId);
             EnsureDecisionVersion(lead, command.ExpectedDecisionVersion);
+            await EnsureDecisionRecordIsOpenAsync(lead, ct);
 
             replay = await _db.Set<LeadFitAssessment>().AsNoTracking()
                 .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.IdempotencyKey == command.IdempotencyKey, ct);
@@ -180,6 +181,7 @@ public sealed class LeadParticipationService : ILeadParticipationService
                 ?? throw new KeyNotFoundException($"Lead {leadId} was not found in this business unit.");
             EnsureCurrentRevision(lead, command.ExpectedLeadRevisionId);
             EnsureDecisionVersion(lead, command.ExpectedDecisionVersion);
+            await EnsureDecisionRecordIsOpenAsync(lead, ct);
 
             replay = await LoadDecisionByKeyAsync(businessUnitId, command.IdempotencyKey, ct);
             if (replay is not null) return DecisionReplay(replay, requestHash);
@@ -514,6 +516,20 @@ public sealed class LeadParticipationService : ILeadParticipationService
     {
         if (lead.CurrentRevisionNumber != expectedDecisionVersion)
             throw new InvalidOperationException("The Lead decision version changed after this workbench was loaded. Refresh and try again.");
+    }
+
+    private async Task EnsureDecisionRecordIsOpenAsync(Lead lead, CancellationToken ct)
+    {
+        var status = LifecyclePolicy.Canonicalize("Lead", lead.LeadStatus?.SetupCode, lead.LeadStatus?.SetupValue);
+        if (status is "CONVERTED_TO_RFQ" or "QUOTED" or "NEGOTIATION" or "AWARDED"
+            or "PARTIALLY_AWARDED" or "LOST" or "COMPLETED")
+            throw new InvalidOperationException(
+                "The Lead decision record is read-only after RFQ conversion or downstream commercial activity.");
+
+        if (await _db.Rfqs.AsNoTracking()
+            .AnyAsync(x => x.BusinessUnitId == lead.BusinessUnitId && x.LeadId == lead.Id, ct))
+            throw new InvalidOperationException(
+                "The Lead decision record is read-only because a formal RFQ already exists.");
     }
 
     private static string NormalizeOverallDecision(string value)

@@ -167,5 +167,9 @@ describe('Lead Decision Workbench rules', () => {
       promotedLineCount: 1,
       promotedAtUtc: '2026-08-25T12:00:00Z',
     } }), initializeDecisionMap(workbench()))).toBe(true);
+    expect(decisionRecordIsLocked(workbench({ blockers: [{
+      code: 'RFQ_REVISION_REQUIRED',
+      message: 'Review the amendment against the existing RFQ.',
+    }] }), initializeDecisionMap(workbench()))).toBe(true);
   });
 });

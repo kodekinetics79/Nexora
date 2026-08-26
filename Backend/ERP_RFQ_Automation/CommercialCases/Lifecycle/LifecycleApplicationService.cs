@@ -17,6 +17,9 @@ public interface ILifecycleApplicationService
     Task<LifecycleTransitionResult> TransitionRfqAsync(long businessUnitId, long rfqId, LifecycleActor actor, LifecycleTransitionCommand command, bool reopen, CancellationToken ct);
     Task<LifecycleTransitionResult> TransitionQuoteAsync(long businessUnitId, long quoteId, LifecycleActor actor, LifecycleTransitionCommand command, bool reopen, CancellationToken ct);
     Task<LifecycleTransitionResult> TransitionLeadInCurrentTransactionAsync(long businessUnitId, long leadId, LifecycleActor actor, LifecycleTransitionCommand command, bool reopen, CancellationToken ct);
+    Task<LifecycleTransitionResult> CompleteRfqPromotionInCurrentTransactionAsync(long businessUnitId, long leadId,
+        long rfqId, long promotionId, long leadRevisionId, long participationDecisionId,
+        LifecycleActor actor, LifecycleTransitionCommand command, CancellationToken ct);
     Task<LifecycleTransitionResult> TransitionQuoteInCurrentTransactionAsync(long businessUnitId, long quoteId, LifecycleActor actor, LifecycleTransitionCommand command, bool reopen, CancellationToken ct);
     Task RecordLeadPromotedToRfqInCurrentTransactionAsync(long businessUnitId, long leadId, long rfqId, LifecycleActor actor, string correlationId, CancellationToken ct);
 }
@@ -71,7 +74,10 @@ public sealed class LifecycleApplicationService : ILifecycleApplicationService
 
     public Task<LifecycleTransitionResult> TransitionLeadAsync(
         long businessUnitId, long leadId, LifecycleActor actor, LifecycleTransitionCommand command, bool reopen, CancellationToken ct)
-        => ExecuteAsync(LeadAggregate, businessUnitId, leadId, actor, command, reopen, ct);
+    {
+        RejectReservedLeadPromotion(command);
+        return ExecuteAsync(LeadAggregate, businessUnitId, leadId, actor, command, reopen, ct);
+    }
 
     public Task<LifecycleTransitionResult> TransitionRfqAsync(
         long businessUnitId, long rfqId, LifecycleActor actor, LifecycleTransitionCommand command, bool reopen, CancellationToken ct)
@@ -82,6 +88,57 @@ public sealed class LifecycleApplicationService : ILifecycleApplicationService
         => ExecuteAsync(QuoteAggregate, businessUnitId, quoteId, actor, command, reopen, ct);
 
     public async Task<LifecycleTransitionResult> TransitionLeadInCurrentTransactionAsync(
+        long businessUnitId, long leadId, LifecycleActor actor, LifecycleTransitionCommand command, bool reopen, CancellationToken ct)
+    {
+        RejectReservedLeadPromotion(command);
+        return await TransitionLeadInCurrentTransactionCoreAsync(
+            businessUnitId, leadId, actor, command, reopen, ct);
+    }
+
+    public async Task<LifecycleTransitionResult> CompleteRfqPromotionInCurrentTransactionAsync(
+        long businessUnitId, long leadId, long rfqId, long promotionId, long leadRevisionId,
+        long participationDecisionId, LifecycleActor actor, LifecycleTransitionCommand command, CancellationToken ct)
+    {
+        if (_db.Database.CurrentTransaction == null)
+            throw new InvalidOperationException("An active database transaction is required.");
+        if (LifecyclePolicy.Canonicalize(LeadAggregate, command.TargetStatusCode) != "CONVERTED_TO_RFQ")
+            throw new LifecycleValidationException(
+                "The RFQ Promotion lifecycle command can only set CONVERTED_TO_RFQ.");
+
+        var lineageExists = await (from rfq in _db.Rfqs.AsNoTracking()
+            join promotion in _db.Set<ERP_RFQ_Automation.CommercialCases.Promotion.RfqPromotion>().AsNoTracking()
+                on new
+                {
+                    BusinessUnitId = rfq.BusinessUnitId,
+                    PromotionId = rfq.PromotionId!.Value,
+                    LeadId = rfq.LeadId!.Value,
+                    LeadRevisionId = rfq.SourceLeadRevisionId!.Value,
+                    ParticipationDecisionId = rfq.ParticipationDecisionId!.Value
+                }
+                equals new
+                {
+                    promotion.BusinessUnitId,
+                    PromotionId = promotion.Id,
+                    promotion.LeadId,
+                    promotion.LeadRevisionId,
+                    promotion.ParticipationDecisionId
+                }
+            where rfq.BusinessUnitId == businessUnitId && rfq.Id == rfqId && rfq.LeadId == leadId
+                && rfq.PromotionId == promotionId && rfq.SourceLeadRevisionId == leadRevisionId
+                && rfq.ParticipationDecisionId == participationDecisionId
+            select rfq.Id).AnyAsync(ct);
+        if (!lineageExists)
+            throw new LifecycleValidationException(
+                "The Lead can only be marked converted after RFQ Promotion persisted an exactly matching RFQ, revision, participation decision and promotion receipt.");
+
+        var result = await TransitionLeadInCurrentTransactionCoreAsync(
+            businessUnitId, leadId, actor, command, reopen: false, ct);
+        await RecordLeadPromotedToRfqInCurrentTransactionAsync(
+            businessUnitId, leadId, rfqId, actor, command.CorrelationId, ct);
+        return result;
+    }
+
+    private async Task<LifecycleTransitionResult> TransitionLeadInCurrentTransactionCoreAsync(
         long businessUnitId, long leadId, LifecycleActor actor, LifecycleTransitionCommand command, bool reopen, CancellationToken ct)
     {
         if (_db.Database.CurrentTransaction == null)
@@ -417,7 +474,8 @@ public sealed class LifecycleApplicationService : ILifecycleApplicationService
                 Status = status,
                 Code = LifecyclePolicy.Canonicalize(aggregateType, status.SetupCode, status.SetupValue)
             })
-            .Where(x => allowed.Contains(x.Code))
+            .Where(x => allowed.Contains(x.Code)
+                && !(aggregateType == LeadAggregate && x.Code == "CONVERTED_TO_RFQ"))
             .GroupBy(x => x.Code, StringComparer.Ordinal)
             .Select(group => group.OrderByDescending(x => !string.IsNullOrWhiteSpace(x.Status.SetupCode)).First())
             .OrderBy(x => x.Code)
@@ -508,6 +566,13 @@ public sealed class LifecycleApplicationService : ILifecycleApplicationService
         if (command.ExpectedVersion < 1) throw new LifecycleValidationException("Expected version must be positive.");
         if (command.ReasonCode?.Trim().Length > 100) throw new LifecycleValidationException("Reason code cannot exceed 100 characters.");
         if (command.ReasonNotes?.Trim().Length > 1000) throw new LifecycleValidationException("Reason notes cannot exceed 1000 characters.");
+    }
+
+    private static void RejectReservedLeadPromotion(LifecycleTransitionCommand command)
+    {
+        if (LifecyclePolicy.Canonicalize(LeadAggregate, command.TargetStatusCode) == "CONVERTED_TO_RFQ")
+            throw new LifecycleValidationException(
+                "CONVERTED_TO_RFQ is reserved for RFQ Promotion after a committed current-revision participation decision.");
     }
 
     private static void Required(string value, string name, int max)

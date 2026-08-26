@@ -274,7 +274,7 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
     .filter((item): item is { code: string; action: { label: string; path: string } } => Boolean(item.action));
 
   return (
-    <Box sx={{ p: { xs: 1, sm: 2 }, maxWidth: 1920, mx: 'auto', pb: 12 }}>
+    <Box sx={{ p: { xs: 1, sm: 2 }, maxWidth: 1920, mx: 'auto', pb: 2 }}>
       <Breadcrumbs separator={<NextIcon sx={{ fontSize: 14 }} />} sx={{ mb: 1.5 }}>
         <Link component="button" variant="caption" onClick={() => navigate('/procurement/leads/all')}>Leads</Link>
         <Link component="button" variant="caption" onClick={() => navigate(`/procurement/leads/view/${leadId}`)}>{workbench.customerRfqReference || `Lead #${leadId}`}</Link>
@@ -421,7 +421,7 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
       <Paper
         elevation={6}
         component="footer"
-        sx={{ position: 'fixed', left: { xs: 8, sm: 'auto' }, right: 12, bottom: 12, zIndex: 10, p: 1.5, borderRadius: 2, maxWidth: { xs: 'calc(100vw - 20px)', md: 980 } }}
+        sx={{ position: 'sticky', bottom: 12, zIndex: 10, mt: 2, p: 1.5, borderRadius: 2, width: '100%' }}
       >
         <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.25} sx={{ alignItems: { xs: 'stretch', md: 'center' } }}>
           <Box sx={{ flex: 1, minWidth: 0 }}>
