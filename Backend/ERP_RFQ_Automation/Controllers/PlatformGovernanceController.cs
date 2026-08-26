@@ -144,7 +144,7 @@ public sealed class PlatformGovernanceController(
     /// anything until this has been done by a named user with a written reason.
     /// </summary>
     [HttpPut("evidence-retention/policy")]
-    [RequireModulePermission("Users", PermissionAction.Edit)]
+    [RequireTenantOwnerRole]
     public Task<ActionResult<EvidenceRetentionView>> UpdateEvidenceRetentionPolicy(
         [FromBody] UpdateEvidenceRetentionPolicyCommand command, CancellationToken ct) =>
         Execute(() => retention.UpdatePolicyAsync(TenantId(), ActorUserId(), IdempotencyKey(), command, ct));
@@ -166,7 +166,7 @@ public sealed class PlatformGovernanceController(
     /// </para>
     /// </summary>
     [HttpPost("evidence-retention/purge-run")]
-    [RequireModulePermission("Users", PermissionAction.Edit)]
+    [RequireTenantOwnerRole]
     public Task<ActionResult<EvidenceRetentionPurgeResult>> RunEvidenceRetentionPurge(
         [FromBody] EvidenceRetentionPurgeCommand? command, CancellationToken ct) =>
         Execute(() => retention.RunPurgeAsync(TenantId(), ActorUserId(), IdempotencyKey(),
@@ -203,7 +203,7 @@ public sealed class PlatformGovernanceController(
     /// test emails the system sent to itself is the imposition this feature exists to remove.</para>
     /// </summary>
     [HttpPost("tenant-data/cleanup")]
-    [RequireModulePermission("Users", PermissionAction.Edit)]
+    [RequireTenantOwnerRole]
     public Task<ActionResult<TenantDataCleanupResult>> RunTenantDataCleanup(
         [FromBody] TenantDataCleanupCommand? command, CancellationToken ct) =>
         Execute(() => tenantData.RunCleanupAsync(TenantId(), ActorUserId(), IdempotencyKey(),

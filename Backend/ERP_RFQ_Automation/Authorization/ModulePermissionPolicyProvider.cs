@@ -6,7 +6,8 @@ namespace ERP_RFQ_Automation.Authorization
     /// <summary>
     /// Resolves the dynamic policy names produced by
     /// <see cref="RequireModulePermissionAttribute"/> ("ModulePermission:{module}:{action}")
-    /// and <see cref="RequireManagerRoleAttribute"/> ("RoleGate:ManagerOrAdmin") without
+    /// <see cref="RequireManagerRoleAttribute"/> ("RoleGate:ManagerOrAdmin"), and
+    /// <see cref="RequireTenantOwnerRoleAttribute"/> ("RoleGate:TenantOwner") without
     /// any per-policy registration. Every other policy name (the legacy CanCreateRFQ /
     /// CanEditQuotation policies and the Platform-plane policies) falls through to the
     /// default provider, so existing behavior is unchanged.
@@ -38,6 +39,15 @@ namespace ERP_RFQ_Automation.Authorization
                 var policy = new AuthorizationPolicyBuilder()
                     .RequireAuthenticatedUser()
                     .AddRequirements(new ManagerRoleRequirement())
+                    .Build();
+                return Task.FromResult<AuthorizationPolicy?>(policy);
+            }
+
+            if (string.Equals(policyName, RequireTenantOwnerRoleAttribute.PolicyName, StringComparison.Ordinal))
+            {
+                var policy = new AuthorizationPolicyBuilder()
+                    .RequireAuthenticatedUser()
+                    .AddRequirements(new TenantOwnerRoleRequirement())
                     .Build();
                 return Task.FromResult<AuthorizationPolicy?>(policy);
             }
