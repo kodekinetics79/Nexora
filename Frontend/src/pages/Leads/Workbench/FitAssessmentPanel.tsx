@@ -143,7 +143,7 @@ const FitAssessmentPanel: React.FC<FitAssessmentPanelProps> = ({
           multiline
           minRows={2}
           disabled={readOnly}
-          helperText={`${rationale.length}/1000${unknownCount > 0 ? ` · ${unknownCount} criterion${unknownCount === 1 ? '' : 's'} remain unknown` : ''}`}
+          helperText={`${rationale.length}/1000${unknownCount > 0 ? ` · ${unknownCount === 1 ? '1 criterion remains' : `${unknownCount} criteria remain`} unknown` : ''}`}
         />
       </Stack>
 

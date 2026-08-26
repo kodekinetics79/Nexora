@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using ERP_RFQ_Automation.CommercialCases.Promotion;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
@@ -169,7 +170,6 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
         var decisionByLine = decision?.Lines.ToDictionary(x => x.LeadItemRevisionId) ?? new();
         var lines = revision.Items.OrderBy(x => x.LineNumber).Select(item =>
         {
-            var snapshot = LeadRevisionLineSnapshot.Parse(item.SnapshotJson);
             decisionByLine.TryGetValue(item.Id, out var lineDecision);
             var canonical = item.LeadItemId.HasValue && canonicalById.TryGetValue(item.LeadItemId.Value, out var linked)
                 ? linked : null;
@@ -200,7 +200,10 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
                 && exactSourceByLeadItemId.TryGetValue(evidenceSourceByLeadItemId[canonical.Id], out var foundSources))
                 exactSources = foundSources;
             var exactSource = exactSources.FirstOrDefault();
-            return new LeadDecisionLineDto(item.Id, item.Id, snapshot.LineNumber ?? item.LineNumber.ToString(),
+            var lineItemNo = string.IsNullOrWhiteSpace(canonical?.LineItemNo)
+                ? item.LineNumber.ToString(CultureInfo.InvariantCulture)
+                : canonical.LineItemNo.Trim();
+            return new LeadDecisionLineDto(item.Id, item.Id, lineItemNo,
                 exactSource?.RawValue, exactSource?.FieldName, exactSource?.SourceAddress,
                 exactSources.Select(x => new LineSourceFieldDto(x.FieldName, x.RawValue!, x.SourceAddress)).ToArray(),
                 canonical?.ProductShortName, canonical?.ProductShortDescription, canonical?.ManufacturerName,
@@ -351,6 +354,8 @@ internal static class LeadDecisionParticipationState
     }
 }
 
+// Lead revision snapshots remain normalized identity evidence. Keep their parser independently
+// tested, but do not use the normalized line token as the customer-facing line identifier.
 internal sealed record LeadRevisionLineSnapshot(
     string? LineNumber,
     string? Part,
