@@ -24,6 +24,12 @@ beforeEach(() => {
 });
 
 describe('PlatformLoginScreen MFA challenge', () => {
+  it('keeps the separate tenant and platform sign-in surfaces visibly connected', () => {
+    render(<PlatformLoginScreen />);
+
+    expect(screen.getByRole('link', { name: 'Back to tenant sign-in' })).toHaveAttribute('href', '/login');
+  });
+
   it('does not treat a password-accepted MFA challenge as a broken login', async () => {
     platformLogin.mockResolvedValue({
       mfaRequired: true,

@@ -11,12 +11,14 @@ import Stack from './Flex';
 export default function PageSection({
   title,
   subtitle,
+  help,
   actions,
   children,
   sx,
 }: {
   title: string;
   subtitle?: string;
+  help?: ReactNode;
   actions?: ReactNode;
   children: ReactNode;
   sx?: SxProps<Theme>;
@@ -31,9 +33,12 @@ export default function PageSection({
         sx={{ mb: subtitle ? 2 : 1.5 }}
       >
         <Box>
-          <Typography variant="h6" sx={{ fontWeight: 800 }}>
-            {title}
-          </Typography>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.25 }}>
+            <Typography variant="h6" sx={{ fontWeight: 800 }}>
+              {title}
+            </Typography>
+            {help}
+          </Box>
           {subtitle && (
             <Typography variant="body2" color="text.secondary" sx={{ mt: 0.25 }}>
               {subtitle}
