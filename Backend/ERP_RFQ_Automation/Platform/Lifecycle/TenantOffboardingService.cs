@@ -126,13 +126,18 @@ public sealed class TenantOffboardingService(
         var sameHand = scheduler is not null && viewerId > 0
                        && scheduler.ActorPlatformUserId == viewerId;
 
+        var commercialPosition = await readiness.GetCommercialRetirementPositionAsync(tenant, ct);
+        var scheduleReadiness = await readiness.AssessAsync(
+            tenant, TenantOffboardingReadinessPhase.Schedule, ct);
+
         return ToStatusDto(
             tenant, record, history, exports,
             sameHand,
             scheduler?.ActorPlatformUserId > 0 ? scheduler.ActorEmail : null,
             // Asked of the readiness service rather than re-derived here, so the screen and the
             // gate cannot drift apart.
-            commercialEvidenceWaived: !await readiness.CommercialEvidenceAppliesAsync(tenant, ct));
+            commercialPosition,
+            scheduleReadiness);
     }
 
     /// <summary>
@@ -255,6 +260,94 @@ public sealed class TenantOffboardingService(
     }
 
     // ------------------------------------------------------------------- schedule / cancel
+
+    /// <summary>
+    /// Records the narrow, auditable exception for a legacy Production-labelled tenant that never
+    /// became a billed customer. The attestation changes no tenant profile and destroys nothing;
+    /// it merely makes the otherwise impossible commercial-closure questions vacuous. Every
+    /// structural offboarding control remains in force.
+    /// </summary>
+    public async Task<TenantOffboardingStatusDto> AttestNonCustomerAsync(
+        long tenantId, AttestNonCustomerRetirementRequest request, ClaimsPrincipal actor,
+        HttpContext? httpContext, CancellationToken ct)
+    {
+        var reason = RequireReason(request?.Reason, MinimumDestructionReasonLength);
+        var tenant = await LoadTenantAsync(tenantId, tracked: false, ct);
+        RequireConfirmation(request?.Confirmation, tenant);
+
+        if (tenant.Status != TenantLifecycleGraph.DeletionRequiresStatus)
+            throw TenantOffboardingRefusedException.Conflict(
+                "A non-customer retirement attestation is available only after the tenant is Archived.");
+
+        var record = await LoadRecordAsync(tenant.Id, tracked: false, ct);
+        var stage = record?.Stage ?? TenantOffboardingStage.NotScheduled;
+        if (stage != TenantOffboardingStage.NotScheduled)
+            throw TenantOffboardingRefusedException.Conflict(
+                $"A non-customer retirement attestation cannot be recorded from stage {stage}.");
+
+        var position = await readiness.GetCommercialRetirementPositionAsync(tenant, ct);
+        if (position.HasCommercialFootprint)
+            throw TenantOffboardingRefusedException.Conflict(
+                "This tenant has platform billing records and cannot be attested as a non-customer. "
+                + $"Found {position.BillingStatementCount} billing statement(s) and "
+                + $"{position.SubscriptionInvoiceCount} subscription invoice(s); complete the "
+                + "governed financial close instead.");
+
+        // Idempotent replay: the immutable fact already exists, so do not create a second audit
+        // decision merely because a browser retried after losing the response.
+        if (position.HasNonCustomerAttestation)
+            return await GetStatusAsync(tenantId, ct, actor);
+
+        if (tenant.DeploymentProfile != TenantDeploymentProfile.Production)
+            throw TenantOffboardingRefusedException.Conflict(
+                "This tenant already has a governed non-production deployment profile and does not "
+                + "need a separate non-customer retirement attestation.");
+
+        await InTransactionAsync(async () =>
+        {
+            // Re-read the commercial facts inside the write transaction. Scheduling re-checks them
+            // again, so a billing record that appears later always wins over this attestation.
+            var current = await readiness.GetCommercialRetirementPositionAsync(tenant, ct);
+            if (current.HasCommercialFootprint)
+                throw TenantOffboardingRefusedException.Conflict(
+                    "Billing records appeared while the attestation was being recorded. Nothing was "
+                    + "waived; complete the governed financial close instead.");
+            if (current.HasNonCustomerAttestation) return;
+
+            await WriteLifecycleEventAsync(
+                tenant, stage, stage, TenantLifecycleActions.AttestNonCustomer, reason, actor,
+                new
+                {
+                    tenant.DeploymentProfile,
+                    current.BillingStatementCount,
+                    current.SubscriptionInvoiceCount,
+                    scope = "commercial-closure-only",
+                    controlsRetained = new[]
+                    {
+                        "archive", "legal-hold", "customer-export", "personal-data-erasure",
+                        "retention-window", "independent-purge-approval"
+                    }
+                }, ct);
+
+            await audit.WriteAsync(actor, TenantLifecycleActions.AttestNonCustomer, nameof(Tenant),
+                tenant.Id.ToString(),
+                new
+                {
+                    reason,
+                    tenant.DeploymentProfile,
+                    current.BillingStatementCount,
+                    current.SubscriptionInvoiceCount,
+                    scope = "commercial-closure-only"
+                },
+                actAsTenantId: tenant.Id, httpContext: httpContext, ct: ct);
+        }, ct);
+
+        logger.LogWarning(
+            "Tenant {TenantId} ('{Slug}') was attested as a non-customer for commercial closure; "
+            + "all structural offboarding controls remain required.", tenant.Id, tenant.Slug);
+
+        return await GetStatusAsync(tenantId, ct, actor);
+    }
 
     public async Task<TenantOffboardingStatusDto> ScheduleDeletionAsync(
         long tenantId, ScheduleTenantDeletionRequest request, ClaimsPrincipal actor,
@@ -1108,7 +1201,8 @@ public sealed class TenantOffboardingService(
         Tenant tenant, TenantOffboarding? record,
         IReadOnlyList<TenantLifecycleEventDto> history, IReadOnlyList<TenantExportReceiptDto> exports,
         bool purgeRequiresDifferentApprover, string? deletionApprovedBy,
-        bool commercialEvidenceWaived = false)
+        TenantCommercialRetirementPosition commercialPosition,
+        TenantOffboardingReadinessResult scheduleReadiness)
     {
         var now = UtcNow;
         var stage = record?.Stage ?? TenantOffboardingStage.NotScheduled;
@@ -1124,7 +1218,8 @@ public sealed class TenantOffboardingService(
             record?.LastExportedOn, record?.LastExportedBy,
 
             CanScheduleDeletion: TenantLifecycleGraph.CanScheduleDeletion(stage)
-                                 && tenant.Status == TenantLifecycleGraph.DeletionRequiresStatus,
+                                 && tenant.Status == TenantLifecycleGraph.DeletionRequiresStatus
+                                 && scheduleReadiness.Ready,
             CanCancelDeletion: TenantLifecycleGraph.CanCancelDeletion(stage),
             // Mirrors the guard inside PurgeAsync, including the status predicate: a tenant that
             // has been brought back to life is no longer purgeable, so the console must stop
@@ -1143,7 +1238,7 @@ public sealed class TenantOffboardingService(
             Disclosures:
             [
                 // First, when it applies: it changes what the rest of the list is describing.
-                .. commercialEvidenceWaived
+                .. !commercialPosition.CommercialEvidenceApplies
                     ? new[] { TenantOffboardingDisclosure.NoCommercialEvidenceRequired }
                     : [],
                 TenantOffboardingDisclosure.Irreversible,
@@ -1151,7 +1246,18 @@ public sealed class TenantOffboardingService(
                 TenantOffboardingDisclosure.StatutoryRecordsMoveWithTheCustomer,
                 TenantOffboardingDisclosure.ErasureIsNotDeletion,
                 TenantOffboardingDisclosure.DeletionIsNotErasure
-            ]);
+            ],
+            CommercialEvidenceRequired: commercialPosition.CommercialEvidenceApplies,
+            CanAttestNonCustomer: stage == TenantOffboardingStage.NotScheduled
+                                  && tenant.Status == TenantLifecycleGraph.DeletionRequiresStatus
+                                  && tenant.DeploymentProfile == TenantDeploymentProfile.Production
+                                  && !commercialPosition.HasCommercialFootprint
+                                  && !commercialPosition.HasNonCustomerAttestation,
+            NonCustomerAttestedOn: commercialPosition.NonCustomerAttestedOn,
+            NonCustomerAttestedBy: commercialPosition.NonCustomerAttestedBy,
+            BillingStatementCount: commercialPosition.BillingStatementCount,
+            SubscriptionInvoiceCount: commercialPosition.SubscriptionInvoiceCount,
+            ReadinessFailures: scheduleReadiness.Failures);
     }
 
     private static bool IsEligible(DateTime? eligibleOn, DateTime now) =>
