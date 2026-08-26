@@ -23,6 +23,11 @@ const updateEvidenceRetentionPolicy = vi.fn();
 const runEvidenceRetentionPurge = vi.fn();
 const getTenantDataControl = vi.fn();
 const runTenantDataCleanup = vi.fn();
+const authUser: { isSuperAdmin: boolean } = { isSuperAdmin: true };
+
+vi.mock('../context/AuthContext', () => ({
+  useAuth: () => ({ userData: authUser }),
+}));
 
 vi.mock('../api/services/platformGovernanceService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../api/services/platformGovernanceService')>();
@@ -207,6 +212,7 @@ const runPreview = async () => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  authUser.isSuperAdmin = true;
   getEvidenceRetention.mockResolvedValue(SUMMARY);
   runEvidenceRetentionPurge.mockResolvedValue(DRY_RUN);
   updateEvidenceRetentionPolicy.mockResolvedValue(SUMMARY);
@@ -265,12 +271,34 @@ describe('StorageRetentionPage', () => {
     expect(screen.getByText(/Nexora keeps no backup of these files/i)).toBeInTheDocument();
   });
 
-  it('defaults the policy to 90 days and keeps automatic deletion opt-in', async () => {
+  it('defaults the policy to 90 days and says the opt-in does not start a scheduler', async () => {
     getEvidenceRetention.mockResolvedValue(SUMMARY_OPT_OUT);
     renderPage();
     const days = await screen.findByLabelText(/keep original files for/i);
     expect(days).toHaveValue(90);
-    expect(screen.getByRole('checkbox', { name: /delete stored files automatically/i })).not.toBeChecked();
+    expect(screen.getByRole('checkbox', { name: /allow permanent deletion/i })).not.toBeChecked();
+    expect(screen.getByText(/does not start an automatic deletion schedule/i)).toBeInTheDocument();
+  });
+
+  it('is visibly read-only and offers no callable mutations to a non-super-admin', async () => {
+    authUser.isSuperAdmin = false;
+    renderPage();
+
+    expect(await screen.findByText(/read-only storage view/i)).toBeInTheDocument();
+    expect(screen.getByText(/only a tenant super administrator/i)).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: /allow permanent deletion/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /save retention policy/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /preview what would be deleted/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /delete stored files permanently/i })).toBeDisabled();
+
+    const cleanup = screen.getByRole('region', { name: /clear out what produced nothing/i });
+    for (const checkbox of within(cleanup).getAllByRole('checkbox')) expect(checkbox).toBeDisabled();
+    expect(within(cleanup).getByRole('button', { name: /preview what would be removed/i })).toBeDisabled();
+    expect(within(cleanup).getByRole('button', { name: /remove them permanently/i })).toBeDisabled();
+
+    expect(updateEvidenceRetentionPolicy).not.toHaveBeenCalled();
+    expect(runEvidenceRetentionPurge).not.toHaveBeenCalled();
+    expect(runTenantDataCleanup).not.toHaveBeenCalled();
   });
 
   it('refuses permanent deletion until the tenant has opted in', async () => {

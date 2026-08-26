@@ -18,6 +18,7 @@ import {
 } from '../../api/services/platformGovernanceService';
 import { EmptyState, ErrorState, LoadingState } from '../../platform/components/States';
 import { looksLikeTechnicalNoise, toPresentableError } from '../../utils/apiErrors';
+import { useAuth } from '../../context/AuthContext';
 
 /* ────────────────────────────────────────────────────────────────────────────
  * Storage & Retention — the tenant-facing control for reclaiming disk space.
@@ -176,10 +177,11 @@ function ExclusionTable({ rows }: { rows: EvidenceRetentionExclusion[] }) {
 interface BucketRowProps {
   bucket: TenantDataControlSummary['buckets'][number];
   checked: boolean;
+  readOnly: boolean;
   onToggle: (code: string, checked: boolean) => void;
 }
 
-function BucketRow({ bucket, checked, onToggle }: BucketRowProps) {
+function BucketRow({ bucket, checked, readOnly, onToggle }: BucketRowProps) {
   const empty = bucket.count === 0;
   return (
     <Paper
@@ -189,7 +191,7 @@ function BucketRow({ bucket, checked, onToggle }: BucketRowProps) {
       <Stack direction="row" sx={{ gap: 1.5, alignItems: 'flex-start' }}>
         <Checkbox
           checked={checked}
-          disabled={!bucket.canClear}
+          disabled={readOnly || !bucket.canClear}
           onChange={(event) => onToggle(bucket.code, event.target.checked)}
           slotProps={{ input: { 'aria-label': `Include: ${bucket.title}` } }}
           sx={{ mt: -0.5 }}
@@ -293,6 +295,10 @@ function RefusalList({ rows }: { rows: TenantDataCleanupResult['refused'] }) {
 
 export default function StorageRetentionPage() {
   const client = useQueryClient();
+  const { userData } = useAuth();
+  // Stored-file deletion is an irreversible tenant-owner decision. The API remains the authority;
+  // this client gate keeps readers from being offered controls their role cannot use.
+  const canManageRetention = userData.isSuperAdmin === true;
 
   const summary = useQuery<EvidenceRetentionSummary>({
     queryKey: ['evidence-retention'],
@@ -445,7 +451,7 @@ export default function StorageRetentionPage() {
   const cleanupReasonGiven = cleanupReason.trim().length > 0;
   const cleanupPreviewShown = cleanupPreview !== null;
   const cleanupWouldRemove = (cleanupPreview?.messagesCleared ?? 0) + (cleanupPreview?.filesDeleted ?? 0);
-  const canRunCleanup = cleanupPreviewShown && cleanupWouldRemove > 0
+  const canRunCleanup = canManageRetention && cleanupPreviewShown && cleanupWouldRemove > 0
     && cleanupReasonGiven && chosen.length > 0;
   const cleanupPhraseTyped = cleanupConfirmText.trim() === CONFIRM_PHRASE;
 
@@ -472,13 +478,9 @@ export default function StorageRetentionPage() {
   const hasSomethingToDelete = previewShown && eligible !== null && eligible > 0;
   const confirmPhraseTyped = confirmText.trim() === CONFIRM_PHRASE;
   const purgeReasonGiven = purgeReason.trim().length > 0;
-  /**
-   * The server refuses a real purge until a policy has been SAVED with automatic deletion on —
-   * irreversible deletion is opt-in twice over. Blocking here turns a guaranteed 409 into an
-   * instruction the user can act on.
-   */
+  /** The saved switch records consent for a manually confirmed purge; it starts no scheduler. */
   const policyOptedIn = summary.data?.policy.isEnabled === true;
-  const canDelete = hasSomethingToDelete && purgeReasonGiven && policyOptedIn;
+  const canDelete = canManageRetention && hasSomethingToDelete && purgeReasonGiven && policyOptedIn;
 
   const excluded = useMemo(() => preview?.skipped ?? [], [preview]);
 
@@ -546,6 +548,15 @@ export default function StorageRetentionPage() {
           files, and reclaim space once the details have been extracted from them.
         </Typography>
       </Box>
+
+      {!canManageRetention && (
+        <Alert severity="info" sx={{ mb: 3 }}>
+          <AlertTitle sx={{ fontWeight: 800 }}>Read-only storage view</AlertTitle>
+          You can review storage usage, retention settings and protected records. Only a tenant
+          super administrator can change the policy, run deletion previews or permanently remove
+          stored files.
+        </Alert>
+      )}
 
       {/* ── Storage figures ─────────────────────────────────────────────────── */}
       <Box component="section" aria-labelledby="storage-usage-heading" sx={{ mb: 3 }}>
@@ -634,6 +645,7 @@ export default function StorageRetentionPage() {
                   key={bucket.code}
                   bucket={bucket}
                   checked={chosen.includes(bucket.code)}
+                  readOnly={!canManageRetention}
                   onToggle={toggleBucket}
                 />
               ))}
@@ -659,6 +671,7 @@ export default function StorageRetentionPage() {
               minRows={2}
               required
               helperText="Required before anything is deleted. Recorded permanently in your audit trail."
+              disabled={!canManageRetention}
               sx={{ maxWidth: 560 }}
             />
 
@@ -666,7 +679,7 @@ export default function StorageRetentionPage() {
               <Button
                 variant="contained"
                 startIcon={<FactCheckOutlined />}
-                disabled={chosen.length === 0 || cleanupDryRun.isPending}
+                disabled={!canManageRetention || chosen.length === 0 || cleanupDryRun.isPending}
                 onClick={() => cleanupDryRun.mutate()}
               >
                 {cleanupDryRun.isPending ? 'Checking…' : 'Preview what would be removed'}
@@ -818,15 +831,16 @@ export default function StorageRetentionPage() {
                 <Switch
                   checked={isEnabled}
                   onChange={(_event, checked) => setIsEnabled(checked)}
+                  disabled={!canManageRetention}
                   slotProps={{ input: { 'aria-describedby': 'retention-enabled-help' } }}
                 />
               )}
-              label="Delete stored files automatically once they pass the retention period"
+              label="Allow permanent deletion once files pass the retention period"
             />
             <Typography id="retention-enabled-help" variant="body2" color="text.secondary" sx={{ mt: -1.5, ml: 6 }}>
-              Off by default. While this is off, nothing is deleted at all — not on a schedule and
-              not by hand. Previews still work. Turning this on and saving is the recorded consent
-              that unlocks permanent deletion, so leave it off until you mean it.
+              Off by default. Turning this on records consent and enables a super administrator to
+              run a separate preview and confirmed deletion below. It does not start an automatic
+              deletion schedule in this build.
             </Typography>
 
             <TextField
@@ -834,6 +848,7 @@ export default function StorageRetentionPage() {
               type="number"
               value={retentionDays}
               onChange={(event) => setRetentionDays(event.target.value)}
+              disabled={!canManageRetention}
               error={daysError !== null}
               helperText={daysError
                 ?? `${EVIDENCE_RETENTION_DEFAULT_DAYS} days is the compliance-approved default: long enough to re-read or re-extract a document during a dispute, short enough to satisfy UAE and KSA data-protection rules that personal data is not kept longer than it is needed.`}
@@ -855,6 +870,7 @@ export default function StorageRetentionPage() {
               minRows={2}
               required
               helperText="Recorded in your audit trail alongside who changed it and when."
+              disabled={!canManageRetention}
               sx={{ maxWidth: 560 }}
             />
 
@@ -875,7 +891,7 @@ export default function StorageRetentionPage() {
               <Button
                 variant="contained"
                 startIcon={<SaveOutlined />}
-                disabled={daysError !== null || !policyReason.trim() || savePolicy.isPending}
+                disabled={!canManageRetention || daysError !== null || !policyReason.trim() || savePolicy.isPending}
                 onClick={() => savePolicy.mutate()}
               >
                 {savePolicy.isPending ? 'Saving…' : 'Save retention policy'}
@@ -916,6 +932,7 @@ export default function StorageRetentionPage() {
             minRows={2}
             required
             helperText="Required before anything is deleted. Recorded permanently in your audit trail."
+            disabled={!canManageRetention}
             sx={{ maxWidth: 560, mb: 2 }}
           />
 
@@ -923,7 +940,7 @@ export default function StorageRetentionPage() {
             <Button
               variant="contained"
               startIcon={<FactCheckOutlined />}
-              disabled={dryRun.isPending}
+              disabled={!canManageRetention || dryRun.isPending}
               onClick={() => dryRun.mutate()}
             >
               {dryRun.isPending ? 'Checking…' : 'Preview what would be deleted'}
@@ -950,9 +967,9 @@ export default function StorageRetentionPage() {
           )}
           {previewShown && !policyOptedIn && (
             <Alert severity="info" sx={{ mt: 2 }}>
-              Permanent deletion is opt-in. Turn on “Delete stored files automatically” above and
-              save the policy first — that saved policy is your recorded consent to irreversible
-              deletion. Previews stay available either way.
+              Permanent deletion is opt-in. Turn on “Allow permanent deletion” above and save the
+              policy first — that saved policy is your recorded consent to irreversible deletion.
+              Previews stay available either way.
             </Alert>
           )}
 
