@@ -27,6 +27,7 @@ import {
   initialOverallFitDecision,
   type OverallFitDraftDecision,
 } from './fitAssessmentDraftState';
+import FeatureHelp from '../../../components/common/FeatureHelp';
 
 const CRITERION_OPTIONS: Array<{ value: FitCriterionDecision; label: string }> = [
   { value: 'PASS', label: 'Pass' },
@@ -87,7 +88,13 @@ const FitAssessmentPanel: React.FC<FitAssessmentPanelProps> = ({
     >
       <Stack direction={{ xs: 'column', sm: 'row' }} sx={{ justifyContent: 'space-between', alignItems: { xs: 'stretch', sm: 'flex-start' }, gap: 2, mb: 2 }}>
         <Box>
-          <Typography id="fit-assessment-heading" component="h2" variant="h6" sx={{ fontWeight: 900 }}>Fit assessment</Typography>
+          <Stack direction="row" spacing={0.25} sx={{ alignItems: 'center' }}>
+            <Typography id="fit-assessment-heading" component="h2" variant="h6" sx={{ fontWeight: 900 }}>Fit assessment</Typography>
+            <FeatureHelp
+              label="fit assessment"
+              description="A governed human decision about whether this opportunity fits your commercial rules. Nexora records the decision and evidence; it does not invent or automatically approve a fit score."
+            />
+          </Stack>
           <Typography id="fit-assessment-description" variant="body2" color="text.secondary">
             A person records the commercial fit against governed criteria. Nexora does not calculate or invent a fit score.
           </Typography>
