@@ -45,6 +45,7 @@ import { useStepUpReauthentication, isStepUpCancelled } from '../../auth/useStep
 import { REQUIRED_ROLE_COPY } from '../../auth/permissions';
 import type { Tenant, TenantOffboardingStatus, TenantPurgeResult } from '../../types';
 import FeatureHelp from '../../../components/common/FeatureHelp';
+import { lifecycleActionBlockers } from './lifecycleActionGuidance';
 
 /**
  * The platform's own floor, mirrored so the operator is told before the request rather
@@ -92,6 +93,22 @@ const destructionStageLabel = (status: TenantOffboardingStatus): string => {
     ? 'Ready for independent deletion approval'
     : 'Retention period in progress';
 };
+
+const ACTION_BLOCKER_IDS = {
+  scheduleDeletion: 'schedule-deletion-blocker',
+  cancelDeletion: 'cancel-deletion-blocker',
+  purge: 'purge-tenant-blocker',
+  erasePersonalData: 'erase-personal-data-blocker',
+} as const;
+
+function ActionBlocker({ id, message }: { id: string; message: string | null }) {
+  if (!message) return null;
+  return (
+    <Typography id={id} variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5, px: 0.5 }}>
+      Unavailable: {message}
+    </Typography>
+  );
+}
 
 export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
   const queryClient = useQueryClient();
@@ -327,6 +344,12 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
       : status.isPurgeEligible
         ? 100
         : 0;
+
+  const actionBlockers = lifecycleActionBlockers(status, {
+    isLoading: legalHolds.isLoading,
+    isError: legalHolds.isError,
+    activeHoldCount: activeHolds.length,
+  });
 
   return (
     <Stack spacing={2.5}>
@@ -594,62 +617,103 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
 
               <RoleGate allowed={permissions.isOwner} requirement={REQUIRED_ROLE_COPY.owner}>
                 {(disabled) => (
-                  <Button
-                    variant="outlined"
-                    color="warning"
-                    startIcon={<ScheduleIcon />}
-                    // canScheduleDeletion is resolved server-side from BOTH axes — the
-                    // tenant must be Archived and the stage must be NotScheduled.
-                    disabled={disabled || !status.canScheduleDeletion}
-                    onClick={() => setScheduleOpen(true)}
-                  >
-                    Schedule deletion
-                  </Button>
+                  <Box>
+                    <Button
+                      variant="outlined"
+                      color="warning"
+                      startIcon={<ScheduleIcon />}
+                      // canScheduleDeletion is resolved server-side from BOTH axes — the
+                      // tenant must be Archived and the stage must be NotScheduled.
+                      disabled={disabled || !status.canScheduleDeletion}
+                      aria-describedby={!disabled && actionBlockers.scheduleDeletion
+                        ? ACTION_BLOCKER_IDS.scheduleDeletion
+                        : undefined}
+                      onClick={() => setScheduleOpen(true)}
+                    >
+                      Schedule deletion
+                    </Button>
+                    {!disabled && (
+                      <ActionBlocker
+                        id={ACTION_BLOCKER_IDS.scheduleDeletion}
+                        message={actionBlockers.scheduleDeletion}
+                      />
+                    )}
+                  </Box>
                 )}
               </RoleGate>
 
               <RoleGate allowed={permissions.isOwner} requirement={REQUIRED_ROLE_COPY.owner}>
                 {(disabled) => (
-                  <Button
-                    variant="outlined"
-                    color="success"
-                    startIcon={<CancelDeletionIcon />}
-                    disabled={disabled || !status.canCancelDeletion}
-                    onClick={() => setCancelOpen(true)}
-                  >
-                    Cancel the scheduled deletion
-                  </Button>
+                  <Box>
+                    <Button
+                      variant="outlined"
+                      color="success"
+                      startIcon={<CancelDeletionIcon />}
+                      disabled={disabled || !status.canCancelDeletion}
+                      aria-describedby={!disabled && actionBlockers.cancelDeletion
+                        ? ACTION_BLOCKER_IDS.cancelDeletion
+                        : undefined}
+                      onClick={() => setCancelOpen(true)}
+                    >
+                      Cancel the scheduled deletion
+                    </Button>
+                    {!disabled && (
+                      <ActionBlocker
+                        id={ACTION_BLOCKER_IDS.cancelDeletion}
+                        message={actionBlockers.cancelDeletion}
+                      />
+                    )}
+                  </Box>
                 )}
               </RoleGate>
 
               <RoleGate allowed={permissions.isOwner} requirement={REQUIRED_ROLE_COPY.owner}>
                 {(disabled) => (
-                  <Button
-                    variant="contained"
-                    color="error"
-                    startIcon={<PurgeIcon />}
-                    disabled={
-                      disabled || destructiveHoldGuard || !status.canPurge
-                      || status.purgeRequiresDifferentApprover
-                    }
-                    onClick={() => setPurgeOpen(true)}
-                  >
-                    Permanently delete eligible tenant data
-                  </Button>
+                  <Box>
+                    <Button
+                      variant="contained"
+                      color="error"
+                      startIcon={<PurgeIcon />}
+                      disabled={
+                        disabled || destructiveHoldGuard || !status.canPurge
+                        || status.purgeRequiresDifferentApprover
+                      }
+                      aria-describedby={!disabled && actionBlockers.purge
+                        ? ACTION_BLOCKER_IDS.purge
+                        : undefined}
+                      onClick={() => setPurgeOpen(true)}
+                    >
+                      Permanently delete eligible tenant data
+                    </Button>
+                    {!disabled && (
+                      <ActionBlocker id={ACTION_BLOCKER_IDS.purge} message={actionBlockers.purge} />
+                    )}
+                  </Box>
                 )}
               </RoleGate>
 
               <RoleGate allowed={permissions.isOwner} requirement={REQUIRED_ROLE_COPY.owner}>
                 {(disabled) => (
-                  <Button
-                    variant="outlined"
-                    color="error"
-                    startIcon={<EraseIcon />}
-                    disabled={disabled || destructiveHoldGuard || !status.canErasePersonalData}
-                    onClick={() => setEraseOpen(true)}
-                  >
-                    De-identify people; retain required records
-                  </Button>
+                  <Box>
+                    <Button
+                      variant="outlined"
+                      color="error"
+                      startIcon={<EraseIcon />}
+                      disabled={disabled || destructiveHoldGuard || !status.canErasePersonalData}
+                      aria-describedby={!disabled && actionBlockers.erasePersonalData
+                        ? ACTION_BLOCKER_IDS.erasePersonalData
+                        : undefined}
+                      onClick={() => setEraseOpen(true)}
+                    >
+                      De-identify people; retain required records
+                    </Button>
+                    {!disabled && (
+                      <ActionBlocker
+                        id={ACTION_BLOCKER_IDS.erasePersonalData}
+                        message={actionBlockers.erasePersonalData}
+                      />
+                    )}
+                  </Box>
                 )}
               </RoleGate>
 

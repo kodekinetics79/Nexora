@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import Stack from '../components/Flex';
-import { useNavigate } from 'react-router-dom';
+import { Link as RouterLink, useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Alert,
@@ -13,6 +13,7 @@ import {
   DialogTitle,
   IconButton,
   InputAdornment,
+  Link,
   MenuItem,
   Paper,
   TextField,
@@ -64,6 +65,26 @@ const ACTION_COPY: Record<ActionKind, { title: string; verb: string }> = {
   restore: { title: 'Restore tenant', verb: 'Restore' },
   impersonate: { title: 'Impersonate tenant', verb: 'Impersonate' },
 };
+
+export function TenantNameLink({ tenant }: { tenant: Tenant }) {
+  return (
+    <Box sx={{ lineHeight: 1.2 }}>
+      <Link
+        component={RouterLink}
+        to={`/platform/tenants/${tenant.id}`}
+        variant="body2"
+        underline="hover"
+        onClick={(event) => event.stopPropagation()}
+        sx={{ fontWeight: 700 }}
+      >
+        {tenant.name}
+      </Link>
+      <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+        {tenant.slug}
+      </Typography>
+    </Box>
+  );
+}
 
 export default function TenantsPage() {
   const navigate = useNavigate();
@@ -177,16 +198,7 @@ export default function TenantsPage() {
       headerName: 'Tenant',
       flex: 1.4,
       minWidth: 200,
-      renderCell: (p: GridRenderCellParams<Tenant>) => (
-        <Box sx={{ lineHeight: 1.2 }}>
-          <Typography variant="body2" sx={{ fontWeight: 700 }}>
-            {p.row.name}
-          </Typography>
-          <Typography variant="caption" color="text.secondary">
-            {p.row.slug}
-          </Typography>
-        </Box>
-      ),
+      renderCell: (p: GridRenderCellParams<Tenant>) => <TenantNameLink tenant={p.row} />,
     },
     {
       field: 'countryCode',
