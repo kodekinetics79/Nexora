@@ -63,6 +63,62 @@ public interface ITenantWorkGate
         IEnumerable<long> businessUnitIds, CancellationToken ct = default);
 }
 
+/// <summary>
+/// The stricter lifecycle boundary for inbound mailboxes.
+///
+/// <para>The general worker gate deliberately admits legacy business units that have no platform
+/// Tenant row. A mailbox cannot use that compatibility rule: an orphaned mailbox still contains
+/// a live external credential and will keep authenticating forever after its former tenant has
+/// been retired. Only a business unit linked to a serviceable platform Tenant is eligible for
+/// network polling. An orphan stays in the database for evidence/audit and operator remediation,
+/// but it cannot make an external connection or poison readiness.</para>
+/// </summary>
+public interface IMailboxTenantWorkGate
+{
+    Task<IReadOnlyList<long>> FilterPollableAsync(
+        IEnumerable<long> businessUnitIds, CancellationToken ct = default);
+}
+
+/// <inheritdoc cref="IMailboxTenantWorkGate"/>
+public sealed class MailboxTenantWorkGate(
+    ITenantAccessService access,
+    ILogger<MailboxTenantWorkGate> logger) : IMailboxTenantWorkGate
+{
+    public async Task<IReadOnlyList<long>> FilterPollableAsync(
+        IEnumerable<long> businessUnitIds, CancellationToken ct = default)
+    {
+        var candidates = businessUnitIds.Distinct().ToList();
+        var admitted = new List<long>(candidates.Count);
+        foreach (var businessUnitId in candidates)
+        {
+            var snapshot = await access.GetAccessAsync(businessUnitId, ct);
+            if (snapshot.HasTenant && !snapshot.IsAccessDenied)
+            {
+                admitted.Add(businessUnitId);
+                continue;
+            }
+
+            if (!snapshot.HasTenant && !snapshot.IsUnresolvable)
+            {
+                logger.LogWarning(
+                    "Mailbox polling refused for orphan business unit {BusinessUnitId}: no platform "
+                    + "tenant owns it. Deactivate the stale mailbox or deliberately link the "
+                    + "business unit to an active tenant before polling can resume.",
+                    businessUnitId);
+            }
+            else
+            {
+                logger.LogInformation(
+                    "Mailbox polling deferred for business unit {BusinessUnitId}: tenant access is {Status}.",
+                    businessUnitId,
+                    snapshot.IsUnresolvable ? "unresolvable" : snapshot.Status?.ToString() ?? "unavailable");
+            }
+        }
+
+        return admitted;
+    }
+}
+
 /// <inheritdoc cref="ITenantWorkGate"/>
 public sealed class TenantWorkGate(
     ITenantAccessService access,

@@ -83,6 +83,8 @@ jobs:
       frontend: ${{ steps.filter.outputs.frontend }}
     steps:
       - uses: actions/checkout@v4
+      - name: Validate deployment contract
+        run: ./scripts/deploy/verify-deployment-contract.sh
       - uses: dorny/paths-filter@v3
         id: filter
         with:

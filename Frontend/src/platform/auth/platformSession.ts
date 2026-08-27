@@ -15,9 +15,12 @@
 // ---------------------------------------------------------------------------
 
 import { jwtDecode } from 'jwt-decode';
+import {
+  notifyPlatformSessionPresenceChanged,
+  PLATFORM_SESSION_TOKEN_KEY,
+} from './platformSessionPresence';
 
 // Dedicated storage keys — kept SEPARATE from the tenant token (`token`).
-const TOKEN_KEY = 'nexora_platform_token';
 const USER_KEY = 'nexora_platform_user';
 const CHANNEL_NAME = 'nexora-platform-session-v1';
 
@@ -73,7 +76,7 @@ const isTokenExpired = (token: string): boolean => {
 // --- reads ------------------------------------------------------------------
 
 export const getPlatformToken = (): string | null => {
-  const token = sessionStorage.getItem(TOKEN_KEY);
+  const token = sessionStorage.getItem(PLATFORM_SESSION_TOKEN_KEY);
   if (token && isTokenExpired(token)) {
     // Expired on read — clear so callers never send a doomed request.
     clearPlatformSession();
@@ -134,11 +137,12 @@ export const setPlatformSession = (token: string, user: PlatformSessionUser): vo
 
 const persistPlatformSession = (token: string, user: PlatformSessionUser): void => {
   const userRaw = JSON.stringify(user);
-  sessionStorage.setItem(TOKEN_KEY, token);
+  sessionStorage.setItem(PLATFORM_SESSION_TOKEN_KEY, token);
   sessionStorage.setItem(USER_KEY, userRaw);
   cachedUserRaw = userRaw;
   cachedUser = user;
   emit();
+  notifyPlatformSessionPresenceChanged();
 };
 
 export const clearPlatformSession = (): void => {
@@ -147,11 +151,12 @@ export const clearPlatformSession = (): void => {
 };
 
 const clearPersistedPlatformSession = (): void => {
-  sessionStorage.removeItem(TOKEN_KEY);
+  sessionStorage.removeItem(PLATFORM_SESSION_TOKEN_KEY);
   sessionStorage.removeItem(USER_KEY);
   cachedUserRaw = null;
   cachedUser = null;
   emit();
+  notifyPlatformSessionPresenceChanged();
 };
 
 // BroadcastChannel is same-origin by browser contract. It lets a newly-opened tab
@@ -201,7 +206,7 @@ const startCrossTabBridge = (): void => {
     if (message.type === 'session-cleared') clearPersistedPlatformSession();
   });
 
-  if (!sessionStorage.getItem(TOKEN_KEY)) {
+  if (!sessionStorage.getItem(PLATFORM_SESSION_TOKEN_KEY)) {
     pendingNonce = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
       ? crypto.randomUUID()
       : `${Date.now()}-${Math.random()}`;

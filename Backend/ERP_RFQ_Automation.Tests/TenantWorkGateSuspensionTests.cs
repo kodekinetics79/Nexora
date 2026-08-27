@@ -1,5 +1,6 @@
 using ERP_RFQ_Automation.CommercialFinance;
 using ERP_RFQ_Automation.CommercialRouting;
+using ERP_RFQ_Automation.HealthChecks;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.MultiTenancy;
 using ERP_RFQ_Automation.Platform.Lifecycle;
@@ -135,6 +136,79 @@ public sealed class TenantWorkGateSuspensionTests
         Assert.Equal(0, suspended.ConsecutivePollFailures);
 
         Assert.NotNull(active.LastPollAttemptOn);
+    }
+
+    [Fact]
+    public async Task An_orphaned_legacy_mailbox_is_not_polled_or_allowed_to_authenticate()
+    {
+        using var harness = new TenantWorkGateHarness();
+        await harness.SeedTenantAsync(Active, status: null, "retired-orphan");
+        await SeedMailboxAsync(harness, Active);
+
+        var report = await PollAsync(harness);
+
+        Assert.Empty(report.Mailboxes);
+        await using var verify = harness.Context();
+        var mailbox = await verify.EmailConfigurations.IgnoreQueryFilters()
+            .SingleAsync(x => x.BusinessUnitId == Active);
+        Assert.True(mailbox.IsActive); // retained for explicit remediation; never silently rewritten
+        Assert.Null(mailbox.LastPollAttemptOn);
+        Assert.Null(mailbox.LastSuccessfulPollOn);
+        Assert.Equal(0, mailbox.ConsecutivePollFailures);
+    }
+
+    [Fact]
+    public async Task The_mailbox_gate_admits_only_an_active_registered_tenant()
+    {
+        using var harness = new TenantWorkGateHarness();
+        await harness.SeedTenantAsync(Active, TenantStatus.Active, "mailbox-active");
+        await harness.SeedTenantAsync(Suspended, TenantStatus.Archived, "mailbox-archived");
+        const long orphan = 991_599;
+        await harness.SeedTenantAsync(orphan, status: null, "mailbox-orphan");
+
+        using var scope = harness.ScopeFactory.CreateScope();
+        var admitted = await harness.MailboxGate(scope)
+            .FilterPollableAsync([Active, Suspended, orphan]);
+
+        Assert.Equal([Active], admitted);
+    }
+
+    [Fact]
+    public async Task Startup_readiness_does_not_resurrect_an_orphaned_mailbox_failure()
+    {
+        using var harness = new TenantWorkGateHarness();
+        await harness.SeedTenantAsync(Active, TenantStatus.Active, "health-active");
+        const long orphan = 991_598;
+        await harness.SeedTenantAsync(orphan, status: null, "health-orphan");
+        await SeedMailboxAsync(harness, Active);
+        await SeedMailboxAsync(harness, orphan);
+
+        await using (var db = harness.Context())
+        {
+            foreach (var mailbox in await db.EmailConfigurations.IgnoreQueryFilters().ToListAsync())
+            {
+                mailbox.LastPollAttemptOn = DateTime.UtcNow;
+                mailbox.LastPollError = "authentication failed";
+                mailbox.ConsecutivePollFailures = 15_431;
+            }
+            await db.SaveChangesAsync();
+        }
+
+        var health = new EmailPollerHealth();
+        var worker = new EmailBackgroundService(
+            harness.Services, NullLogger<EmailBackgroundService>.Instance, pollerHealth: health);
+
+        await worker.SeedChannelHealthAsync(CancellationToken.None);
+
+        var seeded = Assert.Single(health.Mailboxes);
+        await using var verify = harness.Context();
+        var activeMailbox = await verify.EmailConfigurations.IgnoreQueryFilters()
+            .SingleAsync(x => x.BusinessUnitId == Active);
+        var orphanMailbox = await verify.EmailConfigurations.IgnoreQueryFilters()
+            .SingleAsync(x => x.BusinessUnitId == orphan);
+        Assert.Equal(activeMailbox.Id, seeded.MailboxId);
+        Assert.Equal(15_431, seeded.ConsecutiveFailures);
+        Assert.DoesNotContain(health.Mailboxes, mailbox => mailbox.MailboxId == orphanMailbox.Id);
     }
 
     [Fact]
@@ -427,7 +501,8 @@ public sealed class TenantWorkGateSuspensionTests
                 configuration: new ConfigurationBuilder().Build(),
                 storage: new TenantWorkGateStorage(root),
                 pollerHealth: null,
-                workGate: scope.ServiceProvider.GetService<ITenantWorkGate>());
+                workGate: scope.ServiceProvider.GetService<ITenantWorkGate>(),
+                mailboxWorkGate: scope.ServiceProvider.GetService<IMailboxTenantWorkGate>());
             return await service.FetchAndSaveLeadsAsync();
         }
         finally

@@ -41,6 +41,7 @@ public static class TenantLifecycleServiceCollectionExtensions
         // so a worker sweeping every tenant still issues at most one platform query per tenant
         // per cache window.
         services.AddScoped<ITenantWorkGate, TenantWorkGate>();
+        services.AddScoped<IMailboxTenantWorkGate, MailboxTenantWorkGate>();
 
         return services;
     }

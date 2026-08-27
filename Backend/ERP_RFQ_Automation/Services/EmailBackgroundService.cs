@@ -248,7 +248,7 @@ namespace ERP_RFQ_Automation.Services
         /// which never polls and would otherwise learn nothing — still reports the truth.
         /// Best-effort by design: a failure to read it must not stop the poller.
         /// </summary>
-        private async Task SeedChannelHealthAsync(CancellationToken stoppingToken)
+        internal async Task SeedChannelHealthAsync(CancellationToken stoppingToken)
         {
             if (_pollerHealth is null) return;
             try
@@ -261,6 +261,7 @@ namespace ERP_RFQ_Automation.Services
                     .Select(e => new
                     {
                         e.Id,
+                        e.BusinessUnitId,
                         e.EmailAddress,
                         e.LastSuccessfulPollOn,
                         e.LastPollAttemptOn,
@@ -268,6 +269,20 @@ namespace ERP_RFQ_Automation.Services
                         e.ConsecutivePollFailures
                     })
                     .ToListAsync(stoppingToken);
+                if (mailboxes.Count == 0) return;
+
+                // Startup health must use the same authoritative eligibility set as the poll
+                // itself. Otherwise an archived/orphaned mailbox is correctly skipped by the
+                // worker but its durable failure counter is still seeded into the process-local
+                // ledger and /ready remains red forever for work we no longer own.
+                var mailboxGate = scope.ServiceProvider.GetService<
+                    ERP_RFQ_Automation.Platform.Lifecycle.IMailboxTenantWorkGate>();
+                if (mailboxGate is not null)
+                {
+                    var eligible = (await mailboxGate.FilterPollableAsync(
+                        mailboxes.Select(m => m.BusinessUnitId), stoppingToken)).ToHashSet();
+                    mailboxes = mailboxes.Where(m => eligible.Contains(m.BusinessUnitId)).ToList();
+                }
                 if (mailboxes.Count == 0) return;
 
                 // PER MAILBOX. This used to be smeared into one channel-wide row — the OLDEST

@@ -1,28 +1,17 @@
 # =============================================================================
-# THIS FILE IS NOT WHAT IS RUNNING. Read this before trusting anything below.
+# DESIRED-STATE CONTRACT, NOT PROOF OF WHAT IS RUNNING.
 #
 # The production web service was created by hand in the Render dashboard, not
-# from this Blueprint, and nothing syncs the two. Every value here is a
-# DESCRIPTION of intent; the dashboard is the configuration. Confirmed against
-# the Render API on 2026-08-12 — the live service and this file already disagree
-# in three places:
+# from this Blueprint, so editing this file does not change production. This
+# file now matches the last verified dashboard service layout (2026-08-12):
+# name Nexora, repository-root service, Backend Docker context and Dockerfile,
+# and deploy only after checks pass. It is the reviewable contract operators
+# must compare with the Render API before and after every release.
 #
-#     this file            live service (GET /v1/services/srv-d9csjhe1a83c739phue0)
-#     name: nexora-fyjw    name: Nexora
-#     rootDir: Backend     rootDir: ""   (dockerContext Backend, dockerfilePath Backend/Dockerfile)
-#     autoDeployTrigger    was `commit` until it was set to `checksPass` BY HAND
-#
-# That third line is why this warning exists rather than a tidier comment. The
-# `autoDeployTrigger: checksPass` block below was added on 2026-08-11 to stop
-# red commits deploying, it was reviewed, merged, and it changed nothing at all
-# for a day: Render never read it. The deploy gate existed only in this file.
-# It was believed to be live, and it was quoted as live, until somebody asked
-# the API instead of reading the YAML.
-#
-# So: a change here has NO effect until either it is applied in the dashboard or
-# this service is linked to the Blueprint. If you link it, delete this banner and
-# reconcile the three rows above first — a sync would otherwise rename the
-# service and move its root directory.
+# Do not create a second Blueprint service. Either link the existing service
+# deliberately after reviewing the proposed plan, or apply the same values in
+# its dashboard. A successful repository test proves this contract is internally
+# coherent; only the API call below proves production matches it.
 #
 # Verify, do not assume:
 #   curl -H "Authorization: Bearer $RENDER_API_KEY" \
@@ -42,10 +31,11 @@ services:
   # the Blueprint. Cost: +$85/mo on Render `pro`.
   # ---------------------------------------------------------------------------
   - type: web
-    name: nexora-fyjw
+    name: Nexora
     runtime: docker
-    rootDir: Backend
-    dockerfilePath: ./Dockerfile
+    branch: main
+    dockerContext: Backend
+    dockerfilePath: Backend/Dockerfile
     # ---------------------------------------------------------------------------
     # DEPLOY ONLY WHAT CI HAS ALREADY GONE GREEN ON.
     #
