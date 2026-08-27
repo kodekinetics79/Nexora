@@ -267,7 +267,10 @@ namespace ERP_RFQ_Automation.Services
             try
             {
                 var mailboxes = await LoadEligibleMailboxHealthAsync(stoppingToken);
-                _pollerHealth.RetireMailboxesExcept(mailboxes.Select(m => m.Id).ToHashSet());
+                // Startup hydration never retires a live in-process observation. A hosted-service
+                // test may start with a legitimate current-cycle record, and SeedMailboxes itself
+                // correctly gives that observation precedence over a durable snapshot. Ongoing
+                // standby reconciliation is the authoritative retirement path below.
                 if (mailboxes.Count == 0) return;
 
                 // PER MAILBOX. This used to be smeared into one channel-wide row — the OLDEST
