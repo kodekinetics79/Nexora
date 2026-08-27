@@ -65,7 +65,6 @@ const ExtractionReviewPage = lazy(() => import('./pages/ExtractionReview/Extract
 const ExtractionReviewDetailPage = lazy(() => import('./pages/ExtractionReview/ExtractionReviewDetailPage'));
 const AllRFQsPage = lazy(() => import('./pages/Procurement/RFQs/AllRFQsPage'));
 const DraftRFQsPage = lazy(() => import('./pages/Procurement/RFQs/DraftRFQsPage'));
-const OutstandingRFQsPage = lazy(() => import('./pages/Procurement/RFQs/OutstandingRFQsPage'));
 const ViewRFQPage = lazy(() => import('./pages/Procurement/RFQs/ViewRFQPage'));
 const SourcingWorkbenchPage = lazy(() => import('./pages/Procurement/Sourcing/SourcingWorkbenchPage'));
 const SourcingCasePage = lazy(() => import('./pages/Procurement/Sourcing/SourcingCasePage'));
@@ -250,7 +249,9 @@ function App() {
       <Route path="/procurement/rfqs" element={<Navigate to="/procurement/rfqs/all" replace />} />
       <Route path="/procurement/rfqs/all" element={<MainLayout><PermissionGuard moduleName="RFQ Management"><AllRFQsPage /></PermissionGuard></MainLayout>} />
       <Route path="/procurement/rfqs/draft" element={<MainLayout><PermissionGuard moduleName="RFQ Management"><DraftRFQsPage /></PermissionGuard></MainLayout>} />
-      <Route path="/procurement/rfqs/outstanding" element={<MainLayout><PermissionGuard moduleName="RFQ Management"><OutstandingRFQsPage /></PermissionGuard></MainLayout>} />
+      {/* This address used to render assigned Leads under an RFQ heading. Keep old bookmarks alive,
+          but send them to the canonical Lead queue; its Leads permission guard owns access. */}
+      <Route path="/procurement/rfqs/outstanding" element={<Navigate to="/procurement/leads/assigned" replace />} />
       {/* Tombstone the former direct Lead -> RFQ creator. Old bookmarks and notifications must
           enter the governed Lead decision workbench; this address never renders a second creation
           experience. The destination route owns its normal Leads permission gate. */}

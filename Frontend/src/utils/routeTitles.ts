@@ -76,7 +76,8 @@ const STATIC_ROUTE_TITLES: Readonly<Record<string, string>> = {
   // RFQs & sourcing
   '/procurement/rfqs/all': 'All RFQs',
   '/procurement/rfqs/draft': 'Draft RFQs',
-  '/procurement/rfqs/outstanding': 'Outstanding RFQs',
+  // Legacy bookmark: App redirects this former pseudo-RFQ queue to Assigned Leads.
+  '/procurement/rfqs/outstanding': 'Assigned Leads',
   '/procurement/supplier-quotes': 'Supplier Quote Inbox',
   '/procurement/commercial-inbox': 'Commercial Inbox',
   '/procurement/handoffs': 'Procurement Handoffs',
