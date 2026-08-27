@@ -7,6 +7,7 @@ using ERP_RFQ_Automation.DTOs.RfqDTOs;
 using ERP_RFQ_Automation.Interfaces;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Repositories;
+using ERP_RFQ_Automation.CommercialCases.Promotion;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -133,6 +134,124 @@ public sealed class RfqServerAuthorityTests
         Assert.DoesNotContain("nextval('nexora_rfq_number_seq')", source, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("SENT", false, false)]
+    [InlineData("DRAFT", true, false)]
+    [InlineData("DRAFT", false, true)]
+    public void Hard_delete_domain_gate_rejects_non_draft_and_governed_rfqs(
+        string status,
+        bool leadLinked,
+        bool promoted)
+    {
+        var rfq = new Rfq
+        {
+            Rfqno = "NXR-TEST",
+            RecDate = DateTime.UtcNow,
+            BusinessUnitId = 41,
+            CreatedBy = "test",
+            CreatedDate = DateTime.UtcNow,
+            LeadId = leadLinked ? 12 : null,
+            PromotionId = promoted ? 19 : null,
+            Rfqstatus = new SetupMaster
+            {
+                SetupCode = status,
+                SetupType = "RfqStatus",
+                SetupValue = status,
+                BusinessUnitId = 41,
+                CreatedBy = "test"
+            }
+        };
+
+        Assert.Throws<RfqDeletionNotAllowedException>(() =>
+            RfqDeletionGovernance.EnsureHardDeletable(rfq));
+    }
+
+    [Fact]
+    public void Hard_delete_domain_gate_allows_only_manual_draft()
+    {
+        var rfq = new Rfq
+        {
+            Rfqno = "NXR-MANUAL-DRAFT",
+            RecDate = DateTime.UtcNow,
+            BusinessUnitId = 41,
+            CreatedBy = "test",
+            CreatedDate = DateTime.UtcNow,
+            Rfqstatus = new SetupMaster
+            {
+                SetupCode = "DRAFT",
+                SetupType = "RfqStatus",
+                SetupValue = "Draft",
+                BusinessUnitId = 41,
+                CreatedBy = "test"
+            }
+        };
+
+        RfqDeletionGovernance.EnsureHardDeletable(rfq);
+    }
+
+    [Fact]
+    public async Task Delete_api_returns_conflict_when_repository_refuses_governed_rfq()
+    {
+        var repository = new RecordingRfqRepository
+        {
+            DeleteFailure = new RfqDeletionNotAllowedException("Promoted RFQs are immutable.")
+        };
+        var controller = Controller(repository, "41", "operator@example.test");
+
+        var result = Assert.IsType<ConflictObjectResult>(await controller.Delete(11));
+        var problem = Assert.IsType<ProblemDetails>(result.Value);
+        Assert.Equal(StatusCodes.Status409Conflict, problem.Status);
+    }
+
+    [Fact]
+    public async Task Repository_hard_deletes_only_a_manual_draft()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(null);
+        Seed.EnsureBusinessUnit(context, 41);
+        context.SetupMasters.Add(new SetupMaster
+        {
+            SetupId = 4101, SetupType = "RfqStatus", SetupCode = "DRAFT", SetupValue = "Draft",
+            BusinessUnitId = 41, IsActive = true, CreatedBy = "test", CreatedOn = DateTime.UtcNow
+        });
+        context.Rfqs.Add(new Rfq
+        {
+            Id = 501, Rfqno = "NXR-MANUAL-DRAFT", RecDate = DateTime.UtcNow,
+            RfqstatusId = 4101, BusinessUnitId = 41,
+            CreatedBy = "test", CreatedDate = DateTime.UtcNow
+        });
+        await context.SaveChangesAsync();
+
+        await new RfqRepository(context).DeleteAsync(501, 41);
+
+        Assert.False(await context.Rfqs.AnyAsync(x => x.Id == 501));
+    }
+
+    [Fact]
+    public async Task Repository_preserves_a_non_draft_commercial_record()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(null);
+        Seed.EnsureBusinessUnit(context, 41);
+        context.SetupMasters.Add(new SetupMaster
+        {
+            SetupId = 4102, SetupType = "RfqStatus", SetupCode = "SENT", SetupValue = "Sent",
+            BusinessUnitId = 41, IsActive = true, CreatedBy = "test", CreatedOn = DateTime.UtcNow
+        });
+        context.Rfqs.Add(new Rfq
+        {
+            Id = 502, Rfqno = "NXR-SENT", RecDate = DateTime.UtcNow,
+            RfqstatusId = 4102, BusinessUnitId = 41,
+            CreatedBy = "test", CreatedDate = DateTime.UtcNow
+        });
+        await context.SaveChangesAsync();
+
+        await Assert.ThrowsAsync<RfqDeletionNotAllowedException>(() =>
+            new RfqRepository(context).DeleteAsync(502, 41));
+
+        Assert.True(await context.Rfqs.AnyAsync(x => x.Id == 502));
+    }
+
     private static RfqController Controller(
         IRfqRepository repository,
         string? businessUnitClaim,
@@ -192,6 +311,7 @@ public sealed class RfqServerAuthorityTests
 
     private sealed class RecordingRfqRepository : IRfqRepository
     {
+        public Exception? DeleteFailure { get; init; }
         public List<long> TenantIds { get; } = [];
         public Rfq? Updated { get; private set; }
         public int CallCount { get; private set; }
@@ -227,7 +347,7 @@ public sealed class RfqServerAuthorityTests
         public Task DeleteAsync(long id, long businessUnitId)
         {
             Record(businessUnitId);
-            return Task.CompletedTask;
+            return DeleteFailure is null ? Task.CompletedTask : Task.FromException(DeleteFailure);
         }
 
         private void Record(long businessUnitId)

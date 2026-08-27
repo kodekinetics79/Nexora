@@ -353,7 +353,10 @@ public sealed class RfqPromotionService : IRfqPromotionService
         if (!string.Equals(receipt.RequestHash, requestHash, StringComparison.Ordinal))
             throw new InvalidOperationException("The idempotency key was already used for a different RFQ promotion request.");
         var rfq = await _db.Rfqs.AsNoTracking()
-            .SingleAsync(x => x.BusinessUnitId == businessUnitId && x.PromotionId == receipt.Id, ct);
+            .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.PromotionId == receipt.Id, ct);
+        if (rfq is null)
+            throw new InvalidOperationException(
+                "The RFQ promotion receipt exists but its immutable RFQ is missing. Recovery must restore the original RFQ; replay will not create a replacement.");
         var decision = await _db.Set<LeadParticipationDecision>().AsNoTracking()
             .SingleAsync(x => x.BusinessUnitId == businessUnitId && x.Id == receipt.ParticipationDecisionId, ct);
         var revisionNumber = await _db.Set<LeadRevision>().AsNoTracking()

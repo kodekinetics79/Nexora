@@ -51,16 +51,22 @@ namespace ERP_RFQ_Automation.Controllers
         private readonly ErpRfqAutomationContext _context;
         private readonly IEvidenceObjectStorage _evidenceStorage;
         private readonly IFileStorage? _legacyStorage;
+        private readonly ICommercialAccessContext _commercialAccess;
+        private readonly IAuthorizationService _authorization;
         private readonly ILogger<FileController> _logger;
 
         public FileController(
             ErpRfqAutomationContext context,
             IFileStorage legacyStorage,
+            ICommercialAccessContext commercialAccess,
+            IAuthorizationService authorization,
             ILogger<FileController> logger)
         {
             _context = context;
             _legacyStorage = legacyStorage;
             _evidenceStorage = new LocalEvidenceObjectStorage(legacyStorage);
+            _commercialAccess = commercialAccess;
+            _authorization = authorization;
             _logger = logger;
         }
 
@@ -69,11 +75,15 @@ namespace ERP_RFQ_Automation.Controllers
             ErpRfqAutomationContext context,
             IFileStorage legacyStorage,
             IEvidenceObjectStorage evidenceStorage,
+            ICommercialAccessContext commercialAccess,
+            IAuthorizationService authorization,
             ILogger<FileController> logger)
         {
             _context = context;
             _legacyStorage = null;
             _evidenceStorage = evidenceStorage;
+            _commercialAccess = commercialAccess;
+            _authorization = authorization;
             _logger = logger;
         }
 
@@ -86,7 +96,6 @@ namespace ERP_RFQ_Automation.Controllers
             });
 
         [HttpGet("attachment/{attachmentId:long}")]
-        [RequireModulePermission("Leads", PermissionAction.View)]
         public async Task<IActionResult> DownloadAttachment(long attachmentId, CancellationToken ct)
         {
             var rawBusinessUnitId = User.FindFirst("businessUnitId")?.Value;
@@ -115,6 +124,15 @@ namespace ERP_RFQ_Automation.Controllers
 
                 if (attachment is null || (!isLead && !isCustomerPurchaseOrder))
                     return NotFound();
+
+                // This endpoint is polymorphic. Requiring Leads/View for a customer PO both
+                // grants the wrong authority and locks legitimate award users out. Resolve the
+                // parent first, then require the module that owns that record.
+                var module = isLead ? "Leads" : "Customer Awards";
+                var permission = await _authorization.AuthorizeAsync(
+                    User, null, $"{RequireModulePermissionAttribute.PolicyPrefix}{module}:{PermissionAction.View}");
+                if (!permission.Succeeded)
+                    return Forbid();
 
                 // Ownership is proved against the parent's OWN table. The explicit business-unit
                 // predicate is deliberate defence in depth even though both are query-filtered.
@@ -154,9 +172,32 @@ namespace ERP_RFQ_Automation.Controllers
 
                 if (source is null || job is null)
                 {
+                    // Customer-PO documents are written directly to content-addressed evidence
+                    // storage, not through the lead occurrence ledger. The attachment therefore
+                    // carries the authoritative URI and digest itself.
+                    if (isCustomerPurchaseOrder)
+                    {
+                        if (string.IsNullOrWhiteSpace(attachment.ContentSha256))
+                            return Conflict("The customer purchase-order evidence has no recorded content digest.");
+                        if (!await CanReadAttachmentParentAsync(
+                                false, attachment.ParentId, businessUnitId, ct))
+                            return NotFound();
+                        var purchaseOrderStream = await _evidenceStorage.OpenVerifiedReadAsync(
+                            attachment.FilePath, attachment.ContentSha256, ct);
+                        return await ServeVerifiedAttachmentAsync(
+                            purchaseOrderStream,
+                            attachment,
+                            attachment.MimeType ?? "application/octet-stream",
+                            businessUnitId,
+                            ct);
+                    }
+
                     // Compatibility is limited to direct legacy construction. The application DI
                     // path always supplies IEvidenceObjectStorage and therefore fails closed.
                     if (_legacyStorage is null)
+                        return NotFound();
+                    if (!await CanReadAttachmentParentAsync(
+                            isLead, attachment.ParentId, businessUnitId, ct))
                         return NotFound();
                     var legacyStream = await _legacyStorage.OpenReadAsync(attachment.FilePath, ct);
                     return await ServeVerifiedAttachmentAsync(
@@ -174,6 +215,12 @@ namespace ERP_RFQ_Automation.Controllers
                         title: "The evidence object failed integrity verification.");
                 }
 
+                // Re-resolve commercial scope at the last possible point before bytes are
+                // opened. Direct ids from another rep's book remain indistinguishable from a
+                // missing object even when the caller shares the tenant.
+                if (!await CanReadAttachmentParentAsync(
+                        isLead, attachment.ParentId, businessUnitId, ct))
+                    return NotFound();
                 var stream = await _evidenceStorage.OpenVerifiedReadAsync(
                     job.StoragePath, source.ContentHash, ct);
                 var contentType = string.IsNullOrWhiteSpace(source.DetectedMimeType)
@@ -218,20 +265,26 @@ namespace ERP_RFQ_Automation.Controllers
 
             try
             {
-                var isAuthorizedLeadEvidence = await _context.Set<LeadOccurrenceDocument>()
+                var owningLeadIds = await _context.Set<LeadOccurrenceDocument>()
                     .AsNoTracking()
-                    .AnyAsync(link => link.BusinessUnitId == businessUnitId
+                    .Where(link => link.BusinessUnitId == businessUnitId
                         && link.SourceDocumentId == sourceDocumentId
-                        && link.Occurrence.LeadId.HasValue, ct);
-                if (!isAuthorizedLeadEvidence)
+                        && link.Occurrence.LeadId.HasValue)
+                    .Select(link => link.Occurrence.LeadId!.Value)
+                    .Distinct()
+                    .ToListAsync(ct);
+                if (owningLeadIds.Count == 0)
                 {
-                    isAuthorizedLeadEvidence = await _context.Set<LeadIngestionOccurrence>()
+                    owningLeadIds = await _context.Set<LeadIngestionOccurrence>()
                         .AsNoTracking()
-                        .AnyAsync(occurrence => occurrence.BusinessUnitId == businessUnitId
+                        .Where(occurrence => occurrence.BusinessUnitId == businessUnitId
                             && occurrence.SourceDocumentId == sourceDocumentId
-                            && occurrence.LeadId.HasValue, ct);
+                            && occurrence.LeadId.HasValue)
+                        .Select(occurrence => occurrence.LeadId!.Value)
+                        .Distinct()
+                        .ToListAsync(ct);
                 }
-                if (!isAuthorizedLeadEvidence)
+                if (owningLeadIds.Count == 0)
                     return NotFound();
 
                 var document = await _context.Set<SourceDocument>().AsNoTracking()
@@ -258,6 +311,26 @@ namespace ERP_RFQ_Automation.Controllers
                 if (job is null || string.IsNullOrWhiteSpace(job.StoragePath))
                     return NotFound("The source document has no exact stored-object relation.");
 
+                var mayRead = false;
+                foreach (var leadId in owningLeadIds)
+                {
+                    var stillLinked = await _context.Set<LeadOccurrenceDocument>().AsNoTracking()
+                        .AnyAsync(link => link.BusinessUnitId == businessUnitId
+                            && link.SourceDocumentId == sourceDocumentId
+                            && link.Occurrence.LeadId == leadId, ct)
+                        || await _context.Set<LeadIngestionOccurrence>().AsNoTracking()
+                            .AnyAsync(occurrence => occurrence.BusinessUnitId == businessUnitId
+                                && occurrence.SourceDocumentId == sourceDocumentId
+                                && occurrence.LeadId == leadId, ct);
+                    if (stillLinked && await _commercialAccess.CanAccessLeadAsync(leadId, ct))
+                    {
+                        mayRead = true;
+                        break;
+                    }
+                }
+                if (!mayRead)
+                    return NotFound();
+
                 var stream = await _evidenceStorage.OpenVerifiedReadAsync(
                     job.StoragePath, document.ContentHash, ct);
                 Response.Headers[IntegrityHeader] = IntegrityVerified;
@@ -281,6 +354,37 @@ namespace ERP_RFQ_Automation.Controllers
                 return Problem(statusCode: StatusCodes.Status409Conflict,
                     title: "The evidence object failed integrity verification.");
             }
+        }
+
+        private async Task<bool> CanReadAttachmentParentAsync(
+            bool isLead,
+            long parentId,
+            long businessUnitId,
+            CancellationToken ct)
+        {
+            if (isLead)
+                return await _commercialAccess.CanAccessLeadAsync(parentId, ct);
+
+            var purchaseOrder = await _context.CustomerPurchaseOrders.AsNoTracking()
+                .Where(po => po.Id == parentId && po.BusinessUnitId == businessUnitId)
+                .Select(po => new { po.CommercialCaseId, po.RfqId })
+                .SingleOrDefaultAsync(ct);
+            if (purchaseOrder is null)
+                return false;
+
+            // A PO's commercial case is the primary lineage authority. RfqId is retained as a
+            // governed fallback for old matched records whose case-to-lead repair is pending.
+            var leadIds = await _context.Leads.AsNoTracking()
+                .Where(lead => lead.BusinessUnitId == businessUnitId
+                    && lead.CommercialCaseId == purchaseOrder.CommercialCaseId)
+                .Select(lead => lead.Id)
+                .ToListAsync(ct);
+            foreach (var leadId in leadIds)
+                if (await _commercialAccess.CanAccessLeadAsync(leadId, ct))
+                    return true;
+
+            return purchaseOrder.RfqId.HasValue
+                && await _commercialAccess.CanAccessRfqAsync(purchaseOrder.RfqId.Value, ct);
         }
 
         /// <summary>
