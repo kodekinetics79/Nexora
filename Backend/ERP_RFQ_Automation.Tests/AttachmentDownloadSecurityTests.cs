@@ -4,9 +4,14 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using ERP_RFQ_Automation.Controllers;
+using ERP_RFQ_Automation.Authorization;
+using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
+using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.Infrastructure.Storage;
+using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Tests.Support;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Infrastructure;
@@ -70,6 +75,84 @@ public sealed class AttachmentDownloadSecurityTests : IDisposable
         var controller = Controller(context, storage, businessUnitId: 1);
 
         var result = await controller.DownloadAttachment(2002, CancellationToken.None);
+
+        Assert.IsType<NotFoundResult>(result);
+        Assert.False(controller.Response.Headers.ContainsKey(FileController.IntegrityHeader));
+    }
+
+    [Theory]
+    [InlineData("rep-a-owner", true)]
+    [InlineData("rep-b-peer", false)]
+    [InlineData("manager-descendant", true)]
+    [InlineData("manager-non-descendant", false)]
+    [InlineData("tenant-admin", true)]
+    public async Task Attachment_bytes_honor_authoritative_commercial_scope(
+        string actorScenario,
+        bool mayRead)
+    {
+        _ = actorScenario;
+        using var db = new TestDb();
+        await using var context = db.ContextFor(null);
+        Seed.Lead(context, 101, 1);
+        context.Attachments.Add(Attachment(1001, 101, "Manual_Attachments/scoped.txt"));
+        await context.SaveChangesAsync();
+        var storage = new LocalFileStorage(_root, Path.GetTempPath());
+        await storage.WriteImmutableAsync("Manual_Attachments/scoped.txt", "scoped"u8.ToArray());
+        var controller = Controller(context, storage, 1,
+            commercialAccess: new SelectiveCommercialAccessContext(1, mayRead));
+
+        var result = await controller.DownloadAttachment(1001, default);
+
+        if (mayRead)
+            Assert.IsType<FileStreamResult>(result);
+        else
+            Assert.IsType<NotFoundResult>(result);
+    }
+
+    [Theory]
+    [InlineData("rep-a-owner", true)]
+    [InlineData("rep-b-peer", false)]
+    [InlineData("manager-descendant", true)]
+    [InlineData("manager-non-descendant", false)]
+    [InlineData("tenant-admin", true)]
+    public async Task Source_document_bytes_honor_authoritative_commercial_scope(
+        string actorScenario,
+        bool mayRead)
+    {
+        _ = actorScenario;
+        using var db = new TestDb();
+        await using var context = db.ContextFor(null);
+        Seed.Lead(context, 101, 1);
+        var (documentId, storagePath, hash) = await SeedSourceDocumentAsync(context, 1, 101);
+        var storage = new LocalFileStorage(_root, Path.GetTempPath());
+        await storage.WriteImmutableAsync(storagePath, "source bytes"u8.ToArray());
+        var controller = Controller(context, storage, 1,
+            commercialAccess: new SelectiveCommercialAccessContext(1, mayRead));
+
+        var result = await controller.DownloadSourceDocument(documentId, default);
+
+        if (mayRead)
+        {
+            Assert.IsType<FileStreamResult>(result);
+            Assert.Equal(hash, Sha256("source bytes"));
+        }
+        else
+            Assert.IsType<NotFoundResult>(result);
+    }
+
+    [Fact]
+    public async Task Source_document_bytes_deny_cross_tenant_ids_before_storage_open()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(null);
+        Seed.Lead(context, 202, 2);
+        var (documentId, storagePath, _) = await SeedSourceDocumentAsync(context, 2, 202);
+        var storage = new LocalFileStorage(_root, Path.GetTempPath());
+        await storage.WriteImmutableAsync(storagePath, "source bytes"u8.ToArray());
+        var controller = Controller(context, storage, 1,
+            commercialAccess: new SelectiveCommercialAccessContext(1, allowed: true));
+
+        var result = await controller.DownloadSourceDocument(documentId, default);
 
         Assert.IsType<NotFoundResult>(result);
         Assert.False(controller.Response.Headers.ContainsKey(FileController.IntegrityHeader));
@@ -270,12 +353,18 @@ public sealed class AttachmentDownloadSecurityTests : IDisposable
         ErpRfqAutomationContext context,
         IFileStorage storage,
         long? businessUnitId,
-        ILogger<FileController>? logger = null)
+        ILogger<FileController>? logger = null,
+        ICommercialAccessContext? commercialAccess = null)
     {
         var claims = businessUnitId.HasValue
             ? new[] { new Claim("businessUnitId", businessUnitId.Value.ToString()) }
             : Array.Empty<Claim>();
-        var controller = new FileController(context, storage, logger ?? NullLogger<FileController>.Instance)
+        var controller = new FileController(
+            context,
+            storage,
+            commercialAccess ?? new PermitCommercialAccessContext(businessUnitId ?? 1),
+            new AllowAuthorizationService(),
+            logger ?? NullLogger<FileController>.Instance)
         {
             ControllerContext = new ControllerContext
             {
@@ -287,6 +376,76 @@ public sealed class AttachmentDownloadSecurityTests : IDisposable
             ProblemDetailsFactory = new TestProblemDetailsFactory()
         };
         return controller;
+    }
+
+    private static async Task<(long DocumentId, string StoragePath, string Hash)> SeedSourceDocumentAsync(
+        ErpRfqAutomationContext context,
+        long businessUnitId,
+        long leadId)
+    {
+        var batchId = Guid.NewGuid();
+        var hash = Sha256("source bytes");
+        var storagePath = $"Evidence/{businessUnitId}/{hash}.txt";
+        var batch = new LeadIngestionBatch
+        {
+            Id = batchId, BusinessUnitId = businessUnitId, SourceChannel = "test",
+            CreatedBy = "test", CreatedAtUtc = DateTimeOffset.UtcNow, UpdatedAtUtc = DateTimeOffset.UtcNow
+        };
+        var corpus = DocumentCorpus.Create(businessUnitId, batchId, CorpusSourceType.ManualUpload);
+        context.AddRange(batch, corpus);
+        await context.SaveChangesAsync();
+        var job = new ExtractionJob
+        {
+            BatchId = batchId, BusinessUnitId = businessUnitId,
+            SourceType = ExtractionSourceType.ManualUpload, ContentHash = hash,
+            StoragePath = storagePath, FileName = "source.txt", FileType = "txt",
+            Status = ExtractionStatus.Succeeded, MaxAttempts = 5,
+            NextAttemptAt = DateTime.UtcNow, CreatedOn = DateTime.UtcNow, UpdatedOn = DateTime.UtcNow
+        };
+        context.Add(job);
+        await context.SaveChangesAsync();
+        var document = SourceDocument.Create(businessUnitId, corpus.Id, hash, "source.txt",
+            "text/plain", "local", storagePath, hash, "source bytes"u8.Length);
+        document.ReleaseFromQuarantine("local", storagePath, hash);
+        document.BindExtractionJob(job.Id);
+        context.Add(document);
+        await context.SaveChangesAsync();
+        context.Add(new LeadIngestionOccurrence
+        {
+            BusinessUnitId = businessUnitId, BatchId = batchId, LeadId = leadId,
+            SourceDocumentId = document.Id, SourceChannel = "test",
+            IdempotencyKey = Guid.NewGuid().ToString("N"), LogicalInquiryFingerprint = hash,
+            Classification = LeadOccurrenceClassification.New, ProcessingPath = LeadProcessingPath.Deterministic,
+            IngestedAtUtc = DateTimeOffset.UtcNow, CreatedAtUtc = DateTimeOffset.UtcNow,
+            ActorId = "test", CorrelationId = Guid.NewGuid().ToString("N")
+        });
+        await context.SaveChangesAsync();
+        return (document.Id, storagePath, hash);
+    }
+
+    private sealed class SelectiveCommercialAccessContext(long tenant, bool allowed)
+        : ICommercialAccessContext
+    {
+        public Task<CommercialActorScope?> ResolveAsync(CancellationToken ct = default) =>
+            Task.FromResult<CommercialActorScope?>(new(tenant, 1, 1, AccountTeamScope.TenantWide(1)));
+        public Task<bool> CanAccessLeadAsync(long leadId, CancellationToken ct = default) => Task.FromResult(allowed);
+        public Task<bool> CanAccessCustomerAsync(long customerId, CancellationToken ct = default) => Task.FromResult(allowed);
+        public Task<bool> CanAccessRfqAsync(long rfqId, CancellationToken ct = default) => Task.FromResult(allowed);
+        public Task<bool> CanAccessQuoteAsync(long quoteId, CancellationToken ct = default) => Task.FromResult(allowed);
+        public Task<bool> CanAccessOrderAsync(long orderId, CancellationToken ct = default) => Task.FromResult(allowed);
+    }
+
+    private sealed class AllowAuthorizationService : IAuthorizationService
+    {
+        public Task<AuthorizationResult> AuthorizeAsync(
+            ClaimsPrincipal user, object? resource, string policyName) =>
+            Task.FromResult(AuthorizationResult.Success());
+
+        public Task<AuthorizationResult> AuthorizeAsync(
+            ClaimsPrincipal user,
+            object? resource,
+            IEnumerable<IAuthorizationRequirement> requirements) =>
+            Task.FromResult(AuthorizationResult.Success());
     }
 
     private sealed class TestProblemDetailsFactory : ProblemDetailsFactory

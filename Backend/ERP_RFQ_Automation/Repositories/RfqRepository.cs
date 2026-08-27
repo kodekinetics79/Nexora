@@ -800,14 +800,16 @@ namespace ERP_RFQ_Automation.Repositories
         {
             var rfq = await _context.Rfqs
                 .Include(r => r.Rfqitems)
+                .Include(r => r.Rfqstatus)
                 .FirstOrDefaultAsync(r => r.Id == id && r.BusinessUnitId == businessUnitId);
 
-            if (rfq != null)
-            {
-                _context.Rfqitems.RemoveRange(rfq.Rfqitems);
-                _context.Rfqs.Remove(rfq);
-                await _context.SaveChangesAsync();
-            }
+            if (rfq is null)
+                throw new KeyNotFoundException($"RFQ with ID {id} was not found in Business Unit {businessUnitId}.");
+
+            RfqDeletionGovernance.EnsureHardDeletable(rfq);
+            _context.Rfqitems.RemoveRange(rfq.Rfqitems);
+            _context.Rfqs.Remove(rfq);
+            await _context.SaveChangesAsync();
         }
 
 
