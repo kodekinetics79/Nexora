@@ -131,6 +131,15 @@ namespace ERP_RFQ_Automation.Services
         private readonly IEmailPollerHealth? _pollerHealth;
         private readonly ILogger<EmailBackgroundService> _logger;
 
+        private sealed record DurableMailboxHealth(
+            long Id,
+            long BusinessUnitId,
+            string EmailAddress,
+            DateTime? LastSuccessfulPollOn,
+            DateTime? LastPollAttemptOn,
+            string? LastPollError,
+            int ConsecutivePollFailures);
+
         public EmailBackgroundService(
             IServiceProvider services,
             ILogger<EmailBackgroundService> logger,
@@ -195,8 +204,12 @@ namespace ERP_RFQ_Automation.Services
                                 "Another instance holds the email-poller lock; standing by for {Interval}s.",
                                 interval.TotalSeconds);
                             // Standing by is a legitimate, healthy state — the loop is turning
-                            // and another instance is doing the work — so it must never clear
-                            // or fabricate a mailbox result.
+                            // and another instance is doing the work. It cannot fabricate poll
+                            // results, but it must retire ledger entries for mailboxes this process
+                            // no longer owns; otherwise an archived tenant keeps this standby
+                            // instance's /ready red forever because it never produces a cycle
+                            // report of its own.
+                            await RefreshChannelHealthEligibilityAsync(stoppingToken);
                             _pollerHealth?.StandBy();
                         }
                     }
@@ -253,36 +266,8 @@ namespace ERP_RFQ_Automation.Services
             if (_pollerHealth is null) return;
             try
             {
-                using var scope = _services.CreateScope();
-                var dbContext = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
-                var mailboxes = await dbContext.EmailConfigurations
-                    .AsNoTracking()
-                    .Where(e => e.IsActive && e.Protocol.ToUpper() == "IMAP")
-                    .Select(e => new
-                    {
-                        e.Id,
-                        e.BusinessUnitId,
-                        e.EmailAddress,
-                        e.LastSuccessfulPollOn,
-                        e.LastPollAttemptOn,
-                        e.LastPollError,
-                        e.ConsecutivePollFailures
-                    })
-                    .ToListAsync(stoppingToken);
-                if (mailboxes.Count == 0) return;
-
-                // Startup health must use the same authoritative eligibility set as the poll
-                // itself. Otherwise an archived/orphaned mailbox is correctly skipped by the
-                // worker but its durable failure counter is still seeded into the process-local
-                // ledger and /ready remains red forever for work we no longer own.
-                var mailboxGate = scope.ServiceProvider.GetService<
-                    ERP_RFQ_Automation.Platform.Lifecycle.IMailboxTenantWorkGate>();
-                if (mailboxGate is not null)
-                {
-                    var eligible = (await mailboxGate.FilterPollableAsync(
-                        mailboxes.Select(m => m.BusinessUnitId), stoppingToken)).ToHashSet();
-                    mailboxes = mailboxes.Where(m => eligible.Contains(m.BusinessUnitId)).ToList();
-                }
+                var mailboxes = await LoadEligibleMailboxHealthAsync(stoppingToken);
+                _pollerHealth.RetireMailboxesExcept(mailboxes.Select(m => m.Id).ToHashSet());
                 if (mailboxes.Count == 0) return;
 
                 // PER MAILBOX. This used to be smeared into one channel-wide row — the OLDEST
@@ -333,6 +318,64 @@ namespace ERP_RFQ_Automation.Services
                     "Could not seed the email channel health from the durable poll ledger; "
                     + "the first poll cycle will establish it.");
             }
+        }
+
+        /// <summary>
+        /// Reconciles process-local readiness with the current authoritative mailbox ownership
+        /// set. Standby instances call this every loop because they never receive a leader's poll
+        /// report and therefore have no other way to retire an archived tenant's stale failure.
+        /// A failed refresh leaves the previous ledger intact rather than claiming recovery.
+        /// </summary>
+        internal async Task RefreshChannelHealthEligibilityAsync(CancellationToken stoppingToken)
+        {
+            if (_pollerHealth is null) return;
+            try
+            {
+                var mailboxes = await LoadEligibleMailboxHealthAsync(stoppingToken);
+                _pollerHealth.RetireMailboxesExcept(mailboxes.Select(m => m.Id).ToHashSet());
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                // shutting down
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Could not refresh authoritative mailbox eligibility while standing by; "
+                    + "the existing readiness ledger is retained.");
+            }
+        }
+
+        private async Task<List<DurableMailboxHealth>> LoadEligibleMailboxHealthAsync(
+            CancellationToken stoppingToken)
+        {
+            using var scope = _services.CreateScope();
+            var dbContext = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+            var mailboxes = await dbContext.EmailConfigurations
+                .AsNoTracking()
+                .Where(e => e.IsActive && e.Protocol.ToUpper() == "IMAP")
+                .Select(e => new DurableMailboxHealth(
+                    e.Id,
+                    e.BusinessUnitId,
+                    e.EmailAddress,
+                    e.LastSuccessfulPollOn,
+                    e.LastPollAttemptOn,
+                    e.LastPollError,
+                    e.ConsecutivePollFailures))
+                .ToListAsync(stoppingToken);
+            if (mailboxes.Count == 0) return mailboxes;
+
+            // Readiness is a cross-instance decision just like the pre-authentication fence. A
+            // cached Active answer can outlive an archive made on another node, so the ledger's
+            // eligibility set is always refreshed from the control plane rather than waiting for
+            // the normal cache TTL.
+            var mailboxGate = scope.ServiceProvider.GetService<
+                ERP_RFQ_Automation.Platform.Lifecycle.IMailboxTenantWorkGate>();
+            if (mailboxGate is null) return mailboxes;
+
+            var eligible = (await mailboxGate.FilterPollableFreshAsync(
+                mailboxes.Select(m => m.BusinessUnitId), stoppingToken)).ToHashSet();
+            return mailboxes.Where(m => eligible.Contains(m.BusinessUnitId)).ToList();
         }
 
         /// <summary>
