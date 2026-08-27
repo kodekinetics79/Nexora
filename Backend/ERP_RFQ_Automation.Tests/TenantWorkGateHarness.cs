@@ -56,7 +56,11 @@ public sealed class TenantWorkGateHarness : IDisposable
 
         // Absent registration is the "deployment without the lifecycle module" case: every worker
         // resolves the gate with GetService and carries on unfiltered when it is not there.
-        if (registerGate) services.AddScoped<ITenantWorkGate, TenantWorkGate>();
+        if (registerGate)
+        {
+            services.AddScoped<ITenantWorkGate, TenantWorkGate>();
+            services.AddScoped<IMailboxTenantWorkGate, MailboxTenantWorkGate>();
+        }
 
         configure?.Invoke(services);
 
@@ -133,6 +137,9 @@ public sealed class TenantWorkGateHarness : IDisposable
 
     public ITenantWorkGate Gate(IServiceScope scope) =>
         scope.ServiceProvider.GetRequiredService<ITenantWorkGate>();
+
+    public IMailboxTenantWorkGate MailboxGate(IServiceScope scope) =>
+        scope.ServiceProvider.GetRequiredService<IMailboxTenantWorkGate>();
 
     public void Dispose()
     {

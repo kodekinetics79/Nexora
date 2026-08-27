@@ -24,10 +24,33 @@ beforeEach(() => {
 });
 
 describe('PlatformLoginScreen MFA challenge', () => {
+  it('exposes a page heading and names the password visibility control', () => {
+    render(<PlatformLoginScreen />);
+
+    expect(screen.getByRole('heading', { level: 1, name: 'Platform Console' })).toBeVisible();
+    const visibilityToggle = screen.getByRole('button', { name: 'Show password' });
+    expect(visibilityToggle).toHaveAttribute('aria-pressed', 'false');
+
+    fireEvent.click(visibilityToggle);
+
+    expect(screen.getByRole('button', { name: 'Hide password' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
   it('keeps the separate tenant and platform sign-in surfaces visibly connected', () => {
     render(<PlatformLoginScreen />);
 
     expect(screen.getByRole('link', { name: 'Back to tenant sign-in' })).toHaveAttribute('href', '/login');
+  });
+
+  it('uses customer language first and keeps the session boundary in contextual help', async () => {
+    render(<PlatformLoginScreen />);
+
+    expect(screen.getByText('Sign in with your platform operator account.')).toBeVisible();
+    expect(screen.queryByText('scope=platform')).not.toBeInTheDocument();
+
+    fireEvent.mouseOver(screen.getByRole('button', { name: 'Learn more about Platform Console' }));
+
+    expect(await screen.findByRole('tooltip')).toHaveTextContent(/dedicated scope=platform session/i);
   });
 
   it('does not treat a password-accepted MFA challenge as a broken login', async () => {

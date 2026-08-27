@@ -13,6 +13,14 @@ the backend URL below to function.
 
 The current backend is deployed at **https://nexora-fyjw.onrender.com**.
 
+The existing Render service (`srv-d9csjhe1a83c739phue0`, dashboard name `Nexora`) was
+created manually and is not linked to the checked-in Blueprint. `render.yaml` is the
+reviewed desired-state contract and matches the last verified dashboard layout, but a
+green repository check is not evidence that Render consumed it. Before each release,
+compare the live service with that contract through the Render API and prove the deployed
+revision through `GET /build-identity`. Do not create a second service while attempting
+to link the Blueprint.
+
 Set configuration as **Render environment variables** (nothing sensitive is baked into the image —
 `appsettings.json` ships only placeholders and the app FAILS FAST without these):
 
@@ -50,10 +58,10 @@ they were previously undocumented:
 - `Platform__BootstrapOwnerEmail` / `Platform__BootstrapOwnerPassword` do not fail the
   boot — they fail *silently*, which is worse: see §3.
 
-The repository includes `render.yaml` with a persistent disk mounted at `/var/data`.
-Use that Blueprint or attach an equivalent Render disk before accepting customer
-documents. A service without the disk remains stateless and must not be used for RFQ
-evidence ingestion.
+The repository contract includes a persistent disk mounted at `/var/data`. Apply the
+equivalent settings to the existing service (or deliberately link that service to the
+Blueprint after reviewing the plan) before accepting customer documents. A service
+without the disk remains stateless and must not be used for RFQ evidence ingestion.
 
 In Production, the filesystem provider always requires an explicit storage root and
 verifies that it is writable. The disk-backed profile additionally enables strict mount
@@ -64,9 +72,13 @@ an existing service to the mounted root, copy any
 recoverable legacy files and rewrite absolute `Attachments.FilePath` values to portable
 `Uploads/...` paths; absolute paths outside the configured root are deliberately rejected.
 
-- Health check: `GET /health` → `Healthy`. Render's deploy health check uses
-  `GET /ready`, which additionally requires the database, evidence storage **and a
-  reachable ClamAV daemon**.
+- Liveness and Render deploy health check: `GET /health` → `Healthy`.
+- Operational readiness: `GET /ready` reports evidence storage, storage capacity,
+  scanner, OCR and worker health. Inspect it after deployment; do not point Render's
+  restart/liveness gate at it while the declared pilot storage posture is intentionally
+  reported as not durable.
+- Deployment identity: `GET /build-identity` must report the exact merge SHA from the
+  Render deployment metadata.
 - The app URL is `https://nexora-fyjw.onrender.com`.
 
 ### Data-boundary manifest (optional, but it is what stops the retyping)
@@ -102,19 +114,36 @@ per-type overrides: `LogicalKey`, `Classification`, `Disposition`.
   deletion certification needs from them, and is not a claim that anything about a
   subprocessor has been checked.
 
-### Malware scanning (required)
+### Malware scanning posture
 
-`render.yaml` declares a second Render service, `nexora-clamav` — a **private
-service** running `docker.io/clamav/clamav:1.5` and reachable only over Render's
-private network on TCP 3310. The backend streams every upload to it, and both
-uploads and `/ready` **fail closed** without it.
+The current Render contract deliberately selects the built-in structural inspector for
+the pilot. It enforces file/type/archive safety and the EICAR test string, but it is **not
+an antivirus engine** and must not be represented as one. Real customer-document
+production requires the private ClamAV service and host wiring described in
+**[`docs/RUNBOOK-CLAMAV-RENDER.md`](docs/RUNBOOK-CLAMAV-RENDER.md)**. The single-box
+deployment already includes ClamAV; this paragraph concerns the current Render topology.
 
-`DocumentInspection__ClamAV__Host` / `__Port` are wired automatically by the
-Blueprint; do not set them by hand. Before the first sync, confirm both services
-are in the **same Render region** — private networking depends on it and a
-service's region cannot be changed afterwards.
+### Retired or orphaned mailbox remediation
 
-Setup, verification and outage handling: **[`docs/RUNBOOK-CLAMAV-RENDER.md`](docs/RUNBOOK-CLAMAV-RENDER.md)**.
+Mailbox polling is stricter than other legacy background work: a live external mailbox
+credential must belong to a serviceable platform Tenant. An active IMAP row whose business
+unit has no platform Tenant, or whose Tenant is Provisioning, PastDue, Suspended or Archived,
+is not polled and is not included in `/ready`. Its durable failure counters remain in the
+database as operational evidence; the application does not silently rewrite or delete them.
+
+After deploying this boundary, no data migration is required to clear readiness. On the next
+poller start/cycle, only eligible mailboxes seed the in-process health ledger. Operators should
+still resolve the stale row deliberately:
+
+1. If the customer is genuinely active, repair the Tenant-to-BusinessUnit linkage first and
+   validate the mailbox credentials from Setup → Email Inboxes.
+2. If the customer was retired, deactivate the mailbox through that governed screen. For an
+   orphan that no tenant administrator can reach, use a reviewed owner-role maintenance change
+   scoped to the exact `Email_Configurations.ID`, retain the row and its poll history, and record
+   the operator/reason in the platform change ticket. Do not delete the mailbox row or its
+   evidence merely to turn `/ready` green.
+3. Verify the retired mailbox's failure count no longer advances, the active mailbox still
+   advances `LastSuccessfulPollOn`, and `/ready` no longer names the retired address.
 - **Neon endpoint:** use the **direct** endpoint (no `-pooler`) for now. The
   pooled endpoint needs `Max Auto Prepare=0` + RLS-via-`SET LOCAL` (ADR-0005 Ph2).
 

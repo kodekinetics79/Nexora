@@ -141,8 +141,10 @@ FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
 # The comment here used to claim "the Tesseract nuget also ships linux-x64 natives". It does
 # not — Tesseract 5.2.0 contains no .so and no runtimes/ directory at all, so the managed
 # wrapper depends entirely on what this image provides, under the exact names it probes for.
+# wget is the single-box container health probe. Keep the probe dependency in the runtime
+# image instead of relying on an undocumented base-image tool.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends liblept5 libtesseract5 \
+    && apt-get install -y --no-install-recommends wget liblept5 libtesseract5 \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=build /app ./

@@ -1,0 +1,156 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+render="$root/render.yaml"
+dockerfile="$root/Backend/Dockerfile"
+compose="$root/deploy/single-box/docker-compose.yml"
+example="$root/deploy/single-box/.env.example"
+
+require_line() {
+    file=$1
+    pattern=$2
+    message=$3
+    if ! grep -Eq "$pattern" "$file"; then
+        printf 'deployment contract: %s\n' "$message" >&2
+        exit 1
+    fi
+}
+
+reject_line() {
+    file=$1
+    pattern=$2
+    message=$3
+    if grep -Eiq "$pattern" "$file"; then
+        printf 'deployment contract: %s\n' "$message" >&2
+        exit 1
+    fi
+}
+
+# Last verified layout of existing Render service srv-d9csjhe1a83c739phue0. Parse YAML rather
+# than accepting individual matching lines: indentation can move a valid-looking key onto the
+# wrong service, a duplicate env key can override the safe value, and greps proved neither the
+# persistent-volume contract nor the separate migration credential.
+command -v ruby >/dev/null 2>&1 || {
+    printf 'deployment contract: Ruby is required to validate render.yaml structurally.\n' >&2
+    exit 1
+}
+ruby - "$render" <<'RUBY'
+require "yaml"
+
+path = ARGV.fetch(0)
+document = YAML.safe_load(
+  File.read(path),
+  permitted_classes: [],
+  permitted_symbols: [],
+  aliases: false
+)
+services = document.fetch("services")
+nexora = services.select { |service| service["name"] == "Nexora" }
+raise "Render contract must contain exactly one Nexora service" unless nexora.length == 1
+service = nexora.first
+
+expected_service = {
+  "type" => "web",
+  "runtime" => "docker",
+  "branch" => "main",
+  "dockerContext" => "Backend",
+  "dockerfilePath" => "Backend/Dockerfile",
+  "autoDeployTrigger" => "checksPass",
+  "healthCheckPath" => "/health"
+}
+expected_service.each do |key, value|
+  raise "Render Nexora #{key} must be #{value.inspect}" unless service[key] == value
+end
+raise "Render rootDir would change the repository-root service layout" if service.key?("rootDir")
+
+disk = service.fetch("disk")
+expected_disk = {
+  "name" => "nexora-evidence",
+  "mountPath" => "/var/data",
+  "sizeGB" => 5
+}
+expected_disk.each do |key, value|
+  raise "Render evidence disk #{key} must be #{value.inspect}" unless disk[key] == value
+end
+
+env_rows = service.fetch("envVars")
+keys = env_rows.map { |row| row.fetch("key") }
+duplicates = keys.group_by { |key| key }.select { |_key, values| values.length > 1 }.keys
+raise "Render envVars contain duplicate keys: #{duplicates.join(', ')}" unless duplicates.empty?
+env = env_rows.to_h { |row| [row.fetch("key"), row] }
+
+expected_values = {
+  "Storage__RootPath" => "/var/data/nexora/uploads",
+  "Storage__RequiredMountPath" => "/var/data",
+  "Storage__EnforcePersistentMount" => "true",
+  "EvidenceStorage__Provider" => "Local",
+  "Database__ApplyMigrationsOnStartup" => "true",
+  "Database__AllowManagedOwnerRoleMigrationCompatibility" => "true"
+}
+expected_values.each do |key, value|
+  raise "Render #{key} must be #{value.inspect}" unless env.fetch(key)["value"] == value
+end
+
+%w[ConnectionStrings__DefaultConnection ConnectionStrings__MigrationConnection].each do |key|
+  row = env.fetch(key)
+  raise "Render #{key} must remain a dashboard-managed secret" unless row["sync"] == false
+  raise "Render #{key} must not carry a repository value" if row.key?("value")
+end
+RUBY
+
+# Compose may only call a probe client the runtime image explicitly installs.
+require_line "$compose" 'wget -qO- http://127\.0\.0\.1:8080/health' 'Compose backend health probe changed unexpectedly.'
+require_line "$dockerfile" 'apt-get install -y --no-install-recommends wget ' 'The backend image must install its wget health-probe dependency.'
+
+# A distributable template must never carry an operator's or customer's real identity.
+require_line "$example" '^Notifications__Smtp__Username=smtp-user@example\.com$' 'SMTP username must remain a non-routable example identity.'
+require_line "$example" '^Notifications__FromAddress=noreply@example\.com$' 'From address must remain a non-routable example identity.'
+require_line "$example" 'User buyer@example\.com$' 'Inbound mailbox documentation must use an example identity.'
+reject_line "$example" '(kodekinetics|naspakinc|secureserver)' 'A real organization/provider identity leaked into the distributable example.'
+
+# Both supported Vercel project-root layouts must publish the same browser boundary. Parse JSON
+# instead of grepping it so malformed config and subtly different policy values both fail CI.
+python3 - "$root/vercel.json" "$root/Frontend/vercel.json" <<'PY'
+import json
+import sys
+
+paths = sys.argv[1:]
+configs = []
+for path in paths:
+    with open(path, encoding="utf-8") as stream:
+        configs.append(json.load(stream))
+
+def policy(config):
+    rules = config.get("headers", [])
+    assert len(rules) == 1 and rules[0].get("source") == "/(.*)", \
+        "security headers must cover every SPA route"
+    return {header["key"]: header["value"] for header in rules[0].get("headers", [])}
+
+root, frontend = map(policy, configs)
+assert root == frontend, "root and Frontend Vercel security policies drifted"
+required = {
+    "Content-Security-Policy",
+    "X-Content-Type-Options",
+    "X-Frame-Options",
+    "Referrer-Policy",
+    "Permissions-Policy",
+}
+assert required <= root.keys(), "a required static-frontend security header is missing"
+csp = root["Content-Security-Policy"]
+for directive in (
+    "default-src 'self'",
+    "object-src 'none'",
+    "frame-ancestors 'none'",
+    "script-src 'self'",
+    "connect-src 'self' https://nexora-fyjw.onrender.com",
+):
+    assert directive in csp, f"CSP is missing {directive}"
+assert root["X-Content-Type-Options"] == "nosniff"
+assert root["X-Frame-Options"] == "DENY"
+assert "geolocation=(self)" in root["Permissions-Policy"], \
+    "delivery confirmation uses same-origin geolocation"
+assert "camera=()" in root["Permissions-Policy"] and "microphone=()" in root["Permissions-Policy"]
+PY
+
+printf 'deployment contract: ok\n'

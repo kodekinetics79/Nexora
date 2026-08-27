@@ -320,16 +320,13 @@ public sealed class GoldenJourneyGovernedTenantTests : IDisposable
     }
 
     /// <summary>
-    /// The seeder must resolve the SAME tenant row the enforcement path resolves.
+    /// The seeder repairs a stable canonical row while runtime authorization rejects ambiguity.
     ///
     /// <para>Nothing keeps a business unit to one Tenant row: there is no unique index on
-    /// <c>PrimaryBusinessUnitId</c>, and <c>TenantAccessService.CoreQuery</c> carries an explicit
-    /// <c>OrderBy(t =&gt; t.Id)</c> precisely because its authors knew that. The seeder read the same
-    /// predicate with no ordering at all. With two candidate rows that is the worst available
-    /// failure: the seeder attaches the plan to whichever row the engine happened to hand it and
-    /// logs, truthfully as far as it knows, that the tenant is now entitled — while every
-    /// <c>[RequiresEntitlement]</c> action reads the OTHER row and keeps answering 403. Diagnosis
-    /// then starts from a log line that is false, which is more expensive than no log line at all.
+    /// <c>PrimaryBusinessUnitId</c>. The development fixture seeder still needs deterministic
+    /// repair semantics, so it attaches the plan to the lowest-id row rather than whichever row
+    /// the engine happens to return. That does not confer runtime authority: TenantAccessService
+    /// observes both owners and refuses the ambiguous mapping.
     /// </para>
     ///
     /// <para><b>Why the SQL is asserted as well as the outcome.</b> On SQLite a <c>bigint</c> primary
@@ -394,15 +391,19 @@ public sealed class GoldenJourneyGovernedTenantTests : IDisposable
                 .ToListAsync();
 
             Assert.Equal(2, rows.Count);
-            // The plan is on the row the enforcement query reads…
+            // The plan is on the stable canonical repair row…
             Assert.Equal(lowerTenantId, rows[0].Id);
             Assert.NotNull(rows[0].PlanId);
-            // …and the seeder did not wander off and entitle the row nobody reads.
+            // …and the seeder did not wander off and repair an insertion-order-dependent row.
             Assert.Null(rows[1].PlanId);
         }
 
-        // The permit is the point: the enforcement path, unchanged, now answers yes.
-        Assert.True((await CheckRfqAsync(businessUnitId)).Allowed);
+        // Repair and runtime authority are deliberately different contracts. The fixture seeder
+        // remains deterministic so it can repair the canonical row, but two tenant owners are
+        // still ambiguous at the authorization boundary and therefore fail closed.
+        var access = await CheckRfqAsync(businessUnitId);
+        Assert.False(access.Allowed);
+        Assert.Contains("could not be confirmed", access.Reason, StringComparison.OrdinalIgnoreCase);
 
         // And the ordering is in the query, not in the engine's goodwill.
         var lookups = recorder.Statements.Where(sql =>

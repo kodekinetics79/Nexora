@@ -103,13 +103,10 @@ internal static class GovernedPlatformTenantSeeder
             logger.LogInformation("Seeded local plan '{PlanCode}'.", planCode);
         }
 
-        // ORDER BY Id, exactly as TenantAccessService.CoreQuery does. Nothing enforces one Tenant
-        // per PrimaryBusinessUnitId — there is no unique index on that column, and the enforcement
-        // query carries an explicit OrderBy because its authors knew that. Resolving the row a
-        // different way here is the worst kind of divergence: with two candidate rows the seeder
-        // would attach the plan to one and log that it had, while every [RequiresEntitlement] check
-        // read the other and kept answering 403. The diagnosis would then start from a log line that
-        // is false. Same predicate, same ordering, same row.
+        // ORDER BY Id, exactly as the fixture repair contract requires. Nothing enforces one
+        // Tenant per PrimaryBusinessUnitId in the legacy schema, so the development seeder repairs
+        // the stable canonical (oldest) row. Runtime authorization is deliberately stricter:
+        // TenantAccessService refuses an ambiguous mapping instead of using this repair rule.
         var tenant = await db.Set<Tenant>().IgnoreQueryFilters()
             .OrderBy(t => t.Id)
             .FirstOrDefaultAsync(t => t.PrimaryBusinessUnitId == businessUnit.Id);

@@ -116,12 +116,12 @@ export default function PlatformLoginScreen() {
           </Box>
           <Box>
             <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 0.25 }}>
-              <Typography variant="h5" sx={{ fontWeight: 900, letterSpacing: '-0.5px' }}>
+              <Typography variant="h5" component="h1" sx={{ fontWeight: 900, letterSpacing: '-0.5px' }}>
                 Platform Console
               </Typography>
               <FeatureHelp
                 label="Platform Console"
-                description="A separate control plane for authorized platform operators. Platform Owners can administer, offboard, and permanently delete tenants here; a tenant administrator cannot delete an entire tenant."
+                description="A separate control plane for authorized platform operators. It uses a dedicated scope=platform session rather than a tenant account. Platform Owners can administer, offboard, and permanently delete tenants here; a tenant administrator cannot delete an entire tenant."
                 placement="right"
               />
             </Box>
@@ -138,14 +138,7 @@ export default function PlatformLoginScreen() {
             </Typography>
           </Box>
           <Typography variant="body2" color="text.secondary">
-            Sign in with your{' '}
-            <Box
-              component="code"
-              sx={{ px: 0.6, py: 0.2, borderRadius: 1, bgcolor: 'action.hover', fontWeight: 700 }}
-            >
-              scope=platform
-            </Box>{' '}
-            operator account.
+            Sign in with your platform operator account.
           </Typography>
         </Stack>
 
@@ -261,7 +254,13 @@ export default function PlatformLoginScreen() {
                   ),
                   endAdornment: (
                     <InputAdornment position="end">
-                      <IconButton onClick={() => setShowPassword((s) => !s)} edge="end" size="small">
+                      <IconButton
+                        onClick={() => setShowPassword((s) => !s)}
+                        edge="end"
+                        size="small"
+                        aria-label={showPassword ? 'Hide password' : 'Show password'}
+                        aria-pressed={showPassword}
+                      >
                         {showPassword ? <VisibilityOff fontSize="small" /> : <Visibility fontSize="small" />}
                       </IconButton>
                     </InputAdornment>

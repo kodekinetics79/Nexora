@@ -173,6 +173,10 @@ namespace ERP_RFQ_Automation.Services
         // the intake unit tests can construct the service without it; absent means "poll every
         // mailbox", which is the behaviour that existed before it.
         private readonly ERP_RFQ_Automation.Platform.Lifecycle.ITenantWorkGate? _workGate;
+        // Mailbox-only lifecycle gate. Unlike the general compatibility gate, this refuses an
+        // orphan BusinessUnit: a live external credential must always have an active platform
+        // tenant owner. Optional only for reduced unit-test hosts; production registers it.
+        private readonly ERP_RFQ_Automation.Platform.Lifecycle.IMailboxTenantWorkGate? _mailboxWorkGate;
         // SEC-ING-01: the ambient tenant scope every mailbox is polled inside. Optional only so the
         // existing construction sites stay source-compatible; when it is not supplied it is
         // resolved from the container instead (the accessor is a singleton, so any scope yields the
@@ -197,7 +201,8 @@ namespace ERP_RFQ_Automation.Services
             IConfiguration configuration, IFileStorage storage,
             IEmailPollerHealth? pollerHealth = null,
             ERP_RFQ_Automation.Platform.Lifecycle.ITenantWorkGate? workGate = null,
-            ITenantScopeAccessor? tenantScope = null)
+            ITenantScopeAccessor? tenantScope = null,
+            ERP_RFQ_Automation.Platform.Lifecycle.IMailboxTenantWorkGate? mailboxWorkGate = null)
         {
             _tenantScope = tenantScope;
             _context = context;
@@ -207,6 +212,7 @@ namespace ERP_RFQ_Automation.Services
             _scopeFactory = scopeFactory;
             _pollerHealth = pollerHealth;
             _workGate = workGate;
+            _mailboxWorkGate = mailboxWorkGate;
             _useUnifiedQueue = configuration.GetValue("Ingestion:UseUnifiedQueue", true);
             _initialLookback = PositiveDays(
                 configuration.GetValue("Ingestion:Email:InitialLookbackDays", DEFAULT_INITIAL_LOOKBACK_DAYS),
@@ -280,10 +286,12 @@ namespace ERP_RFQ_Automation.Services
             // reinstating a long-suspended tenant.
             //
             // Called BEFORE any tenant scope is pushed; see ITenantWorkGate for why that matters.
-            if (_workGate is not null && configs.Count > 0)
+            if (configs.Count > 0 && (_mailboxWorkGate is not null || _workGate is not null))
             {
-                var serviceable = await _workGate.FilterServiceableAsync(
-                    configs.Select(c => c.BusinessUnitId));
+                var businessUnits = configs.Select(c => c.BusinessUnitId);
+                var serviceable = _mailboxWorkGate is not null
+                    ? await _mailboxWorkGate.FilterPollableAsync(businessUnits)
+                    : await _workGate!.FilterServiceableAsync(businessUnits);
                 var admitted = serviceable.ToHashSet();
                 var deferred = configs.Where(c => !admitted.Contains(c.BusinessUnitId)).ToList();
 
@@ -364,6 +372,22 @@ namespace ERP_RFQ_Automation.Services
                             "Skipping mailbox {Email} (configuration {ConfigurationId}, BU "
                             + "{BusinessUnitId}) because it was deactivated or ceased to be IMAP "
                             + "after discovery.",
+                            handle.EmailAddress, handle.Id, handle.BusinessUnitId);
+                        continue;
+                    }
+
+                    // The lifecycle snapshot used during discovery is cached for normal request
+                    // throughput and may be stale on this instance after another instance archives
+                    // the tenant. Authentication is the irreversible external boundary: re-read
+                    // the authoritative platform row now, immediately before any IMAP connection.
+                    // Ambiguous ownership and control-plane failures both refuse the connection.
+                    if (_mailboxWorkGate is not null
+                        && !await _mailboxWorkGate.MayPollFreshAsync(handle.BusinessUnitId))
+                    {
+                        _logger.LogInformation(
+                            "Skipping mailbox {Email} (configuration {ConfigurationId}, BU "
+                            + "{BusinessUnitId}) because its authoritative tenant lifecycle "
+                            + "state changed or could not be resolved after discovery.",
                             handle.EmailAddress, handle.Id, handle.BusinessUnitId);
                         continue;
                     }
@@ -592,6 +616,7 @@ namespace ERP_RFQ_Automation.Services
                     pollSocket.Dispose();
                     throw;
                 }
+                await RefuseAuthenticationIfTenantChangedAsync(config);
                 await client.AuthenticateAsync(
                     ERP_RFQ_Automation.Mailbox.MailboxLoginIdentity.ForInbound(config), config.Password);
                 var inbox = client.Inbox;
@@ -654,6 +679,7 @@ namespace ERP_RFQ_Automation.Services
                                 reconnectSocket.Dispose();
                                 throw;
                             }
+                            await RefuseAuthenticationIfTenantChangedAsync(config);
                             await client.AuthenticateAsync(
                     ERP_RFQ_Automation.Mailbox.MailboxLoginIdentity.ForInbound(config), config.Password);
                             await client.Inbox.OpenAsync(FolderAccess.ReadWrite);
@@ -700,6 +726,18 @@ namespace ERP_RFQ_Automation.Services
                 _logger.LogError(ex, "IMAP error for config: {Email}", config.EmailAddress);
                 return FailedOutcome(config, ex, window, downloaded, alreadyIngested, tally);
             }
+        }
+
+        private async Task RefuseAuthenticationIfTenantChangedAsync(EmailConfiguration config)
+        {
+            if (_mailboxWorkGate is null
+                || await _mailboxWorkGate.MayPollFreshAsync(config.BusinessUnitId))
+                return;
+
+            throw new InvalidOperationException(
+                $"Mailbox authentication refused for {config.EmailAddress} (BU "
+                + $"{config.BusinessUnitId}): the authoritative tenant lifecycle state is no "
+                + "longer pollable or could not be resolved.");
         }
 
         /// <summary>The ingest keys already recorded for the messages in this window. One query

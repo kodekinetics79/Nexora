@@ -63,6 +63,93 @@ public interface ITenantWorkGate
         IEnumerable<long> businessUnitIds, CancellationToken ct = default);
 }
 
+/// <summary>
+/// The stricter lifecycle boundary for inbound mailboxes.
+///
+/// <para>The general worker gate deliberately admits legacy business units that have no platform
+/// Tenant row. A mailbox cannot use that compatibility rule: an orphaned mailbox still contains
+/// a live external credential and will keep authenticating forever after its former tenant has
+/// been retired. Only a business unit linked to a serviceable platform Tenant is eligible for
+/// network polling. An orphan stays in the database for evidence/audit and operator remediation,
+/// but it cannot make an external connection or poison readiness.</para>
+/// </summary>
+public interface IMailboxTenantWorkGate
+{
+    Task<IReadOnlyList<long>> FilterPollableAsync(
+        IEnumerable<long> businessUnitIds, CancellationToken ct = default);
+
+    /// <summary>
+    /// Authoritative single-tenant fence for the instant immediately before external mailbox
+    /// authentication. This deliberately bypasses the ordinary lifecycle cache.
+    /// </summary>
+    Task<bool> MayPollFreshAsync(long businessUnitId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Authoritative eligibility refresh for process-local readiness ledgers on instances that
+    /// may be standing by rather than producing their own poll report.
+    /// </summary>
+    Task<IReadOnlyList<long>> FilterPollableFreshAsync(
+        IEnumerable<long> businessUnitIds, CancellationToken ct = default);
+}
+
+/// <inheritdoc cref="IMailboxTenantWorkGate"/>
+public sealed class MailboxTenantWorkGate(
+    ITenantAccessService access,
+    ILogger<MailboxTenantWorkGate> logger) : IMailboxTenantWorkGate
+{
+    public async Task<IReadOnlyList<long>> FilterPollableAsync(
+        IEnumerable<long> businessUnitIds, CancellationToken ct = default)
+        => await FilterAsync(businessUnitIds, fresh: false, ct);
+
+    public async Task<bool> MayPollFreshAsync(long businessUnitId, CancellationToken ct = default)
+        => IsPollable(await access.GetFreshAccessAsync(businessUnitId, ct), businessUnitId);
+
+    public async Task<IReadOnlyList<long>> FilterPollableFreshAsync(
+        IEnumerable<long> businessUnitIds, CancellationToken ct = default)
+        => await FilterAsync(businessUnitIds, fresh: true, ct);
+
+    private async Task<IReadOnlyList<long>> FilterAsync(
+        IEnumerable<long> businessUnitIds, bool fresh, CancellationToken ct)
+    {
+        var candidates = businessUnitIds.Distinct().ToList();
+        var admitted = new List<long>(candidates.Count);
+        foreach (var businessUnitId in candidates)
+        {
+            var snapshot = fresh
+                ? await access.GetFreshAccessAsync(businessUnitId, ct)
+                : await access.GetAccessAsync(businessUnitId, ct);
+            if (IsPollable(snapshot, businessUnitId))
+                admitted.Add(businessUnitId);
+        }
+
+        return admitted;
+    }
+
+    private bool IsPollable(TenantAccessSnapshot snapshot, long businessUnitId)
+    {
+        if (snapshot.HasTenant && !snapshot.IsAccessDenied)
+            return true;
+
+        if (!snapshot.HasTenant && !snapshot.IsUnresolvable)
+        {
+            logger.LogWarning(
+                "Mailbox polling refused for orphan business unit {BusinessUnitId}: no platform "
+                + "tenant owns it. Deactivate the stale mailbox or deliberately link the "
+                + "business unit to an active tenant before polling can resume.",
+                businessUnitId);
+        }
+        else
+        {
+            logger.LogInformation(
+                "Mailbox polling deferred for business unit {BusinessUnitId}: tenant access is {Status}.",
+                businessUnitId,
+                snapshot.IsUnresolvable ? "unresolvable" : snapshot.Status?.ToString() ?? "unavailable");
+        }
+
+        return false;
+    }
+}
+
 /// <inheritdoc cref="ITenantWorkGate"/>
 public sealed class TenantWorkGate(
     ITenantAccessService access,
