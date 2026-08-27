@@ -3,11 +3,19 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   WorkbenchStagePanel,
   WorkbenchStageTabs,
+  workbenchStageFromValue,
   workbenchStagePanelId,
   workbenchStageTabId,
 } from './WorkbenchStageNavigation';
 
 describe('WorkbenchStageNavigation', () => {
+  it('opens an explicitly linked stage and defaults unknown links to evidence', () => {
+    expect(workbenchStageFromValue('evidence')).toBe('evidence');
+    expect(workbenchStageFromValue('promote')).toBe('promote');
+    expect(workbenchStageFromValue('anything-else')).toBe('evidence');
+    expect(workbenchStageFromValue(null)).toBe('evidence');
+  });
+
   it('associates every stage tab with its panel and exposes only the active panel', () => {
     render(
       <>

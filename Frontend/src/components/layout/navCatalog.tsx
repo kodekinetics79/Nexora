@@ -331,7 +331,8 @@ export const ADVANCED_GROUPS: NavGroup[] = [
         description: 'The team view: who is loaded, what is overdue and where deals are stalling.',
         path: '/sales/team',
         icon: <TeamIcon />,
-        moduleName: 'Dashboard',
+        // CommercialIntelligenceController.TeamOverview and the route both authorize Leads:view.
+        moduleName: 'Leads',
         managerOnly: true,
         keywords: ['manager', 'control tower', 'team', 'workload', 'team overview', 'overview'],
       },

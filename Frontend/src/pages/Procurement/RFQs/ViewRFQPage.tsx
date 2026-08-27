@@ -41,6 +41,7 @@ import commercialIntelligenceService from '../../../api/services/commercialIntel
 import { formatMoney } from '../../../utils/currency';
 import { formatDateSafe, parseDateSafe } from '../../../utils/dates';
 import { statusLabel } from '../../../utils/statusLabels';
+import { commercialActionPermissions } from '../../../utils/commercialActionPermissions';
 
 const DataField: React.FC<{ label: string; value: string | number | null; bold?: boolean; color?: string }> = ({ label, value, bold = true, color = 'text.primary' }) => (
   <Box sx={{ mb: 1.5 }}>
@@ -71,6 +72,7 @@ const ViewRFQPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { userData, hasPermission } = useAuth();
+  const commercialAccess = commercialActionPermissions(hasPermission);
   const { enqueueSnackbar } = useSnackbar();
   const queryClient = useQueryClient();
 
@@ -395,7 +397,11 @@ const ViewRFQPage: React.FC = () => {
                 <Grid size={{ xs: 12, md: 4 }}><DataField label="RFQ #" value={rfq.rfqno} /></Grid>
                 <Grid size={{ xs: 12, md: 4 }}><DataField label="Current Lead revision" value={`Revision ${rfq.activeLeadRevision || 1}`} /></Grid>
                 <Grid size={{ xs: 12, md: 4 }}>
-                  <Button size="small" variant="outlined" onClick={() => navigate(`/procurement/leads/view/${rfq.leadId}`)}>Open Canonical Lead</Button>
+                  {rfq.leadId && commercialAccess.canViewLeadEvidence ? (
+                    <Button size="small" variant="outlined" onClick={() => navigate(`/procurement/leads/view/${rfq.leadId}`)}>
+                      Open Canonical Lead
+                    </Button>
+                  ) : null}
                 </Grid>
                 <Grid size={{ xs: 12, md: 4 }}><DataField label="Customer / Buyer" value={rfq.buyersName || rfq.customerName || 'N/A'} /></Grid>
                 <Grid size={{ xs: 12, md: 4 }}><DataField label="Customer Email" value={rfq.customerEmail || rfq.leadEmail || 'N/A'} /></Grid>
@@ -557,7 +563,7 @@ const ViewRFQPage: React.FC = () => {
                               <Typography variant="caption" color="error.main" sx={{ fontWeight: 700 }}>
                                 {sourcingLine.shortfallQuantity} to source · {statusLabel(sourcingLine.resolution)}
                               </Typography>
-                              {hasPermission('RFQ Management', 'edit') && (
+                              {commercialAccess.canCreateOrOpenSourcingCase && (
                                 <Button
                                   size="small"
                                   variant="contained"
@@ -637,7 +643,7 @@ const ViewRFQPage: React.FC = () => {
                     This RFQ has no governed promotion receipt in the response. It may be a legacy or manually created record; immutable source lineage cannot be claimed.
                   </Alert>
                 )}
-                {rfq.leadId ? (
+                {rfq.leadId && commercialAccess.canViewLeadEvidence ? (
                   <Button
                     fullWidth variant="contained" size="small"
                     onClick={() => navigate(`/procurement/leads/${rfq.leadId}/workbench`)}
@@ -713,8 +719,16 @@ const ViewRFQPage: React.FC = () => {
         <DataField label="Original customer value" value={evidenceItem?.itemText || evidenceItem?.materialPotext || evidenceItem?.productShortDescription || 'Source text not linked'} bold={false} />
         <DataField label="Normalized part" value={evidenceItem?.manufacturerPartNumber || evidenceItem?.itemMaterialCode || 'Unresolved'} />
         <DataField label="Normalized quantity / UOM" value={evidenceItem ? `${evidenceItem.quantity} ${evidenceItem.unitOfMeasure || 'EA'}` : null} />
-        <DataField label="Extraction location" value="Open Canonical Lead to inspect document, page, sheet, row, or bounding-box evidence." bold={false} />
-        {Boolean(rfq.leadId) && <Button variant="outlined" startIcon={<EvidenceIcon />} onClick={() => navigate(`/procurement/leads/view/${rfq.leadId}`)}>Open Canonical Lead evidence</Button>}
+        <DataField label="Extraction location" value="Open the Lead decision record's Evidence stage to inspect document, page, sheet, row, or bounding-box evidence." bold={false} />
+        {Boolean(rfq.leadId) && commercialAccess.canViewLeadEvidence && (
+          <Button
+            variant="outlined"
+            startIcon={<EvidenceIcon />}
+            onClick={() => navigate(`/procurement/leads/${rfq.leadId}/workbench?stage=evidence`)}
+          >
+            Open exact source evidence
+          </Button>
+        )}
       </Drawer>
     </Box>
   );

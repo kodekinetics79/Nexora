@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import ViewRFQPage from './ViewRFQPage';
@@ -11,10 +11,14 @@ const getRfq = vi.fn();
 const getWorkbench = vi.fn();
 const getRfqIntelligence = vi.fn();
 const getRfqLineResolutions = vi.fn();
+const testAccess = vi.hoisted(() => ({
+  navigate: vi.fn(),
+  denied: new Set<string>(),
+}));
 
 vi.mock('react-router-dom', async (importOriginal) => {
   const actual = await importOriginal<typeof import('react-router-dom')>();
-  return { ...actual, useNavigate: () => vi.fn(), useParams: () => ({ id: '9001' }) };
+  return { ...actual, useNavigate: () => testAccess.navigate, useParams: () => ({ id: '9001' }) };
 });
 vi.mock('../../../api/services/rfqService', () => ({
   default: {
@@ -36,7 +40,10 @@ vi.mock('../../../api/services/commercialLifecycleService', () => ({
   default: { getState: vi.fn().mockResolvedValue({ aggregateId: 9001, currentStatusCode: 'APPROVED', version: 1, isTerminal: false, allowedTransitions: [] }) },
 }));
 vi.mock('../../../context/AuthContext', () => ({
-  useAuth: () => ({ hasPermission: () => true, userData: { businessUnitId: 7, userName: 'qa', id: 1 } }),
+  useAuth: () => ({
+    hasPermission: (moduleName: string, action = 'view') => !testAccess.denied.has(`${moduleName}:${action}`),
+    userData: { businessUnitId: 7, userName: 'qa', id: 1 },
+  }),
 }));
 vi.mock('notistack', () => ({ useSnackbar: () => ({ enqueueSnackbar: vi.fn() }) }));
 // Panels with their own data of their own; not what this spec is about.
@@ -139,10 +146,79 @@ const wrapper = ({ children }: { children: ReactNode }) => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  testAccess.denied.clear();
   getRfq.mockResolvedValue(rfq());
   getWorkbench.mockResolvedValue(workbench(rfq().rfqitems));
   getRfqIntelligence.mockResolvedValue(intelligence());
   getRfqLineResolutions.mockResolvedValue([]);
+});
+
+describe('ViewRFQPage — cross-module Lead links', () => {
+  it('hides every RFQ-to-Lead destination when Leads:view is denied', async () => {
+    testAccess.denied.add('Leads:view');
+    render(<ViewRFQPage />, { wrapper });
+
+    await screen.findAllByText('RFQ-9001');
+    expect(screen.queryByRole('button', { name: 'Open Canonical Lead' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Open Lead decision record' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Open exact source evidence' })).not.toBeInTheDocument();
+  });
+
+  it('routes the general Canonical Lead action only to the guarded Lead detail destination', async () => {
+    render(<ViewRFQPage />, { wrapper });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Open Canonical Lead' }));
+    expect(testAccess.navigate).toHaveBeenCalledWith('/procurement/leads/view/55');
+  });
+
+  it('takes exact line evidence to the Lead workbench Evidence stage', async () => {
+    const sourcing = workbench(rfq().rfqitems);
+    sourcing.lines[0] = {
+      ...sourcing.lines[0],
+      availableQuantity: 0,
+      shortfallQuantity: 10,
+      resolution: 'SHORTAGE',
+    };
+    getWorkbench.mockResolvedValue(sourcing);
+    render(<ViewRFQPage />, { wrapper });
+
+    const evidenceButtons = await screen.findAllByRole('button', {
+      name: 'Inspect persisted source and normalization evidence',
+    });
+    fireEvent.click(evidenceButtons[0]);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open exact source evidence' }));
+
+    expect(testAccess.navigate).toHaveBeenCalledWith(
+      '/procurement/leads/55/workbench?stage=evidence',
+    );
+  });
+});
+
+describe('ViewRFQPage — Sourcing Case authority', () => {
+  beforeEach(() => {
+    const sourcing = workbench(rfq().rfqitems);
+    sourcing.lines[0] = {
+      ...sourcing.lines[0],
+      availableQuantity: 0,
+      shortfallQuantity: 10,
+      resolution: 'SHORTAGE',
+    };
+    getWorkbench.mockResolvedValue(sourcing);
+  });
+
+  it('hides the mutation when Supplier History view is denied even if RFQ edit is granted', async () => {
+    testAccess.denied.add('Supplier History:view');
+    render(<ViewRFQPage />, { wrapper });
+
+    await screen.findByText('10 to source · Shortage');
+    expect(screen.queryByRole('button', { name: 'Create / Open Sourcing Case' })).not.toBeInTheDocument();
+  });
+
+  it('offers the mutation only when both server-required grants are present', async () => {
+    render(<ViewRFQPage />, { wrapper });
+
+    expect(await screen.findByRole('button', { name: 'Create / Open Sourcing Case' })).toBeInTheDocument();
+  });
 });
 
 /**

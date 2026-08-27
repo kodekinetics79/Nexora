@@ -170,8 +170,13 @@ namespace ERP_RFQ_Automation.Controllers
                 // from a plain FK Include with no BU / SetupType / IsActive predicate, so the login
                 // response and the API could disagree — the UI renders everything and every call
                 // 403s. There is now one decision, made in one place.
-                response.IsSuperAdmin = await _roleGate.IsSuperAdminAsync(roleId, actor.BusinessUnitId);
-                response.IsManager = await _roleGate.IsManagerOrAdminAsync(roleId, actor.BusinessUnitId);
+                var roleRank = await _roleGate.GetRoleRankAsync(roleId, actor.BusinessUnitId);
+                response.IsSuperAdmin = roleRank >= RoleRanks.Owner;
+                response.IsManager = roleRank >= RoleRanks.Manager;
+                // PermissionHandler grants every module action at Admin rank. Report that exact
+                // effective authority instead of forcing an Admin with zero table rows into an
+                // empty UI. Owner remains the only IsSuperAdmin tier.
+                response.HasModuleAuthorityByRank = roleRank >= RoleRanks.Admin;
 
                 var roles = await _repository.GetRolesAsync(actor.BusinessUnitId);
                 response.RoleName = roles.FirstOrDefault(x => x.SetupId == roleId)?.SetupName;

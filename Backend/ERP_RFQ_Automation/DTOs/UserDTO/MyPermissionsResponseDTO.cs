@@ -32,6 +32,13 @@ namespace ERP_RFQ_Automation.DTOs.UserDTO
 
         public bool IsManager { get; set; }
 
+        /// <summary>
+        /// The caller's role rank satisfies every tenant module permission requirement directly.
+        /// This mirrors <c>PermissionHandler</c>'s explicit <c>rank &gt;= Admin</c> rule and is
+        /// deliberately separate from <see cref="IsSuperAdmin"/>, which remains Owner-only.
+        /// </summary>
+        public bool HasModuleAuthorityByRank { get; set; }
+
         public List<MyModulePermissionDTO> Permissions { get; set; } = new();
 
         /// <summary>

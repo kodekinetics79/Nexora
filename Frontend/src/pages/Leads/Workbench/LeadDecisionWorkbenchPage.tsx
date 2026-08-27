@@ -1,5 +1,5 @@
 import React from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Alert,
@@ -41,6 +41,7 @@ import SourceEvidencePanel from './SourceEvidencePanel';
 import {
   WorkbenchStagePanel,
   WorkbenchStageTabs,
+  workbenchStageFromValue,
   type WorkbenchStage,
 } from './WorkbenchStageNavigation';
 import { retryOperation, type RetryOperation } from './retryIdempotency';
@@ -57,6 +58,7 @@ import {
   validGovernedDecision,
   type DecisionMap,
 } from './workbenchRules';
+import { commercialActionPermissions } from '../../../utils/commercialActionPermissions';
 
 const CountChip = ({ label, count, color = 'default' }: { label: string; count: number; color?: 'default' | 'success' | 'warning' | 'info' }) => (
   <Chip size="small" label={`${label} ${count}`} color={color} variant={count > 0 ? 'filled' : 'outlined'} sx={{ fontWeight: 800 }} />
@@ -69,9 +71,13 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
   const { hasPermission } = useAuth();
-  const canEdit = hasPermission('Leads', 'edit');
-  const canPromote = canEdit && hasPermission('RFQ Management', 'create');
-  const [stage, setStage] = React.useState<WorkbenchStage>('evidence');
+  const commercialAccess = commercialActionPermissions(hasPermission);
+  const canEdit = commercialAccess.canEditLeadDecision;
+  const canPromote = commercialAccess.canPromoteLeadToRfq;
+  const [searchParams] = useSearchParams();
+  const [stage, setStage] = React.useState<WorkbenchStage>(() =>
+    workbenchStageFromValue(searchParams.get('stage')),
+  );
   const [decisions, setDecisions] = React.useState<DecisionMap>({});
   const [baselineDecisions, setBaselineDecisions] = React.useState<DecisionMap>({});
   const [fitAssessment, setFitAssessment] = React.useState<FitAssessmentDTO | null>(null);
@@ -194,7 +200,9 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
     onSuccess: async (receipt) => {
       enqueueSnackbar(`${receipt.promotedLineCount} approved line${receipt.promotedLineCount === 1 ? '' : 's'} promoted to one RFQ.`, { variant: 'success' });
       await refresh();
-      navigate(`/procurement/rfqs/view/${receipt.rfqId}`);
+      if (commercialAccess.canViewPromotedRfq) {
+        navigate(`/procurement/rfqs/view/${receipt.rfqId}`);
+      }
     },
     onError: (error: unknown) => enqueueSnackbar(
       presentableErrorMessage(error, 'The approved lines could not be promoted. No second RFQ was created.'),
@@ -260,7 +268,9 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
   });
   const displayedBlockers = deduplicateDisplayedPromotionBlockers(blockers);
   const promotionPermissionBlocker = !canPromote && counts.bid > 0
-    ? 'RFQ creation permission is required. Hand this committed decision to an authorized RFQ owner.'
+    ? !canEdit
+      ? 'Lead edit permission is required to change or promote this decision record.'
+      : 'RFQ creation permission is required. Hand this committed decision to an authorized RFQ owner.'
     : null;
   const primaryBlocker = promotionPermissionBlocker ?? displayedBlockers[0] ?? null;
   const actionableBlockers = workbench.blockers
@@ -299,7 +309,13 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
       </Paper>
 
       {workbench.promotion ? (
-        <Alert severity="success" sx={{ mb: 1.5 }} action={<Button color="inherit" onClick={() => navigate(`/procurement/rfqs/view/${workbench.promotion!.rfqId}`)}>Open RFQ</Button>}>
+        <Alert
+          severity="success"
+          sx={{ mb: 1.5 }}
+          action={commercialAccess.canViewPromotedRfq
+            ? <Button color="inherit" onClick={() => navigate(`/procurement/rfqs/view/${workbench.promotion!.rfqId}`)}>Open RFQ</Button>
+            : undefined}
+        >
           <AlertTitle>Already promoted</AlertTitle>
           Revision {workbench.promotion.leadRevisionNumber} promoted {workbench.promotion.promotedLineCount} approved line{workbench.promotion.promotedLineCount === 1 ? '' : 's'} to {workbench.promotion.rfqNumber || `RFQ #${workbench.promotion.rfqId}`}.
         </Alert>

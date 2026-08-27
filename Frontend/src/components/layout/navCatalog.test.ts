@@ -197,6 +197,21 @@ describe('the rail was cut to five rows', () => {
   });
 });
 
+describe('catalog permissions match route authority', () => {
+  it('uses Leads for the sales-manager control tower in both catalog and router', () => {
+    const managerView = ADVANCED_ENTRIES.find((entry) => entry.path === '/sales/team');
+
+    expect(managerView).toMatchObject({
+      label: 'Sales manager control tower',
+      moduleName: 'Leads',
+      managerOnly: true,
+    });
+    expect(appSource).toContain(
+      '<Route path="/sales/team" element={<MainLayout><PermissionGuard moduleName="Leads"><TeamOverviewPage /></PermissionGuard></MainLayout>} />',
+    );
+  });
+});
+
 describe('nothing was deleted to get there', () => {
   it('keeps every one of the 69 destinations the old rail carried', () => {
     const missing = Object.entries(OLD_RAIL_DESTINATIONS)

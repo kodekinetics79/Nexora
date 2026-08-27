@@ -45,6 +45,7 @@ import commercialRoutingService, {
 import {
   OwnerPickerMenu, AssignReasonDialog, assignmentNeedsReason, useOwnerOptions,
 } from './LeadOwnerPicker';
+import { commercialActionPermissions } from '../../utils/commercialActionPermissions';
 
 // ---------------------------------------------------------------------------
 // Column visibility and order are AA-01 server-side per-user preferences now
@@ -257,7 +258,8 @@ const LeadsPage: React.FC = () => {
 
   // One resolve dialog for the whole grid (never one per row).
   const [resolveLead, setResolveLead] = useState<LeadResponseDTO | null>(null);
-  const canEditLeads = hasPermission('Leads', 'edit');
+  const commercialAccess = commercialActionPermissions(hasPermission);
+  const canEditLeads = commercialAccess.canEditLeadDecision;
 
   // AA-01: which columns, in which order, for THIS user — resolved server-side and
   // shared with every other grid that opts in.
@@ -993,7 +995,7 @@ const LeadsPage: React.FC = () => {
                 <ViewIcon fontSize="small" />
               </IconButton>
             </Tooltip>
-            {hasPermission('Leads', 'edit') && <Tooltip title="Open decision workbench">
+            {commercialAccess.canOpenLeadWorkbench && <Tooltip title="Open decision workbench">
               <IconButton
                 size="small"
                 aria-label="Open decision workbench"

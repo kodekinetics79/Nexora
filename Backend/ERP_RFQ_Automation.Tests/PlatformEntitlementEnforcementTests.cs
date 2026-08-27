@@ -415,6 +415,7 @@ public sealed class PlatformEntitlementEnforcementTests
     private sealed class StubUserRepository : IUserRepository
     {
         public User? Existing { get; set; }
+        public IEnumerable<RoleResponseDTO> Roles { get; set; } = [];
         public bool Added { get; private set; }
         public bool Updated { get; private set; }
 
@@ -426,7 +427,7 @@ public sealed class PlatformEntitlementEnforcementTests
             long? id, string? userName, string? email, long? roleId, string? region, bool? isActive, long businessUnitId)
             => throw new NotSupportedException();
         public Task DeleteAsync(long id, long businessUnitId) => throw new NotSupportedException();
-        public Task<IEnumerable<DTOs.UserDTO.RoleResponseDTO>> GetRolesAsync(long businessUnitId) => throw new NotSupportedException();
+        public Task<IEnumerable<DTOs.UserDTO.RoleResponseDTO>> GetRolesAsync(long businessUnitId) => Task.FromResult(Roles);
         public Task<IEnumerable<DTOs.TeamDTOs.TeamResponseDTO>> GetTeamsAsync(long businessUnitId) => throw new NotSupportedException();
         public Task<IEnumerable<DTOs.BusinessUnit.BusinessUnitResponseDTO>> GetBusinessUnitsAsync() => throw new NotSupportedException();
         public Task<IEnumerable<DTOs.UserGroup.UserGroupResponseDTO>> GetUserGroupsAsync(long businessUnitId) => throw new NotSupportedException();
@@ -436,9 +437,10 @@ public sealed class PlatformEntitlementEnforcementTests
 
     private sealed class StubRoleGate : ERP_RFQ_Automation.Authorization.IRoleGate
     {
-        public Task<bool> IsSuperAdminAsync(long roleId, long businessUnitId) => Task.FromResult(true);
-        public Task<short> GetRoleRankAsync(long roleId, long businessUnitId) => Task.FromResult(RoleRanks.Owner);
-        public Task<bool> IsManagerOrAdminAsync(long roleId, long businessUnitId) => Task.FromResult(true);
+        public short Rank { get; init; } = RoleRanks.Owner;
+        public Task<bool> IsSuperAdminAsync(long roleId, long businessUnitId) => Task.FromResult(Rank >= RoleRanks.Owner);
+        public Task<short> GetRoleRankAsync(long roleId, long businessUnitId) => Task.FromResult(Rank);
+        public Task<bool> IsManagerOrAdminAsync(long roleId, long businessUnitId) => Task.FromResult(Rank >= RoleRanks.Manager);
         public Task<bool> CanManageRoleAsync(long callerRoleId, long? targetRoleId, long businessUnitId) => Task.FromResult(true);
     }
 
@@ -526,6 +528,45 @@ public sealed class PlatformEntitlementEnforcementTests
     }
 
     // ---- 3c. Entitlements on the session bootstrap -----------------------
+
+    [Theory]
+    [InlineData(RoleRanks.Admin, true, false, true)]
+    [InlineData(RoleRanks.Manager, false, false, true)]
+    [InlineData(RoleRanks.Owner, true, true, true)]
+    public async Task MePermissions_ReportsPermissionHandlerRankAuthority_WithZeroPermissionRows(
+        short rank, bool hasModuleAuthorityByRank, bool isSuperAdmin, bool isManager)
+    {
+        const long roleId = 81;
+        var repository = new StubUserRepository
+        {
+            Roles = [new RoleResponseDTO { SetupId = roleId, SetupName = RoleRanks.Describe(rank) }]
+        };
+        var controller = new UserController(
+            repository, new StubWebHostEnvironment(), new StubRoleGate { Rank = rank })
+        {
+            ControllerContext = new ControllerContext
+            {
+                HttpContext = new DefaultHttpContext
+                {
+                    User = new ClaimsPrincipal(new ClaimsIdentity(new[]
+                    {
+                        new Claim("businessUnitId", Bu.ToString()),
+                        new Claim(ClaimTypes.NameIdentifier, "999"),
+                        new Claim("roleId", roleId.ToString())
+                    }, "test"))
+                }
+            }
+        };
+
+        var result = await controller.GetMyPermissions();
+
+        var ok = Assert.IsType<OkObjectResult>(result.Result);
+        var me = Assert.IsType<MyPermissionsResponseDTO>(ok.Value);
+        Assert.Equal(hasModuleAuthorityByRank, me.HasModuleAuthorityByRank);
+        Assert.Equal(isSuperAdmin, me.IsSuperAdmin);
+        Assert.Equal(isManager, me.IsManager);
+        Assert.Empty(me.Permissions);
+    }
 
     /// <summary>
     /// Wiring, not unit: the entry point the client actually calls

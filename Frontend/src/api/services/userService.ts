@@ -59,6 +59,8 @@ export interface MePermissionsResponse {
   businessUnitId: number;
   isSuperAdmin: boolean;
   isManager: boolean;
+  /** Mirrors PermissionHandler's rank >= Admin module-authority rule. */
+  hasModuleAuthorityByRank?: boolean;
   permissions: MePermissionDTO[];
   /**
    * Runtime-available entitlement keys the caller's TENANT is granted (e.g.
