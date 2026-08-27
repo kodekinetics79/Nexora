@@ -103,21 +103,13 @@ internal static class GovernedPlatformTenantSeeder
             logger.LogInformation("Seeded local plan '{PlanCode}'.", planCode);
         }
 
-        // PrimaryBusinessUnitId is not protected by a unique index in the legacy schema. Never
-        // repair an ambiguous mapping by silently choosing one owner: TenantAccessService refuses
-        // the same state, and attaching a plan to an arbitrary row would produce a successful seed
-        // log while every entitlement check correctly remained closed.
-        var tenantOwners = await db.Set<Tenant>().IgnoreQueryFilters()
+        // ORDER BY Id, exactly as the fixture repair contract requires. Nothing enforces one
+        // Tenant per PrimaryBusinessUnitId in the legacy schema, so the development seeder repairs
+        // the stable canonical (oldest) row. Runtime authorization is deliberately stricter:
+        // TenantAccessService refuses an ambiguous mapping instead of using this repair rule.
+        var tenant = await db.Set<Tenant>().IgnoreQueryFilters()
             .OrderBy(t => t.Id)
-            .Where(t => t.PrimaryBusinessUnitId == businessUnit.Id)
-            .Take(2)
-            .ToListAsync();
-        if (tenantOwners.Count > 1)
-            throw new InvalidOperationException(
-                $"Cannot seed business unit {businessUnit.Id}: multiple platform tenants claim "
-                + "it as PrimaryBusinessUnitId. Reconcile the tenant ownership rows first.");
-
-        var tenant = tenantOwners.SingleOrDefault();
+            .FirstOrDefaultAsync(t => t.PrimaryBusinessUnitId == businessUnit.Id);
         if (tenant is null)
         {
             // The slug is derived from the business unit code the same way the provisioning wizard
