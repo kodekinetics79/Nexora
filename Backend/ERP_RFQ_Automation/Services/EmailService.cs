@@ -173,6 +173,10 @@ namespace ERP_RFQ_Automation.Services
         // the intake unit tests can construct the service without it; absent means "poll every
         // mailbox", which is the behaviour that existed before it.
         private readonly ERP_RFQ_Automation.Platform.Lifecycle.ITenantWorkGate? _workGate;
+        // Mailbox-only lifecycle gate. Unlike the general compatibility gate, this refuses an
+        // orphan BusinessUnit: a live external credential must always have an active platform
+        // tenant owner. Optional only for reduced unit-test hosts; production registers it.
+        private readonly ERP_RFQ_Automation.Platform.Lifecycle.IMailboxTenantWorkGate? _mailboxWorkGate;
         // SEC-ING-01: the ambient tenant scope every mailbox is polled inside. Optional only so the
         // existing construction sites stay source-compatible; when it is not supplied it is
         // resolved from the container instead (the accessor is a singleton, so any scope yields the
@@ -197,7 +201,8 @@ namespace ERP_RFQ_Automation.Services
             IConfiguration configuration, IFileStorage storage,
             IEmailPollerHealth? pollerHealth = null,
             ERP_RFQ_Automation.Platform.Lifecycle.ITenantWorkGate? workGate = null,
-            ITenantScopeAccessor? tenantScope = null)
+            ITenantScopeAccessor? tenantScope = null,
+            ERP_RFQ_Automation.Platform.Lifecycle.IMailboxTenantWorkGate? mailboxWorkGate = null)
         {
             _tenantScope = tenantScope;
             _context = context;
@@ -207,6 +212,7 @@ namespace ERP_RFQ_Automation.Services
             _scopeFactory = scopeFactory;
             _pollerHealth = pollerHealth;
             _workGate = workGate;
+            _mailboxWorkGate = mailboxWorkGate;
             _useUnifiedQueue = configuration.GetValue("Ingestion:UseUnifiedQueue", true);
             _initialLookback = PositiveDays(
                 configuration.GetValue("Ingestion:Email:InitialLookbackDays", DEFAULT_INITIAL_LOOKBACK_DAYS),
@@ -280,10 +286,12 @@ namespace ERP_RFQ_Automation.Services
             // reinstating a long-suspended tenant.
             //
             // Called BEFORE any tenant scope is pushed; see ITenantWorkGate for why that matters.
-            if (_workGate is not null && configs.Count > 0)
+            if (configs.Count > 0 && (_mailboxWorkGate is not null || _workGate is not null))
             {
-                var serviceable = await _workGate.FilterServiceableAsync(
-                    configs.Select(c => c.BusinessUnitId));
+                var businessUnits = configs.Select(c => c.BusinessUnitId);
+                var serviceable = _mailboxWorkGate is not null
+                    ? await _mailboxWorkGate.FilterPollableAsync(businessUnits)
+                    : await _workGate!.FilterServiceableAsync(businessUnits);
                 var admitted = serviceable.ToHashSet();
                 var deferred = configs.Where(c => !admitted.Contains(c.BusinessUnitId)).ToList();
 
