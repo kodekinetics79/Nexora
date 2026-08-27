@@ -12,6 +12,8 @@ import customerService from '../../api/services/customerService';
 import contactService from '../../api/services/contactService';
 import { presentableErrorMessage } from '../../utils/apiErrors';
 import { candidateExplanation, clientCandidates, confidencePercent, type ClientIdentityLike } from './ClientCell';
+import { useAuth } from '../../context/AuthContext';
+import { commercialActionPermissions } from '../../utils/commercialActionPermissions';
 
 /**
  * The one place a person links a lead to a client organisation.
@@ -126,6 +128,8 @@ const ResolveClientDialog: React.FC<ResolveClientDialogProps> = ({
   open, leadId, lead, onClose, onResolved, onSelect, prefill,
 }) => {
   const queryClient = useQueryClient();
+  const { hasPermission } = useAuth();
+  const commercialAccess = commercialActionPermissions(hasPermission);
   const [selectedCustomerId, setSelectedCustomerId] = React.useState<number | null>(null);
   const [selectedContactId, setSelectedContactId] = React.useState<number | ''>('');
   const [searchTerm, setSearchTerm] = React.useState('');
@@ -142,7 +146,9 @@ const ResolveClientDialog: React.FC<ResolveClientDialogProps> = ({
   const setDetail = (key: keyof typeof newDetails) => (event: React.ChangeEvent<HTMLInputElement>) =>
     setNewDetails((current) => ({ ...current, [key]: event.target.value }));
 
-  const isOpen = open && leadId != null;
+  // Hosts intentionally retain their selected Lead while the dialog is open. Re-deriving this
+  // from live authority closes every host consistently when a refresh fails or access is revoked.
+  const isOpen = open && leadId != null && commercialAccess.canLinkLeadClient;
   const deferred = typeof onSelect === 'function';
 
   // Reset every time the dialog is opened for a lead — a stale selection from a
@@ -219,8 +225,14 @@ const ResolveClientDialog: React.FC<ResolveClientDialogProps> = ({
   }, [selectedCustomerId, candidates, searchQuery.data]);
 
   const mutation = useMutation({
-    mutationFn: (selection: { customerId: number; contactId?: number | null }) =>
-      leadService.linkClient(Number(leadId), selection),
+    mutationFn: (selection: { customerId: number; contactId?: number | null }) => {
+      // Re-check at the write boundary as well as hiding/closing the UI. This covers the narrow
+      // race where authority expires after the last render but before the click is dispatched.
+      if (!hasPermission('Leads', 'edit')) {
+        throw new Error('Current Lead edit permission is required. The client was not linked.');
+      }
+      return leadService.linkClient(Number(leadId), selection);
+    },
     onSuccess: (_data, selection) => {
       toast.success('Client linked to this lead.');
       queryClient.invalidateQueries({ queryKey: ['leads'] });
@@ -249,6 +261,9 @@ const ResolveClientDialog: React.FC<ResolveClientDialogProps> = ({
    */
   const createClient = useMutation({
     mutationFn: async () => {
+      if (!hasPermission('Leads', 'edit') || !hasPermission('Customers', 'create')) {
+        throw new Error('Current Customer create permission is required. The client was not created.');
+      }
       const form = new FormData();
       form.append('Name', newName.trim());
       if (newEmail.trim()) form.append('ContactEmail', newEmail.trim());
@@ -368,7 +383,7 @@ const ResolveClientDialog: React.FC<ResolveClientDialogProps> = ({
               />
             ))}
 
-            {debouncedTerm.length >= 2 && !searchQuery.isFetching && !searchQuery.isError && searchResults.length === 0 && !creating && (
+            {commercialAccess.canCreateClientFromLead && debouncedTerm.length >= 2 && !searchQuery.isFetching && !searchQuery.isError && searchResults.length === 0 && !creating && (
               <Box sx={{ py: 0.5 }}>
                 <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
                   No client matches “{debouncedTerm}”.
@@ -397,7 +412,7 @@ const ResolveClientDialog: React.FC<ResolveClientDialogProps> = ({
           </RadioGroup>
         </FormControl>
 
-        {creating && (
+        {commercialAccess.canCreateClientFromLead && creating && (
           <Box sx={{ mt: 2, p: 2, border: '1px solid', borderColor: 'divider', borderRadius: 2 }}>
             <Typography variant="subtitle2" sx={{ fontWeight: 800, mb: 0.5 }}>
               New client

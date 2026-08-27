@@ -4,7 +4,8 @@ import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
   Box, Typography, Paper, Button, Chip, IconButton,
-  Tooltip, Stack,
+  Tooltip, Stack, Dialog, DialogActions, DialogContent, DialogTitle,
+  CircularProgress,
 } from '@mui/material';
 import {
   DataGrid, type GridColDef, type GridPaginationModel
@@ -24,12 +25,15 @@ import ApiErrorNotice from '../../../components/common/ApiErrorNotice';
 import { gridEmptyOverlay } from '../../../components/common/gridOverlays';
 import ViewTabs from '../../../components/layout/ViewTabs';
 import { formatDateSafe } from '../../../utils/dates';
+import { commercialActionPermissions } from '../../../utils/commercialActionPermissions';
 
 const DraftRFQsPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { userData } = useAuth();
+  const { userData, hasPermission } = useAuth();
+  const commercialAccess = commercialActionPermissions(hasPermission);
+  const canDeleteDraftRfq = commercialAccess.canDeleteDraftRfq;
   const { enqueueSnackbar } = useSnackbar();
   const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ pageSize: 10, page: 0 });
   const [search, setSearch] = useState('');
@@ -37,6 +41,7 @@ const DraftRFQsPage: React.FC = () => {
   // Approval Dialog State
   const [approvalDialogOpen, setApprovalDialogOpen] = useState(false);
   const [selectedRfq, setSelectedRfq] = useState<any>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{ id: number; reference: string } | null>(null);
 
   const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['rfqs-draft', paginationModel, search],
@@ -62,13 +67,29 @@ const DraftRFQsPage: React.FC = () => {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: (id: number) => rfqService.delete(id, userData?.businessUnitId || 0),
+    mutationFn: (id: number) => {
+      // The dialog may have been open when an authority refresh failed or the grant was revoked.
+      // Re-check at the destructive boundary; the API remains the final authority after this.
+      if (!hasPermission('RFQ Management', 'delete')) {
+        throw new Error('Current RFQ delete permission is required. The draft was not deleted.');
+      }
+      return rfqService.delete(id, userData?.businessUnitId || 0);
+    },
     onSuccess: () => {
       enqueueSnackbar('RFQ Deleted', { variant: 'info' });
+      setDeleteTarget(null);
       queryClient.invalidateQueries({ queryKey: ['rfqs-draft'] });
     },
-    onError: () => enqueueSnackbar('Failed to delete RFQ', { variant: 'error' }),
+    onError: () => enqueueSnackbar('The draft RFQ was not deleted.', { variant: 'error' }),
   });
+
+  React.useEffect(() => {
+    if (!canDeleteDraftRfq && deleteTarget !== null) {
+      // A stale or revoked snapshot must close an already-open destructive affordance rather than
+      // letting an old confirmation survive until somebody presses Enter.
+      setDeleteTarget(null);
+    }
+  }, [canDeleteDraftRfq, deleteTarget]);
 
   // Memoised because DataGrid takes a component TYPE here: rebuilding the factory on every
   // render would hand it a new type each time and remount the overlay for no reason.
@@ -166,9 +187,19 @@ const DraftRFQsPage: React.FC = () => {
           <Tooltip title="Open lifecycle">
             <IconButton size="small" sx={{ color: 'success.main', bgcolor: 'success.lighter' }} onClick={() => navigate(`/procurement/rfqs/view/${p.row.id}`)}><ProcessIcon fontSize="small" /></IconButton>
           </Tooltip>
-          {!p.row.leadId && (
+          {!p.row.leadId && canDeleteDraftRfq && (
             <Tooltip title="Delete">
-              <IconButton size="small" sx={{ color: 'error.main', bgcolor: 'error.lighter' }} onClick={() => deleteMutation.mutate(p.row.id)}><DeleteIcon fontSize="small" /></IconButton>
+              <IconButton
+                aria-label={`Delete draft RFQ ${p.row.rfqno || `RFQ-${p.row.id}`}`}
+                size="small"
+                sx={{ color: 'error.main', bgcolor: 'error.lighter' }}
+                onClick={() => {
+                  deleteMutation.reset();
+                  setDeleteTarget({ id: p.row.id, reference: p.row.rfqno || `RFQ-${p.row.id}` });
+                }}
+              >
+                <DeleteIcon fontSize="small" />
+              </IconButton>
             </Tooltip>
           )}
         </Stack>
@@ -257,6 +288,58 @@ const DraftRFQsPage: React.FC = () => {
           }}
         />
       )}
+
+      <Dialog
+        open={deleteTarget !== null}
+        onClose={() => {
+          if (!deleteMutation.isPending) {
+            setDeleteTarget(null);
+            deleteMutation.reset();
+          }
+        }}
+        aria-labelledby="delete-draft-rfq-title"
+        aria-describedby="delete-draft-rfq-description"
+        fullWidth
+        maxWidth="xs"
+      >
+        <DialogTitle id="delete-draft-rfq-title" sx={{ fontWeight: 900 }}>
+          Delete draft RFQ {deleteTarget?.reference}?
+        </DialogTitle>
+        <DialogContent dividers>
+          <Typography id="delete-draft-rfq-description" variant="body2">
+            This permanently deletes this manual draft. It cannot be undone. Lead-promoted RFQs
+            cannot be deleted here because their governed promotion lineage must be retained.
+          </Typography>
+          {deleteMutation.isError && (
+            <ApiErrorNotice
+              error={deleteMutation.error}
+              fallbackMessage="The draft RFQ was not deleted. Nothing changed — review your access or try again."
+              sx={{ mt: 2 }}
+            />
+          )}
+        </DialogContent>
+        <DialogActions sx={{ p: 2 }}>
+          <Button
+            color="inherit"
+            disabled={deleteMutation.isPending}
+            onClick={() => {
+              setDeleteTarget(null);
+              deleteMutation.reset();
+            }}
+          >
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            color="error"
+            disabled={!deleteTarget || deleteMutation.isPending}
+            startIcon={deleteMutation.isPending ? <CircularProgress size={16} color="inherit" /> : <DeleteIcon />}
+            onClick={() => deleteTarget && deleteMutation.mutate(deleteTarget.id)}
+          >
+            {deleteMutation.isPending ? 'Deleting…' : 'Delete draft permanently'}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 };

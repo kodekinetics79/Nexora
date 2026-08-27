@@ -46,7 +46,7 @@ const isTokenExpired = (token: string): boolean => {
  * mere presence of a row meant "can view". Trusting a v1 snapshot under v2 rules would silently
  * grant read on every module the user has any row for.
  */
-export const PERMISSION_SCHEMA_VERSION = 2;
+export const PERMISSION_SCHEMA_VERSION = 3;
 
 /** How long a loaded permission set is considered fresh. Mirrors the server's ~60s RBAC cache. */
 export const PERMISSIONS_STALE_MS = 60_000;
@@ -75,6 +75,8 @@ export interface UserData {
   roleName?: string;
   isSuperAdmin?: boolean;
   isManager?: boolean;
+  /** Server-resolved rank >= Admin authority. Separate from Owner-only isSuperAdmin. */
+  hasModuleAuthorityByRank?: boolean;
   businessUnitId?: number;
   permissions?: Permission[];
   /**
@@ -112,6 +114,8 @@ interface AuthContextType {
    */
   permissionsError: string | null;
   permissionsLoading: boolean;
+  /** True until a current `/me/permissions` snapshot has loaded successfully. */
+  permissionsStale: boolean;
   /** Re-reads `/api/User/me/permissions`. Honours the stale window unless `force` is set. */
   refreshPermissions: (options?: { force?: boolean }) => Promise<void>;
 }
@@ -163,6 +167,9 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const [userData, setUserDataState] = useState<UserData>(readCachedUserData);
   const [permissionsError, setPermissionsError] = useState<string | null>(null);
   const [permissionsLoading, setPermissionsLoading] = useState(false);
+  const [permissionsStale, setPermissionsStale] = useState(true);
+  /** State counterpart to the ref below, used only to schedule expiry from the exact success. */
+  const [permissionsLoadedAt, setPermissionsLoadedAt] = useState(0);
   /** Epoch ms of the last successful `/me/permissions` read; 0 means "never loaded". */
   const lastLoadedAtRef = useRef(0);
   /** Guards against overlapping loads (StrictMode double-effect, mount + focus in the same tick). */
@@ -213,6 +220,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
             businessUnitId: me.businessUnitId ?? previous.businessUnitId,
             isSuperAdmin: me.isSuperAdmin === true,
             isManager: me.isManager === true,
+            hasModuleAuthorityByRank: me.hasModuleAuthorityByRank === true,
             permissions: me.permissions ?? [],
             // A server that predates the field omits it; that must read as "none", not "keep
             // whatever the previous snapshot claimed".
@@ -222,9 +230,15 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
           localStorage.setItem("userData", JSON.stringify(next));
           return next;
         });
-        lastLoadedAtRef.current = Date.now();
+        const loadedAt = Date.now();
+        lastLoadedAtRef.current = loadedAt;
+        setPermissionsLoadedAt(loadedAt);
+        setPermissionsStale(false);
         setPermissionsError(null);
       } catch (error) {
+        // A cached snapshot may remain useful for read-only navigation, but it is no longer safe
+        // to advertise a destructive mutation after the authority refresh itself failed.
+        setPermissionsStale(true);
         setPermissionsError(presentableErrorMessage(error, PERMISSIONS_LOAD_FAILED_MESSAGE));
       } finally {
         setPermissionsLoading(false);
@@ -240,7 +254,9 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     setToken(null);
     setUserData({});
     lastLoadedAtRef.current = 0;
+    setPermissionsLoadedAt(0);
     setPermissionsError(null);
+    setPermissionsStale(true);
     localStorage.clear();
     window.location.href = "/login";
   };
@@ -250,7 +266,10 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     // SEE everything — every mutation is rejected server-side by the read-only
     // impersonation middleware regardless of what the client renders.
     if (getImpersonation()) return true;
-    if (userData.isSuperAdmin === true) return true;
+    // Mutation authority must be current. A failed refresh leaves read navigation intact but
+    // suppresses destructive/edit/create controls until the server confirms the snapshot again.
+    if (action !== 'view' && permissionsStale) return false;
+    if (userData.isSuperAdmin === true || userData.hasModuleAuthorityByRank === true) return true;
     if (!userData.permissions) return false;
 
     const permission = userData.permissions.find(
@@ -268,7 +287,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       case 'view': return permission.canView === true;
       default: return false;
     }
-  }, [userData.isSuperAdmin, userData.permissions]);
+  }, [permissionsStale, userData.hasModuleAuthorityByRank, userData.isSuperAdmin, userData.permissions]);
 
   const hasEntitlement = useCallback((key: string) => {
     // Impersonating platform operators mirror `hasPermission`: let them SEE the full surface —
@@ -290,6 +309,21 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     window.addEventListener('focus', onFocus);
     return () => window.removeEventListener('focus', onFocus);
   }, [token, refreshPermissions]);
+
+  // A tab can remain focused for hours. Focus-only refresh meant its create/edit/delete controls
+  // could continue advertising a revoked grant indefinitely even though the documented freshness
+  // window is 60 seconds. Expire from the exact successful read and revalidate automatically.
+  // Marking the snapshot stale before the request makes mutations fail closed while it is in
+  // flight; cached read-only navigation remains available by design.
+  useEffect(() => {
+    if (!token || permissionsLoadedAt <= 0) return;
+    const delay = Math.max(0, permissionsLoadedAt + PERMISSIONS_STALE_MS - Date.now());
+    const timer = window.setTimeout(() => {
+      setPermissionsStale(true);
+      void refreshPermissions({ force: true });
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [permissionsLoadedAt, refreshPermissions, token]);
 
   // FE-12: while the app is open, schedule a proactive logout for the moment
   // the current token expires, redirecting to /login with a friendly notice
@@ -337,6 +371,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         hasEntitlement,
         permissionsError,
         permissionsLoading,
+        permissionsStale,
         refreshPermissions,
       }}
     >
