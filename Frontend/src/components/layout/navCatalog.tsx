@@ -188,7 +188,7 @@ export const PRIMARY_NAV: PrimaryNavItem[] = [
     key: 'leads',
     label: 'Leads',
     labelKey: 'lead_management',
-    description: 'Customer enquiries that have been read and are waiting to be qualified or quoted.',
+    description: 'Canonical customer enquiries being owned, assessed and given a participation decision.',
     icon: <LeadIcon />,
     path: '/procurement/leads/all',
     moduleName: 'Leads',
@@ -212,6 +212,9 @@ export const PRIMARY_NAV: PrimaryNavItem[] = [
         label: 'Assigned',
         path: '/procurement/leads/assigned',
         moduleName: 'Leads',
+        // An assigned Lead's fit and participation work happens at its numeric workbench route.
+        // Exact list routes win before this fallback, so Unassigned/Revisions keep their own tab.
+        activePrefixes: ['/procurement/leads/'],
       },
       {
         key: 'leads-revisions',
@@ -225,7 +228,7 @@ export const PRIMARY_NAV: PrimaryNavItem[] = [
     key: 'rfqs',
     label: 'RFQs',
     labelKey: 'rfq_management',
-    description: 'Qualified requests being priced — line coverage, sourcing and supplier responses.',
+    description: 'Formal requests promoted from approved Lead lines — pricing, sourcing and supplier responses.',
     icon: <RfqIcon />,
     path: '/procurement/rfqs/all',
     moduleName: 'RFQ Management',
@@ -247,12 +250,6 @@ export const PRIMARY_NAV: PrimaryNavItem[] = [
         key: 'rfqs-draft',
         label: 'Drafts',
         path: '/procurement/rfqs/draft',
-        moduleName: 'RFQ Management',
-      },
-      {
-        key: 'rfqs-outstanding',
-        label: 'Outstanding',
-        path: '/procurement/rfqs/outstanding',
         moduleName: 'RFQ Management',
       },
       {

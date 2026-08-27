@@ -105,7 +105,7 @@ test.describe('WCAG 2.1 AA — axe scan', () => {
      */
     for (const [route, title] of [
       ['/procurement/rfqs/draft', 'Draft RFQs | NEXORA'],
-      ['/procurement/rfqs/outstanding', 'Outstanding RFQs | NEXORA'],
+      ['/procurement/rfqs/outstanding', 'Assigned Leads | NEXORA'],
       ['/sales/quotes', 'Quotes | NEXORA'],
       ['/analytics/deadlines', 'Deadline Board | NEXORA'],
       // The landing screen and the directory that replaced the 69-row rail. The first screen after

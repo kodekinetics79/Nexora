@@ -37,6 +37,12 @@ const RFQ_VIEWS: NavView[] = [
   { key: 'draft', label: 'Drafts', path: '/procurement/rfqs/draft' },
 ];
 
+const LEAD_VIEWS: NavView[] = [
+  { key: 'all', label: 'All Leads', path: '/procurement/leads/all', activePrefixes: ['/procurement/leads/view'] },
+  { key: 'unassigned', label: 'Unassigned', path: '/procurement/leads/outstanding' },
+  { key: 'assigned', label: 'Assigned', path: '/procurement/leads/assigned', activePrefixes: ['/procurement/leads/'] },
+];
+
 describe('which tab an address is on', () => {
   it('lights the filtered tab on its own query', () => {
     expect(activeViewKey(QUOTE_VIEWS, '/sales/quotes', '?state=sent')).toBe('sent');
@@ -62,6 +68,14 @@ describe('which tab an address is on', () => {
 
   it('lights the owning list from a detail page', () => {
     expect(activeViewKey(QUOTE_VIEWS, '/sales/quotes/view/42', '')).toBe('draft');
+  });
+
+  it('lights Assigned Leads while a rep is in the decision workbench', () => {
+    expect(activeViewKey(LEAD_VIEWS, '/procurement/leads/492/workbench', '')).toBe('assigned');
+  });
+
+  it('lets the exact unassigned Lead route win over the Assigned workbench prefix', () => {
+    expect(activeViewKey(LEAD_VIEWS, '/procurement/leads/outstanding', '')).toBe('unassigned');
   });
 
   it('lights nothing for an address that belongs to no view', () => {

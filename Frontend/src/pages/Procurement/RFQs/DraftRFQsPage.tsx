@@ -74,7 +74,7 @@ const DraftRFQsPage: React.FC = () => {
   // render would hand it a new type each time and remount the overlay for no reason.
   const noRowsOverlay = React.useMemo(() => gridEmptyOverlay({
     title: 'No draft RFQs',
-    message: 'A converted lead lands here as a draft until it is reviewed and approved.',
+    message: 'A committed participation decision promotes approved Bid lines here as a formal draft RFQ for review.',
     icon: <ItemsIcon sx={{ fontSize: 48 }} />,
     // A clear queue with no way forward is still a dead end: the reader now knows there is nothing
     // to approve and has to work out on their own where drafts come from.
@@ -191,10 +191,10 @@ const DraftRFQsPage: React.FC = () => {
           variant="contained"
           color="primary"
           startIcon={<ProcessIcon />}
-          onClick={() => navigate('/procurement/rfqs/outstanding')}
+          onClick={() => navigate('/procurement/leads/assigned')}
           sx={{ fontWeight: 800, borderRadius: 2 }}
         >
-          Process Outstanding Leads
+          Review Assigned Leads
         </Button>
       </Stack>
 

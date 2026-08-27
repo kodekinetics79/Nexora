@@ -44,8 +44,8 @@ const OutstandingLeadsPage: React.FC = () => {
   const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ pageSize: 10, page: 0 });
   const [search, setSearch] = useState('');
   const [menuAnchor, setMenuAnchor] = useState<{ el: HTMLElement, row: any } | null>(null);
-  // Filter toggle wired to the existing excludeAssigned param: on = only leads
-  // still waiting for an owner; off = every accepted lead not yet converted.
+  // Filter toggle wired to the existing excludeAssigned param: on = only Leads
+  // still waiting for an owner; off = every accepted Lead not yet promoted to an RFQ.
   const [unassignedOnly, setUnassignedOnly] = useState(true);
   // Inline 2-click assign: click "Assign to..." on a row, then pick a name.
   const [quickAssign, setQuickAssign] = useState<{ el: HTMLElement, leadId: number } | null>(null);
@@ -122,7 +122,7 @@ const OutstandingLeadsPage: React.FC = () => {
   // render would hand it a new type each time and remount the overlay for no reason.
   const noRowsOverlay = React.useMemo(() => gridEmptyOverlay({
     title: unassignedOnly ? 'Every accepted lead has an owner' : 'No outstanding leads',
-    message: 'Accepted leads appear here until they are assigned and converted to an RFQ.',
+    message: 'Accepted Leads appear here until assigned. Fit and participation then happen in the Decision Workbench; only approved Bid lines are promoted into a formal RFQ.',
     icon: <ItemsIcon sx={{ fontSize: 48 }} />,
     action: (
       <Button variant="contained" onClick={() => navigate('/procurement/leads/all')} sx={{ fontWeight: 700 }}>
