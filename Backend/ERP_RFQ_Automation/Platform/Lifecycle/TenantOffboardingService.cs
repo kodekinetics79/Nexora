@@ -930,7 +930,8 @@ public sealed class TenantOffboardingService(
     // ------------------------------------------------------------------------------- helpers
 
     /// <summary>
-    /// Refuses a purge executed by the same platform user who scheduled the deletion.
+    /// Refuses a purge executed by a platform user who supplied either destructive prerequisite:
+    /// scheduling the deletion or attesting that a Production-labelled tenant was not a customer.
     ///
     /// <para><b>Where the maker's identity comes from, and why not from the offboarding record.</b>
     /// <see cref="TenantOffboarding.DeletionScheduledBy"/> holds an email, and an email is a label
@@ -983,6 +984,28 @@ public sealed class TenantOffboardingService(
                 + "a customer's records requires a second platform Owner: the person who decided it "
                 + "must not also be the person who carries it out. Have another Owner run the purge, "
                 + "or cancel the deletion if the decision has changed.");
+
+        var attester = await context.Set<TenantLifecycleEvent>().AsNoTracking()
+            .Where(e => e.TenantId == tenant.Id
+                        && e.Action == TenantLifecycleActions.AttestNonCustomer)
+            .OrderByDescending(e => e.OccurredOn).ThenByDescending(e => e.Id)
+            .Select(e => new { e.ActorPlatformUserId, e.ActorEmail, e.OccurredOn })
+            .FirstOrDefaultAsync(ct);
+
+        if (attester is null) return;
+
+        if (attester.ActorPlatformUserId <= 0)
+            throw TenantOffboardingRefusedException.Conflict(
+                "This tenant's non-customer attestation carries no attributable platform account, "
+                + "so an independent purge approval cannot be verified and the purge is refused.");
+
+        if (attester.ActorPlatformUserId == approverId)
+            throw TenantOffboardingRefusedException.Conflict(
+                $"This same operator ({attester.ActorEmail}) attested on "
+                + $"{attester.OccurredOn:yyyy-MM-dd HH:mm} UTC that tenant {tenant.Id} was not a "
+                + "customer. That attestation waives commercial-closure evidence and is part of the "
+                + "destruction decision; its maker cannot also approve the later purge. Have another "
+                + "platform Owner run the purge.");
     }
 
     /// <summary>

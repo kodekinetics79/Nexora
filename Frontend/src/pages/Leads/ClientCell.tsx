@@ -1,5 +1,5 @@
 import React from 'react';
-import { Box, Button, Chip, Stack, Tooltip, Typography } from '@mui/material';
+import { Box, Button, ButtonBase, Chip, Stack, Tooltip, Typography } from '@mui/material';
 import type { ClientCandidateDTO } from '../../api/services/leadService';
 
 /**
@@ -284,8 +284,7 @@ const ClientCell: React.FC<ClientCellProps> = ({ lead, onResolve, canEdit = true
     }
 
     return (
-      <Box
-        component="button"
+      <ButtonBase
         type="button"
         onClick={onResolve}
         aria-label={label}
@@ -297,7 +296,7 @@ const ClientCell: React.FC<ClientCellProps> = ({ lead, onResolve, canEdit = true
         }}
       >
         {body}
-      </Box>
+      </ButtonBase>
     );
   }
 

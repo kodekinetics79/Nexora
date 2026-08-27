@@ -542,7 +542,7 @@ function MoneyDialog({
               {action.invoice.invoiceNumber} · outstanding {money(action.invoice.outstandingAmount, action.invoice.currency)}
             </Typography>
             <TextField
-              autoFocus required type="number" label="Amount" value={action.amount}
+              required type="number" label="Amount" value={action.amount}
               slotProps={{ htmlInput: { min: 0.01, max: action.invoice.outstandingAmount, step: 0.01 } }}
               error={action.amount !== '' && (amount <= 0 || amount > action.invoice.outstandingAmount)}
               helperText="Cannot exceed the server-reported outstanding balance."

@@ -1,4 +1,5 @@
 using ERP_RFQ_Automation.AI;
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.Models;
@@ -10,54 +11,60 @@ namespace ERP_RFQ_Automation.Extraction;
 public static class ProcessingEvidenceQuery
 {
     public static async Task<ProcessingEvidenceResponse?> ReadRfqAsync(
-        ErpRfqAutomationContext db, long businessUnitId, long rfqId, CancellationToken ct)
+        ErpRfqAutomationContext db, CommercialActorScope actor, long rfqId, CancellationToken ct)
     {
         var leadId = await db.Rfqs.AsNoTracking()
-            .Where(x => x.BusinessUnitId == businessUnitId && x.Id == rfqId)
+            .Where(x => x.BusinessUnitId == actor.BusinessUnitId)
+            .InCommercialScope(db, actor.BusinessUnitId, actor.AccountScope, DateTime.UtcNow)
+            .Where(x => x.Id == rfqId)
             .Select(x => x.LeadId)
             .SingleOrDefaultAsync(ct);
         return leadId.HasValue
-            ? await ReadLeadAsync(db, businessUnitId, leadId.Value, ct)
+            ? await ReadLeadAsync(db, actor, leadId.Value, ct)
             : null;
     }
 
     public static async Task<ProcessingEvidenceResponse?> ReadSupplierQuoteAsync(
-        ErpRfqAutomationContext db, long businessUnitId, long supplierQuoteId, CancellationToken ct)
+        ErpRfqAutomationContext db, CommercialActorScope actor, long supplierQuoteId, CancellationToken ct)
     {
         var rfqId = await db.Set<SupplierQuote>().AsNoTracking()
-            .Where(x => x.BusinessUnitId == businessUnitId && x.Id == supplierQuoteId)
+            .Where(x => x.BusinessUnitId == actor.BusinessUnitId && x.Id == supplierQuoteId)
             .Select(x => (long?)x.RfqId)
             .SingleOrDefaultAsync(ct);
         return rfqId.HasValue
-            ? await ReadRfqAsync(db, businessUnitId, rfqId.Value, ct)
+            ? await ReadRfqAsync(db, actor, rfqId.Value, ct)
             : null;
     }
 
     public static async Task<ProcessingEvidenceResponse?> ReadClientPurchaseOrderAsync(
-        ErpRfqAutomationContext db, long businessUnitId, long clientPurchaseOrderId, CancellationToken ct)
+        ErpRfqAutomationContext db, CommercialActorScope actor, long clientPurchaseOrderId, CancellationToken ct)
     {
         var commercialCaseId = await db.CustomerPurchaseOrders.AsNoTracking()
-            .Where(x => x.BusinessUnitId == businessUnitId && x.Id == clientPurchaseOrderId)
+            .Where(x => x.BusinessUnitId == actor.BusinessUnitId && x.Id == clientPurchaseOrderId)
             .Select(x => (long?)x.CommercialCaseId)
             .SingleOrDefaultAsync(ct);
         if (!commercialCaseId.HasValue)
             return null;
 
         var leadId = await db.Leads.AsNoTracking()
-            .Where(x => x.BusinessUnitId == businessUnitId
-                && x.CommercialCaseId == commercialCaseId.Value)
+            .Where(x => x.BusinessUnitId == actor.BusinessUnitId)
+            .InCommercialScope(db, actor.BusinessUnitId, actor.AccountScope, DateTime.UtcNow)
+            .Where(x => x.CommercialCaseId == commercialCaseId.Value)
             .Select(x => (long?)x.Id)
             .SingleOrDefaultAsync(ct);
         return leadId.HasValue
-            ? await ReadLeadAsync(db, businessUnitId, leadId.Value, ct)
+            ? await ReadLeadAsync(db, actor, leadId.Value, ct)
             : null;
     }
 
     public static async Task<ProcessingEvidenceResponse?> ReadLeadAsync(
-        ErpRfqAutomationContext db, long businessUnitId, long leadId, CancellationToken ct)
+        ErpRfqAutomationContext db, CommercialActorScope actor, long leadId, CancellationToken ct)
     {
+        var businessUnitId = actor.BusinessUnitId;
         var lead = await db.Leads.AsNoTracking()
-            .Where(x => x.BusinessUnitId == businessUnitId && x.Id == leadId)
+            .Where(x => x.BusinessUnitId == businessUnitId)
+            .InCommercialScope(db, businessUnitId, actor.AccountScope, DateTime.UtcNow)
+            .Where(x => x.Id == leadId)
             .Select(x => new { x.Id, NexoraSerial = x.CommercialCaseReference })
             .SingleOrDefaultAsync(ct);
         if (lead is null)
@@ -65,8 +72,8 @@ public static class ProcessingEvidenceQuery
 
         var leadOccurrences = await db.Set<LeadIngestionOccurrence>().AsNoTracking()
             .Where(x => x.BusinessUnitId == businessUnitId && x.LeadId == leadId)
-            .OrderBy(x => x.CreatedAtUtc)
             .ToListAsync(ct);
+        leadOccurrences = leadOccurrences.OrderBy(x => x.CreatedAtUtc).ToList();
         var jobIds = leadOccurrences.Where(x => x.ExtractionJobId.HasValue)
             .Select(x => x.ExtractionJobId!.Value).Distinct().ToList();
         jobIds.AddRange(await db.Set<ExtractionJob>().AsNoTracking()
@@ -84,7 +91,8 @@ public static class ProcessingEvidenceQuery
             .Distinct().ToArray();
         var sourceOccurrences = await db.Set<SourceDocumentOccurrence>().AsNoTracking()
             .Where(x => x.BusinessUnitId == businessUnitId && occurrenceIds.Contains(x.Id))
-            .OrderBy(x => x.ReceivedOn).ToListAsync(ct);
+            .ToListAsync(ct);
+        sourceOccurrences = sourceOccurrences.OrderBy(x => x.ReceivedOn).ToList();
 
         var sourceDocumentIds = sourceOccurrences.Select(x => x.SourceDocumentId)
             .Concat(leadOccurrences.Where(x => x.SourceDocumentId.HasValue)
@@ -94,13 +102,15 @@ public static class ProcessingEvidenceQuery
             .ToDictionaryAsync(x => x.Id, ct);
         var runs = await db.Set<ExtractionRun>().AsNoTracking()
             .Where(x => x.BusinessUnitId == businessUnitId && jobIds.Contains(x.ExtractionJobId))
-            .OrderBy(x => x.CreatedOn).ToListAsync(ct);
+            .ToListAsync(ct);
+        runs = runs.OrderBy(x => x.CreatedOn).ToList();
         var aiRequests = await db.Set<AiRequest>().AsNoTracking().Include(x => x.Attempts)
             .Where(x => x.BusinessUnitId == businessUnitId
                 && ((x.ExtractionJobId.HasValue && jobIds.Contains(x.ExtractionJobId.Value))
                     || (x.SourceDocumentOccurrenceId.HasValue
                         && occurrenceIds.Contains(x.SourceDocumentOccurrenceId.Value))))
-            .OrderBy(x => x.CreatedOn).ToListAsync(ct);
+            .ToListAsync(ct);
+        aiRequests = aiRequests.OrderBy(x => x.CreatedOn).ToList();
         var rfqs = await db.Rfqs.AsNoTracking()
             .Where(x => x.BusinessUnitId == businessUnitId && x.LeadId == leadId)
             .OrderBy(x => x.CreatedDate)

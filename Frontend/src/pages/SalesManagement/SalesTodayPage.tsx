@@ -388,7 +388,7 @@ export default function SalesTodayPage() {
       <DialogContent>
         <Stack spacing={2} sx={{ pt: 1 }}>
           <Typography variant="body2">This records a manager decision against the evidence. It does not change commercial workflow state.</Typography>
-          <TextField label="Decision reason" value={acknowledgementReason} onChange={event => setAcknowledgementReason(event.target.value)} multiline minRows={3} autoFocus inputRef={acknowledgementReasonInputRef} required slotProps={{ htmlInput: { maxLength: 1000 } }} />
+          <TextField label="Decision reason" value={acknowledgementReason} onChange={event => setAcknowledgementReason(event.target.value)} multiline minRows={3} inputRef={acknowledgementReasonInputRef} required slotProps={{ htmlInput: { maxLength: 1000 } }} />
           <TextField select label="Disposition" value={acknowledgementDisposition} onChange={event => setAcknowledgementDisposition(event.target.value)} fullWidth>
             <MenuItem value="ACKNOWLEDGED">Acknowledged</MenuItem>
             <MenuItem value="RESOLVED">Resolved</MenuItem>

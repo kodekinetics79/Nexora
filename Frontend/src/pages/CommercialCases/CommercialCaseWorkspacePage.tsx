@@ -677,7 +677,6 @@ const CommercialCaseWorkspacePage: React.FC = () => {
             )}
             <TextField
               required
-              autoFocus
               inputRef={feedbackReasonInputRef}
               multiline
               minRows={3}

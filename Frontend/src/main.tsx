@@ -2,7 +2,6 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import { QueryClientProvider } from '@tanstack/react-query';
-import { ReactQueryDevtools } from '@tanstack/react-query-devtools';
 import CssBaseline from '@mui/material/CssBaseline';
 import { AuthProvider } from './context/AuthContext';
 import { ThemeContextProvider } from './context/ThemeContext';
@@ -13,6 +12,17 @@ import { SnackbarProvider } from 'notistack';
 import { Toaster } from 'react-hot-toast';
 import './index.css';
 import './i18n';
+
+// Developer tooling must never ship to a customer build. Besides leaving the black floating
+// toggle visible over application controls, the panel exposes query keys, cached payloads and
+// request state to anyone who can open the tenant portal. Vite folds this branch away in a
+// production build, so the package is neither loaded nor emitted into production assets.
+const DevelopmentQueryDevtools = import.meta.env.DEV
+  ? React.lazy(async () => {
+      const module = await import('@tanstack/react-query-devtools');
+      return { default: module.ReactQueryDevtools };
+    })
+  : null;
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
@@ -32,7 +42,11 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
           </BrowserRouter>
         </AuthProvider>
       </ThemeContextProvider>
-      <ReactQueryDevtools initialIsOpen={false} />
+      {DevelopmentQueryDevtools && (
+        <React.Suspense fallback={null}>
+          <DevelopmentQueryDevtools initialIsOpen={false} />
+        </React.Suspense>
+      )}
     </QueryClientProvider>
   </React.StrictMode>
 );

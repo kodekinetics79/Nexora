@@ -96,7 +96,6 @@ export default function ReasonDialog({
           </Typography>
           {extra}
           <TextField
-            autoFocus
             fullWidth
             required
             multiline

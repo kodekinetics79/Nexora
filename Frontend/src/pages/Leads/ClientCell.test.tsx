@@ -106,6 +106,21 @@ describe('ClientCell', () => {
     expect(onResolve).toHaveBeenCalledTimes(1);
   });
 
+  it('uses a named native button that accepts keyboard-generated activation', () => {
+    const onResolve = vi.fn();
+    render(<ClientCell lead={states[1][1]} onResolve={onResolve} />);
+
+    const trigger = screen.getByRole('button', { name: /Suggested client Saudi Electricity Company/i });
+    expect(trigger.tagName).toBe('BUTTON');
+    expect(trigger).toHaveAttribute('type', 'button');
+    trigger.focus();
+    expect(trigger).toHaveFocus();
+
+    // Browsers dispatch a detail=0 click when Enter/Space activates a native button.
+    fireEvent.click(trigger, { detail: 0 });
+    expect(onResolve).toHaveBeenCalledTimes(1);
+  });
+
   it('counts the competing clients when the evidence is ambiguous', () => {
     render(<ClientCell lead={states[2][1]} onResolve={() => {}} />);
     expect(screen.getByText('2 possible clients')).toBeInTheDocument();

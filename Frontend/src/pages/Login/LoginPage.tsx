@@ -31,6 +31,7 @@ import { keyframes, css } from '@emotion/react';
 import styled from '@emotion/styled';
 import { useAuth } from '../../context/AuthContext';
 import { useAppTheme } from '../../context/ThemeContext';
+import { contrastTextFor } from '../../utils/contrast';
 import Branding from '../../components/common/Branding';
 import axiosInstance from '../../api/axiosInstance';
 import { useNavigate } from 'react-router-dom';
@@ -189,7 +190,7 @@ const NodeBadge = styled.div<{ color: string }>`
   top: -10px;
   right: -10px;
   background: ${props => props.color};
-  color: #fff;
+  color: ${props => contrastTextFor(props.color)};
   font-size: 8px;
   padding: 2px 6px;
   border-radius: 4px;

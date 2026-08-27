@@ -1,4 +1,3 @@
-using System.Security.Claims;
 using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.Extraction;
@@ -12,19 +11,21 @@ namespace ERP_RFQ_Automation.Controllers;
 [ApiController]
 [Authorize]
 [Route("api/processing-evidence")]
-public sealed class ProcessingEvidenceController(ErpRfqAutomationContext db) : ControllerBase
+public sealed class ProcessingEvidenceController(
+    ErpRfqAutomationContext db,
+    ICommercialAccessContext commercialAccess) : ControllerBase
 {
     [HttpGet("leads/{leadId:long}")]
     [RequireModulePermission("Leads", PermissionAction.View)]
     public async Task<ActionResult<ProcessingEvidenceResponse>> Lead(
         long leadId, CancellationToken cancellationToken)
     {
-        var businessUnitId = TenantId();
-        if (businessUnitId <= 0)
+        var actor = await commercialAccess.ResolveAsync(cancellationToken);
+        if (actor is null)
             return Forbid();
 
         var evidence = await ProcessingEvidenceQuery.ReadLeadAsync(
-            db, businessUnitId, leadId, cancellationToken);
+            db, actor, leadId, cancellationToken);
         return evidence is null ? NotFound() : Ok(evidence);
     }
 
@@ -33,12 +34,12 @@ public sealed class ProcessingEvidenceController(ErpRfqAutomationContext db) : C
     public async Task<ActionResult<ProcessingEvidenceResponse>> Rfq(
         long rfqId, CancellationToken cancellationToken)
     {
-        var businessUnitId = TenantId();
-        if (businessUnitId <= 0)
+        var actor = await commercialAccess.ResolveAsync(cancellationToken);
+        if (actor is null)
             return Forbid();
 
         var evidence = await ProcessingEvidenceQuery.ReadRfqAsync(
-            db, businessUnitId, rfqId, cancellationToken);
+            db, actor, rfqId, cancellationToken);
         return evidence is null ? NotFound() : Ok(evidence);
     }
 
@@ -47,12 +48,12 @@ public sealed class ProcessingEvidenceController(ErpRfqAutomationContext db) : C
     public async Task<ActionResult<ProcessingEvidenceResponse>> SupplierQuote(
         long supplierQuoteId, CancellationToken cancellationToken)
     {
-        var businessUnitId = TenantId();
-        if (businessUnitId <= 0)
+        var actor = await commercialAccess.ResolveAsync(cancellationToken);
+        if (actor is null)
             return Forbid();
 
         var evidence = await ProcessingEvidenceQuery.ReadSupplierQuoteAsync(
-            db, businessUnitId, supplierQuoteId, cancellationToken);
+            db, actor, supplierQuoteId, cancellationToken);
         return evidence is null ? NotFound() : Ok(evidence);
     }
 
@@ -61,12 +62,12 @@ public sealed class ProcessingEvidenceController(ErpRfqAutomationContext db) : C
     public async Task<ActionResult<ProcessingEvidenceResponse>> ClientPurchaseOrder(
         long clientPurchaseOrderId, CancellationToken cancellationToken)
     {
-        var businessUnitId = TenantId();
-        if (businessUnitId <= 0)
+        var actor = await commercialAccess.ResolveAsync(cancellationToken);
+        if (actor is null)
             return Forbid();
 
         var evidence = await ProcessingEvidenceQuery.ReadClientPurchaseOrderAsync(
-            db, businessUnitId, clientPurchaseOrderId, cancellationToken);
+            db, actor, clientPurchaseOrderId, cancellationToken);
         return evidence is null ? NotFound() : Ok(evidence);
     }
 
@@ -95,24 +96,26 @@ public sealed class ProcessingEvidenceController(ErpRfqAutomationContext db) : C
     public async Task<ActionResult<FieldEvidenceResponse>> LeadFields(
         long leadId, CancellationToken cancellationToken)
     {
-        var businessUnitId = TenantId();
-        if (businessUnitId <= 0)
+        var actor = await commercialAccess.ResolveAsync(cancellationToken);
+        if (actor is null)
             return Forbid();
 
         var leadExists = await db.Leads.AsNoTracking()
-            .AnyAsync(l => l.Id == leadId && l.BusinessUnitId == businessUnitId, cancellationToken);
+            .Where(l => l.BusinessUnitId == actor.BusinessUnitId)
+            .InCommercialScope(db, actor.BusinessUnitId, actor.AccountScope, DateTime.UtcNow)
+            .AnyAsync(l => l.Id == leadId, cancellationToken);
         if (!leadExists) return NotFound();
 
         // Both anchors are tenant-scoped on every leg: canonical inquiries reached through
         // Lead.Id, canonical line items through LeadItem.Id, and the evidence rows through
         // their own BusinessUnitId. A lead in another tenant resolves to nothing.
         var inquiryIds = await db.Set<CanonicalInquiry>().AsNoTracking()
-            .Where(i => i.BusinessUnitId == businessUnitId && i.LeadId == leadId)
+            .Where(i => i.BusinessUnitId == actor.BusinessUnitId && i.LeadId == leadId)
             .Select(i => i.Id)
             .ToListAsync(cancellationToken);
 
         var lineItemAnchors = await db.Set<CanonicalLineItem>().AsNoTracking()
-            .Where(li => li.BusinessUnitId == businessUnitId
+            .Where(li => li.BusinessUnitId == actor.BusinessUnitId
                          && li.LeadItemId.HasValue
                          && li.Inquiry.LeadId == leadId)
             .Select(li => new { CanonicalId = li.Id, LeadItemId = li.LeadItemId!.Value, li.LineNumber })
@@ -122,7 +125,7 @@ public sealed class ProcessingEvidenceController(ErpRfqAutomationContext db) : C
         var leadItemByCanonical = lineItemAnchors.ToDictionary(a => a.CanonicalId, a => a);
 
         var rows = await db.Set<FieldEvidence>().AsNoTracking()
-            .Where(f => f.BusinessUnitId == businessUnitId
+            .Where(f => f.BusinessUnitId == actor.BusinessUnitId
                         && ((f.InquiryId.HasValue && inquiryIds.Contains(f.InquiryId.Value))
                             || (f.LineItemId.HasValue && canonicalLineIds.Contains(f.LineItemId.Value))))
             .Select(f => new
@@ -181,13 +184,13 @@ public sealed class ProcessingEvidenceController(ErpRfqAutomationContext db) : C
         // specification" — changes what may be quoted just as much as a line does, and it
         // used to reach the reviewer only if they opened the source file by hand.
         var corpusIds = await db.Set<CanonicalInquiry>().AsNoTracking()
-            .Where(i => i.BusinessUnitId == businessUnitId && i.LeadId == leadId)
+            .Where(i => i.BusinessUnitId == actor.BusinessUnitId && i.LeadId == leadId)
             .Select(i => i.CorpusId)
             .Distinct()
             .ToListAsync(cancellationToken);
 
         var narrative = corpusIds.Count == 0 ? null : await db.Set<DocumentRegion>().AsNoTracking()
-            .Where(r => r.BusinessUnitId == businessUnitId
+            .Where(r => r.BusinessUnitId == actor.BusinessUnitId
                         && r.RegionType == DocumentRegionType.Text
                         && r.Text != null
                         && corpusIds.Contains(r.Page.Document.CorpusId))
@@ -210,10 +213,6 @@ public sealed class ProcessingEvidenceController(ErpRfqAutomationContext db) : C
             narrative));
     }
 
-    private long TenantId() => long.TryParse(
-        User.FindFirstValue("businessUnitId") ?? User.FindFirstValue("business_unit_id"), out var id)
-        ? id
-        : 0;
 }
 
 /// <param name="LeadItemId">The reviewer-visible line this value belongs to; null for lead-level fields.</param>

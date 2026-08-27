@@ -3,24 +3,6 @@ import globals from 'globals';
 import tseslint from 'typescript-eslint';
 import jsxA11y from 'eslint-plugin-jsx-a11y';
 
-/**
- * eslint-plugin-jsx-a11y ships its recommended set at "error". This codebase
- * has a large backlog of pre-existing accessibility violations outside the
- * current a11y workstream, so every rule is downgraded to a warning: issues
- * surface in editors and in `npm run lint:a11y`, but they do not turn an
- * otherwise-green build red. Promote these to "error" once the backlog is
- * cleared.
- */
-const asWarnings = (rules) =>
-  Object.fromEntries(
-    Object.entries(rules ?? {}).map(([name, config]) => {
-      const [severity, ...options] = Array.isArray(config) ? config : [config];
-      // Preserve rules the preset deliberately disables.
-      if (severity === 'off' || severity === 0) return [name, config];
-      return [name, options.length > 0 ? ['warn', ...options] : 'warn'];
-    }),
-  );
-
 export default tseslint.config(
   {
     ignores: [
@@ -69,6 +51,8 @@ export default tseslint.config(
         },
       },
     },
-    rules: asWarnings(jsxA11y.flatConfigs.recommended.rules),
+    // Accessibility regressions fail CI. The recommended preset deliberately
+    // keeps its disabled rules disabled and reports every enabled rule as an error.
+    rules: jsxA11y.flatConfigs.recommended.rules,
   },
 );

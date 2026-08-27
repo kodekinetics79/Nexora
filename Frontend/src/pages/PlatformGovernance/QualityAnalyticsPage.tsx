@@ -5,12 +5,10 @@ import {
   Stack, Tab, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Tabs,
   Typography,
 } from '@mui/material';
-import { CheckCircleOutlined, ErrorOutlined, InsightsOutlined } from '@mui/icons-material';
+import { InsightsOutlined } from '@mui/icons-material';
 import ArtifactStudioPage from './ArtifactStudioPage';
-import { platformGovernanceService, type QualityMetric } from '../../api/services/platformGovernanceService';
-
-const displayValue = (metric: QualityMetric) => metric.value === null || metric.value === undefined
-  ? 'Insufficient evidence' : `${metric.value.toLocaleString()}${metric.unit === '%' ? '%' : ` ${metric.unit}`}`;
+import { platformGovernanceService } from '../../api/services/platformGovernanceService';
+import { QualityMetricCard, QualityRecommendationButton } from './QualityAnalyticsActions';
 
 export default function QualityAnalyticsPage() {
   const [tab, setTab] = useState(0);
@@ -47,16 +45,12 @@ export default function QualityAnalyticsPage() {
           {quality.data && <>
             <Alert severity="info" sx={{ mb: 2 }}>{quality.data.accuracyLimitation}</Alert>
             <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, 1fr)', xl: 'repeat(4, 1fr)' }, gap: 1.5, mb: 2 }}>
-              {quality.data.metrics.map((metric) => <Paper key={metric.key} variant="outlined"
-                onClick={() => setDrilldown(metric.drilldownKey)}
-                sx={{ p: 2, cursor: 'pointer', minHeight: 132, borderColor: drilldown === metric.drilldownKey ? 'primary.main' : undefined }}>
-                <Stack direction="row" sx={{ justifyContent: 'space-between', gap: 1 }}>
-                  <Typography variant="body2" color="text.secondary">{metric.label}</Typography>
-                  {metric.evidenceStatus === 'Measured' ? <CheckCircleOutlined color="success" fontSize="small" /> : <ErrorOutlined color="warning" fontSize="small" />}
-                </Stack>
-                <Typography variant="h6" sx={{ mt: 1, fontWeight: 750 }}>{displayValue(metric)}</Typography>
-                <Typography variant="caption" color="text.secondary">{metric.numerator.toLocaleString()} / {metric.denominator.toLocaleString()} records</Typography>
-              </Paper>)}
+              {quality.data.metrics.map((metric) => <QualityMetricCard
+                key={metric.key}
+                metric={metric}
+                selected={drilldown === metric.drilldownKey}
+                onSelect={() => setDrilldown(metric.drilldownKey)}
+              />)}
             </Box>
             {selectedMetric && <Alert severity="success" icon={<InsightsOutlined />} sx={{ mb: 2 }}>
               <strong>{selectedMetric.label}:</strong> {selectedMetric.definition}
@@ -76,10 +70,14 @@ export default function QualityAnalyticsPage() {
               </TableContainer>
               <Stack sx={{ gap: 2 }}>
                 <Paper variant="outlined" sx={{ p: 2 }}><Typography variant="subtitle1" sx={{ fontWeight: 750, mb: 1 }}>Evidence-based recommendations</Typography>
-                  <Stack sx={{ gap: 1.5 }}>{quality.data.recommendations.map((item) => <Box key={item.title} onClick={() => setDrilldown(item.drilldownKey)} sx={{ cursor: 'pointer' }}>
-                    <Stack direction="row" sx={{ gap: .75, alignItems: 'center' }}><Chip size="small" label={item.priority} color={item.priority === 'Critical' ? 'error' : item.priority === 'High' ? 'warning' : 'default'} /><Typography variant="body2" sx={{ fontWeight: 700 }}>{item.title}</Typography></Stack>
-                    <Typography variant="body2" sx={{ mt: .5 }}>{item.recommendation}</Typography><Typography variant="caption" color="text.secondary">{item.evidence}</Typography>
-                  </Box>)}</Stack>
+                  <Stack sx={{ gap: 1.5 }}>{quality.data.recommendations.map((item) => <QualityRecommendationButton
+                    key={item.title}
+                    title={item.title}
+                    priority={item.priority}
+                    recommendation={item.recommendation}
+                    evidence={item.evidence}
+                    onSelect={() => setDrilldown(item.drilldownKey)}
+                  />)}</Stack>
                 </Paper>
                 <Paper variant="outlined" sx={{ p: 2 }}><Typography variant="subtitle1" sx={{ fontWeight: 750, mb: 1 }}>Leading exception causes</Typography>
                   {quality.data.exceptionCauses.map((cause) => <Stack key={`${cause.category}-${cause.code}`} direction="row" sx={{ justifyContent: 'space-between', gap: 1, py: .5 }}><Typography variant="body2">{cause.code}</Typography><Chip size="small" label={cause.count} /></Stack>)}

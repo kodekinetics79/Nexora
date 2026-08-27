@@ -179,7 +179,6 @@ const LeadDecisionActions: React.FC<Props> = ({ leadId, reviewVersion, canEdit, 
             Record exactly what the customer needs to clarify. This keeps the lead open and adds an immutable audit entry.
           </DialogContentText>
           <TextField
-            autoFocus
             required
             fullWidth
             multiline

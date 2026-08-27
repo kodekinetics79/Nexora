@@ -194,7 +194,6 @@ export const AssignReasonDialog: React.FC<AssignReasonDialogProps> = ({
             : `${leadCount} of the selected inquiries already belong to someone else. Moving them to ${ownerName} is recorded against every name involved, so say why.`}
         </DialogContentText>
         <TextField
-          autoFocus
           fullWidth
           multiline
           rows={3}

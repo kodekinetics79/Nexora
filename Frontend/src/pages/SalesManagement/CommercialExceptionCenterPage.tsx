@@ -476,7 +476,6 @@ export default function CommercialExceptionCenterPage() {
             </>
           )}
           <TextField
-            autoFocus
             fullWidth
             required
             multiline

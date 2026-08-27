@@ -747,7 +747,7 @@ export default function AccountsReceivablePage() {
         <DialogContent sx={{ pt: 2 }}>
           <Stack spacing={2}>
             <Alert severity="warning">This governed action reverses receipt {reversing?.receiptNumber} and restores its invoice balances.</Alert>
-            <TextField label="Reason" value={reversalReason} onChange={event => setReversalReason(event.target.value)} required multiline minRows={3} autoFocus />
+            <TextField label="Reason" value={reversalReason} onChange={event => setReversalReason(event.target.value)} required multiline minRows={3} />
           </Stack>
         </DialogContent>
         <DialogActions><Button disabled={reversePayment.isPending} onClick={closeReversalDialog}>Cancel</Button><Button color="error" variant="contained" disabled={reversePayment.isPending || !reversalReason.trim()} onClick={() => reversePayment.mutate()}>Reverse payment</Button></DialogActions>
@@ -758,7 +758,7 @@ export default function AccountsReceivablePage() {
         <DialogContent sx={{ pt: 2 }}>
           <Stack spacing={2}>
             <Alert severity="warning">This {documentTypeLabel(cancelling?.documentType ?? 'Invoice')} draft will no longer be available for issuing.</Alert>
-            <TextField label="Reason" value={cancellationReason} onChange={event => setCancellationReason(event.target.value)} required multiline minRows={3} autoFocus helperText={`${cancellationReason.length}/500`} slotProps={{ htmlInput: { maxLength: 500 } }} />
+            <TextField label="Reason" value={cancellationReason} onChange={event => setCancellationReason(event.target.value)} required multiline minRows={3} helperText={`${cancellationReason.length}/500`} slotProps={{ htmlInput: { maxLength: 500 } }} />
           </Stack>
         </DialogContent>
         <DialogActions><Button disabled={cancelDocument.isPending} onClick={closeCancellationDialog}>Keep draft</Button><Button color="error" variant="contained" disabled={cancelDocument.isPending || !cancellationReason.trim()} onClick={() => cancelDocument.mutate()}>Cancel draft</Button></DialogActions>
@@ -828,7 +828,7 @@ export default function AccountsReceivablePage() {
               {exceptionAction?.action === 'cancel' && 'Cancellation closes this request without applying or releasing funds.'}
               {exceptionAction?.action === 'reverse' && 'Reversal restores the financial position and requires independent evidence.'}
             </Alert>
-            {exceptionNeedsReason && <TextField required multiline minRows={3} autoFocus label="Reason" value={exceptionReason} onChange={event => setExceptionReason(event.target.value)} helperText={`${exceptionReason.length}/500 · minimum 20 characters`} slotProps={{ htmlInput: { maxLength: 500 } }} />}
+            {exceptionNeedsReason && <TextField required multiline minRows={3} label="Reason" value={exceptionReason} onChange={event => setExceptionReason(event.target.value)} helperText={`${exceptionReason.length}/500 · minimum 20 characters`} slotProps={{ htmlInput: { maxLength: 500 } }} />}
             {exceptionNeedsEvidence && <TextField required label={exceptionAction?.action.includes('disbursement') ? 'Provider reference' : 'Evidence reference'} value={exceptionEvidence} onChange={event => setExceptionEvidence(event.target.value)} slotProps={{ htmlInput: { maxLength: exceptionAction?.action.includes('disbursement') ? 100 : 250 } }} />}
           </Stack>
         </DialogContent>

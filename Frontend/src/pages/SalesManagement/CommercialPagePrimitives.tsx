@@ -70,7 +70,7 @@ export function QueryState({ loading, error, empty, onRetry, emptyText, children
 }
 
 export function ResponsiveTable({ label, children }: { label: string; children: ReactNode }) {
-  return <Paper variant="outlined" role="region" aria-label={label} tabIndex={0} sx={{ overflowX: 'auto', maxWidth: '100%' }}>{children}</Paper>;
+  return <Paper variant="outlined" role="region" aria-label={label} sx={{ overflowX: 'auto', maxWidth: '100%' }}>{children}</Paper>;
 }
 
 export function StatusChip({ value }: { value: string }) {

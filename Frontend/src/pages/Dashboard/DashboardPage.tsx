@@ -266,7 +266,7 @@ export default function DashboardPage() {
       ) : null}
 
       {dashboard.isLoading ? (
-        <Box sx={{ minHeight: 320, display: 'grid', placeItems: 'center' }}><CircularProgress /></Box>
+        <Box sx={{ minHeight: 320, display: 'grid', placeItems: 'center' }}><CircularProgress aria-label="Loading dashboard" /></Box>
       ) : data?.kpis.length ? (
         <>
           {/* The "Commercial Attention" block that used to sit here was seven

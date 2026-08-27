@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Phase 1 base journey: Lead -> RFQ -> Customer Quote Draft, end to end, locally.
+# Governed pilot gate: Lead decision workbench -> RFQ Promotion, end to end, locally and in CI.
 #
 # One command. Starts PostgreSQL, migrates, starts the backend (which also hosts the extraction
 # worker), seeds the deterministic golden scenario, starts the frontend, resolves every id the
@@ -225,7 +225,7 @@ FRONTEND_PID=$!
 wait_for "$FRONTEND_URL" "Frontend" 90
 
 # ---------------------------------------------------------------- 6. browser journey
-log "Running the Phase 1 base journey in a real browser."
+log "Running the governed Lead-to-RFQ pilot gate in a real browser."
 set +e
 (
   cd "$FRONTEND_DIR"
@@ -240,6 +240,6 @@ set -e
 
 log "Artifacts: $FRONTEND_DIR/playwright-report (HTML), $FRONTEND_DIR/test-results (traces, screenshots, video), $RUN_DIR (service logs)."
 if [[ $PLAYWRIGHT_STATUS -ne 0 ]]; then
-  die "Base journey FAILED (exit $PLAYWRIGHT_STATUS). Open $FRONTEND_DIR/playwright-report/index.html"
+  die "Governed pilot gate FAILED (exit $PLAYWRIGHT_STATUS). Open $FRONTEND_DIR/playwright-report/index.html"
 fi
-log "BASE LEAD -> RFQ -> CUSTOMER QUOTE DRAFT: browser journey PASSED."
+log "GOVERNED LEAD DECISION -> RFQ PROMOTION: browser journey PASSED."

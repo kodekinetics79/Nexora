@@ -99,7 +99,7 @@ export default function CommercialMemoryPage() {
       <DialogContent dividers><Stack spacing={2}>
         <Alert severity={governanceDialog?.action === "disable" ? "warning" : "info"}>This records a new auditable governance version. The observed evidence remains unchanged.</Alert>
         <Box><Typography variant="caption" color="text.secondary">Signal</Typography><Typography sx={{ fontWeight: 700 }}>{governanceDialog?.signal.subject}</Typography><Typography variant="body2">{governanceDialog?.signal.value}</Typography></Box>
-        <TextField autoFocus required multiline minRows={3} label="Decision reason" value={governanceReason} onChange={(event) => setGovernanceReason(event.target.value)} helperText="Explain the business evidence for this decision." />
+        <TextField required multiline minRows={3} label="Decision reason" value={governanceReason} onChange={(event) => setGovernanceReason(event.target.value)} helperText="Explain the business evidence for this decision." />
       </Stack></DialogContent>
       <DialogActions><Button onClick={closeGovernanceDialog} disabled={governanceMutation.isPending}>Cancel</Button><Button variant="contained" startIcon={governanceDialog?.action === "approve" ? <CheckCircle2 size={17} /> : governanceDialog?.action === "disable" ? <Ban size={17} /> : <RotateCcw size={17} />} disabled={!governanceReason.trim() || governanceMutation.isPending} onClick={() => governanceMutation.mutate()}>{governanceMutation.isPending ? "Recording..." : governanceDialog ? readable(governanceDialog.action) : "Record"}</Button></DialogActions>
     </Dialog>

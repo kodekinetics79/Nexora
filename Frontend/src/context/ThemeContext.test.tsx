@@ -1,7 +1,21 @@
 import { describe, expect, it } from 'vitest';
 import { render } from '@testing-library/react';
 import CssBaseline from '@mui/material/CssBaseline';
+import { getContrastRatio, useTheme } from '@mui/material/styles';
 import { ThemeContextProvider } from './ThemeContext';
+
+const PaletteProbe = () => {
+  const theme = useTheme();
+  return (
+    <output
+      data-page={theme.palette.background.default}
+      data-paper={theme.palette.background.paper}
+      data-disabled={theme.palette.text.disabled}
+      data-warning={theme.palette.warning.main}
+      data-info={theme.palette.info.main}
+    />
+  );
+};
 
 /**
  * Every stylesheet emotion has injected into the document, as text.
@@ -58,5 +72,20 @@ describe('the live theme', () => {
     // The selector must be scoped. A bare `body`/`*` rule would align digits everywhere,
     // including paragraphs, which is a design decision nobody asked for.
     expect(injectedCss()).not.toMatch(/(?:body|\*)\s*\{[^}]*font-variant-numeric/);
+  });
+
+  it('keeps caption and semantic text tokens above the WCAG AA text floor', () => {
+    const { container } = render(
+      <ThemeContextProvider>
+        <PaletteProbe />
+      </ThemeContextProvider>,
+    );
+
+    const probe = container.querySelector('output')!;
+    const page = probe.dataset.page!;
+    const paper = probe.dataset.paper!;
+    expect(getContrastRatio(probe.dataset.disabled!, page)).toBeGreaterThanOrEqual(4.5);
+    expect(getContrastRatio(probe.dataset.warning!, paper)).toBeGreaterThanOrEqual(4.5);
+    expect(getContrastRatio(probe.dataset.info!, paper)).toBeGreaterThanOrEqual(4.5);
   });
 });

@@ -1,3 +1,4 @@
+using System.IdentityModel.Tokens.Jwt;
 using System.Reflection;
 using System.Security.Claims;
 using ERP_RFQ_Automation.Billing.Controllers;
@@ -5,8 +6,20 @@ using ERP_RFQ_Automation.Platform.Auth;
 using ERP_RFQ_Automation.Platform.Controllers;
 using ERP_RFQ_Automation.Platform.Models;
 using ERP_RFQ_Automation.Platform.Provisioning;
+using ERP_RFQ_Automation.Platform.Services;
+using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.Abstractions;
+using Microsoft.AspNetCore.Mvc.Filters;
+using Microsoft.AspNetCore.Mvc.ModelBinding;
+using Microsoft.AspNetCore.Routing;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ERP_RFQ_Automation.Tests;
 
@@ -178,9 +191,10 @@ public sealed class RedTeamSeparationOfDutiesTests
     [InlineData("Purge")]
     [InlineData("ErasePersonalData")]
     [InlineData("ScheduleDeletion")]
+    [InlineData("AttestNonCustomer")]
     [InlineData("CancelDeletion")]
     [InlineData("PurgePreview")]
-    public async Task Every_destructive_lifecycle_verb_refuses_a_SupportAdmin(string action)
+    public async Task Every_destructive_or_sensitive_lifecycle_verb_refuses_a_SupportAdmin(string action)
     {
         var method = typeof(ERP_RFQ_Automation.Platform.Lifecycle.TenantOffboardingController)
             .GetMethod(action);
@@ -190,6 +204,71 @@ public sealed class RedTeamSeparationOfDutiesTests
         Assert.False(await CanReachAsync(method!, PlatformRole.BillingAdmin));
         Assert.False(await CanReachAsync(method!, PlatformRole.ReadOnlyOps));
         Assert.True(await CanReachAsync(method!, PlatformRole.Owner));
+    }
+
+    [Fact]
+    public async Task Non_customer_attestation_requires_an_Owner_and_a_recent_password_step_up()
+    {
+        var action = typeof(ERP_RFQ_Automation.Platform.Lifecycle.TenantOffboardingController)
+            .GetMethod("AttestNonCustomer")!;
+
+        Assert.True(await CanReachAsync(action, PlatformRole.Owner));
+        Assert.False(await CanReachAsync(action, PlatformRole.SupportAdmin));
+        Assert.False(await CanReachAsync(action, PlatformRole.BillingAdmin));
+
+        var highRisk = Assert.Single(
+            action.GetCustomAttributes<PlatformHighRiskOperationAttribute>());
+        Assert.Equal("tenant.attest-non-customer", highRisk.Operation);
+
+        // Exercise the real high-risk filter with a password-only Owner session. This is the
+        // relaxed-MFA path where the Owner policy can be satisfied without an amr=mfa claim; the
+        // route-level high-risk gate must then demand a fresh, server-side password proof.
+        using var db = new TestDb();
+        await using var context = db.ContextFor(null);
+        var now = DateTime.UtcNow;
+        var user = new PlatformUser
+        {
+            Email = "attestation-owner@example.test",
+            PasswordHash = "not-used-by-this-filter",
+            PlatformRole = PlatformRole.Owner,
+            IsActive = true,
+            CreatedOn = now,
+            CreatedBy = "test"
+        };
+        context.Set<PlatformUser>().Add(user);
+        await context.SaveChangesAsync();
+
+        const string jti = "attest-non-customer-step-up-test";
+        var session = new PlatformSession
+        {
+            Jti = jti,
+            PlatformUserId = user.Id,
+            SessionGeneration = 1,
+            IssuedAtUtc = now.AddHours(-1),
+            ExpiresAtUtc = now.AddHours(1),
+            LastPasswordReauthAtUtc = now.AddMinutes(-6)
+        };
+        context.Set<PlatformSession>().Add(session);
+        await context.SaveChangesAsync();
+
+        var options = PlatformMfaPolicyOptions.CreateFromConfiguration(
+            new ConfigurationBuilder().Build(), new TestEnvironment());
+        var filter = new PlatformHighRiskOperationFilter(
+            highRisk.Operation, context, options,
+            new PlatformAuditService(context, NullLogger<PlatformAuditService>.Instance));
+        var principal = PasswordOnlyOwner(user.Id, user.Email, jti);
+
+        var stale = FilterContext(principal);
+        await filter.OnAuthorizationAsync(stale);
+        var refused = Assert.IsType<ObjectResult>(stale.Result);
+        Assert.Equal(StatusCodes.Status403Forbidden, refused.StatusCode);
+
+        session.LastPasswordReauthAtUtc = DateTime.UtcNow;
+        await context.SaveChangesAsync();
+
+        var recent = FilterContext(principal);
+        await filter.OnAuthorizationAsync(recent);
+        Assert.Null(recent.Result);
     }
 
     /// <summary>
@@ -288,4 +367,31 @@ public sealed class RedTeamSeparationOfDutiesTests
             new Claim(PlatformAuthConstants.AuthenticationMethodClaim,
                 PlatformAuthConstants.MfaAuthenticationMethod)
         ], PlatformAuthConstants.Scheme));
+
+    private static ClaimsPrincipal PasswordOnlyOwner(long userId, string email, string jti) =>
+        new(new ClaimsIdentity(
+        [
+            new Claim(JwtRegisteredClaimNames.Sub, userId.ToString()),
+            new Claim("email", email),
+            new Claim(JwtRegisteredClaimNames.Jti, jti),
+            new Claim(PlatformAuthConstants.ScopeClaim, PlatformAuthConstants.PlatformScopeValue),
+            new Claim(PlatformAuthConstants.PlatformRoleClaim, nameof(PlatformRole.Owner))
+        ], PlatformAuthConstants.Scheme));
+
+    private static AuthorizationFilterContext FilterContext(ClaimsPrincipal principal)
+    {
+        var http = new DefaultHttpContext { User = principal };
+        return new AuthorizationFilterContext(
+            new ActionContext(http, new RouteData(), new ActionDescriptor(), new ModelStateDictionary()),
+            []);
+    }
+
+    private sealed class TestEnvironment : IHostEnvironment
+    {
+        public string EnvironmentName { get; set; } = Environments.Development;
+        public string ApplicationName { get; set; } = "ERP_RFQ_Automation.Tests";
+        public string ContentRootPath { get; set; } = AppContext.BaseDirectory;
+        public Microsoft.Extensions.FileProviders.IFileProvider ContentRootFileProvider { get; set; } =
+            new Microsoft.Extensions.FileProviders.NullFileProvider();
+    }
 }

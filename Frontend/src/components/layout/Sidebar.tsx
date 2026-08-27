@@ -235,94 +235,92 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
     const groupListId = `${instanceId}-group-${group.key}`;
 
     return (
-      <React.Fragment key={group.key}>
-        <ListItem disablePadding sx={{ display: 'block', mb: 0.5 }}>
-          <Tooltip title={collapsed ? group.title : ''} placement="right">
-            <ListItemButton
-              onClick={() => setOpenGroups((prev) => ({ ...prev, [group.key]: !prev[group.key] }))}
-              selected={isSelected}
-              aria-expanded={hasCollapsibleGroup ? isOpen : undefined}
-              aria-controls={hasCollapsibleGroup && isOpen ? groupListId : undefined}
-              aria-label={collapsed ? group.title : undefined}
-              sx={rowSx(isSelected)}
+      <ListItem key={group.key} disablePadding sx={{ display: 'block', mb: 0.5 }}>
+        <Tooltip title={collapsed ? group.title : ''} placement="right">
+          <ListItemButton
+            onClick={() => setOpenGroups((prev) => ({ ...prev, [group.key]: !prev[group.key] }))}
+            selected={isSelected}
+            aria-expanded={hasCollapsibleGroup ? isOpen : undefined}
+            aria-controls={hasCollapsibleGroup && isOpen ? groupListId : undefined}
+            aria-label={collapsed ? group.title : undefined}
+            sx={rowSx(isSelected)}
+          >
+            <ListItemIcon
+              sx={{
+                minWidth: 0,
+                mr: collapsed ? 0 : 1.5,
+                justifyContent: 'center',
+                color: 'inherit',
+                opacity: isSelected ? 1 : 0.7,
+              }}
             >
-              <ListItemIcon
-                sx={{
-                  minWidth: 0,
-                  mr: collapsed ? 0 : 1.5,
-                  justifyContent: 'center',
-                  color: 'inherit',
-                  opacity: isSelected ? 1 : 0.7,
-                }}
-              >
-                {React.cloneElement(group.entries[0].icon as React.ReactElement<any>, {
-                  sx: { fontSize: 20 },
-                })}
-              </ListItemIcon>
-              {!collapsed && (
-                <>
-                  <ListItemText
-                    primary={group.title}
-                    slotProps={{ primary: { sx: { fontSize: '0.875rem', fontWeight: isSelected ? 600 : 500 } } }}
-                  />
-                  {isOpen ? <ExpandLess /> : <ExpandMore />}
-                </>
-              )}
-            </ListItemButton>
-          </Tooltip>
-        </ListItem>
-
+              {React.cloneElement(group.entries[0].icon as React.ReactElement<any>, {
+                sx: { fontSize: 20 },
+              })}
+            </ListItemIcon>
+            {!collapsed && (
+              <>
+                <ListItemText
+                  primary={group.title}
+                  slotProps={{ primary: { sx: { fontSize: '0.875rem', fontWeight: isSelected ? 600 : 500 } } }}
+                />
+                {isOpen ? <ExpandLess /> : <ExpandMore />}
+              </>
+            )}
+          </ListItemButton>
+        </Tooltip>
         {hasCollapsibleGroup && (
           <Collapse in={isOpen} timeout="auto" unmountOnExit>
-            <List component="div" disablePadding id={groupListId} aria-label={group.title}>
+            <List component="ul" disablePadding id={groupListId} aria-label={group.title}>
               {group.entries.map((entry) => {
                 const isChildSelected = isPathMatched(entry.path, location);
                 return (
-                  <ListItemButton
-                    key={entry.key}
-                    onClick={() => navigateTo(entry.path)}
-                    selected={isChildSelected}
-                    aria-current={isChildSelected ? 'page' : undefined}
-                    sx={{
-                      minHeight: 40,
-                      pl: 4,
-                      pr: 2,
-                      mx: 1,
-                      mb: 0.2,
-                      borderRadius: 1.5,
-                      color: 'text.secondary',
-                      '&:hover': { backgroundColor: 'action.hover' },
-                      // A selected child used primary.main as 0.8rem text, which drops under 4.5:1
-                      // for the lighter brand colours (SC 1.4.3). Body colour plus weight, a tinted
-                      // background and an accent bar instead.
-                      '&.Mui-selected': {
-                        color: 'text.primary',
-                        backgroundColor: (theme) => alpha(theme.palette.primary.main, 0.14),
-                        boxShadow: (theme) => `inset 3px 0 0 0 ${theme.palette.primary.main}`,
-                      },
-                      '&.Mui-selected:hover': {
-                        backgroundColor: (theme) => alpha(theme.palette.primary.main, 0.22),
-                      },
-                      '&.Mui-focusVisible': {
-                        outline: (theme) => `3px solid ${theme.palette.primary.main}`,
-                        outlineOffset: -1,
-                      },
-                    }}
-                  >
-                    <ListItemIcon sx={{ minWidth: 24, color: 'inherit' }}>
-                      <BulletIcon sx={{ fontSize: 6 }} />
-                    </ListItemIcon>
-                    <ListItemText
-                      primary={navEntryLabel(entry, t)}
-                      slotProps={{ primary: { sx: { fontSize: '0.8rem', fontWeight: isChildSelected ? 600 : 400 } } }}
-                    />
-                  </ListItemButton>
+                  <ListItem key={entry.key} disablePadding sx={{ display: 'block' }}>
+                    <ListItemButton
+                      onClick={() => navigateTo(entry.path)}
+                      selected={isChildSelected}
+                      aria-current={isChildSelected ? 'page' : undefined}
+                      sx={{
+                        minHeight: 40,
+                        pl: 4,
+                        pr: 2,
+                        mx: 1,
+                        mb: 0.2,
+                        borderRadius: 1.5,
+                        color: 'text.secondary',
+                        '&:hover': { backgroundColor: 'action.hover' },
+                        // A selected child used primary.main as 0.8rem text, which drops under 4.5:1
+                        // for the lighter brand colours (SC 1.4.3). Body colour plus weight, a tinted
+                        // background and an accent bar instead.
+                        '&.Mui-selected': {
+                          color: 'text.primary',
+                          backgroundColor: (theme) => alpha(theme.palette.primary.main, 0.14),
+                          boxShadow: (theme) => `inset 3px 0 0 0 ${theme.palette.primary.main}`,
+                        },
+                        '&.Mui-selected:hover': {
+                          backgroundColor: (theme) => alpha(theme.palette.primary.main, 0.22),
+                        },
+                        '&.Mui-focusVisible': {
+                          outline: (theme) => `3px solid ${theme.palette.primary.main}`,
+                          outlineOffset: -1,
+                        },
+                      }}
+                    >
+                      <ListItemIcon sx={{ minWidth: 24, color: 'inherit' }}>
+                        <BulletIcon sx={{ fontSize: 6 }} />
+                      </ListItemIcon>
+                      <ListItemText
+                        primary={navEntryLabel(entry, t)}
+                        slotProps={{ primary: { sx: { fontSize: '0.8rem', fontWeight: isChildSelected ? 600 : 400 } } }}
+                      />
+                    </ListItemButton>
+                  </ListItem>
                 );
               })}
             </List>
           </Collapse>
         )}
-      </React.Fragment>
+      </ListItem>
     );
   };
 
