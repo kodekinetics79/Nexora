@@ -173,6 +173,79 @@ public sealed class TenantWorkGateSuspensionTests
         Assert.Equal([Active], admitted);
     }
 
+    [Theory]
+    [InlineData(TenantStatus.Active, TenantStatus.Archived)]
+    [InlineData(TenantStatus.Archived, TenantStatus.Active)]
+    public async Task Ambiguous_mailbox_ownership_fails_closed_regardless_of_tenant_order(
+        TenantStatus firstStatus, TenantStatus secondStatus)
+    {
+        using var harness = new TenantWorkGateHarness();
+        await harness.SeedTenantAsync(Active, status: null, "duplicate-owner-bu");
+        await using (var db = harness.Context())
+        {
+            db.Set<Tenant>().AddRange(
+                new Tenant
+                {
+                    Name = "First owner",
+                    Slug = $"duplicate-first-{firstStatus.ToString().ToLowerInvariant()}",
+                    Status = firstStatus,
+                    PrimaryBusinessUnitId = Active,
+                    CreatedBy = "tests",
+                    CreatedOn = DateTime.UtcNow
+                },
+                new Tenant
+                {
+                    Name = "Second owner",
+                    Slug = $"duplicate-second-{secondStatus.ToString().ToLowerInvariant()}",
+                    Status = secondStatus,
+                    PrimaryBusinessUnitId = Active,
+                    CreatedBy = "tests",
+                    CreatedOn = DateTime.UtcNow.AddSeconds(1)
+                });
+            await db.SaveChangesAsync();
+        }
+        harness.Evict(Active);
+
+        using var scope = harness.ScopeFactory.CreateScope();
+        var snapshot = await scope.ServiceProvider.GetRequiredService<
+            ERP_RFQ_Automation.Platform.Entitlements.ITenantAccessService>()
+            .GetFreshAccessAsync(Active);
+        var admitted = await harness.MailboxGate(scope).FilterPollableFreshAsync([Active]);
+
+        Assert.True(snapshot.IsUnresolvable);
+        Assert.Empty(admitted);
+    }
+
+    [Fact]
+    public async Task Fresh_pre_authentication_fence_refuses_a_tenant_archived_on_another_instance()
+    {
+        using var harness = new TenantWorkGateHarness();
+        await harness.SeedTenantAsync(Active, TenantStatus.Active, "fresh-pre-auth");
+        await SeedMailboxAsync(harness, Active);
+
+        // Prime this process's ordinary lifecycle cache as Active, then mutate through a separate
+        // context without eviction — the exact shape of another instance archiving the tenant.
+        using (var scope = harness.ScopeFactory.CreateScope())
+            Assert.Equal([Active], await harness.MailboxGate(scope).FilterPollableAsync([Active]));
+        await using (var db = harness.Context())
+        {
+            var tenant = await db.Set<Tenant>().IgnoreQueryFilters()
+                .SingleAsync(t => t.PrimaryBusinessUnitId == Active);
+            tenant.Status = TenantStatus.Archived;
+            await db.SaveChangesAsync();
+        }
+
+        var report = await PollAsync(harness);
+
+        Assert.Empty(report.Mailboxes);
+        await using var verify = harness.Context();
+        var mailbox = await verify.EmailConfigurations.IgnoreQueryFilters()
+            .SingleAsync(x => x.BusinessUnitId == Active);
+        Assert.Null(mailbox.LastPollAttemptOn);
+        Assert.Null(mailbox.LastSuccessfulPollOn);
+        Assert.Equal(0, mailbox.ConsecutivePollFailures);
+    }
+
     [Fact]
     public async Task Startup_readiness_does_not_resurrect_an_orphaned_mailbox_failure()
     {
@@ -209,6 +282,43 @@ public sealed class TenantWorkGateSuspensionTests
         Assert.Equal(activeMailbox.Id, seeded.MailboxId);
         Assert.Equal(15_431, seeded.ConsecutiveFailures);
         Assert.DoesNotContain(health.Mailboxes, mailbox => mailbox.MailboxId == orphanMailbox.Id);
+    }
+
+    [Fact]
+    public async Task Standby_readiness_refresh_retires_a_tenant_archived_on_another_instance()
+    {
+        using var harness = new TenantWorkGateHarness();
+        await harness.SeedTenantAsync(Active, TenantStatus.Active, "standby-refresh");
+        await SeedMailboxAsync(harness, Active);
+        await using (var db = harness.Context())
+        {
+            var mailbox = await db.EmailConfigurations.IgnoreQueryFilters()
+                .SingleAsync(x => x.BusinessUnitId == Active);
+            mailbox.LastPollAttemptOn = DateTime.UtcNow;
+            mailbox.LastPollError = "authentication failed";
+            mailbox.ConsecutivePollFailures = 15_431;
+            await db.SaveChangesAsync();
+        }
+
+        var health = new EmailPollerHealth();
+        var worker = new EmailBackgroundService(
+            harness.Services, NullLogger<EmailBackgroundService>.Instance, pollerHealth: health);
+        await worker.SeedChannelHealthAsync(CancellationToken.None);
+        Assert.Single(health.Mailboxes);
+
+        // No cache eviction: this archive represents a lifecycle change committed by a different
+        // application instance while this one is standing by behind the advisory lock.
+        await using (var db = harness.Context())
+        {
+            var tenant = await db.Set<Tenant>().IgnoreQueryFilters()
+                .SingleAsync(t => t.PrimaryBusinessUnitId == Active);
+            tenant.Status = TenantStatus.Archived;
+            await db.SaveChangesAsync();
+        }
+
+        await worker.RefreshChannelHealthEligibilityAsync(CancellationToken.None);
+
+        Assert.Empty(health.Mailboxes);
     }
 
     [Fact]

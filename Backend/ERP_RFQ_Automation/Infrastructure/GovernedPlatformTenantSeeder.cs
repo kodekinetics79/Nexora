@@ -103,16 +103,21 @@ internal static class GovernedPlatformTenantSeeder
             logger.LogInformation("Seeded local plan '{PlanCode}'.", planCode);
         }
 
-        // ORDER BY Id, exactly as TenantAccessService.CoreQuery does. Nothing enforces one Tenant
-        // per PrimaryBusinessUnitId — there is no unique index on that column, and the enforcement
-        // query carries an explicit OrderBy because its authors knew that. Resolving the row a
-        // different way here is the worst kind of divergence: with two candidate rows the seeder
-        // would attach the plan to one and log that it had, while every [RequiresEntitlement] check
-        // read the other and kept answering 403. The diagnosis would then start from a log line that
-        // is false. Same predicate, same ordering, same row.
-        var tenant = await db.Set<Tenant>().IgnoreQueryFilters()
+        // PrimaryBusinessUnitId is not protected by a unique index in the legacy schema. Never
+        // repair an ambiguous mapping by silently choosing one owner: TenantAccessService refuses
+        // the same state, and attaching a plan to an arbitrary row would produce a successful seed
+        // log while every entitlement check correctly remained closed.
+        var tenantOwners = await db.Set<Tenant>().IgnoreQueryFilters()
             .OrderBy(t => t.Id)
-            .FirstOrDefaultAsync(t => t.PrimaryBusinessUnitId == businessUnit.Id);
+            .Where(t => t.PrimaryBusinessUnitId == businessUnit.Id)
+            .Take(2)
+            .ToListAsync();
+        if (tenantOwners.Count > 1)
+            throw new InvalidOperationException(
+                $"Cannot seed business unit {businessUnit.Id}: multiple platform tenants claim "
+                + "it as PrimaryBusinessUnitId. Reconcile the tenant ownership rows first.");
+
+        var tenant = tenantOwners.SingleOrDefault();
         if (tenant is null)
         {
             // The slug is derived from the business unit code the same way the provisioning wizard

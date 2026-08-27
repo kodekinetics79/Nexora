@@ -157,6 +157,17 @@ public sealed class TenantAccessService : ITenantAccessService
         if (_cache.TryGetValue(CacheKey(businessUnitId), out TenantAccessSnapshot? cached) && cached is not null)
             return cached;
 
+        return await ResolveAndCacheAsync(businessUnitId, ct);
+    }
+
+    public Task<TenantAccessSnapshot> GetFreshAccessAsync(
+        long businessUnitId, CancellationToken ct = default)
+        => ResolveAndCacheAsync(businessUnitId, ct);
+
+    private async Task<TenantAccessSnapshot> ResolveAndCacheAsync(
+        long businessUnitId, CancellationToken ct)
+    {
+
         TenantAccessSnapshot snapshot;
         TimeSpan ttl;
         try
@@ -217,7 +228,17 @@ public sealed class TenantAccessService : ITenantAccessService
     /// </summary>
     private async Task<TenantAccessSnapshot> ResolveAsync(long businessUnitId, CancellationToken ct)
     {
-        var core = await CoreQuery(businessUnitId).FirstOrDefaultAsync(ct);
+        // PrimaryBusinessUnitId is intentionally not unique in the legacy schema. Picking the
+        // first row made access depend on insertion order: an old Active tenant could keep a
+        // mailbox polling after a newer Archived owner was recorded, while the reverse ordering
+        // could disable a valid tenant. Two owners is an ambiguous authority, so refuse it.
+        var owners = await CoreQuery(businessUnitId).Take(2).ToListAsync(ct);
+        if (owners.Count > 1)
+            throw new InvalidOperationException(
+                $"Business unit {businessUnitId} is claimed by multiple platform tenants; "
+                + "lifecycle access cannot be resolved safely.");
+
+        var core = owners.SingleOrDefault();
         if (core is null)
             // RESOLVED, with no tenant. The platform plane answered; this BusinessUnit simply has
             // no Tenant row, so there is no status to enforce and no plan to limit. Kept as an

@@ -376,6 +376,22 @@ namespace ERP_RFQ_Automation.Services
                         continue;
                     }
 
+                    // The lifecycle snapshot used during discovery is cached for normal request
+                    // throughput and may be stale on this instance after another instance archives
+                    // the tenant. Authentication is the irreversible external boundary: re-read
+                    // the authoritative platform row now, immediately before any IMAP connection.
+                    // Ambiguous ownership and control-plane failures both refuse the connection.
+                    if (_mailboxWorkGate is not null
+                        && !await _mailboxWorkGate.MayPollFreshAsync(handle.BusinessUnitId))
+                    {
+                        _logger.LogInformation(
+                            "Skipping mailbox {Email} (configuration {ConfigurationId}, BU "
+                            + "{BusinessUnitId}) because its authoritative tenant lifecycle "
+                            + "state changed or could not be resolved after discovery.",
+                            handle.EmailAddress, handle.Id, handle.BusinessUnitId);
+                        continue;
+                    }
+
                     _logger.LogInformation("Starting process for configuration: {Email}", config.EmailAddress);
                     outcome = await ProcessConfigAsync(mailboxScope.ServiceProvider, config);
                 }
@@ -600,6 +616,7 @@ namespace ERP_RFQ_Automation.Services
                     pollSocket.Dispose();
                     throw;
                 }
+                await RefuseAuthenticationIfTenantChangedAsync(config);
                 await client.AuthenticateAsync(
                     ERP_RFQ_Automation.Mailbox.MailboxLoginIdentity.ForInbound(config), config.Password);
                 var inbox = client.Inbox;
@@ -662,6 +679,7 @@ namespace ERP_RFQ_Automation.Services
                                 reconnectSocket.Dispose();
                                 throw;
                             }
+                            await RefuseAuthenticationIfTenantChangedAsync(config);
                             await client.AuthenticateAsync(
                     ERP_RFQ_Automation.Mailbox.MailboxLoginIdentity.ForInbound(config), config.Password);
                             await client.Inbox.OpenAsync(FolderAccess.ReadWrite);
@@ -708,6 +726,18 @@ namespace ERP_RFQ_Automation.Services
                 _logger.LogError(ex, "IMAP error for config: {Email}", config.EmailAddress);
                 return FailedOutcome(config, ex, window, downloaded, alreadyIngested, tally);
             }
+        }
+
+        private async Task RefuseAuthenticationIfTenantChangedAsync(EmailConfiguration config)
+        {
+            if (_mailboxWorkGate is null
+                || await _mailboxWorkGate.MayPollFreshAsync(config.BusinessUnitId))
+                return;
+
+            throw new InvalidOperationException(
+                $"Mailbox authentication refused for {config.EmailAddress} (BU "
+                + $"{config.BusinessUnitId}): the authoritative tenant lifecycle state is no "
+                + "longer pollable or could not be resolved.");
         }
 
         /// <summary>The ingest keys already recorded for the messages in this window. One query

@@ -203,6 +203,21 @@ public interface ITenantAccessService
     Task<TenantAccessSnapshot> GetAccessAsync(long businessUnitId, CancellationToken ct = default);
 
     /// <summary>
+    /// Re-reads the platform control plane without accepting this process's cached snapshot.
+    /// Use only at an irreversible/external boundary where the ordinary 60-second convergence
+    /// window is unsafe, such as immediately before authenticating to a customer mailbox.
+    /// </summary>
+    async Task<TenantAccessSnapshot> GetFreshAccessAsync(
+        long businessUnitId, CancellationToken ct = default)
+    {
+        // Compatibility implementation for deliberately reduced test doubles. The production
+        // service overrides this method and bypasses the cache atomically; an implementation
+        // that only supports Evict/Get still obtains the same externally visible contract.
+        Evict(businessUnitId);
+        return await GetAccessAsync(businessUnitId, ct);
+    }
+
+    /// <summary>
     /// Drops the cached snapshot for one BusinessUnit so the next resolution re-reads
     /// the platform plane. Called by tenant lifecycle mutations (suspend/resume/
     /// archive/restore, plan change) so enforcement is immediate on the mutating
