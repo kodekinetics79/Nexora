@@ -3,6 +3,10 @@ import { useLocation } from 'react-router-dom';
 import { Box } from '@mui/material';
 import useDocumentTitle from '../../hooks/useDocumentTitle';
 import { resolveRouteTitle } from '../../utils/routeTitles';
+import {
+  getPlatformSessionPresence,
+  subscribePlatformSessionPresence,
+} from '../../platform/auth/platformSessionPresence';
 import { MAIN_CONTENT_ID } from './SkipLink';
 
 /** Roughly 500ms of frames — enough for a lazy route chunk to mount `<main>`. */
@@ -25,7 +29,18 @@ const MAX_FOCUS_ATTEMPTS = 30;
  */
 const RouteAnnouncer: React.FC = () => {
   const { pathname, search, hash } = useLocation();
-  const routeTitle = resolveRouteTitle(pathname);
+  const isPlatformAuthed = React.useSyncExternalStore(
+    subscribePlatformSessionPresence,
+    getPlatformSessionPresence,
+    () => false,
+  );
+  // PlatformGuard renders the operator sign-in in place at the requested
+  // console URL. Until a platform session exists, announcing the destination
+  // page (for example "Tenants") claims that protected content has loaded
+  // when the person is actually still at the authentication boundary.
+  const routeTitle = pathname.startsWith('/platform') && !isPlatformAuthed
+    ? 'Platform Console Sign In'
+    : resolveRouteTitle(pathname);
   const [announcement, setAnnouncement] = React.useState('');
   // Tracks the last location we reacted to. A boolean "first render" flag is
   // not enough: React StrictMode double-invokes effects in development, so the
@@ -35,7 +50,10 @@ const RouteAnnouncer: React.FC = () => {
   useDocumentTitle(routeTitle);
 
   React.useEffect(() => {
-    const locationKey = `${pathname}${search}${hash}`;
+    // The effective title is part of the location identity. PlatformGuard
+    // renders sign-in in place; when a platform session is established the
+    // path stays the same but the screen and title legitimately change.
+    const locationKey = `${pathname}${search}${hash}|${routeTitle ?? ''}`;
     // Same location as last time — a StrictMode re-run or an unrelated
     // re-render, not a navigation.
     if (lastHandledLocation.current === locationKey) return;

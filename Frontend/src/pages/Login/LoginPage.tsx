@@ -34,7 +34,7 @@ import { useAppTheme } from '../../context/ThemeContext';
 import { contrastTextFor } from '../../utils/contrast';
 import Branding from '../../components/common/Branding';
 import axiosInstance from '../../api/axiosInstance';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import userService, { type MePermissionsResponse } from '../../api/services/userService';
 import { presentableErrorMessage } from '../../utils/apiErrors';
 import { MAIN_CONTENT_ID } from '../../components/layout/SkipLink';
@@ -604,6 +604,37 @@ const LoginPage: React.FC = () => {
             })}
           </RadialWrapper>
 
+          <Box
+            component="aside"
+            aria-label="Nexora inquiry-to-RFQ workflow"
+            sx={{
+              position: 'absolute',
+              left: '50%',
+              top: '50%',
+              transform: 'translate(-50%, -50%)',
+              zIndex: 15,
+              width: 270,
+              px: 2.5,
+              py: 2.25,
+              textAlign: 'center',
+              borderRadius: 4,
+              border: '1px solid',
+              borderColor: 'divider',
+              bgcolor: mode === 'dark' ? 'rgba(15, 23, 42, 0.9)' : 'rgba(255, 255, 255, 0.92)',
+              backdropFilter: 'blur(14px)',
+              boxShadow: mode === 'dark'
+                ? '0 18px 50px -28px rgba(0, 0, 0, 0.95)'
+                : '0 18px 50px -28px rgba(15, 23, 42, 0.35)',
+            }}
+          >
+            <Typography component="p" variant="h5" sx={{ fontWeight: 900, lineHeight: 1.15, mb: 1 }}>
+              Email evidence to governed RFQ
+            </Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ lineHeight: 1.55 }}>
+              Capture. Reconcile. Decide. Promote. Every approved line stays traceable to its source.
+            </Typography>
+          </Box>
+
           <Box sx={{ position: 'absolute', top: 50, left: 50, zIndex: 30 }}>
             <Branding fontSize={28} />
           </Box>
@@ -749,9 +780,10 @@ const LoginPage: React.FC = () => {
                       password on the sign-in page" the whole time. */}
                   <Box sx={{ mt: -3, mb: 3, display: 'flex', justifyContent: 'flex-end' }}>
                     <Button
+                      component={Link}
+                      to="/forgot-password"
                       variant="text"
                       size="small"
-                      onClick={() => navigate('/forgot-password')}
                       sx={{ fontWeight: 700, textTransform: 'none' }}
                     >
                       Forgot password?
@@ -810,9 +842,10 @@ const LoginPage: React.FC = () => {
                   Platform Owners use a separate control-plane account for cross-tenant administration.
                 </Typography>
                 <Button
+                  component={Link}
+                  to="/platform/tenants"
                   variant="text"
                   size="small"
-                  onClick={() => navigate('/platform/tenants')}
                   sx={{ fontWeight: 800, textTransform: 'none' }}
                 >
                   Platform Owner? Manage or delete tenants
