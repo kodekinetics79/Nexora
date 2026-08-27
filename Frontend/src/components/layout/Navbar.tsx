@@ -575,7 +575,7 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth, sidebarEx
                     <CircularProgress size={14} aria-label="Searching" sx={{ ml: 1 }} />
                   ) : (
                     <Box aria-hidden sx={{ ml: 'auto', px: 0.8, py: 0.2, backgroundColor: 'action.hover', borderRadius: 1, border: '1px solid', borderColor: 'divider' }}>
-                      <Typography variant="caption" sx={{ fontWeight: 700, fontSize: 10, color: 'text.secondary' }}>⌘ K</Typography>
+                      <Typography variant="caption" sx={{ fontWeight: 700, fontSize: 10, color: 'text.primary' }}>⌘ K</Typography>
                     </Box>
                   )}
                 </Box>
