@@ -9,11 +9,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  * These tests assert what a PERSON SEES on it — the sentence at the top, the words on the buttons,
  * and above all that a failed queue never renders as a clear one. That last property is the reason
  * the screen exists in this shape: an empty list on an outage is how a rep concludes the pipeline
- * is dead and stops working it, and this page shows six queues at once, so one silent failure would
- * be six times as easy to miss.
+ * is dead and stops working it, and this page shows several queues at once, so one silent failure
+ * is especially easy to miss.
  */
 
 const auth = {
+  userData: {
+    id: 71,
+    businessUnitId: 1,
+    isManager: false,
+    isSuperAdmin: false,
+  },
   modules: [
     'Leads',
     'RFQ Management',
@@ -25,7 +31,7 @@ const auth = {
 
 vi.mock('../../context/AuthContext', () => ({
   useAuth: () => ({
-    userData: { businessUnitId: 1, isManager: false },
+    userData: auth.userData,
     hasPermission: (moduleName: string) => auth.modules.includes(moduleName),
   }),
 }));
@@ -35,6 +41,7 @@ vi.mock('../../components/layout/ViewTabs', () => ({ default: () => null }));
 const api = {
   needsReview: vi.fn(),
   outstandingLeads: vi.fn(),
+  assignedLeads: vi.fn(),
   rfqs: vi.fn(),
   supplierInbox: vi.fn(),
   quotes: vi.fn(),
@@ -45,7 +52,10 @@ vi.mock('../../api/services/extractionReviewService', () => ({
   default: { getNeedsReview: (...args: unknown[]) => api.needsReview(...args) },
 }));
 vi.mock('../../api/services/leadService', () => ({
-  default: { getOutstandingLeads: (...args: unknown[]) => api.outstandingLeads(...args) },
+  default: {
+    getOutstandingLeads: (...args: unknown[]) => api.outstandingLeads(...args),
+    getAssignedLeads: (...args: unknown[]) => api.assignedLeads(...args),
+  },
 }));
 vi.mock('../../api/services/rfqService', () => ({
   default: { getAll: (...args: unknown[]) => api.rfqs(...args) },
@@ -67,6 +77,7 @@ const empty = { items: [], totalCount: 0, pageNumber: 1, pageSize: 25 };
 const allQueuesEmpty = () => {
   api.needsReview.mockResolvedValue(empty);
   api.outstandingLeads.mockResolvedValue(empty);
+  api.assignedLeads.mockResolvedValue(empty);
   api.rfqs.mockResolvedValue({ items: [], totalItems: 0, pageNumber: 1, pageSize: 25, totalPages: 0 });
   api.supplierInbox.mockResolvedValue([]);
   api.quotes.mockResolvedValue({ items: [], totalItems: 0 });
@@ -90,6 +101,12 @@ const section = (heading: string | RegExp) =>
   screen.getByRole('region', { name: heading });
 
 beforeEach(() => {
+  auth.userData = {
+    id: 71,
+    businessUnitId: 1,
+    isManager: false,
+    isSuperAdmin: false,
+  };
   auth.modules = ['Leads', 'RFQ Management', 'Supplier History', 'Quotations', 'Customer Awards'];
   allQueuesEmpty();
 });
@@ -123,6 +140,65 @@ describe('what is waiting on you', () => {
       actionLabel: 'Open it',
     });
     expect(items[0].path).not.toContain('undefined');
+  });
+
+  it('opens an assigned inquiry directly in the governed decision workbench', async () => {
+    api.assignedLeads.mockResolvedValue({
+      ...empty,
+      items: [
+        {
+          id: 914,
+          rfqno: 'RFQ-CUSTOMER-914',
+          buyersName: 'Northstar Industries',
+          customerName: 'Northstar Industries',
+          acceptedDate: '2026-08-24T09:00:00Z',
+          assignedOn: '2026-08-24T10:00:00Z',
+          assignedToFullName: 'Amina Saleh',
+        },
+      ],
+    });
+
+    const items = await loadQueue('leads-to-decide', {
+      businessUnitId: 1,
+      userId: 71,
+    });
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      id: 914,
+      reference: 'RFQ-CUSTOMER-914',
+      path: '/procurement/leads/914/workbench',
+      actionLabel: 'Make decision',
+    });
+  });
+
+  it('scopes assigned decisions to the rep but lets a manager read the team queue', async () => {
+    await loadQueue('leads-to-decide', {
+      businessUnitId: 1,
+      userId: 71,
+      teamScope: false,
+    });
+    expect(api.assignedLeads).toHaveBeenLastCalledWith(expect.objectContaining({
+      businessUnitId: 1,
+      assignedToId: 71,
+    }));
+
+    await loadQueue('leads-to-decide', {
+      businessUnitId: 1,
+      userId: 88,
+      teamScope: true,
+    });
+    expect(api.assignedLeads).toHaveBeenLastCalledWith(expect.objectContaining({
+      businessUnitId: 1,
+      assignedToId: undefined,
+    }));
+  });
+
+  it('fails closed rather than broadening a rep queue when user identity is unavailable', async () => {
+    await expect(loadQueue('leads-to-decide', { businessUnitId: 1 })).rejects.toThrow(
+      /identity is unavailable/i,
+    );
+    expect(api.assignedLeads).not.toHaveBeenCalled();
   });
 
   it('keeps open customer POs urgent and excludes only terminal lifecycle records', async () => {
@@ -204,7 +280,7 @@ describe('an empty queue is never a dead end', () => {
     expect(within(documents).getByRole('button', { name: 'Upload a document' })).toBeInTheDocument();
   });
 
-  it('offers a next action on every one of the six queues', async () => {
+  it('offers a next action on every queue', async () => {
     renderInbox();
 
     await screen.findByText('You are clear.');
@@ -212,6 +288,7 @@ describe('an empty queue is never a dead end', () => {
     for (const heading of [
       /documents to check/i,
       /enquiries without an owner/i,
+      /my enquiries awaiting a decision/i,
       /rfqs still in draft/i,
       /supplier replies to read/i,
       /quotes not yet sent/i,
@@ -253,6 +330,17 @@ describe('a queue that failed is never shown as a queue that is clear', () => {
     await screen.findByText(/could not be read/i);
     expect(screen.queryByText('You are clear.')).toBeNull();
   });
+
+  it('renders an assigned-decision outage as a failure, never an empty decision queue', async () => {
+    api.assignedLeads.mockRejectedValue(outage());
+
+    renderInbox();
+
+    await screen.findByText(/assigned enquiries awaiting a decision could not be loaded/i);
+    const decisions = section(/my enquiries awaiting a decision/i);
+    expect(within(decisions).getByRole('button', { name: /try again/i })).toBeInTheDocument();
+    expect(within(decisions).queryByText(/no assigned enquiry is waiting/i)).toBeNull();
+  });
 });
 
 describe('permissions decide what is even asked for', () => {
@@ -263,6 +351,7 @@ describe('permissions decide what is even asked for', () => {
 
     await screen.findByRole('region', { name: /documents to check/i });
     expect(api.needsReview).toHaveBeenCalled();
+    expect(api.assignedLeads).toHaveBeenCalledWith(expect.objectContaining({ assignedToId: 71 }));
     // Asking for a queue the server will refuse turns a permission boundary into an error banner
     // on the first screen after sign-in.
     expect(api.quotes).not.toHaveBeenCalled();
