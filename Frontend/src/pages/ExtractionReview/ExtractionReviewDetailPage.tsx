@@ -1261,7 +1261,6 @@ const ExtractionReviewDetailPage: React.FC = () => {
               one is by definition not among the values already on the document.
               Existing values are offered as one-click shortcuts beneath it. */}
           <TextField
-            autoFocus
             fullWidth
             label={bulkField ? BULK_FIELD_LABEL[bulkField] : ''}
             value={bulkValue}
@@ -1367,7 +1366,6 @@ const ExtractionReviewDetailPage: React.FC = () => {
             </Alert>
           )}
           <TextField
-            autoFocus
             fullWidth
             required
             multiline

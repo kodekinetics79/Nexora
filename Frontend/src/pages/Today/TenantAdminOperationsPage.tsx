@@ -130,7 +130,7 @@ export default function TenantAdminOperationsPage() {
       <DialogTitle>Verify source and retry extraction</DialogTitle>
       <DialogContent><Stack spacing={2} sx={{ pt: 1 }}>
         <Typography variant="body2">{recovery?.fileName}</Typography>
-        <TextField autoFocus required multiline minRows={3} label="Recovery reason" value={recoveryReason} onChange={event => setRecoveryReason(event.target.value)} slotProps={{ htmlInput: { maxLength: 1000 } }} />
+        <TextField required multiline minRows={3} label="Recovery reason" value={recoveryReason} onChange={event => setRecoveryReason(event.target.value)} slotProps={{ htmlInput: { maxLength: 1000 } }} />
         {recover.isError && <Alert severity="error">The source could not be verified. Refresh the queue status and try again.</Alert>}
       </Stack></DialogContent>
       <DialogActions><Button onClick={() => setRecovery(null)} disabled={recover.isPending}>Cancel</Button><Button variant="contained" disabled={recover.isPending || !recoveryReason.trim()} onClick={() => recover.mutate()}>{recover.isPending ? 'Verifying...' : 'Verify and retry'}</Button></DialogActions>

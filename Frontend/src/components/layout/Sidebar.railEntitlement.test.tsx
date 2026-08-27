@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -64,5 +64,14 @@ describe('the rail keeps operational workspaces discoverable', () => {
   it('keeps the searchable directory as a fallback', () => {
     renderRail();
     expect(screen.getByRole('button', { name: 'Screen directory' })).toBeInTheDocument();
+  });
+
+  it('renders only list items as direct children of every list', () => {
+    const { container } = renderRail();
+    fireEvent.click(screen.getByRole('button', { name: 'Catalogue & stock' }));
+
+    for (const list of container.querySelectorAll('ul')) {
+      expect(Array.from(list.children).every((child) => child.tagName === 'LI')).toBe(true);
+    }
   });
 });

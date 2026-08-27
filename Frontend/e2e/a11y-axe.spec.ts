@@ -9,9 +9,9 @@ import { loginThroughUi } from './support/login';
  *
  * Axe catches roughly a third of WCAG issues, so this is a regression gate, not
  * a VPAT substitute — manual keyboard/screen-reader passes still required. The
- * gate is set at zero *critical* violations so it stays green against the
- * pre-existing serious/moderate backlog on pages outside the layout shell,
- * while blocking anything that outright locks a user out.
+ * release gate is set at zero serious or critical violations. Moderate/minor
+ * findings remain visible in the failure message when a release-blocking issue
+ * exists, while manual keyboard/screen-reader review covers what Axe cannot.
  */
 
 const WCAG_AA_TAGS = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'];
@@ -33,15 +33,15 @@ const describeViolations = (violations: Result[]): string => {
     .join('\n');
 };
 
-const criticalOnly = (violations: Result[]): Result[] =>
-  violations.filter((violation) => violation.impact === 'critical');
+const releaseBlocking = (violations: Result[]): Result[] =>
+  violations.filter((violation) => violation.impact === 'critical' || violation.impact === 'serious');
 
 test.describe('WCAG 2.1 AA — axe scan', () => {
   test.describe('unauthenticated', () => {
     // The shared storageState would bounce us straight to /dashboard.
     test.use({ storageState: { cookies: [], origins: [] } });
 
-    test('login page has no critical accessibility violations', async ({ page }) => {
+    test('login page has no serious or critical accessibility violations', async ({ page }) => {
       await page.goto('/login');
 
       // Regression guards for the fixes this spec was added alongside.
@@ -53,18 +53,18 @@ test.describe('WCAG 2.1 AA — axe scan', () => {
       await expect(page.getByRole('button', { name: 'Show password' })).toBeVisible();
 
       const results = await scan(page);
-      expect(criticalOnly(results.violations), describeViolations(results.violations)).toEqual([]);
+      expect(releaseBlocking(results.violations), describeViolations(results.violations)).toEqual([]);
     });
   });
 
   test.describe('authenticated', () => {
-    test('dashboard has no critical accessibility violations', async ({ page }) => {
+    test('dashboard has no serious or critical accessibility violations', async ({ page }) => {
       await page.goto('/dashboard');
       await expect(page).toHaveTitle('Dashboard | NEXORA');
       await expect(page.getByRole('main')).toBeVisible();
 
       const results = await scan(page);
-      expect(criticalOnly(results.violations), describeViolations(results.violations)).toEqual([]);
+      expect(releaseBlocking(results.violations), describeViolations(results.violations)).toEqual([]);
     });
 
     test('layout shell exposes skip link, landmarks and current-page state', async ({ page }) => {
@@ -113,13 +113,13 @@ test.describe('WCAG 2.1 AA — axe scan', () => {
       ['/inbox', 'Inbox | NEXORA'],
       ['/advanced', 'All Screens | NEXORA'],
     ] as const) {
-      test(`${route} has no critical accessibility violations`, async ({ page }) => {
+      test(`${route} has no serious or critical accessibility violations`, async ({ page }) => {
         await page.goto(route);
         await expect(page).toHaveTitle(title);
         await expect(page.getByRole('main')).toBeVisible();
 
         const results = await scan(page);
-        expect(criticalOnly(results.violations), describeViolations(results.violations)).toEqual([]);
+        expect(releaseBlocking(results.violations), describeViolations(results.violations)).toEqual([]);
       });
     }
 

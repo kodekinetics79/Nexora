@@ -89,9 +89,11 @@ jobs:
           filters: |
             backend:
               - 'Backend/**'
+              - 'scripts/e2e/**'
               - '.github/workflows/ci.yml'
             frontend:
               - 'Frontend/**'
+              - 'scripts/e2e/**'
               - '.github/workflows/ci.yml'
 
   backend:
@@ -234,6 +236,9 @@ jobs:
 
       - name: Build (tsc + vite)
         run: npm run build
+
+      - name: Accessibility lint
+        run: npm run lint:a11y
 
       - name: List browser acceptance suite
         run: npm run e2e:list
@@ -417,9 +422,63 @@ jobs:
         # whole picture from one run, not the first failure and three cancellations.
         run: npm test -- --shard=${{ matrix.shard }}/3
 
+  # A compile, unit suite, or fixture server cannot certify the product's core commercial
+  # boundary. This job creates an empty disposable PostgreSQL database, starts the real API and
+  # frontend, seeds only governed starting conditions, and requires the browser to persist a fit
+  # assessment, commit partial participation, and promote exactly one RFQ. It uses generated
+  # credentials and is therefore unconditional: no repository variables or secrets can silently
+  # turn the pilot signal off.
+  pilot-gate:
+    name: Pilot gate (governed Lead to RFQ)
+    needs: changes
+    if: ${{ needs.changes.outputs.backend == 'true' || needs.changes.outputs.frontend == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify Docker is available
+        run: |
+          docker version --format 'Docker Engine {{.Server.Version}}'
+          docker pull --quiet postgres:16-alpine
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: Frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: Frontend
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        working-directory: Frontend
+        run: npm run e2e:install
+
+      - name: Run the governed pilot journey
+        run: ./scripts/e2e/run-phase1-base-journey.sh
+
+      - name: Upload pilot evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: pilot-gate-evidence
+          path: |
+            .e2e-run
+            Frontend/playwright-report
+            Frontend/test-results
+          if-no-files-found: ignore
+
   ci-green:
     name: CI green
-    needs: [changes, backend, frontend, frontend-unit]
+    needs: [changes, backend, frontend, frontend-unit, pilot-gate]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -430,8 +489,9 @@ jobs:
           BACKEND: ${{ needs.backend.result }}
           FRONTEND: ${{ needs.frontend.result }}
           FRONTEND_UNIT: ${{ needs['frontend-unit'].result }}
+          PILOT_GATE: ${{ needs['pilot-gate'].result }}
         run: |
-          echo "changes=$CHANGES  backend=$BACKEND  frontend=$FRONTEND  frontend-unit=$FRONTEND_UNIT"
+          echo "changes=$CHANGES  backend=$BACKEND  frontend=$FRONTEND  frontend-unit=$FRONTEND_UNIT  pilot-gate=$PILOT_GATE"
           # `changes` gates both suites, so anything other than success means the suites were
           # never even asked to run. Reporting green on that is the exact false negative that
           # made a PR look like it had chosen not to test itself.
@@ -440,7 +500,7 @@ jobs:
             exit 1
           fi
           status=0
-          for suite in BACKEND FRONTEND FRONTEND_UNIT; do
+          for suite in BACKEND FRONTEND FRONTEND_UNIT PILOT_GATE; do
             case "${!suite}" in
               success) echo "  $suite passed." ;;
               skipped) echo "  $suite did not change — not run." ;;

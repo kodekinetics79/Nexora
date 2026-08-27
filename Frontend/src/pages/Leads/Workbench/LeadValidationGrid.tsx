@@ -169,7 +169,7 @@ const LeadValidationGrid: React.FC<LeadValidationGridProps> = ({
         <Tooltip title={fields.length
           ? fields.map((field) => `${field.field}${field.sourceAddress ? ` at ${field.sourceAddress}` : ''}: ${field.rawValue}`).join('\n')
           : 'No exact source-field value was captured'}>
-          <Box tabIndex={0} aria-label={fields.length ? 'Exact source fields; focus for details' : 'No exact source-field value was captured'} sx={{ minWidth: 0 }}>
+          <Box sx={{ minWidth: 0 }}>
             {fields.length ? fields.map((field) => (
               <Typography key={`${field.field}-${field.sourceAddress || ''}`} variant="caption" noWrap sx={{ display: 'block' }}>
                 <Box component="span" sx={{ color: 'text.secondary', fontWeight: 800 }}>{field.field}{field.sourceAddress ? ` · ${field.sourceAddress}` : ''}: </Box>
@@ -260,16 +260,18 @@ const LeadValidationGrid: React.FC<LeadValidationGridProps> = ({
           {' · '}{decisions[row.revisionLineId]?.currency || row.currency || 'No currency'}
         </Typography>
       ) : (
-        <Stack direction="row" spacing={0.5} onClick={(event) => event.stopPropagation()}>
+        <Stack direction="row" spacing={0.5}>
           <TextField size="small" type="number" label="Qty" sx={{ width: 82 }}
             value={decisions[row.revisionLineId]?.quantity ?? ''}
             slotProps={{ htmlInput: { min: 1, step: 1, 'aria-label': `Quantity for line ${row.lineItemNo || row.id}` } }}
+            onClick={(event) => event.stopPropagation()}
             onChange={(event) => updateCommercialField(row.revisionLineId, {
               quantity: event.target.value ? Number(event.target.value) : undefined,
             })} />
           <TextField select size="small" label="UOM" sx={{ width: 92 }}
             value={decisions[row.revisionLineId]?.unitOfMeasure ?? ''}
             slotProps={{ select: { inputProps: { 'aria-label': `Unit of measure for line ${row.lineItemNo || row.id}` } } }}
+            onClick={(event) => event.stopPropagation()}
             onChange={(event) => updateCommercialField(row.revisionLineId, { unitOfMeasure: event.target.value || undefined })}>
             <MenuItem value="">Select</MenuItem>
             {unitOptions.map((option) => <MenuItem key={option.code} value={option.code}>{option.code} · {option.label}</MenuItem>)}
@@ -277,6 +279,7 @@ const LeadValidationGrid: React.FC<LeadValidationGridProps> = ({
           <TextField select size="small" label="CCY" sx={{ width: 92 }}
             value={decisions[row.revisionLineId]?.currency ?? ''}
             slotProps={{ select: { inputProps: { 'aria-label': `Currency for line ${row.lineItemNo || row.id}` } } }}
+            onClick={(event) => event.stopPropagation()}
             onChange={(event) => updateCommercialField(row.revisionLineId, { currency: event.target.value || undefined })}>
             <MenuItem value="">Select</MenuItem>
             {currencyOptions.map((option) => <MenuItem key={option.code} value={option.code}>{option.code} · {option.label}</MenuItem>)}
@@ -340,7 +343,7 @@ const LeadValidationGrid: React.FC<LeadValidationGridProps> = ({
         const savedWarning = parseCatalogWarningSnapshot(snapshot);
         return (
           <Tooltip title={snapshot || 'No warning snapshot'}>
-            <Box tabIndex={0} aria-label="Saved participation decision; focus for warning details" sx={{ minWidth: 0 }}>
+            <Box sx={{ minWidth: 0 }}>
               <Typography variant="caption" sx={{ display: 'block', fontWeight: 800 }} noWrap>
                 {decision.decision === 'Bid' ? (savedWarning.needsAttention ? 'Warning acknowledged' : 'Bid approved') : reason?.label || decision.reasonCode || 'Reason missing'}
               </Typography>
@@ -426,7 +429,6 @@ const LeadValidationGrid: React.FC<LeadValidationGridProps> = ({
           <Stack spacing={2} sx={{ pt: 1 }}>
             <Alert severity="warning">{warningDialog?.detail}</Alert>
             <TextField
-              autoFocus
               required
               multiline
               minRows={3}

@@ -1,10 +1,18 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using ERP_RFQ_Automation.AI;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
+using ERP_RFQ_Automation.CommercialCases.Participation;
 using ERP_RFQ_Automation.CommercialIntelligence.Sales;
 using ERP_RFQ_Automation.CommercialRouting;
+using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
+using ERP_RFQ_Automation.Extraction;
+using ERP_RFQ_Automation.Infrastructure.Storage;
+using ERP_RFQ_Automation.Intelligence.Decision;
 using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Sla;
 using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.Infrastructure;
@@ -102,6 +110,7 @@ public static class GoldenCommercialJourneySeeder
 
         var customerA = await EnsureCustomerAsync(db, tenantA.Id, "Saudi Electricity Company (E2E)", now);
         var customerB = await EnsureCustomerAsync(db, tenantB.Id, "Tenant B Customer (E2E)", now);
+        await EnsureParticipationMastersAsync(db, tenantA.Id, now);
 
         // The catalog decides which lines raise a soft warning. Lines 1 and 3-6 match a product;
         // line 2 deliberately does not, so exactly one line carries "No catalog match found".
@@ -134,8 +143,15 @@ public static class GoldenCommercialJourneySeeder
                 EffectiveFrom: now.Date, EffectiveTo: null, Source: Actor,
                 Reason: "Golden journey seed"), CancellationToken.None);
 
-        var leadA = await EnsureGoldenLeadAsync(db, identity, tenantA.Id, customerA.Id, now);
-        var leadB = await EnsureGoldenLeadAsync(db, identity, tenantB.Id, customerB.Id, now, reference: "E2E-GOLDEN-B-001");
+        // Evidence storage belongs to the PostgreSQL/browser half of this fixture. Resolve it only
+        // after the portable relational seed and its application-service boundary have completed;
+        // the configuration tests intentionally stop at that boundary with a minimal provider.
+        var evidenceStorage = scope.ServiceProvider.GetRequiredService<IEvidenceObjectStorage>();
+        var leadA = await EnsureGoldenLeadAsync(
+            db, identity, evidenceStorage, tenantA.Id, customerA.Id, now);
+        var leadB = await EnsureGoldenLeadAsync(
+            db, identity, evidenceStorage, tenantB.Id, customerB.Id, now,
+            reference: "E2E-GOLDEN-B-001");
 
         // Real routing/assignment path — not a hand-written LeadAssignment row.
         try
@@ -217,6 +233,7 @@ public static class GoldenCommercialJourneySeeder
     /// </summary>
     private static async Task<long> EnsureGoldenLeadAsync(
         ErpRfqAutomationContext db, ILeadIdentityApplicationService identity,
+        IEvidenceObjectStorage evidenceStorage,
         long businessUnitId, long customerId, DateTime now, string reference = "E2E-GOLDEN-A-001")
     {
         var candidate = new Lead
@@ -243,8 +260,13 @@ public static class GoldenCommercialJourneySeeder
         candidate.LeadItems.Add(Line("00060", GoldenLine6Part, "Cable tray 300mm hot-dip", 30, "EA"));
 
         var key = $"golden-journey:{businessUnitId}:{reference}";
+        var batchId = DeterministicBatchId(businessUnitId);
+        var evidenceBytes = BuildGoldenEvidenceBytes(candidate.LeadItems);
+        var evidenceHash = Convert.ToHexString(SHA256.HashData(evidenceBytes)).ToLowerInvariant();
+        var evidence = await PrepareGovernedEvidenceAsync(
+            db, evidenceStorage, businessUnitId, batchId, reference, evidenceBytes, evidenceHash, now);
         var result = await identity.ReconcileAsync(candidate, new LeadIntakeDescriptor(
-            BatchId: DeterministicBatchId(businessUnitId),
+            BatchId: batchId,
             SourceChannel: "ManualUpload",
             IdempotencyKey: key,
             ExternalSourceId: key,
@@ -252,14 +274,14 @@ public static class GoldenCommercialJourneySeeder
             SourceSystem: "GoldenJourneySeed",
             Sender: "bids@sec.com.sa",
             Subject: $"RFQ {reference} — six line golden scenario",
-            OriginalFileName: $"{reference}.xlsx",
-            MimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            FileSize: 20480,
+            OriginalFileName: $"{reference}.txt",
+            MimeType: "text/plain",
+            FileSize: evidenceBytes.Length,
             // Deterministic content hash: the same document identity on every replay, which is
             // what makes duplicate/revision behaviour reproducible.
-            ContentHash: DeterministicHash(key),
-            SourceDocumentId: null,
-            ExtractionJobId: null,
+            ContentHash: evidenceHash,
+            SourceDocumentId: evidence.DocumentId,
+            ExtractionJobId: evidence.ExtractionJobId,
             SourceReceivedAtUtc: now,
             IngestedAtUtc: now,
             ProcessingPath: LeadProcessingPath.Deterministic,
@@ -307,7 +329,196 @@ public static class GoldenCommercialJourneySeeder
                 false, CancellationToken.None);
             db.ChangeTracker.Clear();
         }
+        await EnsureGovernedLineEvidenceAsync(db, businessUnitId, lead.Id, evidence, now);
         return lead.Id;
+    }
+
+    private static async Task EnsureParticipationMastersAsync(
+        ErpRfqAutomationContext db, long businessUnitId, DateTime now)
+    {
+        if (!await db.SetUoms.IgnoreQueryFilters()
+                .AnyAsync(x => x.BusinessUnitId == businessUnitId && x.UomCode == "EA"))
+        {
+            db.SetUoms.Add(new SetUom
+            {
+                BusinessUnitId = businessUnitId,
+                UomCode = "EA",
+                UomName = "Each",
+                IsActive = true,
+                CreatedBy = Actor,
+                CreatedDate = now
+            });
+        }
+        if (!await db.Currencies.IgnoreQueryFilters()
+                .AnyAsync(x => x.BusinessUnitId == businessUnitId && x.Code == "SAR"))
+        {
+            db.Currencies.Add(new Currency
+            {
+                BusinessUnitId = businessUnitId,
+                Code = "SAR",
+                CurrencyName = "Saudi Riyal",
+                ExchangeRate = 1m,
+                IsBaseCurrency = true,
+                IsActive = true,
+                CreatedBy = Actor,
+                CreatedOn = now
+            });
+        }
+        if (!await db.SetupMasters.IgnoreQueryFilters().AnyAsync(x =>
+                x.BusinessUnitId == businessUnitId
+                && x.SetupType == LeadOutcomeReasons.SetupType
+                && x.SetupCode == "OUT_OF_SCOPE"))
+        {
+            db.SetupMasters.Add(new SetupMaster
+            {
+                BusinessUnitId = businessUnitId,
+                SetupType = LeadOutcomeReasons.SetupType,
+                SetupCode = "OUT_OF_SCOPE",
+                SetupValue = "Out of scope",
+                Description = "The requested line is outside the approved product scope.",
+                IsActive = true,
+                CreatedBy = Actor,
+                CreatedOn = now
+            });
+        }
+        await db.SaveChangesAsync();
+    }
+
+    private sealed record PreparedGoldenEvidence(
+        long CorpusId, long DocumentId, long ExtractionJobId, long RegionId, Guid RunId);
+
+    /// <summary>
+    /// Persists the source bytes before reconciliation so the immutable occurrence is born with its
+    /// real source-document and extraction-job identities. Back-filling those provenance fields
+    /// after reconciliation is correctly forbidden by the database occurrence guard.
+    /// </summary>
+    private static async Task<PreparedGoldenEvidence> PrepareGovernedEvidenceAsync(
+        ErpRfqAutomationContext db,
+        IEvidenceObjectStorage evidenceStorage,
+        long businessUnitId,
+        Guid batchId,
+        string reference,
+        byte[] bytes,
+        string hash,
+        DateTime now)
+    {
+        var corpus = await db.Set<DocumentCorpus>().IgnoreQueryFilters()
+            .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.BatchId == batchId);
+        var existingDocument = corpus is null ? null : await db.Set<SourceDocument>().IgnoreQueryFilters()
+            .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId
+                && x.CorpusId == corpus.Id && x.ContentHash == hash);
+        if (existingDocument?.ExtractionJobId is long existingJobId)
+        {
+            var existingRun = await db.Set<ExtractionRun>().IgnoreQueryFilters().AsNoTracking()
+                .SingleAsync(x => x.BusinessUnitId == businessUnitId
+                    && x.SourceDocumentId == existingDocument.Id && x.ExtractionJobId == existingJobId);
+            var existingRegionId = await db.Set<DocumentRegion>().IgnoreQueryFilters().AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId
+                    && x.Page.DocumentId == existingDocument.Id)
+                .Select(x => x.Id).SingleAsync();
+            return new(corpus!.Id, existingDocument.Id, existingJobId, existingRegionId, existingRun.RunId);
+        }
+
+        var stored = await evidenceStorage.WriteImmutableAsync(
+            businessUnitId, "cleared", hash, ".txt", bytes, CancellationToken.None);
+        if (corpus is null)
+        {
+            corpus = DocumentCorpus.Create(businessUnitId, batchId, CorpusSourceType.ManualUpload);
+            db.Add(corpus);
+            await db.SaveChangesAsync();
+        }
+        var job = new ExtractionJob
+        {
+            BatchId = batchId,
+            BusinessUnitId = businessUnitId,
+            SourceType = ExtractionSourceType.ManualUpload,
+            ContentHash = hash,
+            StoragePath = stored.StorageUri,
+            FileName = $"{reference}.txt",
+            FileType = "txt",
+            Status = ExtractionStatus.Succeeded,
+            Priority = 0,
+            SchedulerTag = 0,
+            Attempts = 1,
+            MaxAttempts = 5,
+            NextAttemptAt = now,
+            CreatedOn = now,
+            UpdatedOn = now
+        };
+        db.Add(job);
+        await db.SaveChangesAsync();
+        var document = SourceDocument.Create(
+            businessUnitId, corpus.Id, hash, $"{reference}.txt", "text/plain",
+            stored.Bucket, stored.Key, stored.Version, stored.ByteSize);
+        document.ReleaseFromQuarantine(stored.Bucket, stored.Key, stored.Version);
+        document.BindExtractionJob(job.Id);
+        db.Add(document);
+        await db.SaveChangesAsync();
+
+        var runId = Guid.NewGuid();
+        var run = ExtractionRun.Create(
+            businessUnitId, document.Id, runId, job.Id, 1,
+            "text-fixture/golden-pilot-gate", "lead-evidence/v1");
+        var page = DocumentPage.Create(businessUnitId, document.Id, 1, 100, 100);
+        db.AddRange(run, page);
+        await db.SaveChangesAsync();
+        var region = DocumentRegion.Create(
+            businessUnitId, page.Id, DocumentRegionType.Table,
+            0, 0, 100, 100, Encoding.UTF8.GetString(bytes), 1m);
+        db.Add(region);
+        await db.SaveChangesAsync();
+        return new(corpus.Id, document.Id, job.Id, region.Id, runId);
+    }
+
+    /// <summary>Completes the canonical line/evidence projection after reconciliation assigned IDs.</summary>
+    private static async Task EnsureGovernedLineEvidenceAsync(
+        ErpRfqAutomationContext db,
+        long businessUnitId,
+        long leadId,
+        PreparedGoldenEvidence evidence,
+        DateTime now)
+    {
+        var lead = await db.Leads.IgnoreQueryFilters().Include(x => x.LeadItems)
+            .SingleAsync(x => x.BusinessUnitId == businessUnitId && x.Id == leadId);
+        var leadItemIds = lead.LeadItems.Select(x => x.Id).ToArray();
+        if (await db.Set<FieldEvidence>().IgnoreQueryFilters().AnyAsync(x =>
+                x.BusinessUnitId == businessUnitId
+                && x.ExtractionRun.SourceDocumentId == evidence.DocumentId
+                && x.LineItem != null && x.LineItem.LeadItemId.HasValue
+                && leadItemIds.Contains(x.LineItem.LeadItemId.Value)))
+            return;
+
+        var job = await db.Set<ExtractionJob>().IgnoreQueryFilters()
+            .SingleAsync(x => x.BusinessUnitId == businessUnitId && x.Id == evidence.ExtractionJobId);
+        job.ResultLeadId = leadId;
+        job.UpdatedOn = now;
+        var inquiry = CanonicalInquiry.Create(businessUnitId, evidence.CorpusId, 1);
+        inquiry.PopulateHeader(lead.Rfqno, lead.BuyersName, lead.RecDate, lead.BidClosingDate);
+        inquiry.BindLead(leadId);
+        db.Add(inquiry);
+        await db.SaveChangesAsync();
+        var canonicalLines = lead.LeadItems.OrderBy(x => x.LineItemNo).Select((item, index) =>
+        {
+            var canonical = CanonicalLineItem.Create(
+                businessUnitId, inquiry.Id, index + 1,
+                item.ProductShortDescription ?? item.ItemMaterialCode ?? "Requested line",
+                item.Quantity > 0 ? item.Quantity : null, item.UnitOfMeasure);
+            canonical.Enrich(null, item.ManufacturerPartNumber, item.Currency, null, null, "{}",
+                CanonicalValidationStatus.Valid);
+            canonical.BindLeadItem(item.Id);
+            return (item, canonical);
+        }).ToArray();
+        db.AddRange(canonicalLines.Select(x => x.canonical));
+        await db.SaveChangesAsync();
+        foreach (var (item, canonical) in canonicalLines)
+        {
+            db.Add(FieldEvidence.ForLineItem(
+                businessUnitId, evidence.RegionId, canonical.Id, "requestedLine",
+                item.ProductShortDescription, item.ItemMaterialCode, 1m,
+                "golden-pilot-gate", evidence.RunId,
+                validationStatus: FieldValidationStatus.Valid));
+        }
+        await db.SaveChangesAsync();
     }
 
     /// <summary>Stable per-tenant batch id — a random Guid would break replay idempotency.</summary>
@@ -319,9 +530,10 @@ public static class GoldenCommercialJourneySeeder
         return new Guid(bytes);
     }
 
-    private static string DeterministicHash(string seed) =>
-        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
-            System.Text.Encoding.UTF8.GetBytes(seed))).ToLowerInvariant();
+    private static byte[] BuildGoldenEvidenceBytes(IEnumerable<LeadItem> lines) =>
+        Encoding.UTF8.GetBytes(string.Join('\n', lines
+            .OrderBy(x => x.LineItemNo)
+            .Select(x => $"{x.LineItemNo}|{x.ItemMaterialCode}|{x.Quantity}|{x.UnitOfMeasure}|{x.Currency}")));
 
     private static LeadItem Line(string lineNo, string partNo, string description, int quantity, string uom) => new()
     {

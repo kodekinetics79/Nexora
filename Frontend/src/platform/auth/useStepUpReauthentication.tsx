@@ -150,7 +150,6 @@ export function useStepUpReauthentication(): StepUpReauthentication {
           continues by itself once the password is accepted, and nothing you typed is lost.
         </DialogContentText>
         <TextField
-          autoFocus
           fullWidth
           type="password"
           label="Platform password"

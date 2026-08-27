@@ -259,14 +259,17 @@ export default function TenantsPage() {
       sortable: false,
       filterable: false,
       renderCell: (p) => (
-        <Stack direction="row" spacing={0.5} onClick={(e) => e.stopPropagation()}>
+        <Stack direction="row" spacing={0.5} role="group" aria-label={`Actions for ${p.row.name}`}>
           <Tooltip title={permissions.canAdministerTenants ? 'Edit tenant profile and administrator access' : REQUIRED_ROLE_COPY.tenantAdmin}>
             <span>
               <IconButton
                 size="small"
                 aria-label="Edit tenant"
                 disabled={!permissions.canAdministerTenants}
-                onClick={() => navigate(`/platform/tenants/${p.row.id}?tab=profile-access`)}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  navigate(`/platform/tenants/${p.row.id}?tab=profile-access`);
+                }}
               >
                 <EditIcon fontSize="small" />
               </IconButton>
@@ -279,7 +282,10 @@ export default function TenantsPage() {
                 color="error"
                 aria-label="Offboard or delete tenant"
                 disabled={!permissions.isOwner}
-                onClick={() => navigate(tenantOffboardingPath(p.row.id))}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  navigate(tenantOffboardingPath(p.row.id));
+                }}
               >
                 <DeleteIcon fontSize="small" />
               </IconButton>
@@ -305,7 +311,10 @@ export default function TenantsPage() {
                   color="success"
                   disabled={!permissions.canAdministerTenants}
                   aria-label={p.row.status === 'archived' ? 'Restore tenant' : 'Resume tenant'}
-                  onClick={() => openConfirm(p.row.status === 'archived' ? 'restore' : 'resume', p.row)}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    openConfirm(p.row.status === 'archived' ? 'restore' : 'resume', p.row);
+                  }}
                 >
                   {p.row.status === 'archived' ? <RestoreIcon fontSize="small" /> : <ResumeIcon fontSize="small" />}
                 </IconButton>
@@ -315,7 +324,10 @@ export default function TenantsPage() {
                   color="warning"
                   aria-label="Suspend tenant"
                   disabled={p.row.status === 'provisioning' || !permissions.canAdministerTenants}
-                  onClick={() => openConfirm('suspend', p.row)}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    openConfirm('suspend', p.row);
+                  }}
                 >
                   <SuspendIcon fontSize="small" />
                 </IconButton>
@@ -335,7 +347,10 @@ export default function TenantsPage() {
                 color="error"
                 aria-label="Archive tenant"
                 disabled={p.row.status !== 'suspended' || !permissions.canAdministerTenants}
-                onClick={() => openConfirm('archive', p.row)}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  openConfirm('archive', p.row);
+                }}
               >
                 <ArchiveIcon fontSize="small" />
               </IconButton>
@@ -348,7 +363,10 @@ export default function TenantsPage() {
                 color="primary"
                 aria-label="Impersonate tenant"
                 disabled={p.row.status !== 'active' || !permissions.canImpersonate}
-                onClick={() => openConfirm('impersonate', p.row)}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  openConfirm('impersonate', p.row);
+                }}
               >
                 <ImpersonateIcon fontSize="small" />
               </IconButton>
@@ -519,7 +537,6 @@ export default function TenantsPage() {
             )}
           </DialogContentText>
           <TextField
-            autoFocus
             fullWidth
             required
             label="Audit reason"

@@ -417,7 +417,7 @@ const ResolveClientDialog: React.FC<ResolveClientDialogProps> = ({
             )}
             <Stack spacing={1.5}>
               <TextField
-                size="small" fullWidth required autoFocus
+                size="small" fullWidth required
                 label="Client name"
                 value={newName}
                 onChange={(e) => setNewName(e.target.value)}

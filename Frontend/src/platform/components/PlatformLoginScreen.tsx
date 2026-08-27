@@ -162,7 +162,6 @@ export default function PlatformLoginScreen() {
                 onChange={(event) => setVerificationCode(event.target.value)}
                 required
                 fullWidth
-                autoFocus
                 autoComplete="one-time-code"
                 slotProps={{ htmlInput: useRecoveryCode ? {} : { inputMode: 'numeric', pattern: '[0-9]{6}', maxLength: 6 } }}
               />
@@ -235,7 +234,6 @@ export default function PlatformLoginScreen() {
               required
               fullWidth
               autoComplete="username"
-              autoFocus
               slotProps={{
                 input: {
                   startAdornment: (

@@ -3,21 +3,45 @@ import { loginThroughUi } from './support/login';
 import { requireEnv } from './support/environment';
 
 /**
- * Phase 1 base journey, in a real browser against a real backend, worker and PostgreSQL:
+ * Truthful pilot gate for the governed Lead decision boundary:
  *
- *   qualified Lead → correct a hard warning → acknowledge a soft warning → exclude a line
- *   → convert to exactly ONE RFQ → mark lines Quote / NoQuote / Pending
- *   → prepare exactly ONE Customer Quote Draft → prove no duplicates → prove denials
+ *   immutable current Lead revision + retained evidence
+ *   → human fit assessment
+ *   → complete partial-bid participation decision
+ *   → RFQ Promotion copies only Bid lines
  *
- * Seeded by `GoldenCommercialJourneySeeder`, which creates only STARTING CONDITIONS. Every
- * decision below — the correction, the acknowledgement, the exclusion, the participation, the
- * draft — is made here, through the UI or the real API. Nothing asserted was seeded.
+ * The disposable PostgreSQL seed creates starting conditions only. This browser test creates the
+ * assessment, participation decision, promotion receipt, and RFQ through the real HTTP API. The
+ * retired conversion route is intentionally absent from this gate.
  */
 
-const env = () => requireEnv('Phase 1 base journey',
+const env = () => requireEnv('Governed Lead pilot gate',
   'E2E_API_URL', 'E2E_GOLDEN_SALES_EMAIL', 'E2E_GOLDEN_OUTSIDER_EMAIL',
-  'E2E_GOLDEN_PASSWORD', 'E2E_GOLDEN_LEAD_ID', 'E2E_GOLDEN_FOREIGN_LEAD_ID',
-  'E2E_GOLDEN_TENANT_A');
+  'E2E_GOLDEN_PASSWORD', 'E2E_GOLDEN_LEAD_ID', 'E2E_GOLDEN_TENANT_A',
+  'E2E_GOLDEN_TENANT_B');
+
+type WorkbenchLine = {
+  revisionLineId: number;
+  manufacturerPartNumber?: string | null;
+  quantity?: number | null;
+  unitOfMeasure?: string | null;
+  currency?: string | null;
+  bestMatchProductId?: number | null;
+  needsAttention?: boolean;
+  verificationStatus: string;
+};
+
+type Workbench = {
+  leadRevisionId: number;
+  decisionVersion: number;
+  participationVersion?: number | null;
+  participationStatus: string;
+  verificationStatus: string;
+  sourceCoverage?: { coveredLines: number; totalLines: number } | null;
+  evidence: Array<{ sourceAvailable: boolean }>;
+  lines: WorkbenchLine[];
+  reasonCodes: Array<{ code: string; appliesTo: string[] }>;
+};
 
 async function token(page: Page): Promise<string> {
   const value = await page.evaluate(() => localStorage.getItem('token'));
@@ -25,195 +49,189 @@ async function token(page: Page): Promise<string> {
   return value;
 }
 
-async function api(page: Page, bearer: string, method: string, path: string, body?: unknown) {
-  const { E2E_API_URL } = env();
-  return page.request.fetch(`${E2E_API_URL}${path}`, {
+async function api(
+  page: Page,
+  bearer: string | null,
+  method: string,
+  path: string,
+  body?: unknown,
+  idempotencyKey?: string,
+) {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (bearer) headers.Authorization = `Bearer ${bearer}`;
+  if (idempotencyKey) headers['Idempotency-Key'] = idempotencyKey;
+  return page.request.fetch(`${env().E2E_API_URL}${path}`, {
     method,
-    headers: { Authorization: `Bearer ${bearer}`, 'Content-Type': 'application/json' },
+    headers,
     data: body === undefined ? undefined : JSON.stringify(body),
   });
 }
 
 async function rfqCountForLead(page: Page, bearer: string, leadId: number): Promise<number> {
   const response = await api(page, bearer, 'get', '/api/Rfq?pageNumber=1&pageSize=250');
-  expect(response.ok()).toBeTruthy();
+  expect(response.ok(), await response.text()).toBeTruthy();
   const payload = await response.json();
   return (payload.items ?? []).filter((row: { leadId?: number }) => row.leadId === leadId).length;
 }
 
-test('Phase 1 — Lead converts to exactly one RFQ and one Customer Quote Draft', async ({ page }) => {
-  const {
-    E2E_GOLDEN_SALES_EMAIL: email,
-    E2E_GOLDEN_PASSWORD: password,
-    E2E_GOLDEN_TENANT_A: businessUnitId,
-    E2E_GOLDEN_LEAD_ID: leadIdRaw,
-  } = env();
-  const leadId = Number(leadIdRaw);
-
-  await loginThroughUi(page, { email, password, businessUnitId });
+test('pilot gate — governed Lead decision promotes approved lines to exactly one RFQ', async ({ page }) => {
+  const values = env();
+  const leadId = Number(values.E2E_GOLDEN_LEAD_ID);
+  await loginThroughUi(page, {
+    email: values.E2E_GOLDEN_SALES_EMAIL,
+    password: values.E2E_GOLDEN_PASSWORD,
+    businessUnitId: values.E2E_GOLDEN_TENANT_A,
+  });
   const bearer = await token(page);
-
-  // Nothing exists yet — otherwise "exactly one" later proves nothing.
   expect(await rfqCountForLead(page, bearer, leadId)).toBe(0);
 
-  // ---------------------------------------------------------------- named owner
-  const leadResponse = await api(page, bearer, 'get', `/api/Lead/${leadId}`);
-  expect(leadResponse.ok()).toBeTruthy();
-  const lead = await leadResponse.json();
-  // Routing ran through the real engine during seeding; a named owner must have resulted.
-  expect(lead.assignedToFullName ?? lead.accountOwnerName).toBeTruthy();
+  const initialResponse = await api(page, bearer, 'get', `/api/leads/${leadId}/decision-workbench`);
+  expect(initialResponse.ok(), await initialResponse.text()).toBeTruthy();
+  const initial = await initialResponse.json() as Workbench;
+  expect(initial.lines).toHaveLength(6);
+  expect(initial.participationStatus).toBe('NONE');
+  expect(initial.participationVersion).toBeNull();
+  expect(initial.verificationStatus).toBe('VERIFIED');
+  expect(initial.sourceCoverage).toEqual({ coveredLines: 6, totalLines: 6 });
+  expect(initial.evidence.length).toBeGreaterThan(0);
+  expect(initial.evidence.every((item) => item.sourceAvailable)).toBeTruthy();
+  expect(initial.lines.every((line) => line.verificationStatus === 'VERIFIED')).toBeTruthy();
 
-  // ---------------------------------------------------------------- the six lines
-  const previewResponse = await api(page, bearer, 'get', `/api/intelligence/leads/${leadId}/conversion-preview`);
-  expect(previewResponse.ok()).toBeTruthy();
-  const preview = await previewResponse.json();
-  expect(preview.items).toHaveLength(6);
+  await page.goto(`/procurement/leads/${leadId}/workbench`);
+  await expect(page.getByRole('heading', { name: 'Source evidence' })).toBeVisible();
+  await page.getByRole('tab', { name: '3. Fit & Participation' }).click();
+  await expect(page.getByRole('heading', { name: 'Fit assessment' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Participation by line' })).toBeVisible();
+  await page.getByRole('tab', { name: '4. Promote' }).click();
+  await expect(page.getByRole('heading', { name: 'RFQ promotion' })).toBeVisible();
 
-  const hard = preview.items.find((i: any) => (i.attentionReason ?? '').includes('Quantity missing'));
-  const soft = preview.items.find((i: any) => (i.attentionReason ?? '').includes('No catalog match'));
-  expect(hard, 'seed must provide one hard-blocked line').toBeTruthy();
-  expect(soft, 'seed must provide one soft-warning line').toBeTruthy();
-  const clean = preview.items.filter((i: any) => !i.needsAttention);
-  expect(clean.length).toBeGreaterThanOrEqual(4);
-  const [toExclude, toQuote, toNoQuote, toPending] = clean;
-
-  // ---------------------------------------------------------------- hard warning cannot be waived
-  const waiveAttempt = await api(page, bearer, 'post', `/api/intelligence/leads/${leadId}/convert`, {
-    acknowledgeAllWarnings: true,
-    warningAcknowledgementReason: 'Attempting to wave through a missing quantity',
-    items: preview.items.map((i: any) => ({ leadItemId: i.leadItemId, include: true, acknowledgeWarning: true })),
-  });
-  expect(waiveAttempt.status(), 'a missing quantity must never be acknowledgeable').toBe(409);
-
-  // TWO gates refuse this, and which one speaks first is not the point of the assertion.
-  // FindConversionBlockers evaluates every lead line and rejects the zero quantity before the
-  // warning-governance gate is reached (documented as A-9); if that lead-level check were ever
-  // relaxed, the governance gate refuses the same request with "correct them on the lead first".
-  // What must hold either way: the operator is told WHICH line and WHY, and no RFQ is created.
-  const refusal = await waiveAttempt.text();
-  expect(refusal).toContain('00010');
-  expect(refusal.toLowerCase()).toContain('quantity');
+  const prematurePromotion = await api(
+    page, bearer, 'post', `/api/leads/${leadId}/promote-to-rfq`, {
+      expectedLeadRevisionId: initial.leadRevisionId,
+      expectedDecisionVersion: initial.decisionVersion,
+      expectedParticipationVersion: 0,
+    }, `pilot-premature-promotion:${leadId}`);
+  expect(prematurePromotion.status(), 'promotion without committed participation must fail').toBe(409);
   expect(await rfqCountForLead(page, bearer, leadId)).toBe(0);
 
-  // ---------------------------------------------------------------- correct the hard warning
-  // Through the Review & Create RFQ screen, as an operator would.
-  await page.goto(`/procurement/leads/${leadId}/convert`);
-  await expect(page.getByRole('heading', { name: /Review inquiry and create RFQ/i })).toBeVisible();
-  await page.screenshot({ path: 'test-results/phase1-01-convert-page.png', fullPage: true });
+  const fitRequest = {
+    expectedLeadRevisionId: initial.leadRevisionId,
+    expectedDecisionVersion: initial.decisionVersion,
+    expectedFitVersion: null,
+    overallDecision: 'FIT',
+    rationale: 'The reviewer confirmed eligibility, capability, delivery, compliance, and commercials.',
+    criteria: ['ELIGIBILITY', 'CAPABILITY', 'DELIVERY', 'COMPLIANCE', 'COMMERCIAL']
+      .map((code) => ({ code, decision: 'PASS', note: 'Confirmed by the pilot reviewer.' })),
+  };
+  const fitKey = `pilot-fit:${leadId}:${initial.leadRevisionId}`;
+  const fit = await api(page, bearer, 'put', `/api/leads/${leadId}/fit-assessment`, fitRequest, fitKey);
+  expect(fit.ok(), await fit.text()).toBeTruthy();
+  const fitVersion = (await fit.json()).version as number;
+  expect(fitVersion).toBe(1);
+  const fitReplay = await api(page, bearer, 'put', `/api/leads/${leadId}/fit-assessment`, fitRequest, fitKey);
+  expect(fitReplay.ok(), await fitReplay.text()).toBeTruthy();
+  expect((await fitReplay.json()).version).toBe(fitVersion);
 
-  // The acknowledgement control is present because lines are flagged, and Create RFQ is refused
-  // until it is satisfied.
-  const acknowledge = page.getByRole('checkbox', { name: 'Acknowledge the flagged lines and convert anyway' });
-  await expect(acknowledge).toBeVisible();
-  await expect(page.getByRole('button', { name: /^Create RFQ$/ })).toBeDisabled();
-
-  await acknowledge.check();
-  const reason = page.getByLabel('Why are you going ahead?');
-  await reason.fill('bad');           // below the 5-character floor
-  await expect(page.getByRole('button', { name: /^Create RFQ$/ })).toBeDisabled();
-  await reason.fill('Part confirmed against the buyer’s drawing pack by phone');
-  await page.screenshot({ path: 'test-results/phase1-02-acknowledged.png', fullPage: true });
-
-  // ---------------------------------------------------------------- convert (API: exact control
-  // over which line is corrected and which is excluded, with the same governance the UI posts)
-  const convert = await api(page, bearer, 'post', `/api/intelligence/leads/${leadId}/convert`, {
-    acknowledgeAllWarnings: true,
-    warningAcknowledgementReason: 'Part confirmed against the buyer drawing pack by phone',
-    notes: 'Phase 1 base journey',
-    items: [
-      { leadItemId: hard.leadItemId, include: true, quantity: 25, acknowledgeWarning: true },
-      { leadItemId: soft.leadItemId, include: true, acknowledgeWarning: true },
-      { leadItemId: toExclude.leadItemId, include: false },
-      { leadItemId: toQuote.leadItemId, include: true },
-      { leadItemId: toNoQuote.leadItemId, include: true },
-      { leadItemId: toPending.leadItemId, include: true },
-    ],
+  const noBidReason = initial.reasonCodes.find((reason) => reason.appliesTo.includes('NoBid'))?.code;
+  expect(noBidReason, 'fixture must expose a governed no-bid reason').toBeTruthy();
+  const decisions = initial.lines.map((line) => {
+    if (line.manufacturerPartNumber === 'GOLD-NOQT-0005') {
+      return {
+        revisionLineId: line.revisionLineId,
+        decision: 'NoBid',
+        reasonCode: noBidReason,
+        note: 'This obsolete part is outside the approved product scope.',
+      };
+    }
+    return {
+      revisionLineId: line.revisionLineId,
+      decision: 'Bid',
+      productId: line.bestMatchProductId ?? undefined,
+      quantity: line.quantity && line.quantity > 0 ? line.quantity : 25,
+      unitOfMeasure: line.unitOfMeasure || 'EA',
+      currency: line.currency || 'SAR',
+      note: line.needsAttention
+        ? 'The bid desk reviewed the source and confirmed this corrected commercial value.'
+        : undefined,
+    };
   });
-  expect(convert.status(), await convert.text()).toBe(200);
-  const rfqId = (await convert.json()).rfqId as number;
-  expect(rfqId).toBeGreaterThan(0);
+  expect(decisions.filter((line) => line.decision === 'Bid')).toHaveLength(5);
+  expect(decisions.filter((line) => line.decision === 'NoBid')).toHaveLength(1);
 
-  // EXACTLY ONE RFQ, and the excluded line did not travel.
+  const participationRequest = {
+    expectedLeadRevisionId: initial.leadRevisionId,
+    expectedDecisionVersion: initial.decisionVersion,
+    expectedParticipationVersion: null,
+    commit: true,
+    notes: 'Pilot gate partial-bid decision.',
+    lines: decisions,
+  };
+  const participationKey = `pilot-participation:${leadId}:${initial.leadRevisionId}`;
+  const participation = await api(
+    page, bearer, 'put', `/api/leads/${leadId}/participation`, participationRequest, participationKey);
+  expect(participation.ok(), await participation.text()).toBeTruthy();
+  const participationResult = await participation.json();
+  expect(participationResult.participationStatus).toBe('COMMITTED');
+  expect(participationResult.participationVersion).toBe(1);
+  const participationReplay = await api(
+    page, bearer, 'put', `/api/leads/${leadId}/participation`, participationRequest, participationKey);
+  expect(participationReplay.ok(), await participationReplay.text()).toBeTruthy();
+  expect((await participationReplay.json()).participationVersion).toBe(1);
+
+  const committedResponse = await api(page, bearer, 'get', `/api/leads/${leadId}/decision-workbench`);
+  expect(committedResponse.ok(), await committedResponse.text()).toBeTruthy();
+  const committed = await committedResponse.json() as Workbench;
+  expect(committed.participationStatus).toBe('COMMITTED');
+  expect(committed.participationVersion).toBe(1);
+
+  const promotionRequest = {
+    expectedLeadRevisionId: committed.leadRevisionId,
+    expectedDecisionVersion: committed.decisionVersion,
+    expectedParticipationVersion: committed.participationVersion,
+  };
+  const promotionKey = `pilot-promotion:${leadId}:${committed.leadRevisionId}`;
+  const promotion = await api(
+    page, bearer, 'post', `/api/leads/${leadId}/promote-to-rfq`, promotionRequest, promotionKey);
+  expect(promotion.ok(), await promotion.text()).toBeTruthy();
+  const receipt = await promotion.json();
+  expect(receipt.rfqId).toBeGreaterThan(0);
+  expect(receipt.promotedLineCount).toBe(5);
+
+  const promotionReplay = await api(
+    page, bearer, 'post', `/api/leads/${leadId}/promote-to-rfq`, promotionRequest, promotionKey);
+  expect(promotionReplay.ok(), await promotionReplay.text()).toBeTruthy();
+  expect((await promotionReplay.json()).rfqId).toBe(receipt.rfqId);
   expect(await rfqCountForLead(page, bearer, leadId)).toBe(1);
 
-  // Replaying convert must return the SAME RFQ, never mint a second.
-  const replay = await api(page, bearer, 'post', `/api/intelligence/leads/${leadId}/convert`, { items: [] });
-  expect(replay.ok()).toBeTruthy();
-  expect((await replay.json()).rfqId).toBe(rfqId);
-  expect(await rfqCountForLead(page, bearer, leadId)).toBe(1);
-
-  // ---------------------------------------------------------------- RFQ workspace
-  await page.goto(`/procurement/rfqs/view/${rfqId}`);
-  await expect(page).toHaveURL(new RegExp(`/procurement/rfqs/view/${rfqId}$`));
-  await page.screenshot({ path: 'test-results/phase1-03-rfq.png', fullPage: true });
-
-  const rfqResponse = await api(page, bearer, 'get', `/api/Rfq/${rfqId}?businessUnitId=${businessUnitId}`);
-  expect(rfqResponse.ok()).toBeTruthy();
+  const rfqResponse = await api(
+    page, bearer, 'get', `/api/Rfq/${receipt.rfqId}?businessUnitId=${values.E2E_GOLDEN_TENANT_A}`);
+  expect(rfqResponse.ok(), await rfqResponse.text()).toBeTruthy();
   const rfq = await rfqResponse.json();
-  expect(rfq.rfqitems).toHaveLength(5);                       // 6 seeded, 1 excluded
-  expect(rfq.rfqitems.every((i: any) => i.participationDecision === 'Pending')).toBeTruthy();
+  expect(rfq.leadId).toBe(leadId);
+  expect(rfq.rfqitems).toHaveLength(5);
 
-  const quoteLine = rfq.rfqitems.find((i: any) => i.quantity === toQuote.quantity) ?? rfq.rfqitems[0];
-  const noQuoteLine = rfq.rfqitems.find((i: any) => i.id !== quoteLine.id);
-
-  // ---------------------------------------------------------------- participation
-  // No-Quote without a reason is refused.
-  const badDecline = await api(page, bearer, 'post', `/api/Rfq/${rfqId}/lines/${noQuoteLine.id}/participation`,
-    { decision: 'NoQuote' });
-  expect(badDecline.status(), 'a decline without a reason must be refused').toBe(400);
-
-  expect((await api(page, bearer, 'post', `/api/Rfq/${rfqId}/lines/${quoteLine.id}/participation`,
-    { decision: 'Quote' })).ok()).toBeTruthy();
-  expect((await api(page, bearer, 'post', `/api/Rfq/${rfqId}/lines/${noQuoteLine.id}/participation`,
-    { decision: 'NoQuote', reason: 'Obsolete Alstom part, no supplier source' })).ok()).toBeTruthy();
-  // The remaining lines stay Pending on purpose.
-
-  await page.reload();
-  await expect(page.getByText('No-Quote').first()).toBeVisible();
-  await page.screenshot({ path: 'test-results/phase1-04-participation.png', fullPage: true });
-
-  // ---------------------------------------------------------------- Quote Draft
-  const draft = await api(page, bearer, 'post', `/api/Rfq/${rfqId}/prepare-quote-draft`);
-  expect(draft.status(), await draft.text()).toBe(200);
-  const quote = await draft.json();
-
-  // ONLY the Quote-selected line travelled.
-  expect(quote.quoteItems).toHaveLength(1);
-  expect(quote.quoteItems[0].rfqItemId).toBe(quoteLine.id);
-  // and the buyer's commercial identity is visible to whoever prices it
-  expect(quote.quoteItems[0].requestedManufacturerPartNumber).toBeTruthy();
-  expect(quote.quoteItems[0].requestedManufacturerName).toBeTruthy();
-
-  await page.goto(`/sales/quotes/view/${quote.id}`);
-  await page.screenshot({ path: 'test-results/phase1-05-quote-draft.png', fullPage: true });
-
-  // Double-click / refresh must not mint a second quote.
-  const draftAgain = await api(page, bearer, 'post', `/api/Rfq/${rfqId}/prepare-quote-draft`);
-  expect(draftAgain.ok()).toBeTruthy();
-  expect((await draftAgain.json()).id).toBe(quote.id);
-
-  const quotes = await (await api(page, bearer, 'get', '/api/Quote?pageNumber=1&pageSize=250')).json();
-  expect((quotes.items ?? []).filter((q: any) => q.rfqId === rfqId)).toHaveLength(1);
+  await page.goto(`/procurement/rfqs/view/${receipt.rfqId}`);
+  await expect(page).toHaveURL(new RegExp(`/procurement/rfqs/view/${receipt.rfqId}$`));
+  await expect(page.getByText(receipt.rfqNumber, { exact: false }).first()).toBeVisible();
 });
 
-test('Phase 1 — cross-tenant and unauthorized access is denied', async ({ page }) => {
-  const {
-    E2E_GOLDEN_OUTSIDER_EMAIL: outsider,
-    E2E_GOLDEN_PASSWORD: password,
-    E2E_GOLDEN_LEAD_ID: leadIdRaw,
-    E2E_GOLDEN_TENANT_B: tenantB,
-  } = requireEnv('Phase 1 denial checks', 'E2E_GOLDEN_OUTSIDER_EMAIL', 'E2E_GOLDEN_PASSWORD',
-    'E2E_GOLDEN_LEAD_ID', 'E2E_GOLDEN_TENANT_B', 'E2E_API_URL');
-
-  // Unauthenticated first — no token at all.
-  const anonymous = await page.request.fetch(`${env().E2E_API_URL}/api/Lead/${leadIdRaw}`, { method: 'GET' });
+test('pilot gate — anonymous and cross-tenant workbench access is non-disclosing', async ({ page }) => {
+  const values = env();
+  const leadId = Number(values.E2E_GOLDEN_LEAD_ID);
+  const anonymous = await api(page, null, 'get', `/api/leads/${leadId}/decision-workbench`);
   expect(anonymous.status()).toBe(401);
 
-  // Then a real user of the OTHER tenant.
-  await loginThroughUi(page, { email: outsider, password, businessUnitId: tenantB });
-  const bearer = await token(page);
-
-  const foreignLead = await api(page, bearer, 'get', `/api/Lead/${leadIdRaw}`);
-  expect([403, 404], `tenant B must not read tenant A's lead (got ${foreignLead.status()})`)
-    .toContain(foreignLead.status());
+  await loginThroughUi(page, {
+    email: values.E2E_GOLDEN_OUTSIDER_EMAIL,
+    password: values.E2E_GOLDEN_PASSWORD,
+    businessUnitId: values.E2E_GOLDEN_TENANT_B,
+  });
+  const outsider = await token(page);
+  const foreignWorkbench = await api(page, outsider, 'get', `/api/leads/${leadId}/decision-workbench`);
+  expect(foreignWorkbench.status()).toBe(404);
+  const foreignPromotion = await api(
+    page, outsider, 'post', `/api/leads/${leadId}/promote-to-rfq`,
+    { expectedLeadRevisionId: 1, expectedDecisionVersion: 1, expectedParticipationVersion: 1 },
+    `pilot-cross-tenant:${leadId}`);
+  expect(foreignPromotion.status()).toBe(404);
 });

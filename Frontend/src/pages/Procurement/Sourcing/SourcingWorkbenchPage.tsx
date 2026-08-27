@@ -2486,7 +2486,6 @@ function IssuePurchaseOrderDialog({ order, onClose, onSaved }: any) {
             provider receipt, sent-message ID, or controlled delivery evidence.
           </Alert>
           <TextField
-            autoFocus
             fullWidth
             required
             label="Delivery evidence reference"

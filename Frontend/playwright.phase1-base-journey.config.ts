@@ -1,18 +1,17 @@
 import { defineConfig, devices } from '@playwright/test';
 
 /**
- * Phase 1 base journey: Lead → RFQ → Customer Quote Draft.
+ * Pilot gate: governed Lead decision workbench → RFQ Promotion.
  *
  * Driven by `scripts/e2e/run-phase1-base-journey.sh`, which owns the lifecycle of PostgreSQL,
- * the backend (which hosts the extraction worker in-process) and the frontend, and which exports
- * every id this suite needs from the golden seed manifest.
+ * the backend and frontend, and exports every id this suite needs from the golden seed manifest.
  *
  * Deliberately its own config rather than a project inside `playwright.config.ts`: that config
  * resolves a fixture contract and starts its own web server, both of which fight the script.
  *
  * `retries: 0` is not an oversight. A retry here would mask exactly the defect class this suite
- * exists to catch — a second Convert or Prepare Quote Draft attempt is the idempotency assertion,
- * so an automatic replay would turn a duplicate-record bug into a green run.
+ * exists to catch — the test deliberately replays the participation and promotion requests, so an
+ * automatic test retry would turn a duplicate-record bug into an ambiguous result.
  */
 export default defineConfig({
   testDir: './e2e',

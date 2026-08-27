@@ -401,7 +401,6 @@ export default function PlatformUsersPage() {
             )}
           </DialogContentText>
           <TextField
-            autoFocus
             fullWidth
             required
             type="password"

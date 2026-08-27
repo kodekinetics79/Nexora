@@ -47,6 +47,7 @@ import {
   isInfrastructureHold,
   summariseSecurityRetryHolds,
 } from '../../utils/intakeErrors';
+import { BatchMetricFilterCard } from './BatchMetricFilterCard';
 
 type ChipColor = 'default' | 'primary' | 'success' | 'warning' | 'error' | 'info';
 
@@ -225,7 +226,7 @@ const MatchReviewPanel = ({ occurrenceId, candidate }: { occurrenceId: number; c
       )}
       <Dialog open={action !== null} onClose={() => !mutation.isPending && setAction(null)} fullWidth maxWidth="sm">
         <DialogTitle>{action ? readable(action) : 'Match decision'}</DialogTitle>
-        <DialogContent><TextField autoFocus fullWidth multiline minRows={3} sx={{ mt: 1 }} label="Decision reason" value={reason} onChange={(event) => setReason(event.target.value)} /></DialogContent>
+        <DialogContent><TextField fullWidth multiline minRows={3} sx={{ mt: 1 }} label="Decision reason" value={reason} onChange={(event) => setReason(event.target.value)} /></DialogContent>
         <DialogActions>
           <Button onClick={() => setAction(null)} disabled={mutation.isPending}>Cancel</Button>
           <Button variant="contained" onClick={() => mutation.mutate()} disabled={!reason.trim() || mutation.isPending}>Record decision</Button>
@@ -521,15 +522,13 @@ export default function LeadIngestionBatchPage() {
       <Grid container spacing={1.5} sx={{ mb: 3 }}>
         {metrics.map((metric) => (
           <Grid key={metric.label} size={{ xs: 6, sm: 4, lg: 1.5 }}>
-            <Paper component="button" type="button" variant="outlined" onClick={() => setActiveClassification(metric.classification)}
-              aria-pressed={activeClassification === metric.classification}
-              sx={{ p: 2, borderRadius: 2, minHeight: 104, width: '100%', textAlign: 'left', cursor: 'pointer', bgcolor: activeClassification === metric.classification ? 'action.selected' : 'background.paper' }}>
-              <Stack direction="row" sx={{ justifyContent: 'space-between', alignItems: 'center' }}>
-                <Typography variant="h5" sx={{ fontWeight: 900 }}>{metric.value}</Typography>
-                {metric.icon}
-              </Stack>
-              <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>{metric.label}</Typography>
-            </Paper>
+            <BatchMetricFilterCard
+              label={metric.label}
+              value={metric.value}
+              icon={metric.icon}
+              selected={activeClassification === metric.classification}
+              onSelect={() => setActiveClassification(metric.classification)}
+            />
           </Grid>
         ))}
       </Grid>

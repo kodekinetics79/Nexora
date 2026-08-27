@@ -444,7 +444,10 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
             EmailIngest(86_301, 86_201, "tenant-a-message"),
             EmailIngest(86_302, 86_202, "tenant-b-message"));
         db.Leads.AddRange(
-            Lead(TenantALeadId, TenantA, 86_301, TenantACustomerId, "HTTP-A-RFQ"),
+            // Lead ownership, not customer ownership, is the authority for a rep's opportunity
+            // scope. This is the authenticated rep's RFQ fixture; leaving it unassigned would
+            // correctly keep it in the governed routing queue and make direct evidence reads 404.
+            Lead(TenantALeadId, TenantA, 86_301, TenantACustomerId, "HTTP-A-RFQ", GrowthRepUser),
             Lead(TenantBLeadId, TenantB, 86_302, TenantBCustomerId, "HTTP-B-RFQ"));
         await db.SaveChangesAsync();
 
@@ -913,12 +916,14 @@ public sealed class Release01BHttpApplication : WebApplicationFactory<Program>, 
         FromEmail = "buyer@nexora.invalid", ParseStatus = "NeedsReview", CreatedOn = DateTime.UtcNow
     };
 
-    private static Lead Lead(long id, long tenantId, long ingestId, long customerId, string rfq)
+    private static Lead Lead(
+        long id, long tenantId, long ingestId, long customerId, string rfq, long? assignedTo = null)
     {
         var lead = new Lead
         {
             Id = id, BusinessUnitId = tenantId, EmailIngestsId = ingestId,
             Rfqno = rfq, RecDate = DateTime.UtcNow, LeadSource = "HttpIntegration",
+            AssignTo = assignedTo,
             CreatedBy = "release-01b-tests", CreatedDate = DateTime.UtcNow
         };
         lead.ResolveCommercialIdentity(customerId, null, "EXACT");

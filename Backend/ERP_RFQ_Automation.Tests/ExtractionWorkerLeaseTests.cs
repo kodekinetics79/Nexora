@@ -6,6 +6,7 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace ERP_RFQ_Automation.Tests;
 
+[Collection(BackgroundWorkerTimingCollection.Name)]
 public sealed class ExtractionWorkerLeaseTests
 {
     [Fact]
@@ -287,4 +288,10 @@ public sealed class ExtractionWorkerLeaseTests
         public Task<bool> CompleteAsync(long jobId, string workerId, int leaseAttempt, long? resultLeadId, CancellationToken ct = default)
             => throw new NotSupportedException();
     }
+}
+
+[CollectionDefinition(Name, DisableParallelization = true)]
+public sealed class BackgroundWorkerTimingCollection
+{
+    public const string Name = "Background worker timing";
 }

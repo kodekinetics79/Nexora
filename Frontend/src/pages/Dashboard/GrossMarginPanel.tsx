@@ -47,7 +47,7 @@ export default function GrossMarginPanel({ from, to }: { from: string; to: strin
   if (query.isLoading) {
     return (
       <Paper variant="outlined" sx={{ p: 2, minHeight: 140, display: 'grid', placeItems: 'center' }}>
-        <CircularProgress size={24} />
+        <CircularProgress size={24} aria-label="Loading gross margin" />
       </Paper>
     );
   }

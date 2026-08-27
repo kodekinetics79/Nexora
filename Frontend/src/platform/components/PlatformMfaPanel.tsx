@@ -116,7 +116,7 @@ export default function PlatformMfaPanel() {
                 </Box>
               </Box>
               <TextField
-                required autoFocus label="6-digit authenticator code" value={totpCode}
+                required label="6-digit authenticator code" value={totpCode}
                 onChange={(event) => setTotpCode(event.target.value.replace(/\D/g, '').slice(0, 6))}
                 autoComplete="one-time-code"
                 slotProps={{ htmlInput: { inputMode: 'numeric', pattern: '[0-9]{6}', maxLength: 6 } }}

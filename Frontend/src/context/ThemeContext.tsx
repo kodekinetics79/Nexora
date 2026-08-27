@@ -64,6 +64,16 @@ export const ThemeContextProvider: React.FC<{ children: ReactNode }> = ({ childr
       secondary: {
         main: '#0ea5e9', // Sky Blue
       },
+      // MUI's light defaults are designed primarily as filled-control colours,
+      // not as small text on white. Nexora also uses these semantic tokens for
+      // deadline labels and compact chips, where the stock warning (#ed6c02)
+      // and info (#0288d1) colours miss the 4.5:1 text floor.
+      warning: {
+        main: mode === 'dark' ? '#fdba74' : '#9a3412',
+      },
+      info: {
+        main: mode === 'dark' ? '#38bdf8' : '#0369a1',
+      },
       // Make MUI's own contrastText derivation (secondary/error/warning/...)
       // target AA body text instead of its 3:1 default.
       contrastThreshold: AA_TEXT_CONTRAST,
@@ -74,6 +84,12 @@ export const ThemeContextProvider: React.FC<{ children: ReactNode }> = ({ childr
       text: {
         primary: mode === 'dark' ? '#f1f5f9' : '#0f172a',
         secondary: mode === 'dark' ? '#94a3b8' : '#64748b',
+        // `text.disabled` is also used by this application for explanatory
+        // captions (for example "More workspaces" and "No deadline"). MUI's
+        // default 38%-black resolves to #9a9b9c on the page — 2.66:1. Keep
+        // these captions readable; genuinely disabled native controls remain
+        // exposed as disabled independently of their colour.
+        disabled: mode === 'dark' ? '#94a3b8' : '#64748b',
       },
       divider: mode === 'dark' ? 'rgba(148, 163, 184, 0.1)' : 'rgba(100, 116, 139, 0.1)',
     },
@@ -130,6 +146,18 @@ export const ThemeContextProvider: React.FC<{ children: ReactNode }> = ({ childr
             style: { color: primaryOnSurface },
           },
         ],
+      },
+      MuiTab: {
+        styleOverrides: {
+          root: {
+            '&.Mui-selected': { color: primaryOnSurface },
+          },
+        },
+      },
+      MuiLink: {
+        styleOverrides: {
+          root: { color: primaryOnSurface },
+        },
       },
       MuiPaper: {
         styleOverrides: {

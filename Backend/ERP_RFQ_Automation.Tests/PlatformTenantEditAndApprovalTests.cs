@@ -355,6 +355,61 @@ public sealed class PlatformTenantEditAndApprovalTests
     }
 
     [Fact]
+    public async Task The_non_customer_attester_cannot_later_serve_as_the_independent_purge_approver()
+    {
+        // The attestation makes commercial closure evidence vacuous. It is therefore a maker
+        // decision in the destruction chain, even when a different Owner starts the retention
+        // clock. A two-person schedule/purge sequence is not independent if the purger is also the
+        // person who supplied that waiver.
+        using var db = new TenantLifecycleTestDb();
+        var tenant = await TenantLifecycleHarness.SeedTenantAsync(
+            db, "attester-is-not-checker", TenantStatus.Archived, 9_106);
+        var attester = TenantLifecycleHarness.Operator();
+        var scheduler = TenantLifecycleHarness.SecondApprover();
+
+        await using (var seed = db.ContextFor(null))
+        {
+            seed.Set<TenantLifecycleEvent>().Add(new TenantLifecycleEvent
+            {
+                TenantId = tenant.Id,
+                TenantSlug = tenant.Slug,
+                TenantName = tenant.Name,
+                Action = TenantLifecycleActions.AttestNonCustomer,
+                FromStage = TenantOffboardingStage.NotScheduled.ToString(),
+                ToStage = TenantOffboardingStage.NotScheduled.ToString(),
+                TenantStatus = TenantStatus.Archived.ToString(),
+                Reason = "This environment never became a customer and has no billing footprint.",
+                ActorPlatformUserId = 7,
+                ActorEmail = "operator@example.test",
+                OccurredOn = DateTime.UtcNow.AddMinutes(-1)
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        await using var context = db.ContextFor(null);
+        var clock = new TenantLifecycleHarness.MutableTimeProvider();
+        var service = TenantLifecycleHarness.Service(context, timeProvider: clock);
+        await service.ScheduleDeletionAsync(tenant.Id,
+            new ScheduleTenantDeletionRequest { Reason = GoodReason },
+            scheduler, null, CancellationToken.None);
+        TenantLifecycleHarness.ElapseRetentionWindow(clock);
+
+        var refusal = await Assert.ThrowsAsync<TenantOffboardingRefusedException>(() =>
+            service.PurgeAsync(tenant.Id,
+                new ConfirmTenantDestructionRequest { Reason = GoodReason, Confirmation = tenant.Name },
+                attester, null, CancellationToken.None));
+
+        Assert.Equal(409, refusal.SuggestedStatusCode);
+        Assert.Contains("attestation", refusal.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("another platform Owner", refusal.Message);
+
+        await using var verify = db.ContextFor(null);
+        Assert.Null((await verify.Set<TenantOffboarding>().SingleAsync()).PurgeStartedOn);
+        Assert.DoesNotContain(await verify.Set<TenantLifecycleEvent>().ToListAsync(),
+            e => e.Action == TenantLifecycleActions.PurgeStarted);
+    }
+
+    [Fact]
     public async Task Rescheduling_under_a_new_operator_moves_who_the_second_approver_must_be()
     {
         // The maker is read from the lifecycle event for the LIVE schedule, not from the first one
