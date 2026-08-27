@@ -15,6 +15,7 @@
 export type QueueKey =
   | 'documents-to-check'
   | 'leads-to-own'
+  | 'leads-to-decide'
   | 'rfqs-in-draft'
   | 'supplier-replies'
   | 'quotes-to-send'
@@ -71,6 +72,19 @@ export const INBOX_QUEUES: readonly QueueDefinition[] = [
     errorFallback: 'Unassigned enquiries could not be loaded. No empty result has been assumed — try again.',
   },
   {
+    key: 'leads-to-decide',
+    title: 'My enquiries awaiting a decision',
+    purpose: 'Assigned enquiries stay here while fit, participation, or approved-line promotion still needs attention. Managers see their team’s assigned enquiries here.',
+    moduleName: 'Leads',
+    seeAllPath: '/procurement/leads/assigned',
+    seeAllLabel: 'Open assigned enquiries',
+    emptyTitle: 'No assigned enquiry is waiting for a decision',
+    emptyMessage:
+      'An assigned enquiry stays here until approved Bid lines are promoted to an RFQ, or a full no-bid decision closes it.',
+    emptyAction: { label: 'See all inquiries', path: '/procurement/leads/all', moduleName: 'Leads' },
+    errorFallback: 'Assigned enquiries awaiting a decision could not be loaded. No empty result has been assumed — try again.',
+  },
+  {
     key: 'rfqs-in-draft',
     title: 'RFQs still in draft',
     purpose: 'These have been qualified but not yet priced or sent out for sourcing.',
@@ -79,7 +93,7 @@ export const INBOX_QUEUES: readonly QueueDefinition[] = [
     seeAllLabel: 'Open draft RFQs',
     emptyTitle: 'No RFQ is sitting in draft',
     emptyMessage:
-      'A qualified enquiry becomes a draft RFQ here until it is reviewed. Convert an enquiry to start one.',
+      'A committed participation decision promotes approved Bid lines into a draft RFQ here for review.',
     emptyAction: { label: 'See all inquiries', path: '/procurement/leads/all', moduleName: 'Leads' },
     errorFallback: 'Draft RFQs could not be loaded. No empty result has been assumed — try again.',
   },

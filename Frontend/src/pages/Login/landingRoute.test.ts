@@ -18,9 +18,9 @@ import { INBOX_ROOT } from '../../components/layout/navCatalog';
  * already become a lead — not a document that had just arrived, not a supplier that had just
  * replied, not a quote waiting to be sent.
  *
- * The answer now is one screen for everybody: `/inbox`, which is ungated at the route and asks for
- * each of its six queues separately. The permission problem cannot recur, because there is nothing
- * left to branch on.
+ * The answer now is one authenticated, module-agnostic screen for everybody: `/inbox`, which asks
+ * for each of its queues separately. The permission problem cannot recur, because there is nothing
+ * left to branch on; the route's auth gate independently keeps the tenant shell signed-in only.
  *
  * The fixtures are the actual seeded roles, not invented ones. They are kept because they are the
  * evidence that this is not a regression: each of them must reach a screen that renders.
@@ -55,8 +55,8 @@ describe('post-login landing', () => {
   });
 
   it('lands a user with no view grant anywhere on a screen that explains itself', () => {
-    // `/inbox` has no route guard and tells this person which modules they are missing and where
-    // to ask for them, which is the right answer to "I have no access at all".
+    // After authentication, `/inbox` tells this person which modules they are missing and where to
+    // ask for them, which is the right answer to "I have no module access at all".
     expect(landingRouteFor(false, [])).toBe(INBOX_ROOT);
   });
 

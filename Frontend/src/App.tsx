@@ -2,7 +2,7 @@ import { lazy, Suspense } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { Box, CircularProgress, Typography } from '@mui/material';
 import MainLayout from './components/layout/MainLayout';
-import PermissionGuard from './components/common/PermissionGuard';
+import PermissionGuard, { RequireAuth } from './components/common/PermissionGuard';
 import RouteAnnouncer from './components/layout/RouteAnnouncer';
 import useDocumentTitle from './hooks/useDocumentTitle';
 import { SETUP_ROUTES, SETUP_ADOPTED_ROUTES } from './pages/Setup/setupRoutes';
@@ -172,19 +172,18 @@ function App() {
     <Routes>
       <Route path="/" element={<Navigate to="/login" replace />} />
 
-      {/* The landing screen. Deliberately UNGUARDED at the route: it is the first screen after
-          sign-in, and a user whose grants are still loading — or who holds none — must land on a
-          page that explains that rather than on "Access Denied". Each queue inside asks for its own
-          module and is simply not requested when the grant is absent. */}
-      <Route path="/inbox" element={<MainLayout><InboxPage /></MainLayout>} />
-      {/* Every screen the rail relocated, grouped and searchable. Ungated for the same reason the
-          Setup hub is: the cards are filtered by permission, so an unpermitted user sees a stated
-          reason instead of a denial. */}
-      <Route path="/advanced" element={<MainLayout><AllScreensPage /></MainLayout>} />
+      {/* The landing screen is module-agnostic, not authentication-agnostic. A signed-in user whose
+          grants are still loading — or who holds none — reaches the explanatory Inbox instead of
+          Access Denied; a signed-out visitor must never receive the tenant shell. Each queue inside
+          asks for its own module and is simply not requested when the grant is absent. */}
+      <Route path="/inbox" element={<RequireAuth><MainLayout><InboxPage /></MainLayout></RequireAuth>} />
+      {/* Every screen the rail relocated, grouped and searchable. The cards are permission-filtered,
+          but the directory itself still belongs inside the authenticated tenant boundary. */}
+      <Route path="/advanced" element={<RequireAuth><MainLayout><AllScreensPage /></MainLayout></RequireAuth>} />
       {/* Old landing addresses. `/analytics/deadlines` stays a live screen (it is listed under
           Dashboards & analytics); these two are the shortcuts people type. */}
-      <Route path="/home" element={<Navigate to="/inbox" replace />} />
-      <Route path="/today" element={<Navigate to="/inbox" replace />} />
+      <Route path="/home" element={<RequireAuth><Navigate to="/inbox" replace /></RequireAuth>} />
+      <Route path="/today" element={<RequireAuth><Navigate to="/inbox" replace /></RequireAuth>} />
 
       <Route path="/dashboard" element={<MainLayout><PermissionGuard moduleName="Dashboard"><DashboardPage /></PermissionGuard></MainLayout>} />
       <Route path="/dashboard/team" element={<MainLayout><PermissionGuard moduleName="Dashboard"><TeamWorkloadPage /></PermissionGuard></MainLayout>} />

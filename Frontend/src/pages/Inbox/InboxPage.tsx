@@ -61,6 +61,13 @@ interface QueueResult {
   query: UseQueryResult<InboxItem[]>;
 }
 
+export interface InboxQueueContext {
+  businessUnitId?: number;
+  userId?: number;
+  /** Managers and tenant super administrators may see the assigned queue for the whole team. */
+  teamScope?: boolean;
+}
+
 const byDateAscending = (a: InboxItem, b: InboxItem) => {
   if (!a.sortKey) return 1;
   if (!b.sortKey) return -1;
@@ -98,6 +105,12 @@ const InboxPage: React.FC = () => {
   const navigate = useNavigate();
   const { userData, hasPermission } = useAuth();
   const businessUnitId = userData?.businessUnitId || undefined;
+  const teamScope = userData?.isManager === true || userData?.isSuperAdmin === true;
+  const queueContext = useMemo<InboxQueueContext>(() => ({
+    businessUnitId,
+    userId: userData?.id,
+    teamScope,
+  }), [businessUnitId, teamScope, userData?.id]);
 
   /**
    * Only queues this user may open are requested. Asking for a queue the server will refuse turns
@@ -116,10 +129,10 @@ const InboxPage: React.FC = () => {
    */
   const results = useQueries({
     queries: visibleQueues.map((queue) => ({
-      queryKey: ['inbox', queue.key, businessUnitId] as const,
-      queryFn: (): Promise<InboxItem[]> => loadQueue(queue.key, businessUnitId),
+      queryKey: ['inbox', queue.key, businessUnitId, userData?.id, teamScope] as const,
+      queryFn: (): Promise<InboxItem[]> => loadQueue(queue.key, queueContext),
       // The landing screen is opened many times a day; a short stale window keeps it honest
-      // without re-firing six requests on every tab-back.
+      // without re-firing every queue request on each tab-back.
       staleTime: 30_000,
       // The global mutation/query error backstop already toasts. This screen renders the failure
       // in place as well, because a queue that silently vanished reads as "no work".
@@ -382,7 +395,11 @@ const QueueSection: React.FC<{ definition: QueueDefinition; query: UseQueryResul
  * Kept out of the component so the mapping can be tested without rendering, and so it is obvious
  * that every one of these is an endpoint an existing screen already calls.
  */
-export async function loadQueue(key: QueueKey, businessUnitId?: number): Promise<InboxItem[]> {
+export async function loadQueue(
+  key: QueueKey,
+  context: InboxQueueContext = {},
+): Promise<InboxItem[]> {
+  const { businessUnitId, userId, teamScope = false } = context;
   switch (key) {
     case 'documents-to-check': {
       const page = await extractionReviewService.getNeedsReview({ pageNumber: 1, pageSize: 25 });
@@ -416,6 +433,34 @@ export async function loadQueue(key: QueueKey, businessUnitId?: number): Promise
           path: `/procurement/leads/view/${row.id}`,
           actionLabel: 'Open it',
           sortKey: row.acceptedDate,
+        }))
+        .sort(byDateAscending);
+    }
+
+    case 'leads-to-decide': {
+      // A rep request without an actor id must fail closed. Omitting assignedToId would broaden it
+      // to the manager/team view and expose another rep's assigned work in the landing queue.
+      if (!teamScope && !userId) {
+        throw new Error('The signed-in user identity is unavailable, so assigned enquiries cannot be scoped safely.');
+      }
+      const page = await leadService.getAssignedLeads({
+        pageNumber: 1,
+        pageSize: 25,
+        businessUnitId,
+        assignedToId: teamScope ? undefined : userId,
+      });
+      return (page.items ?? [])
+        .map((row) => ({
+          id: row.id,
+          reference: row.rfqno || `Enquiry ${row.id}`,
+          party: row.customerName || row.buyersName || 'Customer not resolved',
+          detail: [
+            teamScope && row.assignedToFullName ? `Assigned to ${row.assignedToFullName}` : null,
+            formatDateSafe(row.acceptedDate),
+          ].filter(Boolean).join(' · ') || undefined,
+          path: `/procurement/leads/${row.id}/workbench`,
+          actionLabel: 'Make decision',
+          sortKey: row.assignedOn ?? row.acceptedDate,
         }))
         .sort(byDateAscending);
     }
