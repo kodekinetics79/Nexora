@@ -44,7 +44,8 @@ namespace ERP_RFQ_Automation.Controllers
                 // ING-08: the same lie lived here — a 200 with "fetched successfully" was
                 // returned even when every mailbox had refused authentication. The caller is
                 // told what actually happened.
-                var report = await _emailService.FetchAndSaveLeadsAsync(claimBUId);
+                var report = await _emailService.FetchAndSaveLeadsAsync(
+                    claimBUId, HttpContext.RequestAborted);
                 if (report.AnyFailed)
                 {
                     _logger.LogError("Manual email fetch failed for {Failed} of {Total} mailbox(es): {Reasons}",

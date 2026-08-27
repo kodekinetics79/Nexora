@@ -125,7 +125,8 @@ public sealed class EmailChannelTruthfulnessTests
         var lastSuccess = new DateTime(2026, 7, 30, 4, 15, 0, DateTimeKind.Utc);
         await SeedMailboxAsync(db, lastSuccess);
 
-        var service = CreateEmailService(db, new EmailPollerHealth(), out var temp);
+        var service = CreateEmailServiceForTimeoutTest(
+            db, new EmailPollerHealth(), out var temp);
         try
         {
             // Host "localhost:1" refuses the connection, so this exercises the real
@@ -337,7 +338,8 @@ public sealed class EmailChannelTruthfulnessTests
         await ctx.SaveChangesAsync();
     }
 
-    private static EmailService CreateEmailService(TestDb db, IEmailPollerHealth health, out string temp)
+    internal static EmailService CreateEmailServiceForTimeoutTest(
+        TestDb db, IEmailPollerHealth health, out string temp)
     {
         temp = Path.Combine(Path.GetTempPath(), "nexora-email-channel-tests", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(temp);

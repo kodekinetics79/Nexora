@@ -126,10 +126,18 @@ namespace ERP_RFQ_Automation.Services
         /// </summary>
         private static readonly TimeSpan DefaultPollInterval = TimeSpan.FromMinutes(5);
 
+        /// <summary>
+        /// A cycle must finish or yield before the heartbeat's five-minute startup grace
+        /// expires. Provider stalls are failures to record and retry, never a reason to strand
+        /// the hosted worker for the lifetime of the process.
+        /// </summary>
+        internal static readonly TimeSpan DefaultPollCycleTimeout = TimeSpan.FromMinutes(4);
+
         private readonly IServiceProvider _services;
         private readonly IBackgroundWorkerHeartbeats? _heartbeats;
         private readonly IEmailPollerHealth? _pollerHealth;
         private readonly ILogger<EmailBackgroundService> _logger;
+        private readonly TimeSpan _pollCycleTimeout;
 
         private sealed record DurableMailboxHealth(
             long Id,
@@ -144,12 +152,16 @@ namespace ERP_RFQ_Automation.Services
             IServiceProvider services,
             ILogger<EmailBackgroundService> logger,
             IBackgroundWorkerHeartbeats? heartbeats = null,
-            IEmailPollerHealth? pollerHealth = null)
+            IEmailPollerHealth? pollerHealth = null,
+            TimeSpan? pollCycleTimeout = null)
         {
             _services = services;
             _logger = logger;
             _heartbeats = heartbeats;
             _pollerHealth = pollerHealth;
+            _pollCycleTimeout = pollCycleTimeout is { } configured && configured > TimeSpan.Zero
+                ? configured
+                : DefaultPollCycleTimeout;
             _heartbeats?.Register(BackgroundWorkerNames.EmailPoller, DefaultPollInterval);
         }
 
@@ -163,8 +175,13 @@ namespace ERP_RFQ_Automation.Services
             while (!stoppingToken.IsCancellationRequested)
             {
                 var interval = DefaultPollInterval;
-                using (var scope = _services.CreateScope())
+                using var cycleDeadline = CancellationTokenSource
+                    .CreateLinkedTokenSource(stoppingToken);
+                cycleDeadline.CancelAfter(_pollCycleTimeout);
+                var cycleToken = cycleDeadline.Token;
+                try
                 {
+                    using var scope = _services.CreateScope();
                     var dbContext = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
 
                     PostgresAdvisoryLease? lease = null;
@@ -174,11 +191,15 @@ namespace ERP_RFQ_Automation.Services
                     var lockEvaluated = true;
                     try
                     {
-                        lease = await PostgresAdvisoryLease.TryAcquireAsync(dbContext, PollLockName, stoppingToken);
+                        lease = await PostgresAdvisoryLease.TryAcquireAsync(dbContext, PollLockName, cycleToken);
                     }
                     catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                     {
-                        break;
+                        throw;
+                    }
+                    catch (OperationCanceledException) when (cycleDeadline.IsCancellationRequested)
+                    {
+                        throw;
                     }
                     catch (Exception ex)
                     {
@@ -209,7 +230,7 @@ namespace ERP_RFQ_Automation.Services
                             // no longer owns; otherwise an archived tenant keeps this standby
                             // instance's /ready red forever because it never produces a cycle
                             // report of its own.
-                            await RefreshChannelHealthEligibilityAsync(stoppingToken);
+                            await RefreshChannelHealthEligibilityAsync(cycleToken);
                             _pollerHealth?.StandBy();
                         }
                     }
@@ -217,29 +238,34 @@ namespace ERP_RFQ_Automation.Services
                     {
                         await using (lease)
                         {
-                            try
-                            {
-                                await RunPollCycleAsync(scope.ServiceProvider, stoppingToken);
-                            }
-                            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-                            {
-                                break;
-                            }
-                            catch (Exception ex)
-                            {
-                                // BackgroundServiceExceptionBehavior is Ignore, so an escaping
-                                // exception would kill the poller for the lifetime of the
-                                // process. It is caught — but recorded as a FAILURE, never
-                                // logged-and-forgotten while the heartbeat carries on.
-                                _logger.LogError(ex, "Email poll cycle failed; retrying next interval.");
-                                _pollerHealth?.RecordCycleFailure(
-                                    $"The email poll cycle threw {ex.GetType().Name}: {ex.Message}",
-                                    isPermanent: false, DateTimeOffset.UtcNow);
-                            }
-
-                            interval = await ResolvePollIntervalAsync(dbContext, stoppingToken);
+                            await RunPollCycleAsync(scope.ServiceProvider, cycleToken);
+                            interval = await ResolvePollIntervalAsync(dbContext, cycleToken);
                         }
                     }
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    break;
+                }
+                catch (OperationCanceledException) when (cycleDeadline.IsCancellationRequested)
+                {
+                    _logger.LogError(
+                        "Email poll iteration exceeded its {Timeout} deadline; the worker will retry next interval.",
+                        _pollCycleTimeout);
+                    _pollerHealth?.RecordCycleFailure(
+                        $"The email poll iteration exceeded its {_pollCycleTimeout.TotalSeconds:0}-second deadline.",
+                        isPermanent: false, DateTimeOffset.UtcNow);
+                }
+                catch (Exception ex)
+                {
+                    // BackgroundServiceExceptionBehavior is Ignore, so an escaping exception
+                    // would kill the poller for the lifetime of the process. It is caught — but
+                    // recorded as a FAILURE, never logged-and-forgotten while the heartbeat
+                    // carries on.
+                    _logger.LogError(ex, "Email poll iteration failed; retrying next interval.");
+                    _pollerHealth?.RecordCycleFailure(
+                        $"The email poll iteration threw {ex.GetType().Name}: {ex.Message}",
+                        isPermanent: false, DateTimeOffset.UtcNow);
                 }
 
                 // LIVENESS, AND ONLY LIVENESS. Reaching this line means the iteration ran to
@@ -401,7 +427,7 @@ namespace ERP_RFQ_Automation.Services
             try
             {
                 _logger.LogInformation("Starting email fetch...");
-                var report = await emailService.FetchAndSaveLeadsAsync();
+                var report = await emailService.FetchAndSaveLeadsAsync(null, stoppingToken);
                 // The fetch call returned, so the CYCLE is not what failed. Any mailbox that
                 // did fail is already recorded against its own id.
                 _pollerHealth?.RecordCycleCompleted(DateTimeOffset.UtcNow);
@@ -444,7 +470,7 @@ namespace ERP_RFQ_Automation.Services
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
-                return;
+                throw;
             }
             catch (Exception ex)
             {

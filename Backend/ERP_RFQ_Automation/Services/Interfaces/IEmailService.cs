@@ -14,6 +14,19 @@ namespace ERP_RFQ_Automation.Services.Interfaces
         /// must not log success without consulting it.
         /// </summary>
         Task<MailboxPollReport> FetchAndSaveLeadsAsync(long? businessUnitId = null);
+
+        /// <summary>
+        /// Cancellable polling contract used by the hosted email worker. The default keeps
+        /// existing test doubles and non-worker callers source-compatible; production
+        /// <see cref="EmailService"/> overrides it and carries the token through every IMAP
+        /// network boundary.
+        /// </summary>
+        async Task<MailboxPollReport> FetchAndSaveLeadsAsync(
+            long? businessUnitId, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return await FetchAndSaveLeadsAsync(businessUnitId);
+        }
         Task SendEmailAsync(string to, string subject, string body, List<(string FileName, byte[] FileContent, string ContentType)> attachments = null, string fromEmail = null, long? businessUnitId = null);
     }
 }

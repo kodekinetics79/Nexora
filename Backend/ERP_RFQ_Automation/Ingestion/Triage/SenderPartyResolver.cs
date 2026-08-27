@@ -95,6 +95,10 @@ public static class SenderPartyResolver
                 }
             }
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
         catch (Exception)
         {
             // Master data being unavailable must never stop mail: an unresolved sender is a
