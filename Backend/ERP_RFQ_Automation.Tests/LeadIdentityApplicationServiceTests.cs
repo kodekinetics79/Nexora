@@ -272,6 +272,37 @@ public sealed class LeadIdentityApplicationServiceTests
     }
 
     [Fact]
+    public async Task Recovering_identical_source_bytes_does_not_roll_back_a_newer_amendment_when_extraction_varies()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(781);
+        Seed.BusinessUnit(context, 781); Seed.EmailConfig(context, 7811, 781); Seed.EmailIngest(context, 7911, 7811, "NeedsReview");
+        await context.SaveChangesAsync();
+        var service = new LeadIdentityApplicationService(context);
+
+        var original = await service.ReconcileAsync(Candidate(781, 7911, "RFQ-RECOVERY", "buyer@recovery.test", 10),
+            Intake("recovery-original", "same-source-bytes", Guid.NewGuid(), "buyer@recovery.test"));
+        context.ChangeTracker.Clear();
+        var amendment = await service.ReconcileAsync(Candidate(781, 7911, "RFQ-RECOVERY", "buyer@recovery.test", 15),
+            Intake("recovery-amendment", "amended-source-bytes", Guid.NewGuid(), "buyer@recovery.test"));
+        context.ChangeTracker.Clear();
+
+        // The delayed replay contains the original bytes, but a second model extraction differs.
+        // Source-byte identity must win over that non-determinism and bind back to revision 1.
+        var recovered = await service.ReconcileAsync(Candidate(781, 7911, "RFQ-RECOVERY", "buyer@recovery.test", 9),
+            Intake("recovery-delayed", "same-source-bytes", Guid.NewGuid(), "buyer@recovery.test"));
+
+        Assert.Equal(LeadOccurrenceClassification.ExactDuplicate, recovered.Classification);
+        Assert.Equal(original.LeadId, recovered.LeadId);
+        Assert.Equal(original.RevisionId, recovered.RevisionId);
+        Assert.Equal(2, recovered.RevisionNumber);
+        Assert.Equal(2, await context.Set<LeadRevision>().CountAsync(x => x.LeadId == original.LeadId));
+        var current = await context.Leads.Include(x => x.LeadItems).SingleAsync(x => x.Id == original.LeadId);
+        Assert.Equal(amendment.RevisionId, current.CurrentRevisionId);
+        Assert.Equal(15, current.LeadItems.Single(x => x.IsCurrentRevisionProjection).Quantity);
+    }
+
+    [Fact]
     public async Task Unresolved_submission_with_part_overlap_requires_review_despite_quantity_changes_and_extra_lines()
     {
         using var db = new TestDb();
