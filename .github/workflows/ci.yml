@@ -363,7 +363,7 @@ jobs:
   # trigger that reads "not failed" as "passed" would ship a commit nothing ever tested.
   # ---------------------------------------------------------------------------------------------
   frontend-unit:
-    name: Frontend unit suite (shard ${{ matrix.shard }}/3)
+    name: Frontend unit suite (shard ${{ matrix.shard }}/5)
     needs: changes
     if: ${{ needs.changes.outputs.frontend == 'true' }}
     runs-on: ubuntu-latest
@@ -394,11 +394,14 @@ jobs:
     # ci-green needs no change: a matrix job's aggregate result is success only if every leg
     # succeeds, so `needs['frontend-unit'].result` still means what it meant.
     #
-    # Revisit when a single shard approaches 30 minutes: raise the shard count, not the timeout.
+    # RESIZED, 2026-08-28. The suite reached 1233 tests in 142 files and the 3-way shards took
+    # 22-24 minutes. Five shards preserve the same file-level isolation and full-suite coverage
+    # while restoring enough headroom for runner variance. Keep the 30-minute ceiling: when a
+    # shard approaches it again, raise the shard count rather than masking growth with a timeout.
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4, 5]
     timeout-minutes: 30
     defaults:
       run:
@@ -422,7 +425,7 @@ jobs:
       - name: Unit suite (vitest)
         # fail-fast:false above so one failing shard does not cancel the others — you want the
         # whole picture from one run, not the first failure and three cancellations.
-        run: npm test -- --shard=${{ matrix.shard }}/3
+        run: npm test -- --shard=${{ matrix.shard }}/5
 
   # A compile, unit suite, or fixture server cannot certify the product's core commercial
   # boundary. This job creates an empty disposable PostgreSQL database, starts the real API and
