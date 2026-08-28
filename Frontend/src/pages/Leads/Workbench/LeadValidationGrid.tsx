@@ -160,6 +160,44 @@ const LeadValidationGrid: React.FC<LeadValidationGridProps> = ({
       },
     },
     {
+      field: 'quantity',
+      headerName: 'Quote values',
+      width: 260,
+      sortable: false,
+      renderCell: ({ row }) => readOnly ? (
+        <Typography variant="body2" sx={{ fontWeight: 800 }}>
+          {decisions[row.revisionLineId]?.quantity ?? row.quantity ?? 'Missing'} {decisions[row.revisionLineId]?.unitOfMeasure || row.unitOfMeasure || ''}
+          {' · '}{decisions[row.revisionLineId]?.currency || row.currency || 'No currency'}
+        </Typography>
+      ) : (
+        <Stack direction="row" spacing={0.5}>
+          <TextField size="small" type="number" label="Qty" sx={{ width: 82 }}
+            value={decisions[row.revisionLineId]?.quantity ?? ''}
+            slotProps={{ htmlInput: { min: 1, step: 1, 'aria-label': `Quantity for line ${row.lineItemNo || row.id}` } }}
+            onClick={(event) => event.stopPropagation()}
+            onChange={(event) => updateCommercialField(row.revisionLineId, {
+              quantity: event.target.value ? Number(event.target.value) : undefined,
+            })} />
+          <TextField select size="small" label="UOM" sx={{ width: 92 }}
+            value={decisions[row.revisionLineId]?.unitOfMeasure ?? ''}
+            slotProps={{ select: { inputProps: { 'aria-label': `Unit of measure for line ${row.lineItemNo || row.id}` } } }}
+            onClick={(event) => event.stopPropagation()}
+            onChange={(event) => updateCommercialField(row.revisionLineId, { unitOfMeasure: event.target.value || undefined })}>
+            <MenuItem value="">Select</MenuItem>
+            {unitOptions.map((option) => <MenuItem key={option.code} value={option.code}>{option.code} · {option.label}</MenuItem>)}
+          </TextField>
+          <TextField select size="small" label="CCY" sx={{ width: 92 }}
+            value={decisions[row.revisionLineId]?.currency ?? ''}
+            slotProps={{ select: { inputProps: { 'aria-label': `Currency for line ${row.lineItemNo || row.id}` } } }}
+            onClick={(event) => event.stopPropagation()}
+            onChange={(event) => updateCommercialField(row.revisionLineId, { currency: event.target.value || undefined })}>
+            <MenuItem value="">Select</MenuItem>
+            {currencyOptions.map((option) => <MenuItem key={option.code} value={option.code}>{option.code} · {option.label}</MenuItem>)}
+          </TextField>
+        </Stack>
+      ),
+    },
+    {
       field: 'sourceText',
       headerName: 'Customer request / source',
       minWidth: 260,
@@ -252,44 +290,6 @@ const LeadValidationGrid: React.FC<LeadValidationGridProps> = ({
         </TextField>
         );
       },
-    },
-    {
-      field: 'quantity',
-      headerName: 'Quote values',
-      width: 260,
-      sortable: false,
-      renderCell: ({ row }) => readOnly ? (
-        <Typography variant="body2" sx={{ fontWeight: 800 }}>
-          {decisions[row.revisionLineId]?.quantity ?? row.quantity ?? 'Missing'} {decisions[row.revisionLineId]?.unitOfMeasure || row.unitOfMeasure || ''}
-          {' · '}{decisions[row.revisionLineId]?.currency || row.currency || 'No currency'}
-        </Typography>
-      ) : (
-        <Stack direction="row" spacing={0.5}>
-          <TextField size="small" type="number" label="Qty" sx={{ width: 82 }}
-            value={decisions[row.revisionLineId]?.quantity ?? ''}
-            slotProps={{ htmlInput: { min: 1, step: 1, 'aria-label': `Quantity for line ${row.lineItemNo || row.id}` } }}
-            onClick={(event) => event.stopPropagation()}
-            onChange={(event) => updateCommercialField(row.revisionLineId, {
-              quantity: event.target.value ? Number(event.target.value) : undefined,
-            })} />
-          <TextField select size="small" label="UOM" sx={{ width: 92 }}
-            value={decisions[row.revisionLineId]?.unitOfMeasure ?? ''}
-            slotProps={{ select: { inputProps: { 'aria-label': `Unit of measure for line ${row.lineItemNo || row.id}` } } }}
-            onClick={(event) => event.stopPropagation()}
-            onChange={(event) => updateCommercialField(row.revisionLineId, { unitOfMeasure: event.target.value || undefined })}>
-            <MenuItem value="">Select</MenuItem>
-            {unitOptions.map((option) => <MenuItem key={option.code} value={option.code}>{option.code} · {option.label}</MenuItem>)}
-          </TextField>
-          <TextField select size="small" label="CCY" sx={{ width: 92 }}
-            value={decisions[row.revisionLineId]?.currency ?? ''}
-            slotProps={{ select: { inputProps: { 'aria-label': `Currency for line ${row.lineItemNo || row.id}` } } }}
-            onClick={(event) => event.stopPropagation()}
-            onChange={(event) => updateCommercialField(row.revisionLineId, { currency: event.target.value || undefined })}>
-            <MenuItem value="">Select</MenuItem>
-            {currencyOptions.map((option) => <MenuItem key={option.code} value={option.code}>{option.code} · {option.label}</MenuItem>)}
-          </TextField>
-        </Stack>
-      ),
     },
     {
       field: 'verificationStatus',
