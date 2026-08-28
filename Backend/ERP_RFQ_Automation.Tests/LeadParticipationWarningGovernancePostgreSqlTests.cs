@@ -184,6 +184,15 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
         Assert.Equal(promoted.PromotionId, replay.PromotionId);
         Assert.Equal(promoted.RfqId, replay.RfqId);
         Assert.Equal(promoted.RfqNumber, replay.RfqNumber);
+
+        // A client may lose the first response and generate a fresh transport key. The durable
+        // Lead/revision/participation winner remains authoritative even though promotion has
+        // already advanced the Lead lifecycle beyond QUALIFIED.
+        var freshKeyReplay = await promotion.PromoteAsync(Tenant, scenario.LeadId,
+            promotionCommand with { IdempotencyKey = $"warning-promotion:fresh-retry:{scenario.LeadId}" });
+        Assert.True(freshKeyReplay.Replayed);
+        Assert.Equal(promoted.PromotionId, freshKeyReplay.PromotionId);
+        Assert.Equal(promoted.RfqId, freshKeyReplay.RfqId);
         Assert.Equal(1, await context.Set<RfqPromotion>().AsNoTracking()
             .CountAsync(x => x.BusinessUnitId == Tenant && x.LeadId == scenario.LeadId));
         Assert.Equal(1, await context.Rfqs.AsNoTracking()
