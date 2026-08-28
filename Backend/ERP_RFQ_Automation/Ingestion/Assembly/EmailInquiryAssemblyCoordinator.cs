@@ -578,6 +578,20 @@ public sealed class EmailInquiryAssemblyCoordinator : IEmailInquiryAssemblyCoord
             assembly.Status = EmailInquiryAssemblyStatus.NeedsReview;
             assembly.StatusReason = Truncate($"{reasonCode}: {reasonDetail}", 1000);
             assembly.UpdatedAtUtc = DateTimeOffset.UtcNow;
+
+            // The assembly is the authority, but EmailIngest.ParseStatus is the projection the
+            // Inbound Mail screen reads. Leaving it at Queued after this terminal decision tells
+            // the user that work is still running for up to the hourly reconciliation sweep.
+            // Move both records in the same transaction so the screen cannot lag the barrier.
+            var ingest = await _context.EmailIngests.FirstOrDefaultAsync(e =>
+                e.Id == assembly.EmailIngestId
+                && e.EmailConfiguration.BusinessUnitId == businessUnitId, ct);
+            if (ingest is not null
+                && EmailInquiryLedgerReconciliation.ClaimsInFlight(ingest.ParseStatus))
+            {
+                ingest.ParseStatus = EmailInquiryLedgerReconciliation.NeedsReview;
+                ingest.ParsedAt = DateTime.UtcNow;
+            }
             await _context.SaveChangesAsync(ct);
         }, ct);
     }
