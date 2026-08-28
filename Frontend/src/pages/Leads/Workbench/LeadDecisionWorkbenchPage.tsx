@@ -61,6 +61,7 @@ import {
 } from './workbenchRules';
 import { commercialActionPermissions } from '../../../utils/commercialActionPermissions';
 import { useUnsavedWorkGuard } from '../../../hooks/useUnsavedWorkGuard';
+import { catalogPolicyLabel, catalogWarningSummary } from './catalogWarningPresentation';
 
 const CountChip = ({ label, count, color = 'default' }: { label: string; count: number; color?: 'default' | 'success' | 'warning' | 'info' }) => (
   <Chip size="small" label={`${label} ${count}`} color={color} variant={count > 0 ? 'filled' : 'outlined'} sx={{ fontWeight: 800 }} />
@@ -662,6 +663,8 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
                 const reason = workbench.reasonCodes.find((item) => item.code === decision.reasonCode);
                 const chosenProduct = line.catalogMatches?.find((match) => match.productId === decision.productId);
                 const warningSnapshot = line.participation?.warningSnapshotJson || line.warningSnapshotJson;
+                const warningSummary = catalogWarningSummary(warningSnapshot, line.attentionReason);
+                const policyLabel = catalogPolicyLabel(line.participation?.catalogPolicyVersion || line.catalogPolicyVersion);
                 return (
                   <Paper key={line.revisionLineId} variant="outlined" sx={{ p: 1.25 }}>
                     <Stack direction="row" spacing={1} sx={{ alignItems: 'center', justifyContent: 'space-between' }}>
@@ -680,9 +683,14 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
                       </Alert>
                     ) : null}
                     {decision.decision === 'Bid' ? (
-                      <Typography component="pre" variant="caption" color="text.secondary" sx={{ mt: 0.75, mb: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
-                        Policy {line.participation?.catalogPolicyVersion || line.catalogPolicyVersion || 'not supplied'} · warning snapshot {warningSnapshot || 'not supplied'}
-                      </Typography>
+                      <Stack spacing={0.25} sx={{ mt: 0.75 }}>
+                        <Typography variant="caption" color="text.secondary">
+                          Catalog review: {warningSummary}
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary">
+                          {policyLabel}
+                        </Typography>
+                      </Stack>
                     ) : null}
                   </Paper>
                 );

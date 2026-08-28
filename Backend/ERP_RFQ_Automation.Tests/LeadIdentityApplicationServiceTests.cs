@@ -244,6 +244,81 @@ public sealed class LeadIdentityApplicationServiceTests
     }
 
     [Fact]
+    public async Task Workbench_preserves_email_subject_and_message_id_after_human_revision()
+    {
+        const long tenant = 204;
+        const long configurationId = 2041;
+        const long ingestId = 2051;
+        using var db = new TestDb();
+        await using var context = db.ContextFor(tenant);
+        Seed.BusinessUnit(context, tenant);
+        Seed.EmailConfig(context, configurationId, tenant);
+        var ingest = Seed.EmailIngest(context, ingestId, configurationId, "NeedsReview");
+        ingest.MessageId = "<rfq-204@customer.example>";
+        ingest.EmailSubject = "RFQ 204 — retained email provenance";
+        await context.SaveChangesAsync();
+
+        var identity = new LeadIdentityApplicationService(context);
+        var candidate = Candidate(tenant, ingestId, "RFQ-204", "buyer@customer.com", 10);
+        candidate.LeadSource = "Email";
+        var created = await identity.ReconcileAsync(candidate,
+            Intake("email-provenance", "email-provenance-hash", Guid.NewGuid()) with
+            {
+                SourceChannel = "Email",
+                ExternalSourceId = "source-occurrence-204",
+                EmailThreadId = "email:<rfq-204@customer.example>",
+                Sender = ingest.FromEmail,
+                Subject = ingest.EmailSubject
+            });
+
+        var inboundOccurrence = await context.Set<LeadIngestionOccurrence>()
+            .SingleAsync(x => x.Id == created.OccurrenceId);
+        var corpus = DocumentCorpus.Create(tenant, inboundOccurrence.BatchId, CorpusSourceType.Email);
+        context.Add(corpus);
+        await context.SaveChangesAsync();
+        var bodyDocument = SourceDocument.Create(tenant, corpus.Id, new string('c', 64),
+            "rfq-204-body.txt", "text/plain", "evidence", "email/rfq-204-body.txt", "v1", 128);
+        bodyDocument.MarkSecurityStatus(DocumentSecurityStatus.Cleared);
+        context.Add(bodyDocument);
+        await context.SaveChangesAsync();
+        inboundOccurrence.SourceDocumentId = bodyDocument.Id;
+        inboundOccurrence.Documents.Add(new LeadOccurrenceDocument
+        {
+            BusinessUnitId = tenant,
+            SourceDocumentId = bodyDocument.Id,
+            Role = "Primary",
+            Ordinal = 1,
+            LinkedAtUtc = DateTimeOffset.UtcNow
+        });
+        await context.SaveChangesAsync();
+
+        var workbench = new LeadDecisionWorkbenchService(context, new LeadOutcomeReasons(context));
+        var original = await workbench.GetAsync(tenant, created.LeadId);
+        Assert.Equal(ingest.EmailSubject, original.EmailSubject);
+        Assert.Equal(ingest.MessageId, original.EmailMessageId);
+        Assert.NotEqual("source-occurrence-204", original.EmailMessageId);
+
+        await identity.AppendHumanRevisionAsync(tenant, created.LeadId, "commercial.owner@test",
+            "Customer identity reviewed and linked without creating another inbound receipt.",
+            "human-revision:email-provenance");
+        context.ChangeTracker.Clear();
+
+        var currentRevision = await context.Set<LeadRevision>().AsNoTracking()
+            .SingleAsync(x => x.BusinessUnitId == tenant && x.LeadId == created.LeadId
+                && x.RevisionNumber == 2);
+        var humanOccurrence = await context.Set<LeadIngestionOccurrence>().AsNoTracking()
+            .SingleAsync(x => x.Id == currentRevision.EstablishedByOccurrenceId);
+        Assert.Equal(LeadOccurrenceRecordKind.IdentityBaseline, humanOccurrence.RecordKind);
+        Assert.Null(humanOccurrence.Subject);
+        Assert.Null(humanOccurrence.EmailThreadId);
+
+        var corrected = await workbench.GetAsync(tenant, created.LeadId);
+        Assert.Equal(ingest.EmailSubject, corrected.EmailSubject);
+        Assert.Equal(ingest.MessageId, corrected.EmailMessageId);
+        Assert.Equal("buyer@customer.com", corrected.SenderEmail);
+    }
+
+    [Fact]
     public async Task Resending_an_older_revision_is_an_exact_duplicate_without_reverting_current_projection()
     {
         using var db = new TestDb();

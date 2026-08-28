@@ -30,6 +30,11 @@ import type {
 } from '../../../api/services/leadDecisionService';
 import type { DecisionMap } from './workbenchRules';
 import GovernedDecisionDialog from './GovernedDecisionDialog';
+import {
+  catalogPolicyLabel,
+  catalogWarningSummary,
+  parseCatalogWarningSnapshot,
+} from './catalogWarningPresentation';
 
 interface LeadValidationGridProps {
   lines: LeadDecisionLineDTO[];
@@ -60,31 +65,6 @@ const verificationLabel = (status: string): string => {
   if (status === 'MISSING_SOURCE') return 'Missing source';
   if (status === 'MACHINE_SUGGESTION') return 'Machine suggestion';
   return status.replaceAll('_', ' ').toLowerCase().replace(/^./, (value) => value.toUpperCase());
-};
-
-interface CatalogWarningSnapshot {
-  needsAttention: boolean;
-  attentionReason?: string;
-  matches: Array<{ productId: number; productName?: string; materialCode?: string }>;
-}
-
-const parseCatalogWarningSnapshot = (value?: string | null): CatalogWarningSnapshot => {
-  if (!value) return { needsAttention: false, matches: [] };
-  try {
-    const parsed = JSON.parse(value) as Record<string, unknown>;
-    const rawMatches = (parsed.Matches ?? parsed.matches) as Array<Record<string, unknown>> | undefined;
-    return {
-      needsAttention: Boolean(parsed.NeedsAttention ?? parsed.needsAttention),
-      attentionReason: String(parsed.AttentionReason ?? parsed.attentionReason ?? '') || undefined,
-      matches: (rawMatches ?? []).map((match) => ({
-        productId: Number(match.ProductId ?? match.productId),
-        productName: String(match.ProductName ?? match.productName ?? '') || undefined,
-        materialCode: String(match.MaterialCode ?? match.materialCode ?? '') || undefined,
-      })).filter((match) => Number.isFinite(match.productId)),
-    };
-  } catch {
-    return { needsAttention: false, matches: [] };
-  }
 };
 
 const LeadValidationGrid: React.FC<LeadValidationGridProps> = ({
@@ -154,6 +134,30 @@ const LeadValidationGrid: React.FC<LeadValidationGridProps> = ({
       width: 80,
       sortable: false,
       renderCell: ({ row }) => <Typography variant="body2" sx={{ fontWeight: 800 }}>{row.lineItemNo || '—'}</Typography>,
+    },
+    {
+      field: 'participation',
+      headerName: 'Participation',
+      width: 165,
+      sortable: false,
+      renderCell: ({ row }) => {
+        const current = decisions[row.revisionLineId]?.decision ?? 'Pending';
+        if (readOnly) return <Chip size="small" label={current === 'NoBid' ? 'No-bid' : current} variant={current === 'Pending' ? 'outlined' : 'filled'} />;
+        return (
+          <Select
+            size="small"
+            value={current}
+            onChange={(event) => requestDecision(row, event.target.value as LineParticipationDecision)}
+            inputProps={{ 'aria-label': `Participation decision for line ${row.lineItemNo || row.id}` }}
+            sx={{ minWidth: 135, fontSize: '0.78rem' }}
+          >
+            <MenuItem value="Pending">Undecided</MenuItem>
+            <MenuItem value="Bid">Bid</MenuItem>
+            <MenuItem value="NoBid">No-bid…</MenuItem>
+            <MenuItem value="Clarify">Clarify…</MenuItem>
+          </Select>
+        );
+      },
     },
     {
       field: 'sourceText',
@@ -305,30 +309,6 @@ const LeadValidationGrid: React.FC<LeadValidationGridProps> = ({
       ),
     },
     {
-      field: 'participation',
-      headerName: 'Participation',
-      width: 165,
-      sortable: false,
-      renderCell: ({ row }) => {
-        const current = decisions[row.revisionLineId]?.decision ?? 'Pending';
-        if (readOnly) return <Chip size="small" label={current === 'NoBid' ? 'No-bid' : current} variant={current === 'Pending' ? 'outlined' : 'filled'} />;
-        return (
-          <Select
-            size="small"
-            value={current}
-            onChange={(event) => requestDecision(row, event.target.value as LineParticipationDecision)}
-            inputProps={{ 'aria-label': `Participation decision for line ${row.lineItemNo || row.id}` }}
-            sx={{ minWidth: 135, fontSize: '0.78rem' }}
-          >
-            <MenuItem value="Pending">Undecided</MenuItem>
-            <MenuItem value="Bid">Bid</MenuItem>
-            <MenuItem value="NoBid">No-bid…</MenuItem>
-            <MenuItem value="Clarify">Clarify…</MenuItem>
-          </Select>
-        );
-      },
-    },
-    {
       field: 'governance',
       headerName: 'Decision record',
       minWidth: 240,
@@ -341,8 +321,9 @@ const LeadValidationGrid: React.FC<LeadValidationGridProps> = ({
         const policy = row.participation?.catalogPolicyVersion || row.catalogPolicyVersion;
         const snapshot = row.participation?.warningSnapshotJson || row.warningSnapshotJson;
         const savedWarning = parseCatalogWarningSnapshot(snapshot);
+        const warningSummary = catalogWarningSummary(snapshot, row.attentionReason);
         return (
-          <Tooltip title={snapshot || 'No warning snapshot'}>
+          <Tooltip title={`${warningSummary} ${catalogPolicyLabel(policy)}`}>
             <Box sx={{ minWidth: 0 }}>
               <Typography variant="caption" sx={{ display: 'block', fontWeight: 800 }} noWrap>
                 {decision.decision === 'Bid' ? (savedWarning.needsAttention ? 'Warning acknowledged' : 'Bid approved') : reason?.label || decision.reasonCode || 'Reason missing'}
