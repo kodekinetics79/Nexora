@@ -13,6 +13,29 @@ const v1EvidenceDir = path.join(evidenceRoot, 'v1');
 const rfqId = () => requiredNumber('E2E_CORE_RFQ_ID');
 const quoteId = () => requiredNumber('E2E_CORE_QUOTE_ID');
 
+const decodeBase32 = (value: string): Buffer => {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  const bits = value.toUpperCase().replace(/[^A-Z2-7]/g, '')
+    .split('').map((character) => alphabet.indexOf(character).toString(2).padStart(5, '0')).join('');
+  return Buffer.from((bits.match(/.{8}/g) ?? []).map((byte) => Number.parseInt(byte, 2)));
+};
+
+const currentTotp = (secret: string, now: number): string => {
+  const counter = Buffer.alloc(8);
+  counter.writeBigUInt64BE(BigInt(Math.floor(now / 30_000)));
+  const digest = createHmac('sha1', decodeBase32(secret)).update(counter).digest();
+  const offset = digest[digest.length - 1] & 0x0f;
+  return ((digest.readUInt32BE(offset) & 0x7fffffff) % 1_000_000).toString().padStart(6, '0');
+};
+
+const nextTotpAfterFixtureEnrollment = async (page: import('@playwright/test').Page): Promise<string> => {
+  const secret = required('E2E_PLATFORM_TOTP_SECRET');
+  const now = Date.now();
+  const nextStepAt = (Math.floor(now / 30_000) + 1) * 30_000;
+  await page.waitForTimeout(nextStepAt - now + 500);
+  return currentTotp(secret, Date.now());
+};
+
 type Workbench = {
   nexoraSerial: string;
   lines: Array<{ id: number; demandLineId?: number | null; partNumber?: string | null; shortfallQuantity: number }>;
@@ -328,9 +351,17 @@ test('03 RFQ line evidence opens without inventing unavailable provenance', asyn
   const line = page.getByRole('row').filter({ hasText: required('E2E_CORE_PARTIAL_ATP_PART') });
   await line.getByRole('button', { name: /Inspect persisted source and normalization evidence/i }).click();
   await expect(page.getByText('Source evidence', { exact: true })).toBeVisible();
-  await expect(page.getByText(/Open Canonical Lead to inspect document/i)).toBeVisible();
+  await expect(page.getByText(/Open the Lead decision record's Evidence stage/i)).toBeVisible();
+  const exactEvidence = page.getByRole('button', { name: 'Open exact source evidence' });
+  await expect(exactEvidence).toBeVisible();
   await fs.mkdir(evidenceDir, { recursive: true });
   await page.screenshot({ path: path.join(evidenceDir, 'rfq-command-workspace.png'), fullPage: true });
+  await exactEvidence.click();
+  await expect(page).toHaveURL(new RegExp(
+    `/procurement/leads/${requiredNumber('E2E_CORE_LEAD_ID')}/workbench\\?stage=evidence$`,
+  ));
+  await expect(page.getByRole('tab', { name: '1. Evidence' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('heading', { name: 'Source evidence' })).toBeVisible();
 });
 
 test('04 RFQ line outcomes use progressive disclosure for the next commercial action', async ({ page }) => {
@@ -737,7 +768,7 @@ test('29 RFQ Command Workspace remains usable on mobile', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'Procurement Handoffs' })).toBeVisible();
   await expect(page.getByText(required('E2E_CORE_NEXORA_SERIAL'), { exact: true })).toBeVisible();
   await expect(page.getByText('EXT-V2-PO-9001')).toBeVisible();
-  await expect(page.getByText(/DROP SHIP/)).toBeVisible();
+  await expect(page.getByText(/Drop ship/i)).toBeVisible();
   await expect(page.getByText('Not authoritative')).toBeVisible();
   await expect(page.getByText(/Authorized manual entry/)).toBeVisible();
   await expect(page.locator('body')).not.toHaveCSS('overflow-x', 'scroll');
@@ -773,7 +804,7 @@ test('32 Sales Today is an actionable role-scoped work queue', async ({ page }) 
   await loginAs(page, 'manager');
   await page.goto('/sales/today');
   await expect(page.getByRole('heading', { name: 'Sales today' })).toBeVisible();
-  await expect(page.getByText('Team-wide commercial work that needs attention now.')).toBeVisible();
+  await expect(page.getByText('Commercial work across your managed teams that needs attention now.')).toBeVisible();
   const firstAction = page.getByRole('button', { name: 'Open' }).first();
   await expect(firstAction).toBeVisible();
   await firstAction.click();
@@ -816,9 +847,9 @@ test('34 role Today surfaces expose persisted operational work', async ({ page }
 
   await page.goto('/executive/today');
   await expect(page.getByRole('heading', { name: 'Executive RFQ-to-Revenue' })).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Commercial Attention' })).toBeVisible();
-  await page.getByRole('button', { name: /New inquiries/ }).click();
-  await expect(page).toHaveURL(/\/procurement\/leads\/all$/);
+  await expect(page.getByRole('heading', { name: 'Verified Performance' })).toBeVisible();
+  await page.getByRole('button', { name: 'Deadline board' }).click();
+  await expect(page).toHaveURL(/\/analytics\/deadlines$/);
 
   const users = await jsonOk<{ totalCount: number }>(await api(page, token, 'get', '/api/User?pageSize=500'));
   await page.goto('/admin/operations');
@@ -1010,8 +1041,10 @@ test('39 platform owner console uses authenticated persisted operational data', 
 
   await page.goto('/platform/overview');
   await page.getByLabel('Email').fill(required('E2E_PLATFORM_EMAIL'));
-  await page.getByLabel('Password').fill(required('E2E_PLATFORM_PASSWORD'));
+  await page.getByRole('textbox', { name: 'Password', exact: true }).fill(required('E2E_PLATFORM_PASSWORD'));
   await page.getByRole('button', { name: 'Enter Control Plane' }).click();
+  await page.getByLabel('6-digit authenticator code').fill(await nextTotpAfterFixtureEnrollment(page));
+  await page.getByRole('button', { name: 'Verify and enter' }).click();
   await expect(page.getByRole('heading', { name: 'Platform Overview' })).toBeVisible();
   await expect(page.getByText('System Health', { exact: true })).toBeVisible();
 
@@ -1019,33 +1052,65 @@ test('39 platform owner console uses authenticated persisted operational data', 
   await expect(page.getByRole('heading', { name: 'Tenants' })).toBeVisible();
   await expect(page.getByText('Release 01C1 Acceptance', { exact: true }).first()).toBeVisible();
 
-  await page.getByRole('button', { name: 'Provision Tenant' }).click();
-  const provisionDialog = page.getByRole('dialog', { name: 'Provision New Tenant' });
+  await page.getByRole('button', { name: 'Create Company' }).click();
+  const provisionDialog = page.getByRole('dialog', { name: 'Create a company workspace' });
   await provisionDialog.getByLabel('Organization name').fill('V1 Platform Acceptance Tenant');
-  await provisionDialog.getByLabel('Slug').fill('v1-platform-acceptance');
-  await provisionDialog.getByRole('combobox', { name: /Plan/ }).click();
+  await provisionDialog.getByLabel('Workspace slug').fill('v1-platform-acceptance');
+  await provisionDialog.getByLabel('Company contact email').fill('contact@v1-platform-acceptance.local');
+  await provisionDialog.getByLabel('Address line 1').fill('1 Acceptance Way');
+  await provisionDialog.getByLabel('City').fill('Riyadh');
+  await provisionDialog.getByLabel('Country of registration').click();
+  await page.getByRole('option', { name: /Saudi Arabia/ }).click();
+  await provisionDialog.getByRole('button', { name: 'Next' }).click();
+
+  await provisionDialog.getByRole('combobox', { name: 'Plan' }).click();
   await page.getByRole('option', { name: 'Pro' }).click();
-  await page.getByRole('button', { name: 'Provision', exact: true }).click();
-  await expect(page.getByText('V1 Platform Acceptance Tenant', { exact: true })).toBeVisible();
+  await provisionDialog.getByLabel('Billing contact name').fill('V1 Billing Contact');
+  await provisionDialog.getByLabel('Billing contact email').fill('billing@v1-platform-acceptance.local');
+  await provisionDialog.getByLabel('Account owner email (internal)').fill('owner@acceptance.local');
+  await provisionDialog.getByRole('button', { name: 'Next' }).click();
+
+  await provisionDialog.getByLabel('First name').fill('V1');
+  await provisionDialog.getByLabel('Last name').fill('Administrator');
+  await provisionDialog.getByLabel('Work email').fill('admin@v1-platform-acceptance.local');
+  await provisionDialog.getByRole('button', { name: 'Next' }).click();
+  await provisionDialog.getByRole('button', { name: 'Create workspace' }).click();
+  const provisioningProgress = page.getByRole('dialog', {
+    name: 'Provisioning V1 Platform Acceptance Tenant',
+  });
+  await expect(provisioningProgress.getByText('Succeeded', { exact: true }).first()).toBeVisible();
+  await provisioningProgress.getByRole('button', { name: 'Close', exact: true }).click();
+  await expect(page.getByText('V1 Platform Acceptance Tenant', { exact: true }).first()).toBeVisible();
 
   let tenantRow = page.getByRole('row').filter({ hasText: 'Release 01C1 Acceptance' });
-  await tenantRow.getByRole('button', { name: 'Suspend' }).click();
+  await tenantRow.getByRole('button', { name: 'Impersonate tenant', exact: true }).click();
+  await page.getByLabel('Audit reason').fill('V1 read-only support-session verification');
+  await page.getByRole('button', { name: 'Impersonate', exact: true }).click();
+  await expect(page.getByRole('status').filter({ hasText: 'Impersonating Release 01C1 Acceptance — read-only' }))
+    .toBeVisible();
+  await page.getByRole('button', { name: 'Exit impersonation', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Tenants' })).toBeVisible();
+
+  tenantRow = page.getByRole('row').filter({ hasText: 'Release 01C1 Acceptance' });
+  await tenantRow.getByRole('button', { name: 'Suspend tenant', exact: true }).click();
   await page.getByLabel('Audit reason').fill('V1 acceptance lifecycle verification');
-  await page.getByRole('button', { name: 'suspend', exact: true }).click();
+  await page.getByRole('button', { name: 'Suspend', exact: true }).click();
   await expect(tenantRow.getByText('suspended', { exact: true })).toBeVisible();
 
   tenantRow = page.getByRole('row').filter({ hasText: 'Release 01C1 Acceptance' });
-  await tenantRow.getByRole('button', { name: 'Resume' }).click();
+  await tenantRow.getByRole('button', { name: 'Resume tenant', exact: true }).click();
   await page.getByLabel('Audit reason').fill('V1 acceptance lifecycle restoration');
-  await page.getByRole('button', { name: 'resume', exact: true }).click();
-  await expect(tenantRow.getByText('active', { exact: true })).toBeVisible();
-
-  await tenantRow.getByRole('button', { name: 'Impersonate' }).click();
-  await page.getByLabel('Audit reason').fill('V1 read-only support-session verification');
-  await page.getByRole('button', { name: 'impersonate', exact: true }).click();
-  await page.getByText('Release 01C1 Acceptance', { exact: true }).first().click();
-  await expect(page.getByText('Tenant Registry', { exact: true })).toBeVisible();
-  await expect(page.getByText(required('E2E_PLATFORM_TENANT_ID'), { exact: true })).toBeVisible();
+  const refusedResume = page.waitForResponse(
+    (response) => response.request().method() === 'POST'
+      && response.url().endsWith('/api/platform/tenants/1/resume'),
+  );
+  await page.getByRole('button', { name: 'Resume', exact: true }).click();
+  expect((await refusedResume).status()).toBe(409);
+  await expect(page.getByRole('dialog', { name: 'Resume tenant' })).toBeVisible();
+  await page.getByRole('dialog', { name: 'Resume tenant' })
+    .getByRole('button', { name: 'Cancel', exact: true })
+    .click();
+  await expect(tenantRow.getByText('suspended', { exact: true })).toBeVisible();
 
   await page.getByRole('link', { name: 'Pipeline' }).click();
   await expect(page.getByRole('heading', { name: 'Extraction Pipeline' })).toBeVisible();
@@ -1059,7 +1124,9 @@ test('39 platform owner console uses authenticated persisted operational data', 
   await expect(page.getByRole('heading', { name: 'Audit Log' })).toBeVisible();
   await expect(page.getByText('tenant.provision', { exact: true }).first()).toBeVisible();
   await expect(page.getByText('impersonate.issue', { exact: true }).first()).toBeVisible();
-  expect(failures).toEqual([]);
+  expect(failures).toEqual([
+    expect.stringMatching(/^409 .*\/api\/platform\/tenants\/1\/resume$/),
+  ]);
 });
 
 test.afterEach(({ page }, testInfo) => {

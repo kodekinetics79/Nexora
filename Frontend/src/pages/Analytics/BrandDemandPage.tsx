@@ -9,6 +9,7 @@ import { Refresh as RefreshIcon, Insights as BrandIcon } from '@mui/icons-materi
 import dashboardService, { type BrandDemandRowDTO } from '../../api/services/dashboardService';
 import { presentableErrorMessage } from '../../utils/apiErrors';
 import { LoadingState, ErrorState, EmptyState } from '../../platform/components/States';
+import { useAuth } from '../../context/AuthContext';
 
 // ---------------------------------------------------------------------------
 // Brand demand concentration — which manufacturers customers actually ask for.
@@ -44,11 +45,14 @@ const measureValue = (row: BrandDemandRowDTO, measure: Measure): number => {
 };
 
 const BrandDemandPage: React.FC = () => {
+  const { userData } = useAuth();
   const [measure, setMeasure] = useState<Measure>('lines');
+  const canView = Boolean(userData.isManager || userData.isSuperAdmin || userData.hasModuleAuthorityByRank);
 
   const demand = useQuery({
     queryKey: ['brand-demand'],
     queryFn: () => dashboardService.getBrandDemand(),
+    enabled: canView,
     staleTime: 300_000,
     retry: false,
   });
@@ -65,6 +69,17 @@ const BrandDemandPage: React.FC = () => {
   }, [demand.data, measure]);
 
   const data = demand.data;
+
+  if (!canView) {
+    return (
+      <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 760, mx: 'auto' }}>
+        <Alert severity="info">
+          Brand demand aggregates company-wide customer enquiries and is available to Sales
+          Managers and tenant administrators. Your own-account work remains available in Sales Today.
+        </Alert>
+      </Box>
+    );
+  }
 
   return (
     <Box sx={{ p: { xs: 1.5, md: 3 }, maxWidth: 1280, mx: 'auto' }}>

@@ -255,7 +255,7 @@ public sealed class ProvisioningStepExecutor : IProvisioningStepExecutor
 
     private async Task<string?> CreateBusinessUnitAsync(ProvisioningStepContext context, CancellationToken ct)
     {
-        var (db, execution, _, actor, _) = context;
+        var (db, execution, request, actor, _) = context;
 
         if (execution.ProvisionedBusinessUnitId is { } existing)
         {
@@ -281,6 +281,8 @@ public sealed class ProvisioningStepExecutor : IProvisioningStepExecutor
             // MasterReference — printed on quotes the customer keeps.
             BusinessUnitCode = execution.Slug.ToUpperInvariant(),
             BusinessUnitName = execution.Name,
+            LegalName = Normalize(request.LegalName),
+            CommercialRegistrationNumber = Normalize(request.RegistrationNumber),
             Description = $"Primary business unit for tenant '{execution.Name}'",
             IsActive = true,
             CreatedBy = actor,

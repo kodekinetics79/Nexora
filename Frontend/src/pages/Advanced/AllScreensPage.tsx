@@ -1,8 +1,10 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { Link as RouterLink } from 'react-router-dom';
 import { Box, Chip, Stack, Typography } from '@mui/material';
 import CatalogHub, { type CatalogEntry } from '../../components/common/CatalogHub';
 import { ADVANCED_GROUPS, PRIMARY_NAV, navEntryMatches, type NavEntry } from '../../components/layout/navCatalog';
+import { useAuth } from '../../context/AuthContext';
+import { SETUP_ENTRIES } from '../Setup/setupCatalog';
 
 /**
  * Every screen the rail no longer carries — grouped, described in a sentence, and searchable.
@@ -18,38 +20,59 @@ import { ADVANCED_GROUPS, PRIMARY_NAV, navEntryMatches, type NavEntry } from '..
  * destination is the rule, and listing Leads here as well as on the rail is exactly the duplication
  * that put Users and Integration Hub in the navigation twice before Setup Master absorbed them.
  */
-const AllScreensPage: React.FC = () => (
-  <CatalogHub
-    title="Screen directory"
-    intro="Everything Nexora can do that is not part of the daily quote-building path. Each screen here is a full destination with its own address — this page is a directory, not a copy."
-    idPrefix="advanced"
-    groups={ADVANCED_GROUPS as { key: string; title: string; caption: string; entries: NavEntry[] }[]}
-    searchPlaceholder="Search screens — try “invoice”, “stock ageing”, “copilot”"
-    searchAriaLabel="Search all screens"
-    availableLabel={(count) => `${count} screens you can open`}
-    matches={(entry: CatalogEntry, query: string) => navEntryMatches(entry as NavEntry, query)}
-    noAccessTitle="No additional screens are open to your role."
-    noAccessMessage="Everything you can reach is already on the sidebar. Ask an administrator to grant the modules you need — they are listed against each role under Setup → Roles & Permissions."
-  >
-    <Box sx={{ mt: 2.5 }}>
-      <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase' }}>
-        Always on the sidebar
-      </Typography>
-      <Stack direction="row" spacing={1} sx={{ mt: 1, flexWrap: 'wrap', gap: 1 }}>
-        {PRIMARY_NAV.map((item) => (
-          <Chip
-            key={item.key}
-            component={RouterLink}
-            to={item.path}
-            clickable
-            label={item.label}
-            size="small"
-            sx={{ fontWeight: 700 }}
-          />
-        ))}
-      </Stack>
-    </Box>
-  </CatalogHub>
-);
+const AllScreensPage: React.FC = () => {
+  const { hasPermission } = useAuth();
+  // These chips mirror the real rail. Showing RFQs, Quotes or Setup here when the same role cannot
+  // see them in navigation turns the directory into a collection of Access Denied links.
+  const visiblePrimaryNav = useMemo(
+    () => PRIMARY_NAV.filter((item) => {
+      if (item.key === 'setup') {
+        return SETUP_ENTRIES.some((entry) => !entry.moduleName || hasPermission(entry.moduleName));
+      }
+      return !item.moduleName || hasPermission(item.moduleName);
+    }),
+    [hasPermission],
+  );
+
+  return (
+    <CatalogHub
+      title="Screen directory"
+      intro="Everything Nexora can do that is not part of the daily quote-building path. Each screen here is a full destination with its own address — this page is a directory, not a copy."
+      idPrefix="advanced"
+      groups={ADVANCED_GROUPS as { key: string; title: string; caption: string; entries: NavEntry[] }[]}
+      searchPlaceholder="Search screens — try “invoice”, “stock ageing”, “copilot”"
+      searchAriaLabel="Search all screens"
+      availableLabel={(count) => `${count} screens you can open`}
+      matches={(entry: CatalogEntry, query: string) => navEntryMatches(entry as NavEntry, query)}
+      noAccessTitle="No additional screens are open to your role."
+      noAccessMessage="Everything you can reach is already on the sidebar. Ask an administrator to grant the modules you need — they are listed against each role under Setup → Roles & Permissions."
+    >
+      <Box sx={{ mt: 2.5 }}>
+        <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase' }}>
+          Always on the sidebar
+        </Typography>
+        <Stack
+          component="nav"
+          aria-label="Primary navigation shortcuts"
+          direction="row"
+          spacing={1}
+          sx={{ mt: 1, flexWrap: 'wrap', gap: 1 }}
+        >
+          {visiblePrimaryNav.map((item) => (
+            <Chip
+              key={item.key}
+              component={RouterLink}
+              to={item.path}
+              clickable
+              label={item.label}
+              size="small"
+              sx={{ fontWeight: 700 }}
+            />
+          ))}
+        </Stack>
+      </Box>
+    </CatalogHub>
+  );
+};
 
 export default AllScreensPage;

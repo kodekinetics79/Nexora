@@ -21,9 +21,14 @@ const SecurityPage = lazy(() => import('./pages/SecurityPage'));
 const EmailSettingsPage = lazy(() => import('./pages/EmailSettingsPage'));
 const PlatformAuthenticationPage = lazy(() => import('./pages/PlatformAuthenticationPage'));
 
-const PlatformLoader = () => (
-  <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '60vh', width: '100%' }}>
-    <CircularProgress />
+export const PlatformLoader = () => (
+  <Box
+    role="status"
+    aria-live="polite"
+    aria-label="Loading platform page"
+    sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '60vh', width: '100%' }}
+  >
+    <CircularProgress aria-hidden="true" />
   </Box>
 );
 

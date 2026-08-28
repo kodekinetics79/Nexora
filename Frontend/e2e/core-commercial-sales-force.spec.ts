@@ -67,7 +67,7 @@ test('08 ambiguous customer enters review', async ({ page }) => {
   await loginAs(page, 'manager');
   await openLead(page, requiredNumber('E2E_CORE_AMBIGUOUS_LEAD_ID'));
   await expect(page.getByText(/Customer Resolution Required|Ambiguous|Review Required/i).first()).toBeVisible();
-  await expect(page.getByRole('button', { name: /Confirm Existing Customer/i })).toBeVisible();
+  await expect(page.getByRole('button', { name: /Confirm .+|Review possible clients/i })).toBeVisible();
 });
 
 test('09 manager confirms ownership', async ({ page }) => {
@@ -78,7 +78,11 @@ test('09 manager confirms ownership', async ({ page }) => {
   const before = rows.find((row) => row.customerId === customerId);
   expect(before).toBeTruthy();
   const response = await api(page, token, 'post', `/api/commercial-intelligence/account-ownership/${customerId}/assign`,
-    { ownerUserId, expectedVersion: before!.version }, { 'Idempotency-Key': `core-owner-${customerId}-${ownerUserId}` });
+    {
+      ownerUserId,
+      expectedVersion: before!.version,
+      reason: 'Manager confirmed the primary account owner',
+    }, { 'Idempotency-Key': `core-owner-${customerId}-${ownerUserId}` });
   expect(response.ok()).toBeTruthy();
   const after = await jsonOk<Ownership[]>(await api(page, token, 'get', '/api/commercial-intelligence/account-ownership'));
   expect(after.find((row) => row.customerId === customerId)?.ownerUserId).toBe(ownerUserId);

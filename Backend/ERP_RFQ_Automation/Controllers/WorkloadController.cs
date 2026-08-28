@@ -67,6 +67,7 @@ namespace ERP_RFQ_Automation.Controllers
         /// <see cref="GetGrossMargin"/>.</para>
         /// </summary>
         [HttpGet("pipeline-analytics")]
+        [RequireManagerRole]
         [RequireModulePermission("Dashboard", PermissionAction.View)]
         public async Task<ActionResult<PipelineAnalyticsDTO>> GetPipelineAnalytics(CancellationToken ct)
         {
@@ -87,6 +88,7 @@ namespace ERP_RFQ_Automation.Controllers
         /// the explanation.</para>
         /// </summary>
         [HttpGet("gross-margin")]
+        [RequireManagerRole]
         [RequireModulePermission("Dashboard", PermissionAction.View)]
         public async Task<ActionResult<GrossMarginDTO>> GetGrossMargin(
             [FromQuery] DateTime? from, [FromQuery] DateTime? to, CancellationToken ct)

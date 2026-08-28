@@ -342,7 +342,8 @@ const QuoteViewPage: React.FC = () => {
             && (isDraftQuote || quote.statusValue === 'Sent') && <Button
             variant={isDraftQuote ? 'contained' : 'outlined'}
             startIcon={isDraftQuote ? <SendIcon /> : <EmailIcon />}
-            disabled={isUnpricedDraft}
+            disabled={isUnpricedDraft || Boolean(quote.revisionImpact)}
+            title={quote.revisionImpact ? 'Review the customer revision before sending.' : undefined}
             onClick={() => setEmailOpen(true)}
             sx={{ borderRadius: 2 }}
           >

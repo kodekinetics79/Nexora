@@ -94,9 +94,17 @@ export default function SecurityPage() {
           Whether a second factor is enforced for every operator on this deployment, who last changed
           it, and when a relaxation expires. Owner only.
         </Typography>
-        <Button component={RouterLink} to="/platform/security/authentication" variant="outlined" size="small">
-          Open Platform Authentication
-        </Button>
+        <RoleGate allowed={permissions.isOwner} requirement={REQUIRED_ROLE_COPY.platformAuthentication}>
+          {(disabled) => disabled ? (
+            <Button disabled variant="outlined" size="small">
+              Open Platform Authentication
+            </Button>
+          ) : (
+            <Button component={RouterLink} to="/platform/security/authentication" variant="outlined" size="small">
+              Open Platform Authentication
+            </Button>
+          )}
+        </RoleGate>
       </Paper>
 
       <PlatformMfaPanel />

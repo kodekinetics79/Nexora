@@ -38,6 +38,7 @@ import {
 } from '../types';
 import PageHeader from '../components/PageHeader';
 import { usePlatformPermissions } from '../auth/usePlatformPermissions';
+import { usePlatformAuth } from '../auth/usePlatformAuth';
 import { REQUIRED_ROLE_COPY } from '../auth/permissions';
 import { SoftChip } from '../components/StatusChip';
 import { ErrorState } from '../components/States';
@@ -68,6 +69,7 @@ const ROLE_TONE: Record<string, 'success' | 'info' | 'warning' | 'neutral'> = {
 export default function PlatformUsersPage() {
   const queryClient = useQueryClient();
   const permissions = usePlatformPermissions();
+  const { platformUser } = usePlatformAuth();
   const { enqueueSnackbar } = useSnackbar();
 
   const [dialog, setDialog] = useState<DialogState>(null);
@@ -229,14 +231,18 @@ export default function PlatformUsersPage() {
               <PasswordIcon fontSize="small" />
             </IconButton>
           </Tooltip>
-          <Tooltip title="Reset lost MFA">
-            <IconButton size="small" onClick={() => setDialog({ kind: 'mfa', user: p.row })}>
+          <Tooltip title={p.row.id === platformUser?.id ? 'A different Owner must reset your MFA' : 'Reset lost MFA'}>
+            <span>
+            <IconButton disabled={p.row.id === platformUser?.id} size="small" onClick={() => setDialog({ kind: 'mfa', user: p.row })}>
               <MfaIcon fontSize="small" />
             </IconButton>
+            </span>
           </Tooltip>
-          <Tooltip title={p.row.isActive ? 'Deactivate' : 'Reactivate'}>
+          <Tooltip title={p.row.isActive && p.row.id === platformUser?.id ? 'You cannot deactivate your own account' : p.row.isActive ? 'Deactivate' : 'Reactivate'}>
+            <span>
             <IconButton
               size="small"
+              disabled={p.row.isActive && p.row.id === platformUser?.id}
               color={p.row.isActive ? 'error' : 'success'}
               onClick={() =>
                 p.row.isActive
@@ -245,6 +251,7 @@ export default function PlatformUsersPage() {
             >
               {p.row.isActive ? <DeactivateIcon fontSize="small" /> : <ReactivateIcon fontSize="small" />}
             </IconButton>
+            </span>
           </Tooltip>
         </Stack>
       ),

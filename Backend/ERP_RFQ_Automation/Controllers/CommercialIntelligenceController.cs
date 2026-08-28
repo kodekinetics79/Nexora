@@ -604,13 +604,25 @@ public sealed class CommercialIntelligenceController(
         if (fromUtc >= toUtc || toUtc - fromUtc > TimeSpan.FromDays(366))
             return BadRequest(new { error = "The performance period must be between 1 and 366 days." });
         var asOf = DateTime.UtcNow < toUtc ? DateTime.UtcNow : toUtc.AddTicks(-1);
-        var results = tenantWide
-            ? await sales.GetPerformanceAsync(tenant,
-                new SalesPerformanceQuery(null, fromUtc, toUtc, asOf), ct)
-            : (await Task.WhenAll(scope.UserIds.Select(userId =>
-                sales.GetPerformanceAsync(tenant,
-                    new SalesPerformanceQuery(userId, fromUtc, toUtc, asOf), ct))))
-                .SelectMany(x => x).ToList();
+        IReadOnlyList<SalesRepPerformance> results;
+        if (tenantWide)
+        {
+            results = await sales.GetPerformanceAsync(tenant,
+                new SalesPerformanceQuery(null, fromUtc, toUtc, asOf), ct);
+        }
+        else
+        {
+            // ISalesPersistence is request-scoped and shares this controller's DbContext.
+            // EF Core forbids concurrent operations on one context, so managed-team queries
+            // must be sequenced rather than fanned out with Task.WhenAll.
+            var scopedResults = new List<SalesRepPerformance>();
+            foreach (var userId in scope.UserIds)
+            {
+                scopedResults.AddRange(await sales.GetPerformanceAsync(tenant,
+                    new SalesPerformanceQuery(userId, fromUtc, toUtc, asOf), ct));
+            }
+            results = scopedResults;
+        }
         var attributedOutcomeIds = await db.CommercialActivities.AsNoTracking()
             .Where(activity => activity.BusinessUnitId == tenant && activity.AggregateType == "Quote" &&
                 (activity.ActivityType == CommercialActivityType.Won || activity.ActivityType == CommercialActivityType.Lost) &&

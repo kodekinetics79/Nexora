@@ -137,6 +137,15 @@ describe('ClientIdentityPanel — suggested', () => {
     ]);
   });
 
+  it('keeps an ambiguous lead in review language when candidate ranking is not yet available', async () => {
+    getClientCandidates.mockResolvedValue([]);
+    renderPanel(<ClientIdentityPanel lead={lead({ customerMatchStatus: 'AMBIGUOUS' })} />);
+
+    expect(await screen.findByText('Several clients may match')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Review possible clients' })).toBeEnabled();
+    expect(screen.queryByText('No client linked yet')).not.toBeInTheDocument();
+  });
+
   it('names the suggestion, its confidence and its evidence', async () => {
     renderPanel(<ClientIdentityPanel lead={suggested} />);
 

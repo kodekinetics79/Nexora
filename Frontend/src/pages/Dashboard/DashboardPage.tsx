@@ -150,7 +150,7 @@ const KpiCard = ({ kpi }: { kpi: Release01KpiDTO }) => {
 };
 
 export default function DashboardPage() {
-  const { hasPermission } = useAuth();
+  const { hasPermission, userData } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const isExecutiveToday = location.pathname === '/executive/today';
@@ -159,6 +159,9 @@ export default function DashboardPage() {
   const [from, setFrom] = useState(initialFrom);
   const [to, setTo] = useState(initialTo);
   const invalidWindow = !from || !to || !dayjs(from).isBefore(dayjs(to));
+  const canViewManagementAnalytics = Boolean(
+    userData.isManager || userData.isSuperAdmin || userData.hasModuleAuthorityByRank,
+  );
 
   const dashboard = useQuery({
     queryKey: ['dashboard', 'release-01', from, to],
@@ -287,16 +290,18 @@ export default function DashboardPage() {
       {/* FR-DSH-02. Its own panel rather than a KPI tile, because the figure only means
           anything alongside its sample size, its coverage and its cost-basis disclosure, and a
           tile has room for none of those. */}
-      {!invalidWindow && <GrossMarginPanel from={from} to={to} />}
+      {!invalidWindow && canViewManagementAnalytics && <GrossMarginPanel from={from} to={to} />}
 
       <Divider sx={{ my: 3 }} />
       <Stack direction="row" spacing={1.5} sx={{ flexWrap: 'wrap', gap: 1 }}>
         <Button variant="outlined" endIcon={<DrillDownIcon />} onClick={() => navigate('/analytics/deadlines')} sx={{ fontWeight: 800 }}>
           Deadline board
         </Button>
-        <Button variant="outlined" endIcon={<DrillDownIcon />} onClick={() => navigate('/analytics/brand-demand')} sx={{ fontWeight: 800 }}>
-          Brand demand
-        </Button>
+        {canViewManagementAnalytics && (
+          <Button variant="outlined" endIcon={<DrillDownIcon />} onClick={() => navigate('/analytics/brand-demand')} sx={{ fontWeight: 800 }}>
+            Brand demand
+          </Button>
+        )}
         {hasPermission('Leads') && (
           <Button variant="outlined" endIcon={<DrillDownIcon />} onClick={() => navigate('/procurement/extraction/review')} sx={{ fontWeight: 800 }}>
             Extraction review queue

@@ -3,9 +3,8 @@ import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Box, Typography, Paper,Grid, TextField, Button, Divider, Table,
-  TableHead, TableRow, TableCell, TableBody, MenuItem, Stack, IconButton,
- CircularProgress, Breadcrumbs, Link, Autocomplete,
-  InputAdornment, 
+  TableHead, TableRow, TableCell, TableBody, Stack, IconButton,
+ CircularProgress, Breadcrumbs, Link, Autocomplete, Alert,
 } from '@mui/material';
 import {
   Save as SaveIcon,
@@ -20,7 +19,6 @@ import { useAuth } from '../../../context/AuthContext';
 import orderService from '../../../api/services/orderService';
 import customerService from '../../../api/services/customerService';
 import productService from '../../../api/services/productService';
-import setupService from '../../../api/services/setupService';
 import { useSnackbar } from 'notistack';
 import { handleApiError } from '../../../utils/errorHandler';
 import dayjs from 'dayjs';
@@ -59,10 +57,6 @@ const CreateOrderPage: React.FC = () => {
   const [customerId, setCustomerId] = useState<number | null>(null);
   const [orderDate, setOrderDate] = useState(dayjs().format('YYYY-MM-DD'));
   const [deliveryDate, setDeliveryDate] = useState(dayjs().add(7, 'day').format('YYYY-MM-DD'));
-  const [paymentStatusId, setPaymentStatusId] = useState<number | string>('');
-  const [paymentMethodId, setPaymentMethodId] = useState<number | string>('');
-  const [paidAmount, setPaidAmount] = useState<number>(0);
-  const [paymentReference, setPaymentReference] = useState('');
   const [notes, setNotes] = useState('');
   const [termsAndConditions, setTermsAndConditions] = useState('');
   const [items, setItems] = useState<OrderItemState[]>([]);
@@ -84,26 +78,12 @@ const CreateOrderPage: React.FC = () => {
     queryFn: () => productService.getAll({ businessUnitId, pageSize: 200 }),
   });
 
-  const { data: paymentStatuses } = useQuery({
-    queryKey: ['setup-payment-statuses'],
-    queryFn: () => setupService.getAll({ setupType: 'PaymentStatus' }),
-  });
-
-  const { data: paymentMethods } = useQuery({
-    queryKey: ['setup-payment-methods'],
-    queryFn: () => setupService.getAll({ setupType: 'PaymentMethod' }),
-  });
-
   // Effect to load data in edit mode or from RFQ/Quote
   useEffect(() => {
     if (isEditMode && orderData) {
       setCustomerId(orderData.customerId);
       setOrderDate(dayjs(orderData.orderDate).format('YYYY-MM-DD'));
       setDeliveryDate(orderData.deliveryDate ? dayjs(orderData.deliveryDate).format('YYYY-MM-DD') : '');
-      setPaymentStatusId(orderData.paymentStatusId || '');
-      setPaymentMethodId(orderData.paymentMethodId || '');
-      setPaidAmount(orderData.paidAmount || 0);
-      setPaymentReference(orderData.paymentReference || '');
       setNotes(orderData.notes || '');
       setTermsAndConditions(orderData.termsAndConditions || '');
       setItems(orderData.items.map(item => ({
@@ -213,10 +193,6 @@ const CreateOrderPage: React.FC = () => {
       businessUnitId,
       orderDate: dayjs(orderDate).toISOString(),
       deliveryDate: deliveryDate ? dayjs(deliveryDate).toISOString() : null,
-      paymentStatusId: paymentStatusId || null,
-      paymentMethodId: paymentMethodId || null,
-      paidAmount: Number(paidAmount),
-      paymentReference,
       notes,
       termsAndConditions,
       items: items.map(({ tempId, ...rest }) => rest),
@@ -241,6 +217,25 @@ const CreateOrderPage: React.FC = () => {
           It may have been removed, or it belongs to another workspace. Nothing was changed.
         </Typography>
         <Button variant="outlined" onClick={() => navigate('/sales/orders')}>Back to orders</Button>
+      </Box>
+    );
+  }
+
+  if (!isEditMode) {
+    return (
+      <Box sx={{ p: { xs: 2, md: 4 }, maxWidth: 760, mx: 'auto' }}>
+        <Alert severity="info">
+          <Typography variant="h6" component="h1" sx={{ fontWeight: 900, mb: 1 }}>
+            Customer orders start from an accepted purchase order
+          </Typography>
+          A sales order must retain the customer PO, quote revision, approved quantities and
+          commercial-case lineage. Use the Client PO Inbox to reconcile the customer document and
+          create the governed order; free-standing manual orders are not supported.
+        </Alert>
+        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} sx={{ mt: 2 }}>
+          <Button variant="contained" onClick={() => navigate('/sales/client-pos')}>Open Client PO Inbox</Button>
+          <Button variant="outlined" onClick={() => navigate('/sales/orders')}>Back to orders</Button>
+        </Stack>
       </Box>
     );
   }
@@ -319,46 +314,11 @@ const CreateOrderPage: React.FC = () => {
                 />
               </Grid>
 
-              <Grid size={{ xs: 12, md: 4 }}>
-                <TextField
-                  select
-                  fullWidth
-                  label="Payment Status"
-                  value={paymentStatusId}
-                  onChange={(e) => setPaymentStatusId(e.target.value)}
-                  size="small"
-                >
-                  <MenuItem value="">Select Status</MenuItem>
-                  {paymentStatuses?.items.map((s) => (
-                    <MenuItem key={s.setupId} value={s.setupId}>{s.setupName}</MenuItem>
-                  ))}
-                </TextField>
-              </Grid>
-              <Grid size={{ xs: 12, md: 4 }}>
-                <TextField
-                  select
-                  fullWidth
-                  label="Payment Method"
-                  value={paymentMethodId}
-                  onChange={(e) => setPaymentMethodId(e.target.value)}
-                  size="small"
-                >
-                  <MenuItem value="">Select Method</MenuItem>
-                  {paymentMethods?.items.map((m) => (
-                    <MenuItem key={m.setupId} value={m.setupId}>{m.setupName}</MenuItem>
-                  ))}
-                </TextField>
-              </Grid>
-              <Grid size={{ xs: 12, md: 4 }}>
-                <TextField
-                  fullWidth
-                  label="Paid Amount"
-                  type="number"
-                  value={paidAmount}
-                  onChange={(e) => setPaidAmount(Number(e.target.value))}
-                  size="small"
-                  slotProps={{ input: { startAdornment: <InputAdornment position="start">$</InputAdornment> } }}
-                />
+              <Grid size={{ xs: 12 }}>
+                <Alert severity="info">
+                  Payment status and cash allocation are controlled in Accounts Receivable and
+                  cannot be changed through ordinary Sales Order editing.
+                </Alert>
               </Grid>
             </Grid>
           </Paper>

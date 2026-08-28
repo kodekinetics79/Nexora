@@ -104,6 +104,7 @@ const ScannerLine = styled.div<{ primary: string }>`
   box-shadow: 0 0 15px ${props => props.primary};
   z-index: 10;
   animation: ${scan} 4s linear infinite;
+  @media (prefers-reduced-motion: reduce) { animation: none; display: none; }
 `;
 
 const DigitalGrid = styled.div<{ primary: string }>`
@@ -116,6 +117,7 @@ const DigitalGrid = styled.div<{ primary: string }>`
   transform: perspective(1000px) rotateX(60deg);
   mask-image: radial-gradient(circle at center, black, transparent 80%);
   animation: ${gridFloat} 15s linear infinite;
+  @media (prefers-reduced-motion: reduce) { animation: none; }
   z-index: 0;
   opacity: 0.5;
 `;
@@ -201,6 +203,7 @@ const SensorRing = styled.div<{ color: string }>`
   border-radius: 50%;
   opacity: 0.3;
   animation: ${spin} 15s linear infinite;
+  @media (prefers-reduced-motion: reduce) { animation: none; }
 `;
 
 const NodeBadge = styled.div<{ color: string }>`
@@ -242,6 +245,7 @@ const CircularStage = styled.div<{ index: number; x: number; y: number; color: s
     transform: scale(1.1);
     box-shadow: 0 20px 40px -15px ${props => props.color}66;
   }
+  @media (prefers-reduced-motion: reduce) { animation: none; opacity: 1; }
 `;
 
 const ConnectionLine = styled.line<{ index: number; color: string }>`
@@ -251,6 +255,7 @@ const ConnectionLine = styled.line<{ index: number; color: string }>`
   opacity: 0;
   stroke-linecap: round;
   animation: ${props => css`${pathLoop(props.index)} 10s infinite ease-in-out`};
+  @media (prefers-reduced-motion: reduce) { animation: none; opacity: 0.7; stroke-dashoffset: 0; }
 `;
 
 const SVGOverlay = styled.svg`

@@ -143,7 +143,7 @@ test('26 inventory change marks downstream state stale', async ({ page }) => {
   await loginAs(page, 'manager');
   await page.goto(`/sales/quotes/view/${requiredNumber('E2E_CORE_STALE_QUOTE_ID')}`);
   await expect(page.getByText(/Inventory.*stale|Stock.*changed|Revalidation required/i).first()).toBeVisible();
-  await expect(page.getByRole('button', { name: /Ready to Send/i })).toBeDisabled();
+  await expect(page.getByRole('button', { name: /Send to customer/i })).toBeDisabled();
 });
 
 test('27 cross-tenant inventory access is denied', async ({ page }) => {

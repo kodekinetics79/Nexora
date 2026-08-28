@@ -78,9 +78,10 @@ const NAV: {
   { to: '/platform/support', label: 'Support', icon: <SupportIcon />, visible: (p) => p.canAdministerTenants },
   { to: '/platform/email', label: 'Email', icon: <EmailIcon /> },
   { to: '/platform/security', label: 'Security', icon: <SecurityIcon />, visible: (p) => p.canImpersonate },
-  // Its own entry rather than a link buried on the Security page: an operator looking for
-  // "why is the console not asking me for a code" needs to find it from the chrome.
-  { to: '/platform/security/authentication', label: 'Platform Authentication', icon: <PolicyIcon /> },
+  // The page's full read model is Owner-only on the server. Other operators still receive the
+  // effective-policy banner on every route, but must not be sent to a screen whose first request
+  // is guaranteed to return 403.
+  { to: '/platform/security/authentication', label: 'Platform Authentication', icon: <PolicyIcon />, visible: (p) => p.isOwner },
   { to: '/platform/audit', label: 'Audit Log', icon: <AuditIcon /> },
 ];
 
@@ -252,7 +253,7 @@ export default function PlatformLayout() {
               </IconButton>
             )}
             <Tooltip title="Back to tenant app">
-              <IconButton onClick={() => navigate('/dashboard')} sx={{ bgcolor: 'action.hover', borderRadius: 2 }}>
+              <IconButton aria-label="Back to tenant app" onClick={() => navigate('/inbox')} sx={{ bgcolor: 'action.hover', borderRadius: 2 }}>
                 <ArrowBackIcon fontSize="small" />
               </IconButton>
             </Tooltip>

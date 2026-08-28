@@ -1,4 +1,6 @@
 using ERP_RFQ_Automation.Intelligence.Pricing;
+using ERP_RFQ_Automation.LeadIdentity;
+using ERP_RFQ_Automation.Notifications;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.OrderToCash;
 using ERP_RFQ_Automation.QuoteDelivery;
@@ -86,6 +88,44 @@ public sealed class QuotePriceAttestationTests
         var lines = await context.QuotePriceAttestationLines.AsNoTracking().IgnoreQueryFilters()
             .Where(l => l.AttestationId == record.Id).OrderBy(l => l.QuoteItemId).ToListAsync();
         Assert.Equal(new[] { 120.500000m, 80.000000m }, lines.Select(l => l.UnitPrice).ToArray());
+    }
+
+    [Fact]
+    public async Task A_priced_quote_with_an_open_customer_revision_impact_cannot_be_sent()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(Tenant);
+        Seed(context);
+
+        var identity = await new LeadIdentityApplicationService(context).EstablishBaselineRevisionAsync(
+            Tenant, 96_301,
+            new LeadIdentityBaselineRequest("Test", "Establish immutable test revision.",
+                "Service", "tests", "quote-stale-send"));
+        context.Set<LeadRevisionImpact>().Add(new LeadRevisionImpact
+        {
+            BusinessUnitId = Tenant,
+            LeadId = 96_301,
+            LeadRevisionId = identity.RevisionId!.Value,
+            AggregateType = "QUOTE",
+            AggregateId = QuoteId,
+            ImpactType = "QUOTE_REVISION_REQUIRED",
+            Status = "OPEN",
+            DetailsJson = "{}",
+            CreatedAtUtc = DateTimeOffset.UtcNow
+        });
+        await context.SaveChangesAsync();
+        context.ChangeTracker.Clear();
+
+        await new PriceAttestationService(context).AttestAsync(
+            QuoteId, Tenant, PriceAttestationSources.SupplierQuote, "SQ-4471 / Alfa Trading",
+            7, "rep@nexora.invalid", default);
+
+        var service = new QuoteService(context, new RecordingEmailService(), null!);
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => service.SendQuoteEmailAsync(QuoteId, Tenant, "buyer@nexora.invalid"));
+
+        Assert.Contains("stale", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(context.QuoteDeliveryRequests.IgnoreQueryFilters());
     }
 
     /// <summary>
@@ -300,7 +340,7 @@ public sealed class QuotePriceAttestationTests
             QuoteId, Tenant, PriceAttestationSources.SupplierQuote, "SQ-4471", 7, "rep@nexora.invalid", default);
         Assert.True((await attestations.EvaluateAsync(QuoteId, Tenant, default)).Satisfied);
 
-        var sender = new QuoteDeliverySender(service, email);
+        var sender = new QuoteDeliverySender(service, new AcceptingEmailSender());
         var envelope = new QuoteDeliveryEnvelope(
             delivery.Id, Tenant, QuoteId, "buyer@nexora.invalid", "Quote", "Body", null,
             "quote.pdf", 1, Guid.NewGuid(), delivery.AttestedPriceFingerprint);
@@ -519,5 +559,11 @@ public sealed class QuotePriceAttestationTests
             SendCount++;
             return Task.CompletedTask;
         }
+    }
+
+    private sealed class AcceptingEmailSender : IEmailSender
+    {
+        public Task<EmailDeliveryReceipt?> SendAsync(EmailMessage message, CancellationToken ct = default) =>
+            Task.FromResult<EmailDeliveryReceipt?>(new("test", "accepted", DateTimeOffset.UtcNow));
     }
 }

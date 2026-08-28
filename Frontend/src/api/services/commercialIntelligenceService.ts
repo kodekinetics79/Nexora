@@ -25,7 +25,7 @@ export interface CommercialAttentionItem {
 
 export interface SalesTodayDTO {
   generatedAt: string;
-  scope: 'tenant' | 'assigned_to_me';
+  scope: 'tenant' | 'managed_scope' | 'assigned_to_me';
   metrics: IntelligenceMetric[];
   attentionItems: CommercialAttentionItem[];
 }

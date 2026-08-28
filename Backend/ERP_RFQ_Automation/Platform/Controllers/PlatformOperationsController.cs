@@ -434,8 +434,15 @@ public class PlatformOperationsController(
             return "Plan code must be between 1 and 64 characters.";
         if (string.IsNullOrWhiteSpace(request.Name))
             return "Plan name is required.";
-        if (!Entitlements.TypedEntitlementCatalog.TryParse(features, out _, out var entitlementError))
+        if (!Entitlements.TypedEntitlementCatalog.TryParse(features, out var entitlementValues, out var entitlementError))
             return entitlementError;
+        var unavailableEnabled = entitlementValues
+            .Where(item => item.Value && !Entitlements.TypedEntitlementCatalog.IsRuntimeAvailable(item.Key))
+            .Select(item => item.Key)
+            .Order()
+            .ToArray();
+        if (unavailableEnabled.Length > 0)
+            return $"Unavailable capabilities cannot be enabled on a plan: {string.Join(", ", unavailableEnabled)}.";
 
         // Stored COMPLETE, with any key the caller omitted written as false. A plan saved with no
         // entitlements at all used to persist as "{}" — valid, default-deny, and indistinguishable

@@ -208,7 +208,7 @@ export default function SupportTicketQueue({ tenantId, tenantName, height = 'cal
         <Stack direction={{ xs: 'column', lg: 'row' }} spacing={1.5} sx={{ flexWrap: 'wrap' }} alignItems={{ lg: 'center' }}>
           <TextField
             size="small"
-            placeholder="Search subject, body and notes…"
+            placeholder="Search subject or requester…"
             value={search}
             onChange={(event) => {
               setSearch(event.target.value);

@@ -20,7 +20,7 @@ namespace ERP_RFQ_Automation.Controllers;
 [ApiController]
 [Authorize]
 [Route("api/brand-demand")]
-public sealed class BrandDemandController(ErpRfqAutomationContext db) : ControllerBase
+public sealed class BrandDemandController(ErpRfqAutomationContext db, IRoleGate roleGate) : ControllerBase
 {
     [HttpGet]
     [RequireModulePermission("Leads", PermissionAction.View)]
@@ -32,6 +32,8 @@ public sealed class BrandDemandController(ErpRfqAutomationContext db) : Controll
     {
         var businessUnitId = TenantId();
         if (businessUnitId <= 0) return Forbid();
+        var roleId = RoleId();
+        if (roleId <= 0 || !await roleGate.IsManagerOrAdminAsync(roleId, businessUnitId)) return Forbid();
         if (from.HasValue && to.HasValue && from.Value >= to.Value)
             return BadRequest("The 'from' value must be earlier than 'to'.");
 
@@ -42,6 +44,8 @@ public sealed class BrandDemandController(ErpRfqAutomationContext db) : Controll
 
     private long TenantId() => long.TryParse(
         User.FindFirst("businessUnitId")?.Value, out var id) ? id : 0;
+    private long RoleId() => long.TryParse(
+        User.FindFirst("roleId")?.Value, out var id) ? id : 0;
 
     private static DateTime? Normalize(DateTime? value) => value?.Kind switch
     {

@@ -3,6 +3,7 @@ using ERP_RFQ_Automation.MultiTenancy;
 using ERP_RFQ_Automation.Services;
 using ERP_RFQ_Automation.Services.Interfaces;
 using ERP_RFQ_Automation.HealthChecks;
+using ERP_RFQ_Automation.Notifications;
 using Microsoft.EntityFrameworkCore;
 
 namespace ERP_RFQ_Automation.QuoteDelivery;
@@ -24,7 +25,7 @@ public sealed class QuoteDeliveryPreSendException(string errorCode, Exception in
     public bool Permanent { get; init; }
 }
 
-public sealed class QuoteDeliverySender(IQuoteService quotes, IEmailService email) : IQuoteDeliverySender
+public sealed class QuoteDeliverySender(IQuoteService quotes, IEmailSender email) : IQuoteDeliverySender
 {
     public async Task SendAsync(QuoteDeliveryEnvelope request, CancellationToken ct)
     {
@@ -53,11 +54,31 @@ public sealed class QuoteDeliverySender(IQuoteService quotes, IEmailService emai
         {
             throw new QuoteDeliveryPreSendException(exception.GetType().Name, exception);
         }
-        await email.SendEmailAsync(request.RecipientEmail, request.Subject, request.Body,
-            new List<(string FileName, byte[] FileContent, string ContentType)>
+        var message = new EmailMessage
+        {
+            Subject = request.Subject,
+            HtmlBody = request.Body,
+            BusinessUnitId = request.BusinessUnitId.ToString(),
+            TenantId = request.BusinessUnitId.ToString(),
+            // The transport's verified From identity remains authoritative. A tenant's company
+            // address is a Reply-To only; promoting arbitrary profile text to SMTP From would
+            // break SPF/DMARC and let one tenant impersonate another domain.
+            ReplyTo = string.IsNullOrWhiteSpace(request.FromEmail)
+                ? null
+                : new EmailAddress(request.FromEmail),
+            Attachments =
             {
-                (request.AttachmentFileName, pdf, "application/pdf")
-            }, request.FromEmail, request.BusinessUnitId);
+                new EmailAttachment(request.AttachmentFileName, pdf, "application/pdf")
+            }
+        };
+        message.AddTo(request.RecipientEmail);
+
+        // A null receipt is how the guarded/console transport says that no provider accepted the
+        // message. Never turn that into Quote.SentOn: the outbox records an uncertain terminal
+        // outcome and an operator can see that nothing was proven delivered.
+        var receipt = await email.SendAsync(message, ct);
+        if (receipt is null || string.IsNullOrWhiteSpace(receipt.AcceptanceReference))
+            throw new InvalidOperationException("The outbound provider returned no acceptance evidence.");
     }
 }
 
