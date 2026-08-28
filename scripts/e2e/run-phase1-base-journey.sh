@@ -253,6 +253,9 @@ set -e
 
 log "Artifacts: $FRONTEND_DIR/playwright-report (HTML), $FRONTEND_DIR/test-results (traces, screenshots, video), $RUN_DIR (service logs)."
 if [[ $PLAYWRIGHT_STATUS -ne 0 ]]; then
+  log "Backend error summary:"
+  grep -nE 'fail:|Unhandled|Exception|PostgresException|DbUpdateException|permission denied|violates' \
+    "$RUN_DIR/backend.log" | tail -120 >&2 || true
   log "Backend journey log (last 200 lines):"
   tail -200 "$RUN_DIR/backend.log" >&2 || true
   log "Frontend journey log (last 80 lines):"

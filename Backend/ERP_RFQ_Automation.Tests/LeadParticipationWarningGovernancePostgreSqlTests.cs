@@ -233,7 +233,9 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
             Line("00010", 0, null, null, "DECLINED-01"),
             Line("00020", 5, "EA", "SAR", "DECLINED-02")
         ], "full-no-bid");
-        await using var context = database.ContextFor(Tenant);
+        // Exercise the same forced-RLS execution role used by an authenticated tenant request.
+        // Owner-role coverage cannot reveal missing grants or policy failures at transaction commit.
+        await using var context = database.TenantContextWithRls(Tenant);
         var participation = Service(context);
         var fit = await FitAsync(participation, scenario, "full-no-bid");
         var lines = scenario.LineRevisionIds.Select(id => new LeadLineParticipationCommand(
