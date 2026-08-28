@@ -253,6 +253,10 @@ set -e
 
 log "Artifacts: $FRONTEND_DIR/playwright-report (HTML), $FRONTEND_DIR/test-results (traces, screenshots, video), $RUN_DIR (service logs)."
 if [[ $PLAYWRIGHT_STATUS -ne 0 ]]; then
+  log "Backend journey log (last 200 lines):"
+  tail -200 "$RUN_DIR/backend.log" >&2 || true
+  log "Frontend journey log (last 80 lines):"
+  tail -80 "$RUN_DIR/frontend.log" >&2 || true
   die "Governed pilot gate FAILED (exit $PLAYWRIGHT_STATUS). Open $FRONTEND_DIR/playwright-report/index.html"
 fi
 log "GOVERNED LEAD DECISION -> RFQ PROMOTION: browser journey PASSED."

@@ -203,7 +203,12 @@ test.describe.serial('governed commercial outcomes through visible controls', ()
     await selectOption(page, dialog.getByRole('combobox', { name: 'Full no-bid reason' }), /.+/);
     await dialog.getByLabel('Decision note (optional)').fill(
       'Commercial owner confirmed the full no-bid decision for this request.');
+    const commitResponsePromise = page.waitForResponse((response) =>
+      response.request().method() === 'PUT'
+      && response.url().endsWith(`/api/leads/${leadId}/participation`));
     await dialog.getByRole('button', { name: 'Commit full no-bid' }).click();
+    const commitResponse = await commitResponsePromise;
+    expect(commitResponse.ok(), await commitResponse.text()).toBeTruthy();
     await expect(page.getByText('Participation decision committed.')).toBeVisible();
     await expect(page.getByText('Full no-bid committed', { exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: /Promote .* to RFQ/ })).toHaveCount(0);
