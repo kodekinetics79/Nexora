@@ -26,7 +26,7 @@ vi.mock('./pages/SupportPage', () => ({ default: () => <div>support page</div> }
 vi.mock('./pages/SecurityPage', () => ({ default: () => <div>security page</div> }));
 vi.mock('./pages/AuditLogPage', () => ({ default: () => <div>audit page</div> }));
 
-import PlatformRoutes from './PlatformRoutes';
+import PlatformRoutes, { PlatformLoader } from './PlatformRoutes';
 
 /** Renders the platform tree at `entry` and reports where the router ends up. */
 function renderAt(entry: string) {
@@ -56,6 +56,13 @@ function LocationProbe({ onChange }: { onChange: (path: string) => void }) {
 }
 
 describe('platform console routing', () => {
+  it('announces lazy route loading to assistive technology', () => {
+    render(<PlatformLoader />);
+
+    expect(screen.getByRole('status', { name: 'Loading platform page' }))
+      .toHaveAttribute('aria-live', 'polite');
+  });
+
   it('lands an unknown platform path on the console home instead of looping', async () => {
     // Regression: the catch-all used a RELATIVE redirect, so /platform/login resolved to
     // /platform/login/overview, then /platform/login/overview/overview, and so on until the
