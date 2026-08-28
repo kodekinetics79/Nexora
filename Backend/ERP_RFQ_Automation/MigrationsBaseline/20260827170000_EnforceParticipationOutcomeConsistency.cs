@@ -16,6 +16,17 @@ public partial class EnforceParticipationOutcomeConsistency : Migration
     protected override void Up(MigrationBuilder migrationBuilder)
     {
         migrationBuilder.Sql("""
+            DO $pipeline_participation_read$
+            BEGIN
+                IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexora_pipeline_app') THEN
+                    GRANT SELECT ON TABLE
+                        public."LeadFitAssessments",
+                        public."LeadParticipationDecisions"
+                    TO nexora_pipeline_app;
+                END IF;
+            END
+            $pipeline_participation_read$;
+
             CREATE OR REPLACE FUNCTION nexora_validate_lead_participation_snapshot(
                 p_business_unit_id bigint,
                 p_decision_id bigint)
@@ -135,6 +146,17 @@ public partial class EnforceParticipationOutcomeConsistency : Migration
             DROP FUNCTION IF EXISTS nexora_check_lead_participation_line();
             DROP FUNCTION IF EXISTS nexora_check_lead_participation_header();
             DROP FUNCTION IF EXISTS nexora_validate_lead_participation_snapshot(bigint, bigint);
+
+            DO $pipeline_participation_read_down$
+            BEGIN
+                IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexora_pipeline_app') THEN
+                    REVOKE SELECT ON TABLE
+                        public."LeadFitAssessments",
+                        public."LeadParticipationDecisions"
+                    FROM nexora_pipeline_app;
+                END IF;
+            END
+            $pipeline_participation_read_down$;
             """);
     }
 }

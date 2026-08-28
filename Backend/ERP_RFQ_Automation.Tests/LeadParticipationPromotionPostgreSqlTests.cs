@@ -94,6 +94,37 @@ public sealed class LeadParticipationPromotionPostgreSqlTests(PostgreSqlTestData
             "TR_LeadParticipationDecisions_OutcomeConsistency",
             "TR_LeadLineParticipationDecisions_OutcomeConsistency"
         }, outcomeTriggers);
+
+        await using var pipelinePrivileges = new NpgsqlCommand("""
+            SELECT
+                has_table_privilege(
+                    'nexora_pipeline_app',
+                    'public."LeadFitAssessments"',
+                    'SELECT')
+                AND has_table_privilege(
+                    'nexora_pipeline_app',
+                    'public."LeadParticipationDecisions"',
+                    'SELECT')
+                AND NOT has_table_privilege(
+                    'nexora_pipeline_app',
+                    'public."LeadFitAssessments"',
+                    'INSERT,UPDATE,DELETE,TRUNCATE')
+                AND NOT has_table_privilege(
+                    'nexora_pipeline_app',
+                    'public."LeadParticipationDecisions"',
+                    'INSERT,UPDATE,DELETE,TRUNCATE');
+            """, connection);
+        Assert.True((bool)(await pipelinePrivileges.ExecuteScalarAsync())!);
+
+        await using var pipelineReadTransaction = await connection.BeginTransactionAsync();
+        await using var pipelineRead = new NpgsqlCommand("""
+            SET LOCAL ROLE nexora_pipeline_app;
+            SELECT
+                (SELECT count(*) FROM public."LeadFitAssessments")
+              + (SELECT count(*) FROM public."LeadParticipationDecisions");
+            """, connection, pipelineReadTransaction);
+        Assert.IsType<long>(await pipelineRead.ExecuteScalarAsync());
+        await pipelineReadTransaction.RollbackAsync();
     }
 
     [Fact]
@@ -234,12 +265,16 @@ public sealed class ParticipationOutcomeConsistencyMigrationRollbackPostgreSqlTe
 
         await migrator.MigrateAsync(PriorMigration);
         Assert.False(await OutcomeTriggerExistsAsync(container.GetConnectionString()));
+        Assert.False(await PipelineReadGrantExistsAsync(container.GetConnectionString()));
         await migrator.MigrateAsync(TargetMigration);
         Assert.True(await OutcomeTriggerExistsAsync(container.GetConnectionString()));
+        Assert.True(await PipelineReadGrantExistsAsync(container.GetConnectionString()));
         await migrator.MigrateAsync(PriorMigration);
         Assert.False(await OutcomeTriggerExistsAsync(container.GetConnectionString()));
+        Assert.False(await PipelineReadGrantExistsAsync(container.GetConnectionString()));
         await migrator.MigrateAsync(TargetMigration);
         Assert.True(await OutcomeTriggerExistsAsync(container.GetConnectionString()));
+        Assert.True(await PipelineReadGrantExistsAsync(container.GetConnectionString()));
     }
 
     private static async Task<bool> OutcomeTriggerExistsAsync(string connectionString)
@@ -253,6 +288,24 @@ public sealed class ParticipationOutcomeConsistencyMigrationRollbackPostgreSqlTe
               AND tgname = ANY (ARRAY[
                 'TR_LeadParticipationDecisions_OutcomeConsistency',
                 'TR_LeadLineParticipationDecisions_OutcomeConsistency']);
+            """, connection);
+        return (bool)(await command.ExecuteScalarAsync())!;
+    }
+
+    private static async Task<bool> PipelineReadGrantExistsAsync(string connectionString)
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand("""
+            SELECT
+                has_table_privilege(
+                    'nexora_pipeline_app',
+                    'public."LeadFitAssessments"',
+                    'SELECT')
+                AND has_table_privilege(
+                    'nexora_pipeline_app',
+                    'public."LeadParticipationDecisions"',
+                    'SELECT');
             """, connection);
         return (bool)(await command.ExecuteScalarAsync())!;
     }
