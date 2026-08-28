@@ -90,7 +90,8 @@ describe('LifecycleTab disabled action guidance', () => {
     );
 
     const purge = await screen.findByRole('button', { name: 'Permanently delete eligible tenant data' });
-    expect(await screen.findByText(/Release the active legal hold before permanently deleting/i)).toBeVisible();
+    expect((await screen.findAllByText(/Release the active legal hold before permanently deleting/i)).length)
+      .toBeGreaterThanOrEqual(1);
     expect(purge).toHaveAccessibleDescription(/Release the active legal hold/i);
 
     const erase = screen.getByRole('button', { name: 'De-identify people; retain required records' });
@@ -111,5 +112,20 @@ describe('LifecycleTab disabled action guidance', () => {
     const purge = await screen.findByRole('button', { name: 'Permanently delete eligible tenant data' });
     expect(purge).toBeDisabled();
     expect(purge).toHaveAccessibleDescription(/personal-data erasure proof/i);
+    expect(screen.getByText('Retention complete; deletion controls pending')).toBeVisible();
+    expect(screen.getByText('Retention complete — deletion controls pending')).toBeVisible();
+    expect(screen.getByText(/retention period has elapsed.*permanent deletion remains unavailable.*personal-data erasure proof/i)).toBeVisible();
+    expect(screen.queryByText('Ready for independent deletion approval')).not.toBeInTheDocument();
+  });
+
+  it('claims readiness only after the server and legal-hold checks both pass', async () => {
+    renderTab(offboarding({
+      stage: 'PendingDeletion', canCancelDeletion: true, canPurge: true,
+      isPurgeEligible: true, readinessFailures: [],
+    }));
+
+    expect(await screen.findByText('Ready for independent deletion approval')).toBeVisible();
+    expect(screen.getByText('Retention complete — ready for independent deletion approval')).toBeVisible();
+    expect(screen.getByText(/different Platform Owner may now independently approve permanent deletion/i)).toBeVisible();
   });
 });

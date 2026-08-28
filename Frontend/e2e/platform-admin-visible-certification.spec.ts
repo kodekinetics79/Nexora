@@ -254,7 +254,7 @@ test.describe.serial('visible Google Chrome Platform Admin certification', () =>
     assertNoFailures();
   });
 
-  test('provisions a billable tenant through the durable eight-step worker', async ({ page }) => {
+  test('provisions a billable tenant through the durable nine-step worker', async ({ page }) => {
     const assertNoFailures = observeBrowserAndApiFailures(page);
     await signInAsPlatformAdmin(page);
     await page.getByRole('link', { name: 'Tenants', exact: true }).click();
@@ -696,11 +696,18 @@ test.describe.serial('visible Google Chrome Platform Admin certification', () =>
     assertNoFailures();
   });
 
-  test('recovers one explicitly authorized real platform dead-letter through visible Chrome', async ({ page }) => {
-    const tenantId = process.env.E2E_PLATFORM_DLQ_TENANT_ID;
-    const itemId = process.env.E2E_PLATFORM_DLQ_ITEM_ID;
-    test.skip(!tenantId || !itemId,
-      'Requires an isolated real dead-letter fixture via E2E_PLATFORM_DLQ_TENANT_ID and E2E_PLATFORM_DLQ_ITEM_ID.');
+  // This mutation is not part of the required fresh-stack lane: the product deliberately has no
+  // public endpoint that manufactures a poison record. Register the test only when an authorized,
+  // isolated real dead letter has been supplied. Registering it unconditionally and calling
+  // test.skip made the zero-skips reporter fail a correctly configured 10-journey certification,
+  // contradicting the ledger's explicit "excluded rather than skipped" boundary.
+  const deadLetterTenantId = process.env.E2E_PLATFORM_DLQ_TENANT_ID;
+  const deadLetterItemId = process.env.E2E_PLATFORM_DLQ_ITEM_ID;
+  if (deadLetterTenantId && deadLetterItemId) test(
+    'recovers one explicitly authorized real platform dead-letter through visible Chrome',
+    async ({ page }) => {
+    const tenantId = deadLetterTenantId;
+    const itemId = deadLetterItemId;
     const assertNoFailures = observeBrowserAndApiFailures(page);
     await signInAsPlatformAdmin(page);
     await page.goto(`/platform/pipeline?tenant=${tenantId}`);
@@ -726,5 +733,6 @@ test.describe.serial('visible Google Chrome Platform Admin certification', () =>
     await expect(page.getByText(/queued for governed retry.*Audit evidence refreshed/i)).toBeVisible();
     await expect(row).toHaveCount(0);
     assertNoFailures();
-  });
+    },
+  );
 });

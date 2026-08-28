@@ -86,11 +86,16 @@ const STAGE_TONE = {
   Purged: 'error',
 } as const;
 
-const destructionStageLabel = (status: TenantOffboardingStatus): string => {
+const destructionStageLabel = (
+  status: TenantOffboardingStatus,
+  readyForIndependentApproval: boolean,
+): string => {
   if (status.stage === 'NotScheduled') return 'No deletion scheduled';
   if (status.stage === 'Purged') return 'Tenant data deleted; audit tombstone retained';
-  return status.isPurgeEligible
+  return readyForIndependentApproval
     ? 'Ready for independent deletion approval'
+    : status.isPurgeEligible
+      ? 'Retention complete; deletion controls pending'
     : 'Retention period in progress';
 };
 
@@ -357,6 +362,14 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
   });
   const purgePreviewBlocked = preview.isLoading || preview.isFetching
     || preview.isError || preview.data == null;
+  // An elapsed date proves only that the clock completed. It does not prove erasure, financial
+  // closure, export freshness or legal-hold clearance. The previous label collapsed those facts
+  // and told an operator "Ready" while the server correctly refused the same purge. A same-hand
+  // scheduler is still ready for INDEPENDENT approval, hence the separate actor guidance remains
+  // valid once the server and legal-hold reads are both green.
+  const readyForIndependentApproval = status.isPurgeEligible
+    && status.canPurge
+    && !destructiveHoldGuard;
 
   return (
     <Stack spacing={2.5}>
@@ -383,7 +396,11 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
       {status.stage === 'PendingDeletion' && (
         <Alert severity="warning" sx={{ borderRadius: 2 }}>
           <AlertTitle sx={{ fontWeight: 800 }}>
-            Retention period in progress{status.purgeEligibleOn ? ` — permanent deletion eligible from ${fmtDateTime(status.purgeEligibleOn)}` : ''}
+            {readyForIndependentApproval
+              ? 'Retention complete — ready for independent deletion approval'
+              : status.isPurgeEligible
+                ? 'Retention complete — deletion controls pending'
+                : `Retention period in progress${status.purgeEligibleOn ? ` — permanent deletion eligible from ${fmtDateTime(status.purgeEligibleOn)}` : ''}`}
           </AlertTitle>
           <Typography variant="body2" sx={{ mb: 1 }}>
             {status.deletionReason ?? 'No reason recorded.'} — scheduled by {status.deletionScheduledBy ?? 'unknown'}
@@ -397,8 +414,10 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
             sx={{ height: 8, borderRadius: 4 }}
           />
           <Typography variant="caption" sx={{ fontWeight: 700, mt: 0.5, display: 'block' }}>
-            {status.isPurgeEligible
+            {readyForIndependentApproval
               ? 'The retention period has elapsed. A different Platform Owner may now independently approve permanent deletion.'
+              : status.isPurgeEligible
+                ? `The retention period has elapsed. Permanent deletion remains unavailable: ${actionBlockers.purge ?? 'the server readiness checks have not completed.'}`
               : `${status.daysUntilPurgeEligible ?? '—'} day(s) of the ${status.retentionDays ?? '—'}-day period remaining. Permanent deletion is refused until it elapses.`}
           </Typography>
         </Alert>
@@ -475,7 +494,11 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
                 <Typography variant="body2" color="text.secondary">
                   Destruction stage
                 </Typography>
-                <SoftChip label={destructionStageLabel(status)} tone={STAGE_TONE[status.stage]} dot={false} />
+                <SoftChip
+                  label={destructionStageLabel(status, readyForIndependentApproval)}
+                  tone={STAGE_TONE[status.stage]}
+                  dot={false}
+                />
               </Stack>
               <Typography variant="caption" color="text.secondary">
                 {/* The two axes are independent by design; showing only one is how a
