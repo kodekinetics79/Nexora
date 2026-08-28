@@ -15,14 +15,17 @@ public sealed class LeadParticipationController : ControllerBase
     private readonly ILeadParticipationService _participation;
     private readonly IRfqPromotionService _promotion;
     private readonly ILeadDecisionWorkbenchService _workbench;
+    private readonly IRfqRevisionImpactResolutionService _rfqImpactResolution;
     private readonly ICommercialAccessContext _commercialAccess;
 
     public LeadParticipationController(ILeadParticipationService participation, IRfqPromotionService promotion,
-        ILeadDecisionWorkbenchService workbench, ICommercialAccessContext commercialAccess)
+        ILeadDecisionWorkbenchService workbench, IRfqRevisionImpactResolutionService rfqImpactResolution,
+        ICommercialAccessContext commercialAccess)
     {
         _participation = participation;
         _promotion = promotion;
         _workbench = workbench;
+        _rfqImpactResolution = rfqImpactResolution;
         _commercialAccess = commercialAccess;
     }
 
@@ -182,6 +185,27 @@ public sealed class LeadParticipationController : ControllerBase
         catch (InvalidOperationException ex) { return Conflict(Problem(409, "RFQ promotion refused", ex.Message)); }
     }
 
+    [HttpPost("rfq-revision-impact/resolve")]
+    [RequireModulePermission("Leads", PermissionAction.Edit)]
+    [RequireModulePermission("RFQ Management", PermissionAction.Edit)]
+    public async Task<ActionResult<RfqRevisionImpactResolutionResult>> ResolveRfqRevisionImpact(
+        long leadId, [FromBody] ResolveRfqRevisionImpactRequest request, CancellationToken ct)
+    {
+        if (!TryContext(out var businessUnitId, out var actor)) return Unauthorized();
+        if (!await _commercialAccess.CanAccessLeadAsync(leadId, ct)) return NotFound();
+        if (!TryIdempotencyKey(out var key)) return IdempotencyRequired();
+        try
+        {
+            return Ok(await _rfqImpactResolution.ResolveAsync(businessUnitId, leadId,
+                new ResolveRfqRevisionImpactCommand(request.RfqId, request.ExpectedLeadRevisionId,
+                    request.ReconciliationReason, request.ConfirmedHistoricalRfqUnchanged,
+                    key, actor), ct));
+        }
+        catch (KeyNotFoundException ex) { return NotFound(Problem(404, "RFQ amendment review not found", ex.Message)); }
+        catch (ArgumentException ex) { return BadRequest(Problem(400, "RFQ amendment review refused", ex.Message)); }
+        catch (InvalidOperationException ex) { return Conflict(Problem(409, "RFQ amendment review refused", ex.Message)); }
+    }
+
     private bool TryContext(out long businessUnitId, out string actor)
     {
         actor = User.FindFirstValue(ClaimTypes.Email)
@@ -241,3 +265,5 @@ public sealed record SaveParticipationRequest(long ExpectedLeadRevisionId, int E
 public sealed record SaveParticipationResponse(int DecisionVersion, int ParticipationVersion, string ParticipationStatus);
 public sealed record PromoteToRfqRequest(long ExpectedLeadRevisionId, int ExpectedDecisionVersion,
     int ExpectedParticipationVersion, string? IdempotencyKey);
+public sealed record ResolveRfqRevisionImpactRequest(long RfqId, long ExpectedLeadRevisionId,
+    string ReconciliationReason, bool ConfirmedHistoricalRfqUnchanged);

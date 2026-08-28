@@ -1,6 +1,7 @@
 import React from 'react';
-import { TextField, InputAdornment, IconButton, Box, Typography } from '@mui/material';
-import { Search as SearchIcon, Close as CloseIcon } from '@mui/icons-material';
+import { TextField, InputAdornment, IconButton, Box } from '@mui/material';
+import SearchIcon from '@mui/icons-material/Search';
+import CloseIcon from '@mui/icons-material/Close';
 import { useTranslation } from 'react-i18next';
 
 interface SearchFieldProps {
@@ -49,10 +50,11 @@ const SearchField: React.FC<SearchFieldProps> = ({
                 <SearchIcon fontSize="small" sx={{ color: 'text.secondary', opacity: 0.7 }} />
               </InputAdornment>
             ),
-            endAdornment: value && (
+            endAdornment: value ? (
               <InputAdornment position="end">
                 <IconButton 
                   size="small" 
+                  aria-label="Clear search"
                   onClick={() => {
                     onChange('');
                     if (onClear) onClear();
@@ -62,21 +64,11 @@ const SearchField: React.FC<SearchFieldProps> = ({
                   <CloseIcon sx={{ fontSize: 14 }} />
                 </IconButton>
               </InputAdornment>
-            ) || (
-              <InputAdornment position="end" sx={{ display: { xs: 'none', sm: 'flex' } }}>
-                <Box sx={{ 
-                  px: 0.8, 
-                  py: 0.2, 
-                  backgroundColor: 'action.hover', 
-                  borderRadius: 1, 
-                  border: '1px solid', 
-                  borderColor: 'divider',
-                }}>
-                  <Typography variant="caption" sx={{ fontWeight: 800, fontSize: 9, color: 'text.primary' }}>⌘ K</Typography>
-                </Box>
-              </InputAdornment>
-            ),
-          }
+            ) : undefined,
+          },
+          htmlInput: {
+            'aria-label': placeholder || t('search_placeholder'),
+          },
         }}
       />
     </Box>

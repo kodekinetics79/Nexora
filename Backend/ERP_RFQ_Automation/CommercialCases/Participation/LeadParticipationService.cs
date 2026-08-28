@@ -357,6 +357,8 @@ public sealed class LeadParticipationService : ILeadParticipationService
             {
                 var effective = line.Choice == LeadLineParticipationChoice.Bid
                     ? resolvedCommercialByRevisionLine[line.LeadItemRevisionId] : null;
+                var source = leadItemByRevisionLine.TryGetValue(line.LeadItemRevisionId, out var sourceLeadItemId)
+                    && currentLeadItems.TryGetValue(sourceLeadItemId, out var sourceLeadItem) ? sourceLeadItem : null;
                 var linePreview = leadItemByRevisionLine.TryGetValue(line.LeadItemRevisionId, out var previewLeadItemId)
                     && previewByLeadItem.TryGetValue(previewLeadItemId, out var foundPreview) ? foundPreview : null;
                 entity.Lines.Add(new LeadLineParticipationDecision
@@ -374,10 +376,12 @@ public sealed class LeadParticipationService : ILeadParticipationService
                     // meaningful evidence for declining a line, but it is not a valid commercial
                     // quantity to persist on the immutable decision snapshot. Preserve positive
                     // quantities for drafts/review; normalise absent non-bid quantities to null.
-                    Quantity = effective?.Quantity ?? (line.Quantity is > 0 ? line.Quantity : null),
-                    UnitOfMeasure = effective?.Uom?.UomCode ?? Clean(line.UnitOfMeasure),
+                    Quantity = effective?.Quantity
+                        ?? (line.Quantity is > 0 ? line.Quantity : source?.Quantity is > 0 ? source.Quantity : null),
+                    UnitOfMeasure = effective?.Uom?.UomCode ?? Clean(line.UnitOfMeasure ?? source?.UnitOfMeasure),
                     UomId = effective?.Uom?.UomId,
-                    Currency = effective?.Currency?.Code.ToUpperInvariant() ?? Clean(line.Currency)?.ToUpperInvariant(),
+                    Currency = effective?.Currency?.Code.ToUpperInvariant()
+                        ?? Clean(line.Currency ?? source?.Currency)?.ToUpperInvariant(),
                     CurrencyId = effective?.Currency?.Id,
                     CatalogPolicyVersion = "lead-conversion-preview/v1",
                     WarningSnapshotJson = JsonSerializer.Serialize(new

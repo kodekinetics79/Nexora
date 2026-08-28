@@ -14,6 +14,8 @@ export const commercialActionPermissions = (hasPermission: PermissionCheck) => (
   // LeadParticipationController requires BOTH permissions for promotion.
   canPromoteLeadToRfq:
     hasPermission('Leads', 'edit') && hasPermission('RFQ Management', 'create'),
+  canResolveRfqRevisionImpact:
+    hasPermission('Leads', 'edit') && hasPermission('RFQ Management', 'edit'),
   canDeleteDraftRfq: hasPermission('RFQ Management', 'delete'),
   canViewPromotedRfq: hasPermission('RFQ Management', 'view'),
   canViewLeadEvidence: hasPermission('Leads', 'view'),

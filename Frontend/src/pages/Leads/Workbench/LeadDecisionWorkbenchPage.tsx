@@ -35,6 +35,7 @@ import FitAssessmentPanel from './FitAssessmentPanel';
 import FullNoBidCommitDialog from './FullNoBidCommitDialog';
 import LeadValidationGrid from './LeadValidationGrid';
 import SourceEvidencePanel from './SourceEvidencePanel';
+import RfqRevisionImpactResolutionDialog from './RfqRevisionImpactResolutionDialog';
 import {
   WorkbenchStagePanel,
   WorkbenchStageTabs,
@@ -83,10 +84,13 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
   const [fullNoBidDialogOpen, setFullNoBidDialogOpen] = React.useState(false);
   const [bidCommitReviewOpen, setBidCommitReviewOpen] = React.useState(false);
   const [bidCommitReviewPage, setBidCommitReviewPage] = React.useState(0);
+  const [rfqImpactReviewOpen, setRfqImpactReviewOpen] = React.useState(false);
   const fitRetryOperation = React.useRef<RetryOperation | null>(null);
   const participationRetryOperation = React.useRef<RetryOperation | null>(null);
   const promotionKey = React.useRef<string | null>(null);
   const promotionRevision = React.useRef<number | null>(null);
+  const rfqImpactResolutionKey = React.useRef<string | null>(null);
+  const rfqImpactResolutionRevision = React.useRef<number | null>(null);
   const decisionSeed = React.useRef<string | null>(null);
 
   const workbenchQuery = useQuery({
@@ -115,6 +119,10 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
     if (promotionRevision.current !== workbenchQuery.data.leadRevisionId) {
       promotionKey.current = `lead-promotion:${leadId}:${workbenchQuery.data.leadRevisionId}:${crypto.randomUUID()}`;
       promotionRevision.current = workbenchQuery.data.leadRevisionId;
+    }
+    if (rfqImpactResolutionRevision.current !== workbenchQuery.data.leadRevisionId) {
+      rfqImpactResolutionKey.current = `rfq-impact-review:${leadId}:${workbenchQuery.data.leadRevisionId}:${crypto.randomUUID()}`;
+      rfqImpactResolutionRevision.current = workbenchQuery.data.leadRevisionId;
     }
   }, [leadId, workbenchQuery.data]);
 
@@ -209,6 +217,35 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
     ),
   });
 
+  const rfqImpactResolutionMutation = useMutation({
+    mutationFn: (reconciliationReason: string) => {
+      const workbench = workbenchQuery.data!;
+      if (!workbench.promotion || !rfqImpactResolutionKey.current) {
+        throw new Error('The promoted RFQ amendment review is no longer available.');
+      }
+      return leadDecisionService.resolveRfqRevisionImpact(leadId, {
+        rfqId: workbench.promotion.rfqId,
+        expectedLeadRevisionId: workbench.leadRevisionId,
+        reconciliationReason,
+        confirmedHistoricalRfqUnchanged: true,
+      }, rfqImpactResolutionKey.current);
+    },
+    onSuccess: async (result) => {
+      setRfqImpactReviewOpen(false);
+      enqueueSnackbar(
+        result.resolvedImpactCount > 0
+          ? 'RFQ amendment review recorded. Historical RFQ lineage was preserved.'
+          : 'This RFQ amendment review was already recorded.',
+        { variant: 'success' },
+      );
+      await refresh();
+    },
+    onError: (error: unknown) => enqueueSnackbar(
+      presentableErrorMessage(error, 'The RFQ amendment review could not be recorded. Nothing was changed.'),
+      { variant: 'error' },
+    ),
+  });
+
   if (workbenchQuery.isLoading) {
     return (
       <Box sx={{ minHeight: '60vh', display: 'grid', placeItems: 'center' }}>
@@ -230,6 +267,7 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
   }
 
   const workbench = workbenchQuery.data;
+  const rfqRevisionBlocker = workbench.blockers.find((blocker) => blocker.code === 'RFQ_REVISION_REQUIRED');
   const counts = countDecisions(decisions);
   const dirty = !decisionsEqual(decisions, baselineDecisions);
   const governed = Object.values(decisions).every(validGovernedDecision);
@@ -305,7 +343,9 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
         : { progress: 'needs-action', detail: fullNoBidParticipationReady
           ? 'The full no-bid decision is ready to commit. Source validation is not required because no RFQ will be created.'
           : dirty ? 'Review and save or commit the participation changes.' : 'Complete fit and line-level participation decisions.' },
-    promote: workbench.promotion || fullNoBidClosed
+    promote: rfqRevisionBlocker
+      ? { progress: 'blocked', detail: rfqRevisionBlocker.message }
+      : workbench.promotion || fullNoBidClosed
       ? { progress: 'complete', detail: workbench.promotion ? 'This Lead revision already has a durable RFQ promotion receipt.' : 'Full no-bid is complete; promotion is intentionally not available.' }
       : primaryBlocker
         ? { progress: 'blocked', detail: primaryBlocker }
@@ -353,6 +393,35 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
         >
           <AlertTitle>Already promoted</AlertTitle>
           Revision {workbench.promotion.leadRevisionNumber} promoted {workbench.promotion.promotedLineCount} approved line{workbench.promotion.promotedLineCount === 1 ? '' : 's'} to {workbench.promotion.rfqNumber || `RFQ #${workbench.promotion.rfqId}`}.
+        </Alert>
+      ) : null}
+
+      {rfqRevisionBlocker && workbench.promotion ? (
+        <Alert
+          severity="error"
+          sx={{ mb: 1.5 }}
+          action={(
+            <Stack direction="row" spacing={0.75} sx={{ alignItems: 'center' }}>
+              {commercialAccess.canViewPromotedRfq ? (
+                <Button color="inherit" onClick={() => navigate(`/procurement/rfqs/view/${workbench.promotion!.rfqId}`)}>
+                  Open RFQ
+                </Button>
+              ) : null}
+              {commercialAccess.canResolveRfqRevisionImpact ? (
+                <Button color="inherit" variant="outlined" onClick={() => setRfqImpactReviewOpen(true)}>
+                  Complete review
+                </Button>
+              ) : null}
+            </Stack>
+          )}
+        >
+          <AlertTitle>Customer amendment requires RFQ review</AlertTitle>
+          {rfqRevisionBlocker.message}
+          {!commercialAccess.canResolveRfqRevisionImpact ? (
+            <Typography variant="body2" sx={{ mt: 0.5 }}>
+              A user with Lead edit and RFQ edit permission must record the reconciliation outcome.
+            </Typography>
+          ) : null}
         </Alert>
       ) : null}
 
@@ -518,6 +587,15 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
           setFullNoBidDialogOpen(false);
           participationMutation.mutate({ commit: true, reasonCode, notes });
         }}
+      />
+      <RfqRevisionImpactResolutionDialog
+        key={workbench.leadRevisionId}
+        open={rfqImpactReviewOpen}
+        rfqLabel={workbench.promotion?.rfqNumber || `RFQ #${workbench.promotion?.rfqId ?? ''}`}
+        leadRevisionNumber={workbench.leadRevisionNumber}
+        saving={rfqImpactResolutionMutation.isPending}
+        onCancel={() => setRfqImpactReviewOpen(false)}
+        onConfirm={(reason) => rfqImpactResolutionMutation.mutate(reason)}
       />
       <Dialog open={bidCommitReviewOpen} onClose={() => setBidCommitReviewOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle>Commit participation scope</DialogTitle>

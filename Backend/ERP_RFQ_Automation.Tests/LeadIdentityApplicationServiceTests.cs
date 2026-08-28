@@ -1,7 +1,9 @@
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
+using ERP_RFQ_Automation.CommercialCases.Participation;
 using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Repositories;
+using ERP_RFQ_Automation.Sla;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
 
@@ -196,6 +198,49 @@ public sealed class LeadIdentityApplicationServiceTests
 
         var quoteRead = await new QuoteRepository(context).GetByIdAsync(quote.Id, 74);
         Assert.Equal("DRAFT_STALE_REVIEW_REQUIRED", quoteRead.RevisionImpact);
+
+        var workbenchService = new LeadDecisionWorkbenchService(context, new LeadOutcomeReasons(context));
+        var blocked = await workbenchService.GetAsync(74, created.LeadId);
+        Assert.Contains(blocked.Blockers, blocker => blocker.Code == "RFQ_REVISION_REQUIRED");
+
+        const string reason = "Customer quantity amendment reviewed against every original RFQ line.";
+        var resolution = new RfqRevisionImpactResolutionService(context);
+        var command = new ResolveRfqRevisionImpactCommand(rfq.Id, revised.RevisionId!.Value,
+            reason, true, "rfq-amendment-review:resolved-customer", "commercial.owner@test");
+        var firstResolution = await resolution.ResolveAsync(74, created.LeadId, command);
+        var replay = await resolution.ResolveAsync(74, created.LeadId, command);
+
+        Assert.Equal(1, firstResolution.ResolvedImpactCount);
+        Assert.False(firstResolution.Replayed);
+        Assert.Equal(1, replay.ResolvedImpactCount);
+        Assert.True(replay.Replayed);
+        var retainedImpact = await context.Set<LeadRevisionImpact>().AsNoTracking().SingleAsync(x =>
+            x.AggregateType == "RFQ" && x.AggregateId == rfq.Id && x.ImpactType == "RFQ_REVISION_REQUIRED");
+        Assert.Equal("OPEN", retainedImpact.Status);
+        Assert.Null(retainedImpact.ResolvedAtUtc);
+        var resolutionEvent = await context.Set<LeadIdentityAuditEvent>().AsNoTracking().SingleAsync(x =>
+            x.EventType == RfqRevisionImpactResolutionService.ResolutionEventType
+            && x.CorrelationId == RfqRevisionImpactResolutionService.CorrelationPrefix + retainedImpact.Id);
+        Assert.Equal("commercial.owner@test", resolutionEvent.ActorId);
+        Assert.Contains(reason, resolutionEvent.PayloadJson, StringComparison.Ordinal);
+        Assert.DoesNotContain((await workbenchService.GetAsync(74, created.LeadId)).Blockers,
+            blocker => blocker.Code == "RFQ_REVISION_REQUIRED");
+
+        var mismatchedReplay = command with { ReconciliationReason = "A different review outcome must not reuse the command key." };
+        var conflict = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            resolution.ResolveAsync(74, created.LeadId, mismatchedReplay));
+        Assert.Contains("different RFQ amendment review", conflict.Message, StringComparison.OrdinalIgnoreCase);
+
+        var noOpenImpact = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            resolution.ResolveAsync(74, created.LeadId, command with
+            {
+                IdempotencyKey = "rfq-amendment-review:already-closed"
+            }));
+        Assert.Contains("no unresolved RFQ revision impact", noOpenImpact.Message,
+            StringComparison.OrdinalIgnoreCase);
+
+        await Assert.ThrowsAsync<KeyNotFoundException>(() => resolution.ResolveAsync(
+            75, created.LeadId, command with { IdempotencyKey = "rfq-amendment-review:wrong-tenant" }));
     }
 
     [Fact]

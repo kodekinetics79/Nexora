@@ -170,6 +170,20 @@ export interface SaveFitAssessmentRequest {
   criteria: Array<Pick<FitCriterionDTO, 'code' | 'decision' | 'note'>>;
 }
 
+export interface ResolveRfqRevisionImpactRequest {
+  rfqId: number;
+  expectedLeadRevisionId: number;
+  reconciliationReason: string;
+  confirmedHistoricalRfqUnchanged: boolean;
+}
+
+export interface RfqRevisionImpactResolutionResult {
+  rfqId: number;
+  reviewedThroughLeadRevisionId: number;
+  resolvedImpactCount: number;
+  replayed: boolean;
+}
+
 const leadDecisionService = {
   getWorkbench: async (leadId: number): Promise<LeadDecisionWorkbenchDTO> => {
     const response = await axiosInstance.get<LeadDecisionWorkbenchDTO>(`/api/leads/${leadId}/decision-workbench`);
@@ -210,6 +224,19 @@ const leadDecisionService = {
     const response = await axiosInstance.post<PromotionReceiptDTO>(`/api/leads/${leadId}/promote-to-rfq`, request, {
       headers: { 'Idempotency-Key': request.idempotencyKey },
     });
+    return response.data;
+  },
+
+  resolveRfqRevisionImpact: async (
+    leadId: number,
+    request: ResolveRfqRevisionImpactRequest,
+    idempotencyKey: string,
+  ): Promise<RfqRevisionImpactResolutionResult> => {
+    const response = await axiosInstance.post<RfqRevisionImpactResolutionResult>(
+      `/api/leads/${leadId}/rfq-revision-impact/resolve`,
+      request,
+      { headers: { 'Idempotency-Key': idempotencyKey } },
+    );
     return response.data;
   },
 };

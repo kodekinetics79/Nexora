@@ -97,4 +97,19 @@ describe('LifecycleTab disabled action guidance', () => {
     expect(erase).toBeDisabled();
     expect(erase).toHaveAccessibleDescription(/Release the active legal hold/i);
   });
+
+  it('shows the purge-specific server prerequisite after retention has elapsed', async () => {
+    renderTab(offboarding({
+      stage: 'PendingDeletion', canCancelDeletion: true, canPurge: false,
+      isPurgeEligible: true,
+      readinessFailures: [{
+        code: 'PERSONAL_DATA_ERASURE_MISSING',
+        detail: 'Persisted personal-data erasure proof is required before destructive purge.',
+      }],
+    }));
+
+    const purge = await screen.findByRole('button', { name: 'Permanently delete eligible tenant data' });
+    expect(purge).toBeDisabled();
+    expect(purge).toHaveAccessibleDescription(/personal-data erasure proof/i);
+  });
 });

@@ -22,6 +22,19 @@ const renderLogin = () => render(
 );
 
 describe('LoginPage navigation and value statement', () => {
+  it('lets short and mobile viewports scroll instead of clipping the form', () => {
+    renderLogin();
+
+    expect(screen.getByTestId('login-viewport')).toHaveStyle({
+      width: '100%',
+      overflowY: 'auto',
+    });
+    expect(screen.getByTestId('login-viewport')).not.toHaveStyle({
+      fontFamily: "'Poppins', sans-serif",
+    });
+    expect(screen.getByTestId('login-card')).not.toHaveStyle({ height: '850px' });
+  });
+
   it('exposes recovery and platform destinations as links', () => {
     renderLogin();
 

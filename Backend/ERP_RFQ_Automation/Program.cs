@@ -817,6 +817,8 @@ builder.Services.AddScoped<ERP_RFQ_Automation.CommercialCases.Participation.ILea
                            ERP_RFQ_Automation.CommercialCases.Participation.LeadParticipationService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.CommercialCases.Participation.ILeadDecisionWorkbenchService,
                            ERP_RFQ_Automation.CommercialCases.Participation.LeadDecisionWorkbenchService>();
+builder.Services.AddScoped<ERP_RFQ_Automation.CommercialCases.Participation.IRfqRevisionImpactResolutionService,
+                           ERP_RFQ_Automation.CommercialCases.Participation.RfqRevisionImpactResolutionService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.CommercialCases.Promotion.IRfqPromotionService,
                            ERP_RFQ_Automation.CommercialCases.Promotion.RfqPromotionService>();
 builder.Services.AddScoped<ERP_RFQ_Automation.Agent.IAgentTool, ERP_RFQ_Automation.Intelligence.Decision.LeadDecisionBriefTool>();

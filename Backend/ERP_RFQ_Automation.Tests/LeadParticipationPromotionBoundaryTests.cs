@@ -1,4 +1,5 @@
 using System.Reflection;
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.CommercialCases.Participation;
 using ERP_RFQ_Automation.CommercialCases.Promotion;
 using ERP_RFQ_Automation.Controllers;
@@ -24,6 +25,15 @@ public sealed class LeadParticipationPromotionBoundaryTests
         Assert.Contains("PUT fit-assessment", routes);
         Assert.Contains("PUT participation", routes);
         Assert.Contains("POST promote-to-rfq", routes);
+        Assert.Contains("POST rfq-revision-impact/resolve", routes);
+
+        var resolve = typeof(LeadParticipationController).GetMethod(
+            nameof(LeadParticipationController.ResolveRfqRevisionImpact))!;
+        var permissions = resolve.GetCustomAttributes<RequireModulePermissionAttribute>().ToArray();
+        Assert.Contains(permissions, permission =>
+            permission.ModuleName == "Leads" && permission.Action == PermissionAction.Edit);
+        Assert.Contains(permissions, permission =>
+            permission.ModuleName == "RFQ Management" && permission.Action == PermissionAction.Edit);
     }
 
     [Fact]
