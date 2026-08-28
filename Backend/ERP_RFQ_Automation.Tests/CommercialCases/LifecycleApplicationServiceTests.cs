@@ -174,6 +174,28 @@ public sealed class LifecycleApplicationServiceTests
     }
 
     [Fact]
+    public async Task VerifiedLeadWithAnUnresolvedQuantityCannotBeQualified()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(744);
+        var lead = Seed.Lead(context, 1044, 744, leadStatusId: 5058, parseStatus: "Success",
+            items: [Seed.LeadItem(1045, "10", 1, "QA-FLT-50")]);
+        lead.LeadItems.Single().Quantity = null;
+        lead.RequiresCommercialReview = false;
+        lead.CommercialFactsVerified = true;
+        Status(context, 5058, 744, "LeadStatus", "UNDER_REVIEW", "Under Review");
+        Status(context, 5059, 744, "LeadStatus", "QUALIFIED", "Qualified");
+        await context.SaveChangesAsync();
+
+        var error = await Assert.ThrowsAsync<LifecycleValidationException>(() => Service(context).TransitionLeadAsync(
+            744, 1044, Actor(), Command("QUALIFIED", 1, "lead-1044-qualified"), false, default));
+
+        Assert.Contains("positive quantity", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(context.CommercialLifecycleEvents);
+        Assert.Equal(5058, context.Leads.Single().LeadStatusId);
+    }
+
+    [Fact]
     public async Task DirectLeadStatusMutationIsRejectedWithoutLifecycleEvent()
     {
         using var db = new TestDb();

@@ -6,6 +6,7 @@ using ERP_RFQ_Automation.Tests.Support;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 
 namespace ERP_RFQ_Automation.Tests;
 
@@ -32,6 +33,19 @@ public class LeadPersisterSplitTests : IDisposable
         StoragePath = storagePath ?? "/nonexistent/extraction/doc.pdf",
         FileName = "doc.pdf",
         FileType = "pdf",
+        Attempts = 1
+    };
+
+    private static ExtractionJob RaceJob(long id, char hash) => new()
+    {
+        Id = id,
+        BatchId = Guid.NewGuid(),
+        BusinessUnitId = 1,
+        SourceType = ExtractionSourceType.ManualUpload,
+        ContentHash = new string(hash, 64),
+        StoragePath = $"/nonexistent/extraction/race-{id}.txt",
+        FileName = $"race-{id}.txt",
+        FileType = "txt",
         Attempts = 1
     };
 
@@ -205,6 +219,89 @@ public class LeadPersisterSplitTests : IDisposable
     }
 
     [Fact]
+    public async Task Delayed_original_evidence_binds_to_its_matched_revision_after_duplicate_and_amendment()
+    {
+        var delayedOriginal = RaceJob(901, 'a');
+        var distinctDuplicate = RaceJob(902, 'b');
+        var amendment = RaceJob(903, 'c');
+        await using (var seed = _db.ContextFor(null))
+        {
+            Seed.BusinessUnit(seed, 1);
+            Seed.EmailConfig(seed, 100, 1);
+            await seed.SaveChangesAsync();
+            await SeedAuthoritativeSourceAsync(seed, delayedOriginal);
+            await SeedAuthoritativeSourceAsync(seed, distinctDuplicate);
+            await SeedAuthoritativeSourceAsync(seed, amendment);
+        }
+
+        static ChunkedExtractionOutcome Outcome(int lineCount) => new()
+        {
+            Status = ExtractionOutcomeStatus.Ok,
+            Result = Group("NX-RACE-ORIGINAL", lineCount),
+            ExpectedItemCount = lineCount,
+            ExtractedItemCount = lineCount,
+            AiProviderClass = AiProviderClass.Local,
+            ProcessingPath = ExtractionProcessingPath.LocalModel
+        };
+
+        long leadId;
+        await using (var context = _db.ContextFor(null))
+        {
+            var identity = new LeadIdentityApplicationService(context);
+            var persister = new LeadPersister(context, new NoopLogger<LeadPersister>(),
+                leadIdentity: identity);
+
+            // The original assembly is delayed. A byte-distinct copy establishes revision 1,
+            // then a threaded-equivalent amendment advances the current projection to 3 lines.
+            leadId = await persister.PersistAsync(distinctDuplicate, Outcome(2));
+            Assert.Equal(leadId, await persister.PersistAsync(amendment, Outcome(3)));
+
+            context.ChangeTracker.Clear();
+            var beforeRecovery = await context.Leads.Include(x => x.LeadItems)
+                .SingleAsync(x => x.Id == leadId);
+            Assert.Equal(2, beforeRecovery.CurrentRevisionNumber);
+            Assert.Equal(3, beforeRecovery.LeadItems.Count(x => x.IsCurrentRevisionProjection));
+
+            // Recovery of the two-line original must use reconciliation's matched revision 1,
+            // not the now-current three-line projection.
+            Assert.Equal(leadId, await persister.PersistAsync(delayedOriginal, Outcome(2)));
+        }
+
+        await using var verify = _db.ContextFor(null);
+        var lead = await verify.Leads.Include(x => x.LeadItems).SingleAsync(x => x.Id == leadId);
+        Assert.Equal(2, lead.CurrentRevisionNumber);
+        Assert.Equal(3, lead.LeadItems.Count(x => x.IsCurrentRevisionProjection));
+
+        var revisions = await verify.Set<LeadRevision>().Where(x => x.LeadId == leadId)
+            .OrderBy(x => x.RevisionNumber).ToListAsync();
+        Assert.Equal(2, revisions.Count);
+        var revisionOneLineIds = await verify.Set<LeadItemRevision>()
+            .Where(x => x.LeadRevisionId == revisions[0].Id)
+            .OrderBy(x => x.LineNumber)
+            .Select(x => x.LeadItemId!.Value)
+            .ToListAsync();
+        Assert.Equal(2, revisionOneLineIds.Count);
+
+        var recoveredOccurrence = await verify.Set<LeadIngestionOccurrence>().SingleAsync(x =>
+            x.ExtractionJobId == delayedOriginal.Id);
+        Assert.Equal(LeadOccurrenceClassification.ExactDuplicate, recoveredOccurrence.Classification);
+        Assert.Equal(revisions[0].Id, recoveredOccurrence.LeadRevisionId);
+
+        var originalCorpusId = await verify.Set<SourceDocument>()
+            .Where(x => x.ContentHash == delayedOriginal.ContentHash)
+            .Select(x => x.CorpusId)
+            .SingleAsync();
+        var originalInquiry = await verify.Set<CanonicalInquiry>()
+            .Include(x => x.LineItems)
+            .SingleAsync(x => x.CorpusId == originalCorpusId);
+        Assert.Equal(revisionOneLineIds, originalInquiry.LineItems
+            .OrderBy(x => x.LineNumber)
+            .Select(x => x.LeadItemId!.Value)
+            .ToList());
+        Assert.Equal(3, await verify.Set<ExtractionRun>().CountAsync());
+    }
+
+    [Fact]
     public void One_source_receipt_can_link_to_multiple_logical_lead_occurrences()
     {
         using var context = _db.ContextFor(1);
@@ -243,6 +340,48 @@ public class LeadPersisterSplitTests : IDisposable
         Assert.Equal(2, lead.LeadItems.Count);
         Assert.Equal("service", lead.InquiryType);
         Assert.DoesNotContain("Split from a multi-inquiry", lead.HeaderRemarks ?? "");
+    }
+
+    [Fact]
+    public async Task NonPositiveAndUnknownQuantitiesRemainNullAndCannotBeAutoVerifiedByConfidence()
+    {
+        await using (var seed = _db.ContextFor(null))
+        {
+            Seed.BusinessUnit(seed, 1);
+            await seed.SaveChangesAsync();
+            await SeedAuthoritativeSourceAsync(seed, Job());
+        }
+
+        var lines = new[]
+        {
+            Ext.Item(0.99, "Zero demand") with { Quantity = 0 },
+            Ext.Item(0.99, "Negative demand") with { Quantity = -3 },
+            Ext.Item(0.99, "Quantity TBD") with { Quantity = null }
+        }.ToList();
+        var result = Ext.Result(lines, 0.99) with { Rfqno = "RFQ-UNRESOLVED-QTY" };
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                [LeadPersister.AutoVerifyMinConfidenceKey] = "0.85"
+            })
+            .Build();
+
+        await using var context = _db.ContextFor(null);
+        var leadId = await new LeadPersister(context, new NoopLogger<LeadPersister>(),
+                configuration: configuration)
+            .PersistAsync(Job(), new ChunkedExtractionOutcome
+            {
+                Status = ExtractionOutcomeStatus.Ok,
+                Result = result,
+                ExpectedItemCount = 3,
+                ExtractedItemCount = 3
+            });
+
+        var lead = await context.Leads.Include(x => x.LeadItems).SingleAsync(x => x.Id == leadId);
+        Assert.All(lead.LeadItems, line => Assert.Null(line.Quantity));
+        Assert.True(lead.RequiresCommercialReview);
+        Assert.False(lead.CommercialFactsVerified);
+        Assert.Null(lead.ReviewApprovedOn);
     }
 
     [Fact]

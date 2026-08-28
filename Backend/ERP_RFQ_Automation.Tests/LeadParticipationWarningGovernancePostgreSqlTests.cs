@@ -293,6 +293,7 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
         await SeedTenantAsync();
         var batchId = Guid.NewGuid();
         var key = $"participation-warning:{suffix}:{batchId:N}";
+        var requiresIncompleteAmendment = lines.Any(line => line.Quantity <= 0);
         var candidate = new Lead
         {
             Rfqno = $"WARN-{suffix}-{batchId:N}", BuyersName = "SEC Bid Desk", RecDate = Now,
@@ -300,7 +301,15 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
             CreatedBy = "tests", CreatedDate = Now, BusinessUnitId = Tenant,
             NoOfLineItems = lines.Count
         };
-        foreach (var line in lines) candidate.LeadItems.Add(line);
+        // A Lead cannot legitimately enter QUALIFIED with an unresolved current quantity. For
+        // downstream warning tests, establish a commercially valid revision 1 first; after the
+        // governed qualification below, reconcile the requested incomplete values as revision 2.
+        // That models the real production risk: an amendment can invalidate previously reviewed
+        // commercial facts, and participation/promotion must still refuse unsafe Bid scope.
+        foreach (var line in requiresIncompleteAmendment
+                     ? lines.Select(QualificationSafeLine)
+                     : lines)
+            candidate.LeadItems.Add(line);
 
         long leadId;
         await using (var context = database.ContextFor(Tenant))
@@ -328,6 +337,40 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
                 new LifecycleTransitionCommand(target, lead.LifecycleVersion, null, null,
                     "Seed", $"{suffix}-{target}", $"lead-{leadId}",
                     $"warning-{suffix}-{target}:{leadId}"), false, CancellationToken.None);
+        }
+
+        if (requiresIncompleteAmendment)
+        {
+            var amendmentBatchId = Guid.NewGuid();
+            var amendmentKey = $"{key}:amendment";
+            var amendment = new Lead
+            {
+                Rfqno = candidate.Rfqno, BuyersName = candidate.BuyersName, RecDate = candidate.RecDate,
+                BidClosingDate = candidate.BidClosingDate, LeadSource = candidate.LeadSource,
+                CreatedBy = "tests", CreatedDate = Now, BusinessUnitId = Tenant,
+                NoOfLineItems = lines.Count
+            };
+            foreach (var line in lines) amendment.LeadItems.Add(line);
+
+            await using var amendmentContext = database.ContextFor(Tenant);
+            var reconciled = await new LeadIdentityApplicationService(amendmentContext).ReconcileAsync(amendment,
+                new LeadIntakeDescriptor(
+                    amendmentBatchId, "ManualUpload", amendmentKey, amendmentKey, null,
+                    "ParticipationWarningTests", null, $"RFQ {suffix} amendment", $"{suffix}-amendment.xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 20480,
+                    new string('b', 64), null, null, Now, Now, LeadProcessingPath.Deterministic,
+                    false, null, "Service", "tests", amendmentKey), CancellationToken.None);
+            Assert.Equal(leadId, reconciled.LeadId);
+            Assert.Equal(LeadOccurrenceClassification.Revision, reconciled.Classification);
+            Assert.Equal(2, reconciled.RevisionNumber);
+            var amendedLead = await amendmentContext.Leads
+                .Include(lead => lead.LeadStatus)
+                .Include(lead => lead.LeadItems)
+                .SingleAsync(lead => lead.Id == leadId);
+            Assert.Equal("QUALIFIED", amendedLead.LeadStatus?.SetupCode);
+            Assert.Equal(reconciled.RevisionId, amendedLead.CurrentRevisionId);
+            Assert.Contains(amendedLead.LeadItems,
+                line => line.IsCurrentRevisionProjection && line.Quantity <= 0);
         }
 
         var evidenceBytes = Encoding.UTF8.GetBytes(string.Join('\n', lines.Select(x =>
@@ -482,6 +525,17 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
         LineItemNo = lineNo, ItemMaterialCode = part, ManufacturerPartNumber = part,
         ProductShortDescription = "Ball valve 2IN class 300", Quantity = quantity,
         UnitOfMeasure = uom, Currency = currency
+    };
+
+    private static LeadItem QualificationSafeLine(LeadItem line) => new()
+    {
+        LineItemNo = line.LineItemNo,
+        ItemMaterialCode = line.ItemMaterialCode,
+        ManufacturerPartNumber = line.ManufacturerPartNumber,
+        ProductShortDescription = line.ProductShortDescription,
+        Quantity = line.Quantity is > 0 ? line.Quantity : 1,
+        UnitOfMeasure = line.UnitOfMeasure,
+        Currency = line.Currency
     };
 
     private sealed record Scenario(long LeadId, long RevisionId, int RevisionNumber,

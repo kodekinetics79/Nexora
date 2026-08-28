@@ -53,6 +53,10 @@ public static class EmailTriageReasonCodes
     public const string EmptyAfterQuoteStrip = "empty_after_quote_strip";
     /// <summary>An Outlook calendar message (<c>Content-Class: urn:content-classes:calendarmessage</c>).</summary>
     public const string CalendarInvite = "calendar_invite";
+    /// <summary>The sender explicitly labels the fresh message as non-RFQ/informational or
+    /// states that there is no buying or quotation intent. This is stronger than an RFQ word
+    /// mentioned inside that denial, but yields to a separate affirmative request or quantity.</summary>
+    public const string ExplicitNonInquiryIntent = "explicit_non_inquiry_intent";
 
     // --- inquiry ---
     /// <summary>The sender is a known customer contact for this tenant.</summary>
