@@ -19,8 +19,10 @@ import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import extractionReviewService from '../../api/services/extractionReviewService';
 import type { NeedsReviewItem } from '../../api/services/extractionReviewService';
+import operationalReadinessService from '../../api/services/operationalReadinessService';
 import SearchField from '../../components/common/SearchField';
 import ViewTabs from '../../components/layout/ViewTabs';
+import { useAuth } from '../../context/AuthContext';
 import { formatDateSafe } from '../../utils/dates';
 
 dayjs.extend(relativeTime);
@@ -34,6 +36,8 @@ dayjs.extend(relativeTime);
 
 const ExtractionReviewPage: React.FC = () => {
   const navigate = useNavigate();
+  const { userData, hasPermission } = useAuth();
+  const canViewTenantOperations = hasPermission('Users', 'view');
   const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({ pageSize: 50, page: 0 });
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
@@ -56,7 +60,21 @@ const ExtractionReviewPage: React.FC = () => {
     }),
   });
 
+  // This is intentionally a separate read from the review queue. A dead-letter job stopped
+  // before a reviewable Lead existed, whereas this page lists Leads that persisted successfully
+  // but need a person's validation. Showing the operations count here prevents an empty review
+  // queue from falsely suggesting that extraction itself has no outstanding exceptions. The
+  // query is permission-gated so ordinary reviewers neither receive a forbidden request nor learn
+  // tenant-operational counts they are not authorized to see.
+  const operationsReadiness = useQuery({
+    queryKey: ['tenant-operational-readiness', userData.businessUnitId],
+    queryFn: operationalReadinessService.get,
+    enabled: canViewTenantOperations,
+  });
+
   const totalCount = data?.totalCount ?? 0;
+  const extractionDeadLetterCount = operationsReadiness.data?.queues
+    .find(queue => queue.key === 'extraction')?.deadLetter ?? 0;
 
   const formatRelative = (dateStr: string | null) => {
     if (!dateStr) return '—';
@@ -238,6 +256,20 @@ const ExtractionReviewPage: React.FC = () => {
           one level of tabs. They were four separate rail rows under "Lead Management". */}
       <ViewTabs primaryKey="inbox" ariaLabel="Inbox views" />
 
+      {extractionDeadLetterCount > 0 && (
+        <Alert
+          severity="warning"
+          sx={{ mb: 1.5, borderRadius: 2 }}
+          action={(
+            <Button color="inherit" size="small" onClick={() => navigate('/admin/operations')}>
+              Manage exceptions
+            </Button>
+          )}
+        >
+          {extractionDeadLetterCount.toLocaleString()} extraction exception{extractionDeadLetterCount === 1 ? '' : 's'} stopped before a reviewable Lead was created. These are managed in Tenant admin operations and are not documents in this review queue.
+        </Alert>
+      )}
+
       {/* Filters */}
       <Paper sx={{ p: 1.5, mb: 1.5, display: 'flex', gap: 2, alignItems: 'center', borderRadius: 2, border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
         <SearchField width="360px" value={search} onChange={setSearch} placeholder="Search by RFQ No, Buyer Name..." />
@@ -272,7 +304,7 @@ const ExtractionReviewPage: React.FC = () => {
                   <CaughtUpIcon sx={{ fontSize: 56, color: 'success.main', opacity: 0.85 }} />
                   <Typography sx={{ fontWeight: 800 }}>No documents awaiting review — you're all caught up</Typography>
                   <Typography variant="body2" color="text.secondary">
-                    Every new extraction is routed here for a person to verify before it moves downstream.
+                    Successfully persisted Leads that require human validation will appear here.
                   </Typography>
                 </Box>
               ),

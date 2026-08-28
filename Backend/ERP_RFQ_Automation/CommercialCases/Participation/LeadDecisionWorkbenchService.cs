@@ -58,6 +58,34 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
             ? new Dictionary<long, SourceDocument>()
             : await _db.Set<SourceDocument>().AsNoTracking().Where(x => documentIds.Contains(x.Id))
                 .ToDictionaryAsync(x => x.Id, ct);
+        // A human correction establishes a new immutable revision with an IdentityBaseline
+        // occurrence. That occurrence deliberately carries no receipt metadata: copying a
+        // sender, subject or Message-ID onto it would manufacture a second inbound email.
+        // Its document links, however, are inherited from the real occurrence that supplied
+        // the evidence. Resolve that occurrence for display rather than showing the baseline's
+        // intentional nulls as if capture had failed.
+        var sourceOccurrence = occurrence.RecordKind == LeadOccurrenceRecordKind.Ingestion
+            ? occurrence
+            : documentIds.Length == 0
+                ? null
+                : await _db.Set<LeadIngestionOccurrence>().AsNoTracking()
+                    .Where(x => x.BusinessUnitId == businessUnitId
+                        && x.LeadId == leadId
+                        && x.RecordKind == LeadOccurrenceRecordKind.Ingestion
+                        && ((x.SourceDocumentId.HasValue && documentIds.Contains(x.SourceDocumentId.Value))
+                            || x.Documents.Any(document => documentIds.Contains(document.SourceDocumentId))))
+                    .OrderByDescending(x => x.Id)
+                    .FirstOrDefaultAsync(ct);
+        var isEmailSource = string.Equals(sourceOccurrence?.SourceChannel, "Email",
+                StringComparison.OrdinalIgnoreCase)
+            || string.Equals(lead.LeadSource, "Email", StringComparison.OrdinalIgnoreCase);
+        var emailProvenance = isEmailSource && lead.EmailIngestsId.HasValue
+            ? await (from ingest in _db.EmailIngests.AsNoTracking()
+                     where ingest.Id == lead.EmailIngestsId.Value
+                           && ingest.EmailConfiguration.BusinessUnitId == businessUnitId
+                     select new { ingest.MessageId, ingest.EmailSubject, ingest.FromEmail })
+                .SingleOrDefaultAsync(ct)
+            : null;
         var extractionJobIds = documents.Values.Where(x => x.ExtractionJobId.HasValue)
             .Select(x => x.ExtractionJobId!.Value).Distinct().ToArray();
         var extractionJobs = extractionJobIds.Length == 0
@@ -285,8 +313,11 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
         return new LeadDecisionWorkbenchDto(lead.Id, revision.Id, revision.RevisionNumber, lead.CurrentRevisionNumber,
             decision?.Sequence, status, lead.LeadStatus?.SetupCode ?? "UNKNOWN", lead.LeadStatus?.SetupValue,
             lead.CommercialCaseReference, revision.CustomerRfqReference, lead.CustomerId, customerName,
-            lead.BuyersName, occurrence.Sender ?? lead.Clientemail, occurrence.Subject, occurrence.ExternalSourceId,
-            occurrence.SourceReceivedAtUtc, lead.BidClosingDate, lead.AssignToNavigation is null ? null
+            lead.BuyersName, sourceOccurrence?.Sender ?? emailProvenance?.FromEmail ?? lead.Clientemail,
+            sourceOccurrence?.Subject ?? emailProvenance?.EmailSubject,
+            RfcMessageId(sourceOccurrence) ?? emailProvenance?.MessageId,
+            sourceOccurrence?.SourceReceivedAtUtc ?? occurrence.SourceReceivedAtUtc,
+            lead.BidClosingDate, lead.AssignToNavigation is null ? null
                 : $"{lead.AssignToNavigation.FirstName} {lead.AssignToNavigation.LastName}".Trim(),
             lines.Length > 0 && lines.All(x => x.VerificationStatus == "VERIFIED")
                 ? "VERIFIED" : evidence.Count > 0 ? "NEEDS_REVIEW" : "SOURCE_UNAVAILABLE",
@@ -344,6 +375,20 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
 
     private static string? GetString(JsonElement root, string name) =>
         root.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+
+    private static string? RfcMessageId(LeadIngestionOccurrence? occurrence)
+    {
+        if (occurrence is null
+            || !string.Equals(occurrence.SourceChannel, "Email", StringComparison.OrdinalIgnoreCase)
+            || string.IsNullOrWhiteSpace(occurrence.EmailThreadId))
+            return null;
+
+        const string messagePrefix = "email:";
+        var value = occurrence.EmailThreadId.Trim();
+        return value.StartsWith(messagePrefix, StringComparison.OrdinalIgnoreCase)
+            ? value[messagePrefix.Length..]
+            : value;
+    }
 
     private sealed record LineFieldEvidenceProjection(long LeadItemId, string FieldName,
         string? RawValue, string? SourceAddress);
