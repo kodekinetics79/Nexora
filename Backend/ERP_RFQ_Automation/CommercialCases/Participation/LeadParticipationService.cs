@@ -370,7 +370,11 @@ public sealed class LeadParticipationService : ILeadParticipationService
                     ReasonCode = Clean(line.ReasonCode),
                     ReasonNotes = Clean(line.ReasonNotes),
                     ProductId = line.ProductId,
-                    Quantity = effective?.Quantity ?? line.Quantity,
+                    // Participation quantity is commercial data. A zero/missing source quantity is
+                    // meaningful evidence for declining a line, but it is not a valid commercial
+                    // quantity to persist on the immutable decision snapshot. Preserve positive
+                    // quantities for drafts/review; normalise absent non-bid quantities to null.
+                    Quantity = effective?.Quantity ?? (line.Quantity is > 0 ? line.Quantity : null),
                     UnitOfMeasure = effective?.Uom?.UomCode ?? Clean(line.UnitOfMeasure),
                     UomId = effective?.Uom?.UomId,
                     Currency = effective?.Currency?.Code.ToUpperInvariant() ?? Clean(line.Currency)?.ToUpperInvariant(),

@@ -260,6 +260,8 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
 
         Assert.Equal(LeadParticipationOutcome.NoBid, decision.Outcome);
         Assert.All(decision.Lines, line => Assert.Equal(LeadLineParticipationChoice.NoBid, line.Choice));
+        Assert.Null(decision.Lines.Single(line => line.LeadItemRevisionId == scenario.LineRevisionIds[0]).Quantity);
+        Assert.Equal(5, decision.Lines.Single(line => line.LeadItemRevisionId == scenario.LineRevisionIds[1]).Quantity);
         var lead = await context.Leads.AsNoTracking().Include(x => x.LeadStatus)
             .SingleAsync(x => x.BusinessUnitId == Tenant && x.Id == scenario.LeadId);
         Assert.Equal("DISQUALIFIED", lead.LeadStatus?.SetupCode);
