@@ -9,8 +9,17 @@ import {
   fitAssessmentDraftComplete,
   initializeDecisionMap,
   promotionBlockers,
+  terminalDecisionClosedValidation,
   validGovernedDecision,
 } from './workbenchRules';
+
+describe('terminalDecisionClosedValidation', () => {
+  it('keeps validation complete after RFQ promotion or a committed full no-bid', () => {
+    expect(terminalDecisionClosedValidation({ promotion: { rfqId: 63 } as never }, false)).toBe(true);
+    expect(terminalDecisionClosedValidation({ promotion: null }, true)).toBe(true);
+    expect(terminalDecisionClosedValidation({ promotion: null }, false)).toBe(false);
+  });
+});
 
 describe('bidCommercialValuesReady', () => {
   it('blocks Bid commitment when the UOM is not an active tenant master value', () => {

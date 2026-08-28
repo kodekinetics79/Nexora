@@ -74,6 +74,11 @@ export const decisionRecordIsLocked = (
     && counts.noBid === counts.total;
 };
 
+export const terminalDecisionClosedValidation = (
+  workbench: Pick<LeadDecisionWorkbenchDTO, 'promotion'>,
+  fullNoBidClosed: boolean,
+): boolean => Boolean(workbench.promotion) || fullNoBidClosed;
+
 export const validGovernedDecision = (decision: EditableLineDecision): boolean => {
   if (decision.decision === 'Pending' || decision.decision === 'Bid') return true;
   return Boolean(decision.reasonCode?.trim());
