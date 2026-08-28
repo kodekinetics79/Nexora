@@ -74,6 +74,13 @@ wait_for() { # url, label, attempts
     fi
     sleep 2
   done
+  if [[ "$label" == "Backend" && -f "$RUN_DIR/backend.log" ]]; then
+    log "Backend startup log (last 160 lines):"
+    tail -160 "$RUN_DIR/backend.log" >&2
+  elif [[ "$label" == "Frontend" && -f "$RUN_DIR/frontend.log" ]]; then
+    log "Frontend startup log (last 80 lines):"
+    tail -80 "$RUN_DIR/frontend.log" >&2
+  fi
   die "$label did not answer at $url. See $RUN_DIR for logs."
 }
 
