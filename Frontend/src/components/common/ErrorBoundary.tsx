@@ -1,6 +1,7 @@
 import React from 'react';
 import { Box, Typography, Button, Paper } from '@mui/material';
 import { ReportProblemOutlined as ErrorIcon, Refresh as RefreshIcon } from '@mui/icons-material';
+import { claimChunkRecovery, isStaleDeploymentChunkError } from '../../utils/chunkRecovery';
 
 interface ErrorBoundaryProps {
   children: React.ReactNode;
@@ -21,6 +22,22 @@ class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundarySta
   componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
     // Surface the error for diagnostics; a real logging sink can be wired here later.
     console.error('Unhandled UI error captured by ErrorBoundary:', error, errorInfo);
+
+    // A user can keep an older shell open while Vercel atomically moves the production alias
+    // to a new build. Lazy navigation can then request a hashed chunk that belonged to the old
+    // deployment. Recover once per route and cooldown window; a repeated failure remains visible
+    // instead of creating a reload loop.
+    if (isStaleDeploymentChunkError(error)) {
+      try {
+        const locationKey = `${window.location.pathname}${window.location.search}`;
+        if (claimChunkRecovery(window.sessionStorage, locationKey)) {
+          window.location.reload();
+        }
+      } catch {
+        // Storage can be unavailable in hardened/private contexts. The manual recovery action
+        // remains available and no application data is changed.
+      }
+    }
   }
 
   handleReload = () => {

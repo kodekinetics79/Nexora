@@ -55,6 +55,7 @@ import {
   initializeDecisionMap,
   bidCommercialValuesReady,
   promotionBlockers,
+  terminalDecisionClosedValidation,
   validGovernedDecision,
   type DecisionMap,
 } from './workbenchRules';
@@ -325,13 +326,18 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
     || workbench.sourceCoverage.coveredLines >= workbench.sourceCoverage.totalLines;
   const sourceEvidenceBlocked = !sourceEvidenceAvailable
     || workbench.blockers.some((blocker) => ['SOURCE_UNAVAILABLE', 'SOURCE_LINEAGE_INCOMPLETE'].includes(blocker.code));
+  const validationClosedByTerminalDecision = terminalDecisionClosedValidation(workbench, fullNoBidClosed);
   const stageStatuses: WorkbenchStageStatuses = {
     evidence: sourceEvidenceBlocked
       ? { progress: 'blocked', detail: 'Source evidence is unavailable or incomplete. Recover the source before making a commercial decision.' }
       : sourceCoverageComplete
         ? { progress: 'complete', detail: 'Source email and line evidence are available for review.' }
         : { progress: 'needs-action', detail: 'Evidence is available, but one or more Lead lines still need a source link.' },
-    validate: !sourceEvidenceAvailable
+    validate: validationClosedByTerminalDecision
+      ? { progress: 'complete', detail: workbench.promotion
+        ? 'Validation was completed for the immutable Lead revision promoted to this RFQ.'
+        : 'The committed full no-bid closes this Lead without requiring RFQ promotion.' }
+      : !sourceEvidenceAvailable
       ? { progress: 'blocked', detail: 'Source evidence must be available before the transformed Lead can be validated.' }
       : sourceAndLifecycleReady
         ? { progress: 'complete', detail: 'Customer identity, Lead lifecycle, and transformed values are verified.' }
@@ -342,7 +348,11 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
         ? { progress: 'blocked', detail: !canEdit ? 'Your role can review this stage but cannot change the participation decision.' : 'Complete source validation before committing participation.' }
         : { progress: 'needs-action', detail: fullNoBidParticipationReady
           ? 'The full no-bid decision is ready to commit. Source validation is not required because no RFQ will be created.'
-          : dirty ? 'Review and save or commit the participation changes.' : 'Complete fit and line-level participation decisions.' },
+          : !fitActionable ? 'Save a complete human fit assessment for this Lead revision.'
+            : counts.pending > 0 ? 'Choose Bid, No-bid, or clarification for every current revision line.'
+              : counts.clarify > 0 ? 'Resolve every clarification before committing participation.'
+                : counts.bid > 0 && !bidValuesReady ? 'Complete quantity, UOM, currency, and any warning acknowledgement for every Bid line.'
+                  : dirty ? 'Review and save or commit the participation changes.' : 'Commit the saved participation scope.' },
     promote: rfqRevisionBlocker
       ? { progress: 'blocked', detail: rfqRevisionBlocker.message }
       : workbench.promotion || fullNoBidClosed
