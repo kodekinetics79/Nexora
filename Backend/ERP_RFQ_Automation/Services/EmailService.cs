@@ -748,7 +748,7 @@ namespace ERP_RFQ_Automation.Services
                 {
                     var envelopeId = NormalizeMessageId(summary.Envelope?.MessageId);
                     return envelopeId is null || !ledger.Contains(envelopeId);
-                }).ToList();
+                }).OrderBy(summary => summary.UniqueId.Id).ToList();
                 alreadyIngested = summaries.Count - unhandled.Count;
                 var batch = unhandled.Take(_maxNewMessagesPerMailboxAttempt).ToList();
                 var deferred = unhandled.Count - batch.Count;
