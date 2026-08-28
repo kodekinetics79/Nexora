@@ -60,7 +60,7 @@ describe('typed plan entitlements', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
     // Five keys are RuntimeUnavailableBoundary on the server and are denied however the flag
     // reads. Ticking one must not look like selling something.
-    expect(screen.getAllByText('NOT BUILT YET')).toHaveLength(5);
+    expect(screen.getAllByText('NOT AVAILABLE — CANNOT BE SOLD')).toHaveLength(5);
   });
 
   it('renders an actionable empty catalogue without inferred defaults', async () => {
