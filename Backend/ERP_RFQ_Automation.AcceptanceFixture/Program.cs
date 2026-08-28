@@ -1254,26 +1254,21 @@ async Task<Rfq> EnsureRfqAsync(Lead lead, string rfqNumber)
         .SingleOrDefaultAsync(x => x.BusinessUnitId == tenantId
             && (x.Rfqno == rfqNumber || x.LeadId == lead.Id));
     if (existing is not null) return existing;
-    await db.Entry(lead).Collection(x => x.LeadItems).LoadAsync();
     var authorization = await EnsurePromotionAuthorizationAsync(lead);
-    var revisionLines = await db.Set<LeadItemRevision>().AsNoTracking()
-        .Where(x => x.BusinessUnitId == tenantId && x.LeadRevisionId == authorization.RevisionId)
-        .ToDictionaryAsync(x => x.LeadItemId!.Value);
+    var revisionProjection = await LoadCurrentRevisionProjectionAsync(lead, authorization.RevisionId);
     var products = await db.Products.Where(x => x.Buid == tenantId).ToDictionaryAsync(x => x.PartNo, x => x.Id);
     var draftStatus = await EnsureSetupAsync("RFQStatus", "DRAFT", "Draft");
     var rfq = new Rfq { Rfqno = rfqNumber, BuyersName = lead.BuyersName, RecDate = now,
         BidClosingDate = lead.BidClosingDate, LeadId = lead.Id, CustomerId = lead.CustomerId,
         BusinessUnitId = tenantId, RfqstatusId = draftStatus.SetupId, CreatedBy = fixtureActor,
-        CreatedDate = now, NoOfLineItems = lead.LeadItems.Count,
+        CreatedDate = now, NoOfLineItems = revisionProjection.Count,
         PromotionId = authorization.PromotionId,
         SourceLeadRevisionId = authorization.RevisionId,
         ParticipationDecisionId = authorization.DecisionId };
     rfq.InheritCommercialIdentity(lead);
-    foreach (var item in lead.LeadItems.OrderBy(x => x.LineItemNo))
+    foreach (var (revisionLine, item) in revisionProjection)
     {
         products.TryGetValue(item.ManufacturerPartNumber ?? string.Empty, out var productId);
-        if (!revisionLines.TryGetValue(item.Id, out var revisionLine))
-            throw new InvalidOperationException($"Fixture lead line {item.Id} has no immutable revision lineage.");
         rfq.Rfqitems.Add(new Rfqitem { LineItemNo = item.LineItemNo,
             ProductId = productId == 0 ? null : productId, ProductShortDescription = item.ProductShortDescription,
             ItemMaterialCode = item.ItemMaterialCode, ManufacturerPartNumber = item.ManufacturerPartNumber,
@@ -1321,10 +1316,7 @@ async Task<(long RevisionId, long DecisionId, long PromotionId)> EnsurePromotion
     {
         var uom = await EnsureUomAsync("EA", "Each");
         var currency = await EnsureCurrencyAsync("USD", "US Dollar", "$");
-        var revisionLines = await db.Set<LeadItemRevision>().AsNoTracking()
-            .Where(x => x.BusinessUnitId == tenantId && x.LeadRevisionId == revisionId)
-            .OrderBy(x => x.LineNumber).ToArrayAsync();
-        var currentItems = lead.LeadItems.ToDictionary(x => x.Id);
+        var revisionProjection = await LoadCurrentRevisionProjectionAsync(lead, revisionId);
         decision = new LeadParticipationDecision
         {
             BusinessUnitId = tenantId, LeadId = lead.Id, LeadRevisionId = revisionId,
@@ -1335,10 +1327,8 @@ async Task<(long RevisionId, long DecisionId, long PromotionId)> EnsurePromotion
             RequestHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(decisionKey))).ToLowerInvariant(),
             DecidedBy = fixtureActor, DecidedAtUtc = DateTimeOffset.UtcNow
         };
-        foreach (var line in revisionLines)
+        foreach (var (line, current) in revisionProjection)
         {
-            if (!line.LeadItemId.HasValue || !currentItems.TryGetValue(line.LeadItemId.Value, out var current))
-                throw new InvalidOperationException($"Fixture revision line {line.Id} has no canonical Lead item.");
             var productId = await db.Products.Where(x => x.Buid == tenantId
                     && x.PartNo == current.ManufacturerPartNumber)
                 .Select(x => (long?)x.Id).SingleOrDefaultAsync();
@@ -1372,6 +1362,55 @@ async Task<(long RevisionId, long DecisionId, long PromotionId)> EnsurePromotion
         await db.SaveChangesAsync();
     }
     return (revisionId, decision.Id, promotion.Id);
+}
+
+async Task<IReadOnlyList<(LeadItemRevision Revision, LeadItem Item)>> LoadCurrentRevisionProjectionAsync(
+    Lead lead, long revisionId)
+{
+    if (lead.CurrentRevisionId != revisionId)
+        throw new InvalidOperationException(
+            $"Fixture lead {lead.Id} current revision is {lead.CurrentRevisionId?.ToString() ?? "missing"}, not {revisionId}.");
+
+    // Never derive promotion from Lead.LeadItems. This fixture intentionally uses one long-lived
+    // DbContext and loads that navigation more than once; relationship fix-up can therefore leave
+    // repeated references in the in-memory List. It also retains historical projections by design.
+    // LeadItemRevision is the immutable authority for exactly which canonical line belongs to this
+    // revision, so follow that lineage and independently prove it is the complete current projection.
+    var revisionLines = await db.Set<LeadItemRevision>().AsNoTracking()
+        .Include(x => x.LeadItem)
+        .Where(x => x.BusinessUnitId == tenantId && x.LeadId == lead.Id
+            && x.LeadRevisionId == revisionId)
+        .OrderBy(x => x.LineNumber)
+        .ThenBy(x => x.Id)
+        .ToArrayAsync();
+    if (revisionLines.Length == 0)
+        throw new InvalidOperationException(
+            $"Fixture lead {lead.Id} revision {revisionId} has no immutable line projection.");
+
+    var missing = revisionLines.FirstOrDefault(x => !x.LeadItemId.HasValue || x.LeadItem is null);
+    if (missing is not null)
+        throw new InvalidOperationException(
+            $"Fixture revision line {missing.Id} has no canonical Lead item lineage.");
+
+    var revisionItemIds = revisionLines.Select(x => x.LeadItemId!.Value).ToArray();
+    var duplicateItemId = revisionItemIds.GroupBy(x => x).FirstOrDefault(x => x.Count() > 1)?.Key;
+    if (duplicateItemId.HasValue)
+        throw new InvalidOperationException(
+            $"Fixture lead {lead.Id} revision {revisionId} links canonical Lead item {duplicateItemId.Value} more than once.");
+
+    var currentItemIds = await db.LeadItems.AsNoTracking()
+        .Where(x => x.LeadId == lead.Id && x.Lead.BusinessUnitId == tenantId
+            && x.IsCurrentRevisionProjection)
+        .OrderBy(x => x.Id)
+        .Select(x => x.Id)
+        .ToArrayAsync();
+    var orderedRevisionItemIds = revisionItemIds.OrderBy(x => x).ToArray();
+    if (!currentItemIds.SequenceEqual(orderedRevisionItemIds))
+        throw new InvalidOperationException(
+            $"Fixture lead {lead.Id} revision {revisionId} lineage does not exactly match its current Lead projection. "
+            + $"Revision items: [{string.Join(',', orderedRevisionItemIds)}]; current items: [{string.Join(',', currentItemIds)}].");
+
+    return revisionLines.Select(x => (x, x.LeadItem!)).ToArray();
 }
 
 async Task<SetUom> EnsureUomAsync(string code, string name)
