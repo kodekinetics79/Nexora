@@ -279,12 +279,16 @@ test.describe.serial('governed commercial outcomes through visible controls', ()
     expect(quote.rfqId).toBe(partialRfqId);
     expect(quote.leadId).toBe(Number(env().E2E_GOLDEN_PARTIAL_BID_LEAD_ID));
 
-    // An unpriced draft must fail closed at the PDF boundary every time, without creating a
-    // second quote as a side effect.
+    // An unpriced draft must fail closed at the PDF boundary every time and direct the operator
+    // to Commercial Review. Price attestation deliberately comes later: there are no complete
+    // prices to attest yet. Neither refusal may create a second Quote Draft as a side effect.
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const pdf = await readApi(page, await token(page), `/api/Quote/${partialQuoteId}/pdf`);
       expect(pdf.status()).toBe(409);
-      expect((await pdf.json()).priceAttestationRequired).toBe(true);
+      const refusal = await pdf.json();
+      expect(refusal.commercialReviewRequired).toBe(true);
+      expect(refusal.priceAttestationRequired).not.toBe(true);
+      expect(refusal.message).toContain('Commercial Review Required');
     }
   });
 
