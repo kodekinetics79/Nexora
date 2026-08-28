@@ -49,4 +49,26 @@ describe('WorkbenchStageNavigation', () => {
     fireEvent.click(reviewTab);
     expect(onChange).toHaveBeenCalledWith('validate');
   });
+
+  it('announces the current stage and the progress of every other stage', () => {
+    render(
+      <WorkbenchStageTabs
+        value="validate"
+        onChange={vi.fn()}
+        statuses={{
+          evidence: { progress: 'complete', detail: 'Evidence is available.' },
+          validate: { progress: 'needs-action', detail: 'Review transformed values.' },
+          participation: { progress: 'blocked', detail: 'Validation must be completed first.' },
+          promote: { progress: 'blocked', detail: 'Participation must be committed first.' },
+        }}
+      />,
+    );
+
+    expect(screen.getByRole('tab', { name: /1\. Evidence: Complete\. Evidence is available\./i }))
+      .not.toHaveAttribute('aria-current');
+    expect(screen.getByRole('tab', { name: /2\. Review transformation: Current, Needs action\. Review transformed values\./i }))
+      .toHaveAttribute('aria-current', 'step');
+    expect(screen.getByRole('tab', { name: /3\. Fit & Participation: Blocked\./i })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /4\. Promote: Blocked\./i })).toBeInTheDocument();
+  });
 });

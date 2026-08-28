@@ -18,7 +18,7 @@ test('28 Lead shows customer, owners and six line outcomes', async ({ page }) =>
   await page.screenshot({ path: path.join(evidenceDir, '28-lead-six-line-outcomes.png'), fullPage: true });
 });
 
-test('29 Review & Create RFQ preserves customer, owners and inventory results', async ({ page }) => {
+test('29 Decision Workbench preserves customer, owners and inventory results', async ({ page }) => {
   const leadId = requiredNumber('E2E_CORE_RFQ_CREATION_LEAD_ID');
   const token = await loginAs(page, 'manager');
   const resolved = await resolveLead(page, token, leadId);
@@ -32,27 +32,16 @@ test('29 Review & Create RFQ preserves customer, owners and inventory results', 
   ]);
   expect(Number(resolved[0].availableToPromise)).toBeGreaterThan(0);
   await openLead(page, leadId);
-  await page.getByRole('button', { name: 'Review & Create RFQ' }).click();
-  await expect(page.getByRole('heading', { name: 'Review inquiry and create RFQ' })).toBeVisible();
   await expect(page.getByText(required('E2E_CORE_CUSTOMER_NAME'), { exact: false }).first()).toBeVisible();
   await expect(page.getByTestId('commercial-line-resolution')).toHaveCount(6);
-  const existing = await jsonOk<{ items: Array<{ id: number; leadId?: number }> }>(
-    await api(page, token, 'get', '/api/Rfq?pageNumber=1&pageSize=250'),
-  );
-  const existingRfq = existing.items.find((row) => row.leadId === leadId);
-  if (existingRfq) await page.goto(`/procurement/rfqs/view/${existingRfq.id}`);
-  else {
-    // WP-B1: a line the extractor could not read with confidence must be corrected, left out,
-    // or explicitly acknowledged with a reason — the server refuses the conversion otherwise.
-    // This fixture's UnknownProduct line raises exactly that, so the journey now records the
-    // acknowledgement the way an operator would.
-    await acknowledgeExtractionWarningsIfPresent(page);
-    await page.getByRole('button', { name: 'Create RFQ' }).click();
-  }
-  await expect(page).toHaveURL(/\/procurement\/rfqs\/view\/\d+$/);
-  await expect(page.getByText(required('E2E_CORE_RFQ_CREATION_NEXORA_SERIAL'), { exact: false }).first()).toBeVisible();
+  await page.getByRole('button', { name: /Open decision workbench|View decision record/i }).click();
+  await expect(page).toHaveURL(new RegExp(`/procurement/leads/${leadId}/workbench$`));
+  await expect(page.getByRole('tab', { name: '1. Evidence' })).toBeVisible();
+  await expect(page.getByRole('tab', { name: '3. Fit & Participation' })).toBeVisible();
+  await expect(page.getByRole('tab', { name: '4. Promote' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Create RFQ', exact: true })).toHaveCount(0);
   await fs.mkdir(evidenceDir, { recursive: true });
-  await page.screenshot({ path: path.join(evidenceDir, '29-created-rfq.png'), fullPage: true });
+  await page.screenshot({ path: path.join(evidenceDir, '29-governed-decision-workbench.png'), fullPage: true });
 });
 
 test('30 RFQ links back to Lead and Nexora Serial', async ({ page }) => {
@@ -244,23 +233,3 @@ test('40 RFQ lines are marked Quote or No-Quote, and one Quote Draft is prepared
   );
   expect(quotesAfter.items.filter((row) => row.rfqId === rfqId).length).toBe(countBefore);
 });
-
-/**
- * Ticks the extraction-warning acknowledgement on the Review & Create RFQ page when the server
- * has flagged at least one included line, and records a reason.
- *
- * No-op when nothing is flagged, so the same journey works against a clean fixture. Deliberately
- * NOT a blind click: if the control is absent the conversion is expected to succeed unaided, and
- * silently tolerating its absence is what would let the gate regress unnoticed.
- */
-async function acknowledgeExtractionWarningsIfPresent(page: import('@playwright/test').Page) {
-  const acknowledgement = page.getByRole('checkbox', {
-    name: 'Acknowledge the flagged lines and convert anyway',
-  });
-  if (await acknowledgement.count() === 0) return false;
-  await acknowledgement.check();
-  await page
-    .getByLabel('Why are you going ahead?')
-    .fill('Browser acceptance: catalog not seeded for this fixture, parts verified by the test');
-  return true;
-}

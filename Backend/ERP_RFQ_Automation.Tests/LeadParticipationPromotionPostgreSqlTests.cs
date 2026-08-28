@@ -80,6 +80,123 @@ public sealed class LeadParticipationPromotionPostgreSqlTests(PostgreSqlTestData
                 'TR_RfqPromotions_AppendOnly']);
             """);
         Assert.Equal(4, triggers.Count);
+
+        var outcomeTriggers = await ReadSetAsync(connection, """
+            SELECT tgname
+            FROM pg_trigger
+            WHERE NOT tgisinternal
+              AND tgname = ANY (ARRAY[
+                'TR_LeadParticipationDecisions_OutcomeConsistency',
+                'TR_LeadLineParticipationDecisions_OutcomeConsistency']);
+            """);
+        Assert.Equal(new HashSet<string>(StringComparer.Ordinal)
+        {
+            "TR_LeadParticipationDecisions_OutcomeConsistency",
+            "TR_LeadLineParticipationDecisions_OutcomeConsistency"
+        }, outcomeTriggers);
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task Deferred_database_guard_rejects_committed_header_that_disagrees_with_lines()
+    {
+        await using var connection = await database.OpenConnectionAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await SeedParticipationAggregateAsync(connection, transaction, 99310, "FullBid");
+
+        await using var validate = new NpgsqlCommand("SET CONSTRAINTS ALL IMMEDIATE;", connection, transaction);
+        var error = await Assert.ThrowsAsync<PostgresException>(() => validate.ExecuteNonQueryAsync());
+
+        Assert.Equal("23514", error.SqlState);
+        Assert.Contains("inconsistent", error.MessageText, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task Deferred_database_guard_accepts_consistent_committed_no_bid_snapshot()
+    {
+        await using var connection = await database.OpenConnectionAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await SeedParticipationAggregateAsync(connection, transaction, 99320, "NoBid");
+
+        await using var validate = new NpgsqlCommand("SET CONSTRAINTS ALL IMMEDIATE;", connection, transaction);
+        await validate.ExecuteNonQueryAsync();
+        await transaction.RollbackAsync();
+    }
+
+    private static async Task SeedParticipationAggregateAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, long id, string outcome)
+    {
+        await using var command = new NpgsqlCommand("""
+            INSERT INTO "BusinessUnits"
+                ("ID", "BusinessUnitCode", "BusinessUnitName", "CreatedBy", "CreatedOn")
+            VALUES (@id, @code, 'Participation outcome guard', 'tests', now());
+
+            INSERT INTO "Leads"
+                ("ID", "BusinessUnitID", "RFQNo", "BuyersName", "RecDate", "LeadSource", "CreatedBy")
+            VALUES (@id, @id, @rfq, 'Outcome Guard Buyer', now(), 'Test', 'tests');
+
+            INSERT INTO "LeadIngestionBatches"
+                ("Id", "BusinessUnitId", "SourceChannel", "CreatedBy", "CreatedAtUtc", "UpdatedAtUtc", "Version")
+            VALUES (@batch, @id, 'Test', 'tests', now(), now(), 1);
+
+            INSERT INTO "LeadIngestionOccurrences"
+                ("Id", "RecordKind", "BusinessUnitId", "BatchId", "LeadId", "SourceChannel",
+                 "IdempotencyKey", "LogicalInquiryFingerprint", "Classification", "Confidence",
+                 "DecisionReasonsJson", "PolicyVersion", "ProcessingPath", "ExternalAiUsed",
+                 "IngestedAtUtc", "CreatedAtUtc", "ActorType", "ActorId", "CorrelationId", "Version")
+            VALUES (@occurrence, 'Ingestion', @id, @batch, @id, 'Test', @occurrence_key,
+                    repeat('a', 64), 'New', 1, '[]'::jsonb, 'test/v1', 'Deterministic', false,
+                    now(), now(), 'TestFixture', 'tests', @correlation, 1);
+
+            INSERT INTO "LeadRevisions"
+                ("Id", "BusinessUnitId", "LeadId", "RevisionNumber", "EstablishedByOccurrenceId",
+                 "LogicalInquiryFingerprint", "SnapshotJson", "CreatedAtUtc", "CreatedBy",
+                 "ProcessingPath", "ExternalAiUsed")
+            VALUES (@revision, @id, @id, 1, @occurrence, repeat('b', 64), '{}'::jsonb,
+                    now(), 'tests', 'Deterministic', false);
+
+            INSERT INTO "LeadItemRevisions"
+                ("Id", "BusinessUnitId", "LeadId", "LeadRevisionId", "LineNumber",
+                 "LineFingerprint", "SnapshotJson")
+            VALUES (@revision_line, @id, @id, @revision, 1, repeat('c', 64), '{}'::jsonb);
+
+            INSERT INTO "LeadFitAssessments"
+                ("Id", "BusinessUnitId", "LeadId", "LeadRevisionId", "Sequence", "PolicyVersion",
+                 "Recommendation", "IsActionable", "AssessmentJson", "IdempotencyKey", "RequestHash",
+                 "AssessedBy", "AssessedAtUtc")
+            VALUES (@fit, @id, @id, @revision, 1, 'test/v1', 'FIT', true, '{}'::jsonb,
+                    @fit_key, repeat('d', 64), 'tests', now());
+
+            INSERT INTO "LeadParticipationDecisions"
+                ("Id", "BusinessUnitId", "LeadId", "LeadRevisionId", "FitAssessmentId", "Sequence",
+                 "IsCommitted", "Outcome", "IdempotencyKey", "RequestHash", "DecidedBy", "DecidedAtUtc")
+            VALUES (@decision, @id, @id, @revision, @fit, 1, true, @outcome,
+                    @decision_key, repeat('e', 64), 'tests', now());
+
+            INSERT INTO "LeadLineParticipationDecisions"
+                ("Id", "BusinessUnitId", "LeadId", "LeadRevisionId", "ParticipationDecisionId",
+                 "DecisionIsCommitted", "LeadItemRevisionId", "Choice", "ReasonCode",
+                 "CatalogPolicyVersion", "WarningSnapshotJson")
+            VALUES (@decision_line, @id, @id, @revision, @decision, true, @revision_line,
+                    'NoBid', 'NO_CAPACITY', 'test/v1', '{}'::jsonb);
+            """, connection, transaction);
+        command.Parameters.AddWithValue("id", id);
+        command.Parameters.AddWithValue("code", $"OUTCOME-{id}");
+        command.Parameters.AddWithValue("rfq", $"OUTCOME-RFQ-{id}");
+        command.Parameters.AddWithValue("batch", Guid.Parse($"00000000-0000-0000-0000-{id:D12}"));
+        command.Parameters.AddWithValue("occurrence", id + 1);
+        command.Parameters.AddWithValue("occurrence_key", $"outcome-occurrence-{id}");
+        command.Parameters.AddWithValue("correlation", $"outcome-{id}");
+        command.Parameters.AddWithValue("revision", id + 2);
+        command.Parameters.AddWithValue("revision_line", id + 3);
+        command.Parameters.AddWithValue("fit", id + 4);
+        command.Parameters.AddWithValue("fit_key", $"outcome-fit-{id}");
+        command.Parameters.AddWithValue("decision", id + 5);
+        command.Parameters.AddWithValue("outcome", outcome);
+        command.Parameters.AddWithValue("decision_key", $"outcome-decision-{id}");
+        command.Parameters.AddWithValue("decision_line", id + 6);
+        await command.ExecuteNonQueryAsync();
     }
 
     private static async Task<HashSet<string>> ReadSetAsync(NpgsqlConnection connection, string sql)
@@ -89,6 +206,55 @@ public sealed class LeadParticipationPromotionPostgreSqlTests(PostgreSqlTestData
         var values = new HashSet<string>(StringComparer.Ordinal);
         while (await reader.ReadAsync()) values.Add(reader.GetString(0));
         return values;
+    }
+}
+
+public sealed class ParticipationOutcomeConsistencyMigrationRollbackPostgreSqlTests
+{
+    private const string PriorMigration = "20260826134500_ParticipationDraftCommercialIdentity";
+    private const string TargetMigration = "20260827170000_EnforceParticipationOutcomeConsistency";
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task Outcome_consistency_migration_rolls_back_and_replays_cleanly()
+    {
+        AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
+        await using var container = new PostgreSqlBuilder("postgres:16-alpine")
+            .WithDatabase("nexora_participation_outcome_rollback")
+            .WithUsername("nexora")
+            .WithPassword("nexora-tests")
+            .Build();
+        await container.StartAsync();
+        var options = new DbContextOptionsBuilder<ErpRfqAutomationContext>()
+            .UseNpgsql(container.GetConnectionString())
+            .ConfigureWarnings(warnings => warnings.Ignore(RelationalEventId.PendingModelChangesWarning))
+            .Options;
+        await using var context = new ErpRfqAutomationContext(options, new StubTenant(null));
+        var migrator = context.GetService<IMigrator>();
+
+        await migrator.MigrateAsync(PriorMigration);
+        Assert.False(await OutcomeTriggerExistsAsync(container.GetConnectionString()));
+        await migrator.MigrateAsync(TargetMigration);
+        Assert.True(await OutcomeTriggerExistsAsync(container.GetConnectionString()));
+        await migrator.MigrateAsync(PriorMigration);
+        Assert.False(await OutcomeTriggerExistsAsync(container.GetConnectionString()));
+        await migrator.MigrateAsync(TargetMigration);
+        Assert.True(await OutcomeTriggerExistsAsync(container.GetConnectionString()));
+    }
+
+    private static async Task<bool> OutcomeTriggerExistsAsync(string connectionString)
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand("""
+            SELECT count(*) = 2
+            FROM pg_trigger
+            WHERE NOT tgisinternal
+              AND tgname = ANY (ARRAY[
+                'TR_LeadParticipationDecisions_OutcomeConsistency',
+                'TR_LeadLineParticipationDecisions_OutcomeConsistency']);
+            """, connection);
+        return (bool)(await command.ExecuteScalarAsync())!;
     }
 }
 

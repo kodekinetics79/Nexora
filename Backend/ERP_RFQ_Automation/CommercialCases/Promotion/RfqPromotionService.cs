@@ -86,8 +86,11 @@ public sealed class RfqPromotionService : IRfqPromotionService
                     throw new InvalidOperationException("A newer participation decision exists for this revision. Promote the current decision.");
                 if (!decision.IsCommitted)
                     throw new InvalidOperationException("Participation is still a draft. Commit the current-revision decision before promotion.");
-                if (decision.Lines.Any(x => x.Choice is LeadLineParticipationChoice.Pending or LeadLineParticipationChoice.Clarify))
-                    throw new InvalidOperationException("Pending or Clarify lines must be resolved before RFQ promotion.");
+                // Do not trust an append-only historical header merely because it says FullBid
+                // or PartialBid. Legacy/imported data may predate the database aggregate trigger,
+                // and promotion is the last boundary before formal commercial records exist.
+                LeadParticipationOutcomeConsistency.EnsureCommittedSnapshot(
+                    decision.Outcome, decision.Lines.Select(x => x.Choice));
                 var fit = await _db.Set<LeadFitAssessment>().AsNoTracking().SingleOrDefaultAsync(x =>
                     x.BusinessUnitId == businessUnitId && x.Id == decision.FitAssessmentId
                     && x.LeadId == leadId && x.LeadRevisionId == command.ExpectedLeadRevisionId, ct)

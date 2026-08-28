@@ -250,16 +250,20 @@ const AllRFQsPage: React.FC = () => {
           )}
         </Box>
         <Stack direction="row" spacing={2}>
-          {hasPermission('RFQ Management', 'create') && <Button
-            variant="outlined"
-            startIcon={<UploadIcon />}
-            onClick={() => navigate('/procurement/leads/manual-upload')}
-            sx={{ fontWeight: 800, borderRadius: 2 }}
-          >
-            Ingest RFQ
-          </Button>}
+          {hasPermission('RFQ Management', 'create') && (
+            <Tooltip title="Upload a customer inquiry for Lead reconciliation">
+              <Button
+                variant="outlined"
+                startIcon={<UploadIcon />}
+                onClick={() => navigate('/procurement/leads/manual-upload')}
+                sx={{ fontWeight: 800, borderRadius: 2 }}
+              >
+                Upload inquiry
+              </Button>
+            </Tooltip>
+          )}
           <Tooltip title="Refresh Data">
-            <IconButton onClick={() => refetch()} sx={{ bgcolor: 'white', boxShadow: 1 }}>
+            <IconButton onClick={() => refetch()} sx={{ bgcolor: 'background.paper', boxShadow: 1 }}>
               <RefreshIcon />
             </IconButton>
           </Tooltip>

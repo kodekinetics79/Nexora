@@ -23,11 +23,10 @@
  *
  *   npx playwright test --config playwright.production.config.ts --list
  *
- * Safety contract (scenario 6): the suite is tenant-safe and non-destructive.
- * It creates at most ONE test lead (uploaded workbook) and ONE RFQ per run,
- * both clearly labeled with an `E2E-SMOKE-<epoch-ms>` tag in the RFQ number,
- * buyer, product names and conversion notes, so a human can spot and ignore
- * or delete them. Nothing existing is modified or deleted.
+ * Safety contract: the suite is tenant-safe and non-destructive. It creates at
+ * most ONE clearly-labelled test Lead. It does not commit participation or
+ * promote an RFQ against live customer data; that mutation belongs to the
+ * disposable governed-pilot fixture.
  *
  * Journey covered (serial — later tests reuse artifacts from earlier ones):
  *   01  Real UI login → dashboard shell renders, zero console errors on load.
@@ -36,12 +35,10 @@
  *   03  Bulk upload of an in-memory .xlsx (3 line items, deterministic native
  *       parser layout) → batch reconciliation reaches a terminal state and
  *       never shows raw exception copy ("SocketException" / "ClamAV").
- *   04  Convert the smoke lead (or the newest visible lead) to an RFQ: assert
- *       success (RFQ view with Nexora Serial) OR a rendered, human-readable
- *       refusal — never the bare generic wording when the server sent a
- *       ProblemDetails detail worth showing.
+ *   04  Open the legacy /convert bookmark and prove it resolves to the governed
+ *       Decision Workbench with no direct RFQ-creation control.
  *   05  API checks with the browser session's bearer token: AI-trust posture,
- *       /health hard-200, /ready tolerated 503 (evidence-storage gate).
+ *       /health and /ready both hard-200.
  * ============================================================================
  */
 
@@ -56,9 +53,6 @@ const hasCredentials = Boolean(email && password);
 
 /** One tag per run; appears in file name, RFQ number, buyer, products and notes. */
 const RUN_TAG = `E2E-SMOKE-${Date.now()}`;
-
-/** LeadConvertPage's generic fallback (src/pages/Intelligence/LeadConvertPage.tsx). */
-const GENERIC_CONVERT_REFUSAL = "Couldn't create the RFQ. Nothing was changed — please try again.";
 
 // Serial-journey state (worker-local; resets wholesale on retry, which reruns
 // the entire serial chain from test 01).
@@ -125,23 +119,6 @@ function buildSmokeWorkbook() {
   const workbook = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(rows), 'RFQ');
   return XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
-}
-
-/**
- * Mirror of the product's own "is this server text presentable?" gate
- * (src/utils/apiErrors.ts): a ProblemDetails detail carrying operator noise
- * (exception names, URLs, stack frames) is legitimately demoted to the generic
- * wording, so only a clean, human-authored detail obliges a non-generic snackbar.
- */
-function detailIsPresentable(detail: string): boolean {
-  return (
-    detail.length > 0 &&
-    detail.length <= 300 &&
-    !/\b\w*Exception\b/.test(detail) &&
-    !/\bhttps?:\/\/\S+/i.test(detail) &&
-    !/(?:^|\n)\s*at\s+\S+/.test(detail) &&
-    !/<\s*(!doctype|html|body|div)\b/i.test(detail)
-  );
 }
 
 // ─── The journey ────────────────────────────────────────────────────────────
@@ -250,7 +227,7 @@ test.describe.serial('Production smoke — live customer journey', () => {
     console.log(`[production-smoke] batch ${smokeBatchId} → lead ${smokeLeadId || '(none materialized)'}`);
   });
 
-  test('04 lead converts to an RFQ, or renders an honest human-readable refusal', async ({ page }) => {
+  test('04 legacy conversion bookmark resolves to the governed Decision Workbench', async ({ page }) => {
     test.setTimeout(180_000);
     await loginToProduction(page);
     const token = await bearerToken(page);
@@ -268,74 +245,19 @@ test.describe.serial('Production smoke — live customer journey', () => {
       const body = await leads.json() as { items?: Array<{ id: number }> };
       targetLeadId = (body.items ?? []).reduce((max, lead) => Math.max(max, lead.id), 0);
     }
-    expect(targetLeadId, 'a lead is available to exercise the convert flow').toBeGreaterThan(0);
-    console.log(`[production-smoke] converting lead ${targetLeadId}${targetLeadId === smokeLeadId ? ' (created by this run)' : ' (newest existing lead)'}`);
+    expect(targetLeadId, 'a lead is available to exercise the governed decision flow').toBeGreaterThan(0);
+    console.log(`[production-smoke] opening governed workbench for lead ${targetLeadId}${targetLeadId === smokeLeadId ? ' (created by this run)' : ' (newest existing lead)'}`);
 
     await page.goto(`/procurement/leads/${targetLeadId}/convert`);
-
-    // The page resolves to exactly one of three rendered states.
-    const createButton = page.getByRole('button', { name: 'Create RFQ' });
-    const emptyState = page.getByText('Nothing to convert yet');
-    const previewRefusal = page.getByText("We couldn't prepare this lead for conversion");
-    await expect(createButton.or(emptyState).or(previewRefusal).first()).toBeVisible({ timeout: 60_000 });
-
-    if (await previewRefusal.isVisible().catch(() => false)) {
-      // Rendered, human-readable refusal of the preview itself — with a way forward.
-      await expect(page.getByRole('button', { name: 'Try again' })).toBeVisible();
-      console.log('[production-smoke] conversion preview refused with rendered copy — acceptable live outcome, RFQ not attempted.');
-      return;
-    }
-    if (await emptyState.isVisible().catch(() => false)) {
-      // Rendered, human-readable refusal: the lead has no convertible lines.
-      await expect(page.getByText('This lead has no line items we can turn into an RFQ.')).toBeVisible();
-      console.log('[production-smoke] lead has no convertible line items — rendered refusal shown, RFQ not attempted.');
-      return;
-    }
-
-    // Label the RFQ for humans regardless of which lead was converted.
-    await page
-      .getByLabel('Anything the team should know? (optional)')
-      .fill(`${RUN_TAG}: automated production smoke check. Safe to ignore or delete.`);
-
-    const convertResponse = page.waitForResponse((candidate) =>
-      candidate.request().method() === 'POST'
-      && /\/api\/intelligence\/leads\/\d+\/convert/.test(candidate.url()));
-    await expect(createButton).toBeEnabled();
-    await createButton.click();
-    const convert = await convertResponse;
-
-    if (convert.ok()) {
-      // Success: snackbar + RFQ view rendering its serial.
-      await expect(page.getByText('RFQ created — here it is.')).toBeVisible();
-      await expect(page).toHaveURL(/\/procurement\/rfqs\/view\/\d+/, { timeout: 30_000 });
-      await expect(page.getByText(/Nexora Serial:/).first()).toBeVisible({ timeout: 30_000 });
-      console.log(`[production-smoke] RFQ created from lead ${targetLeadId} at ${page.url()}`);
-      return;
-    }
-
-    // Refusal path: the server said no. When it carried a ProblemDetails
-    // detail that reads like product copy, the snackbar must render that
-    // reason — never the bare generic sentence.
-    const status = convert.status();
-    const refusalBody = await convert.json().catch(() => null) as { detail?: unknown } | null;
-    const detail = typeof refusalBody?.detail === 'string' ? refusalBody.detail.trim() : '';
-    // Statuses whose bodies the error boundary deliberately never renders
-    // (auth wording and 5xx dumps) are generic-worthy by design.
-    const serverTextRenderable = status < 500 && ![401, 403, 408, 429].includes(status);
-
-    if (detail && serverTextRenderable && detailIsPresentable(detail)) {
-      await expect(
-        page.getByText(GENERIC_CONVERT_REFUSAL, { exact: true }),
-        `HTTP ${status} carried a ProblemDetails detail ("${detail}") — the generic snackbar must not swallow it`,
-      ).toHaveCount(0);
-      // The real reason is rendered for the human (one collapsed snackbar line).
-      await expect(page.getByText(detail.replace(/\s+/g, ' '), { exact: false }).first()).toBeVisible();
-      console.log(`[production-smoke] convert refused with rendered server reason (HTTP ${status}): ${detail}`);
-    } else {
-      // Generic-worthy response: still a rendered, human-readable refusal.
-      await expect(page.getByText(GENERIC_CONVERT_REFUSAL, { exact: true })).toBeVisible();
-      console.log(`[production-smoke] convert refusal was generic-worthy (HTTP ${status}, detail=${detail ? JSON.stringify(detail) : 'none'}) — generic copy correctly shown.`);
-    }
+    await expect(page).toHaveURL(new RegExp(`/procurement/leads/${targetLeadId}/workbench$`), { timeout: 30_000 });
+    await expect(page.getByText('Decision workbench', { exact: true }).first()).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByRole('tab', { name: /^1\. Evidence:/ })).toBeVisible();
+    await expect(page.getByRole('tab', { name: /^2\. Review transformation:/ })).toBeVisible();
+    await expect(page.getByRole('tab', { name: /^3\. Fit & Participation:/ })).toBeVisible();
+    await expect(page.getByRole('tab', { name: /^4\. Promote:/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Create RFQ', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /Qualify & Create RFQ/i })).toHaveCount(0);
+    console.log(`[production-smoke] legacy bookmark resolved to governed workbench for lead ${targetLeadId}; no direct RFQ action was exposed.`);
   });
 
   test('05 governance and health APIs answer for the browser session', async ({ page }) => {
@@ -356,13 +278,13 @@ test.describe.serial('Production smoke — live customer journey', () => {
     expect(view.policy?.externalProcessingAllowed, 'externalProcessingAllowed is true').toBe(true);
     expect(view.inferencePosture, 'deployment posture is ExternalAuthorized').toBe('ExternalAuthorized');
 
-    // Liveness is a hard requirement; readiness may legitimately be 503 while
-    // the evidence-storage gate is closed.
+    // A pilot-ready deployment must be both alive and ready. A closed evidence-storage
+    // gate is a release blocker, not a passing smoke outcome.
     const health = await page.request.get(`${BACKEND_URL}/health`);
     expect(health.status(), '/health is 200').toBe(200);
 
     const ready = await page.request.get(`${BACKEND_URL}/ready`);
-    expect([200, 503], '/ready is 200, or 503 behind the evidence-storage gate').toContain(ready.status());
-    console.log(`[production-smoke] /health=${health.status()} /ready=${ready.status()} (503 = evidence-storage gate, tolerated)`);
+    expect(ready.status(), '/ready is 200').toBe(200);
+    console.log(`[production-smoke] /health=${health.status()} /ready=${ready.status()}`);
   });
 });

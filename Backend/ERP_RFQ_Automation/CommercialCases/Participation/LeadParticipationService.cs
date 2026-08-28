@@ -327,6 +327,9 @@ public sealed class LeadParticipationService : ILeadParticipationService
                 : bidCount == 0 ? LeadParticipationOutcome.NoBid
                 : bidCount == suppliedLines.Count ? LeadParticipationOutcome.FullBid
                 : LeadParticipationOutcome.PartialBid;
+            if (command.Commit)
+                LeadParticipationOutcomeConsistency.EnsureCommittedSnapshot(
+                    outcome, suppliedLines.Select(x => x.Choice));
             var headerReasonCode = Clean(command.ReasonCode);
             if (outcome == LeadParticipationOutcome.NoBid)
             {

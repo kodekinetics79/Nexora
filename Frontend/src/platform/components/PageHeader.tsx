@@ -22,7 +22,11 @@ export default function PageHeader({
       }}
     >
       <Box>
-        <Typography variant="h4" sx={{ fontWeight: 800, letterSpacing: '-0.02em' }}>
+        <Typography
+          variant="h4"
+          component="h1"
+          sx={{ fontWeight: 800, letterSpacing: '-0.02em' }}
+        >
           {title}
         </Typography>
         {subtitle && (
