@@ -149,22 +149,35 @@ const TABS: TriageTab[] = [
   {
     key: 'Uncertain',
     outcome: 'Uncertain',
-    label: 'Uncertain',
+    label: 'Sent for extraction — uncertain',
     blurb:
-      'Nothing decisive was found either way, so the message was extracted anyway and flagged. Uncertainty never stops a message — only positive evidence of noise does.',
+      'Nothing decisive was found either way, so the message was sent to extraction and flagged. Uncertainty never stops a message — only positive evidence of noise does.',
     emptyTitle: 'No uncertain message',
     emptyMessage: 'Every message so far carried enough evidence for a definite decision.',
   },
   {
     key: 'Inquiry',
     outcome: 'Inquiry',
-    label: 'Extracted',
+    label: 'Sent for inquiry extraction',
     blurb:
       'Messages recognised as customer enquiries and sent for extraction — including free-prose enquiries written straight into the email body.',
-    emptyTitle: 'No message has been extracted as an inquiry',
+    emptyTitle: 'No message has been sent for inquiry extraction',
     emptyMessage: 'No inbound email has been recognised as a customer enquiry yet.',
   },
 ];
+
+/**
+ * The triage outcome is a routing decision, not proof that extraction succeeded. The API-level
+ * copy predates the message-level assembly result and says "Extracted" for Inquiry/Uncertain,
+ * which reads as a completed transformation beside an honest "No inquiry — needs review" result.
+ * Keep the API contract intact and name the two extraction routes for what actually happened.
+ */
+const describeRoutingDecision = (outcome: string) => {
+  const copy = describeTriageOutcome(outcome);
+  if (outcome === 'Inquiry') return { ...copy, label: 'Sent to inquiry extraction' };
+  if (outcome === 'Uncertain') return { ...copy, label: 'Sent to extraction — uncertain' };
+  return copy;
+};
 
 const NOT_REPORTED = 'Not reported';
 
@@ -572,8 +585,8 @@ export default function InboundMailTriagePage() {
       >
         <Box>
           {/*
-            This screen already spends its one level of tabs on the triage outcome (Extracted /
-            Uncertain / Supplier / Noise), so it does NOT also carry the Inbox tab strip its three
+            This screen already spends its one level of tabs on the triage outcome (Inquiry route /
+            Uncertain route / Supplier / Noise), so it does NOT also carry the Inbox tab strip its three
             sibling intake screens do — two stacked strips of the same shape is precisely the
             tab-within-tab confusion this navigation pass exists to remove. A plain link back to the
             queue does the same job without a second row of tabs.
@@ -824,7 +837,7 @@ export default function InboundMailTriagePage() {
                     <TableCell>Received</TableCell>
                     <TableCell>From</TableCell>
                     <TableCell>Subject</TableCell>
-                    <TableCell>Decision</TableCell>
+                    <TableCell>Routing decision</TableCell>
                     <TableCell>Why</TableCell>
                     <TableCell>What became of it</TableCell>
                     <TableCell align="right">Action</TableCell>
@@ -832,7 +845,7 @@ export default function InboundMailTriagePage() {
                 </TableHead>
                 <TableBody>
                   {rows.map((row) => {
-                    const outcome = describeTriageOutcome(row.outcome);
+                    const outcome = describeRoutingDecision(row.outcome);
                     const assembly = describeAssemblyState(row.assemblyState);
                     const assemblyReason = presentableReason(row.assemblyReason);
                     const progress = describeComponentProgress(row);
@@ -1394,8 +1407,8 @@ export default function InboundMailTriagePage() {
               {target?.subject ?? '(no subject)'} — from {target?.from ?? NOT_REPORTED}
             </Typography>
             <Typography variant="body2" component="p" sx={{ mt: 1 }}>
-              The stored original is put back through ingestion and treated as uncertain, so it is extracted and
-              flagged for review rather than dropped. Nothing already recorded is deleted.
+              The stored original is put back through ingestion and treated as uncertain, so it is sent to extraction
+              and flagged for review rather than dropped. Nothing already recorded is deleted.
             </Typography>
           </DialogContentText>
           <TextField

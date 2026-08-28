@@ -57,7 +57,11 @@ public static class LeadItemMapper
             // null for "2,500" it could not read — and this one coalesce turned every one of
             // those back into a real demand for zero units, on the single write path shared by
             // all four ingestion doors.
-            Quantity = source.Quantity,
+            // Every ingestion door converges here, including deterministic parsers that do
+            // not pass through the model client's quarantine. Zero and negative demand are
+            // not quoteable quantities; preserve the line and represent the unresolved value
+            // as NULL so review and promotion gates can distinguish it from a real quantity.
+            Quantity = source.Quantity is > 0 ? source.Quantity : null,
             StorageLocation = Truncate(source.StorageLocation, 100),
             ManufacturerName = Truncate(source.ManufacturerName, 200),
             ManufacturerPartNumber = Truncate(source.ManufacturerPartNumber, 100),

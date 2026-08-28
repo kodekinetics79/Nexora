@@ -303,6 +303,7 @@ public sealed class EmailInquiryLeadAssembler : IEmailInquiryLeadAssembler
             .ToList();
 
         var merged = new List<LeadItemData>();
+        var componentLines = new List<EmailInquiryCommercialConflictDetector.ComponentLines>();
         LeadExtractionResult? header = null;
         var expected = 0;
         var extracted = 0;
@@ -350,7 +351,11 @@ public sealed class EmailInquiryLeadAssembler : IEmailInquiryLeadAssembler
 
             header ??= parsed;
             if (parsed.Items is { Count: > 0 })
+            {
                 merged.AddRange(parsed.Items);
+                componentLines.Add(new EmailInquiryCommercialConflictDetector.ComponentLines(
+                    result.ComponentId, parsed.Items));
+            }
             expected += result.ExpectedItemCount;
             extracted += result.ExtractedItemCount;
             if (!string.IsNullOrWhiteSpace(result.AiProviderClass))
@@ -490,6 +495,24 @@ public sealed class EmailInquiryLeadAssembler : IEmailInquiryLeadAssembler
                 readInFull
                     ? EmailInquiryHoldReasons.NoRequestableContentDetail
                     : EmailInquiryHoldReasons.ContentNotRecoveredDetail, ct);
+            return new AssembleOutcome(null, null);
+        }
+
+        // Body and attachment are peer evidence. If both name the same stable item identity but
+        // disagree on a quote-critical value, creating two ordinary quoteable lines hides the
+        // contradiction and invites a double/incorrect quote. Do not guess, deduplicate, add or
+        // choose precedence: retain the complete message and surface one governed review hold.
+        var commercialConflictCount = EmailInquiryCommercialConflictDetector.Count(componentLines);
+        if (commercialConflictCount > 0)
+        {
+            _log.LogWarning(
+                "Assembly {AssemblyId} has {ConflictCount} cross-component commercial value "
+                + "conflict(s); no Lead is created until the source contradiction is reviewed.",
+                assemblyId, commercialConflictCount);
+            await _coordinator.HoldForReviewAsync(
+                businessUnitId, assemblyId,
+                EmailInquiryHoldReasons.CrossComponentCommercialConflict,
+                EmailInquiryHoldReasons.CrossComponentCommercialConflictDetail, ct);
             return new AssembleOutcome(null, null);
         }
 

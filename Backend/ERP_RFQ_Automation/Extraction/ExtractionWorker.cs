@@ -1617,7 +1617,13 @@ public sealed class LeadPersister : ILeadPersister
         // separate enquiries is exactly the judgement a person should confirm.
         var mayAutoVerify = _autoVerifyMinConfidence is not null
             && outcome.Status == ExtractionOutcomeStatus.Ok
-            && results.Count == 1;
+            && results.Count == 1
+            // Confidence cannot make an unusable demand quantity true. A clean document-level
+            // extraction may legitimately preserve 0, negative or TBD as a null line value;
+            // those lines require a person and may never turn the ingest green through the
+            // confidence shortcut.
+            && results[0].Items is { Count: > 0 }
+            && results[0].Items.All(item => item.Quantity is > 0);
         for (var g = 0; g < results.Count; g++)
         {
             var splitNote = results.Count > 1
@@ -1739,7 +1745,9 @@ public sealed class LeadPersister : ILeadPersister
             // positional (result group N belongs to reconciled Lead N), so re-establish the
             // reconciliation order explicitly instead of binding a source line to whichever
             // Lead PostgreSQL happened to return first.
-            leads = canonicalIds.Select(id => loadedLeads.Single(x => x.Id == id)).ToList();
+            leads = reconciliation.Where(x => x.LeadId > 0)
+                .Select(result => loadedLeads.Single(x => x.Id == result.LeadId))
+                .ToList();
         }
         else
         {
@@ -1763,7 +1771,7 @@ public sealed class LeadPersister : ILeadPersister
             // Lightweight provider tests intentionally use a reduced model without the
             // evidence ledger. Production PostgreSQL contexts always include it.
             if (_context.Model.FindEntityType(typeof(SourceDocument)) is not null)
-                await PersistUnstructuredRunAsync(job, outcome, leads, ct);
+                await PersistUnstructuredRunAsync(job, outcome, leads, reconciliation, ct);
         }
 
         _log.LogInformation(
@@ -1795,6 +1803,7 @@ public sealed class LeadPersister : ILeadPersister
 
     private async Task PersistUnstructuredRunAsync(
         ExtractionJob job, ChunkedExtractionOutcome outcome, IReadOnlyList<Lead> leads,
+        IReadOnlyList<ERP_RFQ_Automation.LeadIdentity.LeadReconciliationResult> reconciliation,
         CancellationToken ct)
     {
         const string parserVersion = "llm-unstructured/v2";
@@ -1921,18 +1930,9 @@ public sealed class LeadPersister : ILeadPersister
             _context.Add(inquiry);
             await _context.SaveChangesAsync(ct);
 
-            // A canonical Lead retains prior projection rows so immutable revisions and
-            // downstream records never lose their historical line ids.  Evidence from this
-            // extraction belongs only to the newly reconciled current projection; counting
-            // historical rows makes every amendment fail after reconciliation and rolls the
-            // whole revision transaction back.
-            var leadItems = lead.LeadItems
-                .Where(x => x.IsCurrentRevisionProjection)
-                .OrderBy(x => x.Id)
-                .ToArray();
-            if (leadItems.Length != result.Items.Count)
-                throw new InvalidOperationException(
-                    $"Lead {lead.Id} has {leadItems.Length} lines but its extraction group has {result.Items.Count}.");
+            var leadItemIds = await ResolveEvidenceLeadItemIdsAsync(
+                job, lead, reconciliation.Count == groups.Count ? reconciliation[groupIndex] : null,
+                result.Items.Count, ct);
             for (var lineIndex = 0; lineIndex < result.Items.Count; lineIndex++)
             {
                 var item = result.Items[lineIndex];
@@ -1945,7 +1945,7 @@ public sealed class LeadPersister : ILeadPersister
                 line.Enrich(item.ManufacturerName, item.ManufacturerPartNumber, item.Currency,
                     item.UnitPrice, ParseNonNegativeInt(item.LeadTime), JsonSerializer.Serialize(item),
                     CanonicalValidationStatus.Warning);
-                line.BindLeadItem(leadItems[lineIndex].Id);
+                line.BindLeadItem(leadItemIds[lineIndex]);
                 _context.Add(line);
                 pending.Add((item, line, lineIndex + 1));
             }
@@ -2039,6 +2039,59 @@ public sealed class LeadPersister : ILeadPersister
                 evidenceCounts[sourceJob.Id], 0);
         }
         await _context.SaveChangesAsync(ct);
+    }
+
+    private async Task<long[]> ResolveEvidenceLeadItemIdsAsync(
+        ExtractionJob job,
+        Lead lead,
+        ERP_RFQ_Automation.LeadIdentity.LeadReconciliationResult? reconciliation,
+        int expectedLineCount,
+        CancellationToken ct)
+    {
+        if (reconciliation?.RevisionId is { } revisionId)
+        {
+            if (reconciliation.LeadId != lead.Id)
+                throw new InvalidOperationException(
+                    $"Evidence reconciliation for extraction job {job.Id} does not match Lead {lead.Id}.");
+
+            var occurrenceIsBound = await _context.Set<ERP_RFQ_Automation.LeadIdentity.LeadIngestionOccurrence>()
+                .AsNoTracking()
+                .AnyAsync(x => x.BusinessUnitId == job.BusinessUnitId
+                    && x.Id == reconciliation.OccurrenceId
+                    && x.BatchId == job.BatchId
+                    && x.ExtractionJobId == job.Id
+                    && x.LeadId == lead.Id
+                    && x.LeadRevisionId == revisionId, ct);
+            if (!occurrenceIsBound)
+                throw new InvalidOperationException(
+                    $"Evidence reconciliation for extraction job {job.Id} is not bound to its occurrence, batch, Lead, and immutable revision.");
+
+            var revisionLines = await _context.Set<ERP_RFQ_Automation.LeadIdentity.LeadItemRevision>()
+                .AsNoTracking()
+                .Where(x => x.BusinessUnitId == job.BusinessUnitId
+                    && x.LeadId == lead.Id
+                    && x.LeadRevisionId == revisionId)
+                .OrderBy(x => x.LineNumber)
+                .Select(x => new { x.LineNumber, x.LeadItemId })
+                .ToListAsync(ct);
+            if (revisionLines.Count != expectedLineCount || revisionLines.Any(x => !x.LeadItemId.HasValue))
+                throw new InvalidOperationException(
+                    $"Lead {lead.Id} revision {revisionId} has {revisionLines.Count} immutable lines but its extraction group has {expectedLineCount}.");
+
+            return revisionLines.Select(x => x.LeadItemId!.Value).ToArray();
+        }
+
+        // Legacy/test graphs without identity reconciliation have no immutable revision result.
+        // They retain the pre-versioning behavior and bind to the one current projection.
+        var currentLeadItemIds = lead.LeadItems
+            .Where(x => x.IsCurrentRevisionProjection)
+            .OrderBy(x => x.Id)
+            .Select(x => x.Id)
+            .ToArray();
+        if (currentLeadItemIds.Length != expectedLineCount)
+            throw new InvalidOperationException(
+                $"Lead {lead.Id} has {currentLeadItemIds.Length} current lines but its extraction group has {expectedLineCount}.");
+        return currentLeadItemIds;
     }
 
     private static Guid DeterministicUnstructuredRunId(ExtractionJob job, string parserVersion)
