@@ -111,13 +111,16 @@ async function chooseNoBidReason(page: Page, dialog: Locator, note: string) {
   await dialog.getByRole('button', { name: 'Apply decision' }).click();
 }
 
-async function uploadAndWaitForReconciliation(page: Page, file: string) {
+async function uploadAndWaitForReconciliation(page: Page, file: string): Promise<string> {
   await page.goto('/procurement/leads/intelligence');
   await page.locator('input[type="file"]').setInputFiles(file);
   await page.getByRole('button', { name: 'Queue for reconciliation' }).click();
   await expect(page).toHaveURL(/\/procurement\/leads\/ingestion\/[0-9a-f-]+$/i);
+  const batchId = page.url().split('/').at(-1);
+  expect(batchId, 'reconciliation route must carry the durable batch id').toBeTruthy();
   await expect(page.getByRole('heading', { name: 'Batch reconciliation' })).toBeVisible();
   await expect(page.getByText(/Processing complete/)).toBeVisible({ timeout: 90_000 });
+  return batchId!;
 }
 
 async function markPartNoBidThroughControls(page: Page, part: string) {
@@ -294,7 +297,26 @@ test.describe.serial('governed commercial outcomes through visible controls', ()
 
   test('customer amendment creates a new Lead revision and marks the Quote Draft stale', async ({ page }) => {
     expect(partialQuoteId, 'Quote Draft journey must run first').toBeGreaterThan(0);
-    await uploadAndWaitForReconciliation(page, partialAmendment);
+    const batchId = await uploadAndWaitForReconciliation(page, partialAmendment);
+    const bearer = await token(page);
+    const batchResponse = await readApi(page, bearer, `/api/LeadIngestion/batches/${batchId}`);
+    expect(batchResponse.ok(), await batchResponse.text()).toBeTruthy();
+    const batch = await batchResponse.json() as {
+      revisions: number;
+      possibleMatches: number;
+      items: Array<{ classification: string; leadId?: number | null; revisionNumber?: number | null }>;
+    };
+    expect(batch.revisions).toBe(1);
+    expect(batch.possibleMatches).toBe(0);
+    expect(batch.items).toContainEqual(expect.objectContaining({
+      classification: 'Revision',
+      leadId: Number(env().E2E_GOLDEN_PARTIAL_BID_LEAD_ID),
+      revisionNumber: 2,
+    }));
+
+    const quoteResponse = await readApi(page, bearer, `/api/Quote/${partialQuoteId}`);
+    expect(quoteResponse.ok(), await quoteResponse.text()).toBeTruthy();
+    expect((await quoteResponse.json()).revisionImpact).toBe('DRAFT_STALE_REVIEW_REQUIRED');
     await page.goto(`/sales/quotes/view/${partialQuoteId}`);
     await expect(page.getByText('Customer Revision Received', { exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Mark review complete' })).toBeVisible();

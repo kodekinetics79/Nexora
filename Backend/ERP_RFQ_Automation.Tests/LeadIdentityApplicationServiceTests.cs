@@ -1,6 +1,7 @@
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Repositories;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
 
@@ -144,6 +145,57 @@ public sealed class LeadIdentityApplicationServiceTests
         Assert.Equal(2, analytics.Metrics.Single(x => x.Key == "leads-received").Numerator);
         Assert.Equal(1, analytics.Metrics.Single(x => x.Key == "duplicate-rate").Numerator);
         Assert.Equal(1, analytics.Metrics.Single(x => x.Key == "revision-rate").Numerator);
+    }
+
+    [Fact]
+    public async Task Buyer_named_amendment_of_resolved_customer_versions_promoted_lead_and_marks_quote_stale()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(74);
+        Seed.BusinessUnit(context, 74); Seed.EmailConfig(context, 7401, 74); Seed.EmailIngest(context, 7501, 7401, "NeedsReview");
+        Seed.Customer(context, 7601, 74, "Saudi Electricity Company");
+        await context.SaveChangesAsync();
+        var service = new LeadIdentityApplicationService(context);
+
+        var original = Candidate(74, 7501, "E2E-GOLDEN-A-PARTIAL", "bids@sec.test", 25);
+        original.BuyersName = "SEC Bid Desk";
+        var created = await service.ReconcileAsync(original,
+            Intake("resolved-customer-original", "resolved-a", Guid.NewGuid(), "bids@sec.test"));
+
+        var canonical = await context.Leads.SingleAsync(x => x.Id == created.LeadId);
+        canonical.ResolveCommercialIdentity(7601, null, "CUSTOMER_CONFIRMED");
+        var rfq = new Rfq
+        {
+            Rfqno = original.Rfqno!, BuyersName = original.BuyersName,
+            RecDate = DateTime.UtcNow, LeadId = canonical.Id,
+            CreatedBy = "test", CreatedDate = DateTime.UtcNow, BusinessUnitId = 74
+        };
+        context.Rfqs.Add(rfq);
+        await context.SaveChangesAsync();
+        var quote = new Quote
+        {
+            QuoteNo = "QT-RESOLVED-AMEND", Rfqid = rfq.Id,
+            BusinessUnitId = 74, CreatedBy = "test", CreatedDate = DateTime.UtcNow
+        };
+        context.Quotes.Add(quote);
+        await context.SaveChangesAsync();
+
+        context.ChangeTracker.Clear();
+        var amendment = Candidate(74, 7501, "E2E-GOLDEN-A-PARTIAL", null, 26);
+        amendment.BuyersName = "SEC Bid Desk";
+        var revised = await service.ReconcileAsync(amendment,
+            Intake("resolved-customer-amendment", "resolved-b", Guid.NewGuid(), sender: null));
+
+        Assert.Equal(LeadOccurrenceClassification.Revision, revised.Classification);
+        Assert.Equal(created.LeadId, revised.LeadId);
+        Assert.Equal(2, revised.RevisionNumber);
+        Assert.Contains(await context.Set<LeadRevisionImpact>().Where(x => x.LeadRevisionId == revised.RevisionId).ToListAsync(),
+            impact => impact.AggregateType == "RFQ" && impact.AggregateId == rfq.Id && impact.ImpactType == "RFQ_REVISION_REQUIRED");
+        Assert.Contains(await context.Set<LeadRevisionImpact>().Where(x => x.LeadRevisionId == revised.RevisionId).ToListAsync(),
+            impact => impact.AggregateType == "QUOTE" && impact.AggregateId == quote.Id && impact.ImpactType == "DRAFT_STALE_REVIEW_REQUIRED");
+
+        var quoteRead = await new QuoteRepository(context).GetByIdAsync(quote.Id, 74);
+        Assert.Equal("DRAFT_STALE_REVIEW_REQUIRED", quoteRead.RevisionImpact);
     }
 
     [Fact]
