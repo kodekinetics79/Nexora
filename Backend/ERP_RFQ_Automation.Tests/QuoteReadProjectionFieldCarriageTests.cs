@@ -320,15 +320,27 @@ public sealed class QuoteReadProjectionFieldCarriageTests
 
     private static async Task<long> SeedRfqLineAsync(ErpRfqAutomationContext db)
     {
-        db.Rfqs.Add(new Rfq
+        // Production RFQs inherit their immutable commercial-case identity from the canonical
+        // Lead. Saving the Lead first exercises the same non-Postgres allocation fallback used by
+        // relational tests; constructing an orphan RFQ here would bypass the governed lineage that
+        // QuoteService now correctly requires before a Quote can inherit it.
+        var lead = Seed.Lead(db, LeadId, BusinessUnitId);
+        await db.SaveChangesAsync();
+        lead.ResolveCommercialIdentity(CustomerId, null,
+            LeadCustomerMatchStatuses.CustomerConfirmedContactUnresolved);
+        await db.SaveChangesAsync();
+
+        var rfq = new Rfq
         {
             Id = RfqId,
             Rfqno = "NXR-RFQ-77001-2026-00000001",
             BusinessUnitId = BusinessUnitId,
-            CustomerId = CustomerId,
+            LeadId = lead.Id,
             CreatedBy = "test",
             CreatedDate = DateTime.UtcNow
-        });
+        };
+        rfq.InheritCommercialIdentity(lead);
+        db.Rfqs.Add(rfq);
         var line = new Rfqitem
         {
             Rfqid = RfqId,
@@ -382,6 +394,7 @@ public sealed class QuoteReadProjectionFieldCarriageTests
     private const long BusinessUnitId = 77_001;
     private const long CustomerId = 77_002;
     private const long ProductId = 77_004;
+    private const long LeadId = 77_005;
     private const long RfqId = 77_006;
     private const long PercentageDiscountId = 77_010;
     private const long QuoteDraftStatusId = 42;

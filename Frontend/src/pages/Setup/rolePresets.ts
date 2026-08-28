@@ -88,6 +88,7 @@ export const ROLE_LADDER: readonly RolePreset[] = [
       { module: "Products", canView: true, canCreate: false, canEdit: false, canDelete: false },
       { module: "Product Categories", canView: true, canCreate: false, canEdit: false, canDelete: false },
       { module: "Quote Configuration", canView: true, canCreate: false, canEdit: true, canDelete: false },
+      { module: "Users", canView: true, canCreate: false, canEdit: false, canDelete: false },
       { module: "Accounts Receivable", canView: true, canCreate: false, canEdit: false, canDelete: false },
       { module: "Customer Statements", canView: true, canCreate: false, canEdit: false, canDelete: false },
       { module: "Collection Controls", canView: true, canCreate: false, canEdit: false, canDelete: false },
