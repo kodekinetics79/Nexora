@@ -54,6 +54,9 @@ namespace ERP_RFQ_Automation.Services
     /// <param name="MessagesNotAcknowledged">Messages left unread on the server because nothing
     /// durable was written. They are RETRIED next cycle; a non-zero count that never falls is an
     /// incident.</param>
+    /// <param name="MessagesDeferred">Durably unhandled messages deliberately left for the next
+    /// bounded mailbox attempt. Deferral is healthy backpressure, not success for the recovery
+    /// checkpoint: the poll ledger must not advance past work that remains on the server.</param>
     public sealed record MailboxPollOutcome(
         long EmailConfigurationId,
         string EmailAddress,
@@ -72,7 +75,8 @@ namespace ERP_RFQ_Automation.Services
         int ComponentsScheduled = 0,
         int MessagesHeldForReview = 0,
         int MessagesRejected = 0,
-        int MessagesNotAcknowledged = 0);
+        int MessagesNotAcknowledged = 0,
+        int MessagesDeferred = 0);
 
     /// <summary>The truthful result of one poll cycle across every configured mailbox.</summary>
     public sealed record MailboxPollReport(IReadOnlyList<MailboxPollOutcome> Mailboxes)
@@ -110,6 +114,7 @@ namespace ERP_RFQ_Automation.Services
         public int MessagesHeldForReview => Mailboxes.Sum(m => m.MessagesHeldForReview);
         public int MessagesRejected => Mailboxes.Sum(m => m.MessagesRejected);
         public int MessagesNotAcknowledged => Mailboxes.Sum(m => m.MessagesNotAcknowledged);
+        public int MessagesDeferred => Mailboxes.Sum(m => m.MessagesDeferred);
     }
 
     public class EmailService : IEmailService
@@ -135,6 +140,10 @@ namespace ERP_RFQ_Automation.Services
         private const double DEFAULT_MAX_LOOKBACK_DAYS = 30;      // never scan further back than this
         private const double DEFAULT_MAILBOX_ATTEMPT_TIMEOUT_SECONDS = 180;
         private const double DEFAULT_NETWORK_OPERATION_TIMEOUT_SECONDS = 30;
+        // Capture/fan-out includes durable object storage, malware inspection and several
+        // transactional writes. A burst must therefore be drained across bounded attempts rather
+        // than letting one IMAP lease grow with mailbox depth until its safety deadline fires.
+        private const int DEFAULT_MAX_NEW_MESSAGES_PER_MAILBOX_ATTEMPT = 10;
         private const long MAX_ATTACHMENT_SIZE = Ingestion.Triage.EmailIngestEnqueuer.MaxAttachmentBytes; // 25 MB
         // Token/Text limiting for LLM to prevent context length errors and excessive costs
         private const int MAX_CHARS_FOR_LLM = 32000; // ~8k tokens (safe for most models)
@@ -191,6 +200,7 @@ namespace ERP_RFQ_Automation.Services
         private readonly TimeSpan _maxLookback;
         private readonly TimeSpan _mailboxAttemptTimeout;
         private readonly TimeSpan _networkOperationTimeout;
+        private readonly int _maxNewMessagesPerMailboxAttempt;
         // ING-09: how old a "Pending" ingest must be before the sweeper treats it as stranded
         // rather than in-flight. Conservative on purpose: the window between the ingest commit
         // and the enqueue is milliseconds, so anything Pending for this long is a crash
@@ -238,6 +248,12 @@ namespace ERP_RFQ_Automation.Services
                     "Ingestion:Email:NetworkOperationTimeoutSeconds",
                     DEFAULT_NETWORK_OPERATION_TIMEOUT_SECONDS),
                 DEFAULT_NETWORK_OPERATION_TIMEOUT_SECONDS);
+            var configuredMailboxBatchSize = configuration.GetValue(
+                "Ingestion:Email:MaxNewMessagesPerMailboxAttempt",
+                DEFAULT_MAX_NEW_MESSAGES_PER_MAILBOX_ATTEMPT);
+            _maxNewMessagesPerMailboxAttempt = configuredMailboxBatchSize > 0
+                ? configuredMailboxBatchSize
+                : DEFAULT_MAX_NEW_MESSAGES_PER_MAILBOX_ATTEMPT;
             var sweepMinutes = configuration.GetValue(
                 "Ingestion:Email:StrandedPendingSweepMinutes", DEFAULT_STRANDED_PENDING_SWEEP_MINUTES);
             _strandedPendingAge = TimeSpan.FromMinutes(
@@ -471,8 +487,10 @@ namespace ERP_RFQ_Automation.Services
                 {
                     _logger.LogInformation(
                         "Finished process for configuration: {Email} ({Downloaded} new message(s), "
-                        + "{AlreadyIngested} already in the ingestion ledger).",
-                        handle.EmailAddress, outcome.MessagesDownloaded, outcome.MessagesAlreadyIngested);
+                        + "{AlreadyIngested} already in the ingestion ledger, {Deferred} deferred "
+                        + "to the next bounded attempt).",
+                        handle.EmailAddress, outcome.MessagesDownloaded,
+                        outcome.MessagesAlreadyIngested, outcome.MessagesDeferred);
                 }
                 else
                 {
@@ -588,7 +606,11 @@ namespace ERP_RFQ_Automation.Services
             config.LastPollAttemptOn = now;
             if (outcome.Succeeded)
             {
-                config.LastSuccessfulPollOn = now;
+                // A bounded attempt proves that the channel works, but not that its recovery
+                // window is drained. Advancing the checkpoint while older messages remain would
+                // make them disappear once the minimum lookback moves past them.
+                if (ShouldAdvanceRecoveryPoint(outcome))
+                    config.LastSuccessfulPollOn = now;
                 config.LastPollError = null;
                 config.ConsecutivePollFailures = 0;
             }
@@ -615,6 +637,9 @@ namespace ERP_RFQ_Automation.Services
                     config.EmailAddress);
             }
         }
+
+        internal static bool ShouldAdvanceRecoveryPoint(MailboxPollOutcome outcome)
+            => outcome.Succeeded && outcome.MessagesDeferred == 0;
 
         /// <summary>
         /// SEC-ING-01: takes the caller's ALREADY tenant-scoped provider instead of creating its
@@ -715,17 +740,28 @@ namespace ERP_RFQ_Automation.Services
                     localContext, config, summaries, cancellationToken);
                 tally.Found = summaries.Count;
 
-                foreach (var summary in summaries)
+                // Only unhandled envelopes consume the batch. Known ledger entries remain cheap
+                // even when the lookback intentionally re-scans a day of mail. An envelope with
+                // no Message-Id is conservatively treated as unhandled; ResolveIngestKey derives
+                // its content identity after download.
+                var unhandled = summaries.Where(summary =>
                 {
                     var envelopeId = NormalizeMessageId(summary.Envelope?.MessageId);
-                    if (envelopeId is not null && ledger.Contains(envelopeId))
-                    {
-                        // Handled on an earlier cycle. The DURABLE record says so — not the
-                        // IMAP \Seen flag, which a human reading the mailbox also sets.
-                        alreadyIngested++;
-                        continue;
-                    }
+                    return envelopeId is null || !ledger.Contains(envelopeId);
+                }).ToList();
+                alreadyIngested = summaries.Count - unhandled.Count;
+                var batch = unhandled.Take(_maxNewMessagesPerMailboxAttempt).ToList();
+                var deferred = unhandled.Count - batch.Count;
+                if (deferred > 0)
+                {
+                    _logger.LogInformation(
+                        "Mailbox {Email} has {Unhandled} unhandled message(s); processing {Batch} "
+                        + "and deferring {Deferred} without advancing the recovery checkpoint.",
+                        config.EmailAddress, unhandled.Count, batch.Count, deferred);
+                }
 
+                foreach (var summary in batch)
+                {
                     var uid = summary.UniqueId;
                     try
                     {
@@ -831,7 +867,7 @@ namespace ERP_RFQ_Automation.Services
                     FailureIsPermanent: false, config.LastSuccessfulPollOn, window.SinceUtc,
                     window.CappedDays, downloaded, alreadyIngested,
                     tally.Found, tally.Captured, tally.ComponentsScheduled,
-                    tally.HeldForReview, tally.Rejected, tally.NotAcknowledged);
+                    tally.HeldForReview, tally.Rejected, tally.NotAcknowledged, deferred);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
