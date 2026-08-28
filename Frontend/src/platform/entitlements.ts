@@ -33,15 +33,20 @@ export const ENTITLEMENT_CATALOG = [
 export type EntitlementKey = (typeof ENTITLEMENT_CATALOG)[number]['key'];
 
 const ENTITLEMENT_KEYS = new Set<string>(ENTITLEMENT_CATALOG.map((entry) => entry.key));
+const AVAILABLE_ENTITLEMENT_KEYS = new Set<string>(
+  ENTITLEMENT_CATALOG.filter((entry) => entry.available).map((entry) => entry.key),
+);
 
 export const isEntitlementKey = (value: string): value is EntitlementKey => ENTITLEMENT_KEYS.has(value);
 
 export const splitPlanEntitlements = (values: readonly string[]) => ({
-  selected: values.filter(isEntitlementKey),
+  selected: values.filter(
+    (value): value is EntitlementKey => isEntitlementKey(value) && AVAILABLE_ENTITLEMENT_KEYS.has(value),
+  ),
   unknown: values.filter((value) => !isEntitlementKey(value)),
 });
 
 /** Existing API wire format: a JSON object whose selected closed-catalogue keys are true. */
 export const serializeEntitlements = (values: readonly EntitlementKey[]): string => JSON.stringify(
-  Object.fromEntries(ENTITLEMENT_CATALOG.map(({ key }) => [key, values.includes(key)])),
+  Object.fromEntries(ENTITLEMENT_CATALOG.map(({ key, available }) => [key, available && values.includes(key)])),
 );

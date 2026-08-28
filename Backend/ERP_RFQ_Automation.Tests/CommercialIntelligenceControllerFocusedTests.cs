@@ -73,6 +73,36 @@ public sealed class CommercialIntelligenceControllerFocusedTests
         Assert.Equal(0m, reconciliation.GetProperty("completenessPercent").GetDecimal());
     }
 
+    [Fact]
+    public async Task Performance_sequences_managed_rep_queries_on_the_request_scoped_sales_service()
+    {
+        const long tenant = 86_920;
+        const long manager = 86_921;
+        const long rep = 86_922;
+        using var database = new TestDb();
+        await using var context = database.ContextFor(tenant);
+        Seed.BusinessUnit(context, tenant);
+        context.Users.AddRange(User(manager, tenant, "manager@test"), User(rep, tenant, "rep@test"));
+        await context.SaveChangesAsync();
+        var sales = new ConcurrencyDetectingSalesService();
+        var scope = new AccountTeamScope(AccountScopeTier.ManagedScope, manager, [], [manager, rep]);
+        var controller = new CommercialIntelligenceController(
+            context, sales, null!, new TestRoleGate(true), new FixedAccountScopeResolver(scope))
+        {
+            ControllerContext = new ControllerContext
+            {
+                HttpContext = new DefaultHttpContext { User = Principal(tenant, manager) }
+            }
+        };
+
+        var response = await controller.Performance(
+            DateTime.UtcNow.AddDays(-7), DateTime.UtcNow.AddDays(1), default);
+
+        Assert.IsType<OkObjectResult>(response);
+        Assert.Equal([manager, rep], sales.QueriedUserIds);
+        Assert.Equal(1, sales.MaximumConcurrency);
+    }
+
     [Theory]
     [InlineData(nameof(InventoryIntelligenceController.RfqResolutions), "RFQ Management")]
     [InlineData(nameof(InventoryIntelligenceController.QuoteResolutions), "Quotations")]
@@ -529,6 +559,39 @@ public sealed class CommercialIntelligenceControllerFocusedTests
             long businessUnitId,
             DateTime asOfUtc,
             CancellationToken ct = default) => Task.FromResult(scope);
+    }
+
+    private sealed class ConcurrencyDetectingSalesService : ISalesApplicationService
+    {
+        private int _active;
+        public int MaximumConcurrency { get; private set; }
+        public List<long> QueriedUserIds { get; } = [];
+
+        public async Task<IReadOnlyList<SalesRepPerformance>> GetPerformanceAsync(
+            long businessUnitId, SalesPerformanceQuery query, CancellationToken ct)
+        {
+            var active = Interlocked.Increment(ref _active);
+            MaximumConcurrency = Math.Max(MaximumConcurrency, active);
+            if (query.SalesRepUserId.HasValue) QueriedUserIds.Add(query.SalesRepUserId.Value);
+            try
+            {
+                // A real EF query yields. The delay makes the old Task.WhenAll implementation
+                // deterministically overlap both calls without requiring a database race.
+                await Task.Delay(20, ct);
+                return [];
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _active);
+            }
+        }
+
+        public WeightedRoutingResult ScoreNewCustomer(NewCustomerRoutingRequest request) => throw new NotSupportedException();
+        public Task<SalesRepProfile> UpsertProfileAsync(long businessUnitId, UpsertSalesRepProfileCommand command, CancellationToken ct) => throw new NotSupportedException();
+        public Task<CommercialActivity> AppendActivityAsync(long businessUnitId, AppendCommercialActivityCommand command, CancellationToken ct) => throw new NotSupportedException();
+        public Task<FollowUpTask> CreateFollowUpAsync(long businessUnitId, CreateFollowUpTaskCommand command, CancellationToken ct) => throw new NotSupportedException();
+        public Task<FollowUpTransitionEvent> TransitionFollowUpAsync(long businessUnitId, long taskId, TransitionFollowUpTaskCommand command, CancellationToken ct) => throw new NotSupportedException();
+        public Task<SalesContribution> RecordContributionAsync(long businessUnitId, RecordSalesContributionCommand command, CancellationToken ct) => throw new NotSupportedException();
     }
 
     private static User User(long id, long tenant, string email) => new()

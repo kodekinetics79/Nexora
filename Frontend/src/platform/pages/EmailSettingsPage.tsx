@@ -363,9 +363,10 @@ export default function EmailSettingsPage() {
     return configuredProvider;
   }, [form, configuredProvider]);
 
-  if (settingsQuery.isLoading || !form) return <LoadingState label="Loading email settings…" />;
+  if (settingsQuery.isLoading) return <LoadingState label="Loading email settings…" />;
   if (settingsQuery.isError)
     return <ErrorState message={platformErrorMessage(settingsQuery.error, 'Could not load email settings')} />;
+  if (!form) return <LoadingState label="Loading email settings…" />;
 
   const isSmtp = form.provider === 'smtp';
   const isSendGrid = form.provider === 'sendgrid';
@@ -435,6 +436,13 @@ export default function EmailSettingsPage() {
         title="Email"
         subtitle="How activation links, invitations and every other message leave the product."
       />
+
+      {statusQuery.isError && (
+        <Alert severity="error" sx={{ mb: 2.5, borderRadius: 3 }}>
+          <AlertTitle sx={{ fontWeight: 800 }}>Mail delivery status is unavailable</AlertTitle>
+          {platformErrorMessage(statusQuery.error, 'Could not verify whether outbound mail is working.')}
+        </Alert>
+      )}
 
       {/* ---- is mail actually working? ------------------------------------ */}
       {status && (
@@ -567,6 +575,11 @@ export default function EmailSettingsPage() {
           </Typography>
 
           <Box sx={{ mt: 2 }}>
+            {providersQuery.isError && (
+              <Alert severity="warning" sx={{ mb: 2 }}>
+                The provider catalogue could not be loaded. Enter the SMTP settings supplied by your provider manually.
+              </Alert>
+            )}
             <ProviderPicker
               providers={smtpProviders}
               value={providerKey}

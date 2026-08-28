@@ -8,7 +8,6 @@ import {
 } from '@mui/material';
 import { Refresh as RefreshIcon } from '@mui/icons-material';
 import {
-  Add as AddIcon,
   Visibility as ViewIcon,
   Search as SearchIcon,
   Assignment as OrderIcon,
@@ -83,9 +82,9 @@ const OrderListPage: React.FC = () => {
           </Typography>
           <Typography variant="body2" color="text.secondary">Manage customer orders and conversions</Typography>
         </Box>
-        <PermissionGuard moduleName="Orders" action="create">
-          <Button variant="contained" startIcon={<AddIcon />} onClick={() => navigate('/sales/orders/create')}>
-            Create Order
+        <PermissionGuard moduleName="Customer Awards" action="view">
+          <Button variant="contained" onClick={() => navigate('/sales/client-pos')}>
+            Open Client PO Inbox
           </Button>
         </PermissionGuard>
       </Stack>
@@ -183,7 +182,7 @@ const OrderListPage: React.FC = () => {
                             <IconButton 
                               size="small" 
                               color="secondary" 
-                              onClick={() => navigate(`/sales/shipments/create?orderId=${order.id}`)}
+                              onClick={() => navigate(`/sales/shipments/from-order/${order.id}`)}
                             >
                               <ShipmentIcon fontSize="small" />
                             </IconButton>

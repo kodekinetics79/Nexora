@@ -15,6 +15,7 @@ import shipmentService from '../../../api/services/shipmentService';
 import type { CreateShipmentDTO, ShipmentItemDTO } from '../../../api/services/shipmentService';
 import orderService from '../../../api/services/orderService';
 import setupService from '../../../api/services/setupService';
+import customerService from '../../../api/services/customerService';
 
 import dayjs from 'dayjs';
 import { formatMoney } from '../../../utils/currency';
@@ -110,6 +111,24 @@ const CreateShipmentPage: React.FC = () => {
     enabled: !!form.orderId,
   });
 
+  const { data: selectedCustomer } = useQuery({
+    queryKey: ['customer-shipping-address', selectedOrder?.customerId],
+    queryFn: () => customerService.getById(Number(selectedOrder!.customerId)),
+    enabled: Boolean(selectedOrder?.customerId) && !isEdit,
+  });
+
+  const customerShippingAddress = React.useMemo(() => {
+    if (!selectedCustomer) return '';
+    return [
+      selectedCustomer.shippingAddressLine1 || selectedCustomer.billingAddressLine1,
+      selectedCustomer.shippingAddressLine2 || selectedCustomer.billingAddressLine2,
+      selectedCustomer.shippingCity || selectedCustomer.billingCity,
+      selectedCustomer.shippingState || selectedCustomer.billingState,
+      selectedCustomer.shippingPostalCode || selectedCustomer.billingPostalCode,
+      selectedCustomer.shippingCountry || selectedCustomer.billingCountry,
+    ].filter(Boolean).join(', ');
+  }, [selectedCustomer]);
+
   // Every despatch already made against this order. The Ship Qty ceiling is the REMAINING
   // quantity, not the ordered quantity: three despatches of 50 against an order for 100 each
   // looked legal on their own, and the server (which is the only ceiling that counts) refuses
@@ -152,7 +171,9 @@ const CreateShipmentPage: React.FC = () => {
     } else if (selectedOrder && !isEdit && form.items.length === 0) {
       setForm(prev => ({
         ...prev,
-        shippingAddress: selectedOrder.notes || '', // Default address from order notes
+        // Internal order notes are never a consignee address. Use the governed Customer master;
+        // when it is incomplete leave the field blank so the dispatcher must state the truth.
+        shippingAddress: customerShippingAddress,
         // Default to what is LEFT to ship, not to the ordered quantity. Defaulting to the full
         // order on a line that is already half despatched pre-fills a quantity the server will
         // refuse, and the operator's only clue was a 200 that silently over-shipped.
@@ -164,7 +185,7 @@ const CreateShipmentPage: React.FC = () => {
         }))
       }));
     }
-  }, [isEdit, existingShipment, selectedOrder, form.items.length, shippedByLine]);
+  }, [isEdit, existingShipment, selectedOrder, customerShippingAddress, form.items.length, shippedByLine]);
 
   const mutation = useMutation({
     mutationFn: (data: CreateShipmentDTO) => 

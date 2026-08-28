@@ -53,7 +53,10 @@ const RouteAnnouncer: React.FC = () => {
     // The effective title is part of the location identity. PlatformGuard
     // renders sign-in in place; when a platform session is established the
     // path stays the same but the screen and title legitimately change.
-    const locationKey = `${pathname}${search}${hash}|${routeTitle ?? ''}`;
+    // Query-string changes frequently represent an in-page tab or filter. Treating them as a
+    // new page moved focus away from the tab the user had just selected and scrolled the whole
+    // view to the top. Path/hash/title changes remain genuine navigation boundaries.
+    const locationKey = `${pathname}${hash}|${routeTitle ?? ''}`;
     // Same location as last time — a StrictMode re-run or an unrelated
     // re-render, not a navigation.
     if (lastHandledLocation.current === locationKey) return;

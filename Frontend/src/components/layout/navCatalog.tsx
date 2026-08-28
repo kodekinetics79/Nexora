@@ -416,6 +416,7 @@ export const ADVANCED_GROUPS: NavGroup[] = [
         path: '/analytics/brand-demand',
         icon: <InsightsIcon />,
         moduleName: 'Leads',
+        managerOnly: true,
         keywords: ['brand', 'manufacturer', 'demand', 'trend'],
       },
       {

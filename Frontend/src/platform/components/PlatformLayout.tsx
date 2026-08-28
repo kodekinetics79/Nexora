@@ -253,7 +253,7 @@ export default function PlatformLayout() {
               </IconButton>
             )}
             <Tooltip title="Back to tenant app">
-              <IconButton onClick={() => navigate('/dashboard')} sx={{ bgcolor: 'action.hover', borderRadius: 2 }}>
+              <IconButton aria-label="Back to tenant app" onClick={() => navigate('/inbox')} sx={{ bgcolor: 'action.hover', borderRadius: 2 }}>
                 <ArrowBackIcon fontSize="small" />
               </IconButton>
             </Tooltip>

@@ -479,9 +479,65 @@ jobs:
             Frontend/test-results
           if-no-files-found: ignore
 
+  # The governed Lead-to-RFQ gate above protects the most important promotion boundary, but it
+  # does not prove that the resulting commercial work can continue through Sales, inventory,
+  # sourcing, Supplier Quotes, Customer Quotes, orders and fulfilment. This second unconditional
+  # gate runs those wider role-scoped journeys against two independent disposable databases.
+  # It intentionally uses no repository credentials and never targets a deployed environment.
+  enterprise-gate:
+    name: Enterprise gate (commercial operations)
+    needs: changes
+    if: ${{ needs.changes.outputs.backend == 'true' || needs.changes.outputs.frontend == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify Docker is available
+        run: |
+          docker version --format 'Docker Engine {{.Server.Version}}'
+          docker pull --quiet postgres:16-alpine
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: Frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: Frontend
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        working-directory: Frontend
+        run: npm run e2e:install
+
+      - name: Run the 79-test enterprise journey
+        run: ./scripts/e2e/run-enterprise-commercial-journey.sh
+
+      - name: Upload enterprise evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: enterprise-gate-evidence
+          include-hidden-files: true
+          path: |
+            .enterprise-e2e-run
+            Frontend/playwright-report-commercial-journey-v2
+            Frontend/playwright-report-core-commercial
+            Frontend/test-results/commercial-journey-v2
+            Frontend/test-results/core-commercial
+          if-no-files-found: ignore
+
   ci-green:
     name: CI green
-    needs: [changes, backend, frontend, frontend-unit, pilot-gate]
+    needs: [changes, backend, frontend, frontend-unit, pilot-gate, enterprise-gate]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -493,8 +549,9 @@ jobs:
           FRONTEND: ${{ needs.frontend.result }}
           FRONTEND_UNIT: ${{ needs['frontend-unit'].result }}
           PILOT_GATE: ${{ needs['pilot-gate'].result }}
+          ENTERPRISE_GATE: ${{ needs['enterprise-gate'].result }}
         run: |
-          echo "changes=$CHANGES  backend=$BACKEND  frontend=$FRONTEND  frontend-unit=$FRONTEND_UNIT  pilot-gate=$PILOT_GATE"
+          echo "changes=$CHANGES  backend=$BACKEND  frontend=$FRONTEND  frontend-unit=$FRONTEND_UNIT  pilot-gate=$PILOT_GATE  enterprise-gate=$ENTERPRISE_GATE"
           # `changes` gates both suites, so anything other than success means the suites were
           # never even asked to run. Reporting green on that is the exact false negative that
           # made a PR look like it had chosen not to test itself.
@@ -503,7 +560,7 @@ jobs:
             exit 1
           fi
           status=0
-          for suite in BACKEND FRONTEND FRONTEND_UNIT PILOT_GATE; do
+          for suite in BACKEND FRONTEND FRONTEND_UNIT PILOT_GATE ENTERPRISE_GATE; do
             case "${!suite}" in
               success) echo "  $suite passed." ;;
               skipped) echo "  $suite did not change — not run." ;;

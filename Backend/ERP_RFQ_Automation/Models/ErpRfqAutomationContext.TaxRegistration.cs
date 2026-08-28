@@ -52,6 +52,8 @@ public partial class ErpRfqAutomationContext
 
         modelBuilder.Entity<BusinessUnit>(entity =>
         {
+            entity.Property(x => x.LegalName).HasMaxLength(256);
+            entity.Property(x => x.CommercialRegistrationNumber).HasMaxLength(64);
             entity.Property(x => x.TaxRegistrationNumber)
                 .HasMaxLength(ERP_RFQ_Automation.Tax.TaxRegistrationNumbers.MaxLength);
 

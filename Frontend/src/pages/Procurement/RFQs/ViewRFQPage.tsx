@@ -206,12 +206,15 @@ const ViewRFQPage: React.FC = () => {
   // precision the model does not have.
   const readinessPercent = intelligence ? Math.round(intelligence.readinessScore) : 0;
   const primaryBlocker = intelligence?.nextBestAction.explanation ?? (intelligenceQuery.isLoading ? 'Calculating from current commercial evidence' : 'Commercial intelligence unavailable');
+  const readinessNarrative = intelligence && canPrepareQuote && intelligence.commercialDecision !== 'VIABLE_READY'
+    ? 'Draft can start now. Resolve the highlighted commercial blockers before releasing it to the customer.'
+    : primaryBlocker;
   // Why the screen's primary action is unavailable. `disabled` with no reason is the state a
   // single transient intelligence failure leaves the page in, and the panel-level alert further
   // down explains the panel, not the button.
   const prepareQuoteReason = quoteDraftMutation.isPending ? 'Preparing the quote draft…'
     : intelligenceQuery.isLoading ? 'Commercial readiness is still being calculated.'
-    : intelligenceQuery.isError ? 'Commercial readiness could not be reconciled, so quoting is held. Retry the panel below.'
+    : intelligenceQuery.isError ? 'Commercial readiness is unavailable. You may start a draft; the server revalidates every release gate before the quote can be issued.'
     : !intelligence ? 'Commercial readiness has not been reported for this RFQ.'
     // Three states, not two. Matching the client gate to the server means a quote can now be
     // STARTED while lines still lack a fulfilment route — that is the normal case for a
@@ -242,9 +245,9 @@ const ViewRFQPage: React.FC = () => {
           </Typography>
         </Breadcrumbs>
 
-        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: { xs: 'flex-start', md: 'center' }, gap: 2, flexDirection: { xs: 'column', md: 'row' } }}>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-            <Typography variant="h4" sx={{ fontWeight: 950, color: 'text.primary', letterSpacing: 0 }}>
+        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: { xs: 'flex-start', lg: 'center' }, gap: 2, flexDirection: { xs: 'column', lg: 'row' } }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap', minWidth: 0 }}>
+            <Typography variant="h4" sx={{ fontWeight: 950, color: 'text.primary', letterSpacing: 0, whiteSpace: 'nowrap' }}>
               {rfq.rfqno}
             </Typography>
             {rfq.nexoraSerial ? (
@@ -272,7 +275,7 @@ const ViewRFQPage: React.FC = () => {
               sx={{ fontWeight: 900, fontSize: '0.65rem', textTransform: 'uppercase' }}
             />
           </Box>
-          <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: 'wrap', position: { md: 'sticky' }, top: 8, zIndex: 2 }}>
+          <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: 'wrap', position: { lg: 'sticky' }, top: 8, zIndex: 2 }}>
             {rfq.commercialCaseId && (
               <Button
                 variant="outlined"
@@ -344,7 +347,7 @@ const ViewRFQPage: React.FC = () => {
               {/* A determinate bar pinned at 0 while the request is in flight is an assertion,
                   and it is indistinguishable from an RFQ that genuinely scores zero. */}
               <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}><LinearProgress variant={intelligence ? 'determinate' : 'indeterminate'} value={readinessPercent} sx={{ flex: 1, height: 8, borderRadius: 1 }} /><Typography sx={{ fontWeight: 800, fontVariantNumeric: 'tabular-nums' }}>{intelligence ? `${readinessPercent}%` : '—'}</Typography></Stack>
-              <Typography variant="caption" color={intelligence?.commercialDecision === 'VIABLE_READY' ? 'success.main' : 'warning.main'} sx={{ display: 'block' }}>{primaryBlocker}</Typography>
+              <Typography variant="caption" color={intelligence?.commercialDecision === 'VIABLE_READY' ? 'success.main' : 'warning.main'} sx={{ display: 'block' }}>{readinessNarrative}</Typography>
             </Grid>
           </Grid>
         </Paper>

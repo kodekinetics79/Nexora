@@ -12809,6 +12809,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .HasMaxLength(255)
                         .HasColumnType("character varying(255)");
 
+                    b.Property<string>("CommercialRegistrationNumber")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
                     b.Property<string>("CreatedBy")
                         .IsRequired()
                         .HasMaxLength(255)
@@ -12836,6 +12840,10 @@ namespace ERP_RFQ_Automation.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("boolean")
                         .HasDefaultValue(true);
+
+                    b.Property<string>("LegalName")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
 
                     b.Property<string>("ModifiedBy")
                         .HasMaxLength(255)

@@ -167,10 +167,9 @@ namespace ERP_RFQ_Automation.Controllers
                 // And had it not, CreateQuoteAsync opens its OWN serializable transaction inside its
                 // own execution strategy, which cannot nest inside an already-open one.
                 //
-                // The re-stamp is gone with it because it was redundant: QuoteService.CreateQuoteAsync
-                // already calls quote.InheritCommercialIdentity(rfq) on both the create and the
-                // idempotent-replay path, inside that transaction — so the identity is committed
-                // atomically with the quote rather than in a second, separate write.
+                // QuoteService owns the persistence invariant and stamps the selected RFQ's
+                // commercial identity before INSERT. The controller owns access/customer checks;
+                // neither layer relies on a second corrective write after the quote exists.
                 var created = await _quoteService.CreateQuoteAsync(request);
                 var actorScope = await _commercialAccess.ResolveAsync(HttpContext.RequestAborted);
                 if (actorScope == null) return Forbid();

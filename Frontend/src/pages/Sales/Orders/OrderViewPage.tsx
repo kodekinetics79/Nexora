@@ -4,12 +4,11 @@ import { useQuery } from '@tanstack/react-query';
 import {
   Box, Typography, Paper, Grid, Stack, Button, Divider, Table,
   TableHead, TableRow, TableCell, TableBody, Chip, Card, CardContent,
-  CircularProgress
+  CircularProgress, Alert, TableContainer
 } from '@mui/material';
 import {
   ArrowBack as BackIcon,
   ReceiptLong as ReceivableIcon,
-  Email as EmailIcon,
   LocalShipping as ShipmentIcon
 } from '@mui/icons-material';
 import { useAuth } from '../../../context/AuthContext';
@@ -23,7 +22,7 @@ const OrderViewPage: React.FC = () => {
   const { userData, hasPermission } = useAuth();
   const businessUnitId = userData?.businessUnitId || 0;
 
-  const { data: order, isLoading } = useQuery({
+  const { data: order, isLoading, isError, refetch } = useQuery({
     queryKey: ['order-details', id, businessUnitId],
     queryFn: () => orderService.getById(Number(id), businessUnitId),
     enabled: !!id && !isNaN(Number(id)),
@@ -40,11 +39,18 @@ const OrderViewPage: React.FC = () => {
   };
 
   if (isLoading) return <Box sx={{ display: 'flex', justifyContent: 'center', p: 5 }}><CircularProgress /></Box>;
+  if (isError) return (
+    <Box sx={{ p: 3, maxWidth: 640, mx: 'auto' }}>
+      <Alert severity="error" action={<Button color="inherit" onClick={() => void refetch()}>Retry</Button>}>
+        The order could not be loaded. This may be a temporary service problem; nothing was changed.
+      </Alert>
+    </Box>
+  );
   if (!order) return <Box sx={{ p: 3 }}><Typography color="error">Order not found.</Typography></Box>;
 
   return (
     <Box sx={{ p: 2, bgcolor: 'background.default', minHeight: '100vh' }}>
-      <Stack direction="row" sx={{ justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
+      <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} sx={{ justifyContent: 'space-between', alignItems: { md: 'center' }, mb: 3 }}>
         <Box>
           <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mb: 0.5 }}>
             <Button startIcon={<BackIcon />} onClick={() => navigate('/sales/orders')} sx={{ color: 'text.secondary', textTransform: 'none' }}>Back to Orders</Button>
@@ -54,21 +60,20 @@ const OrderViewPage: React.FC = () => {
             <Chip label={order.status} size="small" color={getStatusColor(order.status) as any} sx={{ fontWeight: 700 }} />
           </Stack>
         </Box>
-        <Stack direction="row" spacing={1.5}>
+        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} sx={{ width: { xs: '100%', md: 'auto' } }}>
           {/* There is deliberately no "Print Invoice" action here. A tax invoice is the numbered,
               persisted document the finance subsystem issues — not a rendering of the order.
               This links to the governed AR register instead; it is not order-filtered yet. */}
           {hasPermission('Accounts Receivable', 'view') && (
             <Button variant="outlined" startIcon={<ReceivableIcon />} size="small" onClick={() => navigate('/sales/finance')}>Accounts Receivable</Button>
           )}
-          <Button variant="outlined" startIcon={<EmailIcon />} size="small">Email</Button>
           {!order.hasShipments && !['Shipped', 'Delivered', 'Cancelled'].includes(order.status) && (
              <Button 
                 variant="contained" 
                 startIcon={<ShipmentIcon />} 
                 color="secondary" 
                 size="small"
-                onClick={() => navigate(`/sales/shipments/create?orderId=${order.id}`)}
+                onClick={() => navigate(`/sales/shipments/from-order/${order.id}`)}
               >
                 Create Shipment
               </Button>
@@ -108,7 +113,8 @@ const OrderViewPage: React.FC = () => {
             <Box sx={{ p: 2, bgcolor: 'grey.50', borderBottom: '1px solid', borderColor: 'divider' }}>
               <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>ORDER LINE ITEMS</Typography>
             </Box>
-            <Table size="small">
+            <TableContainer>
+            <Table size="small" sx={{ minWidth: 620 }}>
               <TableHead>
                 <TableRow sx={{ bgcolor: 'grey.100' }}>
                   <TableCell sx={{ fontWeight: 800 }}>Product / Description</TableCell>
@@ -133,6 +139,7 @@ const OrderViewPage: React.FC = () => {
                 ))}
               </TableBody>
             </Table>
+            </TableContainer>
           </Paper>
         </Grid>
 

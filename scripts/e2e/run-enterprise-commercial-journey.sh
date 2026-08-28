@@ -237,6 +237,35 @@ load_fixture_environment() {
   export E2E_SKIP_WEB_SERVER=true
 }
 
+enroll_disposable_platform_owner() {
+  local suite_dir="$1" login_json token secret code
+  login_json="$(curl -fsS -X POST "$BACKEND_URL/api/platform/auth/login" \
+    -H 'Content-Type: application/json' \
+    -d "{\"email\":\"$E2E_PLATFORM_EMAIL\",\"password\":\"$E2E_PLATFORM_PASSWORD\"}")"
+  token="$(printf '%s' "$login_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')"
+  secret="$(curl -fsS -X POST "$BACKEND_URL/api/platform/auth/mfa/enrollment" \
+    -H "Authorization: Bearer $token" \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["secret"])')"
+  code="$(python3 - "$secret" <<'PY'
+import base64, hashlib, hmac, struct, sys, time
+raw = sys.argv[1]
+secret = base64.b32decode(raw + '=' * ((8 - len(raw) % 8) % 8))
+counter = struct.pack('>Q', int(time.time()) // 30)
+digest = hmac.new(secret, counter, hashlib.sha1).digest()
+offset = digest[-1] & 15
+print(f'{((struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7fffffff) % 1000000):06d}')
+PY
+)"
+  curl -fsS -o /dev/null -X POST "$BACKEND_URL/api/platform/auth/mfa/enrollment/confirm" \
+    -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+    -d "{\"totpCode\":\"$code\"}"
+  umask 077
+  printf '%s' "$secret" >"$suite_dir/platform-owner-mfa-secret"
+  chmod 600 "$suite_dir/platform-owner-mfa-secret"
+  export E2E_PLATFORM_TOTP_SECRET="$secret"
+  unset login_json token secret code
+}
+
 run_suite() {
   local suite="$1" database="$2" config="$3" expected_count="$4"
   local suite_dir="$RUN_DIR/$suite" storage_root="$RUN_DIR/$suite/storage"
@@ -264,6 +293,11 @@ run_suite() {
 
   start_backend "$database" "$storage_root" "$suite-run" false
 
+  if [[ "$suite" == "commercial-v2" ]]; then
+    log "$suite: enrolling the disposable Platform Owner in mandatory MFA."
+    enroll_disposable_platform_owner "$suite_dir"
+  fi
+
   log "$suite: verifying test discovery ($expected_count expected) before execution."
   set +e
   (
@@ -282,14 +316,24 @@ run_suite() {
     die "$suite discovered ${discovered:-an unknown number of} tests; expected $expected_count."
   }
 
-  log "$suite: running $expected_count real-browser tests against its isolated database."
+  local -a playwright_args=(test --config "$config" --workers=1 --retries=0)
+  if [[ -n "${E2E_TEST_GREP:-}" ]]; then
+    playwright_args+=(--grep "$E2E_TEST_GREP")
+    log "$suite: running the focused real-browser selection '$E2E_TEST_GREP' against its isolated database."
+  else
+    log "$suite: running $expected_count real-browser tests against its isolated database."
+  fi
   set +e
   (
     cd "$FRONTEND_DIR"
     if [[ "$suite" == "commercial-v2" ]]; then
-      E2E_FULL_ACCEPTANCE=true npx playwright test --config "$config" --workers=1 --retries=0
+      if [[ -n "${E2E_TEST_GREP:-}" ]]; then
+        E2E_FULL_ACCEPTANCE=false npx playwright "${playwright_args[@]}"
+      else
+        E2E_FULL_ACCEPTANCE=true npx playwright "${playwright_args[@]}"
+      fi
     else
-      E2E_FULL_ACCEPTANCE=false npx playwright test --config "$config" --workers=1 --retries=0
+      E2E_FULL_ACCEPTANCE=false npx playwright "${playwright_args[@]}"
     fi
   ) 2>&1 | tee "$suite_dir/playwright.log"
   status=${PIPESTATUS[0]}
@@ -302,7 +346,11 @@ run_suite() {
     die "$suite failed (exit $status). Artifacts: $suite_dir and $FRONTEND_DIR/test-results."
   fi
   stop_backend
-  log "$suite PASSED: $expected_count tests, no skips."
+  if [[ -n "${E2E_TEST_GREP:-}" ]]; then
+    log "$suite focused selection PASSED: '$E2E_TEST_GREP'."
+  else
+    log "$suite PASSED: $expected_count tests, no skips."
+  fi
 }
 
 if [[ "$SELECTED_SUITE" == "all" || "$SELECTED_SUITE" == "commercial-v2" ]]; then

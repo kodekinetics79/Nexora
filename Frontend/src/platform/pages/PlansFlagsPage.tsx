@@ -365,7 +365,7 @@ export default function PlansFlagsPage() {
                     {ENTITLEMENT_CATALOG.filter((entry) => entry.group === group).map((entry) => (
                       <Grid key={entry.key} size={{ xs: 12, sm: 6 }}>
                         <FormControlLabel
-                          control={<Checkbox checked={form.entitlements.includes(entry.key)} onChange={(_, checked) => setForm({
+                          control={<Checkbox disabled={!entry.available} checked={entry.available && form.entitlements.includes(entry.key)} onChange={(_, checked) => setForm({
                             ...form,
                             entitlements: checked
                               ? [...form.entitlements, entry.key]
@@ -377,7 +377,7 @@ export default function PlansFlagsPage() {
                                 {entry.label}
                                 {!entry.available && (
                                   <Typography component="span" variant="caption" sx={{ ml: 0.75, fontWeight: 700 }} color="warning.main">
-                                    NOT BUILT YET
+                                    NOT AVAILABLE — CANNOT BE SOLD
                                   </Typography>
                                 )}
                               </Typography>

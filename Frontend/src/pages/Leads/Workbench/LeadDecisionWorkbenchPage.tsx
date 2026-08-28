@@ -60,6 +60,7 @@ import {
   type DecisionMap,
 } from './workbenchRules';
 import { commercialActionPermissions } from '../../../utils/commercialActionPermissions';
+import { useUnsavedWorkGuard } from '../../../hooks/useUnsavedWorkGuard';
 
 const CountChip = ({ label, count, color = 'default' }: { label: string; count: number; color?: 'default' | 'success' | 'warning' | 'info' }) => (
   <Chip size="small" label={`${label} ${count}`} color={color} variant={count > 0 ? 'filled' : 'outlined'} sx={{ fontWeight: 800 }} />
@@ -127,6 +128,17 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
     }
   }, [leadId, workbenchQuery.data]);
 
+  const decisionGuard = useUnsavedWorkGuard({
+    storageKey: workbenchQuery.data
+      ? `nexora.lead-participation.${leadId}.revision.${workbenchQuery.data.leadRevisionId}`
+      : '',
+    value: decisions,
+    // decisionSeed is set only after the authoritative revision has populated the form. This
+    // prevents the empty pre-load map becoming the baseline and immediately reporting a false
+    // unsaved change.
+    enabled: Boolean(workbenchQuery.data && decisionSeed.current),
+  });
+
   const refresh = async () => {
     await queryClient.invalidateQueries({ queryKey: ['lead-decision-workbench', leadId] });
     await queryClient.invalidateQueries({ queryKey: ['lead-detail', leadId] });
@@ -179,6 +191,7 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
     onSuccess: async (result, command) => {
       participationRetryOperation.current = null;
       setBaselineDecisions(decisions);
+      decisionGuard.markSaved(decisions);
       enqueueSnackbar(
         command.commit
           ? result.participationStatus === 'COMMITTED' ? 'Participation decision committed.' : 'Participation decision saved.'
@@ -392,6 +405,31 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
           </Stack>
         </Stack>
       </Paper>
+
+      {decisionGuard.recoveredDraft ? (
+        <Alert
+          severity="warning"
+          sx={{ mb: 1.5 }}
+          action={(
+            <Stack direction="row" spacing={1}>
+              <Button
+                color="inherit"
+                onClick={() => {
+                  setDecisions(decisionGuard.recoveredDraft!.value);
+                  decisionGuard.acceptRecovered();
+                }}
+              >
+                Restore
+              </Button>
+              <Button color="inherit" onClick={decisionGuard.discardRecovered}>Discard</Button>
+            </Stack>
+          )}
+        >
+          <AlertTitle>Unsaved participation work recovered</AlertTitle>
+          Restore the decisions saved in this browser for Lead revision {workbench.leadRevisionNumber},
+          or discard them and keep the server version.
+        </Alert>
+      ) : null}
 
       {workbench.promotion ? (
         <Alert

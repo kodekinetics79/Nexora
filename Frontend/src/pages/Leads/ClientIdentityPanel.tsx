@@ -298,6 +298,36 @@ const ClientIdentityPanel: React.FC<ClientIdentityPanelProps> = ({
     );
   }
 
+  // An ambiguous classifier result can arrive before the candidate endpoint has materialized a
+  // ranked row (or while that supporting read is temporarily unavailable). That is still not the
+  // same as "no match": the operator must be told that several clients may fit and be routed to
+  // an explicit review, not shown contradictory unresolved copy.
+  if (state === 'suggested') {
+    return shell(
+      <Box>
+        <Stack direction="row" spacing={1} sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
+          <UnknownIcon sx={{ fontSize: 18, color: 'warning.main' }} />
+          <Typography sx={{ fontWeight: 900, fontSize: '1.05rem' }}>Several clients may match</Typography>
+        </Stack>
+        <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, maxWidth: 560 }}>
+          The available identity signals are not strong enough to choose safely. Review the client list and confirm the correct organisation.
+        </Typography>
+        {canResolveClient && (
+          <Button
+            variant="contained"
+            size="small"
+            startIcon={<ClientIcon />}
+            onClick={openDialog}
+            sx={{ mt: 1.75, fontWeight: 800, textTransform: 'none' }}
+          >
+            Review possible clients
+          </Button>
+        )}
+      </Box>,
+      'suggested',
+    );
+  }
+
   // ── Unresolved: show what we DO know, then a way forward. ─────────────────
   const sender = realSenderAddress(lead.clientemail);
   const evidence: EvidenceRow[] = [];

@@ -146,6 +146,17 @@ namespace ERP_RFQ_Automation.Controllers
                                               && item.Rfq.BusinessUnitId == businessUnitId, ct);
             if (line is null) return NotFound();
 
+            // A promoted RFQ is a read-only projection of the committed decision against an
+            // immutable Lead revision. Letting this legacy endpoint change its participation
+            // flags would create a second, contradictory decision after promotion. Manual and
+            // historical RFQs keep the old line-decision workflow; governed RFQs must return to
+            // the Lead Decision Workbench and be promoted again through the sole promotion path.
+            if (line.Rfq.PromotionId.HasValue || line.Rfq.SourceLeadRevisionId.HasValue ||
+                line.Rfq.ParticipationDecisionId.HasValue)
+                return Conflict(Problem(StatusCodes.Status409Conflict, "Participation is immutable",
+                    "This governed RFQ was promoted from a committed Lead participation decision. " +
+                    "Review the source Lead revision in the Decision Workbench; RFQ lines cannot be re-decided here."));
+
             try
             {
                 line.DecideParticipation(request.Decision, request.Reason, actor!, DateTime.UtcNow);

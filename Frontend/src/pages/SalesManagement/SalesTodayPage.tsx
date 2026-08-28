@@ -254,7 +254,13 @@ export default function SalesTodayPage() {
   const items = query.data?.attentionItems ?? [];
   const priorityItems = priorities.data?.items ?? [];
 
-  return <PageShell title="Sales today" subtitle={query.data?.scope === 'tenant' ? 'Team-wide commercial work that needs attention now.' : 'Your assigned commercial work that needs attention now.'}>
+  const scopeSubtitle = query.data?.scope === 'tenant'
+    ? 'Tenant-wide commercial work that needs attention now.'
+    : query.data?.scope === 'managed_scope'
+      ? 'Commercial work across your managed teams that needs attention now.'
+      : 'Your assigned commercial work that needs attention now.';
+
+  return <PageShell title="Sales today" subtitle={scopeSubtitle}>
     <MetricGrid metrics={query.data?.metrics ?? []} />
 
     <Stack spacing={1.5} sx={{ mb: 3 }}>

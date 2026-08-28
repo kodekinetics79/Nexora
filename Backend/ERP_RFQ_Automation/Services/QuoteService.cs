@@ -18,6 +18,9 @@ using ERP_RFQ_Automation.QuoteDelivery;
 using ERP_RFQ_Automation.Inventory.Commercial;
 using ERP_RFQ_Automation.CommercialLearning;
 using ERP_RFQ_Automation.OrderToCash;
+using ERP_RFQ_Automation.CommercialCases.Participation;
+using ERP_RFQ_Automation.CommercialCases.Promotion;
+using ERP_RFQ_Automation.LeadIdentity;
 
 namespace ERP_RFQ_Automation.Services
 {
@@ -184,6 +187,18 @@ namespace ERP_RFQ_Automation.Services
                 ValidateQuoteItemFinancials(itemDto.Quantity, itemDto.UnitPrice,
                     itemDto.TaxCategory, itemDto.TaxCategoryReason);
 
+            Rfq? sourceRfq = null;
+            if (request.RfqId is > 0)
+            {
+                sourceRfq = await _context.Rfqs
+                    .SingleOrDefaultAsync(item => item.Id == request.RfqId.Value
+                        && item.BusinessUnitId == request.BusinessUnitId)
+                    ?? throw new ArgumentException("The selected RFQ was not found in this tenant.");
+                if (!sourceRfq.CommercialCaseId.HasValue || string.IsNullOrWhiteSpace(sourceRfq.NexoraSerial))
+                    throw new InvalidOperationException(
+                        "The selected RFQ is not linked to a commercial case, so a quote cannot inherit governed lineage from it.");
+            }
+
             var quote = new Quote
             {
                 QuoteNo = quoteNo,
@@ -228,6 +243,12 @@ namespace ERP_RFQ_Automation.Services
                     CreatedDate = DateTime.UtcNow
                 }).ToList()
             };
+
+            // The controller validates access and customer consistency; the service owns the
+            // atomic persistence invariant. Every RFQ-origin quote therefore receives the case
+            // and Nexora Serial before the first INSERT, including backfill callers and any future
+            // application-service caller that bypasses the HTTP controller.
+            if (sourceRfq is not null) quote.InheritCommercialIdentity(sourceRfq);
 
             await CalculateQuoteTotals(quote);
 
@@ -296,14 +317,67 @@ namespace ERP_RFQ_Automation.Services
                 if (!rfq.CustomerId.HasValue) throw new InvalidOperationException("Resolve the RFQ customer before preparing a Quote Draft.");
                 if (rfq.Rfqitems.Count == 0) throw new InvalidOperationException("Add at least one verified RFQ line before preparing a Quote Draft.");
 
-                // A Quote Draft is a partial-bid instrument: an 84-line SEC bid list routinely
-                // yields 12 quoted lines. Which lines those are is an explicit, recorded human
-                // decision — never "all of them by default", because a line nobody has looked at
-                // must not silently become a commercial commitment.
-                var markedForQuote = rfq.Rfqitems.Where(item => item.IsMarkedForQuote).ToArray();
+                // Lead-origin RFQs already crossed the sole participation gate: an immutable,
+                // committed LeadParticipationDecision and its promotion receipt. Do not require
+                // (or trust) a second mutable RFQ-line decision, because that would let the quote
+                // silently diverge from the approved revision. Legacy/manual RFQs that predate the
+                // governed spine retain their explicit RFQ-line participation fallback.
+                Rfqitem[] markedForQuote;
+                var isGovernedLeadOrigin = rfq.PromotionId.HasValue || rfq.ParticipationDecisionId.HasValue ||
+                    rfq.SourceLeadRevisionId.HasValue;
+                if (isGovernedLeadOrigin)
+                {
+                    if (!rfq.PromotionId.HasValue || !rfq.ParticipationDecisionId.HasValue ||
+                        !rfq.SourceLeadRevisionId.HasValue)
+                        throw new InvalidOperationException(
+                            "The governed RFQ has incomplete promotion lineage. Reconcile its immutable Lead decision before preparing a Quote Draft.");
+
+                    var receipt = await _context.Set<RfqPromotion>().AsNoTracking()
+                        .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId
+                            && x.Id == rfq.PromotionId.Value
+                            && x.LeadId == rfq.LeadId
+                            && x.LeadRevisionId == rfq.SourceLeadRevisionId.Value
+                            && x.ParticipationDecisionId == rfq.ParticipationDecisionId.Value, ct)
+                        ?? throw new InvalidOperationException(
+                            "The governed RFQ promotion receipt could not be verified.");
+                    var decision = await _context.Set<LeadParticipationDecision>().AsNoTracking()
+                        .Include(x => x.Lines)
+                        .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId
+                            && x.Id == receipt.ParticipationDecisionId
+                            && x.LeadId == receipt.LeadId
+                            && x.LeadRevisionId == receipt.LeadRevisionId, ct)
+                        ?? throw new InvalidOperationException(
+                            "The governed RFQ participation decision could not be verified.");
+                    if (!decision.IsCommitted)
+                        throw new InvalidOperationException(
+                            "The governed RFQ participation decision is not committed.");
+
+                    var approvedRevisionLines = decision.Lines
+                        .Where(x => x.Choice == LeadLineParticipationChoice.Bid)
+                        .Select(x => x.LeadItemRevisionId).ToHashSet();
+                    if (approvedRevisionLines.Count == 0)
+                        throw new InvalidOperationException(
+                            "The committed Lead participation decision contains no approved lines for quotation.");
+                    if (rfq.Rfqitems.Any(x => !x.SourceLeadItemRevisionId.HasValue ||
+                            !approvedRevisionLines.Contains(x.SourceLeadItemRevisionId.Value)) ||
+                        rfq.Rfqitems.Select(x => x.SourceLeadItemRevisionId!.Value).Distinct().Count()
+                            != approvedRevisionLines.Count)
+                        throw new InvalidOperationException(
+                            "The RFQ line scope no longer matches its immutable approved Lead lines.");
+                    markedForQuote = rfq.Rfqitems
+                        .Where(x => x.SourceLeadItemRevisionId.HasValue &&
+                            approvedRevisionLines.Contains(x.SourceLeadItemRevisionId.Value))
+                        .ToArray();
+                }
+                else
+                {
+                    markedForQuote = rfq.Rfqitems.Where(item => item.IsMarkedForQuote).ToArray();
+                }
                 if (markedForQuote.Length == 0)
                     throw new InvalidOperationException(
-                        "Mark at least one RFQ line as Quote before preparing a Customer Quote Draft.");
+                        isGovernedLeadOrigin
+                            ? "Approve at least one line through the Lead participation decision before preparing a Customer Quote Draft."
+                            : "Mark at least one RFQ line as Quote before preparing a Customer Quote Draft.");
 
                 // Only the lines being quoted must be complete. A line we are declining is
                 // allowed to be missing a part number — that is frequently WHY it is declined.
@@ -357,7 +431,7 @@ namespace ERP_RFQ_Automation.Services
                     HeaderRemarks = "Commercial Review Required: pricing, inventory, lead time, tax, freight and validity remain pending.",
                     CreatedBy = actor.Trim(),
                     CreatedDate = now,
-                    QuoteItems = rfq.Rfqitems.Where(item => item.IsMarkedForQuote).OrderBy(item => item.Id).Select(item => new QuoteItem
+                    QuoteItems = markedForQuote.OrderBy(item => item.Id).Select(item => new QuoteItem
                     {
                         RfqitemId = item.Id,
                         ProductId = item.ProductId,
@@ -1167,20 +1241,12 @@ namespace ERP_RFQ_Automation.Services
             string companyPhone = config?.CompanyPhone;
             string companyEmail = config?.CompanyEmail;
 
-            // The legal entity, not the workspace label. Guaranteed present for an activated
-            // tenant: the identity.legal-customer activation control requires LegalName and
-            // RegistrationNumber before a tenant may be activated at all.
-            var issuer = await _context.Set<ERP_RFQ_Automation.Platform.Models.Tenant>()
-                .AsNoTracking()
-                .Where(t => t.PrimaryBusinessUnitId == quote.BusinessUnitId)
-                .OrderBy(t => t.Id)
-                .Select(t => new { t.LegalName, t.RegistrationNumber })
-                .FirstOrDefaultAsync(ct);
-
-            string sellerLegalName = string.IsNullOrWhiteSpace(issuer?.LegalName)
+            // Issuer identity is deliberately tenant-owned. Delivery runs under the production
+            // tenant role and must not elevate to the platform control plane to render a PDF.
+            string sellerLegalName = string.IsNullOrWhiteSpace(quote.BusinessUnit?.LegalName)
                 ? quote.BusinessUnit?.BusinessUnitName
-                : issuer.LegalName;
-            string sellerCommercialRegistration = issuer?.RegistrationNumber;
+                : quote.BusinessUnit.LegalName;
+            string sellerCommercialRegistration = quote.BusinessUnit?.CommercialRegistrationNumber;
             string sellerTaxRegistration = quote.BusinessUnit?.TaxRegistrationNumber;
 
             // A document that cannot name its sender is not a document. Refuse, and name the
@@ -1537,6 +1603,15 @@ namespace ERP_RFQ_Automation.Services
                 .FirstOrDefaultAsync(q => q.Id == quoteId && q.BusinessUnitId == businessUnitId)
                 ?? throw new KeyNotFoundException("Quote not found");
 
+            // A customer amendment creates an explicit open impact rather than silently mutating
+            // an existing quote. Sending while that impact is open would distribute a commercial
+            // document known to be stale, even if its old prices still have a valid attestation.
+            if (await _context.Set<LeadRevisionImpact>().AsNoTracking().AnyAsync(x =>
+                    x.BusinessUnitId == businessUnitId && x.AggregateType == "QUOTE" &&
+                    x.AggregateId == quoteId && x.Status == "OPEN"))
+                throw new InvalidOperationException(
+                    "This Quote Draft is stale because a customer revision was received. Review and resolve the revision impact before sending it.");
+
             // R5 PRICE-PROVENANCE GATE — the pre-release control. Every send, first issue or
             // revision, must be covered by a recorded confirmation of where the prices came
             // from (sales manager / supplier quote) whose snapshot still matches the quote's
@@ -1602,6 +1677,11 @@ namespace ERP_RFQ_Automation.Services
                 <p>{quote.BusinessUnit?.BusinessUnitName}</p>
             ";
 
+            var issuerEmail = await _context.QuoteConfigurations.AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId)
+                .Select(x => x.CompanyEmail)
+                .SingleOrDefaultAsync();
+
             var deliveryKey = $"quote:{quote.Id}:delivery:v1";
             var strategy = _context.Database.CreateExecutionStrategy();
             return await strategy.ExecuteAsync(async () =>
@@ -1656,7 +1736,10 @@ namespace ERP_RFQ_Automation.Services
                         RecipientEmail = recipientEmail.Trim(),
                         Subject = subject,
                         Body = body,
-                        FromEmail = quote.Rfq?.Lead?.Clientemail,
+                        // The customer enquiry address is a recipient identity, never the sender.
+                        // QuoteDeliverySender treats this tenant-owned company address as Reply-To;
+                        // the transport's verified From identity remains authoritative.
+                        FromEmail = string.IsNullOrWhiteSpace(issuerEmail) ? null : issuerEmail.Trim(),
                         AttachmentFileName = $"Quote_{quote.QuoteNo}.pdf",
                         AttestedPriceFingerprint = boundFingerprint,
                         RequestedOn = DateTime.UtcNow,

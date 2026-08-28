@@ -117,12 +117,44 @@ test('34 Quote Draft preserves Lead/RFQ/customer/owner/Product lineage', async (
 test('35 Quote send queues delivery without claiming success early', async ({ page }) => {
   const quoteId = requiredNumber('E2E_CORE_SEND_QUOTE_ID');
   const token = await loginAs(page, 'manager');
+  const attestation = await api(page, token, 'post', `/api/Quote/${quoteId}/price-attestation`, {
+    source: 'SALES_MANAGER',
+    sourceReference: 'Acceptance manager approved commercial pricing',
+  });
+  const attestationStatus = await jsonOk<{ satisfied: boolean }>(attestation);
+  expect(attestationStatus.satisfied).toBe(true);
   const recipient = encodeURIComponent(required('E2E_CORE_CONTACT_EMAIL'));
   const sent = await api(page, token, 'post', `/api/Quote/${quoteId}/email?recipientEmail=${recipient}`);
   expect(sent.status()).toBe(202);
   const delivery = await sent.json() as { queuedForDelivery: boolean; delivered: boolean };
   expect(delivery.queuedForDelivery).toBe(true);
   expect(delivery.delivered).toBe(false);
+
+  if (process.env.E2E_EXPECT_QUOTE_DELIVERY === 'true') {
+    await expect.poll(async () => {
+      const persisted = await jsonOk<{ sentOn?: string | null }>(
+        await api(page, token, 'get', `/api/Quote/${quoteId}`),
+      );
+      return Boolean(persisted.sentOn);
+    }, {
+      message: 'the configured provider should accept and finalize the queued quotation',
+      timeout: 30_000,
+    }).toBe(true);
+  } else {
+    // The disposable runner is deliberately DraftOnly. It certifies the more important safety
+    // property: a withheld message becomes visibly terminal and never turns Quote.SentOn green.
+    await expect.poll(async () => {
+      const replay = await api(page, token, 'post', `/api/Quote/${quoteId}/email?recipientEmail=${recipient}`);
+      return replay.status();
+    }, {
+      message: 'a withheld delivery should become visible for operator review',
+      timeout: 20_000,
+    }).toBe(409);
+    const persisted = await jsonOk<{ sentOn?: string | null }>(
+      await api(page, token, 'get', `/api/Quote/${quoteId}`),
+    );
+    expect(persisted.sentOn).toBeFalsy();
+  }
   const followUps = await jsonOk<Array<{ quoteId: number; status: string }>>(await api(page, token, 'get', '/api/commercial-intelligence/follow-ups'));
   expect(followUps.some((row) => row.quoteId === quoteId && /Open|InProgress/i.test(row.status))).toBe(false);
 });
@@ -177,38 +209,34 @@ test.afterEach(async ({ page }, testInfo) => {
   expect(testInfo.annotations.filter((annotation) => annotation.type === 'skip')).toHaveLength(0);
 });
 
-test('40 RFQ lines are marked Quote or No-Quote, and one Quote Draft is prepared', async ({ page }) => {
-  // Closes the Phase 1 journey: Convert to RFQ -> Mark Selected Lines Quote -> Quote Draft.
-  // Everything here is real: real auth, real API, real database. No fixture substitutes for a
-  // step of the journey.
-  const rfqId = requiredNumber('E2E_CORE_RFQ_ID');
+test('40 approved Lead lines remain the sole RFQ scope and Quote preparation is idempotent', async ({ page }) => {
+  // Participation is committed against the immutable Lead revision before promotion. A promoted
+  // RFQ must not invent a second mutable Quote/No-Quote denominator.
+  const rfqId = requiredNumber('E2E_CORE_QUOTE_DRAFT_RFQ_ID');
   const token = await loginAs(page, 'manager');
+
+  const rfq = await jsonOk<{
+    leadId: number;
+    participationDecisionId?: number;
+    rfqitems: Array<{ sourceLeadItemRevisionId?: number }>;
+  }>(await api(page, token, 'get', `/api/Rfq/${rfqId}`));
+  const workbench = await jsonOk<{
+    participationStatus: string;
+    lines: Array<{ revisionLineId: number; participation?: { decision: string } }>;
+    promotion?: { rfqId: number; promotedLineCount: number };
+  }>(await api(page, token, 'get', `/api/leads/${rfq.leadId}/decision-workbench`));
+  const approvedRevisionIds = workbench.lines
+    .filter((line) => line.participation?.decision === 'Bid')
+    .map((line) => line.revisionLineId)
+    .sort((a, b) => a - b);
+  expect(workbench.participationStatus).toBe('COMMITTED');
+  expect(workbench.promotion?.rfqId).toBe(rfqId);
+  expect(workbench.promotion?.promotedLineCount).toBe(approvedRevisionIds.length);
+  expect(rfq.rfqitems.map((line) => line.sourceLeadItemRevisionId).sort((a, b) => Number(a) - Number(b)))
+    .toEqual(approvedRevisionIds);
 
   await page.goto(`/procurement/rfqs/view/${rfqId}`);
   await expect(page).toHaveURL(new RegExp(`/procurement/rfqs/view/${rfqId}$`));
-
-  // Every line starts undecided. A line nobody has looked at must never read as an implicit
-  // commitment to quote it, so this is asserted rather than assumed.
-  const firstQuoteToggle = page.getByRole('button', { name: 'Quote this line' }).first();
-  await expect(firstQuoteToggle).toBeVisible();
-
-  // Decline one line WITH a reason — the dialog must refuse to submit without one.
-  const firstDecline = page.getByRole('button', { name: 'Decline this line' }).first();
-  await firstDecline.click();
-  const confirmDecline = page.getByRole('button', { name: 'Decline line' });
-  await expect(confirmDecline).toBeDisabled(); // no reason yet
-  await page.getByLabel('Why are we not quoting this line?')
-    .fill('Browser acceptance: obsolete part, no supplier source');
-  await expect(confirmDecline).toBeEnabled();
-  await confirmDecline.click();
-  await expect(page.getByText('Line declined, with your reason recorded.')).toBeVisible();
-
-  // Mark a different line for quotation.
-  const quoteToggle = page.getByRole('button', { name: 'Quote this line' }).last();
-  await quoteToggle.click();
-  await expect(page.getByText('Line marked for quotation.')).toBeVisible();
-
-  // Prepare the Customer Quote Draft. Only the Quote-marked lines may reach it.
   await page.getByRole('button', { name: /Prepare Quote Draft/i }).click();
   await expect(page).toHaveURL(/\/sales\/quotes\/view\/\d+$/);
   const firstQuoteUrl = page.url();

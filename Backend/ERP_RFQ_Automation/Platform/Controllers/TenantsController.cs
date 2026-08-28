@@ -147,6 +147,8 @@ public class TenantsController : ControllerBase
                     if (businessUnit is not null)
                     {
                         businessUnit.BusinessUnitName = tenant.Name;
+                        businessUnit.LegalName = tenant.LegalName;
+                        businessUnit.CommercialRegistrationNumber = tenant.RegistrationNumber;
                         businessUnit.ModifiedOn = now;
                         businessUnit.ModifiedBy = actor;
                     }
@@ -657,6 +659,8 @@ public class TenantsController : ControllerBase
                 {
                     BusinessUnitCode = slug.ToUpperInvariant(),
                     BusinessUnitName = tenant.Name,
+                    LegalName = tenant.LegalName,
+                    CommercialRegistrationNumber = tenant.RegistrationNumber,
                     Description = $"Primary business unit for tenant '{tenant.Name}'",
                     IsActive = true,
                     CreatedBy = actor,

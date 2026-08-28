@@ -173,11 +173,14 @@ namespace ERP_RFQ_Automation.Services
                 BusinessUnitId = businessUnitId, // Prioritize the parameter
                 CurrencyId = dto.CurrencyId,
                 StatusId = draftStatus.SetupId,
-                PaymentMethodId = dto.PaymentMethodId,
-                PaymentStatusId = dto.PaymentStatusId ?? unpaidStatus?.SetupId,
-                PaymentDate = dto.PaymentDate,
-                PaidAmount = dto.PaidAmount,
-                PaymentReference = dto.PaymentReference,
+                // Sales-order creation cannot post cash. Payment state is owned by governed
+                // Accounts Receivable documents and allocation endpoints, not ordinary Orders
+                // Create permission. Treat client-supplied payment fields as non-authoritative.
+                PaymentMethodId = null,
+                PaymentStatusId = unpaidStatus?.SetupId,
+                PaymentDate = null,
+                PaidAmount = 0m,
+                PaymentReference = null,
                 OrderDate = dto.OrderDate,
                 DeliveryDate = dto.DeliveryDate,
                 TotalAmount = totalAmount,
@@ -529,11 +532,8 @@ namespace ERP_RFQ_Automation.Services
                                && await IsCancelledStatusAsync(dto.StatusId, businessUnitId);
 
             order.StatusId = dto.StatusId;
-            order.PaymentMethodId = dto.PaymentMethodId;
-            order.PaymentStatusId = dto.PaymentStatusId;
-            order.PaymentDate = dto.PaymentDate;
-            order.PaidAmount = dto.PaidAmount;
-            order.PaymentReference = dto.PaymentReference;
+            // Payment state is deliberately not writable through Orders.Edit. Cash application
+            // belongs to Accounts Receivable's separately authorised, auditable ledger path.
             order.DeliveryDate = dto.DeliveryDate;
             order.Notes = dto.Notes;
             order.ModifiedBy = "System";
