@@ -1,5 +1,7 @@
 using ERP_RFQ_Automation.Ingestion.Assembly;
 using ERP_RFQ_Automation.Tests.Support;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ERP_RFQ_Automation.Tests;
 
@@ -31,6 +33,44 @@ public class EmailInquiryHoldLifecycleTests
         ReasonCode = HoldReason,
         ExtractionJobId = jobId
     };
+
+    [Fact]
+    public async Task Holding_the_assembly_updates_the_inbound_mail_projection_immediately()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(7);
+        Seed.EnsureBusinessUnit(context, 7);
+        Seed.EmailConfig(context, 9, 7);
+        Seed.EmailIngest(context, 1116, 9, EmailInquiryLedgerReconciliation.InFlightQueued);
+        context.EmailInquiryAssemblies.Add(new EmailInquiryAssembly
+        {
+            Id = 167,
+            BusinessUnitId = 7,
+            EmailIngestId = 1116,
+            EmailConfigurationId = 9,
+            MessageKey = "review-projection@test",
+            ManifestContractVersion = EmailInquiryManifestPlanner.ContractVersion,
+            ExpectedComponentCount = 1,
+            CompletedComponentCount = 1,
+            Status = EmailInquiryAssemblyStatus.ReadyForAssembly,
+            CreatedAtUtc = DateTimeOffset.UtcNow.AddMinutes(-2),
+            UpdatedAtUtc = DateTimeOffset.UtcNow.AddMinutes(-2)
+        });
+        await context.SaveChangesAsync();
+
+        var coordinator = new EmailInquiryAssemblyCoordinator(
+            context, NullLogger<EmailInquiryAssemblyCoordinator>.Instance);
+        await coordinator.HoldForReviewAsync(
+            7, 167, EmailInquiryHoldReasons.NoRequestableContent,
+            EmailInquiryHoldReasons.NoRequestableContentDetail);
+
+        context.ChangeTracker.Clear();
+        Assert.Equal(EmailInquiryAssemblyStatus.NeedsReview,
+            (await context.EmailInquiryAssemblies.SingleAsync(x => x.Id == 167)).Status);
+        var ingest = await context.EmailIngests.SingleAsync(x => x.Id == 1116);
+        Assert.Equal(EmailInquiryLedgerReconciliation.NeedsReview, ingest.ParseStatus);
+        Assert.NotNull(ingest.ParsedAt);
+    }
 
     [Fact]
     public void A_held_component_is_not_terminal_so_the_message_is_never_declared_finished()
