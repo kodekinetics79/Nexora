@@ -184,6 +184,15 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
         Assert.Equal(promoted.PromotionId, replay.PromotionId);
         Assert.Equal(promoted.RfqId, replay.RfqId);
         Assert.Equal(promoted.RfqNumber, replay.RfqNumber);
+
+        // A client may lose the first response and generate a fresh transport key. The durable
+        // Lead/revision/participation winner remains authoritative even though promotion has
+        // already advanced the Lead lifecycle beyond QUALIFIED.
+        var freshKeyReplay = await promotion.PromoteAsync(Tenant, scenario.LeadId,
+            promotionCommand with { IdempotencyKey = $"warning-promotion:fresh-retry:{scenario.LeadId}" });
+        Assert.True(freshKeyReplay.Replayed);
+        Assert.Equal(promoted.PromotionId, freshKeyReplay.PromotionId);
+        Assert.Equal(promoted.RfqId, freshKeyReplay.RfqId);
         Assert.Equal(1, await context.Set<RfqPromotion>().AsNoTracking()
             .CountAsync(x => x.BusinessUnitId == Tenant && x.LeadId == scenario.LeadId));
         Assert.Equal(1, await context.Rfqs.AsNoTracking()
@@ -228,10 +237,14 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
     public async Task Full_no_bid_disqualifies_the_lead_and_can_never_create_an_rfq()
     {
         var scenario = await CreateScenarioAsync([
-            Line("00010", 3, "EA", "SAR", "DECLINED-01"),
+            // Missing/zero source quantity is a valid reason to decline a line. Commercial
+            // completeness is a Bid invariant, not a prerequisite for recording No-bid.
+            Line("00010", 0, null, null, "DECLINED-01"),
             Line("00020", 5, "EA", "SAR", "DECLINED-02")
         ], "full-no-bid");
-        await using var context = database.ContextFor(Tenant);
+        // Exercise the same forced-RLS execution role used by an authenticated tenant request.
+        // Owner-role coverage cannot reveal missing grants or policy failures at transaction commit.
+        await using var context = database.TenantContextWithRls(Tenant);
         var participation = Service(context);
         var fit = await FitAsync(participation, scenario, "full-no-bid");
         var lines = scenario.LineRevisionIds.Select(id => new LeadLineParticipationCommand(
@@ -256,6 +269,8 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
 
         Assert.Equal(LeadParticipationOutcome.NoBid, decision.Outcome);
         Assert.All(decision.Lines, line => Assert.Equal(LeadLineParticipationChoice.NoBid, line.Choice));
+        Assert.Null(decision.Lines.Single(line => line.LeadItemRevisionId == scenario.LineRevisionIds[0]).Quantity);
+        Assert.Equal(5, decision.Lines.Single(line => line.LeadItemRevisionId == scenario.LineRevisionIds[1]).Quantity);
         var lead = await context.Leads.AsNoTracking().Include(x => x.LeadStatus)
             .SingleAsync(x => x.BusinessUnitId == Tenant && x.Id == scenario.LeadId);
         Assert.Equal("DISQUALIFIED", lead.LeadStatus?.SetupCode);
@@ -278,6 +293,7 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
         await SeedTenantAsync();
         var batchId = Guid.NewGuid();
         var key = $"participation-warning:{suffix}:{batchId:N}";
+        var requiresIncompleteAmendment = lines.Any(line => line.Quantity <= 0);
         var candidate = new Lead
         {
             Rfqno = $"WARN-{suffix}-{batchId:N}", BuyersName = "SEC Bid Desk", RecDate = Now,
@@ -285,7 +301,15 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
             CreatedBy = "tests", CreatedDate = Now, BusinessUnitId = Tenant,
             NoOfLineItems = lines.Count
         };
-        foreach (var line in lines) candidate.LeadItems.Add(line);
+        // A Lead cannot legitimately enter QUALIFIED with an unresolved current quantity. For
+        // downstream warning tests, establish a commercially valid revision 1 first; after the
+        // governed qualification below, reconcile the requested incomplete values as revision 2.
+        // That models the real production risk: an amendment can invalidate previously reviewed
+        // commercial facts, and participation/promotion must still refuse unsafe Bid scope.
+        foreach (var line in requiresIncompleteAmendment
+                     ? lines.Select(QualificationSafeLine)
+                     : lines)
+            candidate.LeadItems.Add(line);
 
         long leadId;
         await using (var context = database.ContextFor(Tenant))
@@ -313,6 +337,40 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
                 new LifecycleTransitionCommand(target, lead.LifecycleVersion, null, null,
                     "Seed", $"{suffix}-{target}", $"lead-{leadId}",
                     $"warning-{suffix}-{target}:{leadId}"), false, CancellationToken.None);
+        }
+
+        if (requiresIncompleteAmendment)
+        {
+            var amendmentBatchId = Guid.NewGuid();
+            var amendmentKey = $"{key}:amendment";
+            var amendment = new Lead
+            {
+                Rfqno = candidate.Rfqno, BuyersName = candidate.BuyersName, RecDate = candidate.RecDate,
+                BidClosingDate = candidate.BidClosingDate, LeadSource = candidate.LeadSource,
+                CreatedBy = "tests", CreatedDate = Now, BusinessUnitId = Tenant,
+                NoOfLineItems = lines.Count
+            };
+            foreach (var line in lines) amendment.LeadItems.Add(line);
+
+            await using var amendmentContext = database.ContextFor(Tenant);
+            var reconciled = await new LeadIdentityApplicationService(amendmentContext).ReconcileAsync(amendment,
+                new LeadIntakeDescriptor(
+                    amendmentBatchId, "ManualUpload", amendmentKey, amendmentKey, null,
+                    "ParticipationWarningTests", null, $"RFQ {suffix} amendment", $"{suffix}-amendment.xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 20480,
+                    new string('b', 64), null, null, Now, Now, LeadProcessingPath.Deterministic,
+                    false, null, "Service", "tests", amendmentKey), CancellationToken.None);
+            Assert.Equal(leadId, reconciled.LeadId);
+            Assert.Equal(LeadOccurrenceClassification.Revision, reconciled.Classification);
+            Assert.Equal(2, reconciled.RevisionNumber);
+            var amendedLead = await amendmentContext.Leads
+                .Include(lead => lead.LeadStatus)
+                .Include(lead => lead.LeadItems)
+                .SingleAsync(lead => lead.Id == leadId);
+            Assert.Equal("QUALIFIED", amendedLead.LeadStatus?.SetupCode);
+            Assert.Equal(reconciled.RevisionId, amendedLead.CurrentRevisionId);
+            Assert.Contains(amendedLead.LeadItems,
+                line => line.IsCurrentRevisionProjection && line.Quantity <= 0);
         }
 
         var evidenceBytes = Encoding.UTF8.GetBytes(string.Join('\n', lines.Select(x =>
@@ -467,6 +525,17 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
         LineItemNo = lineNo, ItemMaterialCode = part, ManufacturerPartNumber = part,
         ProductShortDescription = "Ball valve 2IN class 300", Quantity = quantity,
         UnitOfMeasure = uom, Currency = currency
+    };
+
+    private static LeadItem QualificationSafeLine(LeadItem line) => new()
+    {
+        LineItemNo = line.LineItemNo,
+        ItemMaterialCode = line.ItemMaterialCode,
+        ManufacturerPartNumber = line.ManufacturerPartNumber,
+        ProductShortDescription = line.ProductShortDescription,
+        Quantity = line.Quantity is > 0 ? line.Quantity : 1,
+        UnitOfMeasure = line.UnitOfMeasure,
+        Currency = line.Currency
     };
 
     private sealed record Scenario(long LeadId, long RevisionId, int RevisionNumber,

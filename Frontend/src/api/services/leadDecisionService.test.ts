@@ -5,13 +5,16 @@ import leadDecisionService, { type SaveFitAssessmentRequest, type SaveParticipat
 vi.mock('../axiosInstance', () => ({
   default: {
     put: vi.fn(),
+    post: vi.fn(),
   },
 }));
 
 const put = vi.mocked(axiosInstance.put);
+const post = vi.mocked(axiosInstance.post);
 
 beforeEach(() => {
   put.mockReset();
+  post.mockReset();
 });
 
 describe('leadDecisionService idempotency contract', () => {
@@ -50,5 +53,27 @@ describe('leadDecisionService idempotency contract', () => {
       request,
       { headers: { 'Idempotency-Key': 'lead-participation-draft:7:stable' } },
     );
+  });
+
+  it('keeps a stable idempotency key on RFQ amendment-review retries', async () => {
+    const request = {
+      rfqId: 19,
+      expectedLeadRevisionId: 72,
+      reconciliationReason: 'Reviewed quantity and delivery changes against the RFQ.',
+      confirmedHistoricalRfqUnchanged: true,
+    };
+    post.mockResolvedValue({ data: {
+      rfqId: 19,
+      reviewedThroughLeadRevisionId: 72,
+      resolvedImpactCount: 1,
+      replayed: false,
+    } });
+
+    await leadDecisionService.resolveRfqRevisionImpact(7, request, 'rfq-impact:7:stable');
+    await leadDecisionService.resolveRfqRevisionImpact(7, request, 'rfq-impact:7:stable');
+
+    expect(post).toHaveBeenCalledTimes(2);
+    expect(post.mock.calls.map((call) => call[2]?.headers?.['Idempotency-Key']))
+      .toEqual(['rfq-impact:7:stable', 'rfq-impact:7:stable']);
   });
 });

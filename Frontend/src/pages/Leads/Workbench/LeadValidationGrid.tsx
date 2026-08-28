@@ -385,6 +385,10 @@ const LeadValidationGrid: React.FC<LeadValidationGridProps> = ({
         </Paper>
       ) : null}
 
+      <Typography variant="caption" color="text.secondary" sx={{ display: { xs: 'block', md: 'none' }, px: 0.5 }}>
+        Swipe or scroll the table horizontally to review catalog match, quote values, validation, participation, and the decision record.
+      </Typography>
+
       <Paper variant="outlined" sx={{ height: { xs: 560, md: 640 }, width: '100%', overflow: 'hidden' }}>
         <DataGrid
           rows={lines}

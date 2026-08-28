@@ -48,6 +48,7 @@ import {
   summariseSecurityRetryHolds,
 } from '../../utils/intakeErrors';
 import { BatchMetricFilterCard } from './BatchMetricFilterCard';
+import { commercialActionPermissions } from '../../utils/commercialActionPermissions';
 
 type ChipColor = 'default' | 'primary' | 'success' | 'warning' | 'error' | 'info';
 
@@ -258,7 +259,9 @@ const ReconciliationRow = ({ item, onRetryHold, retrying, retryOutcome }: Reconc
   const held = isInfrastructureHold(item);
   const classificationPending = item.classification.replaceAll('_', '').toLowerCase() === 'pending';
   const hasExtractionScore = !held && !classificationPending;
-  const canPrepareRfq = hasPermission('Leads', 'create') && hasPermission('RFQ Management', 'create');
+  // Opening the record is a Leads read. Fit/participation and RFQ promotion remain separately
+  // gated inside the workbench, matching their server actions.
+  const canOpenWorkbench = commercialActionPermissions(hasPermission).canOpenLeadWorkbench;
   const failed = held || item.classification.replaceAll('_', '').toLowerCase() === 'rejectedorunprocessable';
   const explanation = failed ? explainIntakeItem(item) : null;
   const meta = held
@@ -386,7 +389,7 @@ const ReconciliationRow = ({ item, onRetryHold, retrying, retryOutcome }: Reconc
               >
                 Review inquiry
               </Button>
-              {canPrepareRfq && (
+              {canOpenWorkbench && (
                 <Button
                   variant="contained"
                   size="small"

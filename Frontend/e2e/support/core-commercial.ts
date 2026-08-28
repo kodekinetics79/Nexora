@@ -69,9 +69,10 @@ export async function openLead(page: Page, leadId: number): Promise<void> {
   await expect(page.getByText('Lead Details Analysis Engine')).toBeVisible();
 }
 
-export async function openLeadConversion(page: Page, leadId: number): Promise<void> {
-  await page.goto(`/procurement/leads/${leadId}/convert`);
-  await expect(page.getByRole('heading', { name: 'Review inquiry and create RFQ' })).toBeVisible();
+export async function openLeadIntelligence(page: Page, leadId: number): Promise<void> {
+  await page.goto(`/procurement/leads/view/${leadId}`);
+  await expect(page.getByText('Lead Details Analysis Engine')).toBeVisible();
+  await expect(page.getByText('Commercial line intelligence', { exact: true })).toBeVisible();
 }
 
 export async function resolutions(page: Page, token: string, aggregate: 'leads' | 'rfqs' | 'quotes', id: number) {

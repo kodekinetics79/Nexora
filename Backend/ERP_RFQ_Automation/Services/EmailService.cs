@@ -54,6 +54,9 @@ namespace ERP_RFQ_Automation.Services
     /// <param name="MessagesNotAcknowledged">Messages left unread on the server because nothing
     /// durable was written. They are RETRIED next cycle; a non-zero count that never falls is an
     /// incident.</param>
+    /// <param name="MessagesDeferred">Durably unhandled messages deliberately left for the next
+    /// bounded mailbox attempt. Deferral is healthy backpressure, not success for the recovery
+    /// checkpoint: the poll ledger must not advance past work that remains on the server.</param>
     public sealed record MailboxPollOutcome(
         long EmailConfigurationId,
         string EmailAddress,
@@ -72,7 +75,8 @@ namespace ERP_RFQ_Automation.Services
         int ComponentsScheduled = 0,
         int MessagesHeldForReview = 0,
         int MessagesRejected = 0,
-        int MessagesNotAcknowledged = 0);
+        int MessagesNotAcknowledged = 0,
+        int MessagesDeferred = 0);
 
     /// <summary>The truthful result of one poll cycle across every configured mailbox.</summary>
     public sealed record MailboxPollReport(IReadOnlyList<MailboxPollOutcome> Mailboxes)
@@ -110,6 +114,7 @@ namespace ERP_RFQ_Automation.Services
         public int MessagesHeldForReview => Mailboxes.Sum(m => m.MessagesHeldForReview);
         public int MessagesRejected => Mailboxes.Sum(m => m.MessagesRejected);
         public int MessagesNotAcknowledged => Mailboxes.Sum(m => m.MessagesNotAcknowledged);
+        public int MessagesDeferred => Mailboxes.Sum(m => m.MessagesDeferred);
     }
 
     public class EmailService : IEmailService
@@ -133,6 +138,12 @@ namespace ERP_RFQ_Automation.Services
         private const double DEFAULT_INITIAL_LOOKBACK_DAYS = 7;   // first ever poll for a mailbox
         private const double DEFAULT_MIN_LOOKBACK_DAYS = 1;       // always re-scan at least this
         private const double DEFAULT_MAX_LOOKBACK_DAYS = 30;      // never scan further back than this
+        private const double DEFAULT_MAILBOX_ATTEMPT_TIMEOUT_SECONDS = 180;
+        private const double DEFAULT_NETWORK_OPERATION_TIMEOUT_SECONDS = 30;
+        // Capture/fan-out includes durable object storage, malware inspection and several
+        // transactional writes. A burst must therefore be drained across bounded attempts rather
+        // than letting one IMAP lease grow with mailbox depth until its safety deadline fires.
+        private const int DEFAULT_MAX_NEW_MESSAGES_PER_MAILBOX_ATTEMPT = 10;
         private const long MAX_ATTACHMENT_SIZE = Ingestion.Triage.EmailIngestEnqueuer.MaxAttachmentBytes; // 25 MB
         // Token/Text limiting for LLM to prevent context length errors and excessive costs
         private const int MAX_CHARS_FOR_LLM = 32000; // ~8k tokens (safe for most models)
@@ -187,6 +198,9 @@ namespace ERP_RFQ_Automation.Services
         private readonly TimeSpan _initialLookback;
         private readonly TimeSpan _minLookback;
         private readonly TimeSpan _maxLookback;
+        private readonly TimeSpan _mailboxAttemptTimeout;
+        private readonly TimeSpan _networkOperationTimeout;
+        private readonly int _maxNewMessagesPerMailboxAttempt;
         // ING-09: how old a "Pending" ingest must be before the sweeper treats it as stranded
         // rather than in-flight. Conservative on purpose: the window between the ingest commit
         // and the enqueue is milliseconds, so anything Pending for this long is a crash
@@ -224,6 +238,22 @@ namespace ERP_RFQ_Automation.Services
                 configuration.GetValue("Ingestion:Email:MaxLookbackDays", DEFAULT_MAX_LOOKBACK_DAYS),
                 DEFAULT_MAX_LOOKBACK_DAYS);
             if (_maxLookback < _minLookback) _maxLookback = _minLookback;
+            _mailboxAttemptTimeout = PositiveSeconds(
+                configuration.GetValue(
+                    "Ingestion:Email:MailboxAttemptTimeoutSeconds",
+                    DEFAULT_MAILBOX_ATTEMPT_TIMEOUT_SECONDS),
+                DEFAULT_MAILBOX_ATTEMPT_TIMEOUT_SECONDS);
+            _networkOperationTimeout = PositiveSeconds(
+                configuration.GetValue(
+                    "Ingestion:Email:NetworkOperationTimeoutSeconds",
+                    DEFAULT_NETWORK_OPERATION_TIMEOUT_SECONDS),
+                DEFAULT_NETWORK_OPERATION_TIMEOUT_SECONDS);
+            var configuredMailboxBatchSize = configuration.GetValue(
+                "Ingestion:Email:MaxNewMessagesPerMailboxAttempt",
+                DEFAULT_MAX_NEW_MESSAGES_PER_MAILBOX_ATTEMPT);
+            _maxNewMessagesPerMailboxAttempt = configuredMailboxBatchSize > 0
+                ? configuredMailboxBatchSize
+                : DEFAULT_MAX_NEW_MESSAGES_PER_MAILBOX_ATTEMPT;
             var sweepMinutes = configuration.GetValue(
                 "Ingestion:Email:StrandedPendingSweepMinutes", DEFAULT_STRANDED_PENDING_SWEEP_MINUTES);
             _strandedPendingAge = TimeSpan.FromMinutes(
@@ -237,6 +267,9 @@ namespace ERP_RFQ_Automation.Services
 
         private static TimeSpan PositiveDays(double configured, double fallback)
             => TimeSpan.FromDays(configured > 0 ? configured : fallback);
+
+        private static TimeSpan PositiveSeconds(double configured, double fallback)
+            => TimeSpan.FromSeconds(configured > 0 ? configured : fallback);
 
         /// <summary>
         /// SEC-ING-01: the ONE query in this service that runs with no tenant pushed, and therefore
@@ -255,7 +288,11 @@ namespace ERP_RFQ_Automation.Services
             return scope.ServiceProvider.GetRequiredService<ITenantScopeAccessor>();
         }
 
-        public async Task<MailboxPollReport> FetchAndSaveLeadsAsync(long? businessUnitId = null)
+        public Task<MailboxPollReport> FetchAndSaveLeadsAsync(long? businessUnitId = null)
+            => FetchAndSaveLeadsAsync(businessUnitId, CancellationToken.None);
+
+        public async Task<MailboxPollReport> FetchAndSaveLeadsAsync(
+            long? businessUnitId, CancellationToken cancellationToken)
         {
             var query = _context.EmailConfigurations
                 .AsNoTracking()
@@ -270,7 +307,7 @@ namespace ERP_RFQ_Automation.Services
                 .OrderBy(e => e.BusinessUnitId).ThenBy(e => e.Id)
                 .Select(e => new MailboxHandle(
                     e.Id, e.BusinessUnitId, e.EmailAddress, e.LastSuccessfulPollOn))
-                .ToListAsync();
+                .ToListAsync(cancellationToken);
 
             // The most expensive gate in the product. ProcessConfigAsync resolves ILLMService from
             // its own scope and enqueues every attachment for extraction, so an unpolled mailbox is
@@ -290,8 +327,8 @@ namespace ERP_RFQ_Automation.Services
             {
                 var businessUnits = configs.Select(c => c.BusinessUnitId);
                 var serviceable = _mailboxWorkGate is not null
-                    ? await _mailboxWorkGate.FilterPollableAsync(businessUnits)
-                    : await _workGate!.FilterServiceableAsync(businessUnits);
+                    ? await _mailboxWorkGate.FilterPollableAsync(businessUnits, cancellationToken)
+                    : await _workGate!.FilterServiceableAsync(businessUnits, cancellationToken);
                 var admitted = serviceable.ToHashSet();
                 var deferred = configs.Where(c => !admitted.Contains(c.BusinessUnitId)).ToList();
 
@@ -311,7 +348,12 @@ namespace ERP_RFQ_Automation.Services
             var tenantScope = TenantScope();
             foreach (var handle in configs)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 MailboxPollOutcome outcome;
+                using var mailboxDeadline = CancellationTokenSource
+                    .CreateLinkedTokenSource(cancellationToken);
+                mailboxDeadline.CancelAfter(_mailboxAttemptTimeout);
+                var mailboxToken = mailboxDeadline.Token;
 
                 // SEC-ING-01. THE PUSH COMES FIRST, AND IT MUST.
                 //
@@ -351,7 +393,7 @@ namespace ERP_RFQ_Automation.Services
                     // be the tenant's own row or nothing.
                     config = await mailboxContext.EmailConfigurations
                         .FirstOrDefaultAsync(e => e.Id == handle.Id
-                            && e.BusinessUnitId == handle.BusinessUnitId);
+                            && e.BusinessUnitId == handle.BusinessUnitId, mailboxToken);
                     if (config is null)
                     {
                         throw new InvalidOperationException(
@@ -382,7 +424,8 @@ namespace ERP_RFQ_Automation.Services
                     // the authoritative platform row now, immediately before any IMAP connection.
                     // Ambiguous ownership and control-plane failures both refuse the connection.
                     if (_mailboxWorkGate is not null
-                        && !await _mailboxWorkGate.MayPollFreshAsync(handle.BusinessUnitId))
+                        && !await _mailboxWorkGate.MayPollFreshAsync(
+                            handle.BusinessUnitId, mailboxToken))
                     {
                         _logger.LogInformation(
                             "Skipping mailbox {Email} (configuration {ConfigurationId}, BU "
@@ -393,7 +436,25 @@ namespace ERP_RFQ_Automation.Services
                     }
 
                     _logger.LogInformation("Starting process for configuration: {Email}", config.EmailAddress);
-                    outcome = await ProcessConfigAsync(mailboxScope.ServiceProvider, config);
+                    outcome = await ProcessConfigAsync(
+                        mailboxScope.ServiceProvider, config, mailboxToken);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (OperationCanceledException) when (mailboxDeadline.IsCancellationRequested)
+                {
+                    var timeout = new TimeoutException(
+                        $"Mailbox attempt exceeded its {_mailboxAttemptTimeout.TotalSeconds:0}-second deadline.");
+                    _logger.LogError(timeout,
+                        "Mailbox {Email} exceeded its polling deadline. Moving to next mailbox.",
+                        handle.EmailAddress);
+                    outcome = config is null
+                        ? FailedOutcome(handle, timeout,
+                            ResolveLookbackWindow(handle.LastSuccessfulPollOn, DateTime.UtcNow))
+                        : FailedOutcome(config, timeout,
+                            ResolveLookbackWindow(config, DateTime.UtcNow));
                 }
                 catch (Exception ex)
                 {
@@ -409,7 +470,8 @@ namespace ERP_RFQ_Automation.Services
                 // as every other write in this cycle. When the guard above refused, `config` is
                 // null and there is nothing tracked to write — the failure is still reported.
                 if (config is not null)
-                    await RecordPollOutcomeAsync(mailboxContext, config, outcome);
+                    await RecordPollOutcomeAsync(
+                        mailboxContext, config, outcome, cancellationToken);
                 outcomes.Add(outcome);
 
                 // The mailbox is named from the HANDLE, never from `config`. When the tenant-scope
@@ -425,8 +487,10 @@ namespace ERP_RFQ_Automation.Services
                 {
                     _logger.LogInformation(
                         "Finished process for configuration: {Email} ({Downloaded} new message(s), "
-                        + "{AlreadyIngested} already in the ingestion ledger).",
-                        handle.EmailAddress, outcome.MessagesDownloaded, outcome.MessagesAlreadyIngested);
+                        + "{AlreadyIngested} already in the ingestion ledger, {Deferred} deferred "
+                        + "to the next bounded attempt).",
+                        handle.EmailAddress, outcome.MessagesDownloaded,
+                        outcome.MessagesAlreadyIngested, outcome.MessagesDeferred);
                 }
                 else
                 {
@@ -449,6 +513,7 @@ namespace ERP_RFQ_Automation.Services
             // sweep failure must never repaint a mailbox result (or the reverse).
             foreach (var sweepBusinessUnitId in configs.Select(c => c.BusinessUnitId).Distinct())
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 try
                 {
                     // Same push-before-CreateScope ordering, and the same fail-closed scope
@@ -474,7 +539,12 @@ namespace ERP_RFQ_Automation.Services
                     if (sweepIntake is null) continue;
                     var sweepLlm = sweepScope.ServiceProvider.GetService<ILLMService>() ?? _llmService;
                     await SweepStrandedPendingIngestsAsync(
-                        sweepContext, sweepIntake, sweepLlm, sweepBusinessUnitId, DateTime.UtcNow);
+                        sweepContext, sweepIntake, sweepLlm, sweepBusinessUnitId,
+                        DateTime.UtcNow, cancellationToken);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
                 }
                 catch (Exception ex)
                 {
@@ -529,13 +599,18 @@ namespace ERP_RFQ_Automation.Services
         /// derived from, and <c>LastPollError</c> is the reason an operator reads.
         /// </summary>
         private async Task RecordPollOutcomeAsync(
-            ErpRfqAutomationContext context, EmailConfiguration config, MailboxPollOutcome outcome)
+            ErpRfqAutomationContext context, EmailConfiguration config, MailboxPollOutcome outcome,
+            CancellationToken cancellationToken)
         {
             var now = DateTime.UtcNow;
             config.LastPollAttemptOn = now;
             if (outcome.Succeeded)
             {
-                config.LastSuccessfulPollOn = now;
+                // A bounded attempt proves that the channel works, but not that its recovery
+                // window is drained. Advancing the checkpoint while older messages remain would
+                // make them disappear once the minimum lookback moves past them.
+                if (ShouldAdvanceRecoveryPoint(outcome))
+                    config.LastSuccessfulPollOn = now;
                 config.LastPollError = null;
                 config.ConsecutivePollFailures = 0;
             }
@@ -549,7 +624,11 @@ namespace ERP_RFQ_Automation.Services
 
             try
             {
-                await context.SaveChangesAsync();
+                await context.SaveChangesAsync(cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
             }
             catch (Exception ex)
             {
@@ -558,6 +637,9 @@ namespace ERP_RFQ_Automation.Services
                     config.EmailAddress);
             }
         }
+
+        internal static bool ShouldAdvanceRecoveryPoint(MailboxPollOutcome outcome)
+            => outcome.Succeeded && outcome.MessagesDeferred == 0;
 
         /// <summary>
         /// SEC-ING-01: takes the caller's ALREADY tenant-scoped provider instead of creating its
@@ -568,7 +650,8 @@ namespace ERP_RFQ_Automation.Services
         /// this provider's DbContext.
         /// </summary>
         private async Task<MailboxPollOutcome> ProcessConfigAsync(
-            IServiceProvider scopedServices, EmailConfiguration config)
+            IServiceProvider scopedServices, EmailConfiguration config,
+            CancellationToken cancellationToken)
         {
             var localContext = scopedServices.GetRequiredService<ErpRfqAutomationContext>();
             var localLlm = scopedServices.GetRequiredService<ILLMService>();
@@ -603,12 +686,19 @@ namespace ERP_RFQ_Automation.Services
                 // connected to one of those exact addresses, so there is no window in which a
                 // rebinding answer can be dialled. The TLS mode and the credential are
                 // deliberately unchanged: nothing about a legitimate host behaves differently.
-                var pollSocket = await ERP_RFQ_Automation.Security.MailEndpointPolicy
-                    .ConnectAsync(config.Host, config.Port, CancellationToken.None);
+                var pollSocket = await WithNetworkDeadlineAsync(
+                    "connect",
+                    ct => ERP_RFQ_Automation.Security.MailEndpointPolicy
+                        .ConnectAsync(config.Host, config.Port, ct),
+                    cancellationToken);
                 try
                 {
-                    await client.ConnectAsync(pollSocket, config.Host, config.Port,
-                        config.UseSsl ? SecureSocketOptions.SslOnConnect : SecureSocketOptions.None);
+                    await WithNetworkDeadlineAsync(
+                        "TLS/session negotiation",
+                        ct => client.ConnectAsync(pollSocket, config.Host, config.Port,
+                            config.UseSsl ? SecureSocketOptions.SslOnConnect : SecureSocketOptions.None,
+                            ct),
+                        cancellationToken);
                 }
                 catch
                 {
@@ -616,13 +706,23 @@ namespace ERP_RFQ_Automation.Services
                     pollSocket.Dispose();
                     throw;
                 }
-                await RefuseAuthenticationIfTenantChangedAsync(config);
-                await client.AuthenticateAsync(
-                    ERP_RFQ_Automation.Mailbox.MailboxLoginIdentity.ForInbound(config), config.Password);
+                await RefuseAuthenticationIfTenantChangedAsync(config, cancellationToken);
+                await WithNetworkDeadlineAsync(
+                    "authentication",
+                    ct => client.AuthenticateAsync(
+                        ERP_RFQ_Automation.Mailbox.MailboxLoginIdentity.ForInbound(config),
+                        config.Password, ct),
+                    cancellationToken);
                 var inbox = client.Inbox;
-                await inbox.OpenAsync(FolderAccess.ReadWrite);
+                await WithNetworkDeadlineAsync(
+                    "opening the inbox",
+                    ct => inbox.OpenAsync(FolderAccess.ReadWrite, ct),
+                    cancellationToken);
                 var query = BuildRFQSearchQuery(window.SinceUtc);
-                var uids = await inbox.SearchAsync(query);
+                var uids = await WithNetworkDeadlineAsync(
+                    "searching the inbox",
+                    ct => inbox.SearchAsync(query, ct),
+                    cancellationToken);
                 _logger.LogInformation("Found {Count} message(s) in the poll window for {Email}", uids.Count, config.EmailAddress);
 
                 // ING-08: envelopes first, full messages only for what the ledger has not seen.
@@ -631,32 +731,52 @@ namespace ERP_RFQ_Automation.Services
                 // the Message-Id in the envelope is enough to ask the ledger.
                 var summaries = uids.Count == 0
                     ? new List<IMessageSummary>()
-                    : (await inbox.FetchAsync(uids,
-                        MessageSummaryItems.UniqueId | MessageSummaryItems.Envelope)).ToList();
-                var ledger = await LoadHandledMessageIdsAsync(localContext, config, summaries);
+                    : (await WithNetworkDeadlineAsync(
+                        "reading message envelopes",
+                        ct => inbox.FetchAsync(uids,
+                            MessageSummaryItems.UniqueId | MessageSummaryItems.Envelope, ct),
+                        cancellationToken)).ToList();
+                var ledger = await LoadHandledMessageIdsAsync(
+                    localContext, config, summaries, cancellationToken);
                 tally.Found = summaries.Count;
 
-                foreach (var summary in summaries)
+                // Only unhandled envelopes consume the batch. Known ledger entries remain cheap
+                // even when the lookback intentionally re-scans a day of mail. An envelope with
+                // no Message-Id is conservatively treated as unhandled; ResolveIngestKey derives
+                // its content identity after download.
+                var unhandled = summaries.Where(summary =>
                 {
                     var envelopeId = NormalizeMessageId(summary.Envelope?.MessageId);
-                    if (envelopeId is not null && ledger.Contains(envelopeId))
-                    {
-                        // Handled on an earlier cycle. The DURABLE record says so — not the
-                        // IMAP \Seen flag, which a human reading the mailbox also sets.
-                        alreadyIngested++;
-                        continue;
-                    }
+                    return envelopeId is null || !ledger.Contains(envelopeId);
+                }).OrderBy(summary => summary.UniqueId.Id).ToList();
+                alreadyIngested = summaries.Count - unhandled.Count;
+                var batch = unhandled.Take(_maxNewMessagesPerMailboxAttempt).ToList();
+                var deferred = unhandled.Count - batch.Count;
+                if (deferred > 0)
+                {
+                    _logger.LogInformation(
+                        "Mailbox {Email} has {Unhandled} unhandled message(s); processing {Batch} "
+                        + "and deferring {Deferred} without advancing the recovery checkpoint.",
+                        config.EmailAddress, unhandled.Count, batch.Count, deferred);
+                }
 
+                foreach (var summary in batch)
+                {
                     var uid = summary.UniqueId;
                     try
                     {
-                        var message = await inbox.GetMessageAsync(uid);
+                        var message = await WithNetworkDeadlineAsync(
+                            $"reading message {uid}",
+                            ct => inbox.GetMessageAsync(uid, ct),
+                            cancellationToken);
                         downloaded++;
                         // ING-01: only mark \Seen once a durable record (EmailIngest + raw .eml)
                         // exists, so a message we fail to persist is retried on the next cycle
                         // instead of vanishing.
                         bool durablyPersisted = await ProcessSingleEmailAsync(
-                            message, config, localContext, localLlm, intake, tally);
+                            message, config, localContext, localLlm, intake, tally,
+                            cancellationToken);
+                        cancellationToken.ThrowIfCancellationRequested();
 
                         // Check if connection is still alive before marking as seen
                         if (!client.IsConnected)
@@ -667,35 +787,67 @@ namespace ERP_RFQ_Automation.Services
                             // because the first connect succeeded. Skipping the policy here
                             // would leave the whole SSRF primitive reachable by dropping one
                             // connection mid-poll.
-                            var reconnectSocket = await ERP_RFQ_Automation.Security.MailEndpointPolicy
-                                .ConnectAsync(config.Host, config.Port, CancellationToken.None);
+                            var reconnectSocket = await WithNetworkDeadlineAsync(
+                                "reconnect",
+                                ct => ERP_RFQ_Automation.Security.MailEndpointPolicy
+                                    .ConnectAsync(config.Host, config.Port, ct),
+                                cancellationToken);
                             try
                             {
-                                await client.ConnectAsync(reconnectSocket, config.Host, config.Port,
-                                    config.UseSsl ? SecureSocketOptions.SslOnConnect : SecureSocketOptions.None);
+                                await WithNetworkDeadlineAsync(
+                                    "reconnect session negotiation",
+                                    ct => client.ConnectAsync(reconnectSocket, config.Host, config.Port,
+                                        config.UseSsl
+                                            ? SecureSocketOptions.SslOnConnect
+                                            : SecureSocketOptions.None,
+                                        ct),
+                                    cancellationToken);
                             }
                             catch
                             {
                                 reconnectSocket.Dispose();
                                 throw;
                             }
-                            await RefuseAuthenticationIfTenantChangedAsync(config);
-                            await client.AuthenticateAsync(
-                    ERP_RFQ_Automation.Mailbox.MailboxLoginIdentity.ForInbound(config), config.Password);
-                            await client.Inbox.OpenAsync(FolderAccess.ReadWrite);
+                            await RefuseAuthenticationIfTenantChangedAsync(
+                                config, cancellationToken);
+                            await WithNetworkDeadlineAsync(
+                                "reauthentication",
+                                ct => client.AuthenticateAsync(
+                                    ERP_RFQ_Automation.Mailbox.MailboxLoginIdentity.ForInbound(config),
+                                    config.Password, ct),
+                                cancellationToken);
+                            await WithNetworkDeadlineAsync(
+                                "reopening the inbox",
+                                ct => client.Inbox.OpenAsync(FolderAccess.ReadWrite, ct),
+                                cancellationToken);
                         }
 
                         if (durablyPersisted)
                         {
                             // Courtesy flag for the humans who also read this mailbox. It is NOT
                             // consulted on the way in any more; the EmailIngests row is.
-                            await inbox.AddFlagsAsync(uid, MessageFlags.Seen, true);
+                            await WithNetworkDeadlineAsync(
+                                $"acknowledging message {uid}",
+                                ct => inbox.AddFlagsAsync(uid, MessageFlags.Seen, true, ct),
+                                cancellationToken);
                         }
                         else
                         {
                             tally.NotAcknowledged++;
                             _logger.LogWarning("Email UID {UID} not persisted durably; it will be retried next cycle.", uid);
                         }
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (TimeoutException)
+                    {
+                        // A timed-out MailKit command leaves the session state uncertain. Abort
+                        // this mailbox cleanly so its outcome is recorded and the next mailbox
+                        // gets a fresh connection; continuing on the same client can only create
+                        // a train of misleading per-message errors.
+                        throw;
                     }
                     catch (Exception ex)
                     {
@@ -705,14 +857,21 @@ namespace ERP_RFQ_Automation.Services
                         _logger.LogError(ex, "Error processing email UID {UID}", uid);
                     }
                 }
-                await client.DisconnectAsync(true);
+                await WithNetworkDeadlineAsync(
+                    "disconnect",
+                    ct => client.DisconnectAsync(true, ct),
+                    cancellationToken);
 
                 return new MailboxPollOutcome(
                     config.Id, config.EmailAddress, Succeeded: true, FailureReason: null,
                     FailureIsPermanent: false, config.LastSuccessfulPollOn, window.SinceUtc,
                     window.CappedDays, downloaded, alreadyIngested,
                     tally.Found, tally.Captured, tally.ComponentsScheduled,
-                    tally.HeldForReview, tally.Rejected, tally.NotAcknowledged);
+                    tally.HeldForReview, tally.Rejected, tally.NotAcknowledged, deferred);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
             }
             catch (Exception ex)
             {
@@ -728,10 +887,12 @@ namespace ERP_RFQ_Automation.Services
             }
         }
 
-        private async Task RefuseAuthenticationIfTenantChangedAsync(EmailConfiguration config)
+        private async Task RefuseAuthenticationIfTenantChangedAsync(
+            EmailConfiguration config, CancellationToken cancellationToken)
         {
             if (_mailboxWorkGate is null
-                || await _mailboxWorkGate.MayPollFreshAsync(config.BusinessUnitId))
+                || await _mailboxWorkGate.MayPollFreshAsync(
+                    config.BusinessUnitId, cancellationToken))
                 return;
 
             throw new InvalidOperationException(
@@ -744,7 +905,7 @@ namespace ERP_RFQ_Automation.Services
         /// per cycle, keyed on the RFC 5322 Message-Id.</summary>
         private static async Task<HashSet<string>> LoadHandledMessageIdsAsync(
             ErpRfqAutomationContext context, EmailConfiguration config,
-            IReadOnlyList<IMessageSummary> summaries)
+            IReadOnlyList<IMessageSummary> summaries, CancellationToken cancellationToken)
         {
             var candidates = summaries
                 .Select(s => NormalizeMessageId(s.Envelope?.MessageId))
@@ -778,8 +939,46 @@ namespace ERP_RFQ_Automation.Services
                                      || c.Status == EmailInquiryComponentStatus.FailedRecoverable)
                                     && c.ExtractionJobId == null)))
                 .Select(e => e.MessageId)
-                .ToListAsync();
+                .ToListAsync(cancellationToken);
             return new HashSet<string>(known, StringComparer.Ordinal);
+        }
+
+        private async Task<T> WithNetworkDeadlineAsync<T>(
+            string operation,
+            Func<CancellationToken, Task<T>> action,
+            CancellationToken mailboxToken)
+        {
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(mailboxToken);
+            deadline.CancelAfter(_networkOperationTimeout);
+            try
+            {
+                return await action(deadline.Token);
+            }
+            catch (OperationCanceledException) when (!mailboxToken.IsCancellationRequested
+                && deadline.IsCancellationRequested)
+            {
+                throw new TimeoutException(
+                    $"IMAP {operation} exceeded its {_networkOperationTimeout.TotalSeconds:0}-second deadline.");
+            }
+        }
+
+        private async Task WithNetworkDeadlineAsync(
+            string operation,
+            Func<CancellationToken, Task> action,
+            CancellationToken mailboxToken)
+        {
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(mailboxToken);
+            deadline.CancelAfter(_networkOperationTimeout);
+            try
+            {
+                await action(deadline.Token);
+            }
+            catch (OperationCanceledException) when (!mailboxToken.IsCancellationRequested
+                && deadline.IsCancellationRequested)
+            {
+                throw new TimeoutException(
+                    $"IMAP {operation} exceeded its {_networkOperationTimeout.TotalSeconds:0}-second deadline.");
+            }
         }
 
         /// <summary>
@@ -991,8 +1190,10 @@ namespace ERP_RFQ_Automation.Services
         internal async Task<bool> ProcessSingleEmailAsync(MimeMessage message, EmailConfiguration config,
             ErpRfqAutomationContext context, ILLMService llmService,
             ERP_RFQ_Automation.Ingestion.Assembly.IEmailInquiryIntakeService? intake = null,
-            MailboxIntakeTally? tally = null)
+            MailboxIntakeTally? tally = null,
+            CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var messageId = ResolveIngestKey(message);
             var from = message.From.ToString();
             var to = message.To.ToString();
@@ -1007,7 +1208,8 @@ namespace ERP_RFQ_Automation.Services
             // stable for this message and different for the next one, and it is already the
             // durable ingestion key (unique index on EmailConfigurationID + MessageID).
             var ingest = await context.EmailIngests.SingleOrDefaultAsync(e =>
-                e.EmailConfigurationId == config.Id && e.MessageId == messageId);
+                e.EmailConfigurationId == config.Id && e.MessageId == messageId,
+                cancellationToken);
             if (ingest is not null)
             {
                 var hasFullyScheduledAssembly = await context.EmailInquiryAssemblies.AnyAsync(a =>
@@ -1018,7 +1220,7 @@ namespace ERP_RFQ_Automation.Services
                     && !a.Components.Any(c =>
                         (c.Status == EmailInquiryComponentStatus.Pending
                          || c.Status == EmailInquiryComponentStatus.FailedRecoverable)
-                        && c.ExtractionJobId == null));
+                        && c.ExtractionJobId == null), cancellationToken);
                 if (hasFullyScheduledAssembly || intake is null)
                 {
                     _logger.LogDebug(
@@ -1071,7 +1273,7 @@ namespace ERP_RFQ_Automation.Services
                 context.EmailIngests.Add(ingest);
                 try
                 {
-                    await context.SaveChangesAsync();
+                    await context.SaveChangesAsync(cancellationToken);
                 }
                 catch (DbUpdateException ex) when (IsDuplicateKeyException(ex))
                 {
@@ -1081,7 +1283,13 @@ namespace ERP_RFQ_Automation.Services
                     try { if (File.Exists(rawPath)) File.Delete(rawPath); } catch { /* best-effort cleanup */ }
                     context.ChangeTracker.Clear();
                     return await ProcessSingleEmailAsync(
-                        message, config, context, llmService, intake, tally);
+                        message, config, context, llmService, intake, tally,
+                        cancellationToken);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    try { if (File.Exists(rawPath)) File.Delete(rawPath); } catch { /* best-effort cleanup */ }
+                    throw;
                 }
                 catch (Exception ex)
                 {
@@ -1095,7 +1303,8 @@ namespace ERP_RFQ_Automation.Services
             // only canonical capture below makes the raw message durable enough to mark \Seen.
 
             return await RouteIngestAsync(
-                message, ingest, config, context, llmService, intake, tally);
+                message, ingest, config, context, llmService, intake, tally,
+                cancellationToken);
         }
 
         /// <summary>
@@ -1115,9 +1324,10 @@ namespace ERP_RFQ_Automation.Services
             MimeMessage message, EmailIngest ingest, EmailConfiguration config,
             ErpRfqAutomationContext context, ILLMService llmService,
             ERP_RFQ_Automation.Ingestion.Assembly.IEmailInquiryIntakeService? intake = null,
-            MailboxIntakeTally? tally = null)
+            MailboxIntakeTally? tally = null,
+            CancellationToken cancellationToken = default)
         {
-
+            cancellationToken.ThrowIfCancellationRequested();
             // ING-07: RECOGNITION. The old gate treated "quote"/"quotation" as strong RFQ
             // evidence (so every supplier reply and order confirmation passed) while a bare
             // prose enquiry with none of its 22 keywords was dropped — simultaneously too
@@ -1126,7 +1336,8 @@ namespace ERP_RFQ_Automation.Services
             // of RFQ vocabulary is never a reason to stop.
             var bodyParts = EmailBodyNormalizer.Normalize(GetEmailBody(message));
             var senderPartyType = await SenderPartyResolver.ResolveAsync(
-                context, config.BusinessUnitId, message.From.Mailboxes.FirstOrDefault()?.Address);
+                context, config.BusinessUnitId, message.From.Mailboxes.FirstOrDefault()?.Address,
+                cancellationToken);
             // A human override is a durable command, not a hint. If the process died after the
             // governed reopen committed but before scheduling completed, the next poll must carry
             // that same Uncertain/manual decision forward. Re-running the deterministic rules here
@@ -1146,18 +1357,19 @@ namespace ERP_RFQ_Automation.Services
             ingest.TriageOutcome = triage.Outcome.ToString();
             ingest.TriageReasonJson = SerializeReasonCodes(triage.ReasonCodes);
             ingest.TriageDecidedOn = DateTime.UtcNow;
-            await context.SaveChangesAsync();
+            await context.SaveChangesAsync(cancellationToken);
 
             EmailInquiryIntakeResult? intakeResult = null;
             if (intake != null)
             {
                 intakeResult = await EnqueueEmailForExtractionAsync(
-                    message, ingest, config, intake, triage, bodyParts);
+                    message, ingest, config, intake, triage, bodyParts, cancellationToken);
 
                 // Document ingestion deliberately clears the shared scoped ChangeTracker before
                 // a retriable write. The checkpoint instance passed into intake may therefore be
                 // detached now; reacquire the authoritative row before recording the outcome.
-                ingest = await context.EmailIngests.SingleAsync(e => e.Id == ingest.Id);
+                ingest = await context.EmailIngests.SingleAsync(
+                    e => e.Id == ingest.Id, cancellationToken);
 
                 // DO NOT ACKNOWLEDGE unless the raw bytes and manifest are durable. This applies
                 // to noise too: a false-positive rejection must remain replayable after a deploy.
@@ -1185,7 +1397,7 @@ namespace ERP_RFQ_Automation.Services
                     string.Join(",", triage.ReasonCodes), ingest.EmailSubject);
                 ingest.ParseStatus = STATUS_REJECTED;
                 ingest.ParsedAt = DateTime.UtcNow;
-                await context.SaveChangesAsync();
+                await context.SaveChangesAsync(cancellationToken);
                 if (tally is not null) tally.Rejected++;
                 return true;
             }
@@ -1209,13 +1421,13 @@ namespace ERP_RFQ_Automation.Services
                         ingest.ParseStatus = STATUS_FAILED;
                     ingest.ParsedAt = DateTime.UtcNow;
                 }
-                await context.SaveChangesAsync();
+                await context.SaveChangesAsync(cancellationToken);
                 return true;
             }
 
             // Legacy direct-extraction path (Ingestion:UseUnifiedQueue=false).
             var (leadId, extractedText) = await SaveLeadFromEmailAndAttachments(
-                message, ingest, config, context, llmService);
+                message, ingest, config, context, llmService, cancellationToken);
             ingest.ParsedAt = DateTime.UtcNow;
             if (leadId > 0)
             {
@@ -1226,7 +1438,7 @@ namespace ERP_RFQ_Automation.Services
                 // No lead created and no more specific status (e.g. scanned-PDF review) was set.
                 ingest.ParseStatus = STATUS_FAILED;
             }
-            await context.SaveChangesAsync();
+            await context.SaveChangesAsync(cancellationToken);
             return true;
         }
 
@@ -1267,8 +1479,10 @@ namespace ERP_RFQ_Automation.Services
             ERP_RFQ_Automation.Ingestion.Assembly.IEmailInquiryIntakeService intake,
             ILLMService llmService,
             long businessUnitId,
-            DateTime nowUtc)
+            DateTime nowUtc,
+            CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var cutoff = nowUtc - _strandedPendingAge;
             var stranded = await context.EmailIngests
                 .Include(e => e.EmailConfiguration)
@@ -1277,7 +1491,7 @@ namespace ERP_RFQ_Automation.Services
                     && e.CreatedOn < cutoff)
                 .OrderBy(e => e.CreatedOn).ThenBy(e => e.Id)
                 .Take(StrandedSweepBatchSize)
-                .ToListAsync();
+                .ToListAsync(cancellationToken);
             if (stranded.Count == 0) return 0;
 
             _logger.LogWarning(
@@ -1288,13 +1502,14 @@ namespace ERP_RFQ_Automation.Services
             var recovered = 0;
             foreach (var ingest in stranded)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 try
                 {
                     if (string.IsNullOrWhiteSpace(ingest.RawEmailPath) || !File.Exists(ingest.RawEmailPath))
                     {
                         ingest.ParseStatus = STATUS_RAW_MESSAGE_LOST;
                         ingest.ParsedAt = DateTime.UtcNow;
-                        await context.SaveChangesAsync();
+                        await context.SaveChangesAsync(cancellationToken);
                         _logger.LogError(
                             "Stranded ingest {IngestId} ({MessageId}) has no retained raw message at "
                             + "'{Path}'; it cannot be recovered and is marked '{Status}'.",
@@ -1328,12 +1543,13 @@ namespace ERP_RFQ_Automation.Services
                               && occurrence.LogicalGroupKey == groupKey
                               && job.BusinessUnitId == businessUnitId
                         select new { job.Status, job.Attempts, job.MaxAttempts })
-                        .ToListAsync();
+                        .ToListAsync(cancellationToken);
 
                     var alreadyEnqueued = jobStates.Count > 0 || await context
                         .Set<ERP_RFQ_Automation.DocumentIntelligence.Persistence.SourceDocumentOccurrence>()
                         .AsNoTracking()
-                        .AnyAsync(o => o.BusinessUnitId == businessUnitId && o.LogicalGroupKey == groupKey);
+                        .AnyAsync(o => o.BusinessUnitId == businessUnitId && o.LogicalGroupKey == groupKey,
+                            cancellationToken);
                     if (alreadyEnqueued)
                     {
                         var runnable = jobStates.Any(j =>
@@ -1346,7 +1562,7 @@ namespace ERP_RFQ_Automation.Services
                         if (runnable)
                         {
                             ingest.ParseStatus = STATUS_QUEUED; // persister flips to Success/NeedsReview
-                            await context.SaveChangesAsync();
+                            await context.SaveChangesAsync(cancellationToken);
                             recovered++;
                             _logger.LogInformation(
                                 "Stranded ingest {IngestId} already had live extraction work under "
@@ -1363,14 +1579,14 @@ namespace ERP_RFQ_Automation.Services
                             .AsNoTracking()
                             .Where(a => a.BusinessUnitId == businessUnitId && a.EmailIngestId == ingest.Id)
                             .Select(a => (ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryAssemblyStatus?)a.Status)
-                            .FirstOrDefaultAsync();
+                            .FirstOrDefaultAsync(cancellationToken);
                         ingest.ParseStatus =
                             ERP_RFQ_Automation.Ingestion.Assembly.EmailInquiryLedgerReconciliation.StatusFor(
                                 STATUS_QUEUED, assemblyStatus, hasRunnableJob: false,
                                 hasStoppedJob: jobStates.Count > 0)
                             ?? STATUS_QUEUED;
                         ingest.ParsedAt = DateTime.UtcNow;
-                        await context.SaveChangesAsync();
+                        await context.SaveChangesAsync(cancellationToken);
                         recovered++;
                         _logger.LogWarning(
                             "Stranded ingest {IngestId} had extraction work under {GroupKey} but "
@@ -1383,7 +1599,7 @@ namespace ERP_RFQ_Automation.Services
                     MimeMessage message;
                     await using (var stream = File.OpenRead(ingest.RawEmailPath))
                     {
-                        message = await MimeMessage.LoadAsync(stream);
+                        message = await MimeMessage.LoadAsync(stream, cancellationToken);
                     }
 
                     // The verdict is deliberately ignored: this message was released by the
@@ -1391,11 +1607,16 @@ namespace ERP_RFQ_Automation.Services
                     // capture that still cannot complete leaves the row Pending for the next
                     // sweep, which is exactly the retry this pass exists to provide.
                     await RouteIngestAsync(
-                        message, ingest, ingest.EmailConfiguration, context, llmService, intake);
+                        message, ingest, ingest.EmailConfiguration, context, llmService, intake,
+                        cancellationToken: cancellationToken);
                     recovered++;
                     _logger.LogInformation(
                         "Stranded ingest {IngestId} ({MessageId}) re-routed; ParseStatus is now '{Status}'.",
                         ingest.Id, ingest.MessageId, ingest.ParseStatus);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
                 }
                 catch (Exception ex)
                 {
@@ -1635,8 +1856,10 @@ namespace ERP_RFQ_Automation.Services
         /// </summary>
         internal async Task<(long leadId, string extractedText)> SaveLeadFromEmailAndAttachments(
             MimeMessage message, EmailIngest ingest, EmailConfiguration config,
-            ErpRfqAutomationContext context, ILLMService llmService)
+            ErpRfqAutomationContext context, ILLMService llmService,
+            CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             // Extract text from email body and attachments
             string extracted = GetEmailBody(message);
             string attachmentsText = "";
@@ -1658,6 +1881,7 @@ namespace ERP_RFQ_Automation.Services
             var attachmentOrdinal = 0;
             foreach (var att in message.Attachments)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 attachmentOrdinal++;
                 if (att is not MimePart part)
                 {
@@ -1713,6 +1937,7 @@ namespace ERP_RFQ_Automation.Services
                 }
             });
             var attachmentResults = await Task.WhenAll(attachmentTasks);
+            cancellationToken.ThrowIfCancellationRequested();
             // ING-04: separate genuine text from the scanned-PDF marker. The marker never reaches
             // the LLM; it only signals that a scanned/image-only PDF could not be OCR'd so the
             // ingest is routed to review instead of silently producing an empty lead.
@@ -1757,7 +1982,8 @@ namespace ERP_RFQ_Automation.Services
             {
                 var ai = await llmService.ExtractLeadDataAsync(limitedText,
                     new AiCallContext(config.BusinessUnitId, AiPurposes.RfqExtraction,
-                        $"email-ingest:{ingest.Id}", AiPromptVersions.StructuredRfqExtraction));
+                        $"email-ingest:{ingest.Id}", AiPromptVersions.StructuredRfqExtraction),
+                    cancellationToken);
                 // Smart validation: Lower threshold if email clearly looks like RFQ
                 var minConfidence = HasStrongRFQIndicators(message, ai)
                     ? MIN_CONFIDENCE_WITH_VALIDATION
@@ -1809,7 +2035,7 @@ namespace ERP_RFQ_Automation.Services
                     isDuplicate = await context.Leads.AnyAsync(l =>
                         l.BusinessUnitId == businessUnitId &&
                         l.Rfqno == ai.Rfqno &&
-                        l.BuyersName == ai.BuyersName);
+                        l.BuyersName == ai.BuyersName, cancellationToken);
                 }
                 else if (!string.IsNullOrWhiteSpace(ai.BuyersName))
                 {
@@ -1823,7 +2049,7 @@ namespace ERP_RFQ_Automation.Services
                             l.NoOfLineItems == ai.Items.Count &&
                             l.LeadItems.Any(li =>
                                 li.CommodityProduct == firstItem.CommodityProduct &&
-                                li.Quantity == firstItem.Quantity));
+                                li.Quantity == firstItem.Quantity), cancellationToken);
                     }
                 }
 
@@ -1850,7 +2076,7 @@ namespace ERP_RFQ_Automation.Services
                 var strategy = context.Database.CreateExecutionStrategy();
                 return await strategy.ExecuteAsync(async () =>
                 {
-                await using var transaction = await context.Database.BeginTransactionAsync();
+                await using var transaction = await context.Database.BeginTransactionAsync(cancellationToken);
                 try
                 {
                     // Parse dates
@@ -1892,7 +2118,7 @@ namespace ERP_RFQ_Automation.Services
                         EmailIngestsId = ingest.Id
                     };
                     context.Leads.Add(lead);
-                    await context.SaveChangesAsync();
+                    await context.SaveChangesAsync(cancellationToken);
                     
                     // Add line items
                     foreach (var aiItem in items)
@@ -1900,7 +2126,7 @@ namespace ERP_RFQ_Automation.Services
                         context.LeadItems.Add(CreateLeadItem(lead.Id, aiItem));
                     }
                     if (items.Count > 0)
-                        await context.SaveChangesAsync();
+                        await context.SaveChangesAsync(cancellationToken);
 
                     // Canonical identity, in the SAME transaction as the lead and its lines.
                     //
@@ -1933,11 +2159,13 @@ namespace ERP_RFQ_Automation.Services
                                 "Email",
                                 "Inbound email: commercial facts were extracted from the message and its "
                                 + "attachments. Canonical identity established at creation.",
-                                "Service", "email-poller", $"email-lead:{config.BusinessUnitId}:{lead.Id}"));
+                                "Service", "email-poller", $"email-lead:{config.BusinessUnitId}:{lead.Id}"),
+                            cancellationToken);
 
                     // Save attachments. Anything storage refuses is appended to the SAME durable
                     // skip record, so the ingest carries one complete list.
-                    var storageSkips = await SaveAttachmentsAsync(message, lead.Id, context);
+                    var storageSkips = await SaveAttachmentsAsync(
+                        message, lead.Id, context, cancellationToken);
                     if (storageSkips.Count > 0)
                     {
                         skippedAttachments.AddRange(storageSkips);
@@ -1945,7 +2173,7 @@ namespace ERP_RFQ_Automation.Services
                     }
 
                     // Commit transaction - all or nothing
-                    await transaction.CommitAsync();
+                    await transaction.CommitAsync(cancellationToken);
                     
                     _logger.LogInformation(
                         "Successfully created lead {LeadId} from email: {Subject}",
@@ -1954,11 +2182,15 @@ namespace ERP_RFQ_Automation.Services
                 }
                 catch (Exception txEx)
                 {
-                    await transaction.RollbackAsync();
+                    await transaction.RollbackAsync(CancellationToken.None);
                     _logger.LogError(txEx, "Transaction rolled back for email: {Subject}", message.Subject);
                     throw; // Re-throw to outer catch
                 }
                 });
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
             }
             catch (Exception ex)
             {
@@ -2471,7 +2703,7 @@ namespace ERP_RFQ_Automation.Services
         /// to exist between the mailbox and the lead.
         /// </summary>
         private async Task<IReadOnlyList<string>> SaveAttachmentsAsync(MimeMessage message, long leadId,
-            ErpRfqAutomationContext context)
+            ErpRfqAutomationContext context, CancellationToken cancellationToken = default)
         {
             var skipped = new List<string>();
             void RecordSkipped(string fileName, string reason)
@@ -2487,6 +2719,7 @@ namespace ERP_RFQ_Automation.Services
             var ordinal = 0;
             foreach (var entity in message.Attachments)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 ordinal++;
                 if (entity is not MimePart part)
                 {
@@ -2521,7 +2754,7 @@ namespace ERP_RFQ_Automation.Services
                     long size = 0;
                     using (var tempStream = new MemoryStream())
                     {
-                        await part.Content.DecodeToAsync(tempStream);
+                        await part.Content.DecodeToAsync(tempStream, cancellationToken);
                         size = tempStream.Length;
                         
                         if (size > MAX_ATTACHMENT_SIZE)
@@ -2534,8 +2767,8 @@ namespace ERP_RFQ_Automation.Services
                         // Write to disk only if size is acceptable
                         tempStream.Position = 0;
                         await using var fileStream = File.Create(physicalPath);
-                        await tempStream.CopyToAsync(fileStream);
-                        await fileStream.FlushAsync();
+                        await tempStream.CopyToAsync(fileStream, cancellationToken);
+                        await fileStream.FlushAsync(cancellationToken);
                     }
 
                     // Add to database (thread-safe since we're sequential now)
@@ -2552,6 +2785,14 @@ namespace ERP_RFQ_Automation.Services
                         UploadedDate = DateTime.UtcNow
                     });
                 }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    if (File.Exists(physicalPath))
+                    {
+                        try { File.Delete(physicalPath); } catch { /* best-effort cleanup */ }
+                    }
+                    throw;
+                }
                 catch (Exception ex)
                 {
                     _logger.LogWarning(ex, "Failed to save attachment: {File}", safeName);
@@ -2566,7 +2807,7 @@ namespace ERP_RFQ_Automation.Services
 
             // Save all attachments at once
             if (message.Attachments.Any())
-                await context.SaveChangesAsync();
+                await context.SaveChangesAsync(cancellationToken);
 
             return skipped;
         }

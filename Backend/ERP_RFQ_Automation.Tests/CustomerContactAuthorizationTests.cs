@@ -214,7 +214,6 @@ public sealed class CustomerContactAuthorizationTests
     {
         var methods = new[]
         {
-            typeof(FileController).GetMethod(nameof(FileController.DownloadAttachment))!,
             typeof(LeadController).GetMethod(nameof(LeadController.GetEmailConfigurations))!,
             typeof(LeadController).GetMethod(nameof(LeadController.GetRejectionReasons))!
         };
@@ -225,6 +224,14 @@ public sealed class CustomerContactAuthorizationTests
             Assert.Equal("Leads", permission.ModuleName);
             Assert.Equal(PermissionAction.View, permission.Action);
         }
+
+        // Attachments are polymorphic and therefore authorize dynamically: Lead evidence uses
+        // Leads/View while customer-PO evidence uses Customer Awards/View.
+        var attachment = typeof(FileController).GetMethod(nameof(FileController.DownloadAttachment))!;
+        Assert.Empty(attachment.GetCustomAttributes<RequireModulePermissionAttribute>(true));
+        var source = File.ReadAllText(Path.Combine(
+            FindRepositoryRoot(), "Backend/ERP_RFQ_Automation/Controllers/FileController.cs"));
+        Assert.Contains("isLead ? \"Leads\" : \"Customer Awards\"", source, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -326,6 +333,15 @@ public sealed class CustomerContactAuthorizationTests
     private static ClaimsPrincipal Principal(long tenant) => new(new ClaimsIdentity(
         [new Claim(ClaimTypes.NameIdentifier, "test-user"), new Claim("businessUnitId", tenant.ToString())],
         "Test"));
+
+    private static string FindRepositoryRoot()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null && !Directory.Exists(Path.Combine(directory.FullName, "Backend")))
+            directory = directory.Parent;
+        return directory?.FullName
+            ?? throw new DirectoryNotFoundException("Could not locate repository root.");
+    }
 
     private sealed class RejectingFileInspectionService : IFileInspectionService
     {

@@ -4,19 +4,13 @@ using Microsoft.EntityFrameworkCore;
 namespace ERP_RFQ_Automation.CommercialCases.Lifecycle;
 
 /// <summary>
-/// The ONE set of gates a lead must clear before it becomes an RFQ, shared by every
-/// door that can create a lead-linked RFQ:
+/// The eligibility checks retained for historical compatibility and diagnostics.
+/// Direct-conversion callers are tombstones and cannot invoke this gate or create an RFQ;
+/// the governed RFQ Promotion service owns the live Lead-origin creation boundary.
 ///
-///  1. <c>LeadRepository.ConvertLeadToRfqAsync</c> (POST /api/Lead/{id}/convert-to-rfq),
-///  2. <c>LeadConversionIntelligence.ConvertAsync</c> (POST /api/ConversionIntelligence/{id}/convert
-///     and the agent tool), and
-///  3. <c>RfqRepository.AddAsync</c> when POST /api/Rfq names a LeadId.
-///
-/// Before this type existed, doors 1 and 2 each carried their own copy of these checks
-/// (already drifting in message wording) and door 3 carried none — a raw POST /api/Rfq
-/// with a LeadId silently created a second RFQ for a lead that already had one, on an
-/// unqualified lead, past the duplicate flag, past extraction review. Duplicated gates
-/// are gates that drift; a door with no gate is not a door.
+/// Historically, three direct doors carried drifting copies of these checks. They are retired;
+/// retaining only this non-persisting policy avoids leaving executable RFQ construction code
+/// behind a throw statement where a future refactor could accidentally reconnect it.
 ///
 /// The database-level backstop for the same invariant is the partial unique index on
 /// RFQ."LeadID" (one non-null LeadID per RFQ row): these checks are the friendly,

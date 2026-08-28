@@ -122,23 +122,40 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
                 JsonSerializer.Deserialize<string[]>(replay.DecisionReasonsJson) ?? [], false);
         }
 
-        var exactLeadId = await _db.Set<LeadIngestionOccurrence>().AsNoTracking()
-            .Where(o => o.BusinessUnitId == candidate.BusinessUnitId && o.LeadId.HasValue && o.LogicalInquiryFingerprint == fingerprint
+        // Source identity is authoritative. Source bytes are authoritative within the same
+        // customer AND customer-RFQ identity; one physical document may legitimately contain two
+        // inquiries, so hash alone must not collapse governed split results. Neither signal may
+        // depend on a second extraction producing the same logical fingerprint: model output can
+        // vary for identical bytes, and a delayed recovery may run after a newer amendment. In
+        // that case treating the old source as a revision rolls the canonical Lead backwards.
+        // Bind the duplicate to the revision established by the original occurrence, while the
+        // Lead's current projection remains on the latest amendment.
+        var exactOccurrence = await _db.Set<LeadIngestionOccurrence>().AsNoTracking()
+            .Where(o => o.BusinessUnitId == candidate.BusinessUnitId && o.LeadId.HasValue
                 && ((!string.IsNullOrWhiteSpace(intake.ExternalSourceId) && o.SourceChannel == intake.SourceChannel && o.ExternalSourceId == intake.ExternalSourceId)
-                    || (!string.IsNullOrWhiteSpace(intake.ContentHash) && scope != null && o.ContentHash == intake.ContentHash && o.CustomerScopeKey == scope)))
-            .OrderByDescending(o => o.Id).Select(o => o.LeadId).FirstOrDefaultAsync(ct);
-        if (exactLeadId.HasValue)
+                    || (!string.IsNullOrWhiteSpace(intake.ContentHash) && scope != null
+                        && o.ContentHash == intake.ContentHash && o.CustomerScopeKey == scope
+                        && (normalizedRfq != null
+                            ? o.LeadRevisionId.HasValue && _db.Set<LeadRevision>().Any(r =>
+                                r.Id == o.LeadRevisionId.Value && r.BusinessUnitId == o.BusinessUnitId
+                                && r.NormalizedCustomerRfqReference == normalizedRfq)
+                            : o.LogicalInquiryFingerprint == fingerprint))))
+            .OrderByDescending(o => o.Id)
+            .Select(o => new { LeadId = o.LeadId!.Value, o.LeadRevisionId })
+            .FirstOrDefaultAsync(ct);
+        if (exactOccurrence is not null)
         {
-            var exact = await _db.Leads.AsNoTracking().SingleAsync(x => x.BusinessUnitId == candidate.BusinessUnitId && x.Id == exactLeadId.Value, ct);
+            var exact = await _db.Leads.AsNoTracking().SingleAsync(x => x.BusinessUnitId == candidate.BusinessUnitId && x.Id == exactOccurrence.LeadId, ct);
+            var matchedRevisionId = exactOccurrence.LeadRevisionId ?? exact.CurrentRevisionId;
             var occurrence = NewOccurrence(candidate.BusinessUnitId, intake, fingerprint, scope,
-                LeadOccurrenceClassification.ExactDuplicate, 1m, ["High-trust source identity or exact content within the same customer scope."], exact.Id, exact.CurrentRevisionId);
+                LeadOccurrenceClassification.ExactDuplicate, 1m, ["High-trust source identity or exact content within the same customer scope."], exact.Id, matchedRevisionId);
             await EnsureBatchAsync(candidate.BusinessUnitId, intake, ct); _db.Add(occurrence);
             // Saved before the audit so the event carries the real occurrence id: an audit row
             // that cannot be joined back to its occurrence is not an audit trail.
             await _db.SaveChangesAsync(ct);
             AddAudit(occurrence, exact.Id, "INGESTION_DUPLICATE_RECORDED", intake, new { exact.CurrentRevisionNumber });
             await _db.SaveChangesAsync(ct); if (ownsTransaction) await tx.CommitAsync(ct);
-            return new(exact.Id, exact.CommercialCaseReference, occurrence.Id, exact.CurrentRevisionId,
+            return new(exact.Id, exact.CommercialCaseReference, occurrence.Id, matchedRevisionId,
                 exact.CurrentRevisionNumber, occurrence.Classification, occurrence.Confidence, occurrence.DecisionReasons(), false);
         }
 
@@ -214,7 +231,7 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         var strong = strongLeadId.HasValue
             ? candidates.FirstOrDefault(x => x.Id == strongLeadId.Value)
                 ?? await _db.Leads.Include(x => x.LeadItems).SingleAsync(x => x.BusinessUnitId == candidate.BusinessUnitId && x.Id == strongLeadId.Value, ct)
-            : candidates.FirstOrDefault(x => scope is not null && CustomerScope(x, null) == scope
+            : candidates.FirstOrDefault(x => CustomerEvidence(candidate, intake.Sender, x) == MatchEvidence.Corroborating
                 && normalizedRfq is not null && CustomerReference(x) == normalizedRfq);
         if (strong is not null)
             return await CreateRevisionAsync(strong, candidate, intake, fingerprint, scope,
@@ -226,7 +243,7 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         // makes an unrelated lead score marginally higher.
         var scored = candidates
             .Select(x => new MatchAssessment(x, Similarity(candidate, x),
-                Evidence(scope, CustomerScope(x, null)),
+                CustomerEvidence(candidate, intake.Sender, x),
                 ReferenceEvidence(normalizedRfq, CustomerReference(x)),
                 ReferenceAmends(normalizedRfq, CustomerReference(x)),
                 groupedLeadIds.Contains(x.Id),
@@ -1383,6 +1400,35 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         if (x.CustomerId.HasValue) return $"customer:{x.CustomerId}";
         if (Normalize(x.Clientemail ?? sender) is { } email) return $"email:{email}";
         return Normalize(x.BuyersName) is { } buyer ? $"buyer:{buyer}" : null;
+    }
+
+    /// <summary>
+    /// Compares customer identity on the strongest axis BOTH documents can actually state.
+    /// A canonical Lead commonly has a resolved CustomerId while a later uploaded amendment can
+    /// only repeat the buyer name printed on the document. Those are different identity TYPES,
+    /// not contradictory values. Treating <c>customer:42</c> and <c>buyer:sec bid desk</c> as two
+    /// different customers stranded genuine amendments in possible-match review after the Lead
+    /// had been promoted. Like-for-like disagreement remains a hard contradiction.
+    /// </summary>
+    private static MatchEvidence CustomerEvidence(Lead incoming, string? sender, Lead existing)
+    {
+        if (incoming.CustomerId.HasValue && existing.CustomerId.HasValue)
+            return incoming.CustomerId == existing.CustomerId
+                ? MatchEvidence.Corroborating : MatchEvidence.Contradicting;
+
+        var incomingEmail = Normalize(incoming.Clientemail ?? sender);
+        var existingEmail = Normalize(existing.Clientemail);
+        if (incomingEmail is not null && existingEmail is not null)
+            return incomingEmail == existingEmail
+                ? MatchEvidence.Corroborating : MatchEvidence.Contradicting;
+
+        var incomingBuyer = Normalize(incoming.BuyersName);
+        var existingBuyer = Normalize(existing.BuyersName);
+        if (incomingBuyer is not null && existingBuyer is not null)
+            return incomingBuyer == existingBuyer
+                ? MatchEvidence.Corroborating : MatchEvidence.Contradicting;
+
+        return MatchEvidence.Absent;
     }
     private static string? Normalize(string? value) { if (string.IsNullOrWhiteSpace(value)) return null; var v = NonWord.Replace(value.Trim().ToLowerInvariant(), ""); return v.Length == 0 ? null : v; }
     private static string Hash(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();

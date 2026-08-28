@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -28,6 +29,17 @@ const renderRail = () =>
       <Sidebar collapsed={false} />
     </MemoryRouter>,
   );
+
+const CollapsedRailHarness = () => {
+  const [collapsed, setCollapsed] = useState(true);
+
+  return (
+    <>
+      <output aria-label="Rail state">{collapsed ? 'collapsed' : 'expanded'}</output>
+      <Sidebar collapsed={collapsed} onRequestExpand={() => setCollapsed(false)} />
+    </>
+  );
+};
 
 describe('the rail keeps operational workspaces discoverable', () => {
   beforeEach(() => {
@@ -64,6 +76,27 @@ describe('the rail keeps operational workspaces discoverable', () => {
   it('keeps the searchable directory as a fallback', () => {
     renderRail();
     expect(screen.getByRole('button', { name: 'Screen directory' })).toBeInTheDocument();
+  });
+
+  it('opens the requested workspace when its collapsed icon is activated', () => {
+    render(
+      <MemoryRouter initialEntries={['/inbox']}>
+        <CollapsedRailHarness />
+      </MemoryRouter>,
+    );
+
+    const catalogue = screen.getByRole('button', { name: 'Catalogue & stock' });
+    expect(screen.getByRole('status', { name: 'Rail state' })).toHaveTextContent('collapsed');
+    expect(screen.queryByRole('button', { name: 'Products' })).not.toBeInTheDocument();
+
+    fireEvent.click(catalogue);
+
+    expect(screen.getByRole('status', { name: 'Rail state' })).toHaveTextContent('expanded');
+    expect(screen.getByRole('button', { name: 'Catalogue & stock' })).toHaveAttribute(
+      'aria-expanded',
+      'true',
+    );
+    expect(screen.getByRole('button', { name: 'Products' })).toBeInTheDocument();
   });
 
   it('renders only list items as direct children of every list', () => {

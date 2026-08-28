@@ -33,6 +33,7 @@ import {
 interface SidebarProps {
   collapsed: boolean;
   onNavigate?: () => void;
+  onRequestExpand?: () => void;
 }
 
 /**
@@ -109,7 +110,7 @@ export const isPrimaryActive = (
   return (item.views ?? []).some((view) => isPathMatched(view.path, location, view.activePrefixes));
 };
 
-const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
+const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate, onRequestExpand }) => {
   const navigate = useNavigate();
   const location = useLocation();
   const { t } = useTranslation();
@@ -238,7 +239,17 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onNavigate }) => {
       <ListItem key={group.key} disablePadding sx={{ display: 'block', mb: 0.5 }}>
         <Tooltip title={collapsed ? group.title : ''} placement="right">
           <ListItemButton
-            onClick={() => setOpenGroups((prev) => ({ ...prev, [group.key]: !prev[group.key] }))}
+            onClick={() => {
+              if (collapsed) {
+                // A collapsed workspace control used to toggle state for a list that could not be
+                // rendered, so it appeared dead. The first click now reveals the rail and the
+                // requested workspace; the second click behaves like the normal disclosure.
+                setOpenGroups((prev) => ({ ...prev, [group.key]: true }));
+                onRequestExpand?.();
+                return;
+              }
+              setOpenGroups((prev) => ({ ...prev, [group.key]: !isOpen }));
+            }}
             selected={isSelected}
             aria-expanded={hasCollapsibleGroup ? isOpen : undefined}
             aria-controls={hasCollapsibleGroup && isOpen ? groupListId : undefined}

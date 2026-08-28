@@ -325,6 +325,10 @@ public sealed class LifecycleApplicationService : ILifecycleApplicationService
             && aggregate.RequiresCommercialReview && !aggregate.CommercialFactsVerified)
             throw new LifecycleValidationException(
                 "AI-extracted commercial facts must be approved before the lead can be qualified.");
+        if (aggregateType == LeadAggregate && targetCode == "QUALIFIED"
+            && aggregate.HasUnresolvedCurrentQuantity)
+            throw new LifecycleValidationException(
+                "Every current Lead line must have a positive quantity before the lead can be qualified.");
 
         // A lead that ends before a quotation exists must say WHY, using the same governed
         // vocabulary a quote outcome uses. Resolved BEFORE anything is mutated, so an ungoverned
@@ -432,7 +436,7 @@ public sealed class LifecycleApplicationService : ILifecycleApplicationService
     {
         if (aggregateType == LeadAggregate)
         {
-            var lead = await _db.Leads.Include(x => x.LeadStatus)
+            var lead = await _db.Leads.Include(x => x.LeadStatus).Include(x => x.LeadItems)
                 .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.Id == aggregateId, ct)
                 ?? throw new LifecycleNotFoundException("Lead was not found.");
             return LifecycleAggregate.ForLead(lead);
@@ -635,6 +639,8 @@ public sealed class LifecycleApplicationService : ILifecycleApplicationService
             Version = lead.LifecycleVersion;
             RequiresCommercialReview = lead.RequiresCommercialReview;
             CommercialFactsVerified = lead.CommercialFactsVerified;
+            HasUnresolvedCurrentQuantity = lead.LeadItems.Any(item =>
+                item.IsCurrentRevisionProjection && (item.Quantity is null or <= 0));
         }
         private LifecycleAggregate(Rfq rfq)
         {
@@ -668,6 +674,7 @@ public sealed class LifecycleApplicationService : ILifecycleApplicationService
         public int Version { get; private set; }
         public bool RequiresCommercialReview { get; }
         public bool CommercialFactsVerified { get; }
+        public bool HasUnresolvedCurrentQuantity { get; }
         public static LifecycleAggregate ForLead(Lead lead) => new(lead);
         public static LifecycleAggregate ForRfq(Rfq rfq) => new(rfq);
         public static LifecycleAggregate ForQuote(Quote quote) => new(quote);

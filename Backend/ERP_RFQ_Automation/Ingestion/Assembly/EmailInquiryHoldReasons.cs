@@ -119,6 +119,15 @@ public static class EmailInquiryHoldReasons
         + "email is retained. Read it before replying: this is not a message that asked for "
         + "nothing.";
 
+    /// <summary>The same strong item identity carries contradictory quote-critical values in
+    /// different message parts. Neither source is silently preferred.</summary>
+    public const string CrossComponentCommercialConflict = "assembly_commercial_value_conflict";
+
+    public const string CrossComponentCommercialConflictDetail =
+        "Different parts of this email give conflicting quantity, unit, currency or price for "
+        + "the same item. No inquiry was created because Nexora cannot safely choose one source. "
+        + "Review the original email and attachments, then reprocess the corrected request.";
+
     /// <summary>
     /// The message merged cleanly, but the persist path produced no Lead.
     ///

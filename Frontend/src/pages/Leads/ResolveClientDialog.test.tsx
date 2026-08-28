@@ -12,6 +12,16 @@ const submitReview = vi.fn();
 const getAll = vi.fn();
 const createCustomer = vi.fn();
 const getByCustomer = vi.fn();
+const testAccess = vi.hoisted(() => ({ denied: new Set<string>(), check: vi.fn() }));
+
+vi.mock('../../context/AuthContext', () => ({
+  useAuth: () => ({
+    hasPermission: (moduleName: string, action = 'view') => {
+      testAccess.check(moduleName, action);
+      return !testAccess.denied.has(`${moduleName}:${action}`);
+    },
+  }),
+}));
 
 vi.mock('../../api/services/leadService', () => ({
   default: {
@@ -73,6 +83,7 @@ const wrapper = ({ children }: { children: ReactNode }) => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  testAccess.denied.clear();
   getById.mockResolvedValue(lead());
   getClientCandidates.mockResolvedValue(CANDIDATES);
   getAll.mockResolvedValue({ items: [], totalCount: 0, pageNumber: 1, pageSize: 10 });
@@ -224,6 +235,32 @@ describe('ResolveClientDialog', () => {
       ));
     });
 
+    it('hides customer creation when Customers:create is denied', async () => {
+      testAccess.denied.add('Customers:create');
+      render(
+        <ResolveClientDialog
+          open
+          leadId={501}
+          lead={lead()}
+          prefill={{ name: 'Fulton County Government' }}
+          onClose={() => {}}
+        />,
+        { wrapper },
+      );
+
+      await screen.findByText('Saudi Electricity Company');
+      fireEvent.change(screen.getByLabelText(/Search all clients by name/i), {
+        target: { value: 'Fulton County Government' },
+      });
+      await waitFor(() => expect(getAll).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'Fulton County Government' }),
+      ));
+      expect(screen.queryByRole('button', {
+        name: /Create .*Fulton County Government.* as a new client/i,
+      })).not.toBeInTheDocument();
+      expect(createCustomer).not.toHaveBeenCalled();
+    });
+
     it('selects the new client but does not link it — that stays a separate, explicit act', async () => {
       const create = await searchForNothing();
       create.click();
@@ -240,5 +277,46 @@ describe('ResolveClientDialog', () => {
       // be correctable before anything is attached to the enquiry.
       expect(linkClient).not.toHaveBeenCalled();
     });
+
+    it('re-checks Customers:create at the write boundary', async () => {
+      const create = await searchForNothing();
+      create.click();
+      const submit = await screen.findByRole('button', { name: /^Create client$/i });
+
+      // Simulates revocation between the rendered affordance and the click event.
+      testAccess.denied.add('Customers:create');
+      testAccess.check.mockClear();
+      submit.click();
+
+      await waitFor(() => expect(testAccess.check).toHaveBeenCalledWith('Customers', 'create'));
+      expect(createCustomer).not.toHaveBeenCalled();
+    });
+  });
+
+  it('closes a retained host dialog when Lead edit authority becomes stale or revoked', async () => {
+    const view = render(
+      <ResolveClientDialog open leadId={501} lead={lead()} onClose={() => {}} />,
+      { wrapper },
+    );
+    await screen.findByRole('dialog');
+
+    testAccess.denied.add('Leads:edit');
+    view.rerender(<ResolveClientDialog open leadId={501} lead={lead()} onClose={() => {}} />);
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  });
+
+  it('re-checks Lead edit authority at the link boundary', async () => {
+    render(<ResolveClientDialog open leadId={501} lead={lead()} onClose={() => {}} />, { wrapper });
+    (await screen.findAllByRole('radio'))[0].click();
+    const confirm = await screen.findByRole('button', { name: /Confirm client/i });
+
+    // No rerender: this is the last-millisecond race after a stale/revoked snapshot is known.
+    testAccess.denied.add('Leads:edit');
+    testAccess.check.mockClear();
+    confirm.click();
+
+    await waitFor(() => expect(testAccess.check).toHaveBeenCalledWith('Leads', 'edit'));
+    expect(linkClient).not.toHaveBeenCalled();
   });
 });

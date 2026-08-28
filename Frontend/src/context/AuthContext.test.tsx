@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import {
   AuthProvider,
   PERMISSION_SCHEMA_VERSION,
+  PERMISSIONS_STALE_MS,
   useAuth,
   type Permission,
 } from './AuthContext';
@@ -34,13 +35,14 @@ const mePayload = (overrides: Record<string, unknown> = {}) => ({
   businessUnitId: 1,
   isSuperAdmin: false,
   isManager: false,
+  hasModuleAuthorityByRank: false,
   permissions: [],
   ...overrides,
 });
 
 /** Surfaces the pieces of the context under assertion as plain text. */
 const Probe = () => {
-  const { hasPermission, hasEntitlement, permissionsError, userData } = useAuth();
+  const { hasPermission, hasEntitlement, permissionsError, permissionsStale, userData } = useAuth();
   return (
     <div>
       <span data-testid="full-nav">{String(hasEntitlement('capability.full-navigation'))}</span>
@@ -51,6 +53,7 @@ const Probe = () => {
       <span data-testid="unknown-module">{String(hasPermission('Leads', 'view'))}</span>
       <span data-testid="role">{userData.roleName ?? 'none'}</span>
       <span data-testid="error">{permissionsError ?? 'none'}</span>
+      <span data-testid="stale">{String(permissionsStale)}</span>
     </div>
   );
 };
@@ -59,6 +62,7 @@ const renderAuth = () => render(<AuthProvider><Probe /></AuthProvider>);
 
 describe('AuthContext', () => {
   beforeEach(() => {
+    vi.useRealTimers();
     localStorage.clear();
     sessionStorage.clear();
     getMyPermissions.mockReset();
@@ -159,6 +163,42 @@ describe('AuthContext', () => {
     expect(screen.getByTestId('unknown-module')).toHaveTextContent('true');
   });
 
+  it('adminRankAuthority_matchesPermissionHandler_evenWithZeroRows', async () => {
+    localStorage.setItem('token', TOKEN);
+    getMyPermissions.mockResolvedValue(mePayload({
+      roleName: 'Tenant Admin',
+      isSuperAdmin: false,
+      isManager: true,
+      hasModuleAuthorityByRank: true,
+      permissions: [],
+    }));
+
+    renderAuth();
+
+    await waitFor(() => expect(screen.getByTestId('stale')).toHaveTextContent('false'));
+    expect(screen.getByTestId('view')).toHaveTextContent('true');
+    expect(screen.getByTestId('create')).toHaveTextContent('true');
+    expect(screen.getByTestId('edit')).toHaveTextContent('true');
+    expect(screen.getByTestId('delete')).toHaveTextContent('true');
+    expect(screen.getByTestId('unknown-module')).toHaveTextContent('true');
+  });
+
+  it('managerWithZeroRows_doesNotInheritAdminModuleAuthority', async () => {
+    localStorage.setItem('token', TOKEN);
+    getMyPermissions.mockResolvedValue(mePayload({
+      roleName: 'Sales Manager',
+      isManager: true,
+      hasModuleAuthorityByRank: false,
+      permissions: [],
+    }));
+
+    renderAuth();
+
+    await waitFor(() => expect(screen.getByTestId('stale')).toHaveTextContent('false'));
+    expect(screen.getByTestId('view')).toHaveTextContent('false');
+    expect(screen.getByTestId('delete')).toHaveTextContent('false');
+  });
+
   it('discardsCachedSnapshot_whenSchemaVersionMismatches', async () => {
     // A snapshot written before `canView` existed: under v1 rules this row meant "can view".
     localStorage.setItem('token', TOKEN);
@@ -221,6 +261,64 @@ describe('AuthContext', () => {
     await waitFor(() => expect(screen.getByTestId('error')).not.toHaveTextContent('none'));
     expect(screen.getByTestId('error').textContent).toMatch(/role does not permit|administrator/i);
     expect(screen.getByTestId('view')).toHaveTextContent('false');
+    expect(screen.getByTestId('stale')).toHaveTextContent('true');
+  });
+
+  it('refreshFailure_keepsCachedReadsButSuppressesStaleMutations', async () => {
+    localStorage.setItem('token', TOKEN);
+    localStorage.setItem('userData', JSON.stringify({
+      id: 2,
+      roleName: 'Cached RFQ Owner',
+      schemaVersion: PERMISSION_SCHEMA_VERSION,
+      permissions: [permission({
+        moduleName: 'Users', canView: true, canCreate: true, canEdit: true, canDelete: true,
+      })],
+    }));
+    getMyPermissions.mockRejectedValue(new Error('network unavailable'));
+
+    renderAuth();
+
+    await waitFor(() => expect(screen.getByTestId('error')).not.toHaveTextContent('none'));
+    expect(screen.getByTestId('stale')).toHaveTextContent('true');
+    expect(screen.getByTestId('view')).toHaveTextContent('true');
+    expect(screen.getByTestId('create')).toHaveTextContent('false');
+    expect(screen.getByTestId('edit')).toHaveTextContent('false');
+    expect(screen.getByTestId('delete')).toHaveTextContent('false');
+  });
+
+  it('activeTab_revalidatesAtExpiry_andSuppressesMutationsWhileRefreshIsPending', async () => {
+    vi.useFakeTimers();
+    localStorage.setItem('token', TOKEN);
+    let resolveRefresh: (value: unknown) => void = () => {};
+    getMyPermissions
+      .mockResolvedValueOnce(mePayload({
+        permissions: [permission({ moduleName: 'Users', canView: true, canEdit: true })],
+      }))
+      .mockReturnValueOnce(new Promise((resolve) => { resolveRefresh = resolve; }));
+
+    renderAuth();
+    await act(async () => { await Promise.resolve(); });
+
+    expect(screen.getByTestId('stale')).toHaveTextContent('false');
+    expect(screen.getByTestId('edit')).toHaveTextContent('true');
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(PERMISSIONS_STALE_MS); });
+
+    expect(getMyPermissions).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId('stale')).toHaveTextContent('true');
+    expect(screen.getByTestId('view')).toHaveTextContent('true');
+    expect(screen.getByTestId('edit')).toHaveTextContent('false');
+
+    await act(async () => {
+      resolveRefresh(mePayload({
+        permissions: [permission({ moduleName: 'Users', canView: true, canEdit: true })],
+      }));
+      await Promise.resolve();
+    });
+
+    expect(screen.getByTestId('stale')).toHaveTextContent('false');
+    expect(screen.getByTestId('edit')).toHaveTextContent('true');
+    vi.useRealTimers();
   });
 
   it('doesNotLoadPermissions_whenThereIsNoSession', () => {

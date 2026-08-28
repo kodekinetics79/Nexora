@@ -11,6 +11,7 @@ using System.Linq;
 using System.Security.Claims;
 using System.Threading.Tasks;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
+using ERP_RFQ_Automation.CommercialCases.Promotion;
 
 namespace ERP_RFQ_Automation.Controllers
 {
@@ -650,6 +651,14 @@ namespace ERP_RFQ_Automation.Controllers
 
                 await _repository.DeleteAsync(id, businessUnitId);
                 return NoContent();
+            }
+            catch (KeyNotFoundException ex)
+            {
+                return NotFound(Problem(StatusCodes.Status404NotFound, "RFQ not found", ex.Message));
+            }
+            catch (RfqDeletionNotAllowedException ex)
+            {
+                return Conflict(Problem(StatusCodes.Status409Conflict, "RFQ cannot be permanently deleted", ex.Message));
             }
             catch (Exception ex)
             {

@@ -31,6 +31,11 @@ interface Props {
   blastRadius?: ReactNode;
   /** The API's own disclosures. Rendered verbatim — they are the legal shape of the act. */
   disclosures?: string[];
+  /**
+   * An external fail-closed prerequisite, such as a fresh server blast-radius preview.
+   * The dialog must not infer that showing warning copy is the same thing as enforcing it.
+   */
+  blocked?: boolean;
   busy?: boolean;
   onClose: () => void;
   onConfirm: (payload: { reason: string; confirmation: string }) => void;
@@ -54,6 +59,7 @@ export default function DestructiveConfirmDialog({
   confirmLabel,
   blastRadius,
   disclosures = [],
+  blocked = false,
   busy = false,
   onClose,
   onConfirm,
@@ -75,6 +81,7 @@ export default function DestructiveConfirmDialog({
   const ready =
     destructiveReasonProblem(reason) === null &&
     confirmationMatches(confirmation, confirmationRequired) &&
+    !blocked &&
     !busy;
 
   return (

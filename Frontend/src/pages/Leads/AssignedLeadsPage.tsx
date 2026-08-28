@@ -92,7 +92,7 @@ const AssignedLeadsPage: React.FC = () => {
   // render would hand it a new type each time and remount the overlay for no reason.
   const noRowsOverlay = React.useMemo(() => gridEmptyOverlay({
     title: myLeadsOnly ? 'No leads are assigned to you' : 'No leads are assigned yet',
-    message: 'A lead appears here once it has an owner, and leaves when it is converted to an RFQ.',
+    message: 'An assigned Lead stays here until a full no-bid closes it or approved Bid lines are promoted into a formal RFQ.',
     icon: <ItemsIcon sx={{ fontSize: 48 }} />,
     action: (
       <Button variant="contained" onClick={() => navigate('/procurement/leads/outstanding')} sx={{ fontWeight: 700 }}>
@@ -260,21 +260,31 @@ const AssignedLeadsPage: React.FC = () => {
     },
     {
       field: 'actions',
-      headerName: 'Details',
-      width: 100,
+      headerName: 'Next action',
+      width: 240,
       sortable: false,
       renderCell: (p) => (
-        <Box sx={{ display: 'flex', alignItems: 'center', height: '100%' }}>
-          <Tooltip title="View Detailed Intelligence">
+        <Stack direction="row" spacing={1} sx={{ alignItems: 'center', height: '100%' }}>
+          <Tooltip title="View canonical Lead">
             <IconButton
+              aria-label={`View canonical Lead ${p.row.rfqno || p.row.id}`}
               size="small"
               sx={{ color: 'primary.main', bgcolor: 'primary.lighter', '&:hover': { bgcolor: 'primary.light', color: 'white' } }}
-              onClick={() => navigate(`/leads/view/${p.row.id}`)}
+              onClick={() => navigate(`/procurement/leads/view/${p.row.id}`)}
             >
               <ViewIcon fontSize="small" />
             </IconButton>
           </Tooltip>
-        </Box>
+          <Button
+            size="small"
+            variant="contained"
+            aria-label={`Open decision workbench for ${p.row.rfqno || `Lead ${p.row.id}`}`}
+            onClick={() => navigate(`/procurement/leads/${p.row.id}/workbench`)}
+            sx={{ fontWeight: 800, whiteSpace: 'nowrap' }}
+          >
+            Decision workbench
+          </Button>
+        </Stack>
       ),
     },
   ];
@@ -285,7 +295,7 @@ const AssignedLeadsPage: React.FC = () => {
       <Box sx={{ mb: 3, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <Box>
           <Typography variant="h5" sx={{ fontWeight: 950, letterSpacing: '-0.02em', mb: 0.5 }}>{t('assigned_leads')}</Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 600 }}>Leads currently being processed by the sales team</Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 600 }}>Assigned Leads waiting for fit, participation or approved-line promotion</Typography>
         </Box>
         <Button variant="outlined" startIcon={<RefreshIcon />} onClick={() => refetch()} size="small" sx={{ fontWeight: 800 }}>Refresh Dashboard</Button>
       </Box>

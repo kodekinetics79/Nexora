@@ -489,7 +489,7 @@ describe('InboundMailTriagePage', () => {
     await screen.findByText(/Automatic reply: Cable tray enquiry/);
     listTriage.mockResolvedValue(INQUIRY_PAGE);
 
-    fireEvent.click(screen.getByRole('tab', { name: /^extracted\b/i }));
+    fireEvent.click(screen.getByRole('tab', { name: /^sent for inquiry extraction \(\d+\)$/i }));
 
     await waitFor(() => expect(listTriage).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'Inquiry' })));
     expect(await screen.findByText(/Requirement — Jebel Ali/)).toBeInTheDocument();
@@ -640,6 +640,8 @@ describe('InboundMailTriagePage — the per-ingest checkpoint never reaches the 
     renderPage();
     const row = await rowFor(/Finished and produced nothing/);
 
+    expect(screen.getByRole('columnheader', { name: 'Routing decision' })).toBeInTheDocument();
+    expect(within(row).getByText('Sent to extraction — uncertain')).toBeInTheDocument();
     expect(within(row).getByText('No inquiry — needs review')).toBeInTheDocument();
     expect(within(row).queryByRole('button', { name: /open lead/i })).not.toBeInTheDocument();
     // The word the checkpoint would have put here, which means the opposite of the truth.
@@ -650,6 +652,8 @@ describe('InboundMailTriagePage — the per-ingest checkpoint never reaches the 
     renderPage();
     const row = await rowFor(/Finished and produced a lead/);
 
+    expect(within(row).getByText('Sent to inquiry extraction')).toBeInTheDocument();
+    expect(within(row).queryByText('Extracted as inquiry')).not.toBeInTheDocument();
     expect(within(row).getByText('Inquiry created — needs your review')).toBeInTheDocument();
     fireEvent.click(within(row).getByRole('button', { name: /open lead/i }));
     expect(navigate).toHaveBeenCalledWith('/procurement/leads/view/8110');

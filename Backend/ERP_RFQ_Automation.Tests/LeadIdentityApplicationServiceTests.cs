@@ -1,6 +1,9 @@
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
+using ERP_RFQ_Automation.CommercialCases.Participation;
 using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Repositories;
+using ERP_RFQ_Automation.Sla;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
 
@@ -147,6 +150,100 @@ public sealed class LeadIdentityApplicationServiceTests
     }
 
     [Fact]
+    public async Task Buyer_named_amendment_of_resolved_customer_versions_promoted_lead_and_marks_quote_stale()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(74);
+        Seed.BusinessUnit(context, 74); Seed.EmailConfig(context, 7401, 74); Seed.EmailIngest(context, 7501, 7401, "NeedsReview");
+        Seed.Customer(context, 7601, 74, "Saudi Electricity Company");
+        await context.SaveChangesAsync();
+        var service = new LeadIdentityApplicationService(context);
+
+        var original = Candidate(74, 7501, "E2E-GOLDEN-A-PARTIAL", "bids@sec.test", 25);
+        original.BuyersName = "SEC Bid Desk";
+        var created = await service.ReconcileAsync(original,
+            Intake("resolved-customer-original", "resolved-a", Guid.NewGuid(), "bids@sec.test"));
+
+        var canonical = await context.Leads.SingleAsync(x => x.Id == created.LeadId);
+        canonical.ResolveCommercialIdentity(7601, null, "CUSTOMER_CONFIRMED");
+        var rfq = new Rfq
+        {
+            Rfqno = original.Rfqno!, BuyersName = original.BuyersName,
+            RecDate = DateTime.UtcNow, LeadId = canonical.Id,
+            CreatedBy = "test", CreatedDate = DateTime.UtcNow, BusinessUnitId = 74
+        };
+        context.Rfqs.Add(rfq);
+        await context.SaveChangesAsync();
+        var quote = new Quote
+        {
+            QuoteNo = "QT-RESOLVED-AMEND", Rfqid = rfq.Id,
+            BusinessUnitId = 74, CreatedBy = "test", CreatedDate = DateTime.UtcNow
+        };
+        context.Quotes.Add(quote);
+        await context.SaveChangesAsync();
+
+        context.ChangeTracker.Clear();
+        var amendment = Candidate(74, 7501, "E2E-GOLDEN-A-PARTIAL", null, 26);
+        amendment.BuyersName = "SEC Bid Desk";
+        var revised = await service.ReconcileAsync(amendment,
+            Intake("resolved-customer-amendment", "resolved-b", Guid.NewGuid(), sender: null));
+
+        Assert.Equal(LeadOccurrenceClassification.Revision, revised.Classification);
+        Assert.Equal(created.LeadId, revised.LeadId);
+        Assert.Equal(2, revised.RevisionNumber);
+        Assert.Contains(await context.Set<LeadRevisionImpact>().Where(x => x.LeadRevisionId == revised.RevisionId).ToListAsync(),
+            impact => impact.AggregateType == "RFQ" && impact.AggregateId == rfq.Id && impact.ImpactType == "RFQ_REVISION_REQUIRED");
+        Assert.Contains(await context.Set<LeadRevisionImpact>().Where(x => x.LeadRevisionId == revised.RevisionId).ToListAsync(),
+            impact => impact.AggregateType == "QUOTE" && impact.AggregateId == quote.Id && impact.ImpactType == "DRAFT_STALE_REVIEW_REQUIRED");
+
+        var quoteRead = await new QuoteRepository(context).GetByIdAsync(quote.Id, 74);
+        Assert.Equal("DRAFT_STALE_REVIEW_REQUIRED", quoteRead.RevisionImpact);
+
+        var workbenchService = new LeadDecisionWorkbenchService(context, new LeadOutcomeReasons(context));
+        var blocked = await workbenchService.GetAsync(74, created.LeadId);
+        Assert.Contains(blocked.Blockers, blocker => blocker.Code == "RFQ_REVISION_REQUIRED");
+
+        const string reason = "Customer quantity amendment reviewed against every original RFQ line.";
+        var resolution = new RfqRevisionImpactResolutionService(context);
+        var command = new ResolveRfqRevisionImpactCommand(rfq.Id, revised.RevisionId!.Value,
+            reason, true, "rfq-amendment-review:resolved-customer", "commercial.owner@test");
+        var firstResolution = await resolution.ResolveAsync(74, created.LeadId, command);
+        var replay = await resolution.ResolveAsync(74, created.LeadId, command);
+
+        Assert.Equal(1, firstResolution.ResolvedImpactCount);
+        Assert.False(firstResolution.Replayed);
+        Assert.Equal(1, replay.ResolvedImpactCount);
+        Assert.True(replay.Replayed);
+        var retainedImpact = await context.Set<LeadRevisionImpact>().AsNoTracking().SingleAsync(x =>
+            x.AggregateType == "RFQ" && x.AggregateId == rfq.Id && x.ImpactType == "RFQ_REVISION_REQUIRED");
+        Assert.Equal("OPEN", retainedImpact.Status);
+        Assert.Null(retainedImpact.ResolvedAtUtc);
+        var resolutionEvent = await context.Set<LeadIdentityAuditEvent>().AsNoTracking().SingleAsync(x =>
+            x.EventType == RfqRevisionImpactResolutionService.ResolutionEventType
+            && x.CorrelationId == RfqRevisionImpactResolutionService.CorrelationPrefix + retainedImpact.Id);
+        Assert.Equal("commercial.owner@test", resolutionEvent.ActorId);
+        Assert.Contains(reason, resolutionEvent.PayloadJson, StringComparison.Ordinal);
+        Assert.DoesNotContain((await workbenchService.GetAsync(74, created.LeadId)).Blockers,
+            blocker => blocker.Code == "RFQ_REVISION_REQUIRED");
+
+        var mismatchedReplay = command with { ReconciliationReason = "A different review outcome must not reuse the command key." };
+        var conflict = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            resolution.ResolveAsync(74, created.LeadId, mismatchedReplay));
+        Assert.Contains("different RFQ amendment review", conflict.Message, StringComparison.OrdinalIgnoreCase);
+
+        var noOpenImpact = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            resolution.ResolveAsync(74, created.LeadId, command with
+            {
+                IdempotencyKey = "rfq-amendment-review:already-closed"
+            }));
+        Assert.Contains("no unresolved RFQ revision impact", noOpenImpact.Message,
+            StringComparison.OrdinalIgnoreCase);
+
+        await Assert.ThrowsAsync<KeyNotFoundException>(() => resolution.ResolveAsync(
+            75, created.LeadId, command with { IdempotencyKey = "rfq-amendment-review:wrong-tenant" }));
+    }
+
+    [Fact]
     public async Task Resending_an_older_revision_is_an_exact_duplicate_without_reverting_current_projection()
     {
         using var db = new TestDb();
@@ -172,6 +269,37 @@ public sealed class LeadIdentityApplicationServiceTests
         Assert.Equal(2, await context.Set<LeadRevision>().CountAsync(x => x.LeadId == created.LeadId));
         Assert.Equal(15, (await context.Leads.Include(x => x.LeadItems)
             .SingleAsync(x => x.Id == created.LeadId)).LeadItems.Single(x => x.IsCurrentRevisionProjection).Quantity);
+    }
+
+    [Fact]
+    public async Task Recovering_identical_source_bytes_does_not_roll_back_a_newer_amendment_when_extraction_varies()
+    {
+        using var db = new TestDb();
+        await using var context = db.ContextFor(781);
+        Seed.BusinessUnit(context, 781); Seed.EmailConfig(context, 7811, 781); Seed.EmailIngest(context, 7911, 7811, "NeedsReview");
+        await context.SaveChangesAsync();
+        var service = new LeadIdentityApplicationService(context);
+
+        var original = await service.ReconcileAsync(Candidate(781, 7911, "RFQ-RECOVERY", "buyer@recovery.test", 10),
+            Intake("recovery-original", "same-source-bytes", Guid.NewGuid(), "buyer@recovery.test"));
+        context.ChangeTracker.Clear();
+        var amendment = await service.ReconcileAsync(Candidate(781, 7911, "RFQ-RECOVERY", "buyer@recovery.test", 15),
+            Intake("recovery-amendment", "amended-source-bytes", Guid.NewGuid(), "buyer@recovery.test"));
+        context.ChangeTracker.Clear();
+
+        // The delayed replay contains the original bytes, but a second model extraction differs.
+        // Source-byte identity must win over that non-determinism and bind back to revision 1.
+        var recovered = await service.ReconcileAsync(Candidate(781, 7911, "RFQ-RECOVERY", "buyer@recovery.test", 9),
+            Intake("recovery-delayed", "same-source-bytes", Guid.NewGuid(), "buyer@recovery.test"));
+
+        Assert.Equal(LeadOccurrenceClassification.ExactDuplicate, recovered.Classification);
+        Assert.Equal(original.LeadId, recovered.LeadId);
+        Assert.Equal(original.RevisionId, recovered.RevisionId);
+        Assert.Equal(2, recovered.RevisionNumber);
+        Assert.Equal(2, await context.Set<LeadRevision>().CountAsync(x => x.LeadId == original.LeadId));
+        var current = await context.Leads.Include(x => x.LeadItems).SingleAsync(x => x.Id == original.LeadId);
+        Assert.Equal(amendment.RevisionId, current.CurrentRevisionId);
+        Assert.Equal(15, current.LeadItems.Single(x => x.IsCurrentRevisionProjection).Quantity);
     }
 
     [Fact]

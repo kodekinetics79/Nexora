@@ -27,10 +27,12 @@ import { useAuth } from '../../context/AuthContext';
 import LeadRevisionTimeline from './LeadRevisionTimeline';
 import LeadOwnerControl from './LeadOwnerControl';
 import LeadDecisionActions from './LeadDecisionActions';
+import CommercialLineIntelligence from '../../components/common/CommercialLineIntelligence';
 
 import { toast } from 'react-hot-toast';
 import { presentableErrorMessage } from '../../utils/apiErrors';
 import { routingDecisionSentence } from '../../utils/routingDecisionReasons';
+import { commercialActionPermissions } from '../../utils/commercialActionPermissions';
 
 /**
  * SLA deadline chip (WP-A2): urgency at a glance for the bid closing date.
@@ -89,6 +91,7 @@ const DataField: React.FC<{ label: string; value: string | number | null; boldVa
 
 const LeadDetailPage: React.FC = () => {
   const { hasPermission } = useAuth();
+  const commercialAccess = commercialActionPermissions(hasPermission);
   const { t } = useTranslation();
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -116,7 +119,12 @@ const LeadDetailPage: React.FC = () => {
   // "Confirm duplicate" keeps it blocked).
   const [duplicateAction, setDuplicateAction] = React.useState<'not_duplicate' | 'confirm' | null>(null);
   const resolveDuplicateMutation = useMutation({
-    mutationFn: (action: 'not_duplicate' | 'confirm') => leadService.resolveDuplicate(Number(id), action),
+    mutationFn: (action: 'not_duplicate' | 'confirm') => {
+      if (!commercialAccess.canResolveLeadDuplicate) {
+        throw new Error('Lead edit permission is required to resolve a duplicate.');
+      }
+      return leadService.resolveDuplicate(Number(id), action);
+    },
     onSuccess: (_data, action) => {
       toast.success(action === 'not_duplicate'
         ? 'Marked as not a duplicate. This lead can be converted again.'
@@ -193,7 +201,7 @@ const LeadDetailPage: React.FC = () => {
               exactly the case that never occurred in production. */}
           <ClientIdentityPanel
             lead={lead}
-            canEdit={hasPermission('Leads', 'edit')}
+            canEdit={commercialAccess.canEditLeadDecision}
             onChanged={() => queryClient.invalidateQueries({ queryKey: ['lead-detail', Number(id)] })}
           />
           <Box sx={{ mt: 1.5 }}>
@@ -203,7 +211,7 @@ const LeadDetailPage: React.FC = () => {
               assignedToName={lead.assignedToFullName}
               assignmentMethod={lead.assignmentMethod}
               assignmentVersion={lead.assignmentVersion ?? 1}
-              canEdit={hasPermission('Leads', 'edit')}
+              canEdit={commercialAccess.canEditLeadDecision}
             />
           </Box>
         </Box>
@@ -211,7 +219,7 @@ const LeadDetailPage: React.FC = () => {
           <LeadDecisionActions
             leadId={lead.id}
             reviewVersion={lead.reviewVersion ?? 1}
-            canEdit={hasPermission('Leads', 'edit')}
+            canEdit={commercialAccess.canEditLeadDecision}
           />
           {lead.commercialCaseId && (
             <Button
@@ -224,7 +232,7 @@ const LeadDetailPage: React.FC = () => {
               Workspace
             </Button>
           )}
-          <Button
+          {commercialAccess.canOpenLeadWorkbench && <Button
             variant="contained"
             startIcon={<DecisionIcon />}
             size="small"
@@ -232,7 +240,7 @@ const LeadDetailPage: React.FC = () => {
             sx={{ fontWeight: 800, borderRadius: 2, px: 3 }}
           >
             {decisionClosed ? 'View decision record' : 'Open decision workbench'}
-          </Button>
+          </Button>}
         </Stack>
       </Box>
 
@@ -262,7 +270,7 @@ const LeadDetailPage: React.FC = () => {
             >
               View original
             </Button>
-            <Button
+            {commercialAccess.canResolveLeadDuplicate && <Button
               size="small"
               variant="contained"
               color="success"
@@ -271,8 +279,8 @@ const LeadDetailPage: React.FC = () => {
               sx={{ fontWeight: 800, borderRadius: 2 }}
             >
               Not a duplicate
-            </Button>
-            {lead.duplicateStatus === 'suspected' && (
+            </Button>}
+            {commercialAccess.canResolveLeadDuplicate && lead.duplicateStatus === 'suspected' && (
               <Button
                 size="small"
                 variant="contained"
@@ -380,7 +388,7 @@ const LeadDetailPage: React.FC = () => {
                       size="small"
                       variant="outlined"
                       onClick={() => setResolveClientOpen(true)}
-                      disabled={!hasPermission('Leads', 'edit')}
+                      disabled={!commercialAccess.canEditLeadDecision}
                       sx={{ fontWeight: 800, textTransform: 'none', mt: 0.25 }}
                     >
                       Set client
@@ -472,6 +480,12 @@ const LeadDetailPage: React.FC = () => {
               )}
             </Stack>
           </Paper>
+        </Grid>
+
+        {/* Inventory and supplier evidence remains available on the canonical Lead. The retired
+            direct-conversion preview used to be the only place a rep could refresh this context. */}
+        <Grid size={{ xs: 12 }} component="div">
+          <CommercialLineIntelligence stage="lead" recordId={Number(id)} />
         </Grid>
 
         {/* Full Width Bottom: Line Items */}

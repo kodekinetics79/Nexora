@@ -11,6 +11,14 @@ const linkClient = vi.fn();
 const submitReview = vi.fn();
 const getAll = vi.fn();
 const getByCustomer = vi.fn();
+const testAccess = vi.hoisted(() => ({ denied: new Set<string>() }));
+
+vi.mock('../../context/AuthContext', () => ({
+  useAuth: () => ({
+    hasPermission: (moduleName: string, action = 'view') =>
+      !testAccess.denied.has(`${moduleName}:${action}`),
+  }),
+}));
 
 vi.mock('../../api/services/leadService', () => ({
   default: {
@@ -67,6 +75,7 @@ const renderPanel = (node: ReactNode) => render(<>{node}</>, { wrapper });
 
 beforeEach(() => {
   vi.clearAllMocks();
+  testAccess.denied.clear();
   getClientCandidates.mockResolvedValue([]);
   getAll.mockResolvedValue({ items: [], totalCount: 0, pageNumber: 1, pageSize: 10 });
   getByCustomer.mockResolvedValue([]);
@@ -158,6 +167,17 @@ describe('ClientIdentityPanel — suggested', () => {
     expect(body).toEqual({ customerId: 42, contactId: null });
     expect(submitReview).not.toHaveBeenCalled();
     await waitFor(() => expect(onChanged).toHaveBeenCalled());
+  });
+
+  it('fails closed when Lead edit permission is revoked immediately before confirmation', async () => {
+    renderPanel(<ClientIdentityPanel lead={suggested} />);
+
+    const confirm = await screen.findByRole('button', { name: /Confirm Saudi Electricity Company/i });
+    testAccess.denied.add('Leads:edit');
+    confirm.click();
+
+    await waitFor(() => expect(linkClient).not.toHaveBeenCalled());
+    expect(submitReview).not.toHaveBeenCalled();
   });
 
   it('flags competing candidates rather than presenting one guess as settled', async () => {

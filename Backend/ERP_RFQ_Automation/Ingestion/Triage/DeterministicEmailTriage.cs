@@ -75,7 +75,23 @@ public static class DeterministicEmailTriage
     /// <summary>A quantity written against a unit of measure — the strongest conversational
     /// signal that a physical good is being requested.</summary>
     private static readonly Regex QuantityUomPattern = new(
-        @"\b\d{1,6}\s*(?:nos?|pcs?|units?|sets?|mtrs?|m|kg|ltr)\b", Opts, RegexTimeout);
+        @"\b\d{1,6}\s*(?:ea|each|nos?|pcs?|units?|sets?|mtrs?|m|kg|ltr)\b", Opts, RegexTimeout);
+
+    /// <summary>
+    /// Positive declarations that the sender is not asking us to buy, bid or quote. This is
+    /// intentionally semantic rather than a webinar/newsletter keyword list: a webinar can be
+    /// part of a genuine tender, while "non-RFQ", "no quotation requested" and "information
+    /// only" state the sender's intent directly. The pattern accepts ordinary punctuation and
+    /// wording variants without keying the rule to one production test sentence.
+    /// </summary>
+    private static readonly Regex ExplicitNonInquiryIntentPattern = new(
+        @"(?:" +
+        @"(?:^|[\s\[({])non[\s-]*(?:rfq|rfp|rfi|inquir(?:y|ies)|enquir(?:y|ies))(?=$|[\s\])}:;,.!\-])" +
+        @"|\b(?:not|no)\s+(?:an?\s+)?(?:rfq|rfp|rfi|request\s+for\s+quot(?:e|ation)|quotation)\b" +
+        @"|\bno\s+(?:request\s+for\s+)?(?:quote|quotation|pricing|bid)\s+(?:is\s+)?(?:requested|required|needed|intended)\b" +
+        @"|\b(?:no|without)\s+(?:commercial\s+)?(?:buying|purchasing|procurement)\s+intent\b" +
+        @"|\b(?:for\s+information|informational)\s+only\b" +
+        @")", Opts, RegexTimeout);
 
     private static readonly string[] SubjectInquiryTerms =
         { "rfq", "request for quot", "enquiry", "inquiry", "itb", "tender" };
@@ -210,6 +226,19 @@ public static class DeterministicEmailTriage
             }
         }
 
+        // ---- 2b. EXPLICIT NON-INQUIRY INTENT -----------------------------
+        // A negated RFQ mention is not RFQ evidence. The former subject-only substring rule
+        // classified "[NON-RFQ] webinar" as an inquiry simply because the letters RFQ were
+        // present, then paid for extraction only to hold an empty message. An explicit denial
+        // is a deterministic stop unless the fresh body independently contains an operative
+        // request or a quoteable quantity. That fail-open exception handles contradictory mail
+        // such as "not an RFQ amendment; please quote 5 EA" without trying to resolve intent by
+        // word order.
+        if (ExplicitNonInquiryIntentPattern.IsMatch(haystack)
+            && !HasAffirmativeInquiryRequest(s.FreshBody))
+            return new EmailTriageDecision(EmailTriageOutcome.Noise,
+                [EmailTriageReasonCodes.ExplicitNonInquiryIntent], null, threadContinuation);
+
         // ---- 3. INQUIRY ---------------------------------------------------
         var inquiry = new List<string>();
         if (string.Equals(s.SenderPartyType, "customer", StringComparison.OrdinalIgnoreCase))
@@ -238,6 +267,10 @@ public static class DeterministicEmailTriage
     private static bool IsAutoSubmitted(string? value)
         => !string.IsNullOrWhiteSpace(value)
            && !value.Trim().Equals("no", StringComparison.OrdinalIgnoreCase);
+
+    private static bool HasAffirmativeInquiryRequest(string? freshBody)
+        => !string.IsNullOrWhiteSpace(freshBody)
+           && (RequestVerbPattern.IsMatch(freshBody) || QuantityUomPattern.IsMatch(freshBody));
 
     private static bool IsBulkPrecedence(string? value)
     {

@@ -155,12 +155,35 @@ describe('the rail was cut to five rows', () => {
 
   it('accounts for all 69 old destinations across four surfaces', () => {
     // These are the numbers the before/after rests on, so they are asserted rather than counted by
-    // hand: 5 rail rows + 16 tabs + 59 directory cards + 25 Setup entries + the All-screens door.
+    // hand: 5 rail rows + 15 tabs + 59 directory cards + 25 Setup entries + the All-screens door.
     expect(PRIMARY_NAV).toHaveLength(5);
-    expect(PRIMARY_VIEWS).toHaveLength(16);
+    expect(PRIMARY_VIEWS).toHaveLength(15);
     expect(ADVANCED_ENTRIES).toHaveLength(59);
     expect(ADVANCED_GROUPS).toHaveLength(9);
     expect(SETUP_ENTRIES).toHaveLength(25);
+  });
+
+  it('keeps Lead decision work in Leads and out of the formal RFQ views', () => {
+    const leadViews = PRIMARY_NAV.find((item) => item.key === 'leads')?.views ?? [];
+    const rfqViews = PRIMARY_NAV.find((item) => item.key === 'rfqs')?.views ?? [];
+
+    expect(rfqViews.map((view) => view.label)).toEqual([
+      'All RFQs',
+      'Drafts',
+      'Ready for quote',
+    ]);
+    expect(rfqViews.map((view) => view.path)).not.toContain('/procurement/rfqs/outstanding');
+    expect(leadViews.find((view) => view.key === 'leads-assigned')).toMatchObject({
+      path: '/procurement/leads/assigned',
+      activePrefixes: ['/procurement/leads/'],
+    });
+  });
+
+  it('keeps old Outstanding RFQ bookmarks as a redirect, not a second Lead queue', () => {
+    expect(appSource).toContain(
+      '<Route path="/procurement/rfqs/outstanding" element={<Navigate to="/procurement/leads/assigned" replace />} />',
+    );
+    expect(appSource).not.toContain('OutstandingRFQsPage');
   });
 
   it('gives every primary destination at most ONE level of tabs', () => {
@@ -171,6 +194,21 @@ describe('the rail was cut to five rows', () => {
         expect(Object.keys(view)).not.toContain('views');
       }
     }
+  });
+});
+
+describe('catalog permissions match route authority', () => {
+  it('uses Leads for the sales-manager control tower in both catalog and router', () => {
+    const managerView = ADVANCED_ENTRIES.find((entry) => entry.path === '/sales/team');
+
+    expect(managerView).toMatchObject({
+      label: 'Sales manager control tower',
+      moduleName: 'Leads',
+      managerOnly: true,
+    });
+    expect(appSource).toContain(
+      '<Route path="/sales/team" element={<MainLayout><PermissionGuard moduleName="Leads"><TeamOverviewPage /></PermissionGuard></MainLayout>} />',
+    );
   });
 });
 

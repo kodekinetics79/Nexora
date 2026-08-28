@@ -9,7 +9,7 @@ import { PRIMARY_NAV, pathnameOf, type NavView } from './navCatalog';
  *
  * The rail used to carry these: "Draft Quotes", "Sent Quotes", "Follow-up Due" and "Won / Lost"
  * were four rail rows pointing at one screen with four query strings, and "All RFQs / Drafts /
- * Outstanding" were three rows over three routes that a rep reads as one list. A row per filter is
+ * Ready for quote" were three rows a rep reads as views of one formal-RFQ list. A row per filter is
  * how a twelve-row rail becomes a sixty-nine-destination one — and it hides the fact that they are
  * views OF something rather than places of their own.
  *

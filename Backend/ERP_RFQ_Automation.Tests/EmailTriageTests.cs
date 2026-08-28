@@ -244,6 +244,33 @@ public class EmailTriageTests
         Assert.Contains(EmailTriageReasonCodes.RequestVerb, decision.ReasonCodes);
     }
 
+    [Theory]
+    [InlineData("[NON-RFQ] Invitation", "Join our operations webinar. This is for information only.")]
+    [InlineData("Industry update", "This is not a request for quotation; no buying intent exists.")]
+    [InlineData("Product announcement", "No quotation is requested. Contact us if you want the brochure.")]
+    [InlineData("Conference follow-up", "There is no commercial purchasing intent in this message.")]
+    public void ExplicitNonInquiryIntentIsDeterministicNoiseWithoutBeingFooledByNegatedRfqWords(
+        string subject, string body)
+    {
+        var decision = DeterministicEmailTriage.Evaluate(Signals(subject: subject, body: body,
+            senderPartyType: "customer"));
+
+        Assert.Equal(EmailTriageOutcome.Noise, decision.Outcome);
+        Assert.Equal([EmailTriageReasonCodes.ExplicitNonInquiryIntent], decision.ReasonCodes);
+    }
+
+    [Fact]
+    public void AContradictoryNonRfqLabelDoesNotSuppressAnIndependentOperativeRequest()
+    {
+        var decision = DeterministicEmailTriage.Evaluate(Signals(
+            subject: "NON-RFQ amendment note",
+            body: "The note itself is informational only. Please quote 5 EA of QA-FLT-50."));
+
+        Assert.Equal(EmailTriageOutcome.Inquiry, decision.Outcome);
+        Assert.Contains(EmailTriageReasonCodes.RequestVerb, decision.ReasonCodes);
+        Assert.Contains(EmailTriageReasonCodes.QtyUomPattern, decision.ReasonCodes);
+    }
+
     // --------------------------------------------------------- commercial non-inquiry
 
     [Fact]

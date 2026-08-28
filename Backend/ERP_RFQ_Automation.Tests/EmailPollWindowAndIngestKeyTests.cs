@@ -104,7 +104,38 @@ public sealed class EmailPollWindowAndIngestKeyTests
         Assert.DoesNotContain("NotSeen", Describe(query));
     }
 
+    [Fact]
+    public void APartialBacklogDrainDoesNotAdvanceTheRecoveryCheckpoint()
+    {
+        var outcome = SuccessfulOutcome(messagesDeferred: 73);
+
+        Assert.True(outcome.Succeeded);
+        Assert.False(EmailService.ShouldAdvanceRecoveryPoint(outcome));
+    }
+
+    [Fact]
+    public void ACompletelyDrainedWindowAdvancesTheRecoveryCheckpoint()
+    {
+        var outcome = SuccessfulOutcome(messagesDeferred: 0);
+
+        Assert.True(EmailService.ShouldAdvanceRecoveryPoint(outcome));
+    }
+
     // ---------------------------------------------------------------------- the ingest key
+
+    private static MailboxPollOutcome SuccessfulOutcome(int messagesDeferred)
+        => new(
+            EmailConfigurationId: 9,
+            EmailAddress: "intake@tenant.example",
+            Succeeded: true,
+            FailureReason: null,
+            FailureIsPermanent: false,
+            LastSuccessfulPollOn: Now.AddHours(-1),
+            WindowSinceUtc: Now.AddDays(-1),
+            LookbackCappedDays: 0,
+            MessagesDownloaded: 10,
+            MessagesAlreadyIngested: 20,
+            MessagesDeferred: messagesDeferred);
 
     [Fact]
     public void TwoDifferentRfqsUnderTheSameSubjectAreDifferentMessages()

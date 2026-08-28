@@ -19,6 +19,8 @@ import {
 import ResolveClientDialog, {
   CLIENT_LINK_FAILURE_MESSAGE, type ClientSelection,
 } from './ResolveClientDialog';
+import { useAuth } from '../../context/AuthContext';
+import { commercialActionPermissions } from '../../utils/commercialActionPermissions';
 
 /**
  * THE client identity on a lead. Always rendered — there is no state in which
@@ -85,6 +87,9 @@ const ClientIdentityPanel: React.FC<ClientIdentityPanelProps> = ({
   lead, canEdit = true, onChanged, onSelect, pendingSelection,
 }) => {
   const queryClient = useQueryClient();
+  const { hasPermission } = useAuth();
+  const commercialAccess = commercialActionPermissions(hasPermission);
+  const canResolveClient = canEdit && commercialAccess.canLinkLeadClient;
   const [dialogOpen, setDialogOpen] = React.useState(false);
   const deferred = typeof onSelect === 'function';
 
@@ -107,8 +112,14 @@ const ClientIdentityPanel: React.FC<ClientIdentityPanelProps> = ({
   }, [candidatesQuery.data, lead]);
 
   const confirmMutation = useMutation({
-    mutationFn: (selection: { customerId: number; contactId?: number | null }) =>
-      leadService.linkClient(lead.id, selection),
+    mutationFn: (selection: { customerId: number; contactId?: number | null }) => {
+      // Re-check at the write boundary. The permission snapshot can expire between rendering
+      // the suggestion and clicking Confirm, and the client must fail closed before the request.
+      if (!hasPermission('Leads', 'edit')) {
+        throw new Error('Current Lead edit permission is required. The client was not linked.');
+      }
+      return leadService.linkClient(lead.id, selection);
+    },
     onSuccess: () => {
       toast.success('Client confirmed for this lead.');
       queryClient.invalidateQueries({ queryKey: ['lead-detail', lead.id] });
@@ -123,6 +134,10 @@ const ClientIdentityPanel: React.FC<ClientIdentityPanelProps> = ({
 
   const confirmCandidate = (candidate: ClientCandidateDTO) => {
     if (deferred) {
+      if (!hasPermission('Leads', 'edit')) {
+        toast.error('Current Lead edit permission is required. The client choice was not staged.');
+        return;
+      }
       onSelect?.({ customerId: candidate.customerId, contactId: null, customerName: candidate.customerName });
       return;
     }
@@ -174,7 +189,7 @@ const ClientIdentityPanel: React.FC<ClientIdentityPanelProps> = ({
         <Typography variant="body2" color="text.secondary" sx={{ mt: 0.75 }}>
           This client is applied when you save or approve this review.
         </Typography>
-        {canEdit && (
+        {canResolveClient && (
           <Button size="small" onClick={openDialog} sx={{ mt: 1, fontWeight: 800, textTransform: 'none' }}>
             Choose another
           </Button>
@@ -223,7 +238,7 @@ const ClientIdentityPanel: React.FC<ClientIdentityPanelProps> = ({
             {explanation}
           </Typography>
         )}
-        {canEdit && (
+        {canResolveClient && (
           <Button size="small" onClick={openDialog} sx={{ mt: 1, fontWeight: 800, textTransform: 'none' }}>
             Change client
           </Button>
@@ -261,7 +276,7 @@ const ClientIdentityPanel: React.FC<ClientIdentityPanelProps> = ({
             {others === 1 ? '1 other client also matches the evidence.' : `${others} other clients also match the evidence.`}
           </Typography>
         )}
-        {canEdit && (
+        {canResolveClient && (
           <Stack direction="row" spacing={1} sx={{ mt: 1.25, flexWrap: 'wrap', gap: 1 }}>
             <Button
               variant="contained"
@@ -318,7 +333,7 @@ const ClientIdentityPanel: React.FC<ClientIdentityPanelProps> = ({
           : 'This document carries nothing that identifies the buying organisation, so nothing was guessed.'}
       </Typography>
       {evidence.length > 0 && <EvidenceList rows={evidence} />}
-      {canEdit && (
+      {canResolveClient && (
         <Button
           variant="contained"
           size="small"

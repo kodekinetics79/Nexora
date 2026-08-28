@@ -80,9 +80,11 @@ public sealed class EmailInquiryAssemblyRecoveryWorker : BackgroundService
 
         while (!stoppingToken.IsCancellationRequested)
         {
+            var nextDelay = interval;
             try
             {
-                await RunGuardedSweepAsync(stoppingToken);
+                var result = await RunGuardedSweepAsync(stoppingToken);
+                nextDelay = DelayAfterSweep(result, interval);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -99,12 +101,24 @@ public sealed class EmailInquiryAssemblyRecoveryWorker : BackgroundService
             // flipping readiness red on one transient database blip.
             _heartbeats?.Beat(BackgroundWorkerNames.EmailInquiryAssemblyRecovery, interval);
 
-            try { await Task.Delay(interval, stoppingToken); }
+            try { await Task.Delay(nextDelay, stoppingToken); }
             catch (OperationCanceledException) { break; }
         }
 
         _log.LogInformation("EmailInquiryAssemblyRecoveryWorker stopped.");
     }
+
+    /// <summary>
+    /// A rolling deployment briefly runs the old and new instances together. If the old instance
+    /// owns the advisory lease during the new instance's startup pass, waiting the full operator
+    /// interval can postpone the one recovery pass most likely to contain crash-window work. A
+    /// skipped lease therefore retries promptly; a completed sweep keeps the configured cadence.
+    /// </summary>
+    internal static TimeSpan DelayAfterSweep(
+        EmailInquiryRecoverySweepResult result, TimeSpan configuredInterval)
+        => ReferenceEquals(result, EmailInquiryRecoverySweepResult.Skipped)
+            ? TimeSpan.FromSeconds(30)
+            : configuredInterval;
 
     /// <summary>
     /// Acquires the lease, sweeps, and reports. Internal so a test can drive one cycle without

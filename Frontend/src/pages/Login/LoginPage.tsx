@@ -74,16 +74,25 @@ const pathLoop = (index: number) => keyframes`
 
 // --- Styled Components ---
 const Container = styled.div`
-  height: 100vh;
-  width: 100vw;
-  overflow: hidden;
+  min-height: 100vh;
+  min-height: 100dvh;
+  width: 100%;
+  box-sizing: border-box;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 24px;
   position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
   background: ${(props: any) => props.theme.palette.background.default};
-  font-family: 'Poppins', sans-serif;
+  font-family: ${(props: any) => props.theme.typography.fontFamily};
   transition: background 0.5s ease;
+
+  @media (max-width: 768px) {
+    align-items: stretch;
+    padding: 0;
+  }
 `;
 
 const ScannerLine = styled.div<{ primary: string }>`
@@ -114,7 +123,8 @@ const DigitalGrid = styled.div<{ primary: string }>`
 const GlassCard = styled.div<{ mode: string }>`
   width: 1400px;
   max-width: 95vw;
-  height: 850px;
+  min-height: min(850px, calc(100vh - 48px));
+  min-height: min(850px, calc(100dvh - 48px));
   background: ${props => props.mode === 'dark' ? 'rgba(10, 15, 28, 0.85)' : 'rgba(255, 255, 255, 0.7)'};
   backdrop-filter: blur(40px);
   border-radius: 40px;
@@ -127,9 +137,17 @@ const GlassCard = styled.div<{ mode: string }>`
   transition: all 0.5s ease;
 
   @media (max-width: 1200px) {
-    height: auto;
-    min-height: 800px;
+    width: 100%;
+    max-width: 680px;
+    min-height: 0;
     flex-direction: column;
+  }
+
+  @media (max-width: 768px) {
+    max-width: none;
+    min-height: 100vh;
+    min-height: 100dvh;
+    border-radius: 0;
   }
 `;
 
@@ -526,11 +544,11 @@ const LoginPage: React.FC = () => {
   } as const;
 
   return (
-    <Container theme={theme}>
+    <Container theme={theme} data-testid="login-viewport">
       <DigitalGrid primary={primaryColor} />
       <ScannerLine primary={primaryColor} />
 
-      <GlassCard mode={mode}>
+      <GlassCard mode={mode} data-testid="login-card">
         <VisualArea mode={mode}>
           {/* Purely decorative animated pipeline diagram — hidden from
               assistive tech so screen-reader users are not read ~15 orphan

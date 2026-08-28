@@ -127,8 +127,15 @@ public sealed class TenantOffboardingService(
                        && scheduler.ActorPlatformUserId == viewerId;
 
         var commercialPosition = await readiness.GetCommercialRetirementPositionAsync(tenant, ct);
-        var scheduleReadiness = await readiness.AssessAsync(
-            tenant, TenantOffboardingReadinessPhase.Schedule, ct);
+        // The status DTO drives the next destructive control. Once a retention clock is running,
+        // reporting schedule readiness is stale by definition: purge has an additional persisted
+        // erasure prerequisite and re-checks the financial/export evidence at the irreversible
+        // boundary. Returning the phase that belongs to the current stage keeps the console from
+        // advertising a purge that this same service will immediately refuse.
+        var readinessPhase = record?.Stage == TenantOffboardingStage.PendingDeletion
+            ? TenantOffboardingReadinessPhase.Purge
+            : TenantOffboardingReadinessPhase.Schedule;
+        var actionReadiness = await readiness.AssessAsync(tenant, readinessPhase, ct);
 
         return ToStatusDto(
             tenant, record, history, exports,
@@ -137,7 +144,7 @@ public sealed class TenantOffboardingService(
             // Asked of the readiness service rather than re-derived here, so the screen and the
             // gate cannot drift apart.
             commercialPosition,
-            scheduleReadiness);
+            actionReadiness);
     }
 
     /// <summary>
@@ -1225,7 +1232,7 @@ public sealed class TenantOffboardingService(
         IReadOnlyList<TenantLifecycleEventDto> history, IReadOnlyList<TenantExportReceiptDto> exports,
         bool purgeRequiresDifferentApprover, string? deletionApprovedBy,
         TenantCommercialRetirementPosition commercialPosition,
-        TenantOffboardingReadinessResult scheduleReadiness)
+        TenantOffboardingReadinessResult actionReadiness)
     {
         var now = UtcNow;
         var stage = record?.Stage ?? TenantOffboardingStage.NotScheduled;
@@ -1242,13 +1249,14 @@ public sealed class TenantOffboardingService(
 
             CanScheduleDeletion: TenantLifecycleGraph.CanScheduleDeletion(stage)
                                  && tenant.Status == TenantLifecycleGraph.DeletionRequiresStatus
-                                 && scheduleReadiness.Ready,
+                                 && actionReadiness.Ready,
             CanCancelDeletion: TenantLifecycleGraph.CanCancelDeletion(stage),
             // Mirrors the guard inside PurgeAsync, including the status predicate: a tenant that
             // has been brought back to life is no longer purgeable, so the console must stop
             // offering it rather than let an operator discover that at the confirmation dialog.
             CanPurge: TenantLifecycleGraph.CanPurge(stage) && eligible
-                      && tenant.Status == TenantLifecycleGraph.DeletionRequiresStatus,
+                      && tenant.Status == TenantLifecycleGraph.DeletionRequiresStatus
+                      && actionReadiness.Ready,
             CanErasePersonalData: TenantLifecycleGraph.CanErase(stage)
                                   && TenantLifecycleGraph.ErasureAllowedFrom(tenant.Status),
 
@@ -1280,7 +1288,7 @@ public sealed class TenantOffboardingService(
             NonCustomerAttestedBy: commercialPosition.NonCustomerAttestedBy,
             BillingStatementCount: commercialPosition.BillingStatementCount,
             SubscriptionInvoiceCount: commercialPosition.SubscriptionInvoiceCount,
-            ReadinessFailures: scheduleReadiness.Failures);
+            ReadinessFailures: actionReadiness.Failures);
     }
 
     private static bool IsEligible(DateTime? eligibleOn, DateTime now) =>
