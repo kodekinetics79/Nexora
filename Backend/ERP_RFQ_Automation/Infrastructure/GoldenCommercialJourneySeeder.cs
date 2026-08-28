@@ -253,7 +253,7 @@ public static class GoldenCommercialJourneySeeder
 
     // ------------------------------------------------------------------ the six lines
 
-    private const string GoldenLine1Part = "GOLD-HARD-0001";   // quantity 0 -> HARD blocker, must be corrected
+    private const string GoldenLine1Part = "GOLD-HARD-0001";   // stable fixture identity retained for replay compatibility
     private const string GoldenLine2Part = "GOLD-SOFT-0002";   // no catalog row -> SOFT warning, must be acknowledged
     private const string GoldenLine3Part = "GOLD-EXCL-0003";   // valid, but the operator excludes it with a reason
     private const string GoldenLine4Part = "GOLD-QUOTE-0004";  // valid -> marked Quote
@@ -297,8 +297,12 @@ public static class GoldenCommercialJourneySeeder
             HeaderRemarks = "Golden journey: six deterministic lines."
         };
 
-        // Line 1 carries quantity 0 — the HARD blocker the operator must correct in the browser.
-        candidate.LeadItems.Add(Line("00010", GoldenLine1Part, "Ball valve 2IN class 300", 0, "EA"));
+        // The golden journey starts at QUALIFIED so it can certify the downstream fit,
+        // participation, and RFQ-promotion gates. Keep every seeded current line commercially
+        // valid: production now (correctly) refuses qualification when quantity is unresolved.
+        // The browser confirms this value before participation; the later amendment changes it
+        // to 26, which proves immutable revision and stale-downstream handling.
+        candidate.LeadItems.Add(Line("00010", GoldenLine1Part, "Ball valve 2IN class 300", 25, "EA"));
         // Line 2 has no catalog row, so the resolver raises "No catalog match found" — SOFT.
         candidate.LeadItems.Add(Line("00020", GoldenLine2Part, "Gasket spiral wound 4IN", 12, "EA"));
         candidate.LeadItems.Add(Line("00030", GoldenLine3Part, "Hex bolt M12 x 60 A4-80", 200, "EA"));
