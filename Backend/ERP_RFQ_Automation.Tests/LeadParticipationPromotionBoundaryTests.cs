@@ -1,4 +1,5 @@
 using System.Reflection;
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.CommercialCases.Participation;
 using ERP_RFQ_Automation.CommercialCases.Promotion;
 using ERP_RFQ_Automation.Controllers;
@@ -24,6 +25,15 @@ public sealed class LeadParticipationPromotionBoundaryTests
         Assert.Contains("PUT fit-assessment", routes);
         Assert.Contains("PUT participation", routes);
         Assert.Contains("POST promote-to-rfq", routes);
+        Assert.Contains("POST rfq-revision-impact/resolve", routes);
+
+        var resolve = typeof(LeadParticipationController).GetMethod(
+            nameof(LeadParticipationController.ResolveRfqRevisionImpact))!;
+        var permissions = resolve.GetCustomAttributes<RequireModulePermissionAttribute>().ToArray();
+        Assert.Contains(permissions, permission =>
+            permission.ModuleName == "Leads" && permission.Action == PermissionAction.Edit);
+        Assert.Contains(permissions, permission =>
+            permission.ModuleName == "RFQ Management" && permission.Action == PermissionAction.Edit);
     }
 
     [Fact]
@@ -68,6 +78,13 @@ public sealed class LeadParticipationPromotionBoundaryTests
 
         foreach (var relative in forbidden)
             Assert.DoesNotContain(".Rfqs.Add(", File.ReadAllText(Path.Combine(root, relative)), StringComparison.Ordinal);
+
+        var intelligenceSource = File.ReadAllText(Path.Combine(root, forbidden[0]));
+        var leadRepositorySource = File.ReadAllText(Path.Combine(root, forbidden[3]));
+        Assert.DoesNotContain("ConvertCoreAsync", intelligenceSource, StringComparison.Ordinal);
+        Assert.DoesNotContain("CreateRfqFromLeadAsync", leadRepositorySource, StringComparison.Ordinal);
+        Assert.DoesNotContain("new Rfq", intelligenceSource, StringComparison.Ordinal);
+        Assert.DoesNotContain("new Rfq", leadRepositorySource, StringComparison.Ordinal);
 
         var production = Path.Combine(root, "Backend/ERP_RFQ_Automation");
         var insertFiles = Directory.EnumerateFiles(production, "*.cs", SearchOption.AllDirectories)
@@ -281,6 +298,31 @@ public sealed class LeadParticipationPromotionBoundaryTests
         Assert.Equal(expected, LeadParticipationService.IsHumanFitActionable(overall, criteria));
     }
 
+    [Theory]
+    [InlineData(LeadParticipationOutcome.FullBid,
+        new[] { LeadLineParticipationChoice.Bid, LeadLineParticipationChoice.Bid })]
+    [InlineData(LeadParticipationOutcome.PartialBid,
+        new[] { LeadLineParticipationChoice.Bid, LeadLineParticipationChoice.NoBid })]
+    [InlineData(LeadParticipationOutcome.NoBid,
+        new[] { LeadLineParticipationChoice.NoBid, LeadLineParticipationChoice.NoBid })]
+    public void Committed_participation_outcome_must_match_its_line_decisions(
+        LeadParticipationOutcome outcome, LeadLineParticipationChoice[] choices)
+    {
+        LeadParticipationOutcomeConsistency.EnsureCommittedSnapshot(outcome, choices);
+    }
+
+    [Theory]
+    [InlineData(LeadParticipationOutcome.FullBid, LeadLineParticipationChoice.NoBid)]
+    [InlineData(LeadParticipationOutcome.PartialBid, LeadLineParticipationChoice.Bid)]
+    [InlineData(LeadParticipationOutcome.NoBid, LeadLineParticipationChoice.Bid)]
+    [InlineData(LeadParticipationOutcome.Pending, LeadLineParticipationChoice.Pending)]
+    public void Inconsistent_or_unresolved_committed_participation_snapshot_is_rejected(
+        LeadParticipationOutcome outcome, LeadLineParticipationChoice choice)
+    {
+        Assert.Throws<InvalidOperationException>(() =>
+            LeadParticipationOutcomeConsistency.EnsureCommittedSnapshot(outcome, [choice]));
+    }
+
     [Fact]
     public void Compiled_migration_assembly_discovers_the_participation_promotion_migration()
     {
@@ -290,6 +332,7 @@ public sealed class LeadParticipationPromotionBoundaryTests
         Assert.Contains("20260825043000_LeadParticipationAndRfqPromotion", context.Database.GetMigrations());
         Assert.Contains("20260826010000_ReserveConvertedLeadStatusForRfqPromotion", context.Database.GetMigrations());
         Assert.Contains("20260826134500_ParticipationDraftCommercialIdentity", context.Database.GetMigrations());
+        Assert.Contains("20260827170000_EnforceParticipationOutcomeConsistency", context.Database.GetMigrations());
     }
 
     [Fact]

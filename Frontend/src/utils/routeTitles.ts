@@ -146,6 +146,12 @@ const STATIC_ROUTE_TITLES: Readonly<Record<string, string>> = {
   '/platform/tenants': 'Tenants',
   '/platform/pipeline': 'Platform Pipeline',
   '/platform/plans': 'Plans & Feature Flags',
+  '/platform/users': 'Platform Users',
+  '/platform/billing': 'Platform Billing',
+  '/platform/support': 'Platform Support',
+  '/platform/email': 'Platform Email',
+  '/platform/security': 'Platform Security',
+  '/platform/security/authentication': 'Platform Authentication',
   '/platform/audit': 'Platform Audit Log',
 };
 

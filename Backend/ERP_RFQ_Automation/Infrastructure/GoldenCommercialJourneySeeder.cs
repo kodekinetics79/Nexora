@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using ERP_RFQ_Automation.AI;
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
 using ERP_RFQ_Automation.CommercialCases.Participation;
 using ERP_RFQ_Automation.CommercialIntelligence.Sales;
@@ -12,6 +13,7 @@ using ERP_RFQ_Automation.Infrastructure.Storage;
 using ERP_RFQ_Automation.Intelligence.Decision;
 using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.Models;
+using ERP_RFQ_Automation.Platform.Services;
 using ERP_RFQ_Automation.Sla;
 using Microsoft.EntityFrameworkCore;
 
@@ -81,6 +83,7 @@ public static class GoldenCommercialJourneySeeder
         }
 
         var db = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+        var baseline = scope.ServiceProvider.GetRequiredService<ITenantBaselineSeeder>();
         var routing = scope.ServiceProvider.GetRequiredService<ICommercialRoutingApplicationService>();
         var identity = scope.ServiceProvider.GetRequiredService<ILeadIdentityApplicationService>();
         var sales = scope.ServiceProvider.GetRequiredService<ISalesApplicationService>();
@@ -88,13 +91,35 @@ public static class GoldenCommercialJourneySeeder
 
         var (tenantA, tenantB) = await EnsureGovernedTenantsAsync(db, logger, now);
 
-        var adminRoleA = await EnsureRoleAsync(db, tenantA.Id, "SUPER_ADMIN", "Golden Admin", now);
-        var salesRoleA = await EnsureRoleAsync(db, tenantA.Id, "SUPER_ADMIN", "Golden Salesperson", now);
-        var adminRoleB = await EnsureRoleAsync(db, tenantB.Id, "SUPER_ADMIN", "Golden Admin B", now);
+        // Use the production starter-role catalogue. A hand-made Member role without its module
+        // grants is not a sales representative; it is simply denied everywhere. Seeding the same
+        // baseline provisioning uses keeps this fixture an honest RBAC certification surface.
+        foreach (var tenant in new[] { tenantA, tenantB })
+            await baseline.SeedAsync(tenant.Id, new TenantBaselineProfile(
+                CountryCode: "SA", BaseCurrencyCode: "SAR",
+                CompanyName: tenant.BusinessUnitName, Locale: "en-SA"), Actor);
+
+        var adminRoleA = await EnsureRoleAsync(
+            db, tenantA.Id, "SUPER_ADMIN", "Golden Admin", RoleRanks.Owner, now);
+        var salesRoleA = await EnsureRoleAsync(
+            db, tenantA.Id, "SALES_REP", "Sales Representative", RoleRanks.Member, now);
+        var managerRoleA = await EnsureRoleAsync(
+            db, tenantA.Id, "SALES_MANAGER", "Sales Manager", RoleRanks.Manager, now);
+        var deniedRoleA = await EnsureRoleAsync(
+            db, tenantA.Id, "E2E_DENIED", "Golden Denied Member", RoleRanks.Member, now);
+        var outsiderRoleB = await EnsureRoleAsync(
+            db, tenantB.Id, "SALES_REP", "Sales Representative", RoleRanks.Member, now);
 
         var admin = await EnsureUserAsync(db, "golden.admin@e2e.local", "Golden", "Admin", adminRoleA.SetupId, tenantA.Id, password!, now);
         var salesperson = await EnsureUserAsync(db, "golden.sales@e2e.local", "Golden", "Salesperson", salesRoleA.SetupId, tenantA.Id, password!, now);
-        var outsider = await EnsureUserAsync(db, "golden.outsider@e2e.local", "Golden", "Outsider", adminRoleB.SetupId, tenantB.Id, password!, now);
+        var manager = await EnsureUserAsync(db, "golden.manager@e2e.local", "Golden", "Manager", managerRoleA.SetupId, tenantA.Id, password!, now);
+        var denied = await EnsureUserAsync(db, "golden.denied@e2e.local", "Golden", "Denied", deniedRoleA.SetupId, tenantA.Id, password!, now);
+        var outsider = await EnsureUserAsync(db, "golden.outsider@e2e.local", "Golden", "Outsider", outsiderRoleB.SetupId, tenantB.Id, password!, now);
+        var salesTeam = await EnsureSalesTeamAsync(db, tenantA.Id, manager.Id, now);
+        salesperson.TeamId = salesTeam.Id;
+        salesperson.ManagerId = manager.Id;
+        manager.TeamId = salesTeam.Id;
+        await db.SaveChangesAsync();
 
         foreach (var tenantId in new[] { tenantA.Id, tenantB.Id })
             if (!await db.AiProcessingPolicies.AnyAsync(p => p.BusinessUnitId == tenantId))
@@ -110,6 +135,8 @@ public static class GoldenCommercialJourneySeeder
 
         var customerA = await EnsureCustomerAsync(db, tenantA.Id, "Saudi Electricity Company (E2E)", now);
         var customerB = await EnsureCustomerAsync(db, tenantB.Id, "Tenant B Customer (E2E)", now);
+        customerA.AccountTeamId = salesTeam.Id;
+        await db.SaveChangesAsync();
         await EnsureParticipationMastersAsync(db, tenantA.Id, now);
 
         // The catalog decides which lines raise a soft warning. Lines 1 and 3-6 match a product;
@@ -147,24 +174,36 @@ public static class GoldenCommercialJourneySeeder
         // after the portable relational seed and its application-service boundary have completed;
         // the configuration tests intentionally stop at that boundary with a minimal provider.
         var evidenceStorage = scope.ServiceProvider.GetRequiredService<IEvidenceObjectStorage>();
-        var leadA = await EnsureGoldenLeadAsync(
-            db, identity, evidenceStorage, tenantA.Id, customerA.Id, now);
+        var partialBidLead = await EnsureGoldenLeadAsync(
+            db, identity, evidenceStorage, tenantA.Id, customerA.Id, now,
+            reference: "E2E-GOLDEN-A-PARTIAL");
+        var fullBidLead = await EnsureGoldenLeadAsync(
+            db, identity, evidenceStorage, tenantA.Id, customerA.Id, now,
+            reference: "E2E-GOLDEN-A-FULL");
+        var fullNoBidLead = await EnsureGoldenLeadAsync(
+            db, identity, evidenceStorage, tenantA.Id, customerA.Id, now,
+            reference: "E2E-GOLDEN-A-NOBID");
         var leadB = await EnsureGoldenLeadAsync(
             db, identity, evidenceStorage, tenantB.Id, customerB.Id, now,
             reference: "E2E-GOLDEN-B-001");
 
         // Real routing/assignment path — not a hand-written LeadAssignment row.
-        try
+        foreach (var leadId in new[] { partialBidLead, fullBidLead, fullNoBidLead })
         {
-            await routing.RouteLeadAsync(tenantA.Id, new RouteLeadCommand(
-                leadA, $"golden-journey-route-{leadA}", $"golden-journey-{leadA}"), CancellationToken.None);
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Golden journey: routing did not assign lead {LeadId}; it will surface in the unassigned queue.", leadA);
+            try
+            {
+                await routing.RouteLeadAsync(tenantA.Id, new RouteLeadCommand(
+                    leadId, $"golden-journey-route-{leadId}", $"golden-journey-{leadId}"), CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Golden journey: routing did not assign lead {LeadId}; it will surface in the unassigned queue.", leadId);
+            }
         }
 
-        await AssertStartingStateAsync(db, tenantA.Id, leadA, logger);
+        await AssertStartingStateAsync(db, tenantA.Id, partialBidLead, "E2E-GOLDEN-A-PARTIAL", logger);
+        await AssertStartingStateAsync(db, tenantA.Id, fullBidLead, "E2E-GOLDEN-A-FULL", logger);
+        await AssertStartingStateAsync(db, tenantA.Id, fullNoBidLead, "E2E-GOLDEN-A-NOBID", logger);
 
         var manifest = new
         {
@@ -174,10 +213,18 @@ public static class GoldenCommercialJourneySeeder
             adminEmail = admin.Email,
             salespersonUserId = salesperson.Id,
             salespersonEmail = salesperson.Email,
+            salesManagerUserId = manager.Id,
+            salesManagerEmail = manager.Email,
+            deniedUserId = denied.Id,
+            deniedEmail = denied.Email,
             outsiderUserId = outsider.Id,
             outsiderEmail = outsider.Email,
             customerA = customerA.Id,
-            leadId = leadA,
+            // Keep leadId as a compatibility alias for older pilot scripts.
+            leadId = partialBidLead,
+            partialBidLeadId = partialBidLead,
+            fullBidLeadId = fullBidLead,
+            fullNoBidLeadId = fullNoBidLead,
             foreignLeadId = leadB,
             lineParts = new
             {
@@ -200,8 +247,8 @@ public static class GoldenCommercialJourneySeeder
         }
 
         logger.LogInformation(
-            "Golden journey seeded: tenantA={TenantA} lead={LeadId} salesperson={SalesUser} tenantB={TenantB} foreignLead={ForeignLead}.",
-            tenantA.Id, leadA, salesperson.Id, tenantB.Id, leadB);
+            "Golden journey seeded: tenantA={TenantA} partial={PartialLead} full={FullLead} noBid={NoBidLead} salesperson={SalesUser} manager={ManagerUser} tenantB={TenantB} foreignLead={ForeignLead}.",
+            tenantA.Id, partialBidLead, fullBidLead, fullNoBidLead, salesperson.Id, manager.Id, tenantB.Id, leadB);
     }
 
     // ------------------------------------------------------------------ the six lines
@@ -260,8 +307,8 @@ public static class GoldenCommercialJourneySeeder
         candidate.LeadItems.Add(Line("00060", GoldenLine6Part, "Cable tray 300mm hot-dip", 30, "EA"));
 
         var key = $"golden-journey:{businessUnitId}:{reference}";
-        var batchId = DeterministicBatchId(businessUnitId);
-        var evidenceBytes = BuildGoldenEvidenceBytes(candidate.LeadItems);
+        var batchId = DeterministicBatchId(businessUnitId, reference);
+        var evidenceBytes = BuildGoldenEvidenceBytes(reference, candidate.LeadItems);
         var evidenceHash = Convert.ToHexString(SHA256.HashData(evidenceBytes)).ToLowerInvariant();
         var evidence = await PrepareGovernedEvidenceAsync(
             db, evidenceStorage, businessUnitId, batchId, reference, evidenceBytes, evidenceHash, now);
@@ -521,19 +568,17 @@ public static class GoldenCommercialJourneySeeder
         await db.SaveChangesAsync();
     }
 
-    /// <summary>Stable per-tenant batch id — a random Guid would break replay idempotency.</summary>
-    private static Guid DeterministicBatchId(long businessUnitId)
+    /// <summary>Stable per-tenant/source batch id — distinct scenarios must not share a corpus.</summary>
+    internal static Guid DeterministicBatchId(long businessUnitId, string reference)
     {
-        var bytes = new byte[16];
-        BitConverter.GetBytes(businessUnitId).CopyTo(bytes, 0);
-        "GOLDEN"u8.ToArray().CopyTo(bytes, 8);
-        return new Guid(bytes);
+        var identity = Encoding.UTF8.GetBytes($"golden-journey:{businessUnitId}:{reference}");
+        return new Guid(SHA256.HashData(identity).AsSpan(0, 16));
     }
 
-    private static byte[] BuildGoldenEvidenceBytes(IEnumerable<LeadItem> lines) =>
-        Encoding.UTF8.GetBytes(string.Join('\n', lines
+    private static byte[] BuildGoldenEvidenceBytes(string reference, IEnumerable<LeadItem> lines) =>
+        Encoding.UTF8.GetBytes(string.Join('\n', new[] { $"REFERENCE|{reference}" }.Concat(lines
             .OrderBy(x => x.LineItemNo)
-            .Select(x => $"{x.LineItemNo}|{x.ItemMaterialCode}|{x.Quantity}|{x.UnitOfMeasure}|{x.Currency}")));
+            .Select(x => $"{x.LineItemNo}|{x.ItemMaterialCode}|{x.Quantity}|{x.UnitOfMeasure}|{x.Currency}"))));
 
     private static LeadItem Line(string lineNo, string partNo, string description, int quantity, string uom) => new()
     {
@@ -616,19 +661,18 @@ public static class GoldenCommercialJourneySeeder
     }
 
     private static async Task<SetupMaster> EnsureRoleAsync(
-        ErpRfqAutomationContext db, long businessUnitId, string code, string name, DateTime now)
+        ErpRfqAutomationContext db, long businessUnitId, string code, string name,
+        short rank, DateTime now)
     {
         var existing = await db.SetupMasters.IgnoreQueryFilters()
-            .FirstOrDefaultAsync(s => s.BusinessUnitId == businessUnitId && s.SetupType == "Role" && s.SetupValue == name);
+            .FirstOrDefaultAsync(s => s.BusinessUnitId == businessUnitId
+                && s.SetupType == "Role" && s.SetupCode == code);
         if (existing is not null) return existing;
         var role = new SetupMaster
         {
             SetupType = "Role", SetupCode = code, SetupValue = name,
             Description = "Local E2E golden journey role.", BusinessUnitId = businessUnitId,
-            // These roles all carried SetupCode "SUPER_ADMIN", which the old name rule read as
-            // super admin. Rank is explicit now; Owner keeps the golden journey behaving exactly
-            // as it did before the column existed.
-            RoleRank = ERP_RFQ_Automation.Authorization.RoleRanks.Owner,
+            RoleRank = rank,
             IsActive = true, CreatedBy = Actor, CreatedOn = now
         };
         db.SetupMasters.Add(role);
@@ -648,6 +692,11 @@ public static class GoldenCommercialJourneySeeder
             if (existing.Buid != businessUnitId)
                 throw new InvalidOperationException(
                     $"Golden journey seed refused: {email} already belongs to business unit {existing.Buid}.");
+            // These addresses are reserved for this local fixture. Reconcile their role so an
+            // older database where the salesperson was incorrectly seeded as Owner cannot keep
+            // passing a privileged session off as a representative test.
+            existing.RoleId = roleId;
+            existing.IsActive = true;
             return existing;
         }
         var user = new User
@@ -661,6 +710,31 @@ public static class GoldenCommercialJourneySeeder
         db.Users.Add(user);
         await db.SaveChangesAsync();
         return user;
+    }
+
+    private static async Task<Team> EnsureSalesTeamAsync(
+        ErpRfqAutomationContext db, long businessUnitId, long managerId, DateTime now)
+    {
+        var existing = await db.Teams.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(team => team.BusinessUnitId == businessUnitId
+                && team.TeamName == "Golden Sales Team");
+        if (existing is not null)
+        {
+            existing.ManagerId = managerId;
+            return existing;
+        }
+
+        var team = new Team
+        {
+            TeamName = "Golden Sales Team",
+            ManagerId = managerId,
+            BusinessUnitId = businessUnitId,
+            CreatedBy = Actor,
+            CreatedOn = now
+        };
+        db.Teams.Add(team);
+        await db.SaveChangesAsync();
+        return team;
     }
 
     private static async Task<Customer> EnsureCustomerAsync(ErpRfqAutomationContext db, long businessUnitId, string name, DateTime now)
@@ -700,12 +774,12 @@ public static class GoldenCommercialJourneySeeder
     /// state the contract the test depends on, and fail here where the cause is obvious.</para>
     /// </summary>
     private static async Task AssertStartingStateAsync(
-        ErpRfqAutomationContext db, long businessUnitId, long leadId, ILogger logger)
+        ErpRfqAutomationContext db, long businessUnitId, long leadId, string reference, ILogger logger)
     {
         var problems = new List<string>();
 
         var leads = await db.Leads.IgnoreQueryFilters()
-            .Where(l => l.BusinessUnitId == businessUnitId && l.Rfqno == "E2E-GOLDEN-A-001")
+            .Where(l => l.BusinessUnitId == businessUnitId && l.Rfqno == reference)
             .ToListAsync();
         if (leads.Count != 1) problems.Add($"expected exactly 1 canonical Lead, found {leads.Count}");
 
@@ -740,6 +814,19 @@ public static class GoldenCommercialJourneySeeder
 
         // Nothing the browser test is supposed to CREATE may already exist, or its assertions
         // prove nothing.
+        if (lead?.CurrentRevisionId is long currentRevisionId)
+        {
+            var fitAssessments = await db.Set<LeadFitAssessment>().IgnoreQueryFilters()
+                .CountAsync(assessment => assessment.BusinessUnitId == businessUnitId
+                    && assessment.LeadId == leadId
+                    && assessment.LeadRevisionId == currentRevisionId);
+            var participationDecisions = await db.Set<LeadParticipationDecision>().IgnoreQueryFilters()
+                .CountAsync(decision => decision.BusinessUnitId == businessUnitId
+                    && decision.LeadId == leadId
+                    && decision.LeadRevisionId == currentRevisionId);
+            problems.AddRange(StartingStateDecisionProblems(fitAssessments, participationDecisions));
+        }
+
         var rfqs = await db.Rfqs.IgnoreQueryFilters().CountAsync(r => r.LeadId == leadId);
         if (rfqs != 0) problems.Add($"expected no RFQ before the browser converts, found {rfqs}");
         var quotes = await db.Quotes.IgnoreQueryFilters()
@@ -756,6 +843,17 @@ public static class GoldenCommercialJourneySeeder
 
         logger.LogInformation(
             "Golden starting state verified: 1 lead, revision 1 with 6 lines linked to its occurrence, "
-            + "customer confirmed, no RFQ, no Quote, no participation decisions.");
+            + "customer confirmed, no fit assessment, no participation decision, no RFQ and no Quote.");
+    }
+
+    internal static IReadOnlyList<string> StartingStateDecisionProblems(
+        int fitAssessments, int participationDecisions)
+    {
+        var problems = new List<string>();
+        if (fitAssessments != 0)
+            problems.Add($"expected no fit assessment on the current revision, found {fitAssessments}");
+        if (participationDecisions != 0)
+            problems.Add($"expected no participation decision on the current revision, found {participationDecisions}");
+        return problems;
     }
 }

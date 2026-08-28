@@ -26,6 +26,12 @@ public sealed class TestDb : IDisposable
     {
         _connection = new SqliteConnection("Data Source=:memory:");
         _connection.Open();
+        // The production model intentionally uses PostgreSQL's now() for generated UTC
+        // timestamps. SQLite accepts that model when creating the test schema, but only fails
+        // later when a row relies on the default. Register the production-shaped function once
+        // for every relational test instead of making individual fixtures know which downstream
+        // entity happens to use it.
+        _connection.CreateFunction("now", () => DateTime.UtcNow);
         _options = new DbContextOptionsBuilder<ErpRfqAutomationContext>()
             .UseSqlite(_connection)
             .EnableSensitiveDataLogging()

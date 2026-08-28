@@ -76,4 +76,20 @@ describe('lifecycle action guidance', () => {
     }), { isLoading: false, isError: false, activeHoldCount: 1 });
     expect(readyButHeld.purge).toMatch(/Release the active legal hold/);
   });
+
+  it('surfaces purge-phase readiness after the retention clock has elapsed', () => {
+    const result = lifecycleActionBlockers(status({
+      stage: 'PendingDeletion', canCancelDeletion: true, canPurge: false,
+      isPurgeEligible: true,
+      readinessFailures: [
+        {
+          code: 'PERSONAL_DATA_ERASURE_MISSING',
+          detail: 'Persisted personal-data erasure proof is required before destructive purge.',
+        },
+      ],
+    }), clearHolds);
+
+    expect(result.purge).toMatch(/purge-readiness checklist/i);
+    expect(result.purge).toMatch(/personal-data erasure proof/i);
+  });
 });

@@ -74,6 +74,13 @@ wait_for() { # url, label, attempts
     fi
     sleep 2
   done
+  if [[ "$label" == "Backend" && -f "$RUN_DIR/backend.log" ]]; then
+    log "Backend startup log (last 160 lines):"
+    tail -160 "$RUN_DIR/backend.log" >&2
+  elif [[ "$label" == "Frontend" && -f "$RUN_DIR/frontend.log" ]]; then
+    log "Frontend startup log (last 80 lines):"
+    tail -80 "$RUN_DIR/frontend.log" >&2
+  fi
   die "$label did not answer at $url. See $RUN_DIR for logs."
 }
 
@@ -178,12 +185,13 @@ wait_for "$BACKEND_URL/health" "Backend" 150
 log "Golden scenario seeded."
 
 # ---------------------------------------------------------------- 4. ids for the browser test
-read -r TENANT_A TENANT_B ADMIN_EMAIL SALES_EMAIL OUTSIDER_EMAIL LEAD_ID FOREIGN_LEAD_ID <<<"$(
+read -r TENANT_A TENANT_B ADMIN_EMAIL SALES_EMAIL MANAGER_EMAIL DENIED_EMAIL OUTSIDER_EMAIL PARTIAL_LEAD_ID FULL_LEAD_ID NOBID_LEAD_ID FOREIGN_LEAD_ID <<<"$(
   python3 -c "
 import json,sys
 m=json.load(open('$MANIFEST'))
 print(m['tenantA'], m['tenantB'], m['adminEmail'], m['salespersonEmail'],
-      m['outsiderEmail'], m['leadId'], m['foreignLeadId'])"
+      m['salesManagerEmail'], m['deniedEmail'], m['outsiderEmail'], m['partialBidLeadId'], m['fullBidLeadId'],
+      m['fullNoBidLeadId'], m['foreignLeadId'])"
 )"
 
 export SALES_EMAIL="$SALES_EMAIL"
@@ -197,13 +205,18 @@ E2E_GOLDEN_TENANT_A=$TENANT_A
 E2E_GOLDEN_TENANT_B=$TENANT_B
 E2E_GOLDEN_ADMIN_EMAIL=$ADMIN_EMAIL
 E2E_GOLDEN_SALES_EMAIL=$SALES_EMAIL
+E2E_GOLDEN_MANAGER_EMAIL=$MANAGER_EMAIL
+E2E_GOLDEN_DENIED_EMAIL=$DENIED_EMAIL
 E2E_GOLDEN_OUTSIDER_EMAIL=$OUTSIDER_EMAIL
 E2E_GOLDEN_PASSWORD=$E2E_PASSWORD
-E2E_GOLDEN_LEAD_ID=$LEAD_ID
+E2E_GOLDEN_LEAD_ID=$PARTIAL_LEAD_ID
+E2E_GOLDEN_PARTIAL_BID_LEAD_ID=$PARTIAL_LEAD_ID
+E2E_GOLDEN_FULL_BID_LEAD_ID=$FULL_LEAD_ID
+E2E_GOLDEN_FULL_NO_BID_LEAD_ID=$NOBID_LEAD_ID
 E2E_GOLDEN_FOREIGN_LEAD_ID=$FOREIGN_LEAD_ID
 ENV
 chmod 600 "$ENV_FILE"
-log "Resolved ids: tenantA=$TENANT_A lead=$LEAD_ID foreignLead=$FOREIGN_LEAD_ID (credentials in $ENV_FILE, mode 600)."
+log "Resolved ids: tenantA=$TENANT_A partial=$PARTIAL_LEAD_ID full=$FULL_LEAD_ID noBid=$NOBID_LEAD_ID foreignLead=$FOREIGN_LEAD_ID (credentials in $ENV_FILE, mode 600)."
 # ---------------------------------------------------------------- 4b. login preflight
 #
 # A real POST /api/Auth/login that must return 200 AND a JWT. This is the check that catches a
@@ -240,6 +253,13 @@ set -e
 
 log "Artifacts: $FRONTEND_DIR/playwright-report (HTML), $FRONTEND_DIR/test-results (traces, screenshots, video), $RUN_DIR (service logs)."
 if [[ $PLAYWRIGHT_STATUS -ne 0 ]]; then
+  log "Backend error summary:"
+  grep -nE 'fail:|Unhandled|Exception|PostgresException|DbUpdateException|permission denied|violates' \
+    "$RUN_DIR/backend.log" | tail -120 >&2 || true
+  log "Backend journey log (last 200 lines):"
+  tail -200 "$RUN_DIR/backend.log" >&2 || true
+  log "Frontend journey log (last 80 lines):"
+  tail -80 "$RUN_DIR/frontend.log" >&2 || true
   die "Governed pilot gate FAILED (exit $PLAYWRIGHT_STATUS). Open $FRONTEND_DIR/playwright-report/index.html"
 fi
 log "GOVERNED LEAD DECISION -> RFQ PROMOTION: browser journey PASSED."

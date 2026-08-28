@@ -27,6 +27,7 @@ import { useAuth } from '../../context/AuthContext';
 import LeadRevisionTimeline from './LeadRevisionTimeline';
 import LeadOwnerControl from './LeadOwnerControl';
 import LeadDecisionActions from './LeadDecisionActions';
+import CommercialLineIntelligence from '../../components/common/CommercialLineIntelligence';
 
 import { toast } from 'react-hot-toast';
 import { presentableErrorMessage } from '../../utils/apiErrors';
@@ -479,6 +480,12 @@ const LeadDetailPage: React.FC = () => {
               )}
             </Stack>
           </Paper>
+        </Grid>
+
+        {/* Inventory and supplier evidence remains available on the canonical Lead. The retired
+            direct-conversion preview used to be the only place a rep could refresh this context. */}
+        <Grid size={{ xs: 12 }} component="div">
+          <CommercialLineIntelligence stage="lead" recordId={Number(id)} />
         </Grid>
 
         {/* Full Width Bottom: Line Items */}

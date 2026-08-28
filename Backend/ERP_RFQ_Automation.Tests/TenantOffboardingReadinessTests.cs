@@ -74,6 +74,14 @@ public sealed class TenantOffboardingReadinessTests
         }
 
         await using var purge = db.ContextFor(null);
+        var status = await TenantLifecycleHarness.Service(
+                purge, timeProvider: clock,
+                readiness: new TenantOffboardingReadinessService(purge))
+            .GetStatusAsync(tenant.Id, CancellationToken.None);
+        Assert.False(status.CanPurge);
+        Assert.Contains(status.ReadinessFailures,
+            failure => failure.Code == TenantOffboardingReadinessCodes.AccountsReceivableOpen);
+
         var refusal = await Assert.ThrowsAsync<TenantOffboardingRefusedException>(() =>
             TenantLifecycleHarness.Service(purge, timeProvider: clock,
                     readiness: new TenantOffboardingReadinessService(purge))
@@ -103,6 +111,17 @@ public sealed class TenantOffboardingReadinessTests
                     TenantLifecycleHarness.Operator(), null, CancellationToken.None);
 
         TenantLifecycleHarness.ElapseRetentionWindow(clock);
+        await using (var statusContext = db.ContextFor(null))
+        {
+            var status = await TenantLifecycleHarness.Service(
+                    statusContext, timeProvider: clock,
+                    readiness: new TenantOffboardingReadinessService(statusContext))
+                .GetStatusAsync(tenant.Id, CancellationToken.None);
+            Assert.False(status.CanPurge);
+            Assert.Contains(status.ReadinessFailures,
+                failure => failure.Code == TenantOffboardingReadinessCodes.PersonalDataErasureMissing);
+        }
+
         await using (var blocked = db.ContextFor(null))
         {
             var refusal = await Assert.ThrowsAsync<TenantOffboardingRefusedException>(() =>
@@ -126,6 +145,13 @@ public sealed class TenantOffboardingReadinessTests
             .AssessAsync(persisted, TenantOffboardingReadinessPhase.Purge);
         Assert.True(verdict.Ready);
         Assert.NotNull((await ready.Set<TenantOffboarding>().SingleAsync()).PersonalDataErasedOn);
+
+        var readyStatus = await TenantLifecycleHarness.Service(
+                ready, timeProvider: clock,
+                readiness: new TenantOffboardingReadinessService(ready))
+            .GetStatusAsync(tenant.Id, CancellationToken.None);
+        Assert.True(readyStatus.CanPurge);
+        Assert.Empty(readyStatus.ReadinessFailures);
     }
 
     private static async Task<Tenant> SeedReadyTenantAsync(

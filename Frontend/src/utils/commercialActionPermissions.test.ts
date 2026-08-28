@@ -19,6 +19,7 @@ describe('commercial action permission matrix', () => {
       canEditLeadDecision: false,
       canResolveLeadDuplicate: false,
       canPromoteLeadToRfq: false,
+      canResolveRfqRevisionImpact: false,
       canViewLeadEvidence: true,
     });
   });
@@ -35,6 +36,15 @@ describe('commercial action permission matrix', () => {
   it('requires both Lead edit and RFQ create for promotion, matching server authority', () => {
     expect(accessFor('Leads:view', 'RFQ Management:create').canPromoteLeadToRfq).toBe(false);
     expect(accessFor('Leads:edit', 'RFQ Management:create').canPromoteLeadToRfq).toBe(true);
+  });
+
+  it('requires both Lead edit and RFQ edit to close an amendment review', () => {
+    expect(accessFor('Leads:edit').canResolveRfqRevisionImpact).toBe(false);
+    expect(accessFor('RFQ Management:edit').canResolveRfqRevisionImpact).toBe(false);
+    expect(accessFor(
+      'Leads:edit',
+      'RFQ Management:edit',
+    ).canResolveRfqRevisionImpact).toBe(true);
   });
 
   it('keeps Lead linking separate from cross-module Customer creation authority', () => {

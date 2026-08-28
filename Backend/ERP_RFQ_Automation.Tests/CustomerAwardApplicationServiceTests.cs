@@ -370,10 +370,30 @@ internal sealed class CustomerAwardTestFixture : IDisposable
     {
         if (context.BusinessUnits.IgnoreQueryFilters().Any(x => x.Id == businessUnitId)) return;
         var lead = Seed.Lead(context, LeadId, businessUnitId);
-        context.SaveChanges();
         Seed.Customer(context, CustomerId, businessUnitId, "Customer Award Tests");
-        context.SaveChanges();
+        // Resolve while the Lead is still new so the fixture persists one canonical graph. A
+        // separate post-insert update races the PostgreSQL commercial-case assignment trigger and
+        // is not representative of the application service's transactional creation path.
         lead.ResolveCommercialIdentity(CustomerId, null, "VERIFIED");
+        context.SaveChanges();
+        context.Currencies.Add(new Currency
+        {
+            Id = CurrencyId, BusinessUnitId = businessUnitId, Code = "USD", CurrencyName = "US Dollar",
+            ExchangeRate = 1m, IsActive = true, CreatedBy = "tests", CreatedOn = Now
+        });
+        context.SetUoms.AddRange(
+            NewUom(EachUomId, businessUnitId, "EA", "Each"),
+            NewUom(BoxUomId, businessUnitId, "BOX", "Box"));
+        context.SaveChanges();
+        var leadItem = new LeadItem
+        {
+            Id = 880_035, LeadId = lead.Id, LineItemNo = "1", ProductShortDescription = "Awarded widget",
+            Quantity = 10, UnitOfMeasure = "EA", Currency = "USD"
+        };
+        // Explicitly mark this fixed-key fixture row as Added. Relationship discovery treats a
+        // non-default key attached through an unchanged Lead navigation as an existing row and
+        // would correctly issue an UPDATE instead of an INSERT.
+        context.LeadItems.Add(leadItem);
 
         var batch = new LeadIngestionBatch
         {
@@ -400,6 +420,14 @@ internal sealed class CustomerAwardTestFixture : IDisposable
         };
         context.Add(revision);
         context.SaveChanges();
+        var revisionLine = new LeadItemRevision
+        {
+            Id = 880_036, BusinessUnitId = businessUnitId, LeadId = lead.Id,
+            LeadRevisionId = revision.Id, LeadItemId = leadItem.Id, LineNumber = 1,
+            LineFingerprint = new string('f', 64), SnapshotJson = "{}"
+        };
+        context.Add(revisionLine);
+        context.SaveChanges();
         lead.CurrentRevisionId = revision.Id;
         lead.CurrentRevisionNumber = revision.RevisionNumber;
         var fit = new LeadFitAssessment
@@ -420,6 +448,15 @@ internal sealed class CustomerAwardTestFixture : IDisposable
             Notes = "Governed downstream award fixture.", IdempotencyKey = $"award-decision:{businessUnitId}",
             RequestHash = new string('d', 64), DecidedBy = "tests", DecidedAtUtc = new DateTimeOffset(Now)
         };
+        decision.Lines.Add(new LeadLineParticipationDecision
+        {
+            Id = 880_037, BusinessUnitId = businessUnitId, LeadId = lead.Id,
+            LeadRevisionId = revision.Id, LeadItemRevisionId = revisionLine.Id,
+            DecisionIsCommitted = true, Choice = LeadLineParticipationChoice.Bid,
+            Quantity = 10, UnitOfMeasure = "EA", UomId = EachUomId,
+            Currency = "USD", CurrencyId = CurrencyId,
+            CatalogPolicyVersion = "award-fixture/v1", WarningSnapshotJson = "{}"
+        });
         context.Add(decision);
         context.SaveChanges();
         var promotion = new RfqPromotion
@@ -431,14 +468,6 @@ internal sealed class CustomerAwardTestFixture : IDisposable
         };
         context.Add(promotion);
         context.SaveChanges();
-        context.Currencies.Add(new Currency
-        {
-            Id = CurrencyId, BusinessUnitId = businessUnitId, Code = "USD", CurrencyName = "US Dollar",
-            ExchangeRate = 1m, IsActive = true, CreatedBy = "tests", CreatedOn = Now
-        });
-        context.SetUoms.AddRange(
-            NewUom(EachUomId, businessUnitId, "EA", "Each"),
-            NewUom(BoxUomId, businessUnitId, "BOX", "Box"));
         context.Products.AddRange(
             NewProduct(ProductOneId, businessUnitId, "Award Widget 1"),
             NewProduct(ProductTwoId, businessUnitId, "Award Widget 2"));

@@ -222,10 +222,8 @@ namespace ERP_RFQ_Automation.Repositories
                 query = query.Where(l => l.LeadStatusId == null || !finished.Contains(l.LeadStatusId.Value));
             }
             else if (string.Equals(queueView, "ready-for-rfq", StringComparison.OrdinalIgnoreCase))
-                // Mirrors LeadConversionIntelligence.FindConversionBlockers exactly. A closing
-                // date is deliberately NOT required in either place: an enquiry that states no
-                // deadline is still convertible, and a queue that hid those from the user while
-                // conversion accepted them would disagree with the button it exists to feed.
+                // Advisory queue criteria only. RFQ Promotion performs the authoritative
+                // revision, fit, participation and commercial-fact checks before creation.
                 query = query.Where(l => l.CommercialFactsVerified && !l.RequiresCommercialReview
                     && l.CustomerId != null && l.LeadItems.Any()
                     && !l.Rfqs.Any());
@@ -477,97 +475,11 @@ namespace ERP_RFQ_Automation.Repositories
                 "Lead acceptance has moved to the governed lifecycle. Advance the lead to UNDER_REVIEW, then transition it to QUALIFIED.");
         }
 
-        // ARCH-01: convert an accepted lead into a real RFQ (with LeadId set), so the
-        // end-to-end chain Lead -> RFQ -> Quote -> Order -> Shipment is continuous.
-        // Status literals (24 = Lead Accepted, 34 = RFQ Draft) follow existing code
-        // convention; resolving these via SetupMaster codes is tracked as ARCH-03.
+        // Compatibility tombstone. RFQ Promotion is the sole Lead-origin creation path.
         public Task<(long RfqId, string Rfqno)> ConvertLeadToRfqAsync(long id, long businessUnitId, string createdBy)
         {
             return Task.FromException<(long RfqId, string Rfqno)>(new InvalidOperationException(
                 "Direct LeadRepository RFQ creation is retired. Commit the current Lead Revision participation decision and invoke RFQ Promotion."));
-        }
-
-        private async Task<Rfq> CreateRfqFromLeadAsync(Lead lead, long businessUnitId, string createdBy)
-        {
-            // RFQItems.Quantity is NOT NULL and carries CK_RFQItems_Quantity_Positive, so a lead
-            // line whose quantity the document never stated cannot become an RFQ line. Refuse it
-            // here, by name, rather than coalescing to 0 — which would either be rejected by the
-            // database as an opaque 23514 or, worse, accepted as a real demand for nothing.
-            var unquantified = lead.LeadItems
-                .Where(li => li.Quantity is null or <= 0)
-                .Select(li => string.IsNullOrWhiteSpace(li.LineItemNo) ? $"line {li.Id}" : $"line {li.LineItemNo}")
-                .ToList();
-            if (unquantified.Count > 0)
-            {
-                throw new InvalidOperationException(
-                    "This lead cannot be converted until every line states a quantity greater than zero. "
-                    + $"Missing on {string.Join(", ", unquantified)}.");
-            }
-
-            var rfqno = !string.IsNullOrWhiteSpace(lead.Rfqno)
-                ? lead.Rfqno
-                : $"RFQ-{lead.Id}-{DateTime.UtcNow:yyyyMMddHHmmss}";
-            if (await _context.Rfqs.AnyAsync(r => r.Rfqno == rfqno && r.BusinessUnitId == businessUnitId))
-                rfqno = $"{rfqno}-{DateTime.UtcNow:yyyyMMddHHmmss}";
-
-            var now = DateTime.UtcNow;
-            var rfq = new Rfq
-            {
-                Rfqno = rfqno,
-                BuyersName = lead.BuyersName,
-                RecDate = lead.RecDate,
-                BidClosingDate = lead.BidClosingDate,
-                AcknowledgmentDate = lead.AcknowledgmentDate,
-                SubDate = lead.SubDate,
-                HeaderRemarks = lead.HeaderRemarks,
-                OpportunityNo = lead.OpportunityNo,
-                NoOfLineItems = lead.NoOfLineItems ?? lead.LeadItems.Count,
-                Rfqtype = lead.Rfqtype,
-                DurationAgreement = lead.DurationAgreement,
-                LeadId = lead.Id,
-                BusinessUnitId = businessUnitId,
-                RfqstatusId = await LifecycleStatusCatalog.ResolveIdAsync(_context, businessUnitId, "Rfq", "DRAFT"),
-                CreatedBy = createdBy.Trim(),
-                CreatedDate = now,
-                Rfqitems = lead.LeadItems.Select(li => new Rfqitem
-                {
-                    CompanyRef = li.CompanyRef,
-                    CustomerAccountPortalId = li.CustomerAccountPortalId,
-                    CustomerRfqno = li.CustomerRfqno,
-                    ItemMaterialCode = li.ItemMaterialCode,
-                    LineItemNo = li.LineItemNo,
-                    CommodityProduct = li.CommodityProduct,
-                    ProductShortName = li.ProductShortName,
-                    ProductShortDescription = li.ProductShortDescription,
-                    Alternative = li.Alternative,
-                    BuyerName = li.BuyerName,
-                    Currency = li.Currency,
-                    UnitOfMeasure = li.UnitOfMeasure,
-                    UnitPrice = li.UnitPrice,
-                    // Non-null by the guard at the top of this method.
-                    Quantity = li.Quantity!.Value,
-                    StorageLocation = li.StorageLocation,
-                    ManufacturerName = li.ManufacturerName,
-                    ManufacturerPartNumber = li.ManufacturerPartNumber,
-                    AlternateProductName = li.AlternateProductName,
-                    AlternatePartNumber = li.AlternatePartNumber,
-                    ItemText = li.ItemText,
-                    MaterialPotext = li.MaterialPotext,
-                    LeadTime = li.LeadTime,
-                    ReceivedDate = li.ReceivedDate,
-                    BidClosingDateLine = li.BidClosingDateLine,
-                    // Carried from the lead header for the same reason, and by the same rule, as
-                    // LeadConversionIntelligence — see the comment there. Both conversion paths
-                    // have to do this, or which one an operator happened to use decides whether
-                    // the sourcing case and the SLA sweep ever learn the customer's date.
-                    RequiredDesiredDate = lead.RequiredDeliveryDate,
-                    Aiconfidence = li.Aiconfidence,
-                    CreatedBy = createdBy.Trim(),
-                    CreatedDate = now
-                }).ToList()
-            };
-            rfq.InheritCommercialIdentity(lead);
-            return rfq;
         }
 
         public async Task<IEnumerable<RejectionReasonDTO>> GetLeadRejectionReasonsAsync()

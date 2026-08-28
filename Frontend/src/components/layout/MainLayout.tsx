@@ -93,7 +93,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
           <Toolbar sx={{ px: collapsed ? 1 : 2.5, display: 'flex', justifyContent: collapsed ? 'center' : 'flex-start', mb: 2 }}>
             <Branding showText={!collapsed} fontSize={20} logoSize={32} />
           </Toolbar>
-          <Sidebar collapsed={collapsed} />
+          <Sidebar collapsed={collapsed} onRequestExpand={() => setCollapsed(false)} />
         </Drawer>
       </Box>
 

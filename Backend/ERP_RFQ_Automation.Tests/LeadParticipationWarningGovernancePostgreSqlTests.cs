@@ -184,6 +184,15 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
         Assert.Equal(promoted.PromotionId, replay.PromotionId);
         Assert.Equal(promoted.RfqId, replay.RfqId);
         Assert.Equal(promoted.RfqNumber, replay.RfqNumber);
+
+        // A client may lose the first response and generate a fresh transport key. The durable
+        // Lead/revision/participation winner remains authoritative even though promotion has
+        // already advanced the Lead lifecycle beyond QUALIFIED.
+        var freshKeyReplay = await promotion.PromoteAsync(Tenant, scenario.LeadId,
+            promotionCommand with { IdempotencyKey = $"warning-promotion:fresh-retry:{scenario.LeadId}" });
+        Assert.True(freshKeyReplay.Replayed);
+        Assert.Equal(promoted.PromotionId, freshKeyReplay.PromotionId);
+        Assert.Equal(promoted.RfqId, freshKeyReplay.RfqId);
         Assert.Equal(1, await context.Set<RfqPromotion>().AsNoTracking()
             .CountAsync(x => x.BusinessUnitId == Tenant && x.LeadId == scenario.LeadId));
         Assert.Equal(1, await context.Rfqs.AsNoTracking()
@@ -228,10 +237,14 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
     public async Task Full_no_bid_disqualifies_the_lead_and_can_never_create_an_rfq()
     {
         var scenario = await CreateScenarioAsync([
-            Line("00010", 3, "EA", "SAR", "DECLINED-01"),
+            // Missing/zero source quantity is a valid reason to decline a line. Commercial
+            // completeness is a Bid invariant, not a prerequisite for recording No-bid.
+            Line("00010", 0, null, null, "DECLINED-01"),
             Line("00020", 5, "EA", "SAR", "DECLINED-02")
         ], "full-no-bid");
-        await using var context = database.ContextFor(Tenant);
+        // Exercise the same forced-RLS execution role used by an authenticated tenant request.
+        // Owner-role coverage cannot reveal missing grants or policy failures at transaction commit.
+        await using var context = database.TenantContextWithRls(Tenant);
         var participation = Service(context);
         var fit = await FitAsync(participation, scenario, "full-no-bid");
         var lines = scenario.LineRevisionIds.Select(id => new LeadLineParticipationCommand(
@@ -256,6 +269,8 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
 
         Assert.Equal(LeadParticipationOutcome.NoBid, decision.Outcome);
         Assert.All(decision.Lines, line => Assert.Equal(LeadLineParticipationChoice.NoBid, line.Choice));
+        Assert.Null(decision.Lines.Single(line => line.LeadItemRevisionId == scenario.LineRevisionIds[0]).Quantity);
+        Assert.Equal(5, decision.Lines.Single(line => line.LeadItemRevisionId == scenario.LineRevisionIds[1]).Quantity);
         var lead = await context.Leads.AsNoTracking().Include(x => x.LeadStatus)
             .SingleAsync(x => x.BusinessUnitId == Tenant && x.Id == scenario.LeadId);
         Assert.Equal("DISQUALIFIED", lead.LeadStatus?.SetupCode);

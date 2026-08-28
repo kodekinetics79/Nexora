@@ -1,9 +1,11 @@
 using ERP_RFQ_Automation.CommercialIntelligence.Sales;
 using ERP_RFQ_Automation.CommercialRouting;
+using ERP_RFQ_Automation.Authorization;
 using ERP_RFQ_Automation.Infrastructure;
 using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.Platform.Models;
+using ERP_RFQ_Automation.Platform.Services;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
@@ -54,6 +56,31 @@ public sealed class GoldenJourneySeederConfigurationTests : IDisposable
     private readonly List<LogRecord> _log = [];
 
     public void Dispose() => _db.Dispose();
+
+    [Fact]
+    public void Each_governed_outcome_gets_a_stable_but_independent_document_batch()
+    {
+        var partial = GoldenCommercialJourneySeeder.DeterministicBatchId(42, "E2E-GOLDEN-A-PARTIAL");
+        var full = GoldenCommercialJourneySeeder.DeterministicBatchId(42, "E2E-GOLDEN-A-FULL");
+        var noBid = GoldenCommercialJourneySeeder.DeterministicBatchId(42, "E2E-GOLDEN-A-NOBID");
+
+        Assert.Equal(partial,
+            GoldenCommercialJourneySeeder.DeterministicBatchId(42, "E2E-GOLDEN-A-PARTIAL"));
+        Assert.Equal(3, new[] { partial, full, noBid }.Distinct().Count());
+        Assert.NotEqual(partial,
+            GoldenCommercialJourneySeeder.DeterministicBatchId(43, "E2E-GOLDEN-A-PARTIAL"));
+    }
+
+    [Fact]
+    public void A_used_current_revision_cannot_be_certified_as_a_clean_browser_start()
+    {
+        Assert.Empty(GoldenCommercialJourneySeeder.StartingStateDecisionProblems(0, 0));
+
+        var problems = GoldenCommercialJourneySeeder.StartingStateDecisionProblems(2, 3);
+
+        Assert.Contains(problems, problem => problem.Contains("fit assessment", StringComparison.Ordinal));
+        Assert.Contains(problems, problem => problem.Contains("participation decision", StringComparison.Ordinal));
+    }
 
     // ---------------------------------------------------------------- the defect, stated
 
@@ -133,18 +160,50 @@ public sealed class GoldenJourneySeederConfigurationTests : IDisposable
         Assert.Contains(businessUnits, b => b.BusinessUnitCode == GoldenCommercialJourneySeeder.TenantBCode);
         Assert.Equal(2, await ctx.Set<Tenant>().IgnoreQueryFilters().CountAsync());
 
-        // …and the three logins, which are the reason the password is demanded in the first place.
+        // …and the five logins, which are the reason the password is demanded in the first place.
         var users = await ctx.Users.IgnoreQueryFilters().AsNoTracking().ToListAsync();
-        Assert.Equal(3, users.Count);
+        Assert.Equal(5, users.Count);
         foreach (var email in new[]
                  {
-                     "golden.admin@e2e.local", "golden.sales@e2e.local", "golden.outsider@e2e.local"
+                     "golden.admin@e2e.local", "golden.sales@e2e.local", "golden.manager@e2e.local",
+                     "golden.denied@e2e.local", "golden.outsider@e2e.local"
                  })
         {
             var user = Assert.Single(users, u => u.Email == email);
             // The supplied password is what was hashed — not a substitute, and not a blank.
             Assert.True(BCrypt.Net.BCrypt.Verify(SyntheticPassword, user.PasswordHash));
         }
+
+        var sales = Assert.Single(users, user => user.Email == "golden.sales@e2e.local");
+        var manager = Assert.Single(users, user => user.Email == "golden.manager@e2e.local");
+        var denied = Assert.Single(users, user => user.Email == "golden.denied@e2e.local");
+        var outsider = Assert.Single(users, user => user.Email == "golden.outsider@e2e.local");
+        var roles = await ctx.SetupMasters.IgnoreQueryFilters().AsNoTracking()
+            .Where(role => role.SetupType == "Role")
+            .ToDictionaryAsync(role => role.SetupId);
+
+        Assert.Equal("SALES_REP", roles[sales.RoleId!.Value].SetupCode);
+        Assert.Equal(RoleRanks.Member, roles[sales.RoleId.Value].RoleRank);
+        Assert.Equal("SALES_MANAGER", roles[manager.RoleId!.Value].SetupCode);
+        Assert.Equal(RoleRanks.Manager, roles[manager.RoleId.Value].RoleRank);
+        Assert.Equal("E2E_DENIED", roles[denied.RoleId!.Value].SetupCode);
+        Assert.Equal(RoleRanks.Member, roles[denied.RoleId.Value].RoleRank);
+        Assert.Equal("SALES_REP", roles[outsider.RoleId!.Value].SetupCode);
+        Assert.Equal(RoleRanks.Member, roles[outsider.RoleId.Value].RoleRank);
+
+        var team = await ctx.Teams.IgnoreQueryFilters().AsNoTracking()
+            .SingleAsync(value => value.TeamName == "Golden Sales Team");
+        Assert.Equal(manager.Id, team.ManagerId);
+        Assert.Equal(team.Id, sales.TeamId);
+        Assert.Equal(manager.Id, sales.ManagerId);
+        Assert.Equal(team.Id, manager.TeamId);
+
+        Assert.True(await ctx.RolePermissions.IgnoreQueryFilters()
+            .AnyAsync(permission => permission.RoleId == sales.RoleId));
+        Assert.True(await ctx.RolePermissions.IgnoreQueryFilters()
+            .AnyAsync(permission => permission.RoleId == manager.RoleId));
+        Assert.False(await ctx.RolePermissions.IgnoreQueryFilters()
+            .AnyAsync(permission => permission.RoleId == denied.RoleId));
 
         // The success path stays quiet at Error level; noise here would devalue the refusal.
         Assert.DoesNotContain(_log, r => r.Level >= LogLevel.Error);
@@ -250,6 +309,7 @@ public sealed class GoldenJourneySeederConfigurationTests : IDisposable
             builder.AddProvider(new RecordingLoggerProvider(_log));
         });
         services.AddScoped(_ => _db.ContextFor(null));
+        services.AddScoped<ITenantBaselineSeeder, TenantBaselineSeeder>();
         services.AddSingleton<ISalesApplicationService>(stop);
         services.AddSingleton<ICommercialRoutingApplicationService>(stop);
         services.AddSingleton<ILeadIdentityApplicationService>(stop);

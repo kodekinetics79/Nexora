@@ -47,6 +47,8 @@ public sealed class RfqPromotionService : IRfqPromotionService
         });
         var replay = await ReplayAsync(businessUnitId, command.IdempotencyKey, requestHash, ct);
         if (replay is not null) return replay;
+        replay = await ReplayLeadWinnerAsync(businessUnitId, leadId, command, ct);
+        if (replay is not null) return replay;
 
         var strategy = _db.Database.CreateExecutionStrategy();
         try
@@ -56,6 +58,8 @@ public sealed class RfqPromotionService : IRfqPromotionService
                 _db.ChangeTracker.Clear();
                 await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
                 replay = await ReplayAsync(businessUnitId, command.IdempotencyKey, requestHash, ct);
+                if (replay is not null) return replay;
+                replay = await ReplayLeadWinnerAsync(businessUnitId, leadId, command, ct);
                 if (replay is not null) return replay;
 
                 var lead = await _db.Leads
@@ -86,8 +90,11 @@ public sealed class RfqPromotionService : IRfqPromotionService
                     throw new InvalidOperationException("A newer participation decision exists for this revision. Promote the current decision.");
                 if (!decision.IsCommitted)
                     throw new InvalidOperationException("Participation is still a draft. Commit the current-revision decision before promotion.");
-                if (decision.Lines.Any(x => x.Choice is LeadLineParticipationChoice.Pending or LeadLineParticipationChoice.Clarify))
-                    throw new InvalidOperationException("Pending or Clarify lines must be resolved before RFQ promotion.");
+                // Do not trust an append-only historical header merely because it says FullBid
+                // or PartialBid. Legacy/imported data may predate the database aggregate trigger,
+                // and promotion is the last boundary before formal commercial records exist.
+                LeadParticipationOutcomeConsistency.EnsureCommittedSnapshot(
+                    decision.Outcome, decision.Lines.Select(x => x.Choice));
                 var fit = await _db.Set<LeadFitAssessment>().AsNoTracking().SingleOrDefaultAsync(x =>
                     x.BusinessUnitId == businessUnitId && x.Id == decision.FitAssessmentId
                     && x.LeadId == leadId && x.LeadRevisionId == command.ExpectedLeadRevisionId, ct)
@@ -338,6 +345,8 @@ public sealed class RfqPromotionService : IRfqPromotionService
             _db.ChangeTracker.Clear();
             replay = await ReplayAsync(businessUnitId, command.IdempotencyKey, requestHash, ct);
             if (replay is not null) return replay;
+            replay = await ReplayLeadWinnerAsync(businessUnitId, leadId, command, ct);
+            if (replay is not null) return replay;
             var winner = await _db.Rfqs.AsNoTracking()
                 .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.LeadId == leadId, ct);
             if (winner is null) throw;
@@ -362,6 +371,40 @@ public sealed class RfqPromotionService : IRfqPromotionService
         var revisionNumber = await _db.Set<LeadRevision>().AsNoTracking()
             .Where(x => x.BusinessUnitId == businessUnitId && x.Id == receipt.LeadRevisionId)
             .Select(x => x.RevisionNumber).SingleAsync(ct);
+        return Result(receipt, rfq, revisionNumber, decision.Sequence, replayed: true);
+    }
+
+    /// <summary>
+    /// Recovers the one durable Lead-origin RFQ when a transport retry arrives with a fresh
+    /// idempotency key. Promotion changes the Lead lifecycle, so this lookup must happen before
+    /// current-state eligibility checks. The immutable revision and participation snapshot still
+    /// have to match exactly; a different commercial request never aliases to the winner.
+    /// </summary>
+    private async Task<RfqPromotionResult?> ReplayLeadWinnerAsync(
+        long businessUnitId, long leadId, PromoteLeadToRfqCommand command, CancellationToken ct)
+    {
+        var receipt = await _db.Set<RfqPromotion>().AsNoTracking()
+            .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.LeadId == leadId, ct);
+        if (receipt is null) return null;
+
+        var decision = await _db.Set<LeadParticipationDecision>().AsNoTracking()
+            .SingleAsync(x => x.BusinessUnitId == businessUnitId && x.Id == receipt.ParticipationDecisionId, ct);
+        var revisionNumber = await _db.Set<LeadRevision>().AsNoTracking()
+            .Where(x => x.BusinessUnitId == businessUnitId && x.Id == receipt.LeadRevisionId && x.LeadId == leadId)
+            .Select(x => x.RevisionNumber).SingleAsync(ct);
+        if (receipt.LeadRevisionId != command.ExpectedLeadRevisionId
+            || revisionNumber != command.ExpectedDecisionVersion
+            || decision.Sequence != command.ExpectedParticipationVersion
+            || (command.ParticipationDecisionId.HasValue
+                && receipt.ParticipationDecisionId != command.ParticipationDecisionId.Value))
+            throw new InvalidOperationException(
+                "This Lead was already promoted from a different immutable revision or participation decision.");
+
+        var rfq = await _db.Rfqs.AsNoTracking()
+            .SingleOrDefaultAsync(x => x.BusinessUnitId == businessUnitId && x.PromotionId == receipt.Id, ct);
+        if (rfq is null)
+            throw new InvalidOperationException(
+                "The RFQ promotion receipt exists but its immutable RFQ is missing. Recovery must restore the original RFQ; replay will not create a replacement.");
         return Result(receipt, rfq, revisionNumber, decision.Sequence, replayed: true);
     }
 

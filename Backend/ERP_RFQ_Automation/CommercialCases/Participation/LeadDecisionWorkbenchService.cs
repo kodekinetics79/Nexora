@@ -95,7 +95,15 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
             .Where(x => x.BusinessUnitId == businessUnitId && x.LeadId == leadId
                 && x.AggregateType == "RFQ" && x.AggregateId == rfq.Id
                 && x.ImpactType == "RFQ_REVISION_REQUIRED" && x.Status == "OPEN")
-            .OrderByDescending(x => x.CreatedAtUtc).FirstOrDefaultAsync(ct);
+            .Where(impact => !_db.Set<LeadIdentityAuditEvent>().Any(audit =>
+                audit.BusinessUnitId == businessUnitId
+                && audit.LeadId == leadId
+                && audit.EventType == RfqRevisionImpactResolutionService.ResolutionEventType
+                && audit.CorrelationId == RfqRevisionImpactResolutionService.CorrelationPrefix + impact.Id))
+            // LeadRevisionImpact ids are append-only and monotonic. Ordering by the identity keeps
+            // the same newest-impact semantics while remaining executable by SQLite regression
+            // fixtures, which cannot translate DateTimeOffset ORDER BY.
+            .OrderByDescending(x => x.Id).FirstOrDefaultAsync(ct);
         var customerName = lead.CustomerId.HasValue
             ? await _db.Customers.AsNoTracking().Where(x => x.Buid == businessUnitId && x.Id == lead.CustomerId.Value)
                 .Select(x => x.Name).SingleOrDefaultAsync(ct)
@@ -234,7 +242,7 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
                 "Open Lead lifecycle", $"/procurement/leads/view/{lead.Id}"));
         if (openRfqRevisionImpact is not null && rfq is not null)
             blockers.Add(new("RFQ_REVISION_REQUIRED",
-                "A reply or amendment created a newer immutable Lead revision after RFQ promotion. Review the existing RFQ and resolve the change through a governed RFQ revision process; do not promote again.",
+                "A reply or amendment created a newer immutable Lead revision after RFQ promotion. Compare it with the existing RFQ, then record the reconciliation outcome without changing historical RFQ lineage.",
                 "Open existing RFQ", $"/procurement/rfqs/view/{rfq.Id}"));
         if (evidence.Count == 0) blockers.Add(new("SOURCE_UNAVAILABLE", "No retained source evidence is linked to the current revision."));
         if (lines.Any(x => x.VerificationStatus == "MISSING_SOURCE"))

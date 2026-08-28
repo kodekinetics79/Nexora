@@ -321,7 +321,11 @@ namespace ERP_RFQ_Automation.Controllers
             }
             catch (InvalidOperationException ex)
             {
-                return Conflict(new { message = ex.Message });
+                // The document is intentionally blocked before price attestation when its
+                // commercial facts are incomplete. Keep that distinct in the wire contract so
+                // clients send the rep to Commercial Review instead of asking them to attest to
+                // prices that do not exist yet.
+                return Conflict(new { commercialReviewRequired = true, message = ex.Message });
             }
         }
 

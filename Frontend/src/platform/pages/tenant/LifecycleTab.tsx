@@ -155,7 +155,12 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
   const preview = useQuery({
     queryKey: platformKeys.purgePreview(tenant.id),
     queryFn: () => platformApi.getPurgePreview(tenant.id),
-    enabled: permissions.isOwner && Boolean(status?.canPurge),
+    // Fetch on every dialog opening. Cached counts are intentionally treated as stale: the
+    // tenant can change after an earlier preview, and an irreversible confirmation must wait for
+    // the latest server answer rather than reuse yesterday's blast radius.
+    enabled: permissions.isOwner && Boolean(status?.canPurge) && purgeOpen,
+    staleTime: 0,
+    refetchOnMount: 'always',
   });
 
   const invalidate = () => {
@@ -350,6 +355,8 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
     isError: legalHolds.isError,
     activeHoldCount: activeHolds.length,
   });
+  const purgePreviewBlocked = preview.isLoading || preview.isFetching
+    || preview.isError || preview.data == null;
 
   return (
     <Stack spacing={2.5}>
@@ -1062,6 +1069,7 @@ export default function LifecycleTab({ tenant }: { tenant: Tenant }) {
         confirmationRequired={status.confirmationRequired}
         confirmLabel="Confirm permanent deletion"
         disclosures={status.disclosures}
+        blocked={purgePreviewBlocked}
         description={
           <>
             This destroys {tenant.name}'s business records permanently. There is no undo, no recycle bin and no

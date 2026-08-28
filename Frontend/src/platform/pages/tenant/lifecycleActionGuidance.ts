@@ -82,6 +82,8 @@ export const lifecycleActionBlockers = (
       purge = status.daysUntilPurgeEligible == null
         ? 'Wait until the server records that the retention period has elapsed.'
         : `Wait ${status.daysUntilPurgeEligible} day(s) for the retention period to elapse. Cancel the deletion if the decision has changed.`;
+    } else if (readinessFailures.length > 0) {
+      purge = `Complete the server purge-readiness checklist: ${readinessFailures.map((failure) => failure.detail).join(' ')}`;
     } else {
       purge = 'The server has not marked this tenant eligible for permanent deletion. Refresh the offboarding record before trying again.';
     }

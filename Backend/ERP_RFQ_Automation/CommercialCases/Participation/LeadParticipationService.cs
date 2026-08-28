@@ -272,7 +272,7 @@ public sealed class LeadParticipationService : ILeadParticipationService
 
             foreach (var line in suppliedLines)
             {
-                if (line.Quantity is <= 0)
+                if (line.Choice == LeadLineParticipationChoice.Bid && line.Quantity is <= 0)
                     throw new ArgumentException($"Quantity for revision line {line.LeadItemRevisionId} must be greater than zero.");
                 if (line.Choice == LeadLineParticipationChoice.NoBid
                     && (string.IsNullOrWhiteSpace(line.ReasonCode)
@@ -327,6 +327,9 @@ public sealed class LeadParticipationService : ILeadParticipationService
                 : bidCount == 0 ? LeadParticipationOutcome.NoBid
                 : bidCount == suppliedLines.Count ? LeadParticipationOutcome.FullBid
                 : LeadParticipationOutcome.PartialBid;
+            if (command.Commit)
+                LeadParticipationOutcomeConsistency.EnsureCommittedSnapshot(
+                    outcome, suppliedLines.Select(x => x.Choice));
             var headerReasonCode = Clean(command.ReasonCode);
             if (outcome == LeadParticipationOutcome.NoBid)
             {
@@ -354,6 +357,8 @@ public sealed class LeadParticipationService : ILeadParticipationService
             {
                 var effective = line.Choice == LeadLineParticipationChoice.Bid
                     ? resolvedCommercialByRevisionLine[line.LeadItemRevisionId] : null;
+                var source = leadItemByRevisionLine.TryGetValue(line.LeadItemRevisionId, out var sourceLeadItemId)
+                    && currentLeadItems.TryGetValue(sourceLeadItemId, out var sourceLeadItem) ? sourceLeadItem : null;
                 var linePreview = leadItemByRevisionLine.TryGetValue(line.LeadItemRevisionId, out var previewLeadItemId)
                     && previewByLeadItem.TryGetValue(previewLeadItemId, out var foundPreview) ? foundPreview : null;
                 entity.Lines.Add(new LeadLineParticipationDecision
@@ -367,10 +372,16 @@ public sealed class LeadParticipationService : ILeadParticipationService
                     ReasonCode = Clean(line.ReasonCode),
                     ReasonNotes = Clean(line.ReasonNotes),
                     ProductId = line.ProductId,
-                    Quantity = effective?.Quantity ?? line.Quantity,
-                    UnitOfMeasure = effective?.Uom?.UomCode ?? Clean(line.UnitOfMeasure),
+                    // Participation quantity is commercial data. A zero/missing source quantity is
+                    // meaningful evidence for declining a line, but it is not a valid commercial
+                    // quantity to persist on the immutable decision snapshot. Preserve positive
+                    // quantities for drafts/review; normalise absent non-bid quantities to null.
+                    Quantity = effective?.Quantity
+                        ?? (line.Quantity is > 0 ? line.Quantity : source?.Quantity is > 0 ? source.Quantity : null),
+                    UnitOfMeasure = effective?.Uom?.UomCode ?? Clean(line.UnitOfMeasure ?? source?.UnitOfMeasure),
                     UomId = effective?.Uom?.UomId,
-                    Currency = effective?.Currency?.Code.ToUpperInvariant() ?? Clean(line.Currency)?.ToUpperInvariant(),
+                    Currency = effective?.Currency?.Code.ToUpperInvariant()
+                        ?? Clean(line.Currency ?? source?.Currency)?.ToUpperInvariant(),
                     CurrencyId = effective?.Currency?.Id,
                     CatalogPolicyVersion = "lead-conversion-preview/v1",
                     WarningSnapshotJson = JsonSerializer.Serialize(new

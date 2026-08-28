@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { api, apiUrl, jsonOk, loginAs, loginAsOtherTenant, openLeadConversion, required, requiredNumber, resolutionFor, resolveLead } from './support/core-commercial';
+import { api, apiUrl, jsonOk, loginAs, loginAsOtherTenant, openLeadIntelligence, required, requiredNumber, resolutionFor, resolveLead } from './support/core-commercial';
 
 type Availability = { partNumber: string; warehouseId: number; warehouseName: string; onHand: number; reserved: number; available: number; incoming: number };
 
@@ -10,7 +10,7 @@ test('15 exact Product match displays ATP', async ({ page }) => {
   const row = resolutionFor(await resolveLead(page, token, leadId), part);
   expect(row.classification).toBe('KnownInStock');
   expect(Number(row.availableToPromise)).toBeGreaterThanOrEqual(Number(required('E2E_CORE_FULL_ATP_REQUESTED_QTY')));
-  await openLeadConversion(page, leadId);
+  await openLeadIntelligence(page, leadId);
   await expect(page.getByText(part, { exact: true }).first()).toBeVisible();
   await expect(page.getByText(/Known, in stock/)).toBeVisible();
 });
@@ -58,7 +58,7 @@ test('20 unknown item opens related-resource search', async ({ page }) => {
   const token = await loginAs(page, 'manager');
   const row = resolutionFor(await resolveLead(page, token, requiredNumber('E2E_CORE_LEAD_ID')), part);
   expect(row.classification).toBe('UnknownProduct');
-  await openLeadConversion(page, requiredNumber('E2E_CORE_LEAD_ID'));
+  await openLeadIntelligence(page, requiredNumber('E2E_CORE_LEAD_ID'));
   await expect(page.getByText(/x.?unknown.?900/i).first()).toBeVisible();
   await expect(page.getByText(/Unknown product/)).toBeVisible();
   await page.goto('/inventory/resources');
@@ -67,7 +67,7 @@ test('20 unknown item opens related-resource search', async ({ page }) => {
 
 test('21 result-count selection supports 10/20/50', async ({ page }) => {
   const token = await loginAs(page, 'manager');
-  await openLeadConversion(page, requiredNumber('E2E_CORE_LEAD_ID'));
+  await openLeadIntelligence(page, requiredNumber('E2E_CORE_LEAD_ID'));
   const select = page.getByRole('combobox', { name: 'Supplier options' });
   await expect(select).toBeVisible();
   for (const value of ['10', '20', '50']) {
@@ -100,7 +100,7 @@ test('23 inventory failure shows Check Unavailable, not Out of Stock', async ({ 
     await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Acceptance-simulated inventory dependency outage.' }) });
   });
   await loginAs(page, 'manager');
-  await openLeadConversion(page, leadId);
+  await openLeadIntelligence(page, leadId);
   await page.getByRole('button', { name: 'Check', exact: true }).click();
   await expect(page.getByRole('alert').filter({ hasText: /Inventory Check Unavailable/i })).toBeVisible();
   await expect(page.getByText(/Out of Stock/i)).toHaveCount(0);

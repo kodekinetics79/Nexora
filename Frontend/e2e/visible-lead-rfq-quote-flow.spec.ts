@@ -7,15 +7,11 @@ const apiUrl = 'http://127.0.0.1:5192';
 const evidenceDir = path.resolve('../docs/nexora/evidence/visible-lead-rfq-quote-flow');
 const password = 'Nexora#Release01C1Local';
 const manager = { email: 'manager@release01c1.local', password, businessUnitId: '80101' };
-const denied = { email: 'denied@release01c1.local', password, businessUnitId: '80101' };
-const other = { email: 'other@release01c1.local', password, businessUnitId: '80102' };
 const initialUpload = path.resolve('e2e/fixtures/release-visible-new-inquiry.csv');
 const postQuoteRevision = path.resolve('e2e/fixtures/release-visible-post-quote-revision.csv');
 const postQuoteRevisionTwo = path.resolve('e2e/fixtures/release-visible-post-quote-revision-2.csv');
 const possibleMatch = path.resolve('e2e/fixtures/release-visible-possible-match.csv');
 let batchId = '';
-let rfqId = 0;
-let quoteId = 0;
 let nexoraSerial = '';
 
 async function login(page: Page, credentials = manager) {
@@ -35,7 +31,7 @@ async function waitForBatch(page: Page) {
   await expect(page.getByText(/Processing complete/)).toBeVisible({ timeout: 90_000 });
 }
 
-test.describe.serial('Visible Lead Intelligence to Quote Draft journey', () => {
+test.describe.serial('Visible Lead intelligence and governed-decision entry journey', () => {
   test.beforeAll(async () => fs.mkdir(evidenceDir, { recursive: true }));
 
   test('01 Dashboard exposes Lead Intelligence and RFQ entry points', async ({ page }) => {
@@ -65,42 +61,26 @@ test.describe.serial('Visible Lead Intelligence to Quote Draft journey', () => {
     await page.screenshot({ path: path.join(evidenceDir, '03-reconciliation-summary.png'), fullPage: true });
   });
 
-  test('03 New canonical Lead visibly creates one RFQ', async ({ page }) => {
+  test('03 New canonical Lead enters the one governed Decision Workbench', async ({ page }) => {
     await login(page);
     await page.goto('/procurement/leads/view/1');
     const serialChip = page.getByText(/Nexora Serial:/).first();
     await expect(serialChip).toBeVisible();
     nexoraSerial = (await serialChip.textContent())!.replace(/^Nexora Serial:\s*/, '');
     await page.screenshot({ path: path.join(evidenceDir, '04-canonical-lead.png'), fullPage: true });
-    const review = page.getByRole('button', { name: 'Review & Create RFQ' });
-    await expect(review).toBeVisible();
-    await page.screenshot({ path: path.join(evidenceDir, '05-review-create-rfq.png'), fullPage: true });
-    await review.click();
-    await expect(page.getByRole('heading', { name: 'Review inquiry and create RFQ' })).toBeVisible();
-    await page.getByRole('button', { name: 'Create RFQ' }).click();
-    await expect(page).toHaveURL(/\/procurement\/rfqs\/view\/\d+$/);
-    rfqId = Number(page.url().split('/').at(-1));
-    expect(rfqId).toBeGreaterThan(0);
+    const workbench = page.getByRole('button', { name: /Open decision workbench|View decision record/i });
+    await expect(workbench).toBeVisible();
+    await workbench.click();
+    await expect(page).toHaveURL(/\/procurement\/leads\/1\/workbench$/);
+    await expect(page.getByRole('tab', { name: /^1\. Evidence:/ })).toBeVisible();
+    await expect(page.getByRole('tab', { name: /^3\. Fit & Participation:/ })).toBeVisible();
+    await expect(page.getByRole('tab', { name: /^4\. Promote:/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Create RFQ', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /Review & Create RFQ/i })).toHaveCount(0);
+    await page.screenshot({ path: path.join(evidenceDir, '05-governed-decision-workbench.png'), fullPage: true });
   });
 
-  test('04 Created RFQ appears once in All RFQs', async ({ page }) => {
-    await login(page);
-    await page.goto('/procurement/rfqs/all');
-    await expect(page.getByText(nexoraSerial).first()).toBeVisible();
-    await expect(page.getByText(nexoraSerial)).toHaveCount(1);
-    await page.screenshot({ path: path.join(evidenceDir, '06-rfq-list.png'), fullPage: true });
-  });
-
-  test('05 RFQ links to canonical Lead with the same Nexora Serial', async ({ page }) => {
-    await login(page);
-    await page.goto(`/procurement/rfqs/view/${rfqId}`);
-    await expect(page.getByText(`Nexora Serial: ${nexoraSerial}`)).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Open Canonical Lead' })).toBeVisible();
-    await expect(page.getByText(/Active Lead Revision/i)).toBeVisible();
-    await page.screenshot({ path: path.join(evidenceDir, '07-rfq-detail-lineage.png'), fullPage: true });
-  });
-
-  test('06 Exact duplicate does not create another RFQ or Quote', async ({ page, request }) => {
+  test('04 Exact duplicate does not create an RFQ or Quote', async ({ page, request }) => {
     await login(page);
     const auth = { Authorization: `Bearer ${await token(page)}` };
     const beforeRfqs = await (await request.get(`${apiUrl}/api/Rfq?pageNumber=1&pageSize=100`, { headers: auth })).json();
@@ -116,7 +96,7 @@ test.describe.serial('Visible Lead Intelligence to Quote Draft journey', () => {
     expect(afterQuotes.totalItems).toBe(beforeQuotes.totalItems);
   });
 
-  test('07 Active Lead revision is visible with RFQ impact', async ({ page }) => {
+  test('05 Active Lead revision is visible before any RFQ promotion', async ({ page }) => {
     await login(page);
     await page.goto('/procurement/leads/intelligence');
     await page.locator('input[type="file"]').setInputFiles(postQuoteRevision);
@@ -131,21 +111,19 @@ test.describe.serial('Visible Lead Intelligence to Quote Draft journey', () => {
     await page.screenshot({ path: path.join(evidenceDir, '08-revision-impact.png'), fullPage: true });
   });
 
-  test('08 Revised inquiry marks an existing Quote Draft stale', async ({ page }) => {
+  test('06 A second amendment remains an immutable Lead revision before participation', async ({ page }) => {
     await login(page);
-    await page.goto(`/procurement/rfqs/view/${rfqId}`);
-    await page.getByRole('button', { name: 'Prepare Quote Draft' }).click();
-    await expect(page).toHaveURL(/\/sales\/quotes\/view\/\d+$/);
-    quoteId = Number(page.url().split('/').at(-1));
     await page.goto('/procurement/leads/intelligence');
     await page.locator('input[type="file"]').setInputFiles(postQuoteRevisionTwo);
     await page.getByRole('button', { name: 'Queue for reconciliation' }).click();
     await waitForBatch(page);
-    await page.goto(`/sales/quotes/view/${quoteId}`);
-    await expect(page.getByText('Customer Revision Received')).toBeVisible();
+    await expect(page.getByRole('button', { name: /1 Revisions/i })).toBeVisible();
+    await page.goto('/procurement/leads/view/1');
+    await expect(page.getByRole('heading', { name: 'Revision history' })).toBeVisible();
+    await expect(page.getByRole('button', { name: /Open decision workbench|View decision record/i })).toBeVisible();
   });
 
-  test('09 Possible Match decision offers Treat as Revision', async ({ page }) => {
+  test('07 Possible Match decision offers Treat as Revision', async ({ page }) => {
     await login(page);
     await page.goto('/procurement/leads/intelligence');
     await page.locator('input[type="file"]').setInputFiles(possibleMatch);
@@ -164,7 +142,7 @@ test.describe.serial('Visible Lead Intelligence to Quote Draft journey', () => {
     await page.getByRole('button', { name: 'Cancel' }).click();
   });
 
-  test('10 Possible Match Create New Lead persists a canonical Lead with RFQ review', async ({ page }) => {
+  test('08 Possible Match Create New Lead persists a canonical Lead with governed review', async ({ page }) => {
     await login(page);
     await page.goto(`/procurement/leads/ingestion/${batchId}`);
     const create = page.getByRole('button', { name: 'Create new lead' });
@@ -176,62 +154,23 @@ test.describe.serial('Visible Lead Intelligence to Quote Draft journey', () => {
     await expect(openLead).toBeVisible();
     await openLead.click();
     await expect(page).toHaveURL(/\/procurement\/leads\/view\/\d+$/);
-    await expect(page.getByRole('button', { name: 'Review & Create RFQ' })).toBeVisible();
+    await expect(page.getByRole('button', { name: /Open decision workbench|View decision record/i })).toBeVisible();
   });
 
-  test('11 RFQ Prepare Quote Draft is idempotent', async ({ page }) => {
-    await login(page);
-    await page.goto(`/procurement/rfqs/view/${rfqId}`);
-    await page.getByRole('button', { name: 'Prepare Quote Draft' }).click();
-    await expect(page).toHaveURL(new RegExp(`/sales/quotes/view/${quoteId}$`));
-    await page.screenshot({ path: path.join(evidenceDir, '10-prepare-quote-draft.png'), fullPage: true });
-  });
-
-  test('12 Quote Draft preserves full commercial lineage', async ({ page, request }) => {
-    await login(page);
-    await page.goto(`/sales/quotes/view/${quoteId}`);
-    await expect(page.getByText(`Nexora Serial: ${nexoraSerial}`)).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Open Source RFQ' })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Open Canonical Lead' })).toBeVisible();
-    await expect(page.getByText(/Pricing Pending/).first()).toBeVisible();
-    const pdf = await request.get(`${apiUrl}/api/Quote/${quoteId}/pdf`, {
-      headers: { Authorization: `Bearer ${await token(page)}` },
-    });
-    expect(pdf.status()).toBe(409);
-    await page.getByRole('button', { name: 'Mark review complete' }).click();
-    await expect(page.getByText('Customer Revision Received')).not.toBeVisible();
-    await page.screenshot({ path: path.join(evidenceDir, '11-quote-detail-lineage.png'), fullPage: true });
-  });
-
-  test('13 Restricted role cannot prepare a Quote Draft', async ({ page, request }) => {
-    await login(page, denied);
-    const response = await request.post(`${apiUrl}/api/Rfq/${rfqId}/prepare-quote-draft`, {
-      headers: { Authorization: `Bearer ${await token(page)}` },
-    });
-    expect(response.status()).toBe(403);
-  });
-
-  test('14 Cross-tenant RFQ and Quote requests are non-disclosing', async ({ page, request }) => {
-    await login(page, other);
-    const headers = { Authorization: `Bearer ${await token(page)}` };
-    expect((await request.get(`${apiUrl}/api/Rfq/${rfqId}`, { headers })).status()).toBe(404);
-    expect((await request.get(`${apiUrl}/api/Quote/${quoteId}`, { headers })).status()).toBe(404);
-  });
-
-  test('15 Dashboard retains reconciled drill-downs after the journey', async ({ page }) => {
+  test('09 Dashboard retains reconciled drill-downs after the journey', async ({ page }) => {
     await login(page);
     await expect(page.getByText('Verified Performance')).toBeVisible();
     await expect(page.getByRole('button', { name: /Quote Drafts awaiting action/ })).toBeVisible();
     await page.screenshot({ path: path.join(evidenceDir, '12-dashboard-reconciliation.png'), fullPage: true });
   });
 
-  test('16 Mobile navigation and key pages remain usable', async ({ page }) => {
+  test('10 Mobile navigation and governed workbench remain usable', async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 812 });
     await login(page);
-    await page.goto(`/sales/quotes/view/${quoteId}`);
-    await expect(page.getByText(`Nexora Serial: ${nexoraSerial}`)).toBeVisible();
-    await expect(page.getByText(/Commercial Review Required/).first()).toBeVisible();
+    await page.goto('/procurement/leads/1/workbench');
+    await expect(page.getByText('Decision workbench', { exact: true }).first()).toBeVisible();
+    await expect(page.getByRole('tab', { name: /^1\. Evidence:/ })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
-    await page.screenshot({ path: path.join(evidenceDir, '13-mobile-view.png'), fullPage: true });
+    await page.screenshot({ path: path.join(evidenceDir, '13-mobile-workbench.png'), fullPage: true });
   });
 });
