@@ -228,7 +228,9 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
     public async Task Full_no_bid_disqualifies_the_lead_and_can_never_create_an_rfq()
     {
         var scenario = await CreateScenarioAsync([
-            Line("00010", 3, "EA", "SAR", "DECLINED-01"),
+            // Missing/zero source quantity is a valid reason to decline a line. Commercial
+            // completeness is a Bid invariant, not a prerequisite for recording No-bid.
+            Line("00010", 0, null, null, "DECLINED-01"),
             Line("00020", 5, "EA", "SAR", "DECLINED-02")
         ], "full-no-bid");
         await using var context = database.ContextFor(Tenant);

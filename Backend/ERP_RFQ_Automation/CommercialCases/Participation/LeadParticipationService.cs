@@ -272,7 +272,7 @@ public sealed class LeadParticipationService : ILeadParticipationService
 
             foreach (var line in suppliedLines)
             {
-                if (line.Quantity is <= 0)
+                if (line.Choice == LeadLineParticipationChoice.Bid && line.Quantity is <= 0)
                     throw new ArgumentException($"Quantity for revision line {line.LeadItemRevisionId} must be greater than zero.");
                 if (line.Choice == LeadLineParticipationChoice.NoBid
                     && (string.IsNullOrWhiteSpace(line.ReasonCode)
