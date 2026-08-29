@@ -234,7 +234,15 @@ public static class DeterministicEmailTriage
         // request or a quoteable quantity. That fail-open exception handles contradictory mail
         // such as "not an RFQ amendment; please quote 5 EA" without trying to resolve intent by
         // word order.
+        //
+        // An attachment is authoritative evidence that has not been read yet.  The covering
+        // note may say things such as "contains no RFQ reference" or "for information only"
+        // while the attached schedule is the actual enquiry.  Triage cannot prove the message
+        // is non-business until the attachment has passed the governed extraction boundary, so
+        // attachment-bearing mail fails open here.  Machine-verifiable header stops above
+        // (auto-reply, bulk/list, calendar and own outbound mail) remain decisive.
         if (ExplicitNonInquiryIntentPattern.IsMatch(haystack)
+            && !s.HasAttachments
             && !HasAffirmativeInquiryRequest(s.FreshBody))
             return new EmailTriageDecision(EmailTriageOutcome.Noise,
                 [EmailTriageReasonCodes.ExplicitNonInquiryIntent], null, threadContinuation);
