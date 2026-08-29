@@ -616,6 +616,10 @@ public sealed class ExtractionDeadLetterService(
     /// EVIDENCE_INTEGRITY, which means the bytes are present and altered.</summary>
     internal const string EvidenceMissingCategory = "EVIDENCE_MISSING";
 
+    /// <summary>The stored bytes no longer match the immutable intake digest. The altered
+    /// copy must never be rescanned or promoted by the recovery path.</summary>
+    internal const string EvidenceIntegrityCategory = "EVIDENCE_INTEGRITY";
+
     /// <summary>The bytes are intact in a bucket this service is not configured to read.
     /// Recoverable by configuration alone — nothing has been lost.</summary>
     internal const string EvidenceBucketMismatchCategory = "EVIDENCE_BUCKET_MISMATCH";
@@ -634,7 +638,8 @@ public sealed class ExtractionDeadLetterService(
         !sourceLost && !securityBlocker && !IsUnchangedSourceTerminal(category);
 
     private static bool IsUnchangedSourceTerminal(string category) => category is
-        OcrPixelLimitExceededCategory or PasswordProtectedCategory or UnsupportedDocumentCategory;
+        EvidenceIntegrityCategory or OcrPixelLimitExceededCategory
+        or PasswordProtectedCategory or UnsupportedDocumentCategory;
 
     /// <summary>
     /// What the operator must DO about this category, in words, or null where the category
@@ -665,7 +670,7 @@ public sealed class ExtractionDeadLetterService(
             + "documents the original message is still retained: reprocess it from Inbound Mail "
             + "and the parts are rebuilt from the source email. Check that evidence storage is "
             + "backed by a persistent volume before reprocessing, or the bytes will vanish again.",
-        "EVIDENCE_INTEGRITY" => "The stored bytes no longer match the hash recorded at intake. "
+        EvidenceIntegrityCategory => "The stored bytes no longer match the hash recorded at intake. "
             + "Re-upload the document from its original source; retrying this copy cannot succeed.",
         OcrPixelLimitExceededCategory => "The document exceeds the safe OCR pixel limit. Reduce its "
             + "page dimensions or scan resolution, then upload the corrected source as new work; "
@@ -713,7 +718,7 @@ public sealed class ExtractionDeadLetterService(
         if (error.Contains(PasswordProtectedDocumentException.Marker, StringComparison.OrdinalIgnoreCase)
             || error.Contains("password-protected", StringComparison.OrdinalIgnoreCase))
             return PasswordProtectedCategory;
-        if (error.Contains("integrity", StringComparison.OrdinalIgnoreCase)) return "EVIDENCE_INTEGRITY";
+        if (error.Contains("integrity", StringComparison.OrdinalIgnoreCase)) return EvidenceIntegrityCategory;
         if (error.Contains("malware", StringComparison.OrdinalIgnoreCase)) return "MALWARE";
         if (error.Contains(UnsupportedDocumentFormatException.Marker, StringComparison.OrdinalIgnoreCase)
             || error.Contains("unsupported", StringComparison.OrdinalIgnoreCase)

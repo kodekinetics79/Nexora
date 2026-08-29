@@ -30,6 +30,13 @@ describe('tenant extraction recovery actions', () => {
     expect(normalizeExtractionDeadLetter({ ...legacy, resolution: 'SourceObjectUnavailable' }).canRetry).toBe(false);
   });
 
+  it('fails closed when a rolling backend returns a stale affirmative retry decision', () => {
+    const stale = item(true, true);
+    expect(normalizeExtractionDeadLetter({ ...stale, failureCategory: 'EVIDENCE_INTEGRITY' }).canRetry).toBe(false);
+    expect(normalizeExtractionDeadLetter({ ...stale, failureCategory: 'MALWARE' }).canRetry).toBe(false);
+    expect(normalizeExtractionDeadLetter({ ...stale, failureCategory: 'PROCESSING_TIMEOUT' }).canRetry).toBe(true);
+  });
+
   it('keeps readiness renderable while the backend rolls from the legacy contract', () => {
     const normalized = normalizeOperationsReadiness({
       checkedAt: '2026-08-29T00:00:00Z', deploymentReadiness: 'Healthy', blockingReasons: [],
