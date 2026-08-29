@@ -186,6 +186,65 @@ public sealed class Release01ALeadIdentityPostgreSqlTests
     }
 
     [Fact]
+    public async Task Concurrent_unnumbered_inquiries_from_one_customer_create_one_lead_and_one_governed_match_review()
+    {
+        const long tenant = 99136;
+        await using (var seed = _database.ContextFor(tenant))
+        {
+            Seed.BusinessUnit(seed, tenant);
+            Seed.EmailConfig(seed, 99136, tenant);
+            Seed.EmailIngest(seed, 99136, 99136, "NeedsReview");
+            await seed.SaveChangesAsync();
+        }
+
+        var batch = Guid.NewGuid();
+        async Task<LeadReconciliationResult> Ingest(string key, int quantity)
+        {
+            await using var context = _database.ContextFor(tenant);
+            var lead = new Lead
+            {
+                Rfqno = null,
+                BuyersName = "Unnumbered Race Buyer",
+                Clientemail = "unnumbered-race@customer.test",
+                RecDate = DateTime.UtcNow,
+                LeadSource = "Email",
+                CreatedBy = "tests",
+                CreatedDate = DateTime.UtcNow,
+                BusinessUnitId = tenant,
+                EmailIngestsId = 99136
+            };
+            lead.LeadItems.Add(new LeadItem
+            {
+                LineItemNo = "1",
+                ManufacturerPartNumber = "RACE-NO-RFQ-PART",
+                ProductShortDescription = "Quantity-only amendment under concurrent workers",
+                Quantity = quantity,
+                UnitOfMeasure = "EA"
+            });
+            return await new LeadIdentityApplicationService(context).ReconcileAsync(lead,
+                new LeadIntakeDescriptor(batch, "Email", key, key, $"email:{key}", "test",
+                    lead.Clientemail, "Unnumbered RFQ", $"{key}.csv", "text/csv", 100,
+                    Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+                        System.Text.Encoding.UTF8.GetBytes($"{key}:{quantity}"))).ToLowerInvariant(),
+                    null, null, null, DateTimeOffset.UtcNow, LeadProcessingPath.Deterministic,
+                    false, 0, "Service", "tests", key));
+        }
+
+        var results = await Task.WhenAll(
+            Ingest("race-no-rfq-one", 2),
+            Ingest("race-no-rfq-two", 9));
+
+        Assert.Single(results.Where(x => x.LeadId > 0).Select(x => x.LeadId).Distinct());
+        Assert.Contains(results, x => x.Classification == LeadOccurrenceClassification.New);
+        Assert.Contains(results, x => x.Classification == LeadOccurrenceClassification.PossibleMatchReviewRequired);
+        await using var verify = _database.ContextFor(tenant);
+        Assert.Equal(1, await verify.Leads.CountAsync(x => x.BusinessUnitId == tenant));
+        Assert.Equal(1, await verify.Set<LeadRevision>().CountAsync(x => x.BusinessUnitId == tenant));
+        Assert.Equal(2, await verify.Set<LeadIngestionOccurrence>().CountAsync(x => x.BatchId == batch));
+        Assert.Equal(1, await verify.Set<LeadMatchCandidate>().CountAsync(x => x.BusinessUnitId == tenant));
+    }
+
+    [Fact]
     public async Task Concurrent_quote_impact_resolution_appends_one_event_per_impact_and_is_idempotent()
     {
         const long tenant = 99141;
