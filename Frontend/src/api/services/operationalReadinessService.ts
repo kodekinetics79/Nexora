@@ -109,12 +109,12 @@ const terminalLegacyCategories = new Set([
 
 export const normalizeExtractionDeadLetter = (item: ExtractionDeadLetter): ExtractionDeadLetter => ({
   ...item,
-  // Older backends do not return CanRetry. Fail closed for terminal dispositions/categories,
-  // while preserving recovery for ordinary open provider/time-out/parser failures.
-  canRetry: typeof item.canRetry === 'boolean'
-    ? item.canRetry
-    : item.resolution !== 'SourceObjectUnavailable'
-      && !terminalLegacyCategories.has(item.failureCategory),
+  // Deployments can overlap, and an older backend may return either no CanRetry field or a
+  // stale affirmative decision. Terminal source categories always win so the browser cannot
+  // offer an action that the current recovery invariant must reject.
+  canRetry: item.resolution !== 'SourceObjectUnavailable'
+    && !terminalLegacyCategories.has(item.failureCategory)
+    && item.canRetry !== false,
 });
 
 const operationalReadinessService = {

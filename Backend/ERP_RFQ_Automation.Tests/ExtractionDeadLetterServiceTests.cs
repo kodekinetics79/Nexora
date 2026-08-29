@@ -174,6 +174,30 @@ public sealed class ExtractionDeadLetterServiceTests
     }
 
     [Fact]
+    public async Task PreclassifiedIntegrityFailure_CannotRetryAlteredBytes()
+    {
+        using var testDb = new TestDb();
+        await using var db = testDb.ContextFor(7);
+        var job = await SeedDeadLetterAsync(db, 7);
+        job.LastError = "[EVIDENCE_INTEGRITY] The stored digest does not match intake.";
+        await db.SaveChangesAsync();
+        var service = new ExtractionDeadLetterService(
+            db, new AvailableStorage(), new Scanner(MalwareScanStatus.Clean),
+            new FailIfEnteredAdmission());
+
+        var listed = Assert.Single(await service.ListAsync(7, default));
+        Assert.Equal(ExtractionDeadLetterService.EvidenceIntegrityCategory, listed.FailureCategory);
+        Assert.True(listed.BlocksReadiness);
+        Assert.False(listed.CanRetry);
+
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(() => service.RecoverAsync(
+            7, job.Id, "operator@example.com",
+            new("Retry altered evidence.", "integrity-terminal-7-1"), default));
+        Assert.Contains("cannot succeed", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(await db.ExtractionDeadLetterEvents.ToListAsync());
+    }
+
+    [Fact]
     public async Task MalwareDetection_RejectsPreviouslyClearedSourceAndCannotBeRetried()
     {
         using var testDb = new TestDb();
