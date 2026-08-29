@@ -9,6 +9,7 @@ import {
   fitAssessmentDraftComplete,
   initializeDecisionMap,
   promotionBlockers,
+  promotionPanelMode,
   terminalDecisionClosedValidation,
   validGovernedDecision,
 } from './workbenchRules';
@@ -18,6 +19,24 @@ describe('terminalDecisionClosedValidation', () => {
     expect(terminalDecisionClosedValidation({ promotion: { rfqId: 63 } as never }, false)).toBe(true);
     expect(terminalDecisionClosedValidation({ promotion: null }, true)).toBe(true);
     expect(terminalDecisionClosedValidation({ promotion: null }, false)).toBe(false);
+  });
+});
+
+describe('promotionPanelMode', () => {
+  it('treats a durable promotion receipt as terminal even when replay blockers are present', () => {
+    expect(promotionPanelMode({
+      hasPromotion: true,
+      fullNoBidClosed: false,
+      canPromote: true,
+      blockerCount: 2,
+    })).toBe('promoted');
+  });
+
+  it('preserves no-bid, authority, blocker, and ready states before promotion', () => {
+    expect(promotionPanelMode({ hasPromotion: false, fullNoBidClosed: true, canPromote: true, blockerCount: 0 })).toBe('full-no-bid');
+    expect(promotionPanelMode({ hasPromotion: false, fullNoBidClosed: false, canPromote: false, blockerCount: 0 })).toBe('authority-required');
+    expect(promotionPanelMode({ hasPromotion: false, fullNoBidClosed: false, canPromote: true, blockerCount: 1 })).toBe('blocked');
+    expect(promotionPanelMode({ hasPromotion: false, fullNoBidClosed: false, canPromote: true, blockerCount: 0 })).toBe('ready');
   });
 });
 

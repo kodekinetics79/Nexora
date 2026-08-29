@@ -56,6 +56,7 @@ import {
   initializeDecisionMap,
   bidCommercialValuesReady,
   promotionBlockers,
+  promotionPanelMode,
   terminalDecisionClosedValidation,
   validGovernedDecision,
   type DecisionMap,
@@ -333,6 +334,12 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
     participationVersion: workbench.participationVersion,
   });
   const displayedBlockers = deduplicateDisplayedPromotionBlockers(blockers);
+  const promotionMode = promotionPanelMode({
+    hasPromotion: Boolean(workbench.promotion),
+    fullNoBidClosed,
+    canPromote,
+    blockerCount: displayedBlockers.length,
+  });
   const promotionPermissionBlocker = !canPromote && counts.bid > 0
     ? !canEdit
       ? 'Lead edit permission is required to change or promote this decision record.'
@@ -581,14 +588,24 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
             <CountChip label="Excluded as no-bid" count={counts.noBid} />
             <CountChip label="Awaiting clarification" count={counts.clarify} color="info" />
           </Stack>
-          {fullNoBidClosed ? (
+          {promotionMode === 'promoted' && workbench.promotion ? (
+            <Alert
+              severity="success"
+              action={commercialAccess.canViewPromotedRfq
+                ? <Button color="inherit" onClick={() => navigate(`/procurement/rfqs/view/${workbench.promotion!.rfqId}`)}>Open RFQ</Button>
+                : undefined}
+            >
+              <AlertTitle>Promotion completed</AlertTitle>
+              This immutable Lead revision has a durable receipt for {workbench.promotion.promotedLineCount} approved line{workbench.promotion.promotedLineCount === 1 ? '' : 's'} promoted to {workbench.promotion.rfqNumber || `RFQ #${workbench.promotion.rfqId}`}.
+            </Alert>
+          ) : promotionMode === 'full-no-bid' ? (
             <Alert severity="info"><AlertTitle>Full no-bid committed</AlertTitle>No RFQ will be created for this Lead revision.</Alert>
-          ) : !canPromote && blockers.length === 0 ? (
+          ) : promotionMode === 'authority-required' ? (
             <Alert severity="warning">
               <AlertTitle>Authorized RFQ owner required</AlertTitle>
               This decision is ready, but your role cannot create RFQs. An authorized RFQ owner must perform the promotion.
             </Alert>
-          ) : displayedBlockers.length > 0 ? (
+          ) : promotionMode === 'blocked' ? (
             <Alert severity="warning">
               <AlertTitle>Promotion is not ready</AlertTitle>
               <Stack component="ul" spacing={0.5} sx={{ my: 0, pl: 2.5 }}>

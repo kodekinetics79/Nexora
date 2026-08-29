@@ -79,6 +79,28 @@ export const terminalDecisionClosedValidation = (
   fullNoBidClosed: boolean,
 ): boolean => Boolean(workbench.promotion) || fullNoBidClosed;
 
+export type PromotionPanelMode = 'promoted' | 'full-no-bid' | 'authority-required' | 'blocked' | 'ready';
+
+export const promotionPanelMode = ({
+  hasPromotion,
+  fullNoBidClosed,
+  canPromote,
+  blockerCount,
+}: {
+  hasPromotion: boolean;
+  fullNoBidClosed: boolean;
+  canPromote: boolean;
+  blockerCount: number;
+}): PromotionPanelMode => {
+  // A durable receipt is terminal. Lifecycle and replay blockers may still be returned by the
+  // server to prevent a second promotion, but they must not be presented as unfinished work.
+  if (hasPromotion) return 'promoted';
+  if (fullNoBidClosed) return 'full-no-bid';
+  if (!canPromote && blockerCount === 0) return 'authority-required';
+  if (blockerCount > 0) return 'blocked';
+  return 'ready';
+};
+
 export const validGovernedDecision = (decision: EditableLineDecision): boolean => {
   if (decision.decision === 'Pending' || decision.decision === 'Bid') return true;
   return Boolean(decision.reasonCode?.trim());
