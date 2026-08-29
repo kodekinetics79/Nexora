@@ -450,11 +450,11 @@ public sealed class LeadParticipationService : ILeadParticipationService
                 current.EvidenceSourceLeadItemId ?? current.Id,
                 new[]
                 {
-                    current.ItemMaterialCode,
-                    current.ManufacturerPartNumber,
-                    current.ProductShortName,
-                    current.ProductShortDescription,
-                    current.ItemText
+                    new CriticalSourceEvidence.Identity("ItemMaterialCode", current.ItemMaterialCode),
+                    new CriticalSourceEvidence.Identity("ManufacturerPartNumber", current.ManufacturerPartNumber),
+                    new CriticalSourceEvidence.Identity("ProductShortName", current.ProductShortName),
+                    new CriticalSourceEvidence.Identity("ProductShortDescription", current.ProductShortDescription),
+                    new CriticalSourceEvidence.Identity("ItemText", current.ItemText)
                 },
                 supplied.Quantity ?? current.Quantity,
                 supplied.UnitOfMeasure ?? current.UnitOfMeasure));

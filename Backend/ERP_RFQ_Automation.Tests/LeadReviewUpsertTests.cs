@@ -331,6 +331,49 @@ public class LeadReviewUpsertTests
     }
 
     [Fact]
+    public async Task Human_can_once_reapprove_a_historical_auto_verified_lead_with_authoritative_evidence()
+    {
+        using var db = new TestDb();
+        using (var seed = db.ContextFor(null))
+        {
+            var lead = Seed.Lead(seed, 100, Bu, parseStatus: "Success",
+                items: new[] { Seed.LeadItem(1, "VALVE-A", 2) });
+            lead.CommercialFactsVerified = true;
+            lead.RequiresCommercialReview = false;
+            lead.ReviewApprovedBy = LeadPersister.AutoVerifyActor;
+            lead.ReviewApprovedOn = DateTime.UtcNow.AddMinutes(-5);
+            SeedAuthoritativeEvidence(seed, 100);
+            seed.SaveChanges();
+        }
+
+        using (var context = db.ContextFor(Bu))
+        {
+            await new LeadRepository(context).SubmitLeadReviewAsync(100, Bu,
+                new LeadReviewSubmitDTO
+                {
+                    ExpectedVersion = 1,
+                    Action = "approve",
+                    Reason = "Human reviewer verified the historical extraction against its source.",
+                    Items = new() { ItemDto(1, "VALVE-A", 2) }
+                }, "reviewer@example.com");
+        }
+
+        using var verify = db.ContextFor(Bu);
+        var approved = verify.Leads.Single(x => x.Id == 100);
+        Assert.Equal("reviewer@example.com", approved.ReviewApprovedBy);
+        Assert.Equal(2, approved.ReviewVersion);
+        Assert.Equal("approve", verify.Set<LeadReviewAudit>().Single().Action);
+        await Assert.ThrowsAsync<LeadReviewConflictException>(() => new LeadRepository(verify)
+            .SubmitLeadReviewAsync(100, Bu, new LeadReviewSubmitDTO
+            {
+                ExpectedVersion = approved.ReviewVersion,
+                Action = "approve",
+                Reason = "A second approval must not rewrite the immutable review boundary.",
+                Items = new() { ItemDto(1, "VALVE-A", 2) }
+            }, "reviewer@example.com"));
+    }
+
+    [Fact]
     public async Task Approving_a_reviewer_chosen_client_teaches_the_identity_store()
     {
         // The learning loop's ONLY trigger: action == approve AND an explicitly supplied

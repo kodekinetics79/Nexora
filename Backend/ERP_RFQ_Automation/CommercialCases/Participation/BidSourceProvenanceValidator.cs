@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Text.Json;
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.LeadIdentity;
@@ -20,7 +19,7 @@ internal static class BidSourceProvenanceValidator
         long RevisionLineId,
         long ProjectionLeadItemId,
         long EvidenceSourceLeadItemId,
-        IReadOnlyList<string?> IdentityValues,
+        IReadOnlyList<CriticalSourceEvidence.Identity> IdentityValues,
         decimal? Quantity,
         string? UnitOfMeasure);
 
@@ -128,7 +127,7 @@ internal static class BidSourceProvenanceValidator
             .ToArray();
     }
 
-    private static async Task<LeadReviewAudit?> LoadCurrentReviewOverrideAsync(
+    internal static async Task<LeadReviewAudit?> LoadCurrentReviewOverrideAsync(
         ErpRfqAutomationContext db,
         long businessUnitId,
         Lead lead,
@@ -165,41 +164,15 @@ internal static class BidSourceProvenanceValidator
 
     private static IReadOnlyList<string> MissingCriticalEvidence(
         IReadOnlyCollection<FieldValue> evidence,
-        IReadOnlyCollection<string?> identityValues,
+        IReadOnlyCollection<CriticalSourceEvidence.Identity> identityValues,
         decimal? quantity,
         string? uom)
-    {
-        var missing = new List<string>(3);
-        var identities = identityValues.Where(x => !string.IsNullOrWhiteSpace(x)).ToArray();
-        if (identities.Length == 0 || !evidence.Any(field => IsIdentityEvidence(field, identities)))
-            missing.Add("item identity/description");
-        if (!evidence.Any(field => IsQuantityEvidence(field, quantity)))
-            missing.Add("quantity");
-        if (!evidence.Any(field => IsUomEvidence(field, uom)))
-            missing.Add("unit of measure");
-        return missing;
-    }
+        => CriticalSourceEvidence.Assess(
+            evidence.Select(field => new CriticalSourceEvidence.Field(
+                field.FieldName, field.RawValue, field.NormalizedValue)),
+            identityValues, quantity, uom).Missing();
 
-    private static bool IsIdentityEvidence(FieldValue field, IReadOnlyCollection<string?> identities)
-        => IdentityEvidenceFieldNames.Contains(CanonicalFieldName(field.FieldName))
-           && EvidenceValues(field).Any(value => identities.Any(
-               expected => expected is not null && SameCommercialText(value, expected)));
-
-    private static bool IsQuantityEvidence(FieldValue field, decimal? expected)
-        => expected.HasValue
-           && CanonicalFieldName(field.FieldName) == "QUANTITY"
-           && EvidenceValues(field).Any(value => decimal.TryParse(value,
-               NumberStyles.Number, CultureInfo.InvariantCulture, out var parsed)
-               && parsed == expected.Value);
-
-    private static bool IsUomEvidence(FieldValue field, string? expected)
-        => expected is not null
-           && CanonicalFieldName(field.FieldName) is "UNITOFMEASURE" or "UOM"
-           && EvidenceValues(field).Any(value => string.Equals(
-               UomCanonicalizer.CanonicalizeForStorage(value), expected,
-               StringComparison.OrdinalIgnoreCase));
-
-    private static bool ReviewOverrideCoversLine(
+    internal static bool ReviewOverrideCoversLine(
         LeadReviewAudit audit, Requirement requirement, string? effectiveUom)
     {
         try
@@ -229,7 +202,7 @@ internal static class BidSourceProvenanceValidator
                     JsonString(item, "itemText")
                 };
                 var expectedIdentity = requirement.IdentityValues
-                    .Where(x => !string.IsNullOrWhiteSpace(x)).ToArray();
+                    .Select(x => x.Value).Where(x => !string.IsNullOrWhiteSpace(x)).ToArray();
                 var identityMatches = auditedIdentity.Where(x => !string.IsNullOrWhiteSpace(x))
                     .Any(value => expectedIdentity.Any(expected => SameCommercialText(value!, expected!)));
                 var quantityMatches = requirement.Quantity.HasValue
@@ -248,18 +221,11 @@ internal static class BidSourceProvenanceValidator
         return false;
     }
 
-    private static IEnumerable<string> EvidenceValues(FieldValue evidence)
-        => new[] { evidence.NormalizedValue, evidence.RawValue }
-            .Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => value!.Trim());
-
     private static bool SameCommercialText(string left, string right)
         => string.Equals(CanonicalCommercialText(left), CanonicalCommercialText(right),
             StringComparison.Ordinal);
 
     private static string CanonicalCommercialText(string value)
-        => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
-
-    private static string CanonicalFieldName(string value)
         => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
 
     private static bool IsJsonObject(string json)
@@ -287,9 +253,4 @@ internal static class BidSourceProvenanceValidator
         => element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
             ? value.GetString() : null;
 
-    private static readonly HashSet<string> IdentityEvidenceFieldNames = new(StringComparer.Ordinal)
-    {
-        "PRODUCTNAME", "PRODUCTSHORTNAME", "PRODUCTSHORTDESCRIPTION", "ITEMMATERIALCODE",
-        "MANUFACTURERPARTNUMBER", "ITEMTEXT", "REQUESTEDLINE"
-    };
 }

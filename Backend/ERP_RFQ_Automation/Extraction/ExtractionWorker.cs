@@ -21,6 +21,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using ERP_RFQ_Automation.HealthChecks;
 using ERP_RFQ_Automation.Billing.Metering;
+using ERP_RFQ_Automation.CommercialCases.Participation;
 
 namespace ERP_RFQ_Automation.Extraction;
 
@@ -1698,7 +1699,12 @@ public sealed class LeadPersister : ILeadPersister
             // those lines require a person and may never turn the ingest green through the
             // confidence shortcut.
             && results[0].Items is { Count: > 0 }
-            && results[0].Items.All(item => item.Quantity is > 0);
+            && results[0].Items.All(item => item.Quantity is > 0)
+            // Confidence alone is not provenance. Auto-verification is allowed only when
+            // server-owned exact evidence already proves identity, quantity and UOM for every
+            // line. Conversational spans earn that status through deterministic matching below;
+            // model-authored confidence and unverified prose never do.
+            && results[0].Items.All(item => HasCompleteCriticalEvidence(item, job.Id));
         for (var g = 0; g < results.Count; g++)
         {
             var splitNote = results.Count > 1
@@ -2069,8 +2075,39 @@ public sealed class LeadPersister : ILeadPersister
                     valueKind: FieldValueKind.Text,
                     validationStatus: FieldValidationStatus.Valid,
                     transformationsJson: "[]"));
+                var derived = CriticalSourceEvidence.DeriveFromVerifiedSpan(
+                    raw,
+                    CriticalIdentityCandidates(item),
+                    item.Quantity,
+                    item.UnitOfMeasure);
+                if (derived is not null)
+                {
+                    const string transformation =
+                        "[{\"operation\":\"deterministic_verified_span_projection\"}]";
+                    _context.AddRange(
+                        FieldEvidence.ForLineItem(job.BusinessUnitId, region.Id, line.Id,
+                            derived.IdentityFieldName, derived.IdentityRawValue,
+                            derived.IdentityRawValue, 1m, parserVersion, run.RunId,
+                            valueKind: FieldValueKind.Text,
+                            validationStatus: FieldValidationStatus.Valid,
+                            transformationsJson: transformation),
+                        FieldEvidence.ForLineItem(job.BusinessUnitId, region.Id, line.Id,
+                            "Quantity", derived.QuantityRawValue,
+                            item.Quantity?.ToString(CultureInfo.InvariantCulture), 1m,
+                            parserVersion, run.RunId,
+                            valueKind: FieldValueKind.Number,
+                            validationStatus: FieldValidationStatus.Valid,
+                            transformationsJson: transformation),
+                        FieldEvidence.ForLineItem(job.BusinessUnitId, region.Id, line.Id,
+                            "UnitOfMeasure", derived.UnitOfMeasureRawValue,
+                            Services.Uom.UomCanonicalizer.CanonicalizeForStorage(item.UnitOfMeasure),
+                            1m, parserVersion, run.RunId,
+                            valueKind: FieldValueKind.Text,
+                            validationStatus: FieldValidationStatus.Valid,
+                            transformationsJson: transformation));
+                }
                 regionCounts[sourceJobId]++;
-                evidenceCounts[sourceJobId]++;
+                evidenceCounts[sourceJobId] += derived is null ? 1 : 4;
             }
 
             foreach (var exact in item.VerifiedEvidence ?? [])
@@ -2588,6 +2625,35 @@ public sealed class LeadPersister : ILeadPersister
         // Compatibility for jobs created before database-owned provenance was introduced.
         return ExtractionJobMetadata.TryLoad(job);
     }
+
+    private static bool HasCompleteCriticalEvidence(LeadItemData item, long currentJobId)
+    {
+        if (item.SourceExtractionJobId.HasValue && item.SourceExtractionJobId.Value != currentJobId)
+            return false;
+        var evidence = (item.VerifiedEvidence ?? [])
+            .Select(field => new CriticalSourceEvidence.Field(
+                field.FieldName, field.RawValue, field.NormalizedValue))
+            .ToList();
+        var identities = CriticalIdentityCandidates(item);
+        if (CriticalSourceEvidence.Assess(
+            evidence,
+            identities,
+            item.Quantity,
+            item.UnitOfMeasure).Complete)
+            return true;
+        return item.SourceSpanVerified
+            && CriticalSourceEvidence.DeriveFromVerifiedSpan(
+                item.SourceSpan, identities, item.Quantity, item.UnitOfMeasure) is not null;
+    }
+
+    private static CriticalSourceEvidence.Identity[] CriticalIdentityCandidates(LeadItemData item) =>
+    [
+        new("ManufacturerPartNumber", item.ManufacturerPartNumber),
+        new("ItemMaterialCode", item.ItemMaterialCode),
+        new("ProductShortName", item.ProductShortName),
+        new("ProductShortDescription", item.ProductShortDescription),
+        new("ItemText", item.ItemText)
+    ];
 
     /// <summary>Builds one Lead (+ its LeadItems) for one extraction result/group.</summary>
     private static Lead BuildLead(

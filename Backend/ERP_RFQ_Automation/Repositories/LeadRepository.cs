@@ -1275,10 +1275,20 @@ namespace ERP_RFQ_Automation.Repositories
             // entirely and is simply dropped: approving is now idempotent with respect to where
             // the lead sits, so it can be done before advancing, after advancing, or from the
             // dead end a lead is already in.
-            var awaitingReview = lead.EmailIngests != null
+            var sourceOccurrenceCount = (await SourceOccurrenceIdsAsync(
+                lead.Id, businessUnitId)).Count;
+            var historicalAutoVerificationNeedsHumanAuthority = action == "approve"
+                && lead.CommercialFactsVerified
+                && !lead.RequiresCommercialReview
+                && string.Equals(lead.ReviewApprovedBy,
+                    ERP_RFQ_Automation.Extraction.LeadPersister.AutoVerifyActor,
+                    StringComparison.Ordinal)
+                && sourceOccurrenceCount > 0;
+            var awaitingReview = (lead.EmailIngests != null
                 ? string.Equals(lead.EmailIngests.ParseStatus, "NeedsReview", StringComparison.OrdinalIgnoreCase)
                 : !lead.CommercialFactsVerified
-                  && (await SourceOccurrenceIdsAsync(lead.Id, businessUnitId)).Count > 0;
+                  && sourceOccurrenceCount > 0)
+                || historicalAutoVerificationNeedsHumanAuthority;
             if (!awaitingReview)
                 throw new LeadReviewConflictException("This lead is no longer awaiting extraction review.");
 

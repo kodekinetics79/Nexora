@@ -12,6 +12,7 @@ using ERP_RFQ_Automation.Services.DocumentIntelligence;
 using ERP_RFQ_Automation.Services.Interfaces;
 using ERP_RFQ_Automation.Tests.Support;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using OfficeOpenXml;
 using QuestPDF.Fluent;
@@ -234,7 +235,11 @@ public sealed class EmailToLeadVerticalSlicePostgreSqlTests(PostgreSqlTestDataba
         var llm = new EmailToLeadHarness.RefusingLlm();
         await using var services = EmailToLeadHarness.BuildGraph(
             _database.ConnectionString, _storageRoot, llm,
-            registrations => registrations.AddScoped<IConversationalExtractionService, BodyOnlyExtractor>());
+            registrations =>
+            {
+                registrations.AddScoped<IConversationalExtractionService, BodyOnlyExtractor>();
+                registrations.AddSingleton<IConfiguration>(AutoVerifyConfiguration());
+            });
 
         var message = EmailToLeadHarness.BuildBodyOnlyMessage(messageId);
         var (_, assemblyId, schedule) = await EmailToLeadHarness.CaptureAndScheduleAsync(
@@ -254,6 +259,7 @@ public sealed class EmailToLeadVerticalSlicePostgreSqlTests(PostgreSqlTestDataba
 
         Assert.Equal(EmailInquiryAssemblyStatus.Assembled, assembly.Status);
         Assert.Equal(lead.Id, assembly.AssembledLeadId);
+        Assert.False(lead.CommercialFactsVerified);
         Assert.Contains("BODY-ONLY-700", line.ProductShortName);
         Assert.Equal(7, line.Quantity);
         var evidence = Assert.Single(await context.Attachments.AsNoTracking()
@@ -289,6 +295,7 @@ public sealed class EmailToLeadVerticalSlicePostgreSqlTests(PostgreSqlTestDataba
             {
                 registrations.AddScoped<IConversationalExtractionService, ThreeLineBodyExtractor>();
                 registrations.AddScoped<ILeadIdentityApplicationService, LeadIdentityApplicationService>();
+                registrations.AddSingleton<IConfiguration>(AutoVerifyConfiguration());
             });
         await EmailToLeadHarness.CaptureAndScheduleAsync(
             services, businessUnitId, EmailToLeadHarness.BuildBodyOnlyMessage(messageId),
@@ -320,6 +327,16 @@ public sealed class EmailToLeadVerticalSlicePostgreSqlTests(PostgreSqlTestDataba
                 field.Region.SourceAddress
             })
             .ToListAsync();
+        var typedEvidence = await context.Set<FieldEvidence>().AsNoTracking()
+            .Where(field => field.LineItem != null
+                && field.LineItem.Inquiry.LeadId == lead.Id
+                && field.FieldName != "SourceSpan")
+            .Select(field => new
+            {
+                field.LineItem!.LeadItemId,
+                field.FieldName
+            })
+            .ToListAsync();
 
         var expected = new[]
         {
@@ -335,6 +352,11 @@ public sealed class EmailToLeadVerticalSlicePostgreSqlTests(PostgreSqlTestDataba
             var evidence = Assert.Single(sourceEvidence, field => field.LeadItemId == item.Id);
             Assert.Equal(item.ProductShortName, evidence.NormalizedValue);
             Assert.Contains(item.ProductShortName!, evidence.RawValue!, StringComparison.Ordinal);
+            var projected = typedEvidence.Where(field => field.LeadItemId == item.Id)
+                .Select(field => field.FieldName).ToHashSet(StringComparer.Ordinal);
+            Assert.Contains("ProductShortName", projected);
+            Assert.Contains("Quantity", projected);
+            Assert.Contains("UnitOfMeasure", projected);
         }
         Assert.Equal(
             ["message-body:verified-span:1", "message-body:verified-span:2", "message-body:verified-span:3"],
@@ -921,6 +943,12 @@ public sealed class EmailToLeadVerticalSlicePostgreSqlTests(PostgreSqlTestDataba
             && x.Action == "EmailTriageReprocessed"
             && x.TargetId == ingestId).ToListAsync());
     }
+
+    private static IConfiguration AutoVerifyConfiguration()
+        => new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            [LeadPersister.AutoVerifyMinConfidenceKey] = "0.85"
+        }).Build();
 
     private sealed class BodyOnlyExtractor : IConversationalExtractionService
     {
