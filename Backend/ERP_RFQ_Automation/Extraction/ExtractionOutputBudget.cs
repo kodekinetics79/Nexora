@@ -67,15 +67,19 @@ namespace ERP_RFQ_Automation.Extraction;
 ///   => ~806 characters ≈ 230 tokens.
 /// 300 + 230 = 530, rounded UP to 550 so the constant errs toward smaller, safer chunks.
 ///
-/// COST OF THAT CHOICE, stated plainly: the header is now worth two line items rather
-/// than one (550 / 225), which is exactly why the client fields are HEADER fields. Making
+/// CUSTOMER DELIVERY AND AGREEMENT TERMS add 6 more header keys (three values and three
+/// confidences). Their keys, values and separators cost about 240 characters, or 69 tokens
+/// at the same 3.5 characters/token. 550 + 69 = 619, rounded UP to 650.
+///
+/// COST OF THAT CHOICE, stated plainly: the header is now worth about three line items
+/// (650 / 225), which is exactly why these fields are HEADER fields. Making
 /// any of them per-item would cost ~225 tokens PER LINE and give the budget straight back.
 ///
 /// <see cref="SafetyUtilization"/> keeps the projection at 70% of the ceiling. That head
 /// room absorbs the cases the average cannot: unusually verbose ItemText /
 /// ProductShortDescription values, a populated ExtraFields map, and tokenizer variance.
 ///
-/// Resulting chunk sizes: 10 items at a 4,096-token ceiling, 23 items at 8,192.
+/// Resulting chunk sizes: 9 items at a 4,096-token ceiling, 22 items at 8,192.
 /// </summary>
 public static class ExtractionOutputBudget
 {
@@ -83,7 +87,7 @@ public static class ExtractionOutputBudget
     public const int EstimatedOutputTokensPerItem = 225;
 
     /// <summary>Estimated OUTPUT tokens for the document-level header fields emitted once per call.</summary>
-    public const int EstimatedHeaderOutputTokens = 550;
+    public const int EstimatedHeaderOutputTokens = 650;
 
     /// <summary>
     /// Fraction of the provider's output ceiling this budget is willing to project into.

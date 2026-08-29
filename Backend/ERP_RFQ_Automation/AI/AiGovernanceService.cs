@@ -51,8 +51,13 @@ public static class AiPromptVersions
     /// permits JSON numbers, now with an explicit six-decimal precision rule, and the
     /// property-level converter preserves valid fractions without leaking quantity rules
     /// onto other decimal fields such as price.
+    ///
+    /// v5 -> v6 (2026-08-29): added the customer delivery date, delivery location and
+    /// agreement reference (plus their header confidences). The common extraction result and
+    /// Lead/revision model already carried these fields, but the structured/unstructured prompt
+    /// never requested them, so model-read documents silently stored nulls.
     /// </summary>
-    public const string StructuredRfqExtraction = "rfq-extraction-v5";
+    public const string StructuredRfqExtraction = "rfq-extraction-v6";
 }
 
 public sealed record AiCallContext(

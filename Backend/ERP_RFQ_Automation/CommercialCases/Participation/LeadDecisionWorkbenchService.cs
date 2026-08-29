@@ -310,6 +310,10 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
             .ToArrayAsync(ct);
 
         var status = LeadDecisionParticipationState.Resolve(decision, fit, hasDecisionOnPriorRevision);
+        if (!LeadRevisionCommercialSnapshot.TryParse(revision.SnapshotJson, out var frozenHeader)
+            || frozenHeader is null)
+            throw new InvalidOperationException(
+                "The current Lead revision has no valid frozen commercial header. Reconcile it before making a participation decision.");
         return new LeadDecisionWorkbenchDto(lead.Id, revision.Id, revision.RevisionNumber, lead.CurrentRevisionNumber,
             decision?.Sequence, status, lead.LeadStatus?.SetupCode ?? "UNKNOWN", lead.LeadStatus?.SetupValue,
             lead.CommercialCaseReference, revision.CustomerRfqReference, lead.CustomerId, customerName,
@@ -317,7 +321,8 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
             sourceOccurrence?.Subject ?? emailProvenance?.EmailSubject,
             RfcMessageId(sourceOccurrence) ?? emailProvenance?.MessageId,
             sourceOccurrence?.SourceReceivedAtUtc ?? occurrence.SourceReceivedAtUtc,
-            lead.BidClosingDate, lead.AssignToNavigation is null ? null
+            frozenHeader.BidClosingDate, frozenHeader.RequiredDeliveryDate, frozenHeader.DeliveryLocation,
+            frozenHeader.AgreementReference, lead.AssignToNavigation is null ? null
                 : $"{lead.AssignToNavigation.FirstName} {lead.AssignToNavigation.LastName}".Trim(),
             lines.Length > 0 && lines.All(x => x.VerificationStatus == "VERIFIED")
                 ? "VERIFIED" : evidence.Count > 0 ? "NEEDS_REVIEW" : "SOURCE_UNAVAILABLE",
@@ -466,7 +471,8 @@ public sealed record LeadDecisionWorkbenchDto(long LeadId, long LeadRevisionId, 
     int DecisionVersion, int? ParticipationVersion, string ParticipationStatus, string LifecycleStatusCode,
     string? LifecycleStatusLabel, string? NexoraSerial, string? CustomerRfqReference, long? CustomerId,
     string? CustomerName, string? BuyerName, string? SenderEmail, string? EmailSubject, string? EmailMessageId,
-    DateTimeOffset? ReceivedAtUtc, DateTime? BidClosingDate, string? AssignedToName, string VerificationStatus,
+    DateTimeOffset? ReceivedAtUtc, DateTime? BidClosingDate, DateTime? RequiredDeliveryDate,
+    string? DeliveryLocation, string? AgreementReference, string? AssignedToName, string VerificationStatus,
     string? VerifiedBy, DateTimeOffset? VerifiedAtUtc, SourceCoverageDto? SourceCoverage,
     IReadOnlyList<LeadDecisionEvidenceDto> Evidence, IReadOnlyList<LeadDecisionLineDto> Lines,
     IReadOnlyList<DecisionReasonCodeDto> ReasonCodes, IReadOnlyList<DecisionValueOptionDto> UnitOptions,

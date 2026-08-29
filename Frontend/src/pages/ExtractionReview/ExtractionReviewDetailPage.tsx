@@ -97,6 +97,8 @@ interface ReviewHeaderState {
   // bid closing date above and from any line's lead time: the reviewer is looking at
   // the source document, so this is the only place the extraction can be corrected.
   requiredDeliveryDate: string;
+  deliveryLocation: string;
+  agreementReference: string;
   opportunityNo: string;
   headerRemarks: string;
 }
@@ -210,6 +212,10 @@ const evidenceValue = (value: string | number | null | undefined): string => val
 
 const toDateInput = (value?: string | null): string => {
   if (!value) return '';
+  // These are customer calendar dates, not instants. Parsing midnight UTC in a western
+  // browser timezone moves the date back one day, so preserve a valid ISO date token.
+  const isoDate = /^(\d{4}-\d{2}-\d{2})/.exec(value)?.[1];
+  if (isoDate) return isoDate;
   const d = dayjs(value);
   return d.isValid() ? d.format('YYYY-MM-DD') : '';
 };
@@ -292,6 +298,7 @@ const ExtractionReviewDetailPage: React.FC = () => {
 
   const [header, setHeader] = useState<ReviewHeaderState>({
     rfqno: '', buyersName: '', bidClosingDate: '', requiredDeliveryDate: '',
+    deliveryLocation: '', agreementReference: '',
     opportunityNo: '', headerRemarks: '',
   });
   const [items, setItems] = useState<ReviewLineItem[]>([]);
@@ -325,6 +332,8 @@ const ExtractionReviewDetailPage: React.FC = () => {
       buyersName: lead.buyersName ?? '',
       bidClosingDate: toDateInput(lead.bidClosingDate),
       requiredDeliveryDate: toDateInput(lead.requiredDeliveryDate ?? null),
+      deliveryLocation: lead.deliveryLocation ?? '',
+      agreementReference: lead.agreementReference ?? '',
       opportunityNo: lead.opportunityNo ?? '',
       headerRemarks: lead.headerRemarks ?? '',
     };
@@ -573,6 +582,8 @@ const ExtractionReviewDetailPage: React.FC = () => {
       buyersName: header.buyersName || undefined,
       bidClosingDate: header.bidClosingDate || undefined,
       requiredDeliveryDate: header.requiredDeliveryDate || undefined,
+      deliveryLocation: header.deliveryLocation || undefined,
+      agreementReference: header.agreementReference || undefined,
       opportunityNo: header.opportunityNo || undefined,
       headerRemarks: header.headerRemarks || undefined,
       // Only sent when the reviewer picked a client in this session. Omitted
@@ -1020,6 +1031,22 @@ const ExtractionReviewDetailPage: React.FC = () => {
                       ? `Closing date in Hijri: ${lead.bidClosingDateHijri} H`
                       : 'The date the buyer wants the goods — not a supplier lead time.'
                   }
+                />
+              </Grid>
+              <Grid size={{ xs: 12, md: 4 }}>
+                <TextField
+                  fullWidth size="small" label="Delivery Location"
+                  value={header.deliveryLocation} onChange={handleHeaderChange('deliveryLocation')}
+                  disabled={isSubmitting || !canEditLeads}
+                  helperText="Use the destination stated by the buyer; do not infer it from their address."
+                />
+              </Grid>
+              <Grid size={{ xs: 12, md: 4 }}>
+                <TextField
+                  fullWidth size="small" label="Agreement Reference"
+                  value={header.agreementReference} onChange={handleHeaderChange('agreementReference')}
+                  disabled={isSubmitting || !canEditLeads}
+                  helperText="Standing agreement, contract, or framework reference from the source."
                 />
               </Grid>
               <Grid size={{ xs: 12, md: 4 }}>

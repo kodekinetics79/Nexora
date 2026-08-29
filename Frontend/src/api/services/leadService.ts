@@ -114,6 +114,7 @@ export interface LeadResponseDTO {
   // FR-RFQ-03. The standing agreement / frame contract this inquiry is called off
   // against. Distinct from rfqno (the inquiry's own reference).
   agreementReference?: string | null;
+  deliveryLocation?: string | null;
   emailSource: string;
   clientemail: string;
   status: string;

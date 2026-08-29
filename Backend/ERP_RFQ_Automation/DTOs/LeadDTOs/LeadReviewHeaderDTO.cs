@@ -15,6 +15,8 @@ namespace ERP_RFQ_Automation.DTOs.Lead
         /// nobody can trust.
         /// </summary>
         public DateTime? RequiredDeliveryDate { get; set; }
+        public string? DeliveryLocation { get; set; }
+        public string? AgreementReference { get; set; }
 
         public string? OpportunityNo { get; set; }
         public string? HeaderRemarks { get; set; }

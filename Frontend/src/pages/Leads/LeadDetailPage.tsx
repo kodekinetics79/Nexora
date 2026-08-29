@@ -351,6 +351,12 @@ const LeadDetailPage: React.FC = () => {
                   value={lead.requiredDeliveryDate ? formatDate(lead.requiredDeliveryDate) : 'Not stated on the document'}
                 />
               </Grid>
+              <Grid size={{ xs: 12, md: 4 }} component="div">
+                <DataField
+                  label="Delivery Location"
+                  value={lead.deliveryLocation || 'Not stated on the document'}
+                />
+              </Grid>
               {/* FR-RFQ-03. The standing agreement this inquiry is called off against. */}
               <Grid size={{ xs: 12, md: 4 }} component="div">
                 <DataField

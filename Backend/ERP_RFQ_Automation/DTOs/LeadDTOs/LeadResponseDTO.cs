@@ -71,6 +71,7 @@ namespace ERP_RFQ_Automation.DTOs.Lead
         /// from <see cref="DurationAgreement"/> (free-text description, not an identifier).
         /// </summary>
         public string? AgreementReference { get; set; }
+        public string? DeliveryLocation { get; set; }
 
         public string? BiddingDecision { get; set; }
         public DateTime? AcknowledgmentDate { get; set; }

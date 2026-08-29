@@ -24,6 +24,13 @@ public sealed class ExtractionSchemaClientFieldsTests
         "SupplierAccountRefOnDocument", "SupplierAccountRefOnDocumentConfidence"
     ];
 
+    private static readonly string[] CommercialHeaderKeys =
+    [
+        "RequiredDeliveryDate", "RequiredDeliveryDateConfidence",
+        "DeliveryLocation", "DeliveryLocationConfidence",
+        "AgreementReference", "AgreementReferenceConfidence"
+    ];
+
     /// <summary>The 24 per-item VALUE fields the item schema requests, in schema order.</summary>
     private static readonly string[] ItemValueFields =
     [
@@ -52,6 +59,20 @@ public sealed class ExtractionSchemaClientFieldsTests
     }
 
     [Fact]
+    public void The_prompt_asks_for_customer_delivery_and_agreement_header_fields()
+    {
+        var instructions = Instructions();
+        foreach (var key in CommercialHeaderKeys)
+            Assert.Contains($"\"{key}\"", instructions, StringComparison.Ordinal);
+
+        Assert.Contains("CUSTOMER DELIVERY AND AGREEMENT TERMS", instructions, StringComparison.Ordinal);
+        Assert.Contains("Never infer a delivery place", instructions, StringComparison.Ordinal);
+        Assert.Contains("never confuse the bid closing date", instructions, StringComparison.Ordinal);
+        Assert.Contains("unless the document explicitly identifies it as an agreement", instructions,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Every_client_field_is_a_HEADER_field_and_none_is_per_item()
     {
         // A per-item field costs ~225 output tokens PER LINE; a header field is paid once.
@@ -59,6 +80,8 @@ public sealed class ExtractionSchemaClientFieldsTests
         var instructions = Instructions();
         var itemsBlock = instructions[instructions.IndexOf("\"Items\"", StringComparison.Ordinal)..];
         foreach (var key in ClientHeaderKeys)
+            Assert.DoesNotContain($"\"{key}\"", itemsBlock, StringComparison.Ordinal);
+        foreach (var key in CommercialHeaderKeys)
             Assert.DoesNotContain($"\"{key}\"", itemsBlock, StringComparison.Ordinal);
     }
 
@@ -119,11 +142,11 @@ public sealed class ExtractionSchemaClientFieldsTests
     }
 
     [Fact]
-    public void The_prompt_version_was_bumped_for_the_quantity_format_rules()
+    public void The_prompt_version_was_bumped_for_the_current_schema()
     {
         // The ledger attributes every call to the prompt that produced it. Changing the
         // instructions without moving the label would file v4 answers under v3.
-        Assert.Equal("rfq-extraction-v5", AiPromptVersions.StructuredRfqExtraction);
+        Assert.Equal("rfq-extraction-v6", AiPromptVersions.StructuredRfqExtraction);
     }
 
     [Fact]
@@ -143,33 +166,37 @@ public sealed class ExtractionSchemaClientFieldsTests
         var properties = typeof(LeadExtractionResult).GetProperties().Select(p => p.Name).ToHashSet(StringComparer.Ordinal);
         foreach (var key in ClientHeaderKeys)
             Assert.Contains(key, properties);
+        foreach (var key in CommercialHeaderKeys)
+            Assert.Contains(key, properties);
     }
 
     [Fact]
     public void Every_new_field_is_optional_so_existing_positional_call_sites_still_compile()
     {
         var constructor = typeof(LeadExtractionResult).GetConstructors().Single();
-        foreach (var parameter in constructor.GetParameters().Where(p => ClientHeaderKeys.Contains(p.Name)))
+        foreach (var parameter in constructor.GetParameters().Where(p =>
+                     ClientHeaderKeys.Contains(p.Name) || CommercialHeaderKeys.Contains(p.Name)))
             Assert.True(parameter.IsOptional, $"{parameter.Name} must be a trailing optional parameter.");
     }
 
     [Fact]
     public void The_header_budget_pays_for_the_keys_the_schema_actually_requests()
     {
-        // 13 keys, ~806 characters of JSON at ~3.5 characters/token ≈ 230 tokens on top of
-        // the original 300. If someone adds keys without moving this constant, the last
+        // 19 keys: 13 client-identity fields plus 6 delivery/agreement fields. If someone
+        // adds keys without moving this constant, the last
         // fields of every chunked document silently truncate.
         Assert.Equal(13, ClientHeaderKeys.Length);
-        Assert.Equal(550, ExtractionOutputBudget.EstimatedHeaderOutputTokens);
+        Assert.Equal(6, CommercialHeaderKeys.Length);
+        Assert.Equal(650, ExtractionOutputBudget.EstimatedHeaderOutputTokens);
 
         // The documented consequence, asserted rather than assumed. 23/10 (was 11/5) since
         // rfq-extraction-v2 stopped paying for 24 discarded per-field confidences per item.
         Assert.Equal(24, ItemValueFields.Length);
         Assert.Equal(225, ExtractionOutputBudget.EstimatedOutputTokensPerItem);
-        Assert.Equal(23, ExtractionOutputBudget.MaxItemsPerChunk(8192));
-        Assert.Equal(10, ExtractionOutputBudget.MaxItemsPerChunk(4096));
-        Assert.True(ExtractionOutputBudget.FitsBudget(23, 8192));
-        Assert.False(ExtractionOutputBudget.FitsBudget(24, 8192));
+        Assert.Equal(22, ExtractionOutputBudget.MaxItemsPerChunk(8192));
+        Assert.Equal(9, ExtractionOutputBudget.MaxItemsPerChunk(4096));
+        Assert.True(ExtractionOutputBudget.FitsBudget(22, 8192));
+        Assert.False(ExtractionOutputBudget.FitsBudget(23, 8192));
     }
 
     /// <summary>
