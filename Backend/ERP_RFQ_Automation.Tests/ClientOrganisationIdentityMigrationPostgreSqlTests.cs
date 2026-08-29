@@ -71,6 +71,43 @@ public sealed class ClientOrganisationIdentityMigrationPostgreSqlTests(PostgreSq
 
     [Fact]
     [Trait("Category", "PostgreSQL")]
+    public async Task Pipeline_customer_resolution_has_only_the_candidate_permissions_it_needs()
+    {
+        await using var connection = await database.OpenConnectionAsync();
+        await using var privileges = connection.CreateCommand();
+        privileges.CommandText = """
+            SELECT has_table_privilege('nexora_pipeline_app',
+                       'public.lead_customer_match_candidates', 'SELECT'),
+                   has_table_privilege('nexora_pipeline_app',
+                       'public.lead_customer_match_candidates', 'INSERT'),
+                   has_table_privilege('nexora_pipeline_app',
+                       'public.lead_customer_match_candidates', 'UPDATE'),
+                   has_table_privilege('nexora_pipeline_app',
+                       'public.lead_customer_match_candidates', 'DELETE'),
+                   has_table_privilege('nexora_pipeline_app',
+                       'public.lead_customer_match_candidates', 'TRUNCATE'),
+                   has_sequence_privilege('nexora_pipeline_app', pg_get_serial_sequence(
+                       'public.lead_customer_match_candidates', 'Id'), 'USAGE'),
+                   has_sequence_privilege('nexora_pipeline_app', pg_get_serial_sequence(
+                       'public.lead_customer_match_candidates', 'Id'), 'SELECT'),
+                   has_sequence_privilege('nexora_pipeline_app', pg_get_serial_sequence(
+                       'public.lead_customer_match_candidates', 'Id'), 'UPDATE');
+            """;
+
+        await using var reader = await privileges.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        Assert.True(reader.GetBoolean(0));
+        Assert.True(reader.GetBoolean(1));
+        Assert.True(reader.GetBoolean(2));
+        Assert.True(reader.GetBoolean(3));
+        Assert.False(reader.GetBoolean(4));
+        Assert.True(reader.GetBoolean(5));
+        Assert.False(reader.GetBoolean(6));
+        Assert.False(reader.GetBoolean(7));
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
     public async Task A_tenant_session_cannot_read_or_write_another_tenants_candidates()
     {
         var suffix = Random.Shared.Next(1, 40_000);

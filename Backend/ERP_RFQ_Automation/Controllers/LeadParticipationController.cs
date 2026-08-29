@@ -178,12 +178,17 @@ public sealed class LeadParticipationController : ControllerBase
     [HttpPost("promote-to-rfq")]
     [RequireModulePermission("Leads", PermissionAction.Edit)]
     [RequireModulePermission("RFQ Management", PermissionAction.Create)]
-    [RequireManagerRole]
     public async Task<ActionResult<RfqPromotionResult>> PromoteToRfq(
         long leadId, [FromBody] PromoteToRfqRequest request, CancellationToken ct)
     {
         if (!TryContext(out var businessUnitId, out var actor)) return Unauthorized();
+        // Resolve tenant-scoped resource visibility before the role gate. Keeping the manager
+        // policy as an action-level authorization attribute returned 403 before this code ran,
+        // disclosing that a foreign-tenant Lead id existed. Same-tenant callers still receive
+        // the truthful 403 below when they lack commercial decision authority.
         if (!await _commercialAccess.CanAccessLeadAsync(leadId, ct)) return NotFound();
+        if (!await ParticipationDecisionAuthority.CanCommitOrPromoteAsync(User, businessUnitId, _roleGate))
+            return Forbid();
         if (!TryIdempotencyKey(out var key)) return IdempotencyRequired();
         try
         {

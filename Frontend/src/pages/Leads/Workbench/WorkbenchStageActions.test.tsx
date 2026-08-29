@@ -80,9 +80,15 @@ describe('WorkbenchStageActions', () => {
   it('lets a sales rep save a draft without advertising authority to commit it', () => {
     const onSaveDraft = vi.fn();
     const onCommit = vi.fn();
-    renderActions('participation', { canEdit: true, canCommit: false, onSaveDraft, onCommit });
+    renderActions('participation', {
+      canEdit: true,
+      canCommit: false,
+      draftForManagerReview: true,
+      onSaveDraft,
+      onCommit,
+    });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save draft for manager review' }));
     expect(onSaveDraft).toHaveBeenCalledOnce();
     expect(screen.getByRole('button', { name: 'Commit participation' })).toBeDisabled();
     expect(onCommit).not.toHaveBeenCalled();

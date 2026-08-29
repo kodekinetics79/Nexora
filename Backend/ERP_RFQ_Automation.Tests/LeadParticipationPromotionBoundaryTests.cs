@@ -30,15 +30,15 @@ public sealed class LeadParticipationPromotionBoundaryTests
         Assert.Contains("POST promote-to-rfq", routes);
         Assert.Contains("POST rfq-revision-impact/resolve", routes);
 
-        foreach (var actionName in new[]
-                 {
-                     nameof(LeadParticipationController.Promote),
-                     nameof(LeadParticipationController.PromoteToRfq)
-                 })
-        {
-            var action = typeof(LeadParticipationController).GetMethod(actionName)!;
-            Assert.NotEmpty(action.GetCustomAttributes<RequireManagerRoleAttribute>());
-        }
+        var legacyPromote = typeof(LeadParticipationController).GetMethod(
+            nameof(LeadParticipationController.Promote))!;
+        Assert.NotEmpty(legacyPromote.GetCustomAttributes<RequireManagerRoleAttribute>());
+
+        // The canonical route performs the same manager gate inside the action, after its
+        // tenant-scoped existence check, so a foreign Lead remains non-disclosing.
+        var canonicalPromote = typeof(LeadParticipationController).GetMethod(
+            nameof(LeadParticipationController.PromoteToRfq))!;
+        Assert.Empty(canonicalPromote.GetCustomAttributes<RequireManagerRoleAttribute>());
 
         var resolve = typeof(LeadParticipationController).GetMethod(
             nameof(LeadParticipationController.ResolveRfqRevisionImpact))!;
@@ -83,6 +83,32 @@ public sealed class LeadParticipationPromotionBoundaryTests
             Assert.IsType<OkObjectResult>(response.Result);
         else
             Assert.IsType<ForbidResult>(response.Result);
+    }
+
+    [Fact]
+    public async Task Cross_tenant_promote_to_rfq_is_non_disclosing_before_role_authorization()
+    {
+        var promotion = new RecordingPromotionService();
+        var controller = PromotionController(promotion, canAccessLead: false, manager: false);
+
+        var response = await controller.PromoteToRfq(77,
+            new PromoteToRfqRequest(88, 1, 1, null), default);
+
+        Assert.IsType<NotFoundResult>(response.Result);
+        Assert.Equal(0, promotion.Calls);
+    }
+
+    [Fact]
+    public async Task Same_tenant_promote_to_rfq_forbids_insufficient_role()
+    {
+        var promotion = new RecordingPromotionService();
+        var controller = PromotionController(promotion, canAccessLead: true, manager: false);
+
+        var response = await controller.PromoteToRfq(77,
+            new PromoteToRfqRequest(88, 1, 1, null), default);
+
+        Assert.IsType<ForbidResult>(response.Result);
+        Assert.Equal(0, promotion.Calls);
     }
 
     [Theory]
@@ -143,6 +169,38 @@ public sealed class LeadParticipationPromotionBoundaryTests
         return controller;
     }
 
+    private static LeadParticipationController PromotionController(
+        IRfqPromotionService promotion, bool canAccessLead, bool manager)
+    {
+        var controller = new LeadParticipationController(
+            null!, promotion, null!, null!, new FixedCommercialAccess(canAccessLead), new FixedRoleGate(manager));
+        var http = new DefaultHttpContext
+        {
+            User = new ClaimsPrincipal(new ClaimsIdentity(
+            [
+                new Claim("businessUnitId", "9901"),
+                new Claim("roleId", "4001"),
+                new Claim(ClaimTypes.Email, "sales@nexora.test")
+            ], "test"))
+        };
+        http.Request.Headers["Idempotency-Key"] = "promotion-authority-test";
+        controller.ControllerContext = new ControllerContext { HttpContext = http };
+        return controller;
+    }
+
+    private sealed class RecordingPromotionService : IRfqPromotionService
+    {
+        public int Calls { get; private set; }
+
+        public Task<RfqPromotionResult> PromoteAsync(
+            long businessUnitId, long leadId, PromoteLeadToRfqCommand command,
+            CancellationToken ct = default)
+        {
+            Calls++;
+            throw new InvalidOperationException("The authorization regressions must not call promotion.");
+        }
+    }
+
     private sealed class RecordingParticipationService : ILeadParticipationService
     {
         public int CommitCalls { get; private set; }
@@ -175,6 +233,22 @@ public sealed class LeadParticipationPromotionBoundaryTests
         public Task<bool> CanAccessRfqAsync(long rfqId, CancellationToken ct = default) => Task.FromResult(true);
         public Task<bool> CanAccessQuoteAsync(long quoteId, CancellationToken ct = default) => Task.FromResult(true);
         public Task<bool> CanAccessOrderAsync(long orderId, CancellationToken ct = default) => Task.FromResult(true);
+    }
+
+    private sealed class FixedCommercialAccess(bool canAccessLead) : ICommercialAccessContext
+    {
+        public Task<CommercialActorScope?> ResolveAsync(CancellationToken ct = default) =>
+            Task.FromResult<CommercialActorScope?>(null);
+        public Task<bool> CanAccessLeadAsync(long leadId, CancellationToken ct = default) =>
+            Task.FromResult(canAccessLead);
+        public Task<bool> CanAccessCustomerAsync(long customerId, CancellationToken ct = default) =>
+            Task.FromResult(false);
+        public Task<bool> CanAccessRfqAsync(long rfqId, CancellationToken ct = default) =>
+            Task.FromResult(false);
+        public Task<bool> CanAccessQuoteAsync(long quoteId, CancellationToken ct = default) =>
+            Task.FromResult(false);
+        public Task<bool> CanAccessOrderAsync(long orderId, CancellationToken ct = default) =>
+            Task.FromResult(false);
     }
 
     [Fact]

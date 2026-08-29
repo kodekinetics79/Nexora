@@ -32,6 +32,7 @@ interface WorkbenchStageActionsProps {
   participationStatus: string;
   fullNoBid: boolean;
   fullNoBidClosed: boolean;
+  draftForManagerReview?: boolean;
   onSaveDraft: () => void;
   onCommit: () => void;
   canPromote: boolean;
@@ -79,6 +80,7 @@ export const WorkbenchStageActions: React.FC<WorkbenchStageActionsProps> = ({
   participationStatus,
   fullNoBid,
   fullNoBidClosed,
+  draftForManagerReview = false,
   onSaveDraft,
   onCommit,
   canPromote,
@@ -147,7 +149,7 @@ export const WorkbenchStageActions: React.FC<WorkbenchStageActionsProps> = ({
                 disabled={!canEdit || !dirty || !hasSavedFitAssessment || decisionPending || decisionRecordLocked}
                 onClick={onSaveDraft}
               >
-                Save draft
+                {draftForManagerReview ? 'Save draft for manager review' : 'Save draft'}
               </Button>
               <Button
                 variant="contained"

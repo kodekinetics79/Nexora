@@ -82,6 +82,43 @@ public sealed class GoldenJourneySeederConfigurationTests : IDisposable
         Assert.Contains(problems, problem => problem.Contains("participation decision", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public void Golden_line_records_exact_identity_quantity_and_uom_provenance()
+    {
+        var line = new LeadItem
+        {
+            ItemMaterialCode = "GOLD-NOQT-0005",
+            ProductShortDescription = "Intended no-catalog warning line",
+            Quantity = 12.5m,
+            UnitOfMeasure = "EA"
+        };
+
+        var fields = GoldenCommercialJourneySeeder.GoldenEvidenceFields(line);
+
+        Assert.Equal(3, fields.Count);
+        Assert.Contains(fields, x => x.Name == "ItemMaterialCode"
+            && x.Raw == "GOLD-NOQT-0005" && x.Normalized == "GOLD-NOQT-0005");
+        Assert.Contains(fields, x => x.Name == "Quantity" && x.Raw == "12.5" && x.Normalized == "12.5");
+        Assert.Contains(fields, x => x.Name == "UnitOfMeasure" && x.Raw == "EA" && x.Normalized == "EA");
+    }
+
+    [Fact]
+    public void Golden_current_revision_must_freeze_the_live_customer_and_retain_source_lineage()
+    {
+        Assert.Empty(GoldenCommercialJourneySeeder.CurrentRevisionIdentityProblems(
+            leadCustomerId: 101, leadContactId: 202,
+            revisionCustomerId: 101, revisionContactId: 202,
+            hasSourceLineage: true));
+
+        var stale = GoldenCommercialJourneySeeder.CurrentRevisionIdentityProblems(
+            leadCustomerId: 101, leadContactId: 202,
+            revisionCustomerId: null, revisionContactId: null,
+            hasSourceLineage: false);
+        Assert.Contains(stale, x => x.Contains("customer identity", StringComparison.Ordinal));
+        Assert.Contains(stale, x => x.Contains("contact identity", StringComparison.Ordinal));
+        Assert.Contains(stale, x => x.Contains("source-document lineage", StringComparison.Ordinal));
+    }
+
     // ---------------------------------------------------------------- the defect, stated
 
     /// <summary>

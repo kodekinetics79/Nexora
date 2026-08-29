@@ -63,6 +63,7 @@ import {
 import { commercialActionPermissions } from '../../../utils/commercialActionPermissions';
 import { useUnsavedWorkGuard } from '../../../hooks/useUnsavedWorkGuard';
 import { catalogPolicyLabel, catalogWarningSummary } from './catalogWarningPresentation';
+import ParticipationHandoffGuidance from './ParticipationHandoffGuidance';
 
 const CountChip = ({ label, count, color = 'default' }: { label: string; count: number; color?: 'default' | 'success' | 'warning' | 'info' }) => (
   <Chip size="small" label={`${label} ${count}`} color={color} variant={count > 0 ? 'filled' : 'outlined'} sx={{ fontWeight: 800 }} />
@@ -484,11 +485,11 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
       ) : null}
 
       {!canEdit ? <Alert severity="info" sx={{ mb: 1.5 }}>This decision record is read-only for your role.</Alert> : null}
-      {canEdit && !isManager ? (
-        <Alert severity="info" sx={{ mb: 1.5 }}>
-          You can assess fit and save participation drafts. A Manager, Admin, or Owner must commit the decision and promote an RFQ.
-        </Alert>
-      ) : null}
+      <ParticipationHandoffGuidance
+        canEdit={canEdit}
+        isManager={isManager}
+        participationStatus={workbench.participationStatus}
+      />
 
       <WorkbenchStageTabs value={stage} onChange={changeStage} statuses={stageStatuses} />
 
@@ -625,6 +626,7 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
         participationStatus={workbench.participationStatus}
         fullNoBid={fullNoBid}
         fullNoBidClosed={fullNoBidClosed}
+        draftForManagerReview={canEdit && !isManager}
         onSaveDraft={() => participationMutation.mutate({ commit: false })}
         onCommit={() => {
           if (fullNoBid) setFullNoBidDialogOpen(true);
