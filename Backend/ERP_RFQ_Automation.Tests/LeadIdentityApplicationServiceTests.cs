@@ -59,6 +59,24 @@ public sealed class LeadIdentityApplicationServiceTests
     }
 
     [Fact]
+    public void Workbench_evidence_alignment_rejects_matching_generic_name_with_contradictory_part_number()
+    {
+        var canonical = new LeadItem
+        {
+            Id = 101,
+            ProductShortName = "Control valve",
+            ManufacturerPartNumber = "VALVE-A"
+        };
+        LeadDecisionWorkbenchService.LineFieldEvidenceProjection[] crossWired =
+        [
+            new(102, "ProductName", "Control valve", "Control valve", "sheet:row:2:name"),
+            new(102, "ManufacturerPartNumber", "VALVE-B", "VALVE-B", "sheet:row:2:mpn")
+        ];
+
+        Assert.False(LeadDecisionWorkbenchService.EvidenceSupportsCanonicalLine(canonical, crossWired));
+    }
+
+    [Fact]
     public async Task Immutable_revision_freezes_exact_promotable_header_and_line_values()
     {
         using var db = new TestDb();

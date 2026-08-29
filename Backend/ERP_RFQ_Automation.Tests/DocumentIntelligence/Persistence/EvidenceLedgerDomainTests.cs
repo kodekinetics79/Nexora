@@ -54,6 +54,41 @@ public sealed class EvidenceLedgerDomainTests
         Assert.Equal(101, resolved.Id);
     }
 
+    [Fact]
+    public void Structured_evidence_leaves_ambiguous_identity_unbound()
+    {
+        var available = new[]
+        {
+            new LeadItem { Id = 101, ProductShortName = "Control valve", Quantity = 2m, UnitOfMeasure = "EA" },
+            new LeadItem { Id = 102, ProductShortName = "Control valve", Quantity = 2m, UnitOfMeasure = "EA" }
+        };
+        var sourceLine = new CanonicalDtos.CanonicalRfqLineItem
+        {
+            ProductName = Value("Control valve"),
+            Quantity = new CanonicalDtos.CanonicalValue<decimal> { Value = 2m },
+            UnitOfMeasure = Value("EA")
+        };
+
+        Assert.Null(StructuredEvidenceLedgerPersister.ResolveEvidenceLeadItem(sourceLine, available));
+    }
+
+    [Fact]
+    public void Structured_evidence_leaves_contradictory_identity_unbound()
+    {
+        var available = new[]
+        {
+            new LeadItem { Id = 101, ProductShortName = "Industrial control relay", Quantity = 2m, UnitOfMeasure = "EA" }
+        };
+        var sourceLine = new CanonicalDtos.CanonicalRfqLineItem
+        {
+            ProductName = Value("Food-grade conveyor belt material"),
+            Quantity = new CanonicalDtos.CanonicalValue<decimal> { Value = 2m },
+            UnitOfMeasure = Value("EA")
+        };
+
+        Assert.Null(StructuredEvidenceLedgerPersister.ResolveEvidenceLeadItem(sourceLine, available));
+    }
+
     private static CanonicalDtos.CanonicalValue<string> Value(string value) => new()
     {
         Value = value,

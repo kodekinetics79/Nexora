@@ -422,27 +422,51 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
         LeadItem canonical,
         IEnumerable<LineFieldEvidenceProjection> evidence)
     {
-        var expected = new[]
+        var materialized = evidence.ToArray();
+        var strongIdentities = new[]
         {
-            canonical.ItemMaterialCode,
-            canonical.ManufacturerPartNumber,
+            (FieldName: "ITEMMATERIALCODE", Expected: canonical.ItemMaterialCode),
+            (FieldName: "MANUFACTURERPARTNUMBER", Expected: canonical.ManufacturerPartNumber)
+        };
+        var strongMatch = false;
+        foreach (var identity in strongIdentities)
+        {
+            if (string.IsNullOrWhiteSpace(identity.Expected)) continue;
+            var statedValues = materialized
+                .Where(field => CanonicalFieldName(field.FieldName) == identity.FieldName)
+                .SelectMany(field => new[] { field.NormalizedValue, field.RawValue })
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+            if (statedValues.Length == 0) continue;
+            if (!statedValues.Any(value => SameCommercialText(value!, identity.Expected!)))
+                return false;
+            strongMatch = true;
+        }
+
+        var expectedProductText = new[]
+        {
             canonical.ProductShortName,
             canonical.ProductShortDescription,
             canonical.ItemText
         }.Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => value!).ToArray();
-        if (expected.Length == 0) return false;
-
-        return evidence
-            .Where(field => IdentityEvidenceFieldNames.Contains(CanonicalFieldName(field.FieldName)))
+        var productMatch = materialized
+            .Where(field => ProductEvidenceFieldNames.Contains(CanonicalFieldName(field.FieldName)))
             .SelectMany(field => new[] { field.NormalizedValue, field.RawValue })
             .Where(value => !string.IsNullOrWhiteSpace(value))
-            .Any(value => expected.Any(candidate => SameCommercialText(value!, candidate)));
+            .Any(value => expectedProductText.Any(candidate => SameCommercialText(value!, candidate)));
+        return strongMatch || productMatch;
     }
 
     private static readonly HashSet<string> IdentityEvidenceFieldNames = new(StringComparer.Ordinal)
     {
         "ITEMMATERIALCODE", "MANUFACTURERPARTNUMBER", "PRODUCTNAME",
         "PRODUCTSHORTNAME", "PRODUCTSHORTDESCRIPTION", "ITEMTEXT", "SOURCESPAN"
+    };
+
+    private static readonly HashSet<string> ProductEvidenceFieldNames = new(StringComparer.Ordinal)
+    {
+        "PRODUCTNAME", "PRODUCTSHORTNAME", "PRODUCTSHORTDESCRIPTION", "ITEMTEXT", "SOURCESPAN"
     };
 
     private static bool SameCommercialText(string left, string right)

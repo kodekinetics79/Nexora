@@ -4,6 +4,7 @@ using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.Infrastructure.Storage;
 using ERP_RFQ_Automation.Ingestion.Assembly;
 using ERP_RFQ_Automation.Ingestion.Triage;
+using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.MultiTenancy;
 using ERP_RFQ_Automation.Security.DocumentInspection;
@@ -284,7 +285,11 @@ public sealed class EmailToLeadVerticalSlicePostgreSqlTests(PostgreSqlTestDataba
 
         await using var services = EmailToLeadHarness.BuildGraph(
             _database.ConnectionString, _storageRoot, new EmailToLeadHarness.RefusingLlm(),
-            registrations => registrations.AddScoped<IConversationalExtractionService, ThreeLineBodyExtractor>());
+            registrations =>
+            {
+                registrations.AddScoped<IConversationalExtractionService, ThreeLineBodyExtractor>();
+                registrations.AddScoped<ILeadIdentityApplicationService, LeadIdentityApplicationService>();
+            });
         await EmailToLeadHarness.CaptureAndScheduleAsync(
             services, businessUnitId, EmailToLeadHarness.BuildBodyOnlyMessage(messageId),
             expectedComponentCount: 1);
@@ -298,6 +303,10 @@ public sealed class EmailToLeadVerticalSlicePostgreSqlTests(PostgreSqlTestDataba
         var leadItems = await context.LeadItems.AsNoTracking()
             .Where(item => item.LeadId == lead.Id)
             .OrderBy(item => item.Id)
+            .ToListAsync();
+        var revisionItems = await context.Set<LeadItemRevision>().AsNoTracking()
+            .Where(item => item.LeadId == lead.Id)
+            .OrderBy(item => item.LineNumber)
             .ToListAsync();
         var sourceEvidence = await context.Set<FieldEvidence>().AsNoTracking()
             .Where(field => field.LineItem != null
@@ -319,6 +328,8 @@ public sealed class EmailToLeadVerticalSlicePostgreSqlTests(PostgreSqlTestDataba
             "Food-grade conveyor belt material"
         };
         Assert.Equal(expected, leadItems.Select(item => item.ProductShortName).ToArray());
+        Assert.Equal([1, 2, 3], revisionItems.Select(item => item.LineNumber).ToArray());
+        Assert.Equal(leadItems.Select(item => (long?)item.Id), revisionItems.Select(item => item.LeadItemId));
         foreach (var item in leadItems)
         {
             var evidence = Assert.Single(sourceEvidence, field => field.LeadItemId == item.Id);

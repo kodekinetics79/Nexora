@@ -408,21 +408,25 @@ public sealed class StructuredEvidenceLedgerPersister
             if (referenceMatches.Length == 1) return referenceMatches[0];
             if (referenceMatches.Length > 1)
                 return UniqueIdentityMatch(sourceLine, referenceMatches);
+            return null;
         }
 
         var identityMatch = UniqueIdentityMatch(sourceLine, availableLeadItems);
         if (identityMatch is not null) return identityMatch;
 
-        // A stated line reference that matched neither the canonical reference nor one unique
-        // commercial identity is contradictory provenance. Leaving it unbound makes the
-        // promotion gate report missing lineage instead of certifying a positional guess.
-        if (sourceReference is not null) return null;
+        // A usable but ambiguous or contradictory commercial identity must not degrade into a
+        // positional guess. Leaving it unbound makes the promotion gate report missing lineage.
+        if (HasUsableIdentity(sourceLine)) return null;
 
         // Compatibility for legacy spreadsheets whose parser supplied neither line reference
         // nor a usable identity. Indistinguishable rows retain the previous insertion-id order;
         // they cannot be meaningfully separated by commercial content.
         return availableLeadItems.OrderBy(item => item.Id).First();
     }
+
+    private static bool HasUsableIdentity(CanonicalRfqLineItem sourceLine)
+        => CanonicalTexts(sourceLine.ProductName).Any()
+            || CanonicalTexts(sourceLine.ManufacturerPartNumber).Any();
 
     private static LeadItem? UniqueIdentityMatch(
         CanonicalRfqLineItem sourceLine,
