@@ -41,6 +41,68 @@ public sealed class ExtractionWorkerOptions
 
     /// <summary>Backoff when a loop finds no claimable work.</summary>
     public TimeSpan IdlePollDelay { get; set; } = TimeSpan.FromSeconds(2);
+
+    /// <summary>The process memory ceiling used when applying the startup capacity guard.</summary>
+    public long DetectedMemoryLimitBytes { get; set; }
+
+    /// <summary>True when the host memory ceiling required safer concurrency than requested.</summary>
+    public bool CapacityWasClamped { get; set; }
+
+    public int RequestedWorkerCount { get; set; }
+    public int RequestedMaxConcurrentLlmCalls { get; set; }
+    public int RequestedPerTenantConcurrencyCap { get; set; }
+}
+
+/// <summary>
+/// Protects small container plans from starting more document/LLM work than their memory
+/// ceiling can sustain. The .NET GC reports a cgroup-aware ceiling in containers, so this
+/// guard also works when the physical host has far more memory than the service plan.
+/// </summary>
+public static class ExtractionWorkerCapacityPolicy
+{
+    private const long MiB = 1024L * 1024L;
+
+    public static ExtractionWorkerOptions Apply(
+        ExtractionWorkerOptions requested,
+        long totalAvailableMemoryBytes)
+    {
+        ArgumentNullException.ThrowIfNull(requested);
+
+        var workerCount = Math.Max(1, requested.WorkerCount);
+        var llmCap = Math.Max(1, requested.MaxConcurrentLlmCalls);
+        var tenantCap = Math.Max(1, requested.PerTenantConcurrencyCap);
+
+        // Zero means the runtime could not determine a ceiling. In that case keep explicit
+        // operator configuration rather than guessing from physical host memory.
+        if (totalAvailableMemoryBytes > 0 && totalAvailableMemoryBytes <= 768 * MiB)
+        {
+            workerCount = Math.Min(workerCount, 1);
+            llmCap = Math.Min(llmCap, 1);
+            tenantCap = Math.Min(tenantCap, 1);
+        }
+        else if (totalAvailableMemoryBytes > 0 && totalAvailableMemoryBytes <= 1536 * MiB)
+        {
+            workerCount = Math.Min(workerCount, 2);
+            llmCap = Math.Min(llmCap, 2);
+            tenantCap = Math.Min(tenantCap, 2);
+        }
+
+        return new ExtractionWorkerOptions
+        {
+            WorkerCount = workerCount,
+            MaxConcurrentLlmCalls = llmCap,
+            PerTenantConcurrencyCap = tenantCap,
+            LeaseDuration = requested.LeaseDuration,
+            IdlePollDelay = requested.IdlePollDelay,
+            DetectedMemoryLimitBytes = Math.Max(0, totalAvailableMemoryBytes),
+            CapacityWasClamped = workerCount != requested.WorkerCount
+                || llmCap != requested.MaxConcurrentLlmCalls
+                || tenantCap != requested.PerTenantConcurrencyCap,
+            RequestedWorkerCount = requested.WorkerCount,
+            RequestedMaxConcurrentLlmCalls = requested.MaxConcurrentLlmCalls,
+            RequestedPerTenantConcurrencyCap = requested.PerTenantConcurrencyCap
+        };
+    }
 }
 
 /// <summary>
@@ -140,8 +202,17 @@ public sealed class ExtractionWorker : BackgroundService
     protected override Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var count = Math.Max(1, _options.WorkerCount);
-        _log.LogInformation("ExtractionWorker starting {Count} loop(s); LLM cap {Llm}, per-tenant cap {Cap}.",
-            count, _options.MaxConcurrentLlmCalls, _options.PerTenantConcurrencyCap);
+        _log.LogInformation(
+            "ExtractionWorker starting {Count} loop(s); LLM cap {Llm}, per-tenant cap {Cap}; "
+            + "memory ceiling {MemoryMiB} MiB; capacity clamped {Clamped}; requested {RequestedWorkers}/{RequestedLlm}/{RequestedTenant}.",
+            count,
+            _options.MaxConcurrentLlmCalls,
+            _options.PerTenantConcurrencyCap,
+            _options.DetectedMemoryLimitBytes / (1024 * 1024),
+            _options.CapacityWasClamped,
+            _options.RequestedWorkerCount,
+            _options.RequestedMaxConcurrentLlmCalls,
+            _options.RequestedPerTenantConcurrencyCap);
         _workerHeartbeat?.Beat();
 
         var loops = new Task[count];
