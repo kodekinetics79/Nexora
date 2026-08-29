@@ -52,6 +52,10 @@ export interface PresentableError {
 
 const GENERIC_MESSAGE = 'Something went wrong on our side. Your work is safe and nothing was lost.';
 const MAX_MESSAGE_LENGTH = 300;
+// Governed ProblemDetails refusals can name the affected line, every missing evidence field, and
+// the safe recovery action in one sentence. Give only RFC 7807 `detail` this larger bound; plain
+// bodies and all other server fields retain the stricter general-purpose limit.
+const MAX_PROBLEM_DETAIL_LENGTH = 500;
 const MAX_TECHNICAL_LENGTH = 2000;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -144,9 +148,9 @@ export const looksLikeTechnicalNoise = (value: string): boolean =>
  * A server string is shown only when it is a plausible sentence and free of operator signal:
  * non-empty, bounded, printable, not a bare reason phrase, and free of technical markers.
  */
-const isPresentableServerText = (value: string): boolean =>
+const isPresentableServerText = (value: string, maxLength = MAX_MESSAGE_LENGTH): boolean =>
   value.length > 0 &&
-  value.length <= MAX_MESSAGE_LENGTH &&
+  value.length <= maxLength &&
   !containsNonPrintable(value) &&
   !isGenericReasonPhrase(value) &&
   !looksLikeTechnicalNoise(value);
@@ -203,8 +207,8 @@ const SERVER_TEXT_KEYS = ['message', 'detail', 'error', 'title', 'errorMessage']
  * Gates on the RAW string first (the stack-frame marker is line-anchored), then collapses
  * whitespace so multi-line server text renders as one snackbar-safe sentence.
  */
-const presentableCandidate = (raw: string): string | null => {
-  if (!isPresentableServerText(raw)) return null;
+const presentableCandidate = (raw: string, maxLength = MAX_MESSAGE_LENGTH): string | null => {
+  if (!isPresentableServerText(raw, maxLength)) return null;
   const collapsed = collapseWhitespace(raw);
   return collapsed.length > 0 ? collapsed : null;
 };
@@ -239,7 +243,10 @@ const serverText = (data: unknown): string | null => {
   for (const key of SERVER_TEXT_KEYS) {
     const candidate = trimmedString(data[key]);
     if (candidate === null) continue;
-    const presentable = presentableCandidate(candidate);
+    const presentable = presentableCandidate(
+      candidate,
+      key === 'detail' ? MAX_PROBLEM_DETAIL_LENGTH : MAX_MESSAGE_LENGTH,
+    );
     if (presentable !== null) return presentable;
   }
   return null;
