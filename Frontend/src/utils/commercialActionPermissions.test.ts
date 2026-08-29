@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   commercialActionPermissions,
+  hasCommercialDecisionAuthority,
   type PermissionAction,
   type PermissionCheck,
 } from './commercialActionPermissions';
@@ -13,6 +14,12 @@ const accessFor = (...grants: Grant[]) => {
 };
 
 describe('commercial action permission matrix', () => {
+  it('treats the tenant Owner as commercial decision authority even when isManager is false', () => {
+    expect(hasCommercialDecisionAuthority({ isManager: false, isSuperAdmin: true })).toBe(true);
+    expect(hasCommercialDecisionAuthority({ isManager: true, isSuperAdmin: false })).toBe(true);
+    expect(hasCommercialDecisionAuthority({ isManager: false, isSuperAdmin: false })).toBe(false);
+  });
+
   it('lets a Leads viewer inspect the governed workbench without advertising mutations', () => {
     expect(accessFor('Leads:view')).toMatchObject({
       canOpenLeadWorkbench: true,

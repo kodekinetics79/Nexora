@@ -1,6 +1,19 @@
 export type PermissionAction = 'view' | 'create' | 'edit' | 'delete';
 export type PermissionCheck = (moduleName: string, action?: PermissionAction) => boolean;
 
+export type CommercialAuthorityIdentity = {
+  isManager?: boolean;
+  isSuperAdmin?: boolean;
+};
+
+/**
+ * The commercial decision boundary accepts manager-ranked tenant users and the tenant Owner.
+ * `/me/permissions` reports Owner separately as `isSuperAdmin`, so checking only `isManager`
+ * incorrectly turns the most privileged tenant user into a read-only reviewer.
+ */
+export const hasCommercialDecisionAuthority = (identity: CommercialAuthorityIdentity) =>
+  identity.isManager === true || identity.isSuperAdmin === true;
+
 /**
  * Client-side discoverability for the Lead → participation → RFQ boundary.
  *

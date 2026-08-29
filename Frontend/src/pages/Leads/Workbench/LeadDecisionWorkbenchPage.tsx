@@ -61,7 +61,10 @@ import {
   validGovernedDecision,
   type DecisionMap,
 } from './workbenchRules';
-import { commercialActionPermissions } from '../../../utils/commercialActionPermissions';
+import {
+  commercialActionPermissions,
+  hasCommercialDecisionAuthority,
+} from '../../../utils/commercialActionPermissions';
 import { useUnsavedWorkGuard } from '../../../hooks/useUnsavedWorkGuard';
 import { catalogPolicyLabel, catalogWarningSummary } from './catalogWarningPresentation';
 import ParticipationHandoffGuidance from './ParticipationHandoffGuidance';
@@ -79,9 +82,10 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
   const { enqueueSnackbar } = useSnackbar();
   const { hasPermission, userData } = useAuth();
   const commercialAccess = commercialActionPermissions(hasPermission);
-  // This flag is returned by the server from the stored RoleRank. Role names and broad module
-  // grants are deliberately not authority to commit a participation decision.
-  const isManager = userData.isManager === true;
+  // These flags are returned by the server from stored RoleRank. Role names and broad module
+  // grants are deliberately not authority to commit a participation decision. The tenant Owner
+  // is reported separately as isSuperAdmin and carries manager-equivalent commercial authority.
+  const isManager = hasCommercialDecisionAuthority(userData);
   const canEdit = commercialAccess.canEditLeadDecision;
   const canCommitParticipation = canEdit && isManager;
   const canPromote = commercialAccess.canPromoteLeadToRfq && isManager;

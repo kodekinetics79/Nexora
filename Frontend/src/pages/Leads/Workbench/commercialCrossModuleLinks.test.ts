@@ -17,6 +17,11 @@ describe('commercial cross-module link contracts', () => {
     expect(workbenchSource).toContain('if (commercialAccess.canViewPromotedRfq)');
   });
 
+  it('uses the shared Owner-or-manager authority rule for participation and promotion', () => {
+    expect(workbenchSource).toContain('hasCommercialDecisionAuthority(userData)');
+    expect(workbenchSource).not.toContain('const isManager = userData.isManager === true;');
+  });
+
   it('guards duplicate-resolution controls and the mutation with Leads edit authority', () => {
     expect(leadDetailSource.match(/commercialAccess\.canResolveLeadDuplicate/g)?.length).toBeGreaterThanOrEqual(3);
     expect(leadDetailSource).toContain('Lead edit permission is required to resolve a duplicate.');
