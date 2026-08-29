@@ -1334,9 +1334,8 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
             ContactIdSnapshot = lead.ContactId, CreatedAtUtc = DateTimeOffset.UtcNow, CreatedBy = intake.ActorId,
             ProcessingPath = intake.ProcessingPath, ExternalAiUsed = intake.ExternalAiUsed };
         var line = 0;
-        foreach (var item in lead.LeadItems.Where(x => x.IsCurrentRevisionProjection)
-                     .OrderBy(x => Normalize(x.LineItemNo), StringComparer.Ordinal)
-                     .ThenBy(LineFingerprint, StringComparer.Ordinal))
+        foreach (var item in RevisionOrderedItems(
+                     lead.LeadItems.Where(x => x.IsCurrentRevisionProjection)))
             revision.Items.Add(new LeadItemRevision
             {
                 BusinessUnitId = lead.BusinessUnitId,
@@ -1709,8 +1708,7 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
     private static void PopulateRevisionItems(LeadRevision revision, IEnumerable<LeadItem> canonicalItems)
     {
         var line = 0;
-        foreach (var item in canonicalItems.OrderBy(x => Normalize(x.LineItemNo), StringComparer.Ordinal)
-                     .ThenBy(LineFingerprint, StringComparer.Ordinal))
+        foreach (var item in RevisionOrderedItems(canonicalItems))
         {
             revision.Items.Add(new LeadItemRevision
             {
@@ -1722,6 +1720,26 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
                 SnapshotJson = JsonSerializer.Serialize(CommercialItemSnapshot(item))
             });
         }
+    }
+
+    /// <summary>
+    /// Keeps the immutable revision ordinal aligned with the customer's source sequence.
+    /// <para>
+    /// <see cref="LeadItem.LineItemNo"/> is a customer reference, not a sortable position, and
+    /// it is legitimately blank for conversational email. The former fingerprint fallback
+    /// alphabetized those blank-numbered lines, so a source sequence of Industrial, Stainless,
+    /// Food-grade became Food-grade, Industrial, Stainless before evidence was attached by
+    /// ordinal. Persisted rows use their insertion identity as the durable source-order fallback;
+    /// transient replacement rows retain the caller's list order until they receive identities.
+    /// </para>
+    /// </summary>
+    internal static IReadOnlyList<LeadItem> RevisionOrderedItems(IEnumerable<LeadItem> items)
+    {
+        var materialized = items.Select((item, sourceOrdinal) => new { Item = item, SourceOrdinal = sourceOrdinal })
+            .ToArray();
+        return materialized.All(x => x.Item.Id > 0)
+            ? materialized.OrderBy(x => x.Item.Id).Select(x => x.Item).ToArray()
+            : materialized.OrderBy(x => x.SourceOrdinal).Select(x => x.Item).ToArray();
     }
 
     /// <summary>

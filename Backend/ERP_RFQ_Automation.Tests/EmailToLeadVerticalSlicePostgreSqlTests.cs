@@ -275,6 +275,62 @@ public sealed class EmailToLeadVerticalSlicePostgreSqlTests(PostgreSqlTestDataba
     }
 
     [Fact]
+    public async Task Blank_line_numbers_keep_each_verified_body_span_with_its_source_order_item()
+    {
+        var businessUnitId = UniqueBusinessUnitId();
+        var messageId = $"vertical-source-order-{Guid.NewGuid():N}@buyer.example";
+        await using (var connection = await _database.OpenConnectionAsync())
+            await EmailToLeadHarness.SeedTenantAsync(connection, businessUnitId, messageId);
+
+        await using var services = EmailToLeadHarness.BuildGraph(
+            _database.ConnectionString, _storageRoot, new EmailToLeadHarness.RefusingLlm(),
+            registrations => registrations.AddScoped<IConversationalExtractionService, ThreeLineBodyExtractor>());
+        await EmailToLeadHarness.CaptureAndScheduleAsync(
+            services, businessUnitId, EmailToLeadHarness.BuildBodyOnlyMessage(messageId),
+            expectedComponentCount: 1);
+        await EmailToLeadHarness.DrainQueueAsync(services, businessUnitId);
+
+        using var scope = services.CreateScope();
+        using var tenant = scope.ServiceProvider.GetRequiredService<ITenantScopeAccessor>().Push(businessUnitId);
+        var context = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+        var lead = await context.Leads.AsNoTracking()
+            .SingleAsync(item => item.BusinessUnitId == businessUnitId);
+        var leadItems = await context.LeadItems.AsNoTracking()
+            .Where(item => item.LeadId == lead.Id)
+            .OrderBy(item => item.Id)
+            .ToListAsync();
+        var sourceEvidence = await context.Set<FieldEvidence>().AsNoTracking()
+            .Where(field => field.LineItem != null
+                && field.LineItem.Inquiry.LeadId == lead.Id
+                && field.FieldName == "SourceSpan")
+            .Select(field => new
+            {
+                field.LineItem!.LeadItemId,
+                field.NormalizedValue,
+                field.RawValue,
+                field.Region.SourceAddress
+            })
+            .ToListAsync();
+
+        var expected = new[]
+        {
+            "Industrial control relay",
+            "Stainless steel braided hose",
+            "Food-grade conveyor belt material"
+        };
+        Assert.Equal(expected, leadItems.Select(item => item.ProductShortName).ToArray());
+        foreach (var item in leadItems)
+        {
+            var evidence = Assert.Single(sourceEvidence, field => field.LeadItemId == item.Id);
+            Assert.Equal(item.ProductShortName, evidence.NormalizedValue);
+            Assert.Contains(item.ProductShortName!, evidence.RawValue!, StringComparison.Ordinal);
+        }
+        Assert.Equal(
+            ["message-body:verified-span:1", "message-body:verified-span:2", "message-body:verified-span:3"],
+            sourceEvidence.OrderBy(field => field.LeadItemId).Select(field => field.SourceAddress).ToArray());
+    }
+
+    [Fact]
     public async Task Unverified_model_span_stays_visible_but_never_becomes_promotion_evidence()
     {
         var businessUnitId = UniqueBusinessUnitId();
@@ -871,6 +927,34 @@ public sealed class EmailToLeadVerticalSlicePostgreSqlTests(PostgreSqlTestDataba
                 ExtractedItemCount = 1,
                 ProcessingPath = ExtractionProcessingPath.NativeParser
             });
+    }
+
+    private sealed class ThreeLineBodyExtractor : IConversationalExtractionService
+    {
+        public Task<ChunkedExtractionOutcome> ExtractAsync(
+            DocumentExtractionInput input, bool threadContinuation, CancellationToken ct = default)
+        {
+            var items = new[]
+            {
+                (Name: "Industrial control relay", Quantity: 2, Unit: "EA"),
+                (Name: "Stainless steel braided hose", Quantity: 1.5m, Unit: "M"),
+                (Name: "Food-grade conveyor belt material", Quantity: 12.75m, Unit: "KG")
+            }.Select((source, index) => Ext.Item(0.99, source.Name, 1) with
+            {
+                Quantity = source.Quantity,
+                UnitOfMeasure = source.Unit,
+                SourceSpan = $"Line {index + 1}: {source.Name}, quantity {source.Quantity} {source.Unit}",
+                SourceSpanVerified = true
+            }).ToList();
+            return Task.FromResult(new ChunkedExtractionOutcome
+            {
+                Status = ExtractionOutcomeStatus.Ok,
+                Result = Ext.Result(items, 0.99),
+                ExpectedItemCount = items.Count,
+                ExtractedItemCount = items.Count,
+                ProcessingPath = ExtractionProcessingPath.NativeParser
+            });
+        }
     }
 
     private sealed class UnverifiedBodyOnlyExtractor : IConversationalExtractionService

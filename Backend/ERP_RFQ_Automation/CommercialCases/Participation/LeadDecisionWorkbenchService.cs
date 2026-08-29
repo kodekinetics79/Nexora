@@ -188,7 +188,8 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
                           && field.ExtractionRun.SourceDocument.ContentHash == job.ContentHash
                           && job.StoragePath != null && job.StoragePath != ""
                       select new LineFieldEvidenceProjection(field.LineItem!.LeadItemId!.Value,
-                          field.FieldName, field.RawValue, field.Region.SourceAddress))
+                          field.FieldName, field.RawValue, field.NormalizedValue,
+                          field.Region.SourceAddress))
                 .Distinct().ToListAsync(ct));
         var evidencedLeadItemIds = fieldEvidenceRows.Select(x => x.LeadItemId).ToHashSet();
         var exactSourceByLeadItemId = fieldEvidenceRows
@@ -235,10 +236,27 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
             if (canonical is not null
                 && exactSourceByLeadItemId.TryGetValue(evidenceSourceByLeadItemId[canonical.Id], out var foundSources))
                 exactSources = foundSources;
+            var sourceBindingMismatch = canonical is not null
+                && HasIdentityEvidence(exactSources)
+                && !EvidenceSupportsCanonicalLine(canonical, exactSources);
+            if (sourceBindingMismatch && canonical is not null)
+            {
+                // Historical rows may predate the source-order fix. Recover the one unambiguous
+                // display group by commercial identity, but keep the line NEEDS_CHECK: rendering
+                // the right words must never turn a corrupt persisted foreign key into approved
+                // provenance or allow promotion to rely on it.
+                var recovered = exactSourceByLeadItemId.Values
+                    .Where(HasIdentityEvidence)
+                    .Where(candidateSources => EvidenceSupportsCanonicalLine(canonical, candidateSources))
+                    .Take(2)
+                    .ToArray();
+                exactSources = recovered.Length == 1 ? recovered[0] : [];
+            }
             var exactSource = exactSources.FirstOrDefault();
             var lineItemNo = string.IsNullOrWhiteSpace(canonical?.LineItemNo)
                 ? item.LineNumber.ToString(CultureInfo.InvariantCulture)
                 : canonical.LineItemNo.Trim();
+            if (sourceBindingMismatch) verification = "NEEDS_CHECK";
             return new LeadDecisionLineDto(item.Id, item.Id, lineItemNo,
                 exactSource?.RawValue, exactSource?.FieldName, exactSource?.SourceAddress,
                 exactSources.Select(x => new LineSourceFieldDto(x.FieldName, x.RawValue!, x.SourceAddress)).ToArray(),
@@ -247,7 +265,9 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
                 preview?.NormalizedQuantity, preview?.NormalizedUom, catalogResolution, catalogMatches,
                 preview?.BestMatchProductId, preview?.Confidence ?? 0m, preview?.NeedsAttention ?? true,
                 preview?.AttentionReason, catalogPolicyVersion, warningSnapshotJson, verification,
-                sourceAvailable
+                sourceBindingMismatch
+                    ? "Persisted source evidence was bound to a different canonical Lead line. The display recovered an unambiguous identity match where possible, but the evidence lineage must be repaired or reprocessed before participation."
+                    : sourceAvailable
                     ? lead.CommercialFactsVerified
                         ? "Persisted field evidence is linked and the commercial facts were human-verified."
                         : "Persisted field evidence exists; human verification is still required."
@@ -395,8 +415,48 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
             : value;
     }
 
-    private sealed record LineFieldEvidenceProjection(long LeadItemId, string FieldName,
-        string? RawValue, string? SourceAddress);
+    internal static bool HasIdentityEvidence(IEnumerable<LineFieldEvidenceProjection> evidence)
+        => evidence.Any(field => IdentityEvidenceFieldNames.Contains(CanonicalFieldName(field.FieldName)));
+
+    internal static bool EvidenceSupportsCanonicalLine(
+        LeadItem canonical,
+        IEnumerable<LineFieldEvidenceProjection> evidence)
+    {
+        var expected = new[]
+        {
+            canonical.ItemMaterialCode,
+            canonical.ManufacturerPartNumber,
+            canonical.ProductShortName,
+            canonical.ProductShortDescription,
+            canonical.ItemText
+        }.Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => value!).ToArray();
+        if (expected.Length == 0) return false;
+
+        return evidence
+            .Where(field => IdentityEvidenceFieldNames.Contains(CanonicalFieldName(field.FieldName)))
+            .SelectMany(field => new[] { field.NormalizedValue, field.RawValue })
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Any(value => expected.Any(candidate => SameCommercialText(value!, candidate)));
+    }
+
+    private static readonly HashSet<string> IdentityEvidenceFieldNames = new(StringComparer.Ordinal)
+    {
+        "ITEMMATERIALCODE", "MANUFACTURERPARTNUMBER", "PRODUCTNAME",
+        "PRODUCTSHORTNAME", "PRODUCTSHORTDESCRIPTION", "ITEMTEXT", "SOURCESPAN"
+    };
+
+    private static bool SameCommercialText(string left, string right)
+        => string.Equals(CanonicalCommercialText(left), CanonicalCommercialText(right),
+            StringComparison.Ordinal);
+
+    private static string CanonicalCommercialText(string value)
+        => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+
+    private static string CanonicalFieldName(string value)
+        => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+
+    internal sealed record LineFieldEvidenceProjection(long LeadItemId, string FieldName,
+        string? RawValue, string? NormalizedValue, string? SourceAddress);
 }
 
 internal static class LeadDecisionParticipationState

@@ -13,6 +13,52 @@ namespace ERP_RFQ_Automation.Tests;
 public sealed class LeadIdentityApplicationServiceTests
 {
     [Fact]
+    public void Immutable_revision_order_uses_source_insertion_identity_for_blank_customer_line_numbers()
+    {
+        var industrial = new LeadItem { Id = 101, ProductShortName = "Industrial control relay" };
+        var stainless = new LeadItem { Id = 102, ProductShortName = "Stainless steel braided hose" };
+        var foodGrade = new LeadItem { Id = 103, ProductShortName = "Food-grade conveyor belt material" };
+
+        // A database Include does not promise collection order. Persisted identity is the
+        // durable insertion-order fallback; product fingerprints must never alphabetize lines.
+        var persisted = LeadIdentityApplicationService.RevisionOrderedItems(
+            [foodGrade, industrial, stainless]);
+        Assert.Equal(
+            ["Industrial control relay", "Stainless steel braided hose", "Food-grade conveyor belt material"],
+            persisted.Select(item => item.ProductShortName).ToArray());
+
+        // Human-review replacements are transient until the revision and projection are saved.
+        // Their caller order is therefore the only honest source sequence.
+        var transient = LeadIdentityApplicationService.RevisionOrderedItems(
+            [new LeadItem { ProductShortName = "Industrial control relay" },
+             new LeadItem { ProductShortName = "Stainless steel braided hose" },
+             new LeadItem { ProductShortName = "Food-grade conveyor belt material" }]);
+        Assert.Equal(
+            ["Industrial control relay", "Stainless steel braided hose", "Food-grade conveyor belt material"],
+            transient.Select(item => item.ProductShortName).ToArray());
+    }
+
+    [Fact]
+    public void Workbench_evidence_alignment_rejects_a_different_lines_source_span()
+    {
+        var industrial = new LeadItem { Id = 101, ProductShortName = "Industrial control relay" };
+        LeadDecisionWorkbenchService.LineFieldEvidenceProjection[] wrong =
+        [
+            new(103, "SourceSpan", "Line 3: Food-grade conveyor belt material, quantity 12.75 KG",
+                "Food-grade conveyor belt material", "message-body:verified-span:3")
+        ];
+        LeadDecisionWorkbenchService.LineFieldEvidenceProjection[] correct =
+        [
+            new(101, "SourceSpan", "Line 1: Industrial control relay, quantity 2 EA",
+                "Industrial control relay", "message-body:verified-span:1")
+        ];
+
+        Assert.True(LeadDecisionWorkbenchService.HasIdentityEvidence(wrong));
+        Assert.False(LeadDecisionWorkbenchService.EvidenceSupportsCanonicalLine(industrial, wrong));
+        Assert.True(LeadDecisionWorkbenchService.EvidenceSupportsCanonicalLine(industrial, correct));
+    }
+
+    [Fact]
     public async Task Immutable_revision_freezes_exact_promotable_header_and_line_values()
     {
         using var db = new TestDb();

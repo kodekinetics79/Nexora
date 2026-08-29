@@ -1,10 +1,65 @@
 using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
+using ERP_RFQ_Automation.Models;
+using CanonicalDtos = ERP_RFQ_Automation.DTOs.DocumentIntelligence;
 
 namespace ERP_RFQ_Automation.Tests.DocumentIntelligence.Persistence;
 
 public sealed class EvidenceLedgerDomainTests
 {
     private const string Hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    [Fact]
+    public void Structured_evidence_resolves_customer_line_reference_not_database_row_order()
+    {
+        var available = new[]
+        {
+            new LeadItem { Id = 103, LineItemNo = "3", ProductShortName = "Food-grade conveyor belt material", Quantity = 12.75m, UnitOfMeasure = "KG" },
+            new LeadItem { Id = 101, LineItemNo = "1", ProductShortName = "Industrial control relay", Quantity = 2m, UnitOfMeasure = "EA" },
+            new LeadItem { Id = 102, LineItemNo = "2", ProductShortName = "Stainless steel braided hose", Quantity = 1.5m, UnitOfMeasure = "M" }
+        };
+        var sourceLine = new CanonicalDtos.CanonicalRfqLineItem
+        {
+            LineItemNo = Value("1"),
+            ProductName = Value("Industrial control relay"),
+            Quantity = new CanonicalDtos.CanonicalValue<decimal> { Value = 2m },
+            UnitOfMeasure = Value("EA")
+        };
+
+        var resolved = StructuredEvidenceLedgerPersister.ResolveEvidenceLeadItem(sourceLine, available);
+
+        Assert.NotNull(resolved);
+        Assert.Equal(101, resolved.Id);
+        Assert.Equal("Industrial control relay", resolved.ProductShortName);
+    }
+
+    [Fact]
+    public void Structured_evidence_uses_unique_commercial_identity_when_line_reference_is_blank()
+    {
+        var available = new[]
+        {
+            new LeadItem { Id = 103, ProductShortName = "Food-grade conveyor belt material", Quantity = 12.75m, UnitOfMeasure = "KG" },
+            new LeadItem { Id = 101, ProductShortName = "Industrial control relay", Quantity = 2m, UnitOfMeasure = "EA" },
+            new LeadItem { Id = 102, ProductShortName = "Stainless steel braided hose", Quantity = 1.5m, UnitOfMeasure = "M" }
+        };
+        var sourceLine = new CanonicalDtos.CanonicalRfqLineItem
+        {
+            ProductName = Value("Industrial control relay"),
+            Quantity = new CanonicalDtos.CanonicalValue<decimal> { Value = 2m },
+            UnitOfMeasure = Value("EA")
+        };
+
+        var resolved = StructuredEvidenceLedgerPersister.ResolveEvidenceLeadItem(sourceLine, available);
+
+        Assert.NotNull(resolved);
+        Assert.Equal(101, resolved.Id);
+    }
+
+    private static CanonicalDtos.CanonicalValue<string> Value(string value) => new()
+    {
+        Value = value,
+        OriginalValue = value,
+        ValidationStatus = ERP_RFQ_Automation.DTOs.DocumentIntelligence.ValidationStatus.Valid
+    };
 
     [Fact]
     public void SourceDocument_RequiresImmutableContentAddressAndObjectVersion()
