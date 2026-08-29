@@ -46,6 +46,8 @@ export type ExtractionDeadLetter = {
   updatedOn: string;
   resolution: string;
   blocksReadiness: boolean;
+  /** Server-owned recoverability decision; independent from deployment readiness impact. */
+  canRetry: boolean;
   /**
    * What an operator must DO about `failureCategory`, in words. Absent when the
    * category says it all, and absent from older backends. Never the raw stored

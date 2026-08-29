@@ -14,7 +14,7 @@ import { MetricGrid, PageShell, QueryState, ResponsiveTable, StatusChip } from '
 
 type RecoveryDialog = { jobId: number; fileName: string; idempotencyKey: string };
 
-export const canRetryExtractionDeadLetter = (item: ExtractionDeadLetter) => item.blocksReadiness;
+export const canRetryExtractionDeadLetter = (item: ExtractionDeadLetter) => item.canRetry;
 
 export default function TenantAdminOperationsPage() {
   const navigate = useNavigate();
@@ -118,7 +118,7 @@ export default function TenantAdminOperationsPage() {
             <TableCell sx={{ whiteSpace: 'nowrap' }}>{item.attempts} / {item.maxAttempts}</TableCell>
             <TableCell><StatusChip value={item.resolution} /></TableCell>
             <TableCell>{new Date(item.updatedOn).toLocaleString()}</TableCell>
-            <TableCell align="right"><Stack spacing={1} sx={{ alignItems: 'flex-end' }}><Button size="small" onClick={() => navigate(`/procurement/leads/ingestion/${encodeURIComponent(item.batchId)}`)}>Open batch</Button>{canRecoverExtraction && canRetryExtractionDeadLetter(item) && <Button size="small" variant="contained" sx={{ whiteSpace: 'nowrap' }} onClick={() => openRecovery(item.jobId, item.fileName)}>Verify and retry</Button>}{!canRetryExtractionDeadLetter(item) && <Typography variant="caption" color="text.secondary">Terminal — replace or resend source</Typography>}</Stack></TableCell>
+            <TableCell align="right"><Stack spacing={1} sx={{ alignItems: 'flex-end' }}><Button size="small" onClick={() => navigate(`/procurement/leads/ingestion/${encodeURIComponent(item.batchId)}`)}>Open batch</Button>{canRecoverExtraction && canRetryExtractionDeadLetter(item) && <Button size="small" variant="contained" sx={{ whiteSpace: 'nowrap' }} onClick={() => openRecovery(item.jobId, item.fileName)}>Verify and retry</Button>}{!canRetryExtractionDeadLetter(item) && <Typography variant="caption" color="text.secondary">Terminal — follow the recovery guidance</Typography>}</Stack></TableCell>
           </TableRow>)}
         </TableBody></Table></ResponsiveTable>
       </QueryState>

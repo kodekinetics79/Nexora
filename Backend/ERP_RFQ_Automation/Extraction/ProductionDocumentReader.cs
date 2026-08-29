@@ -55,6 +55,7 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
     private readonly Func<byte[], IReadOnlyList<string>>? _tiffFrameOcr;
     private readonly IFileInspectionService? _inspection;
     private readonly IEntitlementService? _entitlements;
+    private readonly IExtractionHeavyWorkAdmission _heavyWorkAdmission;
     private readonly bool _requireOcrEntitlement;
     private readonly NativeSpreadsheetParser _spreadsheetParser = new();
 
@@ -200,6 +201,18 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
     {
     }
 
+    public ProductionDocumentReader(
+        ILogger<ProductionDocumentReader> log,
+        IWebHostEnvironment env,
+        IEvidenceObjectStorage evidenceStorage,
+        IFileInspectionService inspection,
+        IEntitlementService entitlements,
+        IExtractionHeavyWorkAdmission heavyWorkAdmission)
+        : this(log, env, evidenceStorage, null, inspection, entitlements,
+            configuration: null, heavyWorkAdmission: heavyWorkAdmission)
+    {
+    }
+
     internal ProductionDocumentReader(
         ILogger<ProductionDocumentReader> log,
         IWebHostEnvironment env,
@@ -207,13 +220,15 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         Func<byte[], IReadOnlyList<string>>? tiffFrameOcr,
         IFileInspectionService? inspection = null,
         IEntitlementService? entitlements = null,
-        IConfiguration? configuration = null)
+        IConfiguration? configuration = null,
+        IExtractionHeavyWorkAdmission? heavyWorkAdmission = null)
     {
         _log = log;
         _evidenceStorage = evidenceStorage;
         _tiffFrameOcr = tiffFrameOcr;
         _inspection = inspection;
         _entitlements = entitlements;
+        _heavyWorkAdmission = heavyWorkAdmission ?? UnrestrictedExtractionHeavyWorkAdmission.Instance;
         // Whether reading a SCANNED document requires a plan entitlement. Default OFF wherever
         // configuration exists: the entitlement denies when the business unit has no governed
         // platform tenant, or no assigned plan, or a plan whose Features JSON does not name
@@ -234,6 +249,7 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
 
     public async Task<DocumentExtractionInput> ReadAsync(ExtractionJob job, CancellationToken ct = default)
     {
+        await using var heavyWork = await _heavyWorkAdmission.EnterAsync(ct);
         var name = job.FileName ?? Path.GetFileName(job.StoragePath);
         var ext = (job.FileType ?? Path.GetExtension(job.StoragePath) ?? string.Empty)
             .TrimStart('.').ToLowerInvariant();
@@ -997,10 +1013,12 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
                     try
                     {
                         using var pageReader = docReader.GetPageReader(i);
-                        var rawBytes = pageReader.GetImage(new NaiveTransparencyRemover()); // BGRA over white
                         var width = pageReader.GetPageWidth();
                         var height = pageReader.GetPageHeight();
-                        if (rawBytes == null || width <= 0 || height <= 0 || rawBytes.Length < width * height * 4)
+                        var pixels = OcrPixelSafetyPolicy.ValidateDimensions(width, height, $"PDF page {i + 1}");
+                        var requiredBgraBytes = checked(pixels * 4);
+                        var rawBytes = pageReader.GetImage(new NaiveTransparencyRemover()); // BGRA over white
+                        if (rawBytes == null || rawBytes.LongLength < requiredBgraBytes)
                             continue;
 
                         var bmp = BgraToBmp24(rawBytes, width, height);
@@ -1010,6 +1028,10 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
                         if (!string.IsNullOrWhiteSpace(pageText))
                             sb.AppendLine(pageText);
                     }
+                    catch (OcrPixelLimitException)
+                    {
+                        throw;
+                    }
                     catch (Exception exPage)
                     {
                         failedPageCount++;
@@ -1018,6 +1040,10 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
                 }
             }
             return new OcrReadResult(sb.ToString(), pagesToProcess, truncated, failedPageCount);
+        }
+        catch (OcrPixelLimitException)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -1034,6 +1060,8 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         RequireOcrEntitlement(businessUnitId, ocrDecision);
         try
         {
+            var extension = DetectRasterExtension(bytes);
+            OcrPixelSafetyPolicy.ReadAndValidateImageDimensions(bytes, extension);
             lock (OcrLock)
             {
                 using var engine = new TesseractEngine(_tessDataPath, "eng", EngineMode.Default);
@@ -1054,6 +1082,10 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
                     tooSparse ? ExtractionOcrStatus.Failed : ExtractionOcrStatus.Completed, 1, false)
                     { PageCount = 1, PageCountAuthoritative = true };
             }
+        }
+        catch (OcrPixelLimitException)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -1076,6 +1108,7 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         var temporaryPath = Path.Combine(Path.GetTempPath(), $"nexora-ocr-{Guid.NewGuid():N}.tiff");
         try
         {
+            OcrPixelSafetyPolicy.ValidateTiff(bytes);
             var options = new FileStreamOptions
             {
                 Mode = FileMode.CreateNew,
@@ -1114,6 +1147,10 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
 
                 return TiffResult([text.ToString()], images.Count, failedPageCount);
             }
+        }
+        catch (OcrPixelLimitException)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -1230,10 +1267,14 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
 
     private static byte[] BgraToBmp24(byte[] bgra, int width, int height)
     {
-        var rowSize = ((24 * width + 31) / 32) * 4; // rows padded to a 4-byte boundary
-        var pixelDataSize = rowSize * height;
+        OcrPixelSafetyPolicy.ValidateDimensions(width, height, "PDF raster");
+        var rowSize = checked(((24L * width + 31) / 32) * 4); // rows padded to a 4-byte boundary
+        var pixelDataSize = checked(rowSize * height);
         const int headerSize = 54;
-        var bmp = new byte[headerSize + pixelDataSize];
+        var outputSize = checked(headerSize + pixelDataSize);
+        if (outputSize > int.MaxValue)
+            throw new OcrPixelLimitException("PDF raster BMP allocation exceeds the managed array limit.");
+        var bmp = new byte[(int)outputSize];
 
         bmp[0] = 0x42; // 'B'
         bmp[1] = 0x4D; // 'M'
@@ -1245,11 +1286,11 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
         WriteInt16LE(bmp, 26, 1);
         WriteInt16LE(bmp, 28, 24);
         WriteInt32LE(bmp, 30, 0); // BI_RGB
-        WriteInt32LE(bmp, 34, pixelDataSize);
+        WriteInt32LE(bmp, 34, checked((int)pixelDataSize));
         WriteInt32LE(bmp, 38, 2835);
         WriteInt32LE(bmp, 42, 2835);
 
-        var srcStride = width * 4;
+        var srcStride = checked(width * 4);
         for (var y = 0; y < height; y++)
         {
             var srcRow = y * srcStride;
@@ -1263,6 +1304,21 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
             }
         }
         return bmp;
+    }
+
+    private static string DetectRasterExtension(ReadOnlySpan<byte> bytes)
+    {
+        if (bytes.Length >= 8 && bytes[..8].SequenceEqual(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }))
+            return "png";
+        if (bytes.Length >= 2 && bytes[0] == 0xff && bytes[1] == 0xd8)
+            return "jpeg";
+        if (bytes.Length >= 2 && bytes[0] == (byte)'B' && bytes[1] == (byte)'M')
+            return "bmp";
+        if (bytes.Length >= 6 && (bytes[..6].SequenceEqual("GIF87a"u8) || bytes[..6].SequenceEqual("GIF89a"u8)))
+            return "gif";
+        if (bytes.Length >= 12 && bytes[..4].SequenceEqual("RIFF"u8) && bytes[8..12].SequenceEqual("WEBP"u8))
+            return "webp";
+        throw new OcrPixelLimitException("Image format header cannot be verified before OCR.");
     }
 
     private static void WriteInt32LE(byte[] buf, int offset, int value)

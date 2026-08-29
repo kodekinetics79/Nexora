@@ -685,6 +685,8 @@ var requestedExtractionWorkerOptions = new ExtractionWorkerOptions
 builder.Services.AddSingleton(ExtractionWorkerCapacityPolicy.Apply(
     requestedExtractionWorkerOptions,
     GC.GetGCMemoryInfo().TotalAvailableMemoryBytes));
+builder.Services.AddSingleton<IExtractionHeavyWorkAdmission>(
+    new ExtractionHeavyWorkAdmission(GC.GetGCMemoryInfo().TotalAvailableMemoryBytes));
 builder.Services.AddScoped<IExtractionQueue, ExtractionQueue>();
 builder.Services.AddScoped<IChunkedExtractionService, ChunkedExtractionService>();
 // ING-07: the conversational (email-body) extractor. Separate registration, separate prompt,
