@@ -1,5 +1,6 @@
 using ERP_RFQ_Automation.Services.Interfaces;
 using ERP_RFQ_Automation.Services.Uom;
+using System.Globalization;
 
 namespace ERP_RFQ_Automation.Ingestion.Assembly;
 
@@ -11,6 +12,25 @@ namespace ERP_RFQ_Automation.Ingestion.Assembly;
 internal static class EmailInquiryCommercialConflictDetector
 {
     internal sealed record ComponentLines(long ComponentId, IReadOnlyList<LeadItemData> Items);
+    internal sealed record ComponentHeader(long ComponentId, LeadExtractionResult Header);
+
+    /// <summary>
+    /// Counts quote-critical header fields for which two physical message components both give
+    /// a value and those values disagree. Missing values remain fillable by the deterministic
+    /// merge; two non-empty sources are peer evidence and therefore never get an ordinal winner.
+    /// </summary>
+    internal static int CountHeaderConflicts(IReadOnlyList<ComponentHeader> components)
+    {
+        if (components.Count < 2) return 0;
+
+        var conflicts = 0;
+        conflicts += HasConflict(components, x => CanonicalReference(x.Rfqno)) ? 1 : 0;
+        conflicts += HasConflict(components, x => CanonicalDate(x.BidClosingDate)) ? 1 : 0;
+        conflicts += HasConflict(components, x => CanonicalDate(x.RequiredDeliveryDate)) ? 1 : 0;
+        conflicts += HasConflict(components, x => CanonicalText(x.DeliveryLocation)) ? 1 : 0;
+        conflicts += HasConflict(components, x => CanonicalReference(x.AgreementReference)) ? 1 : 0;
+        return conflicts;
+    }
 
     internal static int Count(IReadOnlyList<ComponentLines> components)
     {
@@ -92,6 +112,41 @@ internal static class EmailInquiryCommercialConflictDetector
 
     private static string? CanonicalCode(string? value)
         => string.IsNullOrWhiteSpace(value) ? null : value.Trim().ToUpperInvariant();
+
+    private static bool HasConflict(
+        IReadOnlyList<ComponentHeader> components,
+        Func<LeadExtractionResult, string?> value)
+        => components.Select(component => value(component.Header))
+            .Where(candidate => candidate is not null)
+            .Distinct(StringComparer.Ordinal)
+            .Skip(1)
+            .Any();
+
+    private static string? CanonicalReference(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        var normalized = new string(value.Where(char.IsLetterOrDigit)
+            .Select(char.ToUpperInvariant).ToArray());
+        return normalized.Length == 0 ? null : normalized;
+    }
+
+    private static string? CanonicalText(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        return string.Join(' ', value.Split((char[]?)null,
+            StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            .ToUpperInvariant();
+    }
+
+    private static string? CanonicalDate(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        if (DateTimeOffset.TryParse(value.Trim(), CultureInfo.InvariantCulture,
+                DateTimeStyles.AllowWhiteSpaces | DateTimeStyles.AssumeUniversal,
+                out var parsed))
+            return parsed.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
+        return CanonicalText(value);
+    }
 
     private static bool BothDiffer<T>(T? left, T? right) where T : struct
         => left.HasValue && right.HasValue && !EqualityComparer<T>.Default.Equals(left.Value, right.Value);

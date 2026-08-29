@@ -24,6 +24,7 @@ import { clientDisplayName } from './ClientCell';
 import { parseDateSafe, formatDateSafe } from '../../utils/dates';
 import { downloadAuthenticatedFile } from '../../utils/authenticatedFile';
 import { useAuth } from '../../context/AuthContext';
+import { displayDataValue } from '../../utils/displayDataValue';
 import LeadRevisionTimeline from './LeadRevisionTimeline';
 import LeadOwnerControl from './LeadOwnerControl';
 import LeadDecisionActions from './LeadDecisionActions';
@@ -84,7 +85,7 @@ const DataField: React.FC<{ label: string; value: string | number | null; boldVa
       {label}
     </Typography>
     <Typography sx={{ fontWeight: boldValue ? 800 : 500, fontSize: '0.85rem', color: 'text.primary', whiteSpace: 'pre-wrap' }}>
-      {value || '—'}
+      {displayDataValue(value)}
     </Typography>
   </Box>
 );

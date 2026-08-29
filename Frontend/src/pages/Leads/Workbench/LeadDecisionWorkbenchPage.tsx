@@ -40,6 +40,7 @@ import {
   WorkbenchStagePanel,
   WorkbenchStageTabs,
   workbenchStageFromValue,
+  workbenchStageSearchParams,
   type WorkbenchStage,
   type WorkbenchStageStatuses,
 } from './WorkbenchStageNavigation';
@@ -73,14 +74,20 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
-  const { hasPermission } = useAuth();
+  const { hasPermission, userData } = useAuth();
   const commercialAccess = commercialActionPermissions(hasPermission);
+  // This flag is returned by the server from the stored RoleRank. Role names and broad module
+  // grants are deliberately not authority to commit a participation decision.
+  const isManager = userData.isManager === true;
   const canEdit = commercialAccess.canEditLeadDecision;
-  const canPromote = commercialAccess.canPromoteLeadToRfq;
-  const [searchParams] = useSearchParams();
-  const [stage, setStage] = React.useState<WorkbenchStage>(() =>
-    workbenchStageFromValue(searchParams.get('stage')),
-  );
+  const canCommitParticipation = canEdit && isManager;
+  const canPromote = commercialAccess.canPromoteLeadToRfq && isManager;
+  const canResolveRfqRevisionImpact = commercialAccess.canResolveRfqRevisionImpact && isManager;
+  const [searchParams, setSearchParams] = useSearchParams();
+  const stage = workbenchStageFromValue(searchParams.get('stage'));
+  const changeStage = React.useCallback((nextStage: WorkbenchStage) => {
+    setSearchParams((current) => workbenchStageSearchParams(current, nextStage));
+  }, [setSearchParams]);
   const [decisions, setDecisions] = React.useState<DecisionMap>({});
   const [baselineDecisions, setBaselineDecisions] = React.useState<DecisionMap>({});
   const [fitAssessment, setFitAssessment] = React.useState<FitAssessmentDTO | null>(null);
@@ -200,7 +207,7 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
         { variant: 'success' },
       );
       await refresh();
-      if (command.commit) setStage('promote');
+      if (command.commit) changeStage('promote');
     },
     onError: (error: unknown) => enqueueSnackbar(
       presentableErrorMessage(error, 'The participation decision could not be saved. Nothing was changed.'),
@@ -305,7 +312,7 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
     && !workbench.blockers.some((blocker) => ['SOURCE_UNAVAILABLE', 'SOURCE_LINEAGE_INCOMPLETE', 'LEAD_NOT_ELIGIBLE'].includes(blocker.code));
   // Clarify is a persisted draft decision, not a final participation outcome. It stays editable
   // and saveable, but cannot be labelled COMMITTED or become an RFQ promotion input.
-  const canCommit = canEdit && allDecided && counts.clarify === 0 && governed
+  const canCommit = canCommitParticipation && allDecided && counts.clarify === 0 && governed
     && (fullNoBid ? (fitAssessment?.version ?? 0) > 0 : bidValuesReady && fitActionable && sourceAndLifecycleReady)
     && !decisionMutationPending
     && !fullNoBidClosed
@@ -328,7 +335,9 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
   const promotionPermissionBlocker = !canPromote && counts.bid > 0
     ? !canEdit
       ? 'Lead edit permission is required to change or promote this decision record.'
-      : 'RFQ creation permission is required. Hand this committed decision to an authorized RFQ owner.'
+      : !isManager
+        ? 'A Manager, Admin, or Owner must commit and promote this commercial decision.'
+        : 'RFQ creation permission is required. Hand this committed decision to an authorized RFQ owner.'
     : null;
   const primaryBlocker = promotionPermissionBlocker ?? displayedBlockers[0] ?? null;
   const actionableBlockers = workbench.blockers
@@ -456,7 +465,7 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
                   Open RFQ
                 </Button>
               ) : null}
-              {commercialAccess.canResolveRfqRevisionImpact ? (
+              {canResolveRfqRevisionImpact ? (
                 <Button color="inherit" variant="outlined" onClick={() => setRfqImpactReviewOpen(true)}>
                   Complete review
                 </Button>
@@ -466,17 +475,22 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
         >
           <AlertTitle>Customer amendment requires RFQ review</AlertTitle>
           {rfqRevisionBlocker.message}
-          {!commercialAccess.canResolveRfqRevisionImpact ? (
+          {!canResolveRfqRevisionImpact ? (
             <Typography variant="body2" sx={{ mt: 0.5 }}>
-              A user with Lead edit and RFQ edit permission must record the reconciliation outcome.
+              A Manager, Admin, or Owner with Lead edit and RFQ edit permission must record the reconciliation outcome.
             </Typography>
           ) : null}
         </Alert>
       ) : null}
 
       {!canEdit ? <Alert severity="info" sx={{ mb: 1.5 }}>This decision record is read-only for your role.</Alert> : null}
+      {canEdit && !isManager ? (
+        <Alert severity="info" sx={{ mb: 1.5 }}>
+          You can assess fit and save participation drafts. A Manager, Admin, or Owner must commit the decision and promote an RFQ.
+        </Alert>
+      ) : null}
 
-      <WorkbenchStageTabs value={stage} onChange={setStage} statuses={stageStatuses} />
+      <WorkbenchStageTabs value={stage} onChange={changeStage} statuses={stageStatuses} />
 
       <WorkbenchStagePanel stage="evidence" activeStage={stage}>
         <SourceEvidencePanel workbench={workbench} />
@@ -509,7 +523,7 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
             </Alert>
             <LeadValidationGrid lines={workbench.lines} decisions={decisions} reasonCodes={workbench.reasonCodes}
               unitOptions={workbench.unitOptions ?? []} currencyOptions={workbench.currencyOptions ?? []}
-              readOnly={!canEdit || decisionMutationPending || decisionRecordLocked} onDecisionsChange={setDecisions} />
+              mode="validation" readOnly onDecisionsChange={setDecisions} />
           </Box>
         </Box>
       </WorkbenchStagePanel>
@@ -541,6 +555,7 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
               reasonCodes={workbench.reasonCodes}
               unitOptions={workbench.unitOptions ?? []}
               currencyOptions={workbench.currencyOptions ?? []}
+              mode="participation"
               readOnly={!canEdit || decisionMutationPending || decisionRecordLocked}
               onDecisionsChange={setDecisions}
             />
@@ -597,7 +612,7 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
       <WorkbenchStageActions
         stage={stage}
         status={stageStatuses[stage]}
-        onStageChange={setStage}
+        onStageChange={changeStage}
         canContinueEvidence={!sourceEvidenceBlocked}
         canContinueValidation={sourceAndLifecycleReady}
         canEdit={canEdit}

@@ -80,7 +80,7 @@ public sealed class CanonicalRfqLineItem
 {
     public CanonicalValue<string> LineItemNo { get; set; } = new();
     public CanonicalValue<string> ProductName { get; set; } = new();
-    public CanonicalValue<int> Quantity { get; set; } = new();
+    public CanonicalValue<decimal> Quantity { get; set; } = new();
 
     /// <summary>The buyer's own unit word, verbatim. Canonicalised later; never defaulted here.</summary>
     public CanonicalValue<string> UnitOfMeasure { get; set; } = new();

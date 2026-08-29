@@ -1,5 +1,7 @@
 using System.Net.Mail;
+using System.Data;
 using ERP_RFQ_Automation.CommercialRouting;
+using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -57,6 +59,28 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
     public async Task<ClientResolutionOutcome> ResolveAsync(
         long businessUnitId, long leadId, CancellationToken ct = default)
     {
+        // The customer/contact projection and the immutable commercial revision are one fact.
+        // If revision creation (including lineage rebinding) fails, never leave the mutable Lead
+        // addressed to a customer its current revision does not contain.
+        if (_db.Database.CurrentTransaction is not null)
+            return await ResolveAndAppendRevisionAsync(businessUnitId, leadId, ct);
+
+        // Production enables Npgsql retry-on-failure. A user transaction must be created inside
+        // its execution strategy or every real resolution fails before the first statement.
+        var strategy = _db.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(async () =>
+        {
+            await using var transaction = await _db.Database.BeginTransactionAsync(
+                IsolationLevel.Serializable, ct);
+            var outcome = await ResolveAndAppendRevisionAsync(businessUnitId, leadId, ct);
+            await transaction.CommitAsync(ct);
+            return outcome;
+        });
+    }
+
+    private async Task<ClientResolutionOutcome> ResolveAndAppendRevisionAsync(
+        long businessUnitId, long leadId, CancellationToken ct)
+    {
         var lead = await _db.Leads
             .Include(l => l.LeadItems)
             .Include(l => l.EmailIngests)
@@ -64,8 +88,31 @@ public sealed class LeadCustomerResolutionService : ILeadCustomerResolutionServi
             .SingleOrDefaultAsync(l => l.BusinessUnitId == businessUnitId && l.Id == leadId, ct)
             ?? throw new KeyNotFoundException($"Lead {leadId} was not found in business unit {businessUnitId}.");
 
+        var establishedRevisionId = lead.CurrentRevisionId;
+        var establishedIdentity = establishedRevisionId.HasValue
+            ? await _db.Set<LeadRevision>().AsNoTracking()
+                .Where(x => x.BusinessUnitId == businessUnitId && x.Id == establishedRevisionId.Value)
+                .Select(x => new { x.CustomerIdSnapshot, x.ContactIdSnapshot })
+                .SingleOrDefaultAsync(ct)
+            : null;
+
         var outcome = await ResolveCoreAsync(businessUnitId, lead, ct);
         await _db.SaveChangesAsync(ct);
+        // Client resolution happens after canonical identity reconciliation by design. When it
+        // changes the customer/contact that RFQ promotion will inherit, record a new immutable
+        // commercial revision immediately; otherwise the participation decision would point at
+        // a snapshot that says one customer while the formal RFQ is addressed to another.
+        if (establishedRevisionId.HasValue && establishedIdentity is not null
+            && (establishedIdentity.CustomerIdSnapshot != lead.CustomerId
+                || establishedIdentity.ContactIdSnapshot != lead.ContactId))
+        {
+            var identityKey = $"customer-resolution-revision:{businessUnitId}:{lead.Id}:"
+                + $"{establishedRevisionId.Value}:{lead.CustomerId?.ToString() ?? "none"}:"
+                + $"{lead.ContactId?.ToString() ?? "none"}";
+            await new LeadIdentityApplicationService(_db).AppendHumanRevisionAsync(
+                businessUnitId, lead.Id, "customer-resolution",
+                $"Deterministic client resolution: {outcome.ReasonCode}.", identityKey, ct);
+        }
         return outcome;
     }
 

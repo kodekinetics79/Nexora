@@ -742,12 +742,24 @@ internal sealed class ClientLinkSpine : IDisposable
         await context.SaveChangesAsync();
         foreach (var (item, canonical) in canonicalLines)
         {
-            var evidence = FieldEvidence.ForLineItem(Tenant, region.Id, canonical.Id, "requestedLine",
-                item.ProductShortDescription ?? item.ItemText,
-                item.ManufacturerPartNumber ?? item.ItemMaterialCode, 1m, "client-link-test", runId,
-                validationStatus: FieldValidationStatus.Valid);
-            context.Add(evidence);
-            context.Entry(evidence).Property("ExtractionRunId").CurrentValue = run.Id;
+            var evidence = new[]
+            {
+                FieldEvidence.ForLineItem(Tenant, region.Id, canonical.Id, "requestedLine",
+                    item.ProductShortDescription ?? item.ItemText,
+                    item.ManufacturerPartNumber ?? item.ItemMaterialCode, 1m, "client-link-test", runId,
+                    validationStatus: FieldValidationStatus.Valid),
+                FieldEvidence.ForLineItem(Tenant, region.Id, canonical.Id, "Quantity",
+                    Convert.ToString(item.Quantity, System.Globalization.CultureInfo.InvariantCulture),
+                    Convert.ToString(item.Quantity, System.Globalization.CultureInfo.InvariantCulture),
+                    1m, "client-link-test", runId, valueKind: FieldValueKind.Number,
+                    validationStatus: FieldValidationStatus.Valid),
+                FieldEvidence.ForLineItem(Tenant, region.Id, canonical.Id, "UnitOfMeasure",
+                    item.UnitOfMeasure, item.UnitOfMeasure, 1m, "client-link-test", runId,
+                    validationStatus: FieldValidationStatus.Valid)
+            };
+            context.AddRange(evidence);
+            foreach (var field in evidence)
+                context.Entry(field).Property("ExtractionRunId").CurrentValue = run.Id;
         }
         await context.SaveChangesAsync();
     }

@@ -43,6 +43,7 @@ interface LeadValidationGridProps {
   unitOptions: Array<{ code: string; label: string }>;
   currencyOptions: Array<{ code: string; label: string }>;
   readOnly?: boolean;
+  mode?: 'validation' | 'participation';
   onDecisionsChange: (next: DecisionMap) => void;
 }
 
@@ -68,7 +69,8 @@ const verificationLabel = (status: string): string => {
 };
 
 const LeadValidationGrid: React.FC<LeadValidationGridProps> = ({
-  lines, decisions, reasonCodes, unitOptions, currencyOptions, readOnly = false, onDecisionsChange,
+  lines, decisions, reasonCodes, unitOptions, currencyOptions, readOnly = false,
+  mode = 'participation', onDecisionsChange,
 }) => {
   const [selection, setSelection] = React.useState<GridRowSelectionModel>({ type: 'include', ids: new Set<GridRowId>() });
   const [pagination, setPagination] = React.useState<GridPaginationModel>({ page: 0, pageSize: 50 });
@@ -127,7 +129,8 @@ const LeadValidationGrid: React.FC<LeadValidationGridProps> = ({
     });
   }, [decisions, onDecisionsChange]);
 
-  const columns = React.useMemo<GridColDef<LeadDecisionLineDTO>[]>(() => [
+  const columns = React.useMemo<GridColDef<LeadDecisionLineDTO>[]>(() => {
+    const allColumns: GridColDef<LeadDecisionLineDTO>[] = [
     {
       field: 'lineItemNo',
       headerName: 'Line',
@@ -173,7 +176,7 @@ const LeadValidationGrid: React.FC<LeadValidationGridProps> = ({
         <Stack direction="row" spacing={0.5}>
           <TextField size="small" type="number" label="Qty" sx={{ width: 82 }}
             value={decisions[row.revisionLineId]?.quantity ?? ''}
-            slotProps={{ htmlInput: { min: 1, step: 1, 'aria-label': `Quantity for line ${row.lineItemNo || row.id}` } }}
+            slotProps={{ htmlInput: { min: 0.000001, step: 0.000001, 'aria-label': `Quantity for line ${row.lineItemNo || row.id}` } }}
             onClick={(event) => event.stopPropagation()}
             onChange={(event) => updateCommercialField(row.revisionLineId, {
               quantity: event.target.value ? Number(event.target.value) : undefined,
@@ -337,13 +340,18 @@ const LeadValidationGrid: React.FC<LeadValidationGridProps> = ({
         );
       },
     },
-  ], [currencyOptions, decisions, readOnly, reasonCodes, requestDecision, unitOptions, updateCommercialField]);
+    ];
+    const fields = mode === 'validation'
+      ? new Set(['lineItemNo', 'sourceText', 'productName', 'manufacturerPartNumber', 'verificationStatus'])
+      : new Set(['lineItemNo', 'participation', 'quantity', 'catalogResolution', 'governance']);
+    return allColumns.filter((column) => fields.has(column.field));
+  }, [currencyOptions, decisions, mode, readOnly, reasonCodes, requestDecision, unitOptions, updateCommercialField]);
 
   const selectionCount = selectedRevisionLineIds.length;
 
   return (
     <Stack spacing={1.25}>
-      {!readOnly && selectionCount > 0 ? (
+      {mode === 'participation' && !readOnly && selectionCount > 0 ? (
         <Paper role="region" aria-label="Bulk participation actions" variant="outlined" sx={{ p: 1.25, borderColor: 'primary.main' }}>
           <Stack direction="row" spacing={1} sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
             <Typography variant="body2" sx={{ fontWeight: 900 }}>{selectionCount} line{selectionCount === 1 ? '' : 's'} selected</Typography>
@@ -366,8 +374,8 @@ const LeadValidationGrid: React.FC<LeadValidationGridProps> = ({
         </Paper>
       ) : null}
 
-      <Typography variant="caption" color="text.secondary" sx={{ display: { xs: 'block', md: 'none' }, px: 0.5 }}>
-        Swipe or scroll the table horizontally to review catalog match, quote values, validation, participation, and the decision record.
+      <Typography variant="caption" color="text.secondary" sx={{ display: { xs: 'block', lg: 'none' }, px: 0.5 }}>
+        Swipe or scroll horizontally to review every {mode === 'validation' ? 'source and canonical value' : 'participation field'}.
       </Typography>
 
       <Paper variant="outlined" sx={{ height: { xs: 560, md: 640 }, width: '100%', overflow: 'hidden' }}>
@@ -375,7 +383,7 @@ const LeadValidationGrid: React.FC<LeadValidationGridProps> = ({
           rows={lines}
           columns={columns}
           getRowId={(row) => row.id}
-          checkboxSelection={!readOnly}
+          checkboxSelection={mode === 'participation' && !readOnly}
           disableRowSelectionOnClick
           rowSelectionModel={selection}
           onRowSelectionModelChange={setSelection}

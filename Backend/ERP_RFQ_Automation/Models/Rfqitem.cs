@@ -42,7 +42,7 @@ public partial class Rfqitem
     public decimal? UnitPrice { get; set; }
 
     /// <summary>Null means the customer did not state a quantity; never substitute a demand.</summary>
-    public int? Quantity { get; set; }
+    public decimal? Quantity { get; set; }
 
     public string? StorageLocation { get; set; }
 

@@ -96,27 +96,24 @@ public sealed class ExtractionSchemaClientFieldsTests
     }
 
     [Fact]
-    public void The_item_schema_types_Quantity_as_integer_or_null_never_number()
+    public void The_item_schema_types_Quantity_as_number_or_null_for_fractional_demand()
     {
-        // rfq-extraction-v4. LeadItemData.Quantity is int?; "Quantity": number licensed
-        // 2.0, and one decimal point on one line used to fail the WHOLE document's
-        // deserialization. The parse path is lenient now
-        // (OllamaLlmService.LenientQuantityConverter), but the prompt must stop inviting
-        // the float in the first place.
+        // rfq-extraction-v5. Quantity is decimal(20,6), so the schema must permit the
+        // fractional measured amounts customers actually request.
         var instructions = Instructions();
         var itemsBlock = instructions[instructions.IndexOf("\"Items\"", StringComparison.Ordinal)..];
-        Assert.Contains("\"Quantity\": integer | null", itemsBlock, StringComparison.Ordinal);
-        Assert.DoesNotContain("\"Quantity\": number", itemsBlock, StringComparison.Ordinal);
+        Assert.Contains("\"Quantity\": number | null", itemsBlock, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"Quantity\": integer", itemsBlock, StringComparison.Ordinal);
     }
 
     [Fact]
     public void The_prompt_spells_out_the_quantity_digit_rules()
     {
-        // Bare digits, or null when the document states none. A model that writes 2.0 or
-        // 12,000 sends the line to review; a model that invents a quantity corrupts a
-        // quote. The rule names both prohibitions explicitly.
+        // Exact decimals, or null when the document states none. Grouping separators remain
+        // ambiguous and an invented quantity still corrupts a quote.
         var instructions = Instructions();
-        Assert.Contains("no decimal point", instructions, StringComparison.Ordinal);
+        Assert.Contains("at most 6 decimal places", instructions, StringComparison.Ordinal);
+        Assert.Contains("Do not round or truncate", instructions, StringComparison.Ordinal);
         Assert.Contains("no thousands separators", instructions, StringComparison.Ordinal);
         Assert.Contains("never invent one", instructions, StringComparison.Ordinal);
     }
@@ -126,7 +123,7 @@ public sealed class ExtractionSchemaClientFieldsTests
     {
         // The ledger attributes every call to the prompt that produced it. Changing the
         // instructions without moving the label would file v4 answers under v3.
-        Assert.Equal("rfq-extraction-v4", AiPromptVersions.StructuredRfqExtraction);
+        Assert.Equal("rfq-extraction-v5", AiPromptVersions.StructuredRfqExtraction);
     }
 
     [Fact]

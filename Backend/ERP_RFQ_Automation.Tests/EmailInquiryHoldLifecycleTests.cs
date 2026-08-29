@@ -207,6 +207,8 @@ public class EmailInquiryHoldLifecycleTests
         EmailInquiryHoldReasons.ContentNotRecoveredDetail)]
     [InlineData(EmailInquiryHoldReasons.CrossComponentCommercialConflict,
         EmailInquiryHoldReasons.CrossComponentCommercialConflictDetail)]
+    [InlineData(EmailInquiryHoldReasons.CrossComponentHeaderConflict,
+        EmailInquiryHoldReasons.CrossComponentHeaderConflictDetail)]
     public void A_hold_reason_fits_the_sentence_gate_the_operator_screen_applies(
         string code, string detail)
     {

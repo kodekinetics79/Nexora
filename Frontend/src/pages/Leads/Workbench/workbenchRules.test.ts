@@ -35,6 +35,14 @@ describe('bidCommercialValuesReady', () => {
     expect(bidCommercialValuesReady(decisions, [{ code: 'EA' }], [{ code: 'USD' }], { 7: true })).toBe(true);
     expect(bidCommercialValuesReady({ 7: { ...decisions[7], note: 'no' } }, [{ code: 'EA' }], [{ code: 'USD' }], { 7: true })).toBe(false);
   });
+
+  it('accepts a positive fractional bid quantity without rounding it', () => {
+    expect(bidCommercialValuesReady(
+      { 7: { decision: 'Bid', quantity: 2.750125, unitOfMeasure: 'KG', currency: 'SAR' } },
+      [{ code: 'KG' }],
+      [{ code: 'SAR' }],
+    )).toBe(true);
+  });
 });
 
 const workbench = (over: Partial<LeadDecisionWorkbenchDTO> = {}): LeadDecisionWorkbenchDTO => ({
@@ -99,6 +107,14 @@ describe('Lead Decision Workbench rules', () => {
       101: { decision: 'Pending', productId: 501 },
       102: { decision: 'Pending' },
     });
+  });
+
+  it('initializes the decision draft with the exact normalized fractional quantity', () => {
+    const decisions = initializeDecisionMap(workbench({
+      lines: [{ id: 1, revisionLineId: 101, verificationStatus: 'VERIFIED', normalizedQuantity: 2.750125 }],
+    }));
+
+    expect(decisions[101].quantity).toBe(2.750125);
   });
 
   it('requires governed reasons for NoBid and Clarify', () => {

@@ -57,7 +57,7 @@ public sealed class ConversionPreviewItem
     /// <c>NormalizedQuantity</c>, so a null shows the operator an empty box to fill rather than a
     /// pre-filled zero to approve.
     /// </summary>
-    public int? Quantity { get; init; }
+    public decimal? Quantity { get; init; }
     /// <summary>Raw unit-of-measure string as stored on the lead line.</summary>
     public string? UnitOfMeasure { get; init; }
     public decimal? NormalizedQuantity { get; init; }
@@ -142,7 +142,7 @@ public sealed class ConvertRequestItem
     /// <summary>Explicit catalog product for this line; overrides auto-resolution.</summary>
     public long? ProductId { get; set; }
     /// <summary>Corrected quantity; falls back to the lead line's raw quantity.</summary>
-    public int? Quantity { get; set; }
+    public decimal? Quantity { get; set; }
     /// <summary>Corrected unit of measure; falls back to the lead line's raw value.</summary>
     public string? UnitOfMeasure { get; set; }
 

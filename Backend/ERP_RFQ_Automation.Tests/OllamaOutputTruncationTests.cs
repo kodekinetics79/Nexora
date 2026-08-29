@@ -186,8 +186,8 @@ public sealed class OllamaOutputTruncationTests
     // int? and the schema called it "number", so one line writing 2.0 (or "2") failed
     // the ENTIRE document's deserialization. KILLER 2: validation rejected the whole
     // extraction result when ANY single line carried a non-positive quantity. These
-    // tests pin the replacement behaviour: integral spellings parse, anything else
-    // degrades that LINE to a null quantity (needs review), and only genuinely
+    // tests now pin the decimal contract: integral and fractional spellings parse exactly,
+    // invalid/out-of-range shapes degrade that LINE to null (needs review), and only genuinely
     // document-level defects may still reject the document.
 
     [Theory]
@@ -208,15 +208,14 @@ public sealed class OllamaOutputTruncationTests
 
         Assert.Null(outcome.ErrorCode);
         Assert.NotNull(outcome.Result);
-        Assert.Equal((int?)2, Assert.Single(outcome.Result!.Items).Quantity);
+        Assert.Equal(2m, Assert.Single(outcome.Result!.Items).Quantity);
         Assert.Null(governance.CompletedErrorCode);
     }
 
     [Fact]
-    public async Task QuantityWithARealFraction_BecomesNullForReview_NeverTruncated()
+    public async Task QuantityWithARealFraction_IsPreservedExactly()
     {
         // 2.5 truncated to 2 is a silent under-quote; rounding to 3 is an invention.
-        // Null routes the LINE to review while the document survives.
         var handler = new RecordingHandler(_ => Reply(
             ItemsJson("{\"ProductShortName\":\"Gasket\",\"Quantity\":2.5,\"ItemConfidence\":0.9}"),
             doneReason: "stop", evalCount: 60));
@@ -226,14 +225,27 @@ public sealed class OllamaOutputTruncationTests
 
         Assert.Null(outcome.ErrorCode);
         Assert.NotNull(outcome.Result);
-        Assert.Null(Assert.Single(outcome.Result!.Items).Quantity);
+        Assert.Equal(2.5m, Assert.Single(outcome.Result!.Items).Quantity);
+    }
+
+    [Fact]
+    public async Task FractionalQuantityInAJsonString_IsPreservedExactly()
+    {
+        var handler = new RecordingHandler(_ => Reply(
+            ItemsJson("{\"ProductShortName\":\"Gasket\",\"Quantity\":\"2.750125\",\"ItemConfidence\":0.9}"),
+            doneReason: "stop", evalCount: 60));
+        var service = CreateService(handler, new PermissiveGovernance());
+
+        var outcome = await service.ExtractLeadDataDetailedAsync("PART-1 quantity 2.750125", Context());
+
+        Assert.Equal(2.750125m, Assert.Single(outcome.Result!.Items).Quantity);
     }
 
     [Theory]
     [InlineData("\"ten\"")]     // words are not quantities
-    [InlineData("\"2.5\"")]     // fraction in string clothing — still never truncated
     [InlineData("\"12,000\"")]  // group separators are locale-ambiguous ("2,5" is 2.5)
-    [InlineData("4294967296")]  // beyond int range
+    [InlineData("100000000000000")] // beyond numeric(20,6)'s integral range
+    [InlineData("2.1234567")]    // would require rounding beyond scale 6
     [InlineData("true")]
     [InlineData("{\"value\":2}")]
     [InlineData("[2]")]
@@ -273,10 +285,10 @@ public sealed class OllamaOutputTruncationTests
         Assert.NotNull(outcome.Result);
         var items = outcome.Result!.Items;
         Assert.Equal(4, items.Count);
-        Assert.Equal((int?)10, items[0].Quantity);
+        Assert.Equal(10m, items[0].Quantity);
         Assert.Null(items[1].Quantity);
         Assert.Null(items[2].Quantity);
-        Assert.Equal((int?)3, items[3].Quantity);
+        Assert.Equal(3m, items[3].Quantity);
         Assert.Null(governance.CompletedErrorCode);
 
         // The quarantine is diagnosed — count and line positions, no document content.

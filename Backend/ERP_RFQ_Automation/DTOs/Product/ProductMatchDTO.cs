@@ -62,7 +62,7 @@ namespace ERP_RFQ_Automation.DTOs.ProductDTOs
         public string? OrderNumber { get; set; }
         public DateTime OrderDate { get; set; }
         public string? SupplierName { get; set; }
-        public int? Quantity { get; set; }
+        public decimal? Quantity { get; set; }
         public decimal UnitPrice { get; set; }
         public string? Currency { get; set; }
     }

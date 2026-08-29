@@ -45,17 +45,14 @@ public static class AiPromptVersions
     /// piece count; canonicalisation is deterministic and happens in
     /// <c>Services/Uom/UomCanonicalizer.cs</c>, where it can be corrected and replayed.
     ///
-    /// v3 -> v4 (2026-08-05): quantity format rules. The item schema typed Quantity as
-    /// "number", which licensed <c>"Quantity": 2.0</c> — and because
-    /// <c>LeadItemData.Quantity</c> is an <c>int?</c>, one decimal point on one line
-    /// failed the WHOLE document's deserialization, a candidate cause of the
-    /// "unparseable output" dead-letters. The schema now reads <c>integer | null</c> and
-    /// rule 5 demands bare digits — no decimal point, no thousands separators — with null
-    /// when a line states no quantity. The parse path was hardened in the same change
-    /// (<c>OllamaLlmService.LenientQuantityConverter</c> plus per-line quarantine of
-    /// non-positive quantities), so v4 is belt on top of braces, not the only defence.
+    /// v3 -> v4 (2026-08-05): hardened integer quantity parsing and per-line quarantine.
+    ///
+    /// v4 -> v5 (2026-08-29): quantities are decimal(20,6) end to end. The schema again
+    /// permits JSON numbers, now with an explicit six-decimal precision rule, and the
+    /// property-level converter preserves valid fractions without leaking quantity rules
+    /// onto other decimal fields such as price.
     /// </summary>
-    public const string StructuredRfqExtraction = "rfq-extraction-v4";
+    public const string StructuredRfqExtraction = "rfq-extraction-v5";
 }
 
 public sealed record AiCallContext(

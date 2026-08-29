@@ -207,7 +207,23 @@ describe('catalog permissions match route authority', () => {
       managerOnly: true,
     });
     expect(appSource).toContain(
-      '<Route path="/sales/team" element={<MainLayout><PermissionGuard moduleName="Leads"><TeamOverviewPage /></PermissionGuard></MainLayout>} />',
+      '<Route path="/sales/team" element={<MainLayout><RequireManager><PermissionGuard moduleName="Leads"><TeamOverviewPage /></PermissionGuard></RequireManager></MainLayout>} />',
+    );
+  });
+
+  it('keeps the sales-rep directory manager-only in the catalog and router', () => {
+    const repDirectory = ADVANCED_ENTRIES.find((entry) => entry.path === '/sales/reps');
+
+    expect(repDirectory).toMatchObject({
+      label: 'Sales reps',
+      moduleName: 'Users',
+      managerOnly: true,
+    });
+    expect(appSource).toContain(
+      '<Route path="/sales/reps" element={<MainLayout><RequireManager><PermissionGuard moduleName="Users"><RepDirectoryPage /></PermissionGuard></RequireManager></MainLayout>} />',
+    );
+    expect(appSource).toContain(
+      '<Route path="/sales/reps/:userId" element={<MainLayout><RequireManager><PermissionGuard moduleName="Users"><RepProfilePage /></PermissionGuard></RequireManager></MainLayout>} />',
     );
   });
 });

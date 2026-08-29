@@ -22,6 +22,12 @@ namespace ERP_RFQ_Automation.DTOs.RfqDTOs
         public string? Rfqtype { get; set; }
         public long? RfqtypeId { get; set; }
         public string? DurationAgreement { get; set; }
+        public string? CustomerRfqReference { get; set; }
+        public DateTime? RequiredDeliveryDate { get; set; }
+        public string? DeliveryLocation { get; set; }
+        public string? AgreementReference { get; set; }
+        public string? BidClosingDateHijri { get; set; }
+        public string? InquiryType { get; set; }
         public long? LeadId { get; set; }
         public long? PromotionId { get; set; }
         public long? SourceLeadRevisionId { get; set; }
@@ -75,7 +81,8 @@ namespace ERP_RFQ_Automation.DTOs.RfqDTOs
         public string? UnitOfMeasure { get; set; }
         public int? UomId { get; set; }
         public decimal? UnitPrice { get; set; }
-        public int? Quantity { get; set; }
+        public decimal? Quantity { get; set; }
+        public string? ExtraFields { get; set; }
         public string? StorageLocation { get; set; }
         public long? WarehouseId { get; set; }
         public string? WarehouseName { get; set; }  // for UI
@@ -166,7 +173,7 @@ namespace ERP_RFQ_Automation.DTOs.RfqDTOs
         public int? UomId { get; set; }
         public decimal? UnitPrice { get; set; }
         [Required]
-        public int Quantity { get; set; }
+        public decimal Quantity { get; set; }
         public string? StorageLocation { get; set; }
         public long? WarehouseId { get; set; }
         public string? ManufacturerName { get; set; }
@@ -228,7 +235,7 @@ namespace ERP_RFQ_Automation.DTOs.RfqDTOs
         public string? UnitOfMeasure { get; set; }
         public int? UomId { get; set; }
         public decimal? UnitPrice { get; set; }
-        public int Quantity { get; set; }
+        public decimal Quantity { get; set; }
         public string? StorageLocation { get; set; }
         public long? WarehouseId { get; set; }
         public string? ManufacturerName { get; set; }

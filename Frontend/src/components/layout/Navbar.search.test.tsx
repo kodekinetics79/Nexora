@@ -87,13 +87,14 @@ beforeEach(() => {
 });
 
 describe('Navbar global search', () => {
-  it('surfaces an ordinary Error message instead of rendering a blank or false no-match state', async () => {
+  it('sanitizes search failures instead of exposing gateway details or rendering a false no-match state', async () => {
     mocks.search.mockRejectedValue(new Error('Search gateway timed out.'));
     renderNavbar();
 
     fireEvent.change(searchInput(), { target: { value: 'bolt' } });
 
-    expect(await screen.findByRole('alert')).toHaveTextContent('Search gateway timed out.');
+    expect(await screen.findByRole('alert')).toHaveTextContent('Search is unavailable right now. Try again in a moment.');
+    expect(screen.queryByText('Search gateway timed out.')).not.toBeInTheDocument();
     expect(screen.queryByText(/nothing matches/i)).not.toBeInTheDocument();
   });
 
@@ -167,12 +168,12 @@ describe('Navbar global search', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Open global search' }));
 
-    expect(await screen.findByRole('dialog', { name: 'Search Nexora' })).toBeInTheDocument();
+    expect(await screen.findByRole('dialog', { name: 'Search records' })).toBeInTheDocument();
     expect(searchInput()).toHaveFocus();
     expect(screen.getByText('No recently opened records in this session.')).toBeInTheDocument();
   });
 
-  it('uses the server detail ahead of the generic Error message when both are available', async () => {
+  it('does not expose a server-provided search detail', async () => {
     mocks.search.mockRejectedValue(Object.assign(new Error('Request failed'), {
       response: { data: 'Search access could not be evaluated.' },
     }));
@@ -180,6 +181,16 @@ describe('Navbar global search', () => {
 
     fireEvent.change(searchInput(), { target: { value: 'bolt' } });
 
-    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Search access could not be evaluated.'));
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Search is unavailable right now. Try again in a moment.'));
+    expect(screen.queryByText('Search access could not be evaluated.')).not.toBeInTheDocument();
+  });
+
+  it('labels the dashboard destination truthfully as the workspace home', async () => {
+    renderNavbar();
+
+    fireEvent.click(screen.getByRole('button', { name: /account menu/i }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Workspace home' }));
+
+    expect(screen.getByRole('status', { name: 'current route' })).toHaveTextContent('/dashboard');
   });
 });

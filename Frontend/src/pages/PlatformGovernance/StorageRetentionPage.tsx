@@ -817,8 +817,9 @@ export default function StorageRetentionPage() {
           <AlertTitle sx={{ fontWeight: 800 }}>This does not erase personal data</AlertTitle>
           Buyer names and email addresses read out of these documents were copied into your leads
           and extraction records during processing. Deleting the original files leaves those copies
-          in place. To remove a specific person's details, edit or delete the lead that holds them —
-          this control is about storage, not erasure.
+          in place. To request erasure of a specific person's details, use your organisation's
+          governed privacy process and ask an authorised administrator to review the linked records,
+          legal holds, and retention duties. This control is about file storage, not personal-data erasure.
         </Alert>
       </Box>
 
@@ -854,7 +855,7 @@ export default function StorageRetentionPage() {
               disabled={!canManageRetention}
               error={daysError !== null}
               helperText={daysError
-                ?? `${EVIDENCE_RETENTION_DEFAULT_DAYS} days is the compliance-approved default: long enough to re-read or re-extract a document during a dispute, short enough to satisfy UAE and KSA data-protection rules that personal data is not kept longer than it is needed.`}
+                ?? `${EVIDENCE_RETENTION_DEFAULT_DAYS} days is the configured default. Choose a period that matches your organisation's approved retention policy, contractual duties, legal holds, and applicable laws.`}
               slotProps={{
                 htmlInput: {
                   min: minDays,
@@ -1177,8 +1178,9 @@ export default function StorageRetentionPage() {
           <Alert severity="warning" sx={{ mb: 2 }}>
             <AlertTitle sx={{ fontWeight: 800 }}>This does not erase personal data</AlertTitle>
             Buyer names and email addresses extracted from these documents remain in your leads and
-            evidence records. To remove a specific person's details, edit or delete the lead that
-            holds them.
+            evidence records. To request erasure of a specific person's details, use your
+            organisation's governed privacy process and ask an authorised administrator to review
+            the linked records, legal holds, and retention duties.
           </Alert>
 
           {executePurge.isError && (

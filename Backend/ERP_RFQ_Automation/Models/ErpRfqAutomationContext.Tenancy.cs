@@ -255,6 +255,7 @@ public partial class ErpRfqAutomationContext
         // LeadItem.ExtraFields (partial property in LeadItem.Extra.cs): verbatim
         // unrecognized customer-document columns, stored as jsonb.
         modelBuilder.Entity<LeadItem>().Property(e => e.ExtraFields).HasColumnType("jsonb");
+        modelBuilder.Entity<LeadItem>().Property(e => e.Quantity).HasPrecision(20, 6);
 
         // AA-01 · tenant-defined custom fields. ONE jsonb value bag per owning row (see
         // Models/CustomFieldBagPartials.cs for why it is a bag and not per-tenant DDL).

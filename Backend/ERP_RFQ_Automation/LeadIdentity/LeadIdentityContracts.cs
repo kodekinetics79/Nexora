@@ -75,6 +75,15 @@ public sealed record VerbatimLeadSnapshot(
     string? HeaderRemarks,
     int? NoOfLineItems,
     string? Rfqtype,
+    DateTime? AcknowledgmentDate,
+    DateTime? SubmissionDate,
+    string? OpportunityNo,
+    string? DurationAgreement,
+    DateTime? RequiredDeliveryDate,
+    string? DeliveryLocation,
+    string? BidClosingDateHijri,
+    string? AgreementReference,
+    string? InquiryType,
     IReadOnlyList<VerbatimLeadItemSnapshot> Items);
 
 public sealed record VerbatimLeadItemSnapshot(
@@ -94,7 +103,7 @@ public sealed record VerbatimLeadItemSnapshot(
 
     // Nullable in lockstep with LeadItem.Quantity: a verbatim snapshot that turned "the buyer
     // stated no quantity" into 0 would restore a demand for zero units on amendment.
-    int? Quantity,
+    decimal? Quantity,
     string? StorageLocation,
     string? ManufacturerName,
     string? ManufacturerPartNumber,

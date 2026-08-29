@@ -7,7 +7,6 @@ using ERP_RFQ_Automation.Intelligence.Conversion;
 using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.CommercialCases.Lifecycle;
-using ERP_RFQ_Automation.DocumentIntelligence.Persistence;
 using ERP_RFQ_Automation.Sla;
 using ERP_RFQ_Automation.Services.Uom;
 using Microsoft.EntityFrameworkCore;
@@ -259,9 +258,6 @@ public sealed class LeadParticipationService : ILeadParticipationService
                 if (!lead.CommercialFactsVerified)
                     throw new InvalidOperationException(
                         "A committed Bid requires human verification of the current revision's commercial facts.");
-                await EnsureBidSourceEvidenceReadyAsync(businessUnitId, leadId,
-                    command.ExpectedLeadRevisionId, suppliedLines, leadItemByRevisionLine,
-                    currentLeadItems, ct);
             }
 
             var currentParticipationVersion = await _db.Set<LeadParticipationDecision>()
@@ -272,8 +268,9 @@ public sealed class LeadParticipationService : ILeadParticipationService
 
             foreach (var line in suppliedLines)
             {
-                if (line.Choice == LeadLineParticipationChoice.Bid && line.Quantity is <= 0)
-                    throw new ArgumentException($"Quantity for revision line {line.LeadItemRevisionId} must be greater than zero.");
+                if (line.Quantity is { } suppliedQuantity && !FitsPersistedQuantity(suppliedQuantity))
+                    throw new ArgumentException(
+                        $"Quantity for revision line {line.LeadItemRevisionId} must be positive and fit decimal(20,6) without rounding.");
                 if (line.Choice == LeadLineParticipationChoice.NoBid
                     && (string.IsNullOrWhiteSpace(line.ReasonCode)
                         || await _leadOutcomeReasons.ResolveAsync(businessUnitId, line.ReasonCode.Trim(), ct) is null))
@@ -312,6 +309,10 @@ public sealed class LeadParticipationService : ILeadParticipationService
             var hasUnresolved = suppliedLines.Any(x => x.Choice is LeadLineParticipationChoice.Pending or LeadLineParticipationChoice.Clarify);
             if (command.Commit && hasUnresolved)
                 throw new InvalidOperationException("A committed participation decision cannot contain Pending or Clarify lines. Resolve them or save a draft.");
+            if (command.Commit && suppliedLines.Any(x => x.Choice == LeadLineParticipationChoice.Bid))
+                await EnsureBidSourceEvidenceReadyAsync(businessUnitId, lead,
+                    command.ExpectedLeadRevisionId, suppliedLines, leadItemByRevisionLine,
+                    currentLeadItems, ct);
 
             var explicitProductIds = suppliedLines.Where(x => x.ProductId.HasValue).Select(x => x.ProductId!.Value).Distinct().ToList();
             if (explicitProductIds.Count > 0)
@@ -430,51 +431,36 @@ public sealed class LeadParticipationService : ILeadParticipationService
         }
     }
 
-    private async Task EnsureBidSourceEvidenceReadyAsync(long businessUnitId, long leadId,
+    private async Task EnsureBidSourceEvidenceReadyAsync(long businessUnitId, Lead lead,
         long leadRevisionId, IReadOnlyList<LeadLineParticipationCommand> suppliedLines,
         IReadOnlyDictionary<long, long> leadItemByRevisionLine,
         IReadOnlyDictionary<long, LeadItem> currentLeadItems, CancellationToken ct)
     {
-        var bidLeadItemIds = suppliedLines.Where(x => x.Choice == LeadLineParticipationChoice.Bid)
-            .Select(x => leadItemByRevisionLine.GetValueOrDefault(x.LeadItemRevisionId))
-            .Where(x => x > 0).Distinct().ToArray();
-        if (bidLeadItemIds.Length != suppliedLines.Count(x => x.Choice == LeadLineParticipationChoice.Bid))
-            throw new InvalidOperationException(
-                "Every Bid line must retain exact immutable canonical Lead-item lineage before participation can be committed.");
-        var evidenceSourceIds = bidLeadItemIds.Select(id => currentLeadItems[id].EvidenceSourceLeadItemId ?? id)
-            .Distinct().ToArray();
-        var occurrenceId = await _db.Set<LeadRevision>().AsNoTracking()
-            .Where(x => x.BusinessUnitId == businessUnitId && x.Id == leadRevisionId && x.LeadId == leadId)
-            .Select(x => x.EstablishedByOccurrenceId).SingleAsync(ct);
-        var documentIds = await _db.Set<LeadOccurrenceDocument>().AsNoTracking()
-            .Where(x => x.BusinessUnitId == businessUnitId && x.OccurrenceId == occurrenceId)
-            .Select(x => x.SourceDocumentId).Distinct().ToListAsync(ct);
-        var directDocumentId = await _db.Set<LeadIngestionOccurrence>().AsNoTracking()
-            .Where(x => x.BusinessUnitId == businessUnitId && x.Id == occurrenceId && x.LeadId == leadId)
-            .Select(x => x.SourceDocumentId).SingleAsync(ct);
-        if (directDocumentId.HasValue && !documentIds.Contains(directDocumentId.Value))
-            documentIds.Add(directDocumentId.Value);
-        if (documentIds.Count == 0)
-            throw new InvalidOperationException(
-                "A committed Bid requires retained source documents for the current revision.");
-
-        var evidencedLeadItemIds = await (from field in _db.Set<FieldEvidence>().AsNoTracking()
-            join job in _db.Set<ERP_RFQ_Automation.Extraction.ExtractionJob>().AsNoTracking()
-                on new { field.BusinessUnitId, Id = field.ExtractionRun.ExtractionJobId }
-                equals new { job.BusinessUnitId, job.Id }
-            where field.BusinessUnitId == businessUnitId && field.LineItem != null
-                && field.LineItem.LeadItemId.HasValue
-                && evidenceSourceIds.Contains(field.LineItem.LeadItemId.Value)
-                && documentIds.Contains(field.ExtractionRun.SourceDocumentId)
-                && field.ExtractionRun.SourceDocument.SecurityStatus == DocumentSecurityStatus.Cleared
-                && field.ExtractionRun.SourceDocument.PurgeState == EvidencePurgeState.Present
-                && field.ExtractionRun.SourceDocument.ExtractionJobId == job.Id
-                && field.ExtractionRun.SourceDocument.ContentHash == job.ContentHash
-                && job.StoragePath != null && job.StoragePath != ""
-            select field.LineItem.LeadItemId.Value).Distinct().ToArrayAsync(ct);
-        if (evidenceSourceIds.Except(evidencedLeadItemIds).Any())
-            throw new InvalidOperationException(
-                "Every Bid line requires exact persisted source-field evidence for the current revision before participation can be committed.");
+        var bidLines = suppliedLines.Where(x => x.Choice == LeadLineParticipationChoice.Bid).ToArray();
+        var requirements = new List<BidSourceProvenanceValidator.Requirement>(bidLines.Length);
+        foreach (var supplied in bidLines)
+        {
+            if (!leadItemByRevisionLine.TryGetValue(supplied.LeadItemRevisionId, out var currentId)
+                || !currentLeadItems.TryGetValue(currentId, out var current))
+                throw new InvalidOperationException(
+                    "Every Bid line must retain exact immutable canonical Lead-item lineage before participation can be committed.");
+            requirements.Add(new BidSourceProvenanceValidator.Requirement(
+                supplied.LeadItemRevisionId,
+                current.Id,
+                current.EvidenceSourceLeadItemId ?? current.Id,
+                new[]
+                {
+                    current.ItemMaterialCode,
+                    current.ManufacturerPartNumber,
+                    current.ProductShortName,
+                    current.ProductShortDescription,
+                    current.ItemText
+                },
+                supplied.Quantity ?? current.Quantity,
+                supplied.UnitOfMeasure ?? current.UnitOfMeasure));
+        }
+        await BidSourceProvenanceValidator.ValidateAsync(
+            _db, businessUnitId, lead, leadRevisionId, requirements, ct);
     }
 
     private static readonly string[] GovernedClarificationReasonCodes =
@@ -535,16 +521,21 @@ public sealed class LeadParticipationService : ILeadParticipationService
     private async Task EnsureDecisionRecordIsOpenAsync(Lead lead, CancellationToken ct)
     {
         var status = LifecyclePolicy.Canonicalize("Lead", lead.LeadStatus?.SetupCode, lead.LeadStatus?.SetupValue);
-        if (status is "CONVERTED_TO_RFQ" or "QUOTED" or "NEGOTIATION" or "AWARDED"
-            or "PARTIALLY_AWARDED" or "LOST" or "COMPLETED")
+        if (IsDecisionRecordClosed(status))
             throw new InvalidOperationException(
-                "The Lead decision record is read-only after RFQ conversion or downstream commercial activity.");
+                status == "DISQUALIFIED"
+                    ? "The Lead decision record is read-only after a committed full no-bid. A manager must use the governed Lead reopen action before another assessment or participation decision can be recorded."
+                    : "The Lead decision record is read-only after RFQ conversion or downstream commercial activity.");
 
         if (await _db.Rfqs.AsNoTracking()
             .AnyAsync(x => x.BusinessUnitId == lead.BusinessUnitId && x.LeadId == lead.Id, ct))
             throw new InvalidOperationException(
                 "The Lead decision record is read-only because a formal RFQ already exists.");
     }
+
+    internal static bool IsDecisionRecordClosed(string status) =>
+        status is "DISQUALIFIED" or "CONVERTED_TO_RFQ" or "QUOTED" or "NEGOTIATION" or "AWARDED"
+            or "PARTIALLY_AWARDED" or "LOST" or "COMPLETED";
 
     private static string NormalizeOverallDecision(string value)
     {
@@ -563,6 +554,11 @@ public sealed class LeadParticipationService : ILeadParticipationService
     }
 
     private static string? Clean(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+    private static bool FitsPersistedQuantity(decimal value) =>
+        value > 0m
+        && value <= 99999999999999.999999m
+        && decimal.Round(value, 6, MidpointRounding.ToEven) == value;
+
     public static bool IsHumanFitActionable(string overallDecision, IEnumerable<string> criterionDecisions)
     {
         var governedOverall = NormalizeOverallDecision(overallDecision);

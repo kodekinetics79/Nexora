@@ -63,7 +63,10 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         if (intake.ExternalAiUsed && intake.ProcessingPath != LeadProcessingPath.ExternalModel)
             throw new InvalidOperationException("External use must be authoritatively classified as ExternalModel.");
 
-        var fingerprint = Fingerprint(candidate);
+        // Sender and subject here are authoritative occurrence metadata. The extraction
+        // persister also mirrors that envelope into HeaderRemarks for operator context, but it
+        // is not a commercial term and must not turn a resend into an amendment.
+        var fingerprint = Fingerprint(candidate, intake.Sender, intake.Subject);
         var scope = CustomerScope(candidate, intake.Sender);
         var normalizedRfq = Normalize(candidate.Rfqno ?? candidate.LeadItems.Select(x => x.CustomerRfqno).FirstOrDefault(x => !string.IsNullOrWhiteSpace(x)));
         // Reconciliation reads and then mutates the tenant's canonical Lead set. The lock must
@@ -371,7 +374,7 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
                 MatchEvidenceJson = JsonSerializer.Serialize(new { lineOverlap = ranked.Score, policy = PolicyVersion,
                     customerIdentity = ranked.Scope.ToString(), customerReference = ranked.Reference.ToString(),
                     logicalGroup = ranked.Grouped, emailThread = ranked.ThreadLinked }),
-                DifferencesJson = Diff(Snapshot(ranked.Lead), Snapshot(candidate)),
+                DifferencesJson = Diff(IdentitySnapshot(ranked.Lead), IdentitySnapshot(candidate)),
                 // The buyer's real values, kept verbatim for the human decision. DifferencesJson
                 // above is normalised hash input and must never be projected onto a Lead.
                 ProposedLeadSnapshotJson = VerbatimSnapshotJson(candidate),
@@ -433,7 +436,7 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         var next = canonical.CurrentRevisionNumber + 1;
         var previousSnapshot = canonical.CurrentRevisionId.HasValue
             ? await _db.Set<LeadRevision>().Where(x => x.Id == canonical.CurrentRevisionId.Value).Select(x => x.SnapshotJson).SingleOrDefaultAsync(ct)
-            : JsonSerializer.Serialize(Snapshot(canonical));
+            : JsonSerializer.Serialize(CommercialSnapshot(canonical));
         ApplyCurrentProjection(canonical, incoming);
         var revision = BuildRevision(canonical, occurrence, next, fingerprint, intake);
         foreach (var d in Diff(previousSnapshot, revision.SnapshotJson))
@@ -922,16 +925,15 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         else if (request.Action is "revision" or "link")
         {
             var canonical = await _db.Leads.Include(x => x.LeadItems).SingleAsync(x => x.BusinessUnitId == bu && x.Id == candidate.CandidateLeadId, ct);
-            var proposed = ProposedSnapshot(candidate.DifferencesJson);
             var previous = canonical.CurrentRevisionId.HasValue
                 ? await _db.Set<LeadRevision>().Where(x => x.Id == canonical.CurrentRevisionId.Value).Select(x => x.SnapshotJson).SingleAsync(ct)
-                : JsonSerializer.Serialize(Snapshot(canonical));
+                : JsonSerializer.Serialize(CommercialSnapshot(canonical));
             verbatimApplied = ApplyVerbatimProjection(canonical, candidate.ProposedLeadSnapshotJson);
             // Older possible-match rows may predate verbatim snapshot retention. The human
             // decision is still an occurrence and deserves an immutable revision record, but it
             // must never claim normalized candidate values were applied. Re-state the previous
             // canonical snapshot and exact current line identities instead.
-            var revisionSnapshot = verbatimApplied == true ? proposed : previous;
+            var revisionSnapshot = JsonSerializer.Serialize(CommercialSnapshot(canonical));
             var revision = new LeadRevision { BusinessUnitId = bu, LeadId = canonical.Id,
                 RevisionNumber = canonical.CurrentRevisionNumber + 1, EstablishedByOccurrence = occurrence,
                 LogicalInquiryFingerprint = occurrence.LogicalInquiryFingerprint, SnapshotJson = revisionSnapshot,
@@ -943,8 +945,7 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
             // the revision after insertion would correctly trip LeadPersistenceRules.
             revision.CustomerRfqReference = canonical.Rfqno;
             revision.NormalizedCustomerRfqReference = Normalize(canonical.Rfqno);
-            PopulateRevisionItems(revision, revisionSnapshot,
-                canonical.LeadItems.Where(x => x.IsCurrentRevisionProjection));
+            PopulateRevisionItems(revision, canonical.LeadItems.Where(x => x.IsCurrentRevisionProjection));
             _db.Add(revision); await _db.SaveChangesAsync(ct);
             occurrence.Classification = LeadOccurrenceClassification.Revision; occurrence.LeadId = canonical.Id; occurrence.LeadRevisionId = revision.Id;
             canonical.CurrentRevisionId = revision.Id; canonical.CurrentRevisionNumber = revision.RevisionNumber;
@@ -962,15 +963,15 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
             var newLead = new Lead { Rfqno = null, BuyersName = null, RecDate = now, LeadSource = occurrence.SourceChannel,
                 Clientemail = occurrence.Sender, EmailSource = occurrence.MimeType, CreatedBy = actorId, CreatedDate = now,
                 BusinessUnitId = bu, EmailIngests = ingest, RequiresCommercialReview = true, CommercialFactsVerified = false };
-            var proposed = ProposedSnapshot(candidate.DifferencesJson);
             verbatimApplied = ApplyVerbatimProjection(newLead, candidate.ProposedLeadSnapshotJson);
             _db.Add(newLead); await _db.SaveChangesAsync(ct);
+            var proposed = JsonSerializer.Serialize(CommercialSnapshot(newLead));
             var revision = new LeadRevision { BusinessUnitId = bu, LeadId = newLead.Id, RevisionNumber = 1,
                 EstablishedByOccurrence = occurrence, LogicalInquiryFingerprint = occurrence.LogicalInquiryFingerprint,
                 SnapshotJson = proposed, CustomerRfqReference = newLead.Rfqno, NormalizedCustomerRfqReference = Normalize(newLead.Rfqno),
                 CustomerIdSnapshot = newLead.CustomerId, ContactIdSnapshot = newLead.ContactId, CreatedAtUtc = DateTimeOffset.UtcNow, CreatedBy = actorId,
                 ProcessingPath = LeadProcessingPath.HumanReview, ExternalAiUsed = occurrence.ExternalAiUsed };
-            PopulateRevisionItems(revision, proposed, newLead.LeadItems);
+            PopulateRevisionItems(revision, newLead.LeadItems);
             _db.Add(revision); await _db.SaveChangesAsync(ct);
             newLead.CurrentRevisionId = revision.Id; newLead.CurrentRevisionNumber = 1; newLead.CurrentInquiryFingerprint = occurrence.LogicalInquiryFingerprint;
             newLead.CurrentOccurrenceClassification = LeadOccurrenceClassification.New.ToString(); newLead.IngestedAtUtc = occurrence.IngestedAtUtc;
@@ -1146,9 +1147,8 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
             await _db.SaveChangesAsync(ct);
         }
 
-        // SnapshotJson is the literal Snapshot(lead) with no wrapper envelope: Fingerprint hashes
-        // that exact string, and Diff/IndexedLines read rfq/buyer/closing/items positionally at
-        // the top level. Wrapping it would break the first real amendment's diff.
+        // SnapshotJson is the versioned, exact commercial snapshot. The normalized identity
+        // fingerprint is deliberately separate: hash text is never customer-facing data.
         var revision = BuildRevision(lead, occurrence, 1, fingerprint, intake);
         _db.Add(revision);
         await _db.SaveChangesAsync(ct);
@@ -1329,7 +1329,7 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
     private static LeadRevision BuildRevision(Lead lead, LeadIngestionOccurrence occurrence, int number, string fingerprint, LeadIntakeDescriptor intake)
     {
         var revision = new LeadRevision { BusinessUnitId = lead.BusinessUnitId, LeadId = lead.Id, RevisionNumber = number,
-            EstablishedByOccurrence = occurrence, LogicalInquiryFingerprint = fingerprint, SnapshotJson = JsonSerializer.Serialize(Snapshot(lead)),
+            EstablishedByOccurrence = occurrence, LogicalInquiryFingerprint = fingerprint, SnapshotJson = JsonSerializer.Serialize(CommercialSnapshot(lead)),
             CustomerRfqReference = lead.Rfqno, NormalizedCustomerRfqReference = Normalize(lead.Rfqno), CustomerIdSnapshot = lead.CustomerId,
             ContactIdSnapshot = lead.ContactId, CreatedAtUtc = DateTimeOffset.UtcNow, CreatedBy = intake.ActorId,
             ProcessingPath = intake.ProcessingPath, ExternalAiUsed = intake.ExternalAiUsed };
@@ -1344,7 +1344,7 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
                 LeadItem = item,
                 LineNumber = ++line,
                 LineFingerprint = LineFingerprint(item),
-                SnapshotJson = JsonSerializer.Serialize(ItemSnapshot(item))
+                SnapshotJson = JsonSerializer.Serialize(CommercialItemSnapshot(item))
             });
         return revision;
     }
@@ -1375,7 +1375,13 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
     private void ApplyCurrentProjection(Lead target, Lead source)
     {
         target.Rfqno = source.Rfqno; target.BuyersName = source.BuyersName; target.RecDate = source.RecDate; target.BidClosingDate = source.BidClosingDate;
-        target.HeaderRemarks = source.HeaderRemarks; target.NoOfLineItems = source.NoOfLineItems; target.Rfqtype = source.Rfqtype; target.ModifiedDate = DateTime.UtcNow;
+        target.AcknowledgmentDate = source.AcknowledgmentDate; target.SubDate = source.SubDate;
+        target.HeaderRemarks = source.HeaderRemarks; target.OpportunityNo = source.OpportunityNo;
+        target.NoOfLineItems = source.NoOfLineItems; target.Rfqtype = source.Rfqtype;
+        target.DurationAgreement = source.DurationAgreement; target.RequiredDeliveryDate = source.RequiredDeliveryDate;
+        target.DeliveryLocation = source.DeliveryLocation; target.BidClosingDateHijri = source.BidClosingDateHijri;
+        target.AgreementReference = source.AgreementReference; target.InquiryType = source.InquiryType;
+        target.ModifiedDate = DateTime.UtcNow;
         foreach (var item in target.LeadItems.Where(x => x.IsCurrentRevisionProjection))
             item.IsCurrentRevisionProjection = false;
         foreach (var item in source.LeadItems)
@@ -1385,17 +1391,64 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
             target.LeadItems.Add(clone);
         }
     }
-    public static string Fingerprint(Lead lead) => Hash(JsonSerializer.Serialize(Snapshot(lead)));
+    public static string Fingerprint(Lead lead) => Hash(JsonSerializer.Serialize(IdentitySnapshot(lead)));
+    private static string Fingerprint(Lead lead, string? sender, string? subject) =>
+        Hash(JsonSerializer.Serialize(IdentitySnapshot(lead, sender, subject)));
     // Quantity is nullable because LeadItem.Quantity is. A line whose quantity was never
     // stated now serialises as null instead of 0, so it hashes differently from a line that
     // really does say 0 — which is the point: two documents that differ in whether they state
     // a quantity are not the same document, and dedup must not treat them as one.
-    private sealed record ItemFingerprintSnapshot(string? line, string? part, string? description, int? Quantity, string? uom, string? date);
-    private static object Snapshot(Lead x) => new { rfq = Normalize(x.Rfqno), buyer = Normalize(x.BuyersName), closing = x.BidClosingDate?.ToUniversalTime().ToString("O"),
+    private sealed record ItemFingerprintSnapshot(string? line, string? part, string? description, decimal? Quantity, string? uom, string? date);
+    private static object IdentitySnapshot(Lead x, string? sourceSender = null, string? sourceSubject = null) => new
+    {
+        rfq = Normalize(x.Rfqno), buyer = Normalize(x.BuyersName),
+        closing = x.BidClosingDate?.ToUniversalTime().ToString("O"),
+        acknowledgmentDate = x.AcknowledgmentDate?.ToUniversalTime().ToString("O"),
+        submissionDate = x.SubDate?.ToUniversalTime().ToString("O"),
+        // The persister keeps the legacy email envelope note in HeaderRemarks for operator
+        // context. Sender/subject are occurrence provenance, not customer commercial terms:
+        // a replay with a new "resending" subject must still match the same immutable inquiry.
+        // Preserve any actual remark after that generated prefix in the identity hash.
+        headerRemarks = Normalize(IdentityHeaderRemarks(x, sourceSender, sourceSubject)),
+        opportunityNo = Normalize(x.OpportunityNo),
+        rfqType = Normalize(x.Rfqtype), durationAgreement = Normalize(x.DurationAgreement),
+        requiredDeliveryDate = x.RequiredDeliveryDate?.ToUniversalTime().ToString("O"),
+        deliveryLocation = Normalize(x.DeliveryLocation),
+        agreementReference = Normalize(x.AgreementReference),
+        bidClosingDateHijri = Normalize(x.BidClosingDateHijri),
+        inquiryType = Normalize(x.InquiryType),
         items = x.LeadItems.Where(i => i.IsCurrentRevisionProjection)
-            .Select(ItemSnapshot).OrderBy(i => i.part).ThenBy(i => i.line).ToArray() };
+            .Select(ItemSnapshot).OrderBy(i => i.part).ThenBy(i => i.line).ToArray()
+    };
+    private static LeadRevisionCommercialSnapshot CommercialSnapshot(Lead lead) =>
+        LeadRevisionCommercialSnapshot.Capture(lead, Normalize, NormalizeUom,
+            item => item.BidClosingDateLine?.ToUniversalTime().ToString("O"));
+    private static LeadRevisionLineCommercialSnapshot CommercialItemSnapshot(LeadItem item) =>
+        LeadRevisionLineCommercialSnapshot.Capture(item, Normalize, NormalizeUom,
+            value => value.BidClosingDateLine?.ToUniversalTime().ToString("O"));
     private static ItemFingerprintSnapshot ItemSnapshot(LeadItem x) => new(Normalize(x.LineItemNo), Normalize(x.ManufacturerPartNumber ?? x.ItemMaterialCode),
         Normalize(x.ProductShortDescription ?? x.ItemText), x.Quantity, NormalizeUom(x.UnitOfMeasure), x.BidClosingDateLine?.ToUniversalTime().ToString("O"));
+
+    private static string? IdentityHeaderRemarks(Lead lead, string? sourceSender = null, string? sourceSubject = null)
+    {
+        if (string.IsNullOrWhiteSpace(lead.HeaderRemarks)) return null;
+        var trimmed = lead.HeaderRemarks.Trim();
+
+        sourceSender ??= lead.EmailIngests?.FromEmail;
+        sourceSubject ??= lead.EmailIngests?.EmailSubject;
+        if (sourceSender is null && sourceSubject is null) return trimmed;
+
+        // Use the exact metadata that generated the prefix instead of heuristically parsing a
+        // subject (which may itself contain punctuation). This removes only machine envelope
+        // text and cannot consume an extracted commercial remark that happens to follow it.
+        var prefix = $"Email: From {sourceSender}, Subject: {sourceSubject}.";
+        var prefixIndex = trimmed.IndexOf(prefix, StringComparison.Ordinal);
+        if (prefixIndex < 0) return trimmed;
+        var withoutEnvelope = string.Concat(
+            trimmed.AsSpan(0, prefixIndex),
+            trimmed.AsSpan(prefixIndex + prefix.Length)).Trim();
+        return withoutEnvelope.Length == 0 ? null : withoutEnvelope;
+    }
     private static string LineFingerprint(LeadItem x) => Hash(JsonSerializer.Serialize(ItemSnapshot(x)));
     private static string LineIdentityFingerprint(LeadItem x) => Hash(JsonSerializer.Serialize(new
     {
@@ -1600,7 +1653,14 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         var current = currentDocument.RootElement;
         var differences = new List<LeadRevisionDifference>();
 
-        foreach (var field in new[] { "rfq", "buyer", "closing" })
+        foreach (var field in new[]
+                 {
+                     "rfq", "buyer", "closing", "customerRfqReference", "buyersName", "recDate",
+                     "bidClosingDate", "acknowledgmentDate", "submissionDate", "headerRemarks",
+                     "opportunityNo", "rfqType", "durationAgreement", "requiredDeliveryDate",
+                     "deliveryLocation", "agreementReference", "bidClosingDateHijri", "inquiryType",
+                     "commercialCaseId", "commercialCaseReference", "customerId", "contactId"
+                 })
         {
             var before = PropertyJson(previous, field);
             var after = PropertyJson(current, field);
@@ -1646,27 +1706,20 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         return JsonElement.DeepEquals(leftDocument.RootElement, rightDocument.RootElement);
     }
 
-    private static void PopulateRevisionItems(LeadRevision revision, string snapshotJson, IEnumerable<LeadItem> canonicalItems)
+    private static void PopulateRevisionItems(LeadRevision revision, IEnumerable<LeadItem> canonicalItems)
     {
-        using var document = JsonDocument.Parse(snapshotJson);
-        if (!document.RootElement.TryGetProperty("items", out var items) || items.ValueKind != JsonValueKind.Array) return;
-        var candidates = canonicalItems.GroupBy(LineFingerprint, StringComparer.Ordinal)
-            .ToDictionary(x => x.Key, x => new Queue<LeadItem>(x), StringComparer.Ordinal);
         var line = 0;
-        foreach (var item in items.EnumerateArray())
+        foreach (var item in canonicalItems.OrderBy(x => Normalize(x.LineItemNo), StringComparer.Ordinal)
+                     .ThenBy(LineFingerprint, StringComparer.Ordinal))
         {
-            var json = item.GetRawText();
-            var fingerprint = Hash(json);
-            if (!candidates.TryGetValue(fingerprint, out var matches) || matches.Count == 0)
-                throw new InvalidOperationException("The reviewed revision line cannot be linked to an exact canonical Lead item.");
             revision.Items.Add(new LeadItemRevision
             {
                 BusinessUnitId = revision.BusinessUnitId,
                 LeadId = revision.LeadId,
-                LeadItem = matches.Dequeue(),
+                LeadItem = item,
                 LineNumber = ++line,
-                LineFingerprint = fingerprint,
-                SnapshotJson = json
+                LineFingerprint = LineFingerprint(item),
+                SnapshotJson = JsonSerializer.Serialize(CommercialItemSnapshot(item))
             });
         }
     }
@@ -1677,7 +1730,9 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
     /// </summary>
     private static string VerbatimSnapshotJson(Lead lead) => JsonSerializer.Serialize(new VerbatimLeadSnapshot(
         lead.Rfqno, lead.BuyersName, lead.RecDate, lead.BidClosingDate, lead.HeaderRemarks,
-        lead.NoOfLineItems, lead.Rfqtype,
+        lead.NoOfLineItems, lead.Rfqtype, lead.AcknowledgmentDate, lead.SubDate, lead.OpportunityNo,
+        lead.DurationAgreement, lead.RequiredDeliveryDate, lead.DeliveryLocation,
+        lead.BidClosingDateHijri, lead.AgreementReference, lead.InquiryType,
         lead.LeadItems.Select(x => new VerbatimLeadItemSnapshot(
             x.CompanyRef, x.CustomerAccountPortalId, x.CustomerRfqno, x.ItemMaterialCode, x.CommodityProduct,
             x.BuyerName, x.LineItemNo, x.ProductShortName, x.Alternative, x.ProductShortDescription,
@@ -1718,6 +1773,15 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         lead.BidClosingDate = snapshot.BidClosingDate;
         lead.HeaderRemarks = snapshot.HeaderRemarks;
         lead.Rfqtype = snapshot.Rfqtype;
+        lead.AcknowledgmentDate = snapshot.AcknowledgmentDate;
+        lead.SubDate = snapshot.SubmissionDate;
+        lead.OpportunityNo = snapshot.OpportunityNo;
+        lead.DurationAgreement = snapshot.DurationAgreement;
+        lead.RequiredDeliveryDate = snapshot.RequiredDeliveryDate;
+        lead.DeliveryLocation = snapshot.DeliveryLocation;
+        lead.BidClosingDateHijri = snapshot.BidClosingDateHijri;
+        lead.AgreementReference = snapshot.AgreementReference;
+        lead.InquiryType = snapshot.InquiryType;
         lead.NoOfLineItems = snapshot.NoOfLineItems ?? snapshot.Items.Count;
         lead.ModifiedDate = DateTime.UtcNow;
         // LeadItemRevision is immutable and points at the exact canonical LeadItem that produced

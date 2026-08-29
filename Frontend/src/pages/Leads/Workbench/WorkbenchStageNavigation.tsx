@@ -21,6 +21,15 @@ export const WORKBENCH_STAGE_LABELS: Record<WorkbenchStage, string> = {
 export const workbenchStageFromValue = (value: string | null | undefined): WorkbenchStage =>
   value && Object.hasOwn(WORKBENCH_STAGE_LABELS, value) ? value as WorkbenchStage : 'evidence';
 
+export const workbenchStageSearchParams = (
+  current: URLSearchParams,
+  stage: WorkbenchStage,
+): URLSearchParams => {
+  const next = new URLSearchParams(current);
+  next.set('stage', stage);
+  return next;
+};
+
 export const workbenchStageTabId = (stage: WorkbenchStage): string => `lead-decision-tab-${stage}`;
 export const workbenchStagePanelId = (stage: WorkbenchStage): string => `lead-decision-panel-${stage}`;
 

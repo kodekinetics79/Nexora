@@ -34,6 +34,43 @@ export const RequireAuth: React.FC<{ children: React.ReactNode }> = ({ children 
   return <>{children}</>;
 };
 
+/**
+ * Mirrors the backend's `RequireManagerRole` policy for manager/admin-only read surfaces.
+ * `userData.isManager` is resolved by the server from role rank and is true for Manager, Admin,
+ * and Owner. Keeping this separate from module permissions prevents a member with a broad read
+ * grant from opening a page whose API will correctly answer 403.
+ */
+export const RequireManager: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const { token, userData } = useAuth();
+
+  if (!token) return <RequireAuth>{children}</RequireAuth>;
+  if (userData.isManager === true) return <>{children}</>;
+
+  return (
+    <Box role="alert" aria-live="polite" sx={{
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      justifyContent: 'center',
+      height: '60vh',
+      textAlign: 'center',
+      p: 3,
+    }}>
+      <SecurityIcon sx={{ fontSize: 64, color: 'text.secondary', mb: 2, opacity: 0.5 }} />
+      <Typography variant="h5" component="h1" sx={{ fontWeight: 700, mb: 1 }}>
+        Manager access required
+      </Typography>
+      <Typography variant="body1" sx={{ color: 'text.secondary', mb: 3, maxWidth: 460 }}>
+        This team-wide view is available to Manager, Admin, and Owner roles. Your own sales work
+        remains available from Sales rep today.
+      </Typography>
+      <Button variant="contained" onClick={() => window.history.back()}>
+        Go Back
+      </Button>
+    </Box>
+  );
+};
+
 /** Wording that matches what an administrator actually ticks in Roles & Permissions. */
 const ACTION_LABEL: Record<NonNullable<PermissionGuardProps['action']>, string> = {
   view: 'Can View',

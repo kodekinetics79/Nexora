@@ -1,5 +1,6 @@
 import type { ReactElement } from 'react';
-import { Box, Tooltip } from '@mui/material';
+import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
+import { Box, IconButton, Tooltip } from '@mui/material';
 
 interface Props {
   /** The capability from `usePlatformPermissions`, never a role string compared inline. */
@@ -22,16 +23,24 @@ interface Props {
  * makes it look like the feature does not exist, and the operator's real next step — find
  * the person who can — needs them to know the action is there and who owns it.</p>
  *
- * <p>The wrapping span is required: a disabled MUI button swallows pointer events, so the
- * tooltip would never fire and the explanation would be unreachable.</p>
+ * <p>A disabled MUI button swallows pointer and keyboard events. The adjacent information
+ * button is therefore the tooltip trigger: it remains a valid focus stop without pretending
+ * the disabled action itself is enabled or nesting one button inside another.</p>
  */
 export default function RoleGate({ allowed, requirement, children }: Props) {
   if (allowed) return children(false);
   return (
-    <Tooltip title={requirement}>
-      <Box component="span" sx={{ display: 'inline-flex' }}>
-        {children(true)}
-      </Box>
-    </Tooltip>
+    <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+      {children(true)}
+      <Tooltip title={requirement}>
+        <IconButton
+          size="small"
+          aria-label={`Why this action is unavailable: ${requirement}`}
+          sx={{ color: 'text.secondary' }}
+        >
+          <InfoOutlinedIcon fontSize="inherit" />
+        </IconButton>
+      </Tooltip>
+    </Box>
   );
 }

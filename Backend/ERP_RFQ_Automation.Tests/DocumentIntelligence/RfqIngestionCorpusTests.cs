@@ -1,3 +1,4 @@
+using System.Globalization;
 using ERP_RFQ_Automation.DTOs.DocumentIntelligence;
 using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.Services.DocumentIntelligence;
@@ -287,15 +288,15 @@ public sealed class RfqIngestionCorpusTests
     /// demand for nothing and is quoted.
     /// </summary>
     [Theory]
-    [InlineData("2,500", 2500)]     // thousands separator
-    [InlineData("500 PCS", 500)]    // unit inside the cell
-    [InlineData("12.00", 12)]       // whole number written as a decimal
-    [InlineData("1 000", 1000)]     // space-grouped
-    [InlineData("٥٠٠", 500)]        // Arabic-Indic digits
+    [InlineData("2,500", "2500")]   // thousands separator
+    [InlineData("500 PCS", "500")]  // unit inside the cell
+    [InlineData("12.00", "12")]     // whole number written as a decimal
+    [InlineData("1 000", "1000")]   // space-grouped
+    [InlineData("٥٠٠", "500")]      // Arabic-Indic digits
     [InlineData("10-20", null)]     // a range is not a quantity
     [InlineData("1.234", null)]     // ambiguous: 1234 or 1.234, a thousandfold apart
-    [InlineData("2.5", null)]       // fractional: truncating to 2 is a 20% under-quote
-    public void A_quantity_is_read_or_refused_but_never_defaulted(string raw, int? expected)
+    [InlineData("2.5", "2.5")]      // fractional measured quantity, preserved exactly
+    public void A_quantity_is_read_or_refused_but_never_defaulted(string raw, string? expected)
     {
         var document = Assert.Single(Normalizer.NormalizeSpreadsheetRows(
             new[] { QuantityRow(raw) }, businessUnitId: 7).Documents);
@@ -304,7 +305,7 @@ public sealed class RfqIngestionCorpusTests
         if (expected is { } quantity)
         {
             Assert.Equal(CanonicalValueKind.Normalized, line.Quantity.Kind);
-            Assert.Equal(quantity, line.Quantity.Value);
+            Assert.Equal(decimal.Parse(quantity, CultureInfo.InvariantCulture), line.Quantity.Value);
             Assert.Equal(ValidationStatus.Valid, line.Quantity.ValidationStatus);
         }
         else
@@ -367,7 +368,7 @@ public sealed class RfqIngestionCorpusTests
             .Where(l => l.Quantity.Kind == CanonicalValueKind.Normalized)
             .Select(l => l.Quantity.Value)
             .ToList();
-        Assert.Equal(new[] { 2500, 500, 12, 1000, 500 }, readable);
+        Assert.Equal(new[] { 2500m, 500m, 12m, 1000m, 500m, 2.5m }, readable);
 
         Assert.Equal("صمام كروي", document.LineItems[5].ProductName.Value);
         Assert.Equal("M", document.LineItems[0].UnitOfMeasure.Value);

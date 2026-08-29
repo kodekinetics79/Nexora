@@ -260,6 +260,7 @@ const LeadsPage: React.FC = () => {
   const [resolveLead, setResolveLead] = useState<LeadResponseDTO | null>(null);
   const commercialAccess = commercialActionPermissions(hasPermission);
   const canEditLeads = commercialAccess.canEditLeadDecision;
+  const canCheckMailboxes = hasPermission('Leads', 'create');
 
   // AA-01: which columns, in which order, for THIS user — resolved server-side and
   // shared with every other grid that opts in.
@@ -1039,13 +1040,15 @@ const LeadsPage: React.FC = () => {
           {t('leads')}
         </Typography>
         <Stack direction="row" spacing={1} sx={{ alignItems: 'center', justifyContent: { xs: 'space-between', sm: 'flex-end' } }}>
-          <Tooltip title="Fetches new emails from your connected inboxes now">
-            <span>
+          <Tooltip title={canCheckMailboxes
+            ? 'Fetches new emails from your connected inboxes now'
+            : 'Requires Can Create on Leads. Ask an administrator to update your role under Roles & Permissions.'}>
+            <span tabIndex={canCheckMailboxes ? undefined : 0}>
               <Button
                 variant="outlined"
                 startIcon={syncEmailsMutation.isPending ? <CircularProgress size={18} color="inherit" /> : <EmailIcon />}
                 onClick={() => syncEmailsMutation.mutate()}
-                disabled={syncEmailsMutation.isPending}
+                disabled={syncEmailsMutation.isPending || !canCheckMailboxes}
                 sx={{ fontWeight: 600, borderRadius: 2 }}
               >
                 {syncEmailsMutation.isPending ? 'Checking…' : 'Check for new leads'}

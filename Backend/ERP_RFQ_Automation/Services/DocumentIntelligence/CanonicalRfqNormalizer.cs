@@ -177,11 +177,11 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
     }
 
     /// <summary>
-    /// Names the quantity the document actually stated. "Quantity must be a positive whole number"
+    /// Names the quantity the document actually stated. "Quantity must be a positive number"
     /// on a line that plainly reads "2,500 PCS" tells the reviewer nothing; the reading the parser
     /// refused, and why, is what lets them correct it.
     /// </summary>
-    private static string QuantityMessage(CanonicalValue<int> quantity)
+    private static string QuantityMessage(CanonicalValue<decimal> quantity)
     {
         if (string.IsNullOrWhiteSpace(quantity.OriginalValue))
             return "Quantity is required and the document states none.";
@@ -189,7 +189,7 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
         return quantity.Transformations.Contains($"quantity_origin:{QuantityOrigin.Ambiguous}")
             ? $"Quantity \"{quantity.OriginalValue.Trim()}\" is ambiguous — \".\" could be a decimal point or a "
               + "thousands separator, and the two readings differ a thousandfold. Confirm it."
-            : $"Quantity \"{quantity.OriginalValue.Trim()}\" could not be read as a positive whole number.";
+            : $"Quantity \"{quantity.OriginalValue.Trim()}\" could not be read as a positive number with at most six decimal places.";
     }
 
     private static CanonicalValue<string> RequiredText(string? raw, RfqSpreadsheetRow row, string column, string code, string message)
@@ -325,20 +325,21 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
     /// is never Normalized, which is what <c>ChunkedExtractionService.MapCanonicalItem</c> tests
     /// before it emits anything downstream.</para>
     /// </summary>
-    private static CanonicalValue<int> QuantityValue(string? raw, RfqSpreadsheetRow row, string column, string fieldName)
+    private static CanonicalValue<decimal> QuantityValue(string? raw, RfqSpreadsheetRow row, string column, string fieldName)
     {
-        var value = new CanonicalValue<int>
+        var value = new CanonicalValue<decimal>
         {
             OriginalValue = raw,
             Evidence = new List<SourceEvidence> { Evidence(row, column, raw) }
         };
 
-        var reading = QuantityParser.Parse(NormalizeNumerals(raw), allowFractional: false);
+        var reading = QuantityParser.Parse(NormalizeNumerals(raw), allowFractional: true);
 
-        // A whole-unit demand quantity above int.MaxValue is digit noise, not an order.
-        if (reading.Value is { } quantity && quantity > 0m && quantity <= int.MaxValue)
+        // Never round into the numeric(20,6) persistence boundary. An unsupported precision
+        // is reviewable source data, not permission to silently change the requested amount.
+        if (reading.Value is { } quantity && QuantityParser.FitsPersistedQuantity(quantity))
         {
-            value.Value = (int)quantity;
+            value.Value = quantity;
             value.Kind = CanonicalValueKind.Normalized;
             value.Confidence = 1.0m;
             value.ValidationStatus = ValidationStatus.Valid;
@@ -361,7 +362,7 @@ public sealed class CanonicalRfqNormalizer : ICanonicalRfqNormalizer
         value.Kind = CanonicalValueKind.Extracted;
         value.Confidence = 0.2m;
         value.ValidationStatus = ValidationStatus.Invalid;
-        value.Transformations.Add($"{fieldName}: {QuantityReason(reading, "not a positive whole number")}");
+        value.Transformations.Add($"{fieldName}: {QuantityReason(reading, "not a positive number with at most six decimal places")}");
         value.Transformations.Add($"quantity_origin:{reading.Origin}");
         return value;
     }

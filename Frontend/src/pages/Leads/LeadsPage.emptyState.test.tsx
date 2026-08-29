@@ -18,11 +18,13 @@ import LeadsPage from './LeadsPage';
  */
 
 const getAll = vi.fn();
+const fetchEmails = vi.fn();
+const hasPermission = vi.fn();
 
 vi.mock('../../api/services/leadService', () => ({
   default: {
     getAll: (params: unknown) => getAll(params),
-    fetchEmails: vi.fn(),
+    fetchEmails: () => fetchEmails(),
   },
 }));
 
@@ -43,7 +45,7 @@ vi.mock('../../hooks/useColumnPreferences', () => ({
 vi.mock('../../components/common/ColumnPreferences', () => ({ default: () => null }));
 
 vi.mock('../../context/AuthContext', () => ({
-  useAuth: () => ({ hasPermission: () => true }),
+  useAuth: () => ({ hasPermission }),
 }));
 
 const navigate = vi.fn();
@@ -74,6 +76,7 @@ const renderPage = (route = '/procurement/leads/all') => {
 describe('LeadsPage — an empty grid states which kind of empty it is', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    hasPermission.mockReturnValue(true);
     getAll.mockResolvedValue({ items: [], totalCount: 0, pageNumber: 1, pageSize: 10 });
   });
 
@@ -105,5 +108,18 @@ describe('LeadsPage — an empty grid states which kind of empty it is', () => {
     renderPage('/procurement/leads/all?view=needs-review');
 
     expect(await screen.findByText(/no inquiries match these filters/i)).toBeInTheDocument();
+  });
+
+  it('does not offer mailbox polling to a reader who lacks Leads Can Create', async () => {
+    hasPermission.mockImplementation((_module: string, action?: string) => action !== 'create');
+    renderPage();
+
+    const button = await screen.findByRole('button', { name: /check for new leads/i });
+    expect(button).toBeDisabled();
+    expect(button.parentElement).toHaveAttribute('tabindex', '0');
+
+    fireEvent.mouseOver(button.parentElement as HTMLElement);
+    expect(await screen.findByText(/requires can create on leads/i)).toBeInTheDocument();
+    expect(fetchEmails).not.toHaveBeenCalled();
   });
 });

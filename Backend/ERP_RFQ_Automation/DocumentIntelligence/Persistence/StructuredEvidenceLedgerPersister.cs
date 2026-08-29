@@ -131,7 +131,7 @@ public sealed class StructuredEvidenceLedgerPersister
                 if (string.IsNullOrWhiteSpace(description))
                     description = canonical.ProductName.OriginalValue ?? "[missing product description]";
                 var line = CanonicalLineItem.Create(job.BusinessUnitId, inquiry.Id, lineIndex + 1,
-                    description, canonical.Quantity.Value > 0 ? canonical.Quantity.Value : null,
+                    description, ValueOrNull(canonical.Quantity),
                     canonical.UnitOfMeasure.Value);
                 line.Enrich(canonical.ManufacturerName.Value, canonical.ManufacturerPartNumber.Value,
                     canonical.Currency.Value, ValueOrNull(canonical.UnitPrice), ValueOrNull(canonical.LeadTimeDays),

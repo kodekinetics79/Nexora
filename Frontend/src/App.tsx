@@ -2,7 +2,7 @@ import { lazy, Suspense } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { Box, CircularProgress, Typography } from '@mui/material';
 import MainLayout from './components/layout/MainLayout';
-import PermissionGuard, { RequireAuth } from './components/common/PermissionGuard';
+import PermissionGuard, { RequireAuth, RequireManager } from './components/common/PermissionGuard';
 import RouteAnnouncer from './components/layout/RouteAnnouncer';
 import useDocumentTitle from './hooks/useDocumentTitle';
 import { SETUP_ROUTES, SETUP_ADOPTED_ROUTES } from './pages/Setup/setupRoutes';
@@ -209,9 +209,9 @@ function App() {
       <Route path="/executive/today" element={<MainLayout><PermissionGuard moduleName="Dashboard"><DashboardPage /></PermissionGuard></MainLayout>} />
       <Route path="/admin/operations" element={<MainLayout><PermissionGuard moduleName="Users"><TenantAdminOperationsPage /></PermissionGuard></MainLayout>} />
       <Route path="/sales/actions" element={<MainLayout><PermissionGuard moduleName="Leads"><HumanActionCenterPage /></PermissionGuard></MainLayout>} />
-      <Route path="/sales/team" element={<MainLayout><PermissionGuard moduleName="Leads"><TeamOverviewPage /></PermissionGuard></MainLayout>} />
-      <Route path="/sales/reps" element={<MainLayout><PermissionGuard moduleName="Users"><RepDirectoryPage /></PermissionGuard></MainLayout>} />
-      <Route path="/sales/reps/:userId" element={<MainLayout><PermissionGuard moduleName="Users"><RepProfilePage /></PermissionGuard></MainLayout>} />
+      <Route path="/sales/team" element={<MainLayout><RequireManager><PermissionGuard moduleName="Leads"><TeamOverviewPage /></PermissionGuard></RequireManager></MainLayout>} />
+      <Route path="/sales/reps" element={<MainLayout><RequireManager><PermissionGuard moduleName="Users"><RepDirectoryPage /></PermissionGuard></RequireManager></MainLayout>} />
+      <Route path="/sales/reps/:userId" element={<MainLayout><RequireManager><PermissionGuard moduleName="Users"><RepProfilePage /></PermissionGuard></RequireManager></MainLayout>} />
       <Route path="/sales/accounts" element={<MainLayout><PermissionGuard moduleName="Customers"><AccountOwnershipPage /></PermissionGuard></MainLayout>} />
       <Route path="/sales/routing" element={<MainLayout><PermissionGuard moduleName="Leads"><RoutingQueuePage /></PermissionGuard></MainLayout>} />
       <Route path="/sales/follow-ups" element={<MainLayout><PermissionGuard moduleName="Quotations"><FollowUpsPage /></PermissionGuard></MainLayout>} />

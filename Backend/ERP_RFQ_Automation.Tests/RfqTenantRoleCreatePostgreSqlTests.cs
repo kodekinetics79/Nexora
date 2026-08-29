@@ -156,6 +156,10 @@ public sealed class RfqTenantRoleCreatePostgreSqlTests
             lead.ResolveCommercialIdentity(CustomerId, null, "CUSTOMER_CONFIRMED");
             lead.CommercialFactsVerified = true;
             await tenant.SaveChangesAsync();
+            var customerRevision = await new LeadIdentityApplicationService(tenant).AppendHumanRevisionAsync(
+                Tenant, leadId, "tests", "Test reviewer confirmed the customer identity.",
+                $"tenant-role-customer-revision:{Tenant}:{leadId}");
+            revisionId = customerRevision.RevisionId!.Value;
         }
 
         foreach (var target in new[] { "PENDING_IDENTIFICATION", "ASSIGNED", "UNDER_REVIEW", "QUALIFIED" })
@@ -423,9 +427,18 @@ public sealed class RfqTenantRoleCreatePostgreSqlTests
             canonical.BindLeadItem(item.Id);
             tenant.Add(canonical);
             await tenant.SaveChangesAsync();
-            tenant.Add(FieldEvidence.ForLineItem(Tenant, region.Id, canonical.Id, "requestedLine",
-                item.ProductShortDescription, item.ManufacturerPartNumber ?? item.ItemMaterialCode,
-                1m, "tenant-role-test", runId, validationStatus: FieldValidationStatus.Valid));
+            tenant.AddRange(
+                FieldEvidence.ForLineItem(Tenant, region.Id, canonical.Id, "requestedLine",
+                    item.ProductShortDescription, item.ManufacturerPartNumber ?? item.ItemMaterialCode,
+                    1m, "tenant-role-test", runId, validationStatus: FieldValidationStatus.Valid),
+                FieldEvidence.ForLineItem(Tenant, region.Id, canonical.Id, "Quantity",
+                    Convert.ToString(item.Quantity, System.Globalization.CultureInfo.InvariantCulture),
+                    Convert.ToString(item.Quantity, System.Globalization.CultureInfo.InvariantCulture),
+                    1m, "tenant-role-test", runId, valueKind: FieldValueKind.Number,
+                    validationStatus: FieldValidationStatus.Valid),
+                FieldEvidence.ForLineItem(Tenant, region.Id, canonical.Id, "UnitOfMeasure",
+                    item.UnitOfMeasure, item.UnitOfMeasure, 1m, "tenant-role-test", runId,
+                    validationStatus: FieldValidationStatus.Valid));
         }
         await tenant.SaveChangesAsync();
     }

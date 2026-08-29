@@ -77,6 +77,7 @@ public static class ParticipationModelBuilderExtensions
             e.Property(x => x.Currency).HasMaxLength(8);
             e.Property(x => x.CatalogPolicyVersion).HasMaxLength(64);
             e.Property(x => x.WarningSnapshotJson).HasColumnType("jsonb");
+            e.Property(x => x.Quantity).HasPrecision(20, 6);
             e.HasOne<SetUom>().WithMany().HasForeignKey(x => new { x.BusinessUnitId, x.UomId })
                 .HasPrincipalKey(x => new { x.BusinessUnitId, x.UomId }).OnDelete(DeleteBehavior.Restrict);
             e.HasOne<Currency>().WithMany().HasForeignKey(x => new { x.BusinessUnitId, x.CurrencyId })

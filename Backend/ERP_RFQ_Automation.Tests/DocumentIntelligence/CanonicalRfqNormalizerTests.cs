@@ -61,6 +61,29 @@ public class CanonicalRfqNormalizerTests
     }
 
     [Fact]
+    public void NormalizeSpreadsheetRows_FractionalQuantity_PreservesExactDecimal()
+    {
+        var result = _normalizer.NormalizeSpreadsheetRows(new[]
+        {
+            new RfqSpreadsheetRow
+            {
+                RowNumber = 2,
+                RfqNo = "RFQ-FRACTION-1",
+                BuyerName = "Global Industries",
+                ReceivedDate = "2026-07-14",
+                ProductName = "Cut cable",
+                Quantity = "2.750125",
+                UnitOfMeasure = "M"
+            }
+        }, 7);
+
+        var line = Assert.Single(Assert.Single(result.Documents).LineItems);
+        Assert.Equal(2.750125m, line.Quantity.Value);
+        Assert.Equal(CanonicalValueKind.Normalized, line.Quantity.Kind);
+        Assert.Equal(ValidationStatus.Valid, line.Quantity.ValidationStatus);
+    }
+
+    [Fact]
     public void NormalizeSpreadsheetRows_DuplicateLines_FlagsNeedsReview()
     {
         var rows = new[]

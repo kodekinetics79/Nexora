@@ -55,6 +55,7 @@ import {
   loadRecentSearchHits,
   rememberSearchHit,
 } from './globalSearchHistory';
+import { GLOBAL_SEARCH_FAILURE_MESSAGE, GLOBAL_SEARCH_LABEL } from './globalSearchPresentation';
 
 interface NavbarProps {
   onToggleSidebar: () => void;
@@ -208,15 +209,9 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth, sidebarEx
       } catch (error) {
         if (controller.signal.aborted) return;
         setResults(null);
-        // The server's message is surfaced verbatim; the client invents no copy that could
-        // contradict it, and a failure is never rendered as "no results".
-        const detail = (error as { response?: { data?: unknown } })?.response?.data;
-        const errorMessage = error instanceof Error ? error.message.trim() : '';
-        setSearchError(
-          typeof detail === 'string' && detail.trim()
-            ? detail
-            : errorMessage || 'Search is unavailable right now. Nothing was searched.',
-        );
+        // API and gateway details can contain internal infrastructure or authorization data.
+        // Keep the failure truthful without exposing those details in a global UI surface.
+        setSearchError(GLOBAL_SEARCH_FAILURE_MESSAGE);
         setSearchOpen(true);
       } finally {
         if (!controller.signal.aborted) setSearching(false);
@@ -362,7 +357,7 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth, sidebarEx
       }}
       onKeyDown={handleQuickSearch}
       onFocus={handleSearchFocus}
-      placeholder="Search Nexora…"
+      placeholder={`${GLOBAL_SEARCH_LABEL}…`}
       type="search"
       inputProps={{
         'aria-label': 'Search customers, suppliers, products, enquiries, quotes, orders and shipments',
@@ -608,7 +603,7 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth, sidebarEx
           >
             <DialogTitle id="mobile-search-title" component="div" sx={{ px: 2, py: 1.5 }}>
               <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
-                <Typography variant="h6" component="h2" sx={{ flex: 1, fontWeight: 800 }}>Search Nexora</Typography>
+                <Typography variant="h6" component="h2" sx={{ flex: 1, fontWeight: 800 }}>{GLOBAL_SEARCH_LABEL}</Typography>
                 <IconButton aria-label="Close search" onClick={closeMobileSearch}><CloseIcon /></IconButton>
               </Stack>
             </DialogTitle>
@@ -733,7 +728,7 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, drawerWidth, sidebarEx
           <MenuItem onClick={() => { handleClose(); navigate('/dashboard'); }} sx={{ borderRadius: 2, py: 1.5 }}>
             <ListItemIcon><Person fontSize="small" sx={{ opacity: 0.7 }} /></ListItemIcon>
             <ListItemText
-              primary="Account Profile"
+              primary="Workspace home"
               slotProps={{
                 primary: { variant: 'body2', sx: { fontWeight: 600 } }
               }}

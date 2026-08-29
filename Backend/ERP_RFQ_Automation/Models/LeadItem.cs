@@ -48,7 +48,7 @@ public partial class LeadItem
     /// <para>Nothing downstream may coalesce this to 0. A line whose quantity is unknown is a line
     /// that cannot be quoted until a human supplies it.</para>
     /// </summary>
-    public int? Quantity { get; set; }
+    public decimal? Quantity { get; set; }
 
     public string? StorageLocation { get; set; }
 

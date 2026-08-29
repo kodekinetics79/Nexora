@@ -4,6 +4,7 @@ import {
   WorkbenchStagePanel,
   WorkbenchStageTabs,
   workbenchStageFromValue,
+  workbenchStageSearchParams,
   workbenchStagePanelId,
   workbenchStageTabId,
 } from './WorkbenchStageNavigation';
@@ -14,6 +15,13 @@ describe('WorkbenchStageNavigation', () => {
     expect(workbenchStageFromValue('promote')).toBe('promote');
     expect(workbenchStageFromValue('anything-else')).toBe('evidence');
     expect(workbenchStageFromValue(null)).toBe('evidence');
+  });
+
+  it('creates a bookmarkable stage URL without dropping other query context', () => {
+    const next = workbenchStageSearchParams(new URLSearchParams('view=team&stage=evidence'), 'participation');
+
+    expect(next.get('stage')).toBe('participation');
+    expect(next.get('view')).toBe('team');
   });
 
   it('associates every stage tab with its panel and exposes only the active panel', () => {

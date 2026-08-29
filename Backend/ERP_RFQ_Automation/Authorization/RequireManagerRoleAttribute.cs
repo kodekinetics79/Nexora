@@ -3,9 +3,8 @@ using Microsoft.AspNetCore.Authorization;
 namespace ERP_RFQ_Automation.Authorization
 {
     /// <summary>
-    /// Restricts an endpoint to manager/admin roles (role name contains "admin" or
-    /// "manager", case-insensitive — the same rule as
-    /// LeadRepository.CanManageLeadAssignmentsAsync). Super-admin roles always pass.
+    /// Restricts an endpoint to roles whose server-controlled <c>RoleRank</c> is Manager or higher.
+    /// Human-readable role names never grant authority. Tenant owners always pass.
     /// Resolved dynamically by <see cref="ModulePermissionPolicyProvider"/> and enforced
     /// by <see cref="ManagerRoleHandler"/> via <see cref="IRoleGate"/>.
     /// </summary>

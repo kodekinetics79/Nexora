@@ -128,6 +128,15 @@ public static class EmailInquiryHoldReasons
         + "the same item. No inquiry was created because Nexora cannot safely choose one source. "
         + "Review the original email and attachments, then reprocess the corrected request.";
 
+    /// <summary>Two message parts give different non-empty values for an inquiry-level field
+    /// that controls identity, deadline, delivery or agreement scope.</summary>
+    public const string CrossComponentHeaderConflict = "assembly_critical_header_conflict";
+
+    public const string CrossComponentHeaderConflictDetail =
+        "Different parts of this email give conflicting RFQ reference, closing date, delivery "
+        + "date or location, or agreement reference. No inquiry was created because Nexora "
+        + "cannot safely choose one source. Review the email and attachments.";
+
     /// <summary>
     /// The message merged cleanly, but the persist path produced no Lead.
     ///

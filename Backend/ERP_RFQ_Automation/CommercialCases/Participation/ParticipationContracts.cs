@@ -18,7 +18,7 @@ public sealed record LeadLineParticipationCommand(
     string? ReasonCode = null,
     string? ReasonNotes = null,
     long? ProductId = null,
-    int? Quantity = null,
+    decimal? Quantity = null,
     string? UnitOfMeasure = null,
     string? Currency = null);
 
@@ -51,7 +51,7 @@ public sealed record LeadLineParticipationResult(
     string? ReasonCode,
     string? ReasonNotes,
     long? ProductId,
-    int? Quantity,
+    decimal? Quantity,
     string? UnitOfMeasure,
     int? UomId,
     string? Currency,

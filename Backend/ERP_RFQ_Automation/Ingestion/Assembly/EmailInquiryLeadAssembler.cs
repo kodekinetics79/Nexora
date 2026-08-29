@@ -304,6 +304,7 @@ public sealed class EmailInquiryLeadAssembler : IEmailInquiryLeadAssembler
 
         var merged = new List<LeadItemData>();
         var componentLines = new List<EmailInquiryCommercialConflictDetector.ComponentLines>();
+        var componentHeaders = new List<EmailInquiryCommercialConflictDetector.ComponentHeader>();
         LeadExtractionResult? header = null;
         var expected = 0;
         var extracted = 0;
@@ -362,6 +363,8 @@ public sealed class EmailInquiryLeadAssembler : IEmailInquiryLeadAssembler
             // are never copied through this helper.  This is intentionally deterministic:
             // ordinal order decides provenance, not whichever worker happened to finish first.
             header = header is null ? parsed : MergeMissingHeaderFields(header, parsed);
+            componentHeaders.Add(new EmailInquiryCommercialConflictDetector.ComponentHeader(
+                result.ComponentId, parsed));
             if (parsed.Items is { Count: > 0 })
             {
                 merged.AddRange(parsed.Items);
@@ -390,6 +393,23 @@ public sealed class EmailInquiryLeadAssembler : IEmailInquiryLeadAssembler
                 businessUnitId, assemblyId, EmailInquiryHoldReasons.ResultUnreadable,
                 "This message was processed but nothing usable could be read back from it. "
                 + "It needs a look.", ct);
+            return new AssembleOutcome(null, null);
+        }
+
+        // Header values control inquiry identity, response deadlines and contractual scope.
+        // Ordinal precedence is valid only for filling a missing value; it must never silently
+        // choose between two non-empty, contradictory source statements.
+        var headerConflictCount = EmailInquiryCommercialConflictDetector.CountHeaderConflicts(componentHeaders);
+        if (headerConflictCount > 0)
+        {
+            _log.LogWarning(
+                "Assembly {AssemblyId} has {ConflictCount} cross-component critical-header "
+                + "conflict(s); no Lead is created until the source contradiction is reviewed.",
+                assemblyId, headerConflictCount);
+            await _coordinator.HoldForReviewAsync(
+                businessUnitId, assemblyId,
+                EmailInquiryHoldReasons.CrossComponentHeaderConflict,
+                EmailInquiryHoldReasons.CrossComponentHeaderConflictDetail, ct);
             return new AssembleOutcome(null, null);
         }
 
