@@ -349,7 +349,19 @@ public sealed class EmailInquiryLeadAssembler : IEmailInquiryLeadAssembler
                 continue;
             }
 
-            header ??= parsed;
+            // The body is ordinal zero, so `header ??= parsed` made the covering note the
+            // permanent owner of every header field.  That is usually the component LEAST
+            // likely to state the buyer's RFQ reference, organisation, closing date and
+            // delivery terms; the attachment parser then found those values and assembly
+            // silently threw them away.  Besides producing visibly incomplete Leads, a resend
+            // of the same attachment lost the stable RFQ identity before reconciliation and
+            // was raised as a possible match instead of binding to the canonical Lead.
+            //
+            // Preserve component precedence for values that are actually present, but fill
+            // every missing header field from later components.  Items remain merged below and
+            // are never copied through this helper.  This is intentionally deterministic:
+            // ordinal order decides provenance, not whichever worker happened to finish first.
+            header = header is null ? parsed : MergeMissingHeaderFields(header, parsed);
             if (parsed.Items is { Count: > 0 })
             {
                 merged.AddRange(parsed.Items);
@@ -598,6 +610,67 @@ public sealed class EmailInquiryLeadAssembler : IEmailInquiryLeadAssembler
             assemblyId, leadId, businessUnitId, assembly.Components.Count, merged.Count, ordered.Count);
 
         return new AssembleOutcome(leadId, anchorJob);
+    }
+
+    private static LeadExtractionResult MergeMissingHeaderFields(
+        LeadExtractionResult primary,
+        LeadExtractionResult supplement)
+    {
+        static bool Missing(string? value) => string.IsNullOrWhiteSpace(value);
+        static string? Value(string? primaryValue, string? supplementValue) =>
+            Missing(primaryValue) ? supplementValue : primaryValue;
+        static double? Confidence(string? primaryValue, double? primaryConfidence,
+            string? supplementValue, double? supplementConfidence) =>
+            Missing(primaryValue) && !Missing(supplementValue)
+                ? supplementConfidence
+                : primaryConfidence;
+
+        return primary with
+        {
+            Rfqno = Value(primary.Rfqno, supplement.Rfqno),
+            RfqnoConfidence = Confidence(primary.Rfqno, primary.RfqnoConfidence, supplement.Rfqno, supplement.RfqnoConfidence),
+            BuyersName = Value(primary.BuyersName, supplement.BuyersName),
+            BuyersNameConfidence = Confidence(primary.BuyersName, primary.BuyersNameConfidence, supplement.BuyersName, supplement.BuyersNameConfidence),
+            RecDate = Value(primary.RecDate, supplement.RecDate),
+            RecDateConfidence = Confidence(primary.RecDate, primary.RecDateConfidence, supplement.RecDate, supplement.RecDateConfidence),
+            BidClosingDate = Value(primary.BidClosingDate, supplement.BidClosingDate),
+            BidClosingDateConfidence = Confidence(primary.BidClosingDate, primary.BidClosingDateConfidence, supplement.BidClosingDate, supplement.BidClosingDateConfidence),
+            BiddingDecision = Value(primary.BiddingDecision, supplement.BiddingDecision),
+            BiddingDecisionConfidence = Confidence(primary.BiddingDecision, primary.BiddingDecisionConfidence, supplement.BiddingDecision, supplement.BiddingDecisionConfidence),
+            AcknowledgmentDate = Value(primary.AcknowledgmentDate, supplement.AcknowledgmentDate),
+            AcknowledgmentDateConfidence = Confidence(primary.AcknowledgmentDate, primary.AcknowledgmentDateConfidence, supplement.AcknowledgmentDate, supplement.AcknowledgmentDateConfidence),
+            SubDate = Value(primary.SubDate, supplement.SubDate),
+            SubDateConfidence = Confidence(primary.SubDate, primary.SubDateConfidence, supplement.SubDate, supplement.SubDateConfidence),
+            HeaderRemarks = Value(primary.HeaderRemarks, supplement.HeaderRemarks),
+            HeaderRemarksConfidence = Confidence(primary.HeaderRemarks, primary.HeaderRemarksConfidence, supplement.HeaderRemarks, supplement.HeaderRemarksConfidence),
+            OpportunityNo = Value(primary.OpportunityNo, supplement.OpportunityNo),
+            OpportunityNoConfidence = Confidence(primary.OpportunityNo, primary.OpportunityNoConfidence, supplement.OpportunityNo, supplement.OpportunityNoConfidence),
+            Rfqtype = Value(primary.Rfqtype, supplement.Rfqtype),
+            RfqtypeConfidence = Confidence(primary.Rfqtype, primary.RfqtypeConfidence, supplement.Rfqtype, supplement.RfqtypeConfidence),
+            DurationAgreement = Value(primary.DurationAgreement, supplement.DurationAgreement),
+            DurationAgreementConfidence = Confidence(primary.DurationAgreement, primary.DurationAgreementConfidence, supplement.DurationAgreement, supplement.DurationAgreementConfidence),
+            InquiryType = Value(primary.InquiryType, supplement.InquiryType),
+            InquiryTypeConfidence = Confidence(primary.InquiryType, primary.InquiryTypeConfidence, supplement.InquiryType, supplement.InquiryTypeConfidence),
+            CustomerCompanyName = Value(primary.CustomerCompanyName, supplement.CustomerCompanyName),
+            CustomerCompanyNameConfidence = Confidence(primary.CustomerCompanyName, primary.CustomerCompanyNameConfidence, supplement.CustomerCompanyName, supplement.CustomerCompanyNameConfidence),
+            CustomerCompanyEvidence = Value(primary.CustomerCompanyEvidence, supplement.CustomerCompanyEvidence),
+            CustomerCompanyRegistrationId = Value(primary.CustomerCompanyRegistrationId, supplement.CustomerCompanyRegistrationId),
+            CustomerCompanyRegistrationIdConfidence = Confidence(primary.CustomerCompanyRegistrationId, primary.CustomerCompanyRegistrationIdConfidence, supplement.CustomerCompanyRegistrationId, supplement.CustomerCompanyRegistrationIdConfidence),
+            CustomerBuyerEmail = Value(primary.CustomerBuyerEmail, supplement.CustomerBuyerEmail),
+            CustomerBuyerEmailConfidence = Confidence(primary.CustomerBuyerEmail, primary.CustomerBuyerEmailConfidence, supplement.CustomerBuyerEmail, supplement.CustomerBuyerEmailConfidence),
+            CustomerPortalName = Value(primary.CustomerPortalName, supplement.CustomerPortalName),
+            CustomerPortalNameConfidence = Confidence(primary.CustomerPortalName, primary.CustomerPortalNameConfidence, supplement.CustomerPortalName, supplement.CustomerPortalNameConfidence),
+            SupplierNameOnDocument = Value(primary.SupplierNameOnDocument, supplement.SupplierNameOnDocument),
+            SupplierNameOnDocumentConfidence = Confidence(primary.SupplierNameOnDocument, primary.SupplierNameOnDocumentConfidence, supplement.SupplierNameOnDocument, supplement.SupplierNameOnDocumentConfidence),
+            SupplierAccountRefOnDocument = Value(primary.SupplierAccountRefOnDocument, supplement.SupplierAccountRefOnDocument),
+            SupplierAccountRefOnDocumentConfidence = Confidence(primary.SupplierAccountRefOnDocument, primary.SupplierAccountRefOnDocumentConfidence, supplement.SupplierAccountRefOnDocument, supplement.SupplierAccountRefOnDocumentConfidence),
+            DeliveryLocation = Value(primary.DeliveryLocation, supplement.DeliveryLocation),
+            DeliveryLocationConfidence = Confidence(primary.DeliveryLocation, primary.DeliveryLocationConfidence, supplement.DeliveryLocation, supplement.DeliveryLocationConfidence),
+            RequiredDeliveryDate = Value(primary.RequiredDeliveryDate, supplement.RequiredDeliveryDate),
+            RequiredDeliveryDateConfidence = Confidence(primary.RequiredDeliveryDate, primary.RequiredDeliveryDateConfidence, supplement.RequiredDeliveryDate, supplement.RequiredDeliveryDateConfidence),
+            AgreementReference = Value(primary.AgreementReference, supplement.AgreementReference),
+            AgreementReferenceConfidence = Confidence(primary.AgreementReference, primary.AgreementReferenceConfidence, supplement.AgreementReference, supplement.AgreementReferenceConfidence)
+        };
     }
 
     /// <summary>
