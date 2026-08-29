@@ -271,6 +271,32 @@ public class EmailTriageTests
         Assert.Contains(EmailTriageReasonCodes.QtyUomPattern, decision.ReasonCodes);
     }
 
+    [Theory]
+    [InlineData("Resending the attached schedule. The covering note contains no RFQ reference.")]
+    [InlineData("The note is for information only; please review the attached requirements.")]
+    [InlineData("No quotation is requested in this email body. See the attached bid schedule.")]
+    public void ExplicitNonInquiryLanguageCannotDiscardAnUnreadAttachment(string body)
+    {
+        var decision = DeterministicEmailTriage.Evaluate(Signals(
+            subject: "Attached schedule",
+            body: body,
+            hasAttachments: true));
+
+        Assert.NotEqual(EmailTriageOutcome.Noise, decision.Outcome);
+        Assert.DoesNotContain(EmailTriageReasonCodes.ExplicitNonInquiryIntent, decision.ReasonCodes);
+    }
+
+    [Fact]
+    public void ExplicitNonInquiryWithoutAnAttachmentRemainsNoise()
+    {
+        var decision = DeterministicEmailTriage.Evaluate(Signals(
+            subject: "Product announcement",
+            body: "No quotation is requested. Contact us if you want the brochure."));
+
+        Assert.Equal(EmailTriageOutcome.Noise, decision.Outcome);
+        Assert.Equal([EmailTriageReasonCodes.ExplicitNonInquiryIntent], decision.ReasonCodes);
+    }
+
     // --------------------------------------------------------- commercial non-inquiry
 
     [Fact]
