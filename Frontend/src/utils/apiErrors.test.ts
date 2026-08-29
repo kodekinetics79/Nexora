@@ -343,6 +343,34 @@ describe('toPresentableError — RFC 7807 ProblemDetails', () => {
     );
     expect(result.message).toBe('This RFQ was modified by another user. Reload before saving.');
   });
+
+  it('keeps a bounded governed evidence refusal actionable instead of falling back to its title', () => {
+    const detail = 'Bid revision line 9223372036854775807 cannot be committed or promoted because '
+      + 'the current source lacks exact evidence for item identity/description, quantity, unit of measure. '
+      + 'Record those source fields or complete a governed extraction approval for the current revision '
+      + 'with actor, timestamp, reason, and before/after snapshots.';
+
+    expect(detail.length).toBeGreaterThan(300);
+    const result = toPresentableError(axiosError({
+      status: 409,
+      data: problem({ status: 409, title: 'Participation refused', detail }),
+    }));
+
+    expect(result.message).toBe(detail);
+    expect(result.message).not.toBe('Participation refused');
+  });
+
+  it('still rejects an otherwise-safe server message above the product-copy bound', () => {
+    const detail = `A governed action was refused. ${'Review the source evidence. '.repeat(25)}`;
+
+    expect(detail.length).toBeGreaterThan(500);
+    const result = toPresentableError(axiosError({
+      status: 409,
+      data: problem({ status: 409, title: 'Participation refused', detail }),
+    }));
+
+    expect(result.message).toBe('Participation refused');
+  });
 });
 
 /*
