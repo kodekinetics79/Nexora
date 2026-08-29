@@ -3,6 +3,7 @@ using ERP_RFQ_Automation.AI;
 using ERP_RFQ_Automation.Extraction;
 using ERP_RFQ_Automation.Ingestion.Assembly;
 using ERP_RFQ_Automation.Ingestion.Triage;
+using ERP_RFQ_Automation.LeadIdentity;
 using ERP_RFQ_Automation.Models;
 using ERP_RFQ_Automation.MultiTenancy;
 using ERP_RFQ_Automation.Tests.Support;
@@ -77,6 +78,14 @@ public sealed class EmailInquiryIdenticalContentPostgreSqlTests(PostgreSqlTestDa
         + "GSK-3009,Ring joint gasket R-24 soft iron,8,EA\n"
         + "GSK-3008,Spiral wound gasket DN80 CL150,25,EA\n"
         + "GSK-3007,Spiral wound gasket DN50 CL150,60,EA\n";
+
+    private const string HeaderBearingValves =
+        "rfqno,buyername,productname,quantity,manufacturerpartnumber\n"
+        + "RFQ-LIVE-HEADER-880,Northstar Buyer,Motor starter,1,MOTOR-NEW\n";
+
+    private const string HeaderBearingGaskets =
+        "rfqno,buyername,productname,quantity,manufacturerpartnumber\n"
+        + "RFQ-LIVE-HEADER-880,Northstar Buyer,Seal kit,4,SEAL-NEW\n";
 
     public Task InitializeAsync() => Task.CompletedTask;
 
@@ -243,6 +252,63 @@ public sealed class EmailInquiryIdenticalContentPostgreSqlTests(PostgreSqlTestDa
         Assert.NotEqual(firstAssemblyId, secondAssemblyId);
     }
 
+    [Fact]
+    public async Task Attachment_header_identity_survives_assembly_and_exact_replay_reuses_the_canonical_Lead()
+    {
+        const long bu = 943_003;
+        const string firstMessageId = "attachment-header-first@buyer.example";
+        const string replayMessageId = "attachment-header-replay@buyer.example";
+
+        await SeedAsync(bu, firstMessageId, replayMessageId);
+
+        var llm = new EmailToLeadHarness.RefusingLlm();
+        await using var services = BuildGraph(llm);
+
+        // This is the live production shape: the covering note says only that the schedule is
+        // attached, while the attachment owns the customer's stable RFQ reference. The replay's
+        // body bytes deliberately differ, so the message cannot deduplicate merely because the
+        // ordinal-zero anchor job has the same hash.
+        var firstBody = "Dear Nexora, please quote the attached schedule. Regards, Buyer";
+        var replayBody = "Hello, resending the same attached schedule for your quotation. Regards, Buyer";
+        var first = BuildMessage(firstMessageId, "Motor schedule", "buyer@customer.example",
+            firstBody, HeaderBearingValves, HeaderBearingGaskets);
+        var replay = BuildMessage(replayMessageId, "Motor schedule - replay", "buyer@customer.example",
+            replayBody, HeaderBearingValves, HeaderBearingGaskets);
+
+        var (firstAssemblyId, _) = await CaptureAndScheduleAsync(services, bu, first, firstBody);
+        await EmailToLeadHarness.DrainQueueAsync(services, bu);
+        var (replayAssemblyId, _) = await CaptureAndScheduleAsync(services, bu, replay, replayBody);
+        await EmailToLeadHarness.DrainQueueAsync(services, bu);
+
+        using var scope = services.CreateScope();
+        using var tenant = scope.ServiceProvider.GetRequiredService<ITenantScopeAccessor>().Push(bu);
+        var context = scope.ServiceProvider.GetRequiredService<ErpRfqAutomationContext>();
+        var assemblies = await context.EmailInquiryAssemblies.AsNoTracking()
+            .Where(x => x.BusinessUnitId == bu).OrderBy(x => x.Id).ToListAsync();
+        Assert.Equal(2, assemblies.Count);
+        Assert.All(assemblies, assembly => Assert.Equal(EmailInquiryAssemblyStatus.Assembled, assembly.Status));
+        Assert.Equal(firstAssemblyId, assemblies[0].Id);
+        Assert.Equal(replayAssemblyId, assemblies[1].Id);
+        Assert.True(assemblies[0].AssembledLeadId is > 0);
+        Assert.Equal(assemblies[0].AssembledLeadId, assemblies[1].AssembledLeadId);
+
+        var lead = await context.Leads.AsNoTracking().SingleAsync(x => x.BusinessUnitId == bu);
+        Assert.Equal("RFQ-LIVE-HEADER-880", lead.Rfqno);
+        Assert.Equal("Northstar Buyer", lead.BuyersName);
+        Assert.Equal(2, await context.LeadItems.AsNoTracking().CountAsync(x => x.LeadId == lead.Id));
+        Assert.Equal(2, await context.Set<LeadIngestionOccurrence>().AsNoTracking()
+            .CountAsync(x => x.BusinessUnitId == bu && x.LeadId == lead.Id));
+        Assert.Equal(1, await context.Set<LeadIngestionOccurrence>().AsNoTracking()
+            .CountAsync(x => x.BusinessUnitId == bu && x.LeadId == lead.Id
+                && x.Classification == ERP_RFQ_Automation.LeadIdentity.LeadOccurrenceClassification.ExactDuplicate));
+        Assert.Equal(0, await context.Set<LeadIngestionOccurrence>().AsNoTracking()
+            .CountAsync(x => x.BusinessUnitId == bu
+                && x.Classification == LeadOccurrenceClassification.PossibleMatchReviewRequired));
+        Assert.Equal(1, await context.Set<ERP_RFQ_Automation.LeadIdentity.LeadRevision>().AsNoTracking()
+            .CountAsync(x => x.BusinessUnitId == bu && x.LeadId == lead.Id));
+        Assert.Equal(0, llm.CallCount);
+    }
+
     // =====================================================================================
     // DEFECT 2 — Assembled with no Lead
     // =====================================================================================
@@ -384,7 +450,19 @@ public sealed class EmailInquiryIdenticalContentPostgreSqlTests(PostgreSqlTestDa
                 Status = ExtractionOutcomeStatus.Ok,
                 // Header only. A covering note contributes the header; the priced lines come from
                 // the attachments, which is exactly what the barrier merges.
-                Result = Ext.Result([], 0.95) with { Rfqno = reference },
+                // This double must not invent header facts the covering note did not state.
+                // Doing so would make the attachment-header regression prove only RFQ number
+                // composition while silently accepting loss of the attachment's buyer and dates.
+                Result = Ext.Result([], 0.95) with
+                {
+                    Rfqno = reference,
+                    BuyersName = null,
+                    BuyersNameConfidence = null,
+                    RecDate = null,
+                    RecDateConfidence = null,
+                    BidClosingDate = null,
+                    BidClosingDateConfidence = null
+                },
                 ExpectedItemCount = 0,
                 ExtractedItemCount = 0,
                 ProcessingPath = ExtractionProcessingPath.NativeParser
