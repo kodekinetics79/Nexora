@@ -1002,12 +1002,12 @@ test('38 production readiness reconciles runtime health and tenant queues', asyn
     blockingReasons: string[];
     healthChecks: Array<{ name: string; status: string }>;
     queues: Array<{ label: string; pending: number; inFlight: number; deadLetter: number }>;
-    aiLast30Days: { local: number; external: number; externalSharePercent: number; unresolved: number };
+    aiExternalDependency: { local: number; external: number; authorizedExternal: number; externalSharePercent: number; ceilingPercent: number; ceilingBreached: boolean; unresolved: number };
   }>(await api(page, token, 'get', '/api/operations/readiness'));
 
   expect(readiness.healthChecks.length).toBeGreaterThanOrEqual(5);
   expect(readiness.queues).toHaveLength(3);
-  expect(readiness.aiLast30Days.externalSharePercent).toBeLessThanOrEqual(10);
+  expect(readiness.aiExternalDependency.ceilingBreached).toBe(false);
 
   await page.goto('/admin/operations');
   await expect(page.getByRole('heading', { name: 'Production readiness' })).toBeVisible();

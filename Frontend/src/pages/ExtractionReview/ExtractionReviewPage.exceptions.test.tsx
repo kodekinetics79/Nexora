@@ -66,7 +66,7 @@ describe('Extraction Review exception boundary', () => {
       queues: [
         { key: 'extraction', label: 'Lead extraction', pending: 0, inFlight: 0, deadLetter: 50 },
       ],
-      aiLast30Days: { total: 50, local: 0, external: 0, unresolved: 0, externalSharePercent: 0 },
+      aiExternalDependency: { total: 50, local: 50, external: 0, authorizedExternal: 0, unresolved: 0, externalSharePercent: 0, ceilingPercent: 10, windowSize: 100, ceilingBreached: false },
     });
   });
 

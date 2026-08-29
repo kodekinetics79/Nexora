@@ -20,12 +20,16 @@ export type OperationsReadiness = {
   blockingReasons: string[];
   healthChecks: ReadinessCheck[];
   queues: OperationsQueue[];
-  aiLast30Days: {
+  aiExternalDependency: {
     total: number;
     local: number;
     external: number;
+    authorizedExternal: number;
     unresolved: number;
     externalSharePercent: number;
+    ceilingPercent: number;
+    windowSize: number;
+    ceilingBreached: boolean;
   };
 };
 
