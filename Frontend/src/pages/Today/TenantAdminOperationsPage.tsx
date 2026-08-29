@@ -7,12 +7,14 @@ import {
 import { useNavigate } from 'react-router-dom';
 import userService from '../../api/services/userService';
 import operationalReadinessService from '../../api/services/operationalReadinessService';
-import type { DeadLetterRecoveryResult } from '../../api/services/operationalReadinessService';
+import type { DeadLetterRecoveryResult, ExtractionDeadLetter } from '../../api/services/operationalReadinessService';
 import type { IntelligenceMetric } from '../../api/services/commercialIntelligenceService';
 import { useAuth } from '../../context/AuthContext';
 import { MetricGrid, PageShell, QueryState, ResponsiveTable, StatusChip } from '../SalesManagement/CommercialPagePrimitives';
 
 type RecoveryDialog = { jobId: number; fileName: string; idempotencyKey: string };
+
+export const canRetryExtractionDeadLetter = (item: ExtractionDeadLetter) => item.canRetry;
 
 export default function TenantAdminOperationsPage() {
   const navigate = useNavigate();
@@ -85,8 +87,8 @@ export default function TenantAdminOperationsPage() {
           <ResponsiveTable label="Tenant queue status"><Table size="small"><TableHead><TableRow><TableCell>Workflow</TableCell><TableCell align="right">Pending</TableCell><TableCell align="right">In flight</TableCell><TableCell align="right">Dead letter</TableCell></TableRow></TableHead><TableBody>
             {readiness.data.queues.map(queue => <TableRow hover key={queue.key}><TableCell>{queue.label}</TableCell><TableCell align="right">{queue.pending.toLocaleString()}</TableCell><TableCell align="right">{queue.inFlight.toLocaleString()}</TableCell><TableCell align="right">{queue.deadLetter.toLocaleString()}</TableCell></TableRow>)}
           </TableBody></Table></ResponsiveTable>
-          <Alert severity={readiness.data.aiLast30Days.externalSharePercent > 10 ? 'error' : 'info'}>
-            AI processing, last 30 days: {readiness.data.aiLast30Days.local.toLocaleString()} local, {readiness.data.aiLast30Days.external.toLocaleString()} external ({readiness.data.aiLast30Days.externalSharePercent.toLocaleString()}%), {readiness.data.aiLast30Days.unresolved.toLocaleString()} unresolved.
+          <Alert severity={readiness.data.aiExternalDependency.ceilingBreached ? 'error' : 'info'}>
+            AI processing, latest {readiness.data.aiExternalDependency.windowSize.toLocaleString()} governed calls: {readiness.data.aiExternalDependency.local.toLocaleString()} local, {readiness.data.aiExternalDependency.external.toLocaleString()} external ({readiness.data.aiExternalDependency.authorizedExternal.toLocaleString()} authorized). Unauthorized external dependency is {readiness.data.aiExternalDependency.externalSharePercent.toLocaleString()}% against the configured {readiness.data.aiExternalDependency.ceilingPercent.toLocaleString()}% ceiling; {readiness.data.aiExternalDependency.unresolved.toLocaleString()} unresolved.
           </Alert>
         </>}
       </QueryState>
@@ -116,7 +118,7 @@ export default function TenantAdminOperationsPage() {
             <TableCell sx={{ whiteSpace: 'nowrap' }}>{item.attempts} / {item.maxAttempts}</TableCell>
             <TableCell><StatusChip value={item.resolution} /></TableCell>
             <TableCell>{new Date(item.updatedOn).toLocaleString()}</TableCell>
-            <TableCell align="right"><Stack spacing={1} sx={{ alignItems: 'flex-end' }}><Button size="small" onClick={() => navigate(`/procurement/leads/ingestion/${encodeURIComponent(item.batchId)}`)}>Open batch</Button>{canRecoverExtraction && <Button size="small" variant="contained" sx={{ whiteSpace: 'nowrap' }} onClick={() => openRecovery(item.jobId, item.fileName)}>Verify and retry</Button>}</Stack></TableCell>
+            <TableCell align="right"><Stack spacing={1} sx={{ alignItems: 'flex-end' }}><Button size="small" onClick={() => navigate(`/procurement/leads/ingestion/${encodeURIComponent(item.batchId)}`)}>Open batch</Button>{canRecoverExtraction && canRetryExtractionDeadLetter(item) && <Button size="small" variant="contained" sx={{ whiteSpace: 'nowrap' }} onClick={() => openRecovery(item.jobId, item.fileName)}>Verify and retry</Button>}{!canRetryExtractionDeadLetter(item) && <Typography variant="caption" color="text.secondary">Terminal — follow the recovery guidance</Typography>}</Stack></TableCell>
           </TableRow>)}
         </TableBody></Table></ResponsiveTable>
       </QueryState>

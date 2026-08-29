@@ -61,6 +61,7 @@ public sealed class ExtractionDeadLetterServiceTests
         Assert.Equal(job.Id, listed.JobId);
         Assert.Equal("SourceObjectUnavailable", listed.Resolution);
         Assert.False(listed.BlocksReadiness);
+        Assert.False(listed.CanRetry);
         Assert.Equal(ExtractionDeadLetterService.SourceLostOperatorAction, listed.OperatorAction);
         Assert.Equal(ExtractionStatus.DeadLetter,
             (await db.Set<ExtractionJob>().SingleAsync(x => x.Id == job.Id)).Status);
@@ -82,6 +83,7 @@ public sealed class ExtractionDeadLetterServiceTests
         Assert.Equal(job.Id, listed.JobId);
         Assert.Equal("Open", listed.Resolution);
         Assert.True(listed.BlocksReadiness);
+        Assert.True(listed.CanRetry);
         Assert.NotEqual(ExtractionDeadLetterService.SourceLostOperatorAction, listed.OperatorAction);
     }
 
@@ -153,6 +155,7 @@ public sealed class ExtractionDeadLetterServiceTests
         Assert.Equal(ExtractionDeadLetterAction.EvidenceIntegrityFailure,
             (await db.ExtractionDeadLetterEvents.SingleAsync()).Action);
         Assert.True((await service.ListAsync(7, default)).Single().BlocksReadiness);
+        Assert.False((await service.ListAsync(7, default)).Single().CanRetry);
         var rejectedSource = await db.Set<SourceDocument>().SingleAsync(x => x.Id == sourceId);
         Assert.Equal(DocumentSecurityStatus.Rejected, rejectedSource.SecurityStatus);
         Assert.Null(rejectedSource.MalwareVerdictStatus);
@@ -195,6 +198,7 @@ public sealed class ExtractionDeadLetterServiceTests
             DateTimeOffset.UtcNow, TimeSpan.FromDays(1)));
         Assert.Equal(ExtractionDeadLetterAction.MalwareDetected,
             (await db.ExtractionDeadLetterEvents.SingleAsync()).Action);
+        Assert.False((await service.ListAsync(7, default)).Single().CanRetry);
 
         var retry = new ExtractionDeadLetterService(
             db, new AvailableStorage(), new Scanner(MalwareScanStatus.Clean));
@@ -202,6 +206,62 @@ public sealed class ExtractionDeadLetterServiceTests
             7, job.Id, "operator@example.com",
             new("A malware finding cannot be softened by retry.", "malware-7-2"), default));
         Assert.Single(await db.ExtractionDeadLetterEvents.ToListAsync());
+    }
+
+    [Fact]
+    public async Task OcrPixelLimitRefusal_BlocksReadinessButCannotRetryUnchangedBytes()
+    {
+        using var testDb = new TestDb();
+        await using var db = testDb.ContextFor(7);
+        var job = await SeedDeadLetterAsync(db, 7);
+        job.LastError = "Document parsing refused [ocr_pixel_limit_exceeded]: page is too large.";
+        await db.SaveChangesAsync();
+        var service = new ExtractionDeadLetterService(
+            db, new AvailableStorage(), new Scanner(MalwareScanStatus.Clean),
+            new FailIfEnteredAdmission());
+
+        var listed = Assert.Single(await service.ListAsync(7, default));
+        Assert.Equal(ExtractionDeadLetterService.OcrPixelLimitExceededCategory, listed.FailureCategory);
+        Assert.True(listed.BlocksReadiness);
+        Assert.False(listed.CanRetry);
+        Assert.Contains("Reduce", listed.OperatorAction, StringComparison.OrdinalIgnoreCase);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.RecoverAsync(
+            7, job.Id, "operator@example.com",
+            new("Retry unchanged oversized image.", "ocr-limit-7-1"), default));
+        Assert.Empty(await db.ExtractionDeadLetterEvents.ToListAsync());
+    }
+
+    [Theory]
+    [InlineData("This PDF is password-protected, so Nexora cannot open it.", "PASSWORD_PROTECTED", "unlocked")]
+    [InlineData("[PASSWORD_PROTECTED] encrypted source", "PASSWORD_PROTECTED", "unlocked")]
+    [InlineData("[UNSUPPORTED_DOCUMENT] no reader", "UNSUPPORTED_DOCUMENT", "replacement")]
+    [InlineData("The legacy .doc file passed security inspection but the local binary reader could not parse it; an isolated converter is not configured.", "UNSUPPORTED_DOCUMENT", "replacement")]
+    public async Task TerminalParserRefusal_IsClassifiedAndCannotRetryUnchangedBytes(
+        string lastError,
+        string expectedCategory,
+        string expectedGuidance)
+    {
+        using var testDb = new TestDb();
+        await using var db = testDb.ContextFor(7);
+        var job = await SeedDeadLetterAsync(db, 7);
+        job.LastError = lastError;
+        await db.SaveChangesAsync();
+        var service = new ExtractionDeadLetterService(
+            db, new AvailableStorage(), new Scanner(MalwareScanStatus.Clean),
+            new FailIfEnteredAdmission());
+
+        var listed = Assert.Single(await service.ListAsync(7, default));
+        Assert.Equal(expectedCategory, listed.FailureCategory);
+        Assert.True(listed.BlocksReadiness);
+        Assert.False(listed.CanRetry);
+        Assert.Contains(expectedGuidance, listed.OperatorAction, StringComparison.OrdinalIgnoreCase);
+
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(() => service.RecoverAsync(
+            7, job.Id, "operator@example.com",
+            new("Retry unchanged terminal source.", $"terminal-{expectedCategory}"), default));
+        Assert.Contains("cannot succeed", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(await db.ExtractionDeadLetterEvents.ToListAsync());
     }
 
     [Fact]
@@ -383,5 +443,12 @@ public sealed class ExtractionDeadLetterServiceTests
                 MalwareScanStatus.Unavailable => MalwareScanResult.Unavailable("test-scanner", "offline"),
                 _ => MalwareScanResult.Error("test-scanner", "error"),
             });
+    }
+
+    private sealed class FailIfEnteredAdmission : IExtractionHeavyWorkAdmission
+    {
+        public ValueTask<IAsyncDisposable> EnterAsync(CancellationToken ct) =>
+            throw new InvalidOperationException(
+                "Terminal recovery entered heavy-work admission instead of failing closed.");
     }
 }

@@ -153,7 +153,7 @@ test('dead-letter recovery requires Users edit and Leads create together', async
     body: JSON.stringify({
       checkedAt: '2026-07-30T12:00:00Z', deploymentReadiness: 'Degraded', blockingReasons: [],
       healthChecks: [], queues: [],
-      aiLast30Days: { total: 0, local: 0, external: 0, unresolved: 0, externalSharePercent: 0 },
+      aiExternalDependency: { total: 0, local: 0, external: 0, authorizedExternal: 0, unresolved: 0, externalSharePercent: 0, ceilingPercent: 10, windowSize: 100, ceilingBreached: false },
     }),
   }));
   await page.route('**/api/operations/readiness/extraction-dead-letters', route => route.fulfill({

@@ -407,6 +407,7 @@ public sealed partial class AcceptanceJourneyTests : IAsyncLifetime
             Assert.Equal(2, jobs.Count);
 
             var dead = jobs.Single(j => j.Status == ExtractionStatus.DeadLetter);
+            Assert.Contains(PasswordProtectedDocumentException.Marker, dead.LastError);
             Assert.Contains("password-protected", dead.LastError);
 
             var good = jobs.Single(j => j.Status == ExtractionStatus.Succeeded);

@@ -20,13 +20,30 @@ export type OperationsReadiness = {
   blockingReasons: string[];
   healthChecks: ReadinessCheck[];
   queues: OperationsQueue[];
-  aiLast30Days: {
+  aiExternalDependency: {
     total: number;
     local: number;
     external: number;
+    authorizedExternal: number;
     unresolved: number;
     externalSharePercent: number;
+    ceilingPercent: number;
+    windowSize: number;
+    ceilingBreached: boolean;
   };
+};
+
+type LegacyAiOperationsSummary = {
+  total: number;
+  local: number;
+  external: number;
+  unresolved: number;
+  externalSharePercent: number;
+};
+
+type OperationsReadinessWire = Omit<OperationsReadiness, 'aiExternalDependency'> & {
+  aiExternalDependency?: OperationsReadiness['aiExternalDependency'];
+  aiLast30Days?: LegacyAiOperationsSummary;
 };
 
 export type ExtractionDeadLetter = {
@@ -42,6 +59,8 @@ export type ExtractionDeadLetter = {
   updatedOn: string;
   resolution: string;
   blocksReadiness: boolean;
+  /** Server-owned recoverability decision; independent from deployment readiness impact. */
+  canRetry: boolean;
   /**
    * What an operator must DO about `failureCategory`, in words. Absent when the
    * category says it all, and absent from older backends. Never the raw stored
@@ -60,11 +79,51 @@ export type DeadLetterRecoveryResult = {
   idempotentReplay: boolean;
 };
 
+/** Keeps the page available while Vercel and the backend roll out in either order. */
+export const normalizeOperationsReadiness = (wire: OperationsReadinessWire): OperationsReadiness => {
+  if (wire.aiExternalDependency) {
+    return { ...wire, aiExternalDependency: wire.aiExternalDependency };
+  }
+  const legacy = wire.aiLast30Days;
+  const share = legacy?.externalSharePercent ?? 0;
+  return {
+    ...wire,
+    aiExternalDependency: {
+      total: legacy?.total ?? 0,
+      local: legacy?.local ?? 0,
+      external: legacy?.external ?? 0,
+      authorizedExternal: 0,
+      unresolved: legacy?.unresolved ?? 0,
+      externalSharePercent: share,
+      ceilingPercent: 10,
+      windowSize: legacy?.total ?? 0,
+      ceilingBreached: share > 10,
+    },
+  };
+};
+
+const terminalLegacyCategories = new Set([
+  'EVIDENCE_INTEGRITY', 'MALWARE', 'OCR_PIXEL_LIMIT_EXCEEDED',
+  'PASSWORD_PROTECTED', 'UNSUPPORTED_DOCUMENT',
+]);
+
+export const normalizeExtractionDeadLetter = (item: ExtractionDeadLetter): ExtractionDeadLetter => ({
+  ...item,
+  // Older backends do not return CanRetry. Fail closed for terminal dispositions/categories,
+  // while preserving recovery for ordinary open provider/time-out/parser failures.
+  canRetry: typeof item.canRetry === 'boolean'
+    ? item.canRetry
+    : item.resolution !== 'SourceObjectUnavailable'
+      && !terminalLegacyCategories.has(item.failureCategory),
+});
+
 const operationalReadinessService = {
-  get: async () => (await axiosInstance.get<OperationsReadiness>('/api/operations/readiness')).data,
+  get: async () => normalizeOperationsReadiness(
+    (await axiosInstance.get<OperationsReadinessWire>('/api/operations/readiness')).data,
+  ),
   getExtractionDeadLetters: async () => (
     await axiosInstance.get<ExtractionDeadLetter[]>('/api/operations/readiness/extraction-dead-letters')
-  ).data,
+  ).data.map(normalizeExtractionDeadLetter),
   recoverExtractionDeadLetter: async (jobId: number, reason: string, idempotencyKey: string) => (
     await axiosInstance.post<DeadLetterRecoveryResult>(
       `/api/operations/readiness/extraction-dead-letters/${jobId}/recover`,

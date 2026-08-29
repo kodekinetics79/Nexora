@@ -89,16 +89,12 @@ public sealed class OperationsReadinessController(
                 group.Count(x => x.DeadLetteredOn != null)))
             .SingleOrDefaultAsync(ct) ?? new QueueCounts(0, 0, 0);
 
-        var since = DateTime.UtcNow.AddDays(-30);
-        var ai = await db.AiRequests.AsNoTracking()
-            .Where(x => x.BusinessUnitId == tenantId && x.CreatedOn >= since)
-            .GroupBy(_ => 1)
-            .Select(group => new AiOperationsSummary(
-                group.Count(),
-                group.Count(x => x.ProviderClass == AiProviderClass.Local),
-                group.Count(x => x.ProviderClass == AiProviderClass.External),
-                group.Count(x => x.Status == AiCallStatuses.Reserved || x.Status == AiCallStatuses.Running)))
-            .SingleOrDefaultAsync(ct) ?? new AiOperationsSummary(0, 0, 0, 0);
+        var ceiling = await db.AiProcessingPolicies.AsNoTracking()
+            .Where(x => x.BusinessUnitId == tenantId)
+            .Select(x => (decimal?)x.ExternalDependencyCeilingPercent)
+            .SingleOrDefaultAsync(ct) ?? 10m;
+        var aiSummary = await AiExternalDependencyEvaluator.EvaluateAsync(
+            db.AiRequests, tenantId, ceiling, ct);
 
         var queues = new[]
         {
@@ -112,17 +108,13 @@ public sealed class OperationsReadinessController(
             new QueueStatus("quote-delivery", "Customer quote delivery",
                 delivery.Pending, delivery.InFlight, delivery.DeadLetter)
         };
-        var aiSummary = ai with
-        {
-            ExternalSharePercent = ai.Total == 0 ? 0 : Math.Round(100m * ai.External / ai.Total, 1)
-        };
         var blockingReasons = health.Entries
             .Where(entry => entry.Value.Status == HealthStatus.Unhealthy)
             .Select(entry => $"Dependency {entry.Key} is unhealthy.")
             .Concat(queues.Where(queue => queue.DeadLetter > 0)
                 .Select(queue => $"{queue.Label} has {queue.DeadLetter} dead-letter item(s)."))
-            .Concat(aiSummary.ExternalSharePercent > 10
-                ? [$"External AI share is {aiSummary.ExternalSharePercent}% and exceeds the 10% policy limit."]
+            .Concat(aiSummary.CeilingBreached
+                ? [$"Unauthorized external AI share is {aiSummary.ExternalSharePercent}% and exceeds the configured {aiSummary.CeilingPercent}% policy limit."]
                 : Array.Empty<string>())
             // Stated as a blocking reason rather than a quiet number, because these jobs cannot
             // finish: they will be refused at persistence and the mail behind them will look
@@ -206,7 +198,7 @@ public sealed record OperationsReadinessResponse(
     IReadOnlyList<string> BlockingReasons,
     IReadOnlyList<ReadinessCheck> HealthChecks,
     IReadOnlyList<QueueStatus> Queues,
-    AiOperationsSummary AiLast30Days,
+    AiExternalDependencySnapshot AiExternalDependency,
     LegacyEmailIntakeDrain LegacyEmailIntake);
 
 /// <summary>How much pre-cutover email work is still in flight for this tenant.</summary>
@@ -219,7 +211,3 @@ public sealed record LegacyEmailIntakeDrain(int InFlight, DateTime? OldestCreate
 public sealed record ReadinessCheck(string Name, string Status, double DurationMilliseconds);
 public sealed record QueueStatus(string Key, string Label, int Pending, int InFlight, int DeadLetter);
 public sealed record QueueCounts(int Pending, int InFlight, int DeadLetter);
-public sealed record AiOperationsSummary(int Total, int Local, int External, int Unresolved)
-{
-    public decimal ExternalSharePercent { get; init; }
-}
