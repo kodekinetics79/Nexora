@@ -44,7 +44,7 @@ namespace ERP_RFQ_Automation.Tests;
 /// shared container, per the established pattern.
 /// </summary>
 [Collection(PostgreSqlIntegrationCollection.Name)]
-public sealed class AcceptanceJourneyTests : IAsyncLifetime
+public sealed partial class AcceptanceJourneyTests : IAsyncLifetime
 {
     private const long Tenant = 940_777;
     private static readonly DateTime MailboxBaseline = new(2026, 8, 1, 0, 0, 0, DateTimeKind.Utc);

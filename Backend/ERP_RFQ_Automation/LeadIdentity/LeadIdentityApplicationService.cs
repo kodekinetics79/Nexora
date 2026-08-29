@@ -66,6 +66,23 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
         var fingerprint = Fingerprint(candidate);
         var scope = CustomerScope(candidate, intake.Sender);
         var normalizedRfq = Normalize(candidate.Rfqno ?? candidate.LeadItems.Select(x => x.CustomerRfqno).FirstOrDefault(x => !string.IsNullOrWhiteSpace(x)));
+        // Reconciliation reads and then mutates the tenant's canonical Lead set. The lock must
+        // therefore be stable across every representation of the SAME customer's inquiry. An
+        // earlier key fell back to ExternalSourceId when an extracted schedule omitted the RFQ
+        // number. Two deliveries from the same sender then took different locks, both observed
+        // no Lead, and both minted one. Under an eight-worker mailbox load that produced five
+        // surplus canonical Leads from 200 duplicate/amendment groups.
+        //
+        // Customer scope is deliberately the lock boundary when it exists. It is broader than
+        // one RFQ, but that is the safe trade: unrelated inquiries from one customer wait for a
+        // short database transaction and are still scored independently, while a resend whose
+        // first document states an RFQ and whose second does not can no longer bypass the same
+        // correctness boundary. Tenants and customers remain independent and run in parallel.
+        var reconciliationScope = scope is not null
+            ? $"customer:{scope}"
+            : normalizedRfq is not null
+                ? $"rfq:{normalizedRfq}"
+                : $"source:{intake.ExternalSourceId ?? intake.ContentHash ?? fingerprint}";
         var ownsTransaction = _db.Database.CurrentTransaction is null;
         await using var ownedTransaction = ownsTransaction
             ? await _db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, ct)
@@ -77,7 +94,7 @@ public sealed class LeadIdentityApplicationService : ILeadIdentityApplicationSer
             // differ for two conflicting payloads; without this lock they race to the unique key
             // and the loser surfaces as a 500 instead of a deterministic conflict.
             await _db.Database.ExecuteSqlInterpolatedAsync($"SELECT pg_advisory_xact_lock(hashtextextended({$"lead-reconcile-idempotency:{candidate.BusinessUnitId}:{intake.IdempotencyKey}"}, 0))", ct);
-            await _db.Database.ExecuteSqlInterpolatedAsync($"SELECT pg_advisory_xact_lock(hashtextextended({candidate.BusinessUnitId + ":" + (scope is not null && normalizedRfq is not null ? scope + ":" + normalizedRfq : intake.ExternalSourceId ?? intake.ContentHash ?? fingerprint)}, 0))", ct);
+            await _db.Database.ExecuteSqlInterpolatedAsync($"SELECT pg_advisory_xact_lock(hashtextextended({candidate.BusinessUnitId + ":" + reconciliationScope}, 0))", ct);
         }
         // THE EXTERNAL-DEPENDENCY CEILING IS NOT ENFORCED HERE — DELIBERATELY.
         //

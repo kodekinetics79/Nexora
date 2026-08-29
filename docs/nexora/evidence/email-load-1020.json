@@ -1,0 +1,54 @@
+{
+  "generatedAtUtc": "2026-08-29T00:41:17.728953Z",
+  "seed": 20260828,
+  "scenario": {
+    "total": 1020,
+    "baseInquiries": 200,
+    "logicalRepeats": 200,
+    "quantityAmendments": 200,
+    "multiAttachmentInquiries": 200,
+    "noise": 100,
+    "unsupportedAttachments": 50,
+    "malformedCsv": 30,
+    "byteIdenticalTransportDuplicates": 40
+  },
+  "timing": {
+    "pollSeconds": 55.0435213,
+    "workerSeconds": 620.938399,
+    "totalSeconds": 675.9829858,
+    "messagesPerSecond": 1.50891371739611
+  },
+  "poll": {
+    "MessagesFound": 1020,
+    "MessagesDownloaded": 1020,
+    "MessagesCaptured": 980,
+    "MessagesAlreadyIngested": 0,
+    "ComponentsScheduled": 1830,
+    "MessagesHeldForReview": 0,
+    "MessagesRejected": 100,
+    "MessagesNotAcknowledged": 0,
+    "MessagesDeferred": 0
+  },
+  "durable": {
+    "emailIngests": 980,
+    "assemblies": 980,
+    "extractionJobs": 1830,
+    "extractionJobStates": {
+      "Succeeded": 1800,
+      "DeadLetter": 30
+    },
+    "assemblyStates": {
+      "Assembled": 800,
+      "NeedsReview": 80,
+      "NoInquiry": 100
+    },
+    "leads": 400,
+    "revisions": 600,
+    "rfqs": 0,
+    "activeJobCount": 0,
+    "unsettledAssemblyCount": 0,
+    "missingRawEvidence": 0,
+    "invalidAssembled": 0,
+    "evidenceBytes": 3303328
+  }
+}
