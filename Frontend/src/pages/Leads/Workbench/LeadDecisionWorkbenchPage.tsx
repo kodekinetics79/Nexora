@@ -234,6 +234,9 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
       });
     },
     onSuccess: async (receipt) => {
+      // Promotion makes this revision terminal. A debounced browser draft must not survive the
+      // success navigation and later masquerade as recoverable participation work.
+      decisionGuard.markSaved(decisions);
       enqueueSnackbar(`${receipt.promotedLineCount} approved line${receipt.promotedLineCount === 1 ? '' : 's'} promoted to one RFQ.`, { variant: 'success' });
       await refresh();
       if (commercialAccess.canViewPromotedRfq) {
@@ -435,7 +438,7 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
         agreementReference={workbench.agreementReference}
       />
 
-      {decisionGuard.recoveredDraft ? (
+      {decisionGuard.recoveredDraft && !decisionRecordLocked ? (
         <Alert
           severity="warning"
           sx={{ mb: 1.5 }}

@@ -17,6 +17,11 @@ describe('commercial cross-module link contracts', () => {
     expect(workbenchSource).toContain('if (commercialAccess.canViewPromotedRfq)');
   });
 
+  it('clears and suppresses obsolete browser drafts once promotion makes the revision terminal', () => {
+    expect(workbenchSource).toContain('decisionGuard.markSaved(decisions);');
+    expect(workbenchSource).toContain('decisionGuard.recoveredDraft && !decisionRecordLocked');
+  });
+
   it('uses the shared Owner-or-manager authority rule for participation and promotion', () => {
     expect(workbenchSource).toContain('hasCommercialDecisionAuthority(userData)');
     expect(workbenchSource).not.toContain('const isManager = userData.isManager === true;');
