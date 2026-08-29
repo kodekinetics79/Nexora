@@ -85,4 +85,13 @@ describe('commercial action permission matrix', () => {
       'Supplier History:view',
     ).canCreateOrOpenSourcingCase).toBe(true);
   });
+
+  it('requires RFQ edit and tenant Product visibility to resolve a catalogue product', () => {
+    expect(accessFor('RFQ Management:edit').canResolveRfqProduct).toBe(false);
+    expect(accessFor('Products:view').canResolveRfqProduct).toBe(false);
+    expect(accessFor(
+      'RFQ Management:edit',
+      'Products:view',
+    ).canResolveRfqProduct).toBe(true);
+  });
 });

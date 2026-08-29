@@ -6,7 +6,8 @@ import {
   Box, Typography, Paper, Button, Grid, Stack, Chip,
   Table, TableHead, TableRow, TableCell, TableBody,
   CircularProgress, Divider, Breadcrumbs, Link, Alert, ButtonBase,
-  Drawer, IconButton, LinearProgress, Tooltip,
+  Drawer, IconButton, LinearProgress, Tooltip, Autocomplete, TextField,
+  Dialog, DialogActions, DialogContent, DialogTitle,
 } from '@mui/material';
 import {
   ArrowBack as BackIcon,
@@ -41,6 +42,7 @@ import { formatMoney } from '../../../utils/currency';
 import { formatDateSafe, parseDateSafe } from '../../../utils/dates';
 import { statusLabel } from '../../../utils/statusLabels';
 import { commercialActionPermissions } from '../../../utils/commercialActionPermissions';
+import productService, { type ProductDTO } from '../../../api/services/productService';
 
 const DataField: React.FC<{ label: string; value: string | number | null; bold?: boolean; color?: string }> = ({ label, value, bold = true, color = 'text.primary' }) => (
   <Box sx={{ mb: 1.5 }}>
@@ -126,6 +128,10 @@ const ViewRFQPage: React.FC = () => {
 
   const [lineFilter, setLineFilter] = React.useState('all');
   const [evidenceItemId, setEvidenceItemId] = React.useState<number | null>(null);
+  const [productResolutionItemId, setProductResolutionItemId] = React.useState<number | null>(null);
+  const [productSearch, setProductSearch] = React.useState('');
+  const [selectedProduct, setSelectedProduct] = React.useState<ProductDTO | null>(null);
+  const [productResolutionReason, setProductResolutionReason] = React.useState('');
 
   const { data: rfq, isLoading, isError, refetch } = useQuery({
     queryKey: ['rfq-detail', Number(id)],
@@ -154,6 +160,45 @@ const ViewRFQPage: React.FC = () => {
     queryFn: () => commercialIntelligenceService.getRfqLineResolutions(Number(id)),
     enabled: !!id && hasPermission('RFQ Management'),
     retry: 1,
+  });
+  const productSearchQuery = useQuery({
+    queryKey: ['rfq-product-resolution-search', userData?.businessUnitId, productSearch],
+    queryFn: () => productService.getAll({
+      businessUnitId: userData?.businessUnitId || 0,
+      pageNumber: 1,
+      pageSize: 20,
+      search: productSearch.trim() || undefined,
+      isActive: true,
+    }).then((response) => response.items),
+    enabled: productResolutionItemId !== null && Boolean(userData?.businessUnitId),
+    staleTime: 30_000,
+  });
+
+  const productResolutionMutation = useMutation({
+    mutationFn: async () => {
+      if (!productResolutionItemId || !selectedProduct || !productResolutionReason.trim()) {
+        throw new Error('Choose a catalogue product and record the resolution reason.');
+      }
+      return rfqService.resolveLineProduct(
+        Number(id), productResolutionItemId, selectedProduct.id, productResolutionReason.trim(),
+      );
+    },
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['rfq-detail', Number(id)] }),
+        queryClient.invalidateQueries({ queryKey: ['procurement-sourcing-workbench', Number(id)] }),
+        queryClient.invalidateQueries({ queryKey: ['commercial-line-resolutions', 'rfq', Number(id)] }),
+        queryClient.invalidateQueries({ queryKey: ['rfq-commercial-intelligence', Number(id)] }),
+      ]);
+      setProductResolutionItemId(null);
+      setSelectedProduct(null);
+      setProductResolutionReason('');
+      enqueueSnackbar('Catalogue product resolved. Reopen sourcing to refresh governed Supplier candidates.', { variant: 'success' });
+    },
+    onError: (error: any) => enqueueSnackbar(
+      error?.response?.data?.detail || error?.response?.data?.message || error?.message || 'The product resolution could not be saved.',
+      { variant: 'error' },
+    ),
   });
 
   const quoteDraftMutation = useMutation({
@@ -207,6 +252,13 @@ const ViewRFQPage: React.FC = () => {
   const persistedResolutions = new Map(
     (lineResolutionQuery.data ?? []).filter(line => line.rfqItemId != null).map(line => [line.rfqItemId!, line]),
   );
+  const productResolutionItem = rfq.rfqitems.find((item) => item.id === productResolutionItemId) ?? null;
+  const openProductResolution = (item: typeof rfq.rfqitems[number]) => {
+    setProductResolutionItemId(item.id);
+    setProductSearch(item.manufacturerPartNumber || item.itemMaterialCode || item.productShortDescription || '');
+    setSelectedProduct(null);
+    setProductResolutionReason('');
+  };
   const lineMatches = (itemId: number, filter: string) => {
     const line = sourcingLines.get(itemId);
     const decisionLine = intelligenceLines.get(itemId);
@@ -612,17 +664,33 @@ const ViewRFQPage: React.FC = () => {
                       <TableCell align="right" sx={{ fontSize: '0.85rem', fontWeight: 900, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
                         {item.quantity?.toLocaleString()} {item.unitOfMeasure || 'EA'}
                       </TableCell>
-                      <TableCell>{(() => {
-                        const resolution = persistedResolutions.get(item.id);
-                        // Colour alone does not carry a status: roughly one man in twelve cannot
-                        // separate the success green from the warning amber, and these chips
-                        // differed in nothing else. Each state now has a shape as well.
-                        if (lineResolutionQuery.isLoading) return <Chip size="small" icon={<WaitingIcon />} label="Resolution checking" variant="outlined" />;
-                        if (lineResolutionQuery.isError) return <Chip size="small" icon={<UnavailableIcon />} label="Resolution unavailable" color="error" variant="outlined" />;
-                        if (!resolution) return <Chip size="small" icon={<UndecidedIcon />} label="Resolution not recorded" color="warning" variant="outlined" />;
-                        const reviewed = resolution.productResolution?.decisionState?.toLowerCase().includes('approved') || resolution.classification === 'KnownInStock' || resolution.classification === 'KnownIncoming' || resolution.classification === 'KnownShortage';
-                        return <Tooltip title={`Evidence: ${resolution.evidenceReference || 'not recorded'}`}><Chip size="small" icon={reviewed ? <ApproveIcon /> : <BlockerIcon />} label={reviewed ? 'Persisted resolution' : statusLabel(resolution.classification)} color={reviewed ? 'success' : 'warning'} variant="outlined" /></Tooltip>;
-                      })()}</TableCell>
+                      <TableCell>
+                        <Stack spacing={0.75} sx={{ alignItems: 'flex-start' }}>
+                          {(() => {
+                            const resolution = persistedResolutions.get(item.id);
+                            // A human catalogue decision is authoritative even when the earlier
+                            // inventory-resolution snapshot did not contain an automatic match.
+                            if (item.productResolvedOn && item.productId) {
+                              return (
+                                <Tooltip title={`${item.productName || `Product ${item.productId}`} · ${item.productResolutionReason || 'Reason not returned'}`}>
+                                  <Chip size="small" icon={<ApproveIcon />} label="Human-resolved product" color="success" variant="outlined" />
+                                </Tooltip>
+                              );
+                            }
+                            // Colour alone does not carry a status: each state also has a shape.
+                            if (lineResolutionQuery.isLoading) return <Chip size="small" icon={<WaitingIcon />} label="Resolution checking" variant="outlined" />;
+                            if (lineResolutionQuery.isError) return <Chip size="small" icon={<UnavailableIcon />} label="Resolution unavailable" color="error" variant="outlined" />;
+                            if (!resolution) return <Chip size="small" icon={<UndecidedIcon />} label="Resolution not recorded" color="warning" variant="outlined" />;
+                            const reviewed = resolution.productResolution?.decisionState?.toLowerCase().includes('approved') || resolution.classification === 'KnownInStock' || resolution.classification === 'KnownIncoming' || resolution.classification === 'KnownShortage';
+                            return <Tooltip title={`Evidence: ${resolution.evidenceReference || 'not recorded'}`}><Chip size="small" icon={reviewed ? <ApproveIcon /> : <BlockerIcon />} label={reviewed ? 'Persisted resolution' : statusLabel(resolution.classification)} color={reviewed ? 'success' : 'warning'} variant="outlined" /></Tooltip>;
+                          })()}
+                          {commercialAccess.canResolveRfqProduct && (
+                            <Button size="small" variant="text" onClick={() => openProductResolution(item)}>
+                              {item.productResolvedOn ? 'Change product' : 'Resolve catalogue product'}
+                            </Button>
+                          )}
+                        </Stack>
+                      </TableCell>
                       <TableCell>
                         <Typography variant="caption" sx={{ fontWeight: 700 }}>{sourcingLines.get(item.id) ? statusLabel(sourcingLines.get(item.id)!.resolution) : 'Checking'}</Typography>
                         <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>ATP {sourcingLines.get(item.id)?.availableQuantity ?? '—'} · Short {sourcingLines.get(item.id)?.shortfallQuantity ?? '—'}</Typography>
@@ -773,6 +841,90 @@ const ViewRFQPage: React.FC = () => {
           </Stack>
         </Grid>
       </Grid>
+
+      <Dialog
+        open={Boolean(productResolutionItem)}
+        onClose={() => !productResolutionMutation.isPending && setProductResolutionItemId(null)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>Resolve catalogue product</DialogTitle>
+        <DialogContent dividers>
+          <Stack spacing={2}>
+            <Alert severity="warning">
+              This is a governed commercial decision. Choose the product that the customer line actually requests;
+              Supplier discovery, inventory coverage and pricing will use this identity.
+            </Alert>
+            <Paper variant="outlined" sx={{ p: 2 }}>
+              <Typography variant="caption" color="text.secondary">Customer line</Typography>
+              <Typography sx={{ fontWeight: 800 }}>
+                {productResolutionItem?.manufacturerPartNumber || productResolutionItem?.itemMaterialCode || 'No customer part number'}
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                {productResolutionItem?.productShortDescription || productResolutionItem?.itemText || productResolutionItem?.materialPotext || 'No description recorded'}
+              </Typography>
+            </Paper>
+            <Autocomplete
+              openOnFocus
+              options={productSearchQuery.data ?? []}
+              loading={productSearchQuery.isLoading}
+              value={selectedProduct}
+              onChange={(_, value) => {
+                setSelectedProduct(value);
+                if (value) setProductSearch(`${value.partNo} · ${value.productName || 'Unnamed product'}`);
+              }}
+              inputValue={productSearch}
+              onInputChange={(_, value, reason) => (reason === 'input' || reason === 'clear') && setProductSearch(value)}
+              isOptionEqualToValue={(option, value) => option.id === value.id}
+              getOptionLabel={(option) => `${option.partNo} · ${option.productName || 'Unnamed product'}`}
+              noOptionsText={productSearchQuery.isError
+                ? 'Product search is unavailable. No catalogue decision was saved.'
+                : 'No tenant catalogue product matches this search.'}
+              renderInput={(params) => (
+                <TextField {...params} label="Tenant catalogue product" required helperText="Search by part number or product name." />
+              )}
+              renderOption={(props, option) => {
+                const { key, ...optionProps } = props;
+                return (
+                  <li key={key} {...optionProps}>
+                    <Box>
+                      <Typography variant="body2" sx={{ fontWeight: 800 }}>{option.partNo}</Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        {option.productName || 'Unnamed product'} · On hand {option.qtyOnHand ?? 0}
+                      </Typography>
+                    </Box>
+                  </li>
+                );
+              }}
+            />
+            <TextField
+              label="Resolution reason"
+              required
+              multiline
+              minRows={3}
+              value={productResolutionReason}
+              onChange={(event) => setProductResolutionReason(event.target.value)}
+              helperText="Record the customer part, drawing, specification or catalogue evidence used for this decision."
+            />
+            {productResolutionItem?.productResolvedOn && (
+              <Alert severity="info">
+                Current product: {productResolutionItem.productName || `Product ${productResolutionItem.productId}`}.
+                A correction is allowed until Supplier outreach has been prepared.
+              </Alert>
+            )}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setProductResolutionItemId(null)} disabled={productResolutionMutation.isPending}>Cancel</Button>
+          <Button
+            variant="contained"
+            onClick={() => productResolutionMutation.mutate()}
+            disabled={!selectedProduct || !productResolutionReason.trim() || productResolutionMutation.isPending}
+          >
+            {productResolutionMutation.isPending ? 'Saving resolution…' : 'Save product resolution'}
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       <Drawer anchor="right" open={Boolean(evidenceItem)} onClose={() => setEvidenceItemId(null)} slotProps={{ paper: { sx: { width: { xs: '100%', sm: 440 }, p: 3 } } }}>
         <Stack direction="row" sx={{ justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>

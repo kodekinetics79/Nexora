@@ -30,6 +30,9 @@ export const commercialActionPermissions = (hasPermission: PermissionCheck) => (
   canResolveRfqRevisionImpact:
     hasPermission('Leads', 'edit') && hasPermission('RFQ Management', 'edit'),
   canDeleteDraftRfq: hasPermission('RFQ Management', 'delete'),
+  // The write is RFQ-scoped and the picker must be able to read this tenant's catalogue.
+  canResolveRfqProduct:
+    hasPermission('RFQ Management', 'edit') && hasPermission('Products', 'view'),
   canViewPromotedRfq: hasPermission('RFQ Management', 'view'),
   canViewLeadEvidence: hasPermission('Leads', 'view'),
   canLinkLeadClient: hasPermission('Leads', 'edit'),

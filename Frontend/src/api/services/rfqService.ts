@@ -64,6 +64,9 @@ export interface RfqitemResponseDTO {
     lineItemNo?: string;
     productId?: number;
     productName?: string;
+    productResolvedBy?: string | null;
+    productResolvedOn?: string | null;
+    productResolutionReason?: string | null;
     commodityProduct?: string;
     productShortName?: string;
     productShortDescription?: string;
@@ -214,6 +217,13 @@ const rfqService = {
     },
   prepareQuoteDraft: async (id: number) => {
         const response = await axiosInstance.post(`/api/Rfq/${id}/prepare-quote-draft`);
+        return response.data;
+    },
+  resolveLineProduct: async (id: number, lineId: number, productId: number, reason: string) => {
+        const response = await axiosInstance.post(`/api/Rfq/${id}/lines/${lineId}/resolve-product`, {
+            productId,
+            reason,
+        });
         return response.data;
     },
 };

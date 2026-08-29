@@ -71,6 +71,9 @@ namespace ERP_RFQ_Automation.DTOs.RfqDTOs
         public string? LineItemNo { get; set; }
         public long? ProductId { get; set; }
         public string? ProductName { get; set; }  // for UI
+        public string? ProductResolvedBy { get; set; }
+        public DateTime? ProductResolvedOn { get; set; }
+        public string? ProductResolutionReason { get; set; }
         public string? CommodityProduct { get; set; }
         public string? ProductShortName { get; set; }
         public string? ProductShortDescription { get; set; }
