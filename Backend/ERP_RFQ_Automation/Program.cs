@@ -674,14 +674,17 @@ builder.Services.AddSwaggerGen(c =>
 });
 builder.Services.AddEndpointsApiExplorer();
 // Async extraction pipeline (ADR-0003): durable job queue + bounded worker pool.
-builder.Services.AddSingleton(new ExtractionWorkerOptions
+var requestedExtractionWorkerOptions = new ExtractionWorkerOptions
 {
     WorkerCount = Math.Max(1, builder.Configuration.GetValue("Extraction:WorkerCount", 4)),
     MaxConcurrentLlmCalls = Math.Max(1, builder.Configuration.GetValue("Extraction:MaxConcurrentLlmCalls", 8)),
     PerTenantConcurrencyCap = Math.Max(1, builder.Configuration.GetValue("Extraction:PerTenantConcurrencyCap", 4)),
     LeaseDuration = TimeSpan.FromMinutes(5),
     IdlePollDelay = TimeSpan.FromSeconds(2)
-});
+};
+builder.Services.AddSingleton(ExtractionWorkerCapacityPolicy.Apply(
+    requestedExtractionWorkerOptions,
+    GC.GetGCMemoryInfo().TotalAvailableMemoryBytes));
 builder.Services.AddScoped<IExtractionQueue, ExtractionQueue>();
 builder.Services.AddScoped<IChunkedExtractionService, ChunkedExtractionService>();
 // ING-07: the conversational (email-body) extractor. Separate registration, separate prompt,
