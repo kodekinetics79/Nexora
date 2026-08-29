@@ -531,8 +531,12 @@ public sealed class ExtractionWorker : BackgroundService
                 job.BusinessUnitId, job.Id);
             try
             {
-                var parseReason = ex is UnsupportedDocumentFormatException
-                    ? "unsupported_format" : "document_parse_failed";
+                var parseReason = ex switch
+                {
+                    PasswordProtectedDocumentException => "password_protected",
+                    UnsupportedDocumentFormatException => "unsupported_format",
+                    _ => "document_parse_failed"
+                };
                 if (!await queue.FailPermanentlyAsync(job.Id, workerId, job.Attempts,
                         ex.Message, CancellationToken.None))
                     LogLeaseLost(job.Id, workerId, "recording document parse failure");

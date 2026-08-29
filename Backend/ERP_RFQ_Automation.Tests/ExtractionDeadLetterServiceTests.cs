@@ -217,7 +217,8 @@ public sealed class ExtractionDeadLetterServiceTests
         job.LastError = "Document parsing refused [ocr_pixel_limit_exceeded]: page is too large.";
         await db.SaveChangesAsync();
         var service = new ExtractionDeadLetterService(
-            db, new AvailableStorage(), new Scanner(MalwareScanStatus.Clean));
+            db, new AvailableStorage(), new Scanner(MalwareScanStatus.Clean),
+            new FailIfEnteredAdmission());
 
         var listed = Assert.Single(await service.ListAsync(7, default));
         Assert.Equal(ExtractionDeadLetterService.OcrPixelLimitExceededCategory, listed.FailureCategory);
@@ -228,6 +229,38 @@ public sealed class ExtractionDeadLetterServiceTests
         await Assert.ThrowsAsync<InvalidOperationException>(() => service.RecoverAsync(
             7, job.Id, "operator@example.com",
             new("Retry unchanged oversized image.", "ocr-limit-7-1"), default));
+        Assert.Empty(await db.ExtractionDeadLetterEvents.ToListAsync());
+    }
+
+    [Theory]
+    [InlineData("This PDF is password-protected, so Nexora cannot open it.", "PASSWORD_PROTECTED", "unlocked")]
+    [InlineData("[PASSWORD_PROTECTED] encrypted source", "PASSWORD_PROTECTED", "unlocked")]
+    [InlineData("[UNSUPPORTED_DOCUMENT] no reader", "UNSUPPORTED_DOCUMENT", "replacement")]
+    [InlineData("The legacy .doc file passed security inspection but the local binary reader could not parse it; an isolated converter is not configured.", "UNSUPPORTED_DOCUMENT", "replacement")]
+    public async Task TerminalParserRefusal_IsClassifiedAndCannotRetryUnchangedBytes(
+        string lastError,
+        string expectedCategory,
+        string expectedGuidance)
+    {
+        using var testDb = new TestDb();
+        await using var db = testDb.ContextFor(7);
+        var job = await SeedDeadLetterAsync(db, 7);
+        job.LastError = lastError;
+        await db.SaveChangesAsync();
+        var service = new ExtractionDeadLetterService(
+            db, new AvailableStorage(), new Scanner(MalwareScanStatus.Clean),
+            new FailIfEnteredAdmission());
+
+        var listed = Assert.Single(await service.ListAsync(7, default));
+        Assert.Equal(expectedCategory, listed.FailureCategory);
+        Assert.True(listed.BlocksReadiness);
+        Assert.False(listed.CanRetry);
+        Assert.Contains(expectedGuidance, listed.OperatorAction, StringComparison.OrdinalIgnoreCase);
+
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(() => service.RecoverAsync(
+            7, job.Id, "operator@example.com",
+            new("Retry unchanged terminal source.", $"terminal-{expectedCategory}"), default));
+        Assert.Contains("cannot succeed", failure.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Empty(await db.ExtractionDeadLetterEvents.ToListAsync());
     }
 
@@ -410,5 +443,12 @@ public sealed class ExtractionDeadLetterServiceTests
                 MalwareScanStatus.Unavailable => MalwareScanResult.Unavailable("test-scanner", "offline"),
                 _ => MalwareScanResult.Error("test-scanner", "error"),
             });
+    }
+
+    private sealed class FailIfEnteredAdmission : IExtractionHeavyWorkAdmission
+    {
+        public ValueTask<IAsyncDisposable> EnterAsync(CancellationToken ct) =>
+            throw new InvalidOperationException(
+                "Terminal recovery entered heavy-work admission instead of failing closed.");
     }
 }

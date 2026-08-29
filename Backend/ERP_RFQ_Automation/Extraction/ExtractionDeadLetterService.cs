@@ -152,9 +152,10 @@ public sealed class ExtractionDeadLetterService(
 
             throw new InvalidOperationException("Only a dead-letter extraction job can be recovered.");
         }
-        if (FailureCategory(job.LastError) == OcrPixelLimitExceededCategory)
-            throw new InvalidOperationException(
-                "This document exceeded the safe OCR pixel limit. Replace it with a reduced-resolution source before processing again.");
+        var failureCategory = FailureCategory(job.LastError);
+        if (IsUnchangedSourceTerminal(failureCategory))
+            throw new InvalidOperationException(OperatorAction(failureCategory)
+                ?? "This extraction failure cannot be retried with the unchanged source document.");
         var hasSecurityBlocker = await db.ExtractionDeadLetterEvents.AsNoTracking().AnyAsync(e =>
             e.BusinessUnitId == tenantId
             && e.ExtractionJobId == job.Id
@@ -622,8 +623,18 @@ public sealed class ExtractionDeadLetterService(
     /// <summary>A terminal parser safety refusal. Replaying unchanged bytes cannot succeed.</summary>
     internal const string OcrPixelLimitExceededCategory = "OCR_PIXEL_LIMIT_EXCEEDED";
 
+    /// <summary>An encrypted PDF cannot be read without credentials. The intake contract never
+    /// stores or solicits customer document passwords, so replaying the same bytes is terminal.</summary>
+    internal const string PasswordProtectedCategory = "PASSWORD_PROTECTED";
+
+    /// <summary>No configured reader accepts this format. Replaying unchanged bytes is terminal.</summary>
+    internal const string UnsupportedDocumentCategory = "UNSUPPORTED_DOCUMENT";
+
     internal static bool CanRetry(string category, bool sourceLost, bool securityBlocker) =>
-        !sourceLost && !securityBlocker && category != OcrPixelLimitExceededCategory;
+        !sourceLost && !securityBlocker && !IsUnchangedSourceTerminal(category);
+
+    private static bool IsUnchangedSourceTerminal(string category) => category is
+        OcrPixelLimitExceededCategory or PasswordProtectedCategory or UnsupportedDocumentCategory;
 
     /// <summary>
     /// What the operator must DO about this category, in words, or null where the category
@@ -659,8 +670,12 @@ public sealed class ExtractionDeadLetterService(
         OcrPixelLimitExceededCategory => "The document exceeds the safe OCR pixel limit. Reduce its "
             + "page dimensions or scan resolution, then upload the corrected source as new work; "
             + "retrying the unchanged file cannot succeed.",
-        "UNSUPPORTED_DOCUMENT" => "The file passed inspection but no reader in this deployment "
-            + "can parse it. Ask the sender for a PDF, Word or spreadsheet version.",
+        PasswordProtectedCategory => "This PDF is password-protected and cannot be opened by the "
+            + "extraction service. Ask the sender for an unlocked copy and ingest it as new work; "
+            + "retrying the unchanged file cannot succeed.",
+        UnsupportedDocumentCategory => "The file passed inspection but no reader in this deployment "
+            + "can parse it. Ask the sender for a PDF, Word or spreadsheet version and ingest that "
+            + "replacement as new work; retrying the unchanged file cannot succeed.",
         "PROCESSING_TIMEOUT" => "The model did not answer within the request timeout. Retrying is "
             + "worthwhile; if it repeats, the document is likely too large for the configured "
             + "output budget.",
@@ -695,9 +710,15 @@ public sealed class ExtractionDeadLetterService(
             return EvidenceMissingCategory;
         if (error.Contains($"[{OcrPixelSafetyPolicy.Code}]", StringComparison.OrdinalIgnoreCase))
             return OcrPixelLimitExceededCategory;
+        if (error.Contains(PasswordProtectedDocumentException.Marker, StringComparison.OrdinalIgnoreCase)
+            || error.Contains("password-protected", StringComparison.OrdinalIgnoreCase))
+            return PasswordProtectedCategory;
         if (error.Contains("integrity", StringComparison.OrdinalIgnoreCase)) return "EVIDENCE_INTEGRITY";
         if (error.Contains("malware", StringComparison.OrdinalIgnoreCase)) return "MALWARE";
-        if (error.Contains("unsupported", StringComparison.OrdinalIgnoreCase)) return "UNSUPPORTED_DOCUMENT";
+        if (error.Contains(UnsupportedDocumentFormatException.Marker, StringComparison.OrdinalIgnoreCase)
+            || error.Contains("unsupported", StringComparison.OrdinalIgnoreCase)
+            || error.Contains("isolated converter is not configured", StringComparison.OrdinalIgnoreCase))
+            return UnsupportedDocumentCategory;
         if (error.Contains("timeout", StringComparison.OrdinalIgnoreCase)) return "PROCESSING_TIMEOUT";
         if (error.Contains("provider", StringComparison.OrdinalIgnoreCase)) return "PROCESSING_PROVIDER";
         return "EXTRACTION_FAILURE";

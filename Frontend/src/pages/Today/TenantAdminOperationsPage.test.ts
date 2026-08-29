@@ -24,6 +24,8 @@ describe('tenant extraction recovery actions', () => {
   it('fails closed for terminal rows returned by an older backend', () => {
     const legacy = { ...item(true, true), canRetry: undefined } as unknown as ExtractionDeadLetter;
     expect(normalizeExtractionDeadLetter({ ...legacy, failureCategory: 'EVIDENCE_INTEGRITY' }).canRetry).toBe(false);
+    expect(normalizeExtractionDeadLetter({ ...legacy, failureCategory: 'PASSWORD_PROTECTED' }).canRetry).toBe(false);
+    expect(normalizeExtractionDeadLetter({ ...legacy, failureCategory: 'UNSUPPORTED_DOCUMENT' }).canRetry).toBe(false);
     expect(normalizeExtractionDeadLetter({ ...legacy, failureCategory: 'PROCESSING_PROVIDER' }).canRetry).toBe(true);
     expect(normalizeExtractionDeadLetter({ ...legacy, resolution: 'SourceObjectUnavailable' }).canRetry).toBe(false);
   });

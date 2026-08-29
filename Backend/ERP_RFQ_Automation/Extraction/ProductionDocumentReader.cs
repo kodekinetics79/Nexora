@@ -874,7 +874,7 @@ public sealed class ProductionDocumentReader : IExtractionDocumentReader
             // user was told OCR had failed on a document that is not scanned at all, and the one
             // remedy that works (ask the sender for an unlocked copy) was never mentioned.
             _log.LogWarning(ex, "PDF is password-protected; extraction stopped with a truthful disposition.");
-            throw new UnsupportedDocumentFormatException(
+            throw new PasswordProtectedDocumentException(
                 "This PDF is password-protected, so Nexora cannot open it. Ask the sender for a "
                 + "copy without a password, or remove the password and upload it again.");
         }
@@ -1408,5 +1408,12 @@ public class DocumentParsingException : IOException
 
 public sealed class UnsupportedDocumentFormatException : DocumentParsingException
 {
-    public UnsupportedDocumentFormatException(string message) : base(message) { }
+    public const string Marker = "[UNSUPPORTED_DOCUMENT]";
+    public UnsupportedDocumentFormatException(string message) : base($"{Marker} {message}") { }
+}
+
+public sealed class PasswordProtectedDocumentException : DocumentParsingException
+{
+    public const string Marker = "[PASSWORD_PROTECTED]";
+    public PasswordProtectedDocumentException(string message) : base($"{Marker} {message}") { }
 }

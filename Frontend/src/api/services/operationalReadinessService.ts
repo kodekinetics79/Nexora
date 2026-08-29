@@ -104,6 +104,7 @@ export const normalizeOperationsReadiness = (wire: OperationsReadinessWire): Ope
 
 const terminalLegacyCategories = new Set([
   'EVIDENCE_INTEGRITY', 'MALWARE', 'OCR_PIXEL_LIMIT_EXCEEDED',
+  'PASSWORD_PROTECTED', 'UNSUPPORTED_DOCUMENT',
 ]);
 
 export const normalizeExtractionDeadLetter = (item: ExtractionDeadLetter): ExtractionDeadLetter => ({
