@@ -108,6 +108,8 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
         var decision = await _db.Set<LeadParticipationDecision>().AsNoTracking().Include(x => x.Lines)
             .Where(x => x.BusinessUnitId == businessUnitId && x.LeadRevisionId == revision.Id)
             .OrderByDescending(x => x.Sequence).FirstOrDefaultAsync(ct);
+        var reviewOverride = await BidSourceProvenanceValidator.LoadCurrentReviewOverrideAsync(
+            _db, businessUnitId, lead, revision.ProcessingPath, revision.CreatedBy, ct);
         var hasDecisionOnPriorRevision = decision is null && await _db.Set<LeadParticipationDecision>().AsNoTracking()
             .AnyAsync(x => x.BusinessUnitId == businessUnitId && x.LeadId == leadId, ct);
         var promotion = await _db.Set<RfqPromotion>().AsNoTracking()
@@ -253,15 +255,27 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
             }
             var criticalEvidence = canonical is null
                 ? new CriticalSourceEvidence.Assessment(false, false, false)
-                : AssessCriticalEvidence(canonical, exactSources);
-            var verification = !sourceAvailable ? "MISSING_SOURCE"
-                : lead.CommercialFactsVerified && criticalEvidence.Complete
-                    ? "VERIFIED" : "NEEDS_CHECK";
+                : AssessCriticalEvidence(canonical, exactSources,
+                    lineDecision?.Quantity ?? canonical.Quantity,
+                    lineDecision?.UnitOfMeasure ?? canonical.UnitOfMeasure);
+            var reviewCoversLine = canonical is not null && reviewOverride is not null
+                && BidSourceProvenanceValidator.ReviewOverrideCoversLine(
+                    reviewOverride,
+                    new BidSourceProvenanceValidator.Requirement(
+                        item.Id, canonical.Id, canonical.EvidenceSourceLeadItemId ?? canonical.Id,
+                        CriticalIdentities(canonical), lineDecision?.Quantity ?? canonical.Quantity,
+                        lineDecision?.UnitOfMeasure ?? canonical.UnitOfMeasure),
+                    Services.Uom.UomCanonicalizer.CanonicalizeForStorage(
+                        lineDecision?.UnitOfMeasure ?? canonical.UnitOfMeasure));
+            var verification = lead.CommercialFactsVerified
+                    && (criticalEvidence.Complete || reviewCoversLine)
+                ? "VERIFIED"
+                : !sourceAvailable ? "MISSING_SOURCE" : "NEEDS_CHECK";
             var exactSource = exactSources.FirstOrDefault();
             var lineItemNo = string.IsNullOrWhiteSpace(canonical?.LineItemNo)
                 ? item.LineNumber.ToString(CultureInfo.InvariantCulture)
                 : canonical.LineItemNo.Trim();
-            if (sourceBindingMismatch) verification = "NEEDS_CHECK";
+            if (sourceBindingMismatch && !reviewCoversLine) verification = "NEEDS_CHECK";
             return new LeadDecisionLineDto(item.Id, item.Id, lineItemNo,
                 exactSource?.RawValue, exactSource?.FieldName, exactSource?.SourceAddress,
                 exactSources.Select(x => new LineSourceFieldDto(x.FieldName, x.RawValue!, x.SourceAddress)).ToArray(),
@@ -270,8 +284,10 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
                 preview?.NormalizedQuantity, preview?.NormalizedUom, catalogResolution, catalogMatches,
                 preview?.BestMatchProductId, preview?.Confidence ?? 0m, preview?.NeedsAttention ?? true,
                 preview?.AttentionReason, catalogPolicyVersion, warningSnapshotJson, verification,
-                sourceBindingMismatch
+                sourceBindingMismatch && !reviewCoversLine
                     ? "Persisted source evidence was bound to a different canonical Lead line. The display recovered an unambiguous identity match where possible, but the evidence lineage must be repaired or reprocessed before participation."
+                    : reviewCoversLine
+                    ? "A governed human-review approval covers the exact identity, quantity, and unit for this immutable revision."
                     : sourceAvailable
                     ? criticalEvidence.Complete
                         ? lead.CommercialFactsVerified
@@ -299,9 +315,14 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
             blockers.Add(new("RFQ_REVISION_REQUIRED",
                 "A reply or amendment created a newer immutable Lead revision after RFQ promotion. Compare it with the existing RFQ, then record the reconciliation outcome without changing historical RFQ lineage.",
                 "Open existing RFQ", $"/procurement/rfqs/view/{rfq.Id}"));
-        if (evidence.Count == 0) blockers.Add(new("SOURCE_UNAVAILABLE", "No retained source evidence is linked to the current revision."));
-        if (lines.Any(x => x.VerificationStatus == "MISSING_SOURCE"))
-            blockers.Add(new("SOURCE_LINEAGE_INCOMPLETE", "Every Lead line must have exact persisted source-field evidence before RFQ promotion."));
+        var sourceRequiredLines = decision is null
+            ? lines
+            : lines.Where(x => string.Equals(x.Participation?.Decision, "Bid",
+                StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (sourceRequiredLines.Any(x => x.VerificationStatus == "MISSING_SOURCE"))
+            blockers.Add(new("SOURCE_UNAVAILABLE", "A Bid line has no retained source evidence or governed human approval for the current revision."));
+        if (sourceRequiredLines.Any(x => x.VerificationStatus == "MISSING_SOURCE"))
+            blockers.Add(new("SOURCE_LINEAGE_INCOMPLETE", "Every Bid line must have exact source lineage before RFQ promotion."));
         if (lines.Any(x => x.VerificationStatus == "NEEDS_CHECK"
                 && string.Equals(x.Participation?.Decision, "Bid", StringComparison.OrdinalIgnoreCase)))
             blockers.Add(new("SOURCE_CRITICAL_FIELDS_UNVERIFIED",
@@ -356,7 +377,7 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
             frozenHeader.BidClosingDate, frozenHeader.RequiredDeliveryDate, frozenHeader.DeliveryLocation,
             frozenHeader.AgreementReference, lead.AssignToNavigation is null ? null
                 : $"{lead.AssignToNavigation.FirstName} {lead.AssignToNavigation.LastName}".Trim(),
-            lines.Length > 0 && lines.All(x => x.VerificationStatus == "VERIFIED")
+            sourceRequiredLines.All(x => x.VerificationStatus == "VERIFIED")
                 ? "VERIFIED" : evidence.Count > 0 ? "NEEDS_REVIEW" : "SOURCE_UNAVAILABLE",
             lead.ReviewApprovedBy, lead.ReviewApprovedOn.HasValue
                 ? new DateTimeOffset(DateTime.SpecifyKind(lead.ReviewApprovedOn.Value, DateTimeKind.Utc)) : null,
@@ -478,20 +499,24 @@ public sealed class LeadDecisionWorkbenchService : ILeadDecisionWorkbenchService
 
     private static CriticalSourceEvidence.Assessment AssessCriticalEvidence(
         LeadItem canonical,
-        IEnumerable<LineFieldEvidenceProjection> evidence)
+        IEnumerable<LineFieldEvidenceProjection> evidence,
+        decimal? quantity = null,
+        string? unitOfMeasure = null)
         => CriticalSourceEvidence.Assess(
             evidence.Select(field => new CriticalSourceEvidence.Field(
                 field.FieldName, field.RawValue, field.NormalizedValue)),
-            new[]
-            {
-                canonical.ItemMaterialCode,
-                canonical.ManufacturerPartNumber,
-                canonical.ProductShortName,
-                canonical.ProductShortDescription,
-                canonical.ItemText
-            },
-            canonical.Quantity,
-            canonical.UnitOfMeasure);
+            CriticalIdentities(canonical),
+            quantity ?? canonical.Quantity,
+            unitOfMeasure ?? canonical.UnitOfMeasure);
+
+    private static CriticalSourceEvidence.Identity[] CriticalIdentities(LeadItem canonical) =>
+    [
+        new("ItemMaterialCode", canonical.ItemMaterialCode),
+        new("ManufacturerPartNumber", canonical.ManufacturerPartNumber),
+        new("ProductShortName", canonical.ProductShortName),
+        new("ProductShortDescription", canonical.ProductShortDescription),
+        new("ItemText", canonical.ItemText)
+    ];
 
     private static readonly HashSet<string> IdentityEvidenceFieldNames = new(StringComparer.Ordinal)
     {

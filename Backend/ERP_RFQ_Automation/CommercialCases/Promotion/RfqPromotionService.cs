@@ -197,11 +197,11 @@ public sealed class RfqPromotionService : IRfqPromotionService
                         approvedEvidenceSourceByLeadItemId[projectionId],
                         new[]
                         {
-                            frozenLine!.ItemMaterialCode,
-                            frozenLine.ManufacturerPartNumber,
-                            frozenLine.ProductShortName,
-                            frozenLine.ProductShortDescription,
-                            frozenLine.ItemText
+                            new CriticalSourceEvidence.Identity("ItemMaterialCode", frozenLine!.ItemMaterialCode),
+                            new CriticalSourceEvidence.Identity("ManufacturerPartNumber", frozenLine.ManufacturerPartNumber),
+                            new CriticalSourceEvidence.Identity("ProductShortName", frozenLine.ProductShortName),
+                            new CriticalSourceEvidence.Identity("ProductShortDescription", frozenLine.ProductShortDescription),
+                            new CriticalSourceEvidence.Identity("ItemText", frozenLine.ItemText)
                         },
                         approved.Quantity ?? frozenLine.Quantity,
                         approved.UnitOfMeasure ?? frozenLine.UnitOfMeasure));

@@ -111,26 +111,49 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
 
     [Fact]
     [Trait("Category", "PostgreSQL")]
-    public async Task Exact_verified_prose_span_is_a_complete_bid_provenance_boundary()
+    public async Task Exact_prose_citation_alone_cannot_replace_typed_or_human_approved_provenance()
     {
         var scenario = await CreateScenarioAsync([
-            Line("00010", 2, "EA", "SAR", "VALVE-A")
+            Line("00010", 2, "EA", "SAR", "SPAN-ONLY-A")
         ], "exact-prose-span", seedCriticalEvidence: false, seedSourceSpan: true);
         await using var context = database.ContextFor(Tenant);
         var participation = Service(context);
         var fit = await FitAsync(participation, scenario, "exact-prose-span");
 
-        var decision = await participation.CommitDecisionAsync(
-            Tenant, scenario.LeadId, Decision(scenario, fit.Id,
-                [Bid(scenario.LineRevisionIds[0], "Exact retained source citation reviewed.")],
-                "exact-prose-span"));
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            participation.CommitDecisionAsync(
+                Tenant, scenario.LeadId, Decision(scenario, fit.Id,
+                    [Bid(scenario.LineRevisionIds[0], "Exact retained source citation reviewed.")],
+                    "exact-prose-span")));
 
-        Assert.True(decision.IsCommitted);
+        Assert.Contains("cannot be committed or promoted", error.Message);
+        Assert.Contains("quantity, unit of measure", error.Message);
         var workbench = await new LeadDecisionWorkbenchService(context, new LeadOutcomeReasons(context))
             .GetAsync(Tenant, scenario.LeadId);
-        Assert.Equal("VERIFIED", Assert.Single(workbench.Lines).VerificationStatus);
-        Assert.Equal(1, workbench.SourceCoverage?.CoveredLines);
-        Assert.DoesNotContain(workbench.Blockers,
+        Assert.Equal("NEEDS_CHECK", Assert.Single(workbench.Lines).VerificationStatus);
+        Assert.Equal(0, workbench.SourceCoverage?.CoveredLines);
+    }
+
+    [Fact]
+    [Trait("Category", "PostgreSQL")]
+    public async Task Workbench_checks_the_effective_bid_quantity_not_only_the_canonical_line()
+    {
+        var scenario = await CreateScenarioAsync([
+            Line("00010", 2, "EA", "SAR", "OVERRIDE-QTY-A")
+        ], "effective-bid-quantity");
+        await using var context = database.ContextFor(Tenant);
+        var participation = Service(context);
+        var fit = await FitAsync(participation, scenario, "effective-bid-quantity");
+        var draftCommand = Decision(scenario, fit.Id,
+            [Bid(scenario.LineRevisionIds[0], "Draft quantity differs from the source.", quantity: 3)],
+            "effective-bid-quantity") with { Commit = false };
+        await participation.CommitDecisionAsync(Tenant, scenario.LeadId, draftCommand);
+
+        var workbench = await new LeadDecisionWorkbenchService(context, new LeadOutcomeReasons(context))
+            .GetAsync(Tenant, scenario.LeadId);
+
+        Assert.Equal("NEEDS_CHECK", Assert.Single(workbench.Lines).VerificationStatus);
+        Assert.Contains(workbench.Blockers,
             blocker => blocker.Code == "SOURCE_CRITICAL_FIELDS_UNVERIFIED");
     }
 
@@ -327,6 +350,12 @@ public sealed class LeadParticipationWarningGovernancePostgreSqlTests(PostgreSql
 
         var participation = Service(context);
         var fit = await FitAsync(participation, scenario, "real-review-override");
+        var workbench = await new LeadDecisionWorkbenchService(context, new LeadOutcomeReasons(context))
+            .GetAsync(Tenant, scenario.LeadId);
+        Assert.Equal("VERIFIED", workbench.VerificationStatus);
+        Assert.Equal("VERIFIED", Assert.Single(workbench.Lines).VerificationStatus);
+        Assert.Equal(1, workbench.SourceCoverage?.CoveredLines);
+        Assert.DoesNotContain(workbench.Blockers, blocker => blocker.Code.StartsWith("SOURCE_"));
         var decision = await participation.CommitDecisionAsync(Tenant, scenario.LeadId,
             Decision(scenario, fit.Id,
                 [Bid(scenario.LineRevisionIds[0], "Current governed review covers the exact approved line.")],

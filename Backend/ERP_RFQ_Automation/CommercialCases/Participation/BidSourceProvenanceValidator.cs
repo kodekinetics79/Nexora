@@ -19,7 +19,7 @@ internal static class BidSourceProvenanceValidator
         long RevisionLineId,
         long ProjectionLeadItemId,
         long EvidenceSourceLeadItemId,
-        IReadOnlyList<string?> IdentityValues,
+        IReadOnlyList<CriticalSourceEvidence.Identity> IdentityValues,
         decimal? Quantity,
         string? UnitOfMeasure);
 
@@ -127,7 +127,7 @@ internal static class BidSourceProvenanceValidator
             .ToArray();
     }
 
-    private static async Task<LeadReviewAudit?> LoadCurrentReviewOverrideAsync(
+    internal static async Task<LeadReviewAudit?> LoadCurrentReviewOverrideAsync(
         ErpRfqAutomationContext db,
         long businessUnitId,
         Lead lead,
@@ -164,7 +164,7 @@ internal static class BidSourceProvenanceValidator
 
     private static IReadOnlyList<string> MissingCriticalEvidence(
         IReadOnlyCollection<FieldValue> evidence,
-        IReadOnlyCollection<string?> identityValues,
+        IReadOnlyCollection<CriticalSourceEvidence.Identity> identityValues,
         decimal? quantity,
         string? uom)
         => CriticalSourceEvidence.Assess(
@@ -172,7 +172,7 @@ internal static class BidSourceProvenanceValidator
                 field.FieldName, field.RawValue, field.NormalizedValue)),
             identityValues, quantity, uom).Missing();
 
-    private static bool ReviewOverrideCoversLine(
+    internal static bool ReviewOverrideCoversLine(
         LeadReviewAudit audit, Requirement requirement, string? effectiveUom)
     {
         try
@@ -202,7 +202,7 @@ internal static class BidSourceProvenanceValidator
                     JsonString(item, "itemText")
                 };
                 var expectedIdentity = requirement.IdentityValues
-                    .Where(x => !string.IsNullOrWhiteSpace(x)).ToArray();
+                    .Select(x => x.Value).Where(x => !string.IsNullOrWhiteSpace(x)).ToArray();
                 var identityMatches = auditedIdentity.Where(x => !string.IsNullOrWhiteSpace(x))
                     .Any(value => expectedIdentity.Any(expected => SameCommercialText(value!, expected!)));
                 var quantityMatches = requirement.Quantity.HasValue

@@ -5,14 +5,14 @@ namespace ERP_RFQ_Automation.Tests;
 public sealed class CriticalSourceEvidenceTests
 {
     [Fact]
-    public void Exact_verified_prose_span_proves_identity_quantity_and_unit_together()
+    public void Exact_verified_prose_span_is_a_citation_not_typed_commercial_evidence()
     {
         var assessment = Assess(
             "Line 1: Control valve, manufacturer part number VALVE-A, quantity 2 EA",
             "VALVE-A", 2m, "EA");
 
-        Assert.True(assessment.Complete);
-        Assert.Empty(assessment.Missing());
+        Assert.False(assessment.Complete);
+        Assert.Equal(3, assessment.Missing().Count);
     }
 
     [Theory]
@@ -31,7 +31,7 @@ public sealed class CriticalSourceEvidenceTests
     {
         var assessment = CriticalSourceEvidence.Assess(
             [new("requestedLine", "VALVE-A", "VALVE-A")],
-            ["VALVE-A"], 2m, "EA");
+            [new("ProductShortName", "VALVE-A")], 2m, "EA");
 
         Assert.True(assessment.Identity);
         Assert.False(assessment.Quantity);
@@ -47,7 +47,7 @@ public sealed class CriticalSourceEvidenceTests
                 new("Quantity", "2", "2"),
                 new("UnitOfMeasure", "each", "EA")
             ],
-            ["VALVE-A"], 2m, "EA");
+            [new("ManufacturerPartNumber", "VALVE-A")], 2m, "EA");
 
         Assert.True(assessment.Complete);
     }
@@ -57,7 +57,7 @@ public sealed class CriticalSourceEvidenceTests
     {
         var derived = CriticalSourceEvidence.DeriveFromVerifiedSpan(
             "Line 3: belt BELT-FG-1275, quantity 12.75 kg",
-            [("ManufacturerPartNumber", "BELT-FG-1275")],
+            [new("ManufacturerPartNumber", "BELT-FG-1275")],
             12.75m,
             "KG");
 
@@ -68,9 +68,46 @@ public sealed class CriticalSourceEvidenceTests
         Assert.Equal("kg", derived.UnitOfMeasureRawValue);
     }
 
+    [Theory]
+    [InlineData("VALVE-A-1")]
+    [InlineData("VALVE-A_1")]
+    [InlineData("VALVE-A.1")]
+    [InlineData("VALVE-A/1")]
+    public void Strong_identifier_suffixes_never_project_as_the_requested_part(string stated)
+    {
+        var derived = CriticalSourceEvidence.DeriveFromVerifiedSpan(
+            $"Line 1: {stated}, quantity 2 EA",
+            [new("ManufacturerPartNumber", "VALVE-A")], 2m, "EA");
+
+        Assert.Null(derived);
+    }
+
+    [Fact]
+    public void Generic_description_cannot_replace_an_available_strong_identifier()
+    {
+        var derived = CriticalSourceEvidence.DeriveFromVerifiedSpan(
+            "Control valve, manufacturer part VALVE-B, quantity 2 EA",
+            [
+                new("ManufacturerPartNumber", "VALVE-A"),
+                new("ProductShortName", "Control valve")
+            ], 2m, "EA");
+
+        Assert.Null(derived);
+    }
+
+    [Fact]
+    public void Multiple_quantity_pairs_make_a_span_ineligible_for_projection()
+    {
+        var derived = CriticalSourceEvidence.DeriveFromVerifiedSpan(
+            "VALVE-A kit includes 2 EA seals; quote quantity 1 EA valve",
+            [new("ManufacturerPartNumber", "VALVE-A")], 2m, "EA");
+
+        Assert.Null(derived);
+    }
+
     private static CriticalSourceEvidence.Assessment Assess(
         string span, string identity, decimal quantity, string uom)
         => CriticalSourceEvidence.Assess(
             [new("SourceSpan", span, null)],
-            [identity], quantity, uom);
+            [new("ManufacturerPartNumber", identity)], quantity, uom);
 }

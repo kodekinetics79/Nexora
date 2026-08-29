@@ -1704,7 +1704,7 @@ public sealed class LeadPersister : ILeadPersister
             // server-owned exact evidence already proves identity, quantity and UOM for every
             // line. Conversational spans earn that status through deterministic matching below;
             // model-authored confidence and unverified prose never do.
-            && results[0].Items.All(HasCompleteCriticalEvidence);
+            && results[0].Items.All(item => HasCompleteCriticalEvidence(item, job.Id));
         for (var g = 0; g < results.Count; g++)
         {
             var splitNote = results.Count > 1
@@ -2626,28 +2626,33 @@ public sealed class LeadPersister : ILeadPersister
         return ExtractionJobMetadata.TryLoad(job);
     }
 
-    private static bool HasCompleteCriticalEvidence(LeadItemData item)
+    private static bool HasCompleteCriticalEvidence(LeadItemData item, long currentJobId)
     {
+        if (item.SourceExtractionJobId.HasValue && item.SourceExtractionJobId.Value != currentJobId)
+            return false;
         var evidence = (item.VerifiedEvidence ?? [])
             .Select(field => new CriticalSourceEvidence.Field(
                 field.FieldName, field.RawValue, field.NormalizedValue))
             .ToList();
-        if (item.SourceSpanVerified && !string.IsNullOrWhiteSpace(item.SourceSpan))
-            evidence.Add(new CriticalSourceEvidence.Field("SourceSpan", item.SourceSpan, null));
-        return CriticalSourceEvidence.Assess(
+        var identities = CriticalIdentityCandidates(item);
+        if (CriticalSourceEvidence.Assess(
             evidence,
-            CriticalIdentityCandidates(item).Select(candidate => candidate.Value),
+            identities,
             item.Quantity,
-            item.UnitOfMeasure).Complete;
+            item.UnitOfMeasure).Complete)
+            return true;
+        return item.SourceSpanVerified
+            && CriticalSourceEvidence.DeriveFromVerifiedSpan(
+                item.SourceSpan, identities, item.Quantity, item.UnitOfMeasure) is not null;
     }
 
-    private static (string FieldName, string? Value)[] CriticalIdentityCandidates(LeadItemData item) =>
+    private static CriticalSourceEvidence.Identity[] CriticalIdentityCandidates(LeadItemData item) =>
     [
-        ("ManufacturerPartNumber", item.ManufacturerPartNumber),
-        ("ItemMaterialCode", item.ItemMaterialCode),
-        ("ProductShortName", item.ProductShortName),
-        ("ProductShortDescription", item.ProductShortDescription),
-        ("ItemText", item.ItemText)
+        new("ManufacturerPartNumber", item.ManufacturerPartNumber),
+        new("ItemMaterialCode", item.ItemMaterialCode),
+        new("ProductShortName", item.ProductShortName),
+        new("ProductShortDescription", item.ProductShortDescription),
+        new("ItemText", item.ItemText)
     ];
 
     /// <summary>Builds one Lead (+ its LeadItems) for one extraction result/group.</summary>
