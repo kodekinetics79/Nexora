@@ -62,6 +62,7 @@ export default function RepDirectoryPage() {
   const canEdit = hasPermission('Users', 'edit');
   const [target, setTarget] = useState<RepRoutingProfileDTO | null>(null);
   const [draft, setDraft] = useState<DraftState | null>(null);
+  const [editorOpen, setEditorOpen] = useState(false);
   const mutationIntent = useRef<{ fingerprint: string; key: string } | null>(null);
 
   const summaries = useQuery({ queryKey: ['commercial-intelligence', 'reps'], queryFn: commercialIntelligenceService.getRepDirectory });
@@ -97,11 +98,21 @@ export default function RepDirectoryPage() {
       if (mutationIntent.current?.fingerprint !== fingerprint) mutationIntent.current = { fingerprint, key: crypto.randomUUID() };
       return commercialIntelligenceService.upsertRepRoutingProfile(target!.userId, body, mutationIntent.current.key);
     },
-    onSuccess: () => {
-      enqueueSnackbar('Routing profile saved', { variant: 'success' });
+    onSuccess: async () => {
       mutationIntent.current = null;
-      setTarget(null);
-      void client.invalidateQueries({ queryKey: ['commercial-intelligence', 'rep-routing-profiles'] });
+      // A successful POST is not enough for this directory: the table renders the server's live
+      // eligibility verdict, not just the submitted fields. Keep the named editor intact while the
+      // authoritative overlay is re-read, then close it. Fire-and-forget invalidation previously
+      // cleared `target` during the exit transition (blank title) and left the row stale until a
+      // manual reload when the background refresh lost its race with navigation/rendering.
+      const refreshed = await profiles.refetch();
+      setEditorOpen(false);
+      enqueueSnackbar(
+        refreshed.isError
+          ? 'Routing profile saved, but the directory could not refresh. Use Retry to load the current routing status.'
+          : 'Routing profile saved',
+        { variant: refreshed.isError ? 'warning' : 'success' },
+      );
     },
     onError: (error: any) => {
       const conflict = error?.response?.status === 409;
@@ -123,6 +134,7 @@ export default function RepDirectoryPage() {
   const openEditor = (profile: RepRoutingProfileDTO) => {
     mutationIntent.current = null;
     setTarget(profile);
+    setEditorOpen(true);
     setDraft({
       isRoutingEligible: profile.isRoutingEligible ?? true,
       capacityPercent: String(profile.capacityPercent ?? 100),
@@ -131,7 +143,8 @@ export default function RepDirectoryPage() {
       productCategoryKeys: profile.productCategoryKeys.join(', '),
     });
   };
-  const closeEditor = () => { mutationIntent.current = null; setTarget(null); };
+  const closeEditor = () => { mutationIntent.current = null; setEditorOpen(false); };
+  const clearClosedEditor = () => { setTarget(null); setDraft(null); };
 
   const capacity = Number(draft?.capacityPercent);
   const weight = Number(draft?.distributionWeight);
@@ -199,7 +212,13 @@ export default function RepDirectoryPage() {
         </ResponsiveTable>
       </QueryState>
 
-      <Dialog open={!!target} onClose={() => !mutation.isPending && closeEditor()} fullWidth maxWidth="sm">
+      <Dialog
+        open={editorOpen}
+        onClose={() => !mutation.isPending && closeEditor()}
+        fullWidth
+        maxWidth="sm"
+        slotProps={{ transition: { onExited: clearClosedEditor } }}
+      >
         <DialogTitle>Routing profile &mdash; {target?.name}</DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ pt: 1 }}>
