@@ -79,6 +79,9 @@ const LEAD = {
   rfqno: 'RFQ-7',
   buyersName: 'Buyer',
   bidClosingDate: '2026-09-01T00:00:00Z',
+  requiredDeliveryDate: '2026-10-01T00:00:00Z',
+  deliveryLocation: 'North Logistics Hub, Gate 4',
+  agreementReference: 'FRAME-2026-118',
   opportunityNo: '',
   headerRemarks: '',
   recDate: '2026-08-01T00:00:00Z',
@@ -217,6 +220,16 @@ describe('a tenant-defined field becomes a column on the line', () => {
   it('shows an explicit state, never an empty cell, when the line has no value', async () => {
     renderPage();
     expect((await cellText('20', 'cf:plant_code')).trim()).toBe('Not set');
+  });
+});
+
+describe('customer request terms', () => {
+  it('makes extracted delivery and agreement terms explicitly reviewable', async () => {
+    renderPage();
+
+    expect(await screen.findByDisplayValue('2026-10-01')).toHaveAccessibleName('Required Delivery Date (buyer)');
+    expect(screen.getByDisplayValue('North Logistics Hub, Gate 4')).toHaveAccessibleName('Delivery Location');
+    expect(screen.getByDisplayValue('FRAME-2026-118')).toHaveAccessibleName('Agreement Reference');
   });
 });
 

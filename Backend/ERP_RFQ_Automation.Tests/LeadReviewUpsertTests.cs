@@ -482,7 +482,12 @@ public class LeadReviewUpsertTests
         {
             ExpectedVersion = 1,
             Action = "save",
-            Header = new LeadReviewHeaderDTO { Rfqno = "RFQ-CHANGED", BuyersName = null },
+            Header = new LeadReviewHeaderDTO
+            {
+                Rfqno = "RFQ-CHANGED", BuyersName = null,
+                DeliveryLocation = "North Logistics Hub, Gate 4",
+                AgreementReference = "FRAME-2026-118"
+            },
             Items = new() { ItemDto(1, "L1", 1) }
         });
 
@@ -490,6 +495,8 @@ public class LeadReviewUpsertTests
         var lead = verify.Leads.Single(l => l.Id == 100);
         Assert.Equal("RFQ-CHANGED", lead.Rfqno);          // provided -> updated
         Assert.Equal("Original Buyer", lead.BuyersName);   // null -> preserved
+        Assert.Equal("North Logistics Hub, Gate 4", lead.DeliveryLocation);
+        Assert.Equal("FRAME-2026-118", lead.AgreementReference);
     }
 
     [Fact]

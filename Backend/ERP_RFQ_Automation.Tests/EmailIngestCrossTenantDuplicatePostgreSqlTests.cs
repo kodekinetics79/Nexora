@@ -7,6 +7,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using MimeKit;
+using System.Text.Json;
 
 namespace ERP_RFQ_Automation.Tests;
 
@@ -93,6 +94,22 @@ public sealed class EmailIngestCrossTenantDuplicatePostgreSqlTests
             Assert.Equal(TenantB, ingested.BusinessUnitId);
             Assert.Equal(SharedRfq, ingested.Rfqno);
             Assert.Equal(SharedBuyer, ingested.BuyersName);
+            Assert.Equal(new DateTime(2026, 10, 1), ingested.RequiredDeliveryDate);
+            Assert.Equal("North Logistics Hub, Gate 4", ingested.DeliveryLocation);
+            Assert.Equal("FRAME-2026-118", ingested.AgreementReference);
+
+            // The legacy door establishes its immutable baseline immediately. The commercial
+            // values must survive there too, not only on the mutable Lead projection.
+            var revision = await verify.Set<ERP_RFQ_Automation.LeadIdentity.LeadRevision>()
+                .AsNoTracking().SingleAsync(x => x.BusinessUnitId == TenantB && x.LeadId == leadId);
+            using var snapshot = JsonDocument.Parse(revision.SnapshotJson);
+            var snapshotRoot = snapshot.RootElement;
+            Assert.Equal(new DateTime(2026, 10, 1),
+                snapshotRoot.GetProperty("requiredDeliveryDate").GetDateTime());
+            Assert.Equal("North Logistics Hub, Gate 4",
+                snapshotRoot.GetProperty("deliveryLocation").GetString());
+            Assert.Equal("FRAME-2026-118",
+                snapshotRoot.GetProperty("agreementReference").GetString());
 
             // Tenant A is untouched: two tenants, two leads, same tender.
             Assert.Equal(2, await verify.Leads.AsNoTracking()
@@ -287,7 +304,10 @@ public sealed class EmailIngestCrossTenantDuplicatePostgreSqlTests
         var result = Ext.Result([item], 0.9) with
         {
             Rfqno = rfqno,
-            BuyersName = buyer
+            BuyersName = buyer,
+            RequiredDeliveryDate = "2026-10-01",
+            DeliveryLocation = " North Logistics Hub, Gate 4 ",
+            AgreementReference = " FRAME-2026-118 "
         };
         return new StubLlm(result);
     }

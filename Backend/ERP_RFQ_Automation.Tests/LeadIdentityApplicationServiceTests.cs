@@ -28,6 +28,8 @@ public sealed class LeadIdentityApplicationServiceTests
         lead.Rfqtype = "Public Tender";
         lead.DurationAgreement = "24 months + option";
         lead.RequiredDeliveryDate = new DateTime(2026, 12, 15, 0, 0, 0, DateTimeKind.Utc);
+        lead.DeliveryLocation = "North Logistics Hub, Gate 4";
+        lead.AgreementReference = "FRAME-2026-118";
         var line = lead.LeadItems.Single();
         line.CompanyRef = "COMP/69";
         line.CustomerRfqno = "CUST-RFQ/69";
@@ -49,6 +51,20 @@ public sealed class LeadIdentityApplicationServiceTests
         Assert.Equal("Keep punctuation: A/B & C.", header.RootElement.GetProperty("headerRemarks").GetString());
         Assert.Equal("OPP-69/X", header.RootElement.GetProperty("opportunityNo").GetString());
         Assert.Equal("24 months + option", header.RootElement.GetProperty("durationAgreement").GetString());
+
+        // The decision workbench must read the immutable revision, never a later mutable
+        // projection. Otherwise a stale UI save can silently change the terms a manager sees.
+        var mutableProjection = await context.Leads.SingleAsync(x => x.Id == created.LeadId);
+        mutableProjection.RequiredDeliveryDate = new DateTime(2027, 1, 1);
+        mutableProjection.DeliveryLocation = "Wrong mutable location";
+        mutableProjection.AgreementReference = "WRONG-MUTABLE-REF";
+        await context.SaveChangesAsync();
+        context.ChangeTracker.Clear();
+        var workbench = await new LeadDecisionWorkbenchService(context, new LeadOutcomeReasons(context))
+            .GetAsync(69, created.LeadId);
+        Assert.Equal(new DateTime(2026, 12, 15, 0, 0, 0, DateTimeKind.Utc), workbench.RequiredDeliveryDate);
+        Assert.Equal("North Logistics Hub, Gate 4", workbench.DeliveryLocation);
+        Assert.Equal("FRAME-2026-118", workbench.AgreementReference);
 
         var revisionLine = await context.Set<LeadItemRevision>().AsNoTracking()
             .SingleAsync(x => x.LeadRevisionId == revision.Id);

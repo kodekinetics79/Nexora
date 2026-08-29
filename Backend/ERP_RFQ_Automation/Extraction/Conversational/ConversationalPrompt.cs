@@ -36,9 +36,9 @@ public static class ConversationalPrompt
     /// the LLM client uses to select these instructions, so the prompt that is recorded is
     /// provably the prompt that was sent.
     /// </summary>
-    /// v2 adds the unit-of-measure transcription rule (rule 12): the sender's own wording is
-    /// copied verbatim and canonicalisation is left to <c>Services/Uom/UomCanonicalizer.cs</c>.
-    public const string PromptVersion = "rfq-conversational-v2";
+    /// v3 adds the customer delivery and agreement terms which the common extraction result has
+    /// always supported but the conversational schema accidentally omitted.
+    public const string PromptVersion = "rfq-conversational-v3";
 
     public static bool IsConversational(string? promptVersion)
         => string.Equals(promptVersion, PromptVersion, System.StringComparison.OrdinalIgnoreCase);
@@ -58,11 +58,15 @@ public static class ConversationalPrompt
 10. Dates must be ""YYYY-MM-DD"" or null. A relative deadline (""by the 20th"", ""next week"") that you cannot resolve to an exact date is null — put the sender's wording in ""HeaderRemarks"" instead.
 11. Confidence is your honest reading of THIS message. Conversational prose without labels is normal here, not a defect: score what the sentence actually supports and do not deflate a clear request just because it is informal.
 12. ""UnitOfMeasure"" IS THE SENDER'S OWN WORD for how the item is counted, TRANSCRIBED VERBATIM — ""nos"", ""pcs"", ""each"", ""sets"", ""m"", ""kg"" exactly as written. Do not translate, expand, abbreviate or standardise it; the platform maps spellings onto its own vocabulary (EA, SET, PR, DZ, LOT, M, MM, CM, M2, M3, FT, KG, MT, L, HR, DAY) afterwards, and rewriting the sender's wording destroys the evidence a reviewer checks against. If the sender states no unit, return null — NEVER default to ""EA"" or ""each"". If the sender counts PACKAGES or FORMS (""2 pallets"", ""5 boxes"", ""3 lengths"", ""a couple of drums""), copy that wording verbatim and NEVER convert it to a piece count: the message does not say how many are in one.
+13. CUSTOMER TERMS ARE HEADER FACTS, NOT ITEMS. Copy an explicitly stated delivery place into ""DeliveryLocation"", an explicitly stated agreement/contract/framework reference into ""AgreementReference"", and an exact requested delivery date into ""RequiredDeliveryDate"" as YYYY-MM-DD. Return null when the message does not state the term. Never infer a location from the signature address, and never confuse bid closing with requested delivery.
 
 **REQUIRED JSON SCHEMA (return exactly these keys):**
 {
   ""Rfqno"": string | null,
   ""BidClosingDate"": ""YYYY-MM-DD"" | null,
+  ""RequiredDeliveryDate"": ""YYYY-MM-DD"" | null,
+  ""DeliveryLocation"": string | null,
+  ""AgreementReference"": string | null,
   ""CustomerCompanyName"": string | null,
   ""CustomerCompanyEvidence"": string | null,
   ""CustomerBuyerEmail"": string | null,

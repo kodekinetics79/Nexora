@@ -647,6 +647,7 @@ namespace ERP_RFQ_Automation.Services
 12. ONE CONFIDENCE PER LINE ITEM. Each line-item object must contain EXACTLY the keys listed in the item schema below and NO OTHERS. In particular do NOT add a ""<FieldName>Confidence"" key for any item field — per-field confidences are requested at the document-header level only. A line item carries a single ""ItemConfidence"" summarising how certain you are about that whole line. Emitting extra confidence keys wastes the response budget and causes long documents to be cut off mid-answer.
 13. UNITS OF MEASURE. ""UnitOfMeasure"" is the unit the line's quantity is counted in, and NOTHING else — never a quantity, a size, a description or a price. TRANSCRIBE IT VERBATIM: return the document's own wording character-for-character (""each"", ""EA"", ""pcs"", ""NOS"", ""Activ.unit"" — whichever the document wrote), and do NOT translate, expand, abbreviate or standardise it. The platform maps spellings onto its own vocabulary — EA, SET, PR, DZ, LOT, M, MM, CM, M2, M3, FT, KG, MT, L, HR, DAY — after extraction; doing it here rewrites the customer's own words and destroys the evidence a reviewer checks against. If the document states no unit for a line, return null — NEVER default to ""EA"", ""each"" or ""1"". If the unit names a PACKAGE or a FORM rather than a count (""Pack"", ""Package"", ""Box"", ""Carton"", ""Pallet"", ""Drum"", ""Bundle"", ""Roll"", ""Coil"", ""Length"", ""Pipe""), copy that wording verbatim and NEVER convert it to a piece count: a pallet is not a piece, and the document does not say how many are on one.
 14. THE BUYER'S OWN MATERIAL NUMBER. ""ItemMaterialCode"" is the code THE BUYER uses for the line in ITS OWN system — the number printed under a heading such as ""Material"", ""Material Number"", ""Material Code"", ""Stock Code"", ""SAP Material"", ""Item Code"", ""Cat. No."" or ""Customer Part No."". Copy it VERBATIM. This field takes PRECEDENCE over rule 7: a buyer's material number is a schema field, NOT an unmapped custom column, and must NEVER be diverted into ""ExtraFields"". Keep it distinct from ""ManufacturerPartNumber"", which is the number the MAKER of the goods uses (the two are different numbers for the same part, and a document may print both). If the document states no such number for a line, return null — never copy the description into it and never invent one.
+15. CUSTOMER DELIVERY AND AGREEMENT TERMS. These are document-header facts, not line items. Copy an explicitly stated requested/required delivery date into ""RequiredDeliveryDate"", an explicitly stated delivery place into ""DeliveryLocation"", and an explicitly labelled agreement, contract or framework reference into ""AgreementReference"". Return null when the document does not state the term. Never infer a delivery place from a buyer, supplier or signature address; never confuse the bid closing date with the requested delivery date; and never copy an RFQ, purchase-order or account number into ""AgreementReference"" unless the document explicitly identifies it as an agreement, contract or framework reference. Set each confidence from the exact evidence for that header fact.
 
 **CONFIDENCE GUIDELINES (OPTIMIZED FOR HIGHER PRECISION):**
 - 0.95-1.0: Explicitly stated in text with exact match and clear labeling
@@ -665,6 +666,12 @@ namespace ERP_RFQ_Automation.Services
   ""RecDateConfidence"": number,
   ""BidClosingDate"": ""YYYY-MM-DD"" | null,
   ""BidClosingDateConfidence"": number,
+  ""RequiredDeliveryDate"": ""YYYY-MM-DD"" | null,
+  ""RequiredDeliveryDateConfidence"": number,
+  ""DeliveryLocation"": string | null,
+  ""DeliveryLocationConfidence"": number,
+  ""AgreementReference"": string | null,
+  ""AgreementReferenceConfidence"": number,
   ""BiddingDecision"": string | null,
   ""BiddingDecisionConfidence"": number,
   ""AcknowledgmentDate"": ""YYYY-MM-DD"" | null,

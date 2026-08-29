@@ -51,6 +51,8 @@ export interface ReviewHeaderPayload {
    * Correctable here because extraction is the only thing that has ever written it.
    */
   requiredDeliveryDate?: string;
+  deliveryLocation?: string;
+  agreementReference?: string;
   opportunityNo?: string;
   headerRemarks?: string;
   /**

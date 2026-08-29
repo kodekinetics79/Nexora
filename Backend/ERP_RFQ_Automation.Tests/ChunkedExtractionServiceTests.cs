@@ -504,26 +504,26 @@ public class ChunkedExtractionServiceTests
     [Fact]
     public async Task OutputTruncation_RetriesWithASmallerChunk_NeverTheSameRequestTwice()
     {
-        // The document plans 23 items per chunk against the advertised 8,192-token ceiling,
+        // The document plans 22 items per chunk against the advertised 8,192-token ceiling,
         // but this document is verbose enough that the model truncates above 4 items. The
         // extractor must respond by asking for LESS — halving, floor 1 — not by replaying
         // the identical failing request.
         //
-        // 23, not 11: rfq-extraction-v2 stopped asking for a "<Field>Confidence" number
+        // 22, not 11: rfq-extraction-v2 stopped asking for a "<Field>Confidence" number
         // beside each of the 24 per-item value fields. Those numbers were parsed and then
         // discarded (LeadItem has ONE Aiconfidence column, fed from ItemConfidence), so half
         // of every item's output budget was being spent on output nobody read.
         // EstimatedOutputTokensPerItem went 450 -> 225 and the planned chunk doubled.
         var llm = new BudgetedStubLlm(maxOutputTokens: 8192, truncateAboveItems: 4);
         var planned = ExtractionOutputBudget.MaxItemsPerChunk(8192);
-        Assert.Equal(23, planned); // guards the documented arithmetic
+        Assert.Equal(22, planned); // guards the documented arithmetic
 
         var outcome = await NewService(llm).ExtractUnstructuredAsync(Doc(Rows(planned)));
 
-        // Depth-first halving, left half reprocessed first: 23 -> 11 + 12; 11 -> 5 + 6;
-        // 5 -> 2 + 3; 6 -> 3 + 3; then 12 -> 6 + 6, each 6 -> 3 + 3. Anything <= 4 succeeds.
+        // Depth-first halving, left half reprocessed first: 22 -> 11 + 11; each 11 -> 5 + 6;
+        // 5 -> 2 + 3 and 6 -> 3 + 3. Anything <= 4 succeeds.
         Assert.Equal(
-            new[] { 23, 11, 5, 2, 3, 6, 3, 3, 12, 6, 3, 3, 6, 3, 3 },
+            new[] { 22, 11, 5, 2, 3, 6, 3, 3, 11, 5, 2, 3, 6, 3, 3 },
             llm.RequestedItemCounts);
         // No truncated request is ever replayed at the same size: a truncation is always
         // followed immediately by a STRICTLY SMALLER request (the left half).

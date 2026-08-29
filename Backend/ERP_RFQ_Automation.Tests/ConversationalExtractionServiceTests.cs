@@ -168,6 +168,104 @@ public class ConversationalExtractionServiceTests
         Assert.Equal(ConversationalPrompt.PromptVersion, llm.LastPromptVersion);
         Assert.Equal(AiPurposes.RfqExtraction, llm.LastPurpose);
         Assert.True(ConversationalPrompt.IsConversational(llm.LastPromptVersion));
+        var instructions = ConversationalPrompt.BuildConversationalExtractionInstructions();
+        Assert.Contains("\"RequiredDeliveryDate\"", instructions);
+        Assert.Contains("\"DeliveryLocation\"", instructions);
+        Assert.Contains("\"AgreementReference\"", instructions);
+    }
+
+    [Fact]
+    public async Task Explicit_customer_terms_survive_when_the_model_omits_the_structured_fields()
+    {
+        const string message = """
+            Subject: Materials request
+            From: Buyer <buyer@example.com>
+
+            Please quote 2 each control panels.
+            Required Delivery Date: October 1, 2026
+            Delivery Location: North Logistics Hub, Gate 4
+            Agreement Reference: FRAME-2026-118
+            Example Customer LLC
+            """;
+        var llm = new ProseLlm(Result(new List<LeadItemData>
+        {
+            Item("Control panels", "2 each control panels", 2, "2 each")
+        }));
+
+        var outcome = await NewService(llm).ExtractAsync(Input(message));
+
+        Assert.Equal("2026-10-01", outcome.Result!.RequiredDeliveryDate);
+        Assert.Equal("North Logistics Hub, Gate 4", outcome.Result.DeliveryLocation);
+        Assert.Equal("FRAME-2026-118", outcome.Result.AgreementReference);
+        Assert.Equal(1d, outcome.Result.RequiredDeliveryDateConfidence);
+    }
+
+    [Fact]
+    public async Task Unlabelled_or_relative_terms_are_not_inferred()
+    {
+        const string message = "Please quote 2 each control panels for our Dubai office, needed next week.\nExample Customer LLC";
+        var llm = new ProseLlm(Result(new List<LeadItemData>
+        {
+            Item("Control panels", "2 each control panels", 2, "2 each")
+        }));
+
+        var outcome = await NewService(llm).ExtractAsync(Input(message));
+
+        Assert.Null(outcome.Result!.RequiredDeliveryDate);
+        Assert.Null(outcome.Result.DeliveryLocation);
+        Assert.Null(outcome.Result.AgreementReference);
+    }
+
+    [Fact]
+    public async Task Commercial_terms_in_quoted_history_do_not_amend_the_fresh_request()
+    {
+        const string message = """
+            Please quote 2 each control panels for our current request.
+
+            -----Original Message-----
+            Required Delivery Date: October 1, 2026
+            Delivery Location: Obsolete Warehouse
+            Agreement Reference: OLD-FRAME-9
+            """;
+        var llm = new ProseLlm(Result(new List<LeadItemData>
+        {
+            Item("Control panels", "2 each control panels", 2, "2 each")
+        }));
+
+        var outcome = await NewService(llm).ExtractAsync(Input(message));
+
+        Assert.Null(outcome.Result!.RequiredDeliveryDate);
+        Assert.Null(outcome.Result.DeliveryLocation);
+        Assert.Null(outcome.Result.AgreementReference);
+    }
+
+    [Fact]
+    public async Task Deterministic_backstop_does_not_replace_model_supported_terms()
+    {
+        const string message = """
+            Please quote 2 each control panels.
+            Required Delivery Date: October 1, 2026
+            Delivery Location: Labelled Warehouse
+            Agreement Reference: LABELLED-FRAME
+            """;
+        var llmResult = Result(new List<LeadItemData>
+        {
+            Item("Control panels", "2 each control panels", 2, "2 each")
+        }) with
+        {
+            RequiredDeliveryDate = "2026-10-02",
+            DeliveryLocation = "Model-supported warehouse",
+            AgreementReference = "MODEL-FRAME"
+        };
+
+        var outcome = await NewService(new ProseLlm(llmResult)).ExtractAsync(Input(message));
+
+        Assert.Equal("2026-10-02", outcome.Result!.RequiredDeliveryDate);
+        Assert.Equal("Model-supported warehouse", outcome.Result.DeliveryLocation);
+        Assert.Equal("MODEL-FRAME", outcome.Result.AgreementReference);
+        Assert.Null(outcome.Result.RequiredDeliveryDateConfidence);
+        Assert.Null(outcome.Result.DeliveryLocationConfidence);
+        Assert.Null(outcome.Result.AgreementReferenceConfidence);
     }
 
     [Fact]

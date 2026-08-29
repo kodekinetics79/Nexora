@@ -192,7 +192,8 @@ public sealed class ConversationalExtractionService : IConversationalExtractionS
         var verification = ProseAnchorVerifier.Verify(submitted, modelItems);
         diagnostics.AddRange(verification.Diagnostics);
 
-        var result = call.Result with { Items = verification.Items };
+        var result = ConversationalCommercialTerms.Apply(
+            submitted, call.Result with { Items = verification.Items });
         // A governed redaction placeholder is not an identity: on an external provider the
         // model is shown "[REDACTED_EMAIL]", and echoing it back must not count as knowing
         // who the customer is. (The real sender address still reaches the lead from the

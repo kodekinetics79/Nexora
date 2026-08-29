@@ -119,6 +119,9 @@ export interface LeadDecisionWorkbenchDTO {
   emailMessageId?: string | null;
   receivedAtUtc?: string | null;
   bidClosingDate?: string | null;
+  requiredDeliveryDate?: string | null;
+  deliveryLocation?: string | null;
+  agreementReference?: string | null;
   assignedToName?: string | null;
   verificationStatus: 'VERIFIED' | 'NEEDS_REVIEW' | 'SOURCE_UNAVAILABLE' | string;
   verifiedBy?: string | null;

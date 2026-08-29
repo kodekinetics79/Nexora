@@ -388,6 +388,7 @@ namespace ERP_RFQ_Automation.Repositories
                     RequiredDeliveryDate = l.RequiredDeliveryDate,
                     BidClosingDateHijri = l.BidClosingDateHijri,
                     AgreementReference = l.AgreementReference,
+                    DeliveryLocation = l.DeliveryLocation,
                     BiddingDecision = l.BiddingDecision,
                     AcknowledgmentDate = l.AcknowledgmentDate,
                     SubDate = l.SubDate,
@@ -911,6 +912,7 @@ namespace ERP_RFQ_Automation.Repositories
                 RequiredDeliveryDate = lead.RequiredDeliveryDate,
                 BidClosingDateHijri = lead.BidClosingDateHijri,
                 AgreementReference = lead.AgreementReference,
+                DeliveryLocation = lead.DeliveryLocation,
                 BiddingDecision = lead.BiddingDecision,
                 AcknowledgmentDate = lead.AcknowledgmentDate,
                 SubDate = lead.SubDate,
@@ -1343,6 +1345,8 @@ namespace ERP_RFQ_Automation.Repositories
             if (header.BuyersName != null && header.BuyersName != lead.BuyersName) headerChanged.Add("buyersName");
             if (header.BidClosingDate != null && header.BidClosingDate != lead.BidClosingDate) headerChanged.Add("bidClosingDate");
             if (header.RequiredDeliveryDate != null && header.RequiredDeliveryDate != lead.RequiredDeliveryDate) headerChanged.Add("requiredDeliveryDate");
+            if (header.DeliveryLocation != null && header.DeliveryLocation != lead.DeliveryLocation) headerChanged.Add("deliveryLocation");
+            if (header.AgreementReference != null && header.AgreementReference != lead.AgreementReference) headerChanged.Add("agreementReference");
             if (header.OpportunityNo != null && header.OpportunityNo != lead.OpportunityNo) headerChanged.Add("opportunityNo");
             if (header.HeaderRemarks != null && header.HeaderRemarks != lead.HeaderRemarks) headerChanged.Add("headerRemarks");
             if (header.CustomerId.HasValue && header.CustomerId != lead.CustomerId) headerChanged.Add("customerId");
@@ -1356,6 +1360,8 @@ namespace ERP_RFQ_Automation.Repositories
             if (header.BuyersName != null) lead.BuyersName = header.BuyersName;
             if (header.BidClosingDate != null) lead.BidClosingDate = header.BidClosingDate;
             if (header.RequiredDeliveryDate != null) lead.RequiredDeliveryDate = header.RequiredDeliveryDate;
+            if (header.DeliveryLocation != null) lead.DeliveryLocation = header.DeliveryLocation;
+            if (header.AgreementReference != null) lead.AgreementReference = header.AgreementReference;
             if (header.OpportunityNo != null) lead.OpportunityNo = header.OpportunityNo;
 
             // HeaderRemarks: a client-supplied value wins; otherwise strip the review marker

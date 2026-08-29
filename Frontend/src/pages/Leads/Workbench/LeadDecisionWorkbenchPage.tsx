@@ -65,6 +65,7 @@ import { commercialActionPermissions } from '../../../utils/commercialActionPerm
 import { useUnsavedWorkGuard } from '../../../hooks/useUnsavedWorkGuard';
 import { catalogPolicyLabel, catalogWarningSummary } from './catalogWarningPresentation';
 import ParticipationHandoffGuidance from './ParticipationHandoffGuidance';
+import CustomerRequestTerms from './CustomerRequestTerms';
 
 const CountChip = ({ label, count, color = 'default' }: { label: string; count: number; color?: 'default' | 'success' | 'warning' | 'info' }) => (
   <Chip size="small" label={`${label} ${count}`} color={color} variant={count > 0 ? 'filled' : 'outlined'} sx={{ fontWeight: 800 }} />
@@ -423,6 +424,12 @@ const LeadDecisionWorkbenchPage: React.FC = () => {
           </Stack>
         </Stack>
       </Paper>
+
+      <CustomerRequestTerms
+        requiredDeliveryDate={workbench.requiredDeliveryDate}
+        deliveryLocation={workbench.deliveryLocation}
+        agreementReference={workbench.agreementReference}
+      />
 
       {decisionGuard.recoveredDraft ? (
         <Alert
